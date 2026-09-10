@@ -6,7 +6,7 @@
 //! round-trip a checked claim rather than an assumption - and it is why the
 //! phases are in this order rather than a more convenient one.
 //!
-//! ## Why it is seven functions (task-1894, M4)
+//! ## Why it is seven functions (M4)
 //!
 //! `ImportedDatabase::import_into` was 493 lines and did seven things:
 //! validation, catalog creation, schema import, row movement, index work,
@@ -270,7 +270,7 @@ pub(crate) fn carry_tables(
         //
         // It used to be dropped and named in `skipped`, then imported
         // *flattened* to ascending - both were workarounds for trees that
-        // could only be built one way round. task-1860 made the direction
+        // could only be built one way round. The direction was then made
         // real (see `ColumnSpec::descending`), so the flattening became the
         // lie: the schema text this file carries says `DESC`, a reopen
         // parses it and the planner believes it, and a tree built ascending

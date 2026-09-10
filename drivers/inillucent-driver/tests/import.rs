@@ -4,7 +4,7 @@
 //! imports, and a schema it cannot read is reported as the thing that actually
 //! went wrong.
 //!
-//! Both halves are task-1847. `CREATE TABLE pairs (left TEXT, right TEXT)` is an
+//! Both halves were fixed together. `CREATE TABLE pairs (left TEXT, right TEXT)` is an
 //! ordinary schema - a diff table, a tree, a stereo channel, a page layout all
 //! use those two words - and importing it answered `Corrupt` with *"database
 //! disk image is malformed"*. The file was not damaged; SQLite reads it
@@ -131,7 +131,7 @@ fn clean_up(source: &Path, imported: Option<&Path>) {
 /// `LEFT` and `RIGHT` are not reserved in SQLite - its name production accepts
 /// the `JOIN_KW` token class directly - so a schema it writes with them in has
 /// to load here. This answered `status = Corrupt, message = "database disk
-/// image is malformed"` before task-1847.
+/// image is malformed"` before that was fixed.
 #[test]
 fn a_table_whose_columns_are_named_left_and_right_imports() {
     let Some(source) = build(

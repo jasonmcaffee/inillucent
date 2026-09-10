@@ -227,13 +227,13 @@ pub fn quoted(name: &[u8]) -> Vec<u8> {
 /// produced text the parser cannot read would leave a database whose schema
 /// fails to load, and that is not recoverable from inside the engine.
 ///
-/// These failures stay `Corrupt`, unlike the stored-schema failures task-1847
-/// moved off it in `load.rs`. The distinction is whose text it is: a stored
-/// `CREATE TABLE` is text SQLite wrote and the caller can read, so a parse
-/// failure there is a gap in this engine's grammar and says so. Text *this*
-/// engine just generated and cannot read back is an internal defect nothing the
-/// caller wrote can cause, and filing it under the caller's typos would hide
-/// it.
+/// These failures stay `Corrupt`, unlike the stored-schema failures, which
+/// were moved off `Corrupt` in `load.rs`. The distinction is whose text it
+/// is: a stored `CREATE TABLE` is text SQLite wrote and the caller can read,
+/// so a parse failure there is a gap in this engine's grammar and says so.
+/// Text *this* engine just generated and cannot read back is an internal
+/// defect nothing the caller wrote can cause, and filing it under the
+/// caller's typos would hide it.
 pub fn reparsed(sql: Vec<u8>) -> DbResult<Vec<u8>> {
     let limits = Limits::default();
     let parsed = parse_next_statement(&sql, 0, &limits).map_err(|reason| {

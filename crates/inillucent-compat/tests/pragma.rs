@@ -14,7 +14,7 @@
 use inillucent_compat::differential::{compare, Step};
 
 /// Where this suite's scratch databases live.
-const AREA: &str = "task-1789/pragma";
+const AREA: &str = "pragma";
 
 /// The schema every scenario starts from.
 const SCHEMA: &[Step] = &[

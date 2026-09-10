@@ -393,8 +393,9 @@ impl<'d> Connection<'d> {
     /// `sqlite3_exec` accepts.
     ///
     /// The parser already knows where a statement ends -
-    /// [`Connection::prepare_with_tail`] has been asking it since task-1844 -
-    /// so this asks the same question and there is now one opinion about
+    /// [`Connection::prepare_with_tail`] has been asking it since `ATTACH`
+    /// and per-connection temp databases landed - so this asks the same
+    /// question and there is now one opinion about
     /// statement boundaries instead of two.
     ///
     /// @param sql - the statements, separated by semicolons
@@ -631,8 +632,7 @@ impl<'d> Connection<'d> {
     /// a cell on the `Database`, set by the two wrappers below from the
     /// `Outcome` they got back - so a statement that failed partway left it
     /// holding the previous statement's number, and `sqlite3_changes` and
-    /// `changes()` could answer differently about the same statement
-    /// (task-1854).
+    /// `changes()` could answer differently about the same statement.
     pub fn changes(&self) -> i64 {
         self.engine().changes()
     }

@@ -47,7 +47,7 @@ fn scratch(name: &str) -> PathBuf {
         .and_then(Path::parent)
         .map(Path::to_path_buf)
         .unwrap_or_default()
-        .join("_agent_output/task-1790/equivalence")
+        .join("_agent_output/equivalence")
         .join(name);
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::create_dir_all(&root);

@@ -894,8 +894,8 @@ const SOURCE_URL_VARIABLE: &str = "INILLUCENT_SOURCE_URL";
 ///
 /// **A connection URL holds a password, and an argument is in the process list
 /// for the whole run** - which for a large database is hours, and which every
-/// other process on the machine can read (task-1880 §6). So there are three
-/// ways to say it, in this order:
+/// other process on the machine can read. So there are three ways to say it,
+/// in this order:
 ///
 /// 1. the argument, when it is present and is not `-`;
 /// 2. `INILLUCENT_SOURCE_URL`, when it holds something;
@@ -1256,8 +1256,8 @@ mod source_tests {
 
     /// With no argument, the source comes from the environment.
     ///
-    /// **Which is what this exists for (task-1880 §6).** A connection URL holds
-    /// a password and an argument is in the process list for the whole run.
+    /// **Which is what this exists for.** A connection URL holds a password
+    /// and an argument is in the process list for the whole run.
     #[test]
     fn the_environment_supplies_a_source_that_was_not_an_argument() {
         let context = context(None);

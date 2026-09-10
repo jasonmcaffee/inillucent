@@ -93,7 +93,7 @@ mod at {
     /// The highest LSN any page in the file has ever been stamped with, 8 bytes.
     ///
     /// **A page's LSN has to be a position in the stream currently beside the
-    /// file, and without this it is not always** (task-1885). Recovery applies
+    /// file, and without this it is not always.** Recovery applies
     /// a record to a page only when the page's stamp is below the record's, so
     /// a page carrying a stamp from a stream that no longer exists swallows
     /// every later write to it: the record is skipped, the file stays

@@ -273,8 +273,8 @@ fn emit_limit_table(out: &mut String, rows: &[Table]) {
 /// manifests live in `compat/`, which is above this crate's directory, and a
 /// published `.crate` tarball holds nothing above the crate directory - so a
 /// build script that could only read `../../compat/errors.toml` made this crate
-/// unpublishable, and everything above it in the graph with it. task-1836 found
-/// that the first time it ran `cargo publish --dry-run`.
+/// unpublishable, and everything above it in the graph with it - found the
+/// first time this ran `cargo publish --dry-run`.
 ///
 /// So the manifests are also vendored into `manifests/`, which travels in the
 /// tarball, and the workspace copy wins whenever it is there.

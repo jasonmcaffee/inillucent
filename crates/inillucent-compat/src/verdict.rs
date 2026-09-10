@@ -5,7 +5,7 @@
 //! Where it cannot tell, it says so, and saying so is a third answer rather than
 //! a rounding of one of the other two.
 //!
-//! ## The run this exists because of (task-1884)
+//! ## The run this exists because of
 //!
 //! `inillucent-testrun --strict` reported `inillucent-bench` as FAILED. Run on
 //! its own immediately afterwards it exited 0 with 156 tests passing, so the

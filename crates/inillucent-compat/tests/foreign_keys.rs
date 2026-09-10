@@ -43,7 +43,7 @@ fn pinned_shell() -> Option<PathBuf> {
 
 /// Returns a fresh scratch path, with every companion file removed.
 fn scratch(name: &str) -> PathBuf {
-    let directory = workspace_root().join("_agent_output/task-1788/foreign-keys");
+    let directory = workspace_root().join("_agent_output/foreign-keys");
     let _ = std::fs::create_dir_all(&directory);
     for suffix in ["", "-journal", "-wal", "-shm"] {
         let _ = std::fs::remove_file(directory.join(format!("{name}.db{suffix}")));

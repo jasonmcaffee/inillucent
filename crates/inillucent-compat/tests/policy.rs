@@ -5,9 +5,9 @@
 //! only written down has already been broken somewhere.
 //!
 //! These cover the phase 0-1 crates only. `inillucent-core` and `inillucent-bench`
-//! predate the policy and are deliberately left alone; task-1782 does not touch
-//! the retrieval engine, and reformatting it would make that claim harder to
-//! verify rather than easier.
+//! predate the policy and are deliberately left alone, so a change that
+//! touches nothing else in the retrieval engine stays verifiably minimal;
+//! reformatting it would make that harder to verify rather than easier.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -20,18 +20,18 @@ const GOVERNED: [&str; 23] = [
     "inillucent-vfs",
     "inillucent-sim",
     "inillucent-value",
-    // The rearchitected engine (task-1816, task-1817, task-1832). It is held to
-    // the same standards as the engine it replaces from its first commit rather
-    // than from its last: a crate that is exempt while it is being written is a
-    // crate that is exempt.
+    // The rearchitected engine. It is held to the same standards as the
+    // engine it replaces from its first commit rather than from its last: a
+    // crate that is exempt while it is being written is a crate that is
+    // exempt.
     "inillucent-pool",
     "inillucent-wal",
     "inillucent-tree",
     "inillucent-txn",
     "inillucent-scalar",
     "inillucent-exec",
-    // task-1834: the engine as a database, lifted out of `inillucent-compat`. It
-    // is governed for the reason the comment above gives - a crate that is
+    // The engine as a database, lifted out of `inillucent-compat`. It is
+    // governed for the reason the comment above gives - a crate that is
     // exempt while it is being written is a crate that is exempt - and because
     // the code was already held to this standard while it lived inside a
     // governed crate. Leaving it out would have been a relaxation performed by
@@ -81,7 +81,7 @@ const UNSAFE_ALLOWED: [&str; 9] = [
     // The same counting global allocator as the two profiling binaries above:
     // every method forwards to the system allocator and only adds a counter.
     "crates/inillucent-compat/src/bin/hotprofile.rs",
-    // The gate's memory and processor accounting (task-1838 Part 6). What a
+    // The gate's memory and processor accounting. What a
     // *process* costs is something only the operating system can say, and the
     // reference arm is a separate program this workspace cannot instrument at
     // all - so the numbers come from `GetProcessMemoryInfo`/`GetProcessTimes`
@@ -89,17 +89,17 @@ const UNSAFE_ALLOWED: [&str; 9] = [
     // measurement rather than engine, which is the same ground the three above
     // stand on, and every call site carries its own SAFETY note.
     "crates/inillucent-compat/src/procstat.rs",
-    // The allocator arm (task-1838 Part 5). A `GlobalAlloc` is the only way to
+    // The allocator arm. A `GlobalAlloc` is the only way to
     // ask what the system allocator costs, and the question had to be asked:
     // the TDD expected the Linux gap to be the heap. Every path either forwards
     // to the system allocator unchanged or hands back a block obtained from it
     // for the same size class, and each one carries its own SAFETY note.
     "crates/inillucent-compat/src/bin/allocarm.rs",
     // The same counting allocator again, in the profiler that says which stage
-    // of a compile allocates (task-1838 Part 4/5).
+    // of a compile allocates.
     "crates/inillucent-compat/src/bin/prepareprofile.rs",
     // The same counting allocator once more, in the profiler that says what an
-    // already-prepared statement costs to *execute* (task-1890). It adds one
+    // already-prepared statement costs to *execute*. It adds one
     // thing the four above do not: the allocator captures a backtrace and
     // attributes the allocation to the frame that made it, behind a thread-local
     // reentrancy flag - a capture allocates, so an unguarded one recurses until
@@ -377,9 +377,9 @@ fn the_dependency_policy_covers_what_the_contract_allows() {
 /// a decision somebody has to argue for in a review, which is exactly the
 /// difference between this and a comment.
 ///
-/// task-1894 removed `inillucent-ext`, which was the only crate on it that the
-/// *new* engine links - and therefore the only entry that put two storage models
-/// in a shipped binary rather than merely in the workspace.
+/// `inillucent-ext` has been removed from this list; it was the only crate on
+/// it that the *new* engine links - and therefore the only entry that put two
+/// storage models in a shipped binary rather than merely in the workspace.
 #[test]
 fn no_new_crate_reaches_into_the_retired_engine() {
     /// The crates the rearchitecture retires, whose consumers are counted.
@@ -476,23 +476,34 @@ fn no_new_crate_reaches_into_the_retired_engine() {
 fn no_module_grows_past_the_size_it_is_recorded_at() {
     /// Every module over 2,500 lines, with the ceiling it is held to.
     ///
-    /// task-1894 moved `ImportedDatabase::import_into` - 493 lines that did
-    /// seven things - into `inillucent-engine/src/import.rs` as seven named
-    /// phases, which is what took `lib.rs` from 8,415 to its number here.
+    /// `ImportedDatabase::import_into` - 493 lines that did seven things - was
+    /// moved into `inillucent-engine/src/import.rs` as seven named phases,
+    /// which is what took `lib.rs` from 8,415 to its number here.
+    ///
+    /// The seek-union feature (`AccessPath::RowidSeekUnion` and
+    /// `IndexSeekUnion`, turning an `IN` list and a keyset page's disjunction
+    /// into seeks instead of a scan) touches four of these. `plan.rs`'s own
+    /// growth was cut from 652 lines to 275 by moving the union-construction
+    /// functions into `crates/inillucent-sql/src/plan/seek_union.rs`; the
+    /// rest - the enum variants themselves, and the `describe`/cost/ordering
+    /// match arms that must stay beside the rest of `AccessPath` - has
+    /// nowhere else to go. `physical.rs`, `compile.rs` and `compile_dml.rs`
+    /// each need one new executor arm per engine and are raised as measured,
+    /// with no further extraction attempted this pass.
     const CEILINGS: [(&str, usize); 14] = [
         ("crates/inillucent-engine/src/lib.rs", 8_130),
-        ("crates/inillucent-exec/src/physical.rs", 6_390),
+        ("crates/inillucent-exec/src/physical.rs", 6_690),
         ("crates/inillucent-sql/src/bind.rs", 5_315),
         ("crates/inillucent-tree/src/leaf.rs", 5_315),
-        ("crates/inillucent-vm/src/compile.rs", 4_885),
+        ("crates/inillucent-vm/src/compile.rs", 5_070),
         ("crates/inillucent-tree/src/paged.rs", 3_685),
-        ("crates/inillucent-vm/src/compile_dml.rs", 3_320),
+        ("crates/inillucent-vm/src/compile_dml.rs", 3_335),
         ("crates/inillucent-exec/src/dml.rs", 3_240),
         ("crates/inillucent-ext/src/vtab/fts5/mod.rs", 3_135),
         ("crates/inillucent-engine/src/ddl.rs", 2_950),
         ("crates/inillucent-session/src/connection.rs", 2_855),
         ("crates/inillucent-vm/src/machine.rs", 2_700),
-        ("crates/inillucent-sql/src/plan.rs", 2_630),
+        ("crates/inillucent-sql/src/plan.rs", 2_910),
         ("crates/inillucent-bench/src/synth.rs", 2_600),
     ];
 

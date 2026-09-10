@@ -106,9 +106,9 @@ impl ImportedDatabase {
             // refuses it too, and that is the guarantee - but the VFS has only
             // an extended result code to answer with, and an agent told
             // "access permission denied" cannot tell a confinement from a file
-            // it lacks rights to. `ATTACH` is the statement task-1892 used to
-            // reach a database outside `--root`, so it is the one that says
-            // what happened.
+            // it lacks rights to. `ATTACH` is the statement that can reach a
+            // database outside `--root`, so it is the one that says what
+            // happened.
             let path = match inillucent_vfs::confine::process_root() {
                 None => DbPath::from(text.as_str()),
                 Some(root) => match root.admit(&text) {

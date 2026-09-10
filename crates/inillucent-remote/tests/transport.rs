@@ -2,8 +2,8 @@
 //!
 //! Invariant: **a migration to a host that is not a loopback address either
 //! runs over a verified TLS session or does not run.** Three ways of getting
-//! that wrong are covered here, and each of them is a way this client behaved
-//! before task-1894:
+//! that wrong are covered here, and each of them is a way this client used to
+//! behave:
 //!
 //! 1. **Plaintext by default.** A URL that said nothing about transport
 //!    connected in the clear and sent a password. The policy cases assert the
@@ -38,7 +38,7 @@ use inillucent_remote::{ConnectionUrl, PostgresSource, Transport};
 
 /// Where the generated certificates and the server's log go.
 fn area() -> PathBuf {
-    let path = workspace_root().join("_agent_output/task-1894/tls");
+    let path = workspace_root().join("_agent_output/tls");
     let _ = std::fs::create_dir_all(&path);
     path
 }

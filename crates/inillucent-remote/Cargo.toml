@@ -9,8 +9,7 @@ description = "Reads a running PostgreSQL or MySQL server over its own wire prot
 # **No third-party dependency, deliberately.** The alternative was the `postgres`
 # crate - which is already in this workspace as a benchmark baseline - plus a
 # `mysql` one. Both bring an async runtime, and this crate is linked by
-# `inillucent-cli`, whose peak resident set is a published number. See
-# `tasks/task-1868-migrating-from-postgres-mysql-and-a-front-door-for-agents-tdd.md`.
+# `inillucent-cli`, whose peak resident set is a published number.
 [dependencies]
 inillucent-base = { workspace = true }
 inillucent-vfs = { workspace = true }

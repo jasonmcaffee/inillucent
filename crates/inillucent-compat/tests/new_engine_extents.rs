@@ -357,7 +357,7 @@ fn a_created_index_over_a_table_of_large_values_is_correct() {
 /// there. Reading a delta row to compact it is what refused, with `this value is
 /// stored out of line; read the leaf's extents through the tree first` - which
 /// reached the operator as `public.attachment could not be copied` on the first
-/// table of a real 5.8 GB database (task-1876).
+/// table of a real 5.8 GB database.
 ///
 /// It needs no oracle: the claim is that the write succeeds and reads back byte
 /// for byte, and this engine is the only thing that has to be asked.

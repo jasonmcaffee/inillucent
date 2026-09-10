@@ -150,7 +150,7 @@
     },
     {
       "name": "an_unimplemented_construct_refuses_by_name",
-      "about": "A construct the engine has not built reports `unsupported` and names itself, which is a different thing from a statement that is wrong. A binding that folds this into its general error type has thrown the design away. The example moves as the engine grows: it was VACUUM until task-1859 built it, a second ON CONFLICT clause until task-1860 built that, and is now an encryption key on ATTACH. When that is built, repoint this at whatever still is rather than deleting the case.",
+      "about": "A construct the engine has not built reports `unsupported` and names itself, which is a different thing from a statement that is wrong. A binding that folds this into its general error type has thrown the design away. The example moves as the engine grows: it was VACUUM before that was built, a second ON CONFLICT clause before that was built, and is now an encryption key on ATTACH. When that is built, repoint this at whatever still is rather than deleting the case.",
       "setup": ["CREATE TABLE conflicts (a INTEGER PRIMARY KEY, b TEXT UNIQUE)"],
       "steps": [
         {
@@ -248,7 +248,7 @@
     },
     {
       "name": "reserved_word_column_names",
-      "about": "`left` and `right` are ordinary column names in SQLite - a diff table, a tree, a stereo channel, a page layout - and its name production accepts the join keywords and `INDEXED` directly rather than through the fallback set. A database using them imported as `corrupt` until task-1847, so this case pins every position a name can appear in: the declaration, a bare reference, a qualified one, an ORDER BY, and an explicit alias. The last step is the other half of the rule: a bare alias written with no AS takes the narrow fallback set, so `SELECT left right FROM pairs` is a syntax error in SQLite and has to stay one here - that is what keeps `FROM t LEFT JOIN u` a join rather than a table aliased `left`.",
+      "about": "`left` and `right` are ordinary column names in SQLite - a diff table, a tree, a stereo channel, a page layout - and its name production accepts the join keywords and `INDEXED` directly rather than through the fallback set. A database using them imported as `corrupt` until that was fixed, so this case pins every position a name can appear in: the declaration, a bare reference, a qualified one, an ORDER BY, and an explicit alias. The last step is the other half of the rule: a bare alias written with no AS takes the narrow fallback set, so `SELECT left right FROM pairs` is a syntax error in SQLite and has to stay one here - that is what keeps `FROM t LEFT JOIN u` a join rather than a table aliased `left`.",
       "setup": [
         "CREATE TABLE pairs (left TEXT, right TEXT, inner TEXT, outer TEXT, cross TEXT, indexed TEXT)",
         "INSERT INTO pairs VALUES ('a', 'b', 'i', 'o', 'c', 'x')",
@@ -283,7 +283,7 @@
     },
     {
       "name": "a_temp_table_survives_a_connection_per_call",
-      "about": "A temporary table belongs to a session, and a caller that hands out a connection per call has to stay in one or it loses everything a session scopes. This case runs every statement on its own connection, so it passes only if the driver can continue a session: before task-1848 the Rust driver exposed connect() and not connect_as(), and the C ABI opened a new session on every call - so a CREATE TEMP TABLE typed into a query console was gone by the next statement, an ATTACH did not outlive its own call, and a connection pragma had to be re-applied every time. The last two steps are the rest of the scope: an ordinary table is visible either way, and a temp table shadows a permanent one of the same name, which is only observable if the temp one is still there.",
+      "about": "A temporary table belongs to a session, and a caller that hands out a connection per call has to stay in one or it loses everything a session scopes. This case runs every statement on its own connection, so it passes only if the driver can continue a session: the Rust driver used to expose connect() and not connect_as(), and the C ABI opened a new session on every call - so a CREATE TEMP TABLE typed into a query console was gone by the next statement, an ATTACH did not outlive its own call, and a connection pragma had to be re-applied every time. The last two steps are the rest of the scope: an ordinary table is visible either way, and a temp table shadows a permanent one of the same name, which is only observable if the temp one is still there.",
       "connection": "per_call",
       "setup": [
         "CREATE TABLE kept (a INTEGER PRIMARY KEY, b TEXT)",

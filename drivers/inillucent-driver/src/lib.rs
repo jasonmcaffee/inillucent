@@ -5,9 +5,9 @@
 //! it exists. `crates/unluminous-db` in the Unluminous repository is the first
 //! consumer, and a consumer that reached into `inillucent-pool`,
 //! `inillucent-tree` or `inillucent-exec` would be built on ground the
-//! rearchitecture is still moving: `_agent_output/task-1834-phase5/README.md`
-//! §14 schedules the deletion of four more crates and the absorption of a
-//! fifth. Everything above this line is unaffected by all of it.
+//! rearchitecture is still moving: four more crates are scheduled for deletion
+//! and a fifth for absorption. Everything above this line is unaffected by all
+//! of it.
 //!
 //! `inillucent-driver-capi` is a marshalling layer over this crate that decides
 //! nothing, and is what every language that is not Rust binds to. Rust does not
@@ -256,9 +256,10 @@ impl Database {
     /// - an `ATTACH` does not outlive the statement that made it;
     /// - a connection pragma has to be re-applied on every call.
     ///
-    /// The engine has had this since it grew sessions, and the driver did not
-    /// pass it on (task-1848). Keep the number [`Connection::session`] returns
-    /// and hand it back here, and every later connection is the same session.
+    /// The engine has had this since it grew sessions; the driver did not pass
+    /// it on until this method was added. Keep the number [`Connection::session`]
+    /// returns and hand it back here, and every later connection is the same
+    /// session.
     ///
     /// A number that no `connect` handed out is a session of its own rather
     /// than an error, which is the same thing the engine does with it: a

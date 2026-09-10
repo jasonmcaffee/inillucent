@@ -142,9 +142,9 @@ pub struct Plan {
     /// on its file at all and answers `exclusive` when asked, so this is not a
     /// setting both arms share - it is the question of whether SQLite is asked
     /// to behave the way the engine it is being compared against behaves.
-    /// task-1838 §5 measured what it costs: on Windows a rowid point lookup was
-    /// 12.4 microseconds against Linux's 2.0 for the same C, because a read in
-    /// `normal` mode takes and drops a `LockFileEx` per statement.
+    /// Measured on Windows: a rowid point lookup in `normal` mode was 12.4
+    /// microseconds against Linux's 2.0 for the same C, because the mode
+    /// takes and drops a `LockFileEx` per statement.
     pub locking: String,
     /// The durability level both engines run at.
     pub synchronous: String,
@@ -482,9 +482,9 @@ pub struct Contract {
     /// The most of SQLite's peak resident set this engine may hold, as a ratio.
     ///
     /// **Under one, because the goal is to hold less.** Absent from a contract
-    /// written before task-1869, in which case there is no memory bar and the
-    /// gate reports the ratio without judging it - a missing bar must read as
-    /// "nobody set one", never as "met".
+    /// written before the memory and CPU bars existed, in which case there is
+    /// no memory bar and the gate reports the ratio without judging it - a
+    /// missing bar must read as "nobody set one", never as "met".
     pub memory: Option<f64>,
     /// The most of SQLite's processor time this engine may spend, as a ratio.
     pub cpu: Option<f64>,
@@ -1037,7 +1037,7 @@ pub fn plan_for(scale: &str) -> Plan {
             // Measured with `inillucent-execprofile`: an `UPDATE` that changes
             // a value cost 1,723 ns, and the same `UPDATE` writing back what was
             // already there cost 4,067. `pre` runs outside the timed region on
-            // both arms, exactly as `sqlite_bench.c` runs it (task-1890).
+            // both arms, exactly as `sqlite_bench.c` runs it.
             pre: reset_notes(),
             post: None,
             repeat: write,

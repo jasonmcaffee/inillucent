@@ -139,7 +139,7 @@ pub enum ScalarFunc {
     /// blob would change the answer to `x'00' + x'00'` from `0` to a blob,
     /// which is a difference every application that adds two blobs would see.
     ///
-    /// **task-1860 gave the operators back, on the one condition that keeps
+    /// **The operators were given back, on the one condition that keeps
     /// both answers.** `a + b` binds to this function when a side reads a
     /// column *declared* `VECTOR(n)` - which is the same thing PostgreSQL is
     /// using, a declared type - and stays SQLite's arithmetic otherwise. So
@@ -726,7 +726,7 @@ pub fn lookup_json(folded: &[u8]) -> Option<JsonFunc> {
         // `pragma_function_list` reports them. The parser lowered the operators
         // here already; only the spellings were missing, which made this engine
         // report two fewer functions than it has and refuse a call SQLite
-        // answers. task-1869.
+        // answers.
         b"->" => JsonFunc::Arrow,
         b"->>" => JsonFunc::ArrowShift,
         b"jsonb_extract" => JsonFunc::ExtractB,
@@ -1069,8 +1069,8 @@ const VOLATILE_FLAGS: i64 = 2048;
 /// arguments, which is what SQLite reports and what an application checking
 /// whether a call will bind needs to see.
 ///
-/// **It must name everything the binder will resolve, and task-1869 found that
-/// it did not.** The register answered 161 names where SQLite answers 218, and
+/// **It must name everything the binder will resolve, and a completeness check
+/// found that it did not.** The register answered 161 names where SQLite answers 218, and
 /// the functionality behind most of the difference was present and
 /// byte-identical - `current_date`, `regexp`, `unistr`, `median`, `bm25`,
 /// `matchinfo` and the rest all answered when called. A caller that
@@ -1124,7 +1124,7 @@ pub fn every_function() -> Vec<FunctionEntry> {
 ///
 /// **`narg` is SQLite's own encoding, not "how many arguments".** A negative
 /// number means variadic *and carries a minimum*: `coalesce` reads -4 and
-/// `concat` -3 in the reference's register, not -1. task-1869's
+/// `concat` -3 in the reference's register, not -1. A
 /// register-completeness check compares this column because it is the one an
 /// application reads to decide whether a call will bind, and it found seven
 /// entries here that disagreed with the reference while answering identically.
@@ -1279,7 +1279,7 @@ const SCALARS: &[(&str, i64)] = &[
     ("vector_norm", 1),
     ("vector_sub", 2),
     ("zeroblob", 1),
-    // task-1869: present and answering, and missing from this list until now.
+    // Present and answering, and missing from this list until now.
     // Each was checked against the shell before it was added.
     ("->", 2),
     ("->>", 2),

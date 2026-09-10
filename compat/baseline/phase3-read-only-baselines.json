@@ -1,6 +1,6 @@
 {
   "platform": "windows-x86_64",
-  "task": "task-1783",
+  "captured_by": "readperf",
   "phase": "phases 2-3 read-only baselines",
   "page_size": 4096,
   "measurements": [

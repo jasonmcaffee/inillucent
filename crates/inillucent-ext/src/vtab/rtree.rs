@@ -39,7 +39,7 @@ use crate::shadow::ShadowTables;
 /// new cell, writes the leaf, writes a `%_rowid` row and sometimes a `%_parent`
 /// row - so a five-hundred-cell load did thousands of shadow-table reads and
 /// writes, each one a descent into a b-tree, and `extension.rtree.insert`
-/// measured 0.28x against SQLite (task-1838 §4). None of those intermediate
+/// measured 0.28x against SQLite. None of those intermediate
 /// states is durable state anyone can see: only the last one is. So they are
 /// held here and written once, in `sync`, the same way FTS5 holds a segment.
 ///

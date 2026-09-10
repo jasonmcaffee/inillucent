@@ -5,7 +5,7 @@
 //! test until its row is moved to `Agrees`, which is the same discipline
 //! `new_engine_surface.rs` applies to *acceptance* applied here to *answers*.
 //! Without it, a fix is invisible: the probe was a one-off script, so the nine
-//! wrong answers task-1843 found could each have been repaired and then
+//! wrong answers the review found could each have been repaired and then
 //! silently regressed with nothing to notice.
 //!
 //! ## Why whole scripts through the shells
@@ -21,9 +21,9 @@
 //! nothing
 //!
 //! An `UPDATE` that moves a row across a partial index's predicate exists only
-//! where task-1846's partial indexes and task-1849's `UPDATE` conflict check
-//! meet: neither ticket could test it alone, because before 1846 the index
-//! cannot be created and before 1849 the check is never reached.
+//! where partial indexes and the `UPDATE` conflict check meet: neither could
+//! be tested alone, because until partial indexes existed the index cannot be
+//! created, and until the conflict check existed the check is never reached.
 //!
 //! `crossing.into` and `two.indexes` are the ones that were wrong: a row moving
 //! into the predicate onto a key already there must clash, and it did not. The
@@ -56,15 +56,15 @@
 //! `index.after.writes` and its `WITHOUT ROWID` twin insert, update and delete
 //! *before* the `CREATE INDEX`, so the leaves the build reads carry tombstones
 //! and a delta area. That is a different code path from a freshly imported
-//! table - the merge, rather than the vectorised mini-column read - and
-//! task-1846 gave it a projected implementation of its own to stop it reading
-//! every column of every row. Two implementations of one merge is exactly the
+//! table - the merge, rather than the vectorised mini-column read - and it was
+//! given a projected implementation of its own to stop it reading every
+//! column of every row. Two implementations of one merge is exactly the
 //! shape that drifts, so the answer is compared against the reference here.
 //!
 //! ## All of them agree
 //!
 //! `index.partial`, `index.expr` and `without.rowid.index` - the three
-//! `CREATE INDEX` forms task-1845 left refused - were closed by task-1846, and
+//! `CREATE INDEX` forms that were once left refused - are now built, and
 //! their rows moved from `Differs` to `Agrees`. There is no `Differs` row left,
 //! and the check below that a case which starts agreeing fails until its row is
 //! moved is what will report the next one either way.
@@ -103,12 +103,13 @@ struct Case {
     expect: Expect,
 }
 
-/// The cases: the review's 61, the agreeing shapes it did not record,
-/// task-1849's seven `UNIQUE`-under-`UPDATE` shapes, and task-1846's - two over
-/// a table that has been written to, and five where the two tickets meet.
+/// The cases: the review's 61, the agreeing shapes it did not record, the
+/// seven `UNIQUE`-under-`UPDATE` shapes from fixing the update conflict
+/// check, and the index-forms work's own - two over a table that has been
+/// written to, and five where the two meet.
 const CASES: &[Case] = &[
-    // task-1859 Part E: the silent differences. Every one of these answered,
-    // and answered something else.
+    // The silent differences: every one of these answered, and answered
+    // something else.
     //
     // A `CHECK` containing a subquery is *not* here, and the reason is the
     // shell rather than the engine: both refuse it, in the same words, and the
@@ -122,14 +123,14 @@ const CASES: &[Case] = &[
         script: "CREATE TABLE t(a INTEGER PRIMARY KEY, n INTEGER);\nINSERT INTO t VALUES(1,100),(2,600);\nINSERT INTO t VALUES(1,7) ON CONFLICT(a) DO UPDATE SET n=999 WHERE t.n > 500;\nINSERT INTO t VALUES(2,7) ON CONFLICT(a) DO UPDATE SET n=999 WHERE t.n > 500;\nSELECT * FROM t ORDER BY a;\nSELECT changes();",
         expect: Agrees,
     },
-    // task-1870's QA pass: the two shapes the 416-case probe caught reporting a
+    // A later QA pass: the two shapes the 416-case probe caught reporting a
     // refusal in the wrong words.
     //
     // The pinned reference is not compiled with
     // `SQLITE_ENABLE_UPDATE_DELETE_LIMIT`, so it has no grammar for the clause
     // and answers `near "ORDER": syntax error`. This engine parses the form -
     // it is a published production and the syntax register requires it - and
-    // refuses it at bind time in the reference's words. task-1869 moved
+    // refuses it at bind time in the reference's words. A later change moved
     // `bind::refused` from `Unexpected` to `Refused`, which was right for the
     // forty-seven sentence-shaped refusals it was aimed at and wrong for this
     // one: the message became a bare `ORDER`. Both engines still refused, so
@@ -209,9 +210,9 @@ SELECT group_concat(b) FROM (SELECT b FROM t ORDER BY id);",
         script: "SELECT jsonb_extract(jsonb('{\"a\":2}'), '$.a'), json_extract(jsonb('{\"a\":2}'), '$.a'), typeof(jsonb_extract(jsonb('{\"b\":[1,2]}'), '$.b')), hex(jsonb_extract(jsonb('{\"b\":[1,2]}'), '$.b')), typeof(jsonb_extract(jsonb('{\"s\":\"x\"}'),'$.s'));",
         expect: Agrees,
     },
-    // **The whole specifier family, not the three that were reported.** That is
-    // task-1856's lesson written down: fixing one member of a family and
-    // assuming the rest is how the next three stay hidden.
+    // **The whole specifier family, not the three that were reported.** That
+    // is the lesson from a bug where fixing one member of a family and
+    // assuming the rest left the next three hidden.
     Case {
         name: "fn.strftime.family",
         kind: "time",
@@ -256,7 +257,7 @@ SELECT group_concat(b) FROM (SELECT b FROM t ORDER BY id);",
         script: "CREATE TABLE s(a INTEGER, b INT, c BIGINT, d TEXT, e VARCHAR(3), f CHAR(5), g BLOB, h REAL, i DOUBLE, j NUMERIC, k DECIMAL(4,2), l, m DATETIME);\nCREATE TABLE d1 AS SELECT a,b,c,d,e,f,g,h,i,j,k,l,m FROM s;\nSELECT sql FROM sqlite_schema WHERE name='d1';\nCREATE TABLE d4 AS SELECT g FROM s;\nSELECT sql FROM sqlite_schema WHERE name='d4';",
         expect: Agrees,
     },
-    // task-1859 Part F: the refusals an ordinary query hits.
+    // The refusals an ordinary query hits.
     Case {
         name: "select.bare.column",
         kind: "read",
@@ -311,9 +312,9 @@ SELECT group_concat(b) FROM (SELECT b FROM t ORDER BY id);",
         script: "SELECT 1;\n-- trailing",
         expect: Agrees,
     },
-    // ---------------------------------------------------------- task-1860
+    // ----------------------------------------------------------------------
     //
-    // Every construct the ticket closed, in the order the ticket names them.
+    // A round of constructs closed together, in the order they were fixed.
     // A row here is the guard on a whole feature: `geopoly.overlap` is the
     // sweep, `fts5.external` is the shadow-table grant, and `pgvector.ops` is
     // the three-byte operator lexing that `<=>` needs.
@@ -435,7 +436,7 @@ SELECT sqlite_offset(1);",
         script: "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT);\nSELECT * FROM tables_used('SELECT * FROM t');",
         expect: Agrees,
     },
-    // task-1859 Part G and H.
+    // FTS5 update-in-place and the porter tokenizer, plus VACUUM's shell forms.
     Case {
         name: "fts5.update",
         kind: "fts5",
@@ -472,9 +473,8 @@ SELECT sqlite_offset(1);",
         script: "CREATE TABLE t(id INTEGER PRIMARY KEY, a);\nCREATE TABLE u(id INTEGER PRIMARY KEY, tid);\nCREATE INDEX ia ON t(a);\nEXPLAIN QUERY PLAN SELECT t.id, u.id FROM t JOIN u ON u.tid=t.id ORDER BY t.a;\nEXPLAIN QUERY PLAN SELECT id FROM t WHERE a = 1;",
         expect: Agrees,
     },
-    // task-1859 Part C: the pragma surface. Every one of these answered
-    // nothing at all before - no value and no error, which a caller cannot
-    // tell from an empty result.
+    // The pragmas. Every one of these answered nothing at all before - no
+    // value and no error, which a caller cannot tell from an empty result.
     Case {
         name: "prag.user.version",
         kind: "pragma",
@@ -589,9 +589,9 @@ PRAGMA table_list;",
         script: "PRAGMA nonesuch;\nPRAGMA nonesuch = 4;\nSELECT 1;",
         expect: Agrees,
     },
-    // task-1859 Part B: `USING` and `NATURAL` coalesce the named column, so the
-    // join has one `k` and an unqualified reference to it is not ambiguous.
-    // All five of these answered `ambiguous column name: k` on the ORDER BY.
+    // `USING` and `NATURAL` coalesce the named column, so the join has one
+    // `k` and an unqualified reference to it is not ambiguous. All five of
+    // these answered `ambiguous column name: k` on the ORDER BY.
     Case {
         name: "join.using",
         kind: "join",
@@ -799,12 +799,12 @@ SELECT x.id, y.id FROM t x JOIN t y ON y.a = x.a AND y.id > x.id ORDER BY x.id;"
         script: "CREATE TABLE t(a INTEGER PRIMARY KEY);\nINSERT INTO t VALUES (1);\nINSERT INTO t VALUES (1);\nSELECT count(*) FROM t;",
         expect: Agrees,
     },
-    // task-1849. An `UPDATE` onto another row's key in a secondary `UNIQUE`
-    // index was performed and answered success, leaving the index with two
-    // entries under one key: the first case is the ticket's own script. The
-    // second is the other half of the same defect - the row must not collide
-    // with *itself*, and moving the rowid moves an index entry whose key did
-    // not change, which was already being refused. The rest are the paths a
+    // An `UPDATE` onto another row's key in a secondary `UNIQUE` index was
+    // performed and answered success, leaving the index with two entries
+    // under one key: the first case is the original bug report's own script.
+    // The second is the other half of the same defect - the row must not
+    // collide with *itself*, and moving the rowid moves an index entry whose
+    // key did not change, which was already being refused. The rest are the paths a
     // check that only looked at the table's key never reached.
     Case {
         name: "constraint.unique.update",
@@ -1310,7 +1310,7 @@ SELECT x.id, y.id FROM t x JOIN t y ON y.a = x.a AND y.id > x.id ORDER BY x.id;"
         script: "CREATE TABLE t(a);\nBEGIN;\nCREATE TABLE u(a);\nROLLBACK;\nSELECT count(*) FROM sqlite_schema WHERE name = 'u';",
         expect: Agrees,
     },
-    // task-1855's four, one per conclusion the planner drew from a `DESC`
+    // Four cases, one per conclusion the planner drew from a `DESC`
     // key column, plus the write path that maintains one. Nine rows rather
     // than three, because with three rows an inverted bound selects the same
     // count by coincidence - which is what kept this hidden.

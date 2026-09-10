@@ -10,7 +10,7 @@
 //! comparison against SQLite at a 2 MB `cache_size` has to be able to state the
 //! cache size on both sides.
 //!
-//! This is `tasks/task-1816-rearchitecture-tdd.md`'s `inillucent-pool`, delivered in
+//! This is the rearchitecture's `inillucent-pool`, delivered in
 //! Phase 2. It sits above `inillucent-vfs` and below `inillucent-tree`, and the page
 //! primitives that Phase 1 put in `inillucent-tree::page` moved down here with it -
 //! unchanged, and re-exported from their old path, because a page header is a

@@ -159,8 +159,8 @@ fn assert_agrees(database: &Database, tree: &PagedTree, model: &BTreeMap<i64, Ro
 /// An arbitrary interleaving of insert, update, delete and compaction still
 /// equals a `BTreeMap`.
 ///
-/// The TDD's acceptance, extended from the read-only property test task-1816
-/// wrote. The tree is checked against the model after **every** operation, and
+/// The TDD's acceptance, extended from an earlier read-only property test.
+/// The tree is checked against the model after **every** operation, and
 /// the integrity checker runs at the end of every seed.
 #[test]
 fn a_tree_written_to_arbitrarily_still_agrees_with_a_btreemap() {
@@ -344,8 +344,9 @@ fn holds(pool: &inillucent_pool::Pool, root: PageId, target: PageId, depth: u16)
 
 /// Inserting enough rows splits leaves, and the tree still agrees.
 ///
-/// The pool is small enough that a split has to evict a page it is not holding,
-/// which is the shape task-1817's descent campaign found a stale-parent bug in.
+/// The pool is small enough that a split has to evict a page it is not
+/// holding - the same shape an earlier descent campaign used when it found a
+/// stale parent back-reference corrupting an unrelated page.
 #[test]
 fn a_tree_grown_by_inserts_splits_under_an_evicting_pool() {
     let (mut database, mut tree, mut model) = fixture(512, 16, 40);

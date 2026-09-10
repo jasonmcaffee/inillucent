@@ -2785,7 +2785,22 @@ impl Compiler {
         sorter: u32,
     ) -> DbResult<()> {
         let chosen = plan::write_path_with(table, source, filter, self.levers);
-        if !matches!(chosen, plan::AccessPath::TableScan { .. }) {
+        // A seek union is not collected as a union here - the collection pass
+        // has its own, simpler cursor discipline (the writer's own index
+        // cursor, no residual dedup machinery) and a scan is always correct
+        // regardless of which path found the rows, so the union shapes fall
+        // back to one rather than growing a second copy of the union
+        // compiler for a pass that already re-tests the whole `WHERE` clause
+        // anyway. The lever is only claimed by the shapes actually given
+        // special treatment below, so a fallback here is never misreported as
+        // an indexed write.
+        let indexed = matches!(
+            chosen,
+            plan::AccessPath::RowidSeek { .. }
+                | plan::AccessPath::RowidRange { .. }
+                | plan::AccessPath::IndexSeek { .. }
+        );
+        if indexed {
             self.used |= plan::Levers::INDEXED_WRITE;
         }
         match chosen {

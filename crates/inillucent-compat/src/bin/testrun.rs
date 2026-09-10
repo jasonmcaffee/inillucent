@@ -7,7 +7,7 @@
 //! pass. A runner that could turn a failure into a pass would be worse than no
 //! runner.
 //!
-//! It has **three** answers rather than two, and task-1884 is why. It used to
+//! It has **three** answers rather than two. It used to
 //! read the process's exit status alone, so `inillucent-bench` - which loads the
 //! ONNX runtime and its CUDA provider, and sometimes takes the process down
 //! after libtest has printed its summary - was reported as FAILED having passed
@@ -909,8 +909,8 @@ fn run_one(built: &Built, threads: &str, filter: Option<&str>) -> Outcome {
         // fall back to whatever `cargo` is on PATH, which on a machine with
         // several toolchains is not necessarily this one.
         .env("CARGO", cargo())
-        // **`--show-output`, or `--strict` cannot see a skip at all**
-        // (task-1868). libtest swallows the output of a test that *passes*, and
+        // **`--show-output`, or `--strict` cannot see a skip at all.**
+        // libtest swallows the output of a test that *passes*, and
         // a suite whose prerequisite is absent passes - that is the whole shape
         // of the problem. So the sentence a skipping suite prints to say what is
         // missing never reached this process, `missing_prerequisites`'s
@@ -1051,7 +1051,7 @@ fn missing_prerequisites<'run>(
         // Only a target that passed can be hollow. One that failed, or that the
         // runner could not read, did not "evidence nothing" - it evidenced a
         // problem, and calling it a missing prerequisite as well would put a
-        // second wrong label on the same event (task-1884).
+        // second wrong label on the same event.
         if !outcome.verdict.is_green() {
             continue;
         }
@@ -1065,7 +1065,7 @@ fn missing_prerequisites<'run>(
         // reference is absent, evidenced nothing.
         //
         // **The phrase list used to miss almost every suite it was written
-        // for** (found by task-1868). It matched `has not been built`,
+        // for.** It matched `has not been built`,
         // `is not available` and `no reference`; what the suites actually
         // print is `the pinned SQLite oracle is not built; skipping`,
         // `the pinned shell is not present; skipping` and `no usable C

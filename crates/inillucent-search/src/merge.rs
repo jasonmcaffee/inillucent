@@ -30,8 +30,9 @@
 //! Automatic compaction used to take the second path, which meant one ordinary
 //! `INSERT` could pay a full graph build - nine and a half minutes on the
 //! 598,560 chunk corpus this engine is deployed on, in the middle of somebody
-//! else's transaction. task-1894 M8 made it fold; the single-pass build is now
-//! only ever asked for.
+//! else's transaction. That path was changed to fold pending deltas instead of
+//! rebuilding the whole graph; the single-pass build is now only ever asked for
+//! explicitly, by `compact` or `rebuild`.
 
 use std::sync::Mutex;
 
@@ -215,8 +216,7 @@ pub fn configuration(options: &Options) -> IndexConfig {
     // things at once. A *store* is not a grading. It is rebuilt whenever
     // compaction runs, over a corpus of whatever size the application has, and
     // the sequential build of the 598,560-chunk mailbox this engine is deployed
-    // on takes nine and a half minutes on one core of twenty-four (task-1838
-    // §8).
+    // on takes nine and a half minutes on one core of twenty-four.
     //
     // The parallel build was written for exactly this and was never switched
     // on: a lock per adjacency list, neighbours merged rather than assigned so
@@ -328,7 +328,7 @@ pub fn embedding_of(row: &Row, dims: usize) -> Vec<f32> {
 /// an update tombstoned.
 ///
 /// It used to say here that the single-pass graph is also better connected, and
-/// task-1894's gate did not find that. At 40,000 documents and 64 dimensions the
+/// a recall gate run against it did not find that. At 40,000 documents and 64 dimensions the
 /// folded graph answered 0.704 recall at ten against the rebuilt graph's 0.637.
 /// One reading over twenty-four probes is not a reversal of the claim, but it is
 /// enough to stop the claim being made: what a rebuild is known to buy is the
@@ -360,7 +360,7 @@ pub fn build_from_rows(
 
 /// Folds a bounded batch of deltas into the generation that is already built.
 ///
-/// **This is the automatic path, and the bound is the point (task-1894, M8).**
+/// **This is the automatic path, and the bound is the point.**
 /// The graph is not rebuilt. Each pending entry is one `replace_document`,
 /// which tombstones the old chunk and inserts one node through `Hnsw::insert` -
 /// a descent through the layers and one neighbour selection per layer. So the

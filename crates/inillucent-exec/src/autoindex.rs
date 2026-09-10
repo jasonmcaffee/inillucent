@@ -24,8 +24,8 @@
 //! `PRAGMA automatic_index = off` is asking about.
 //!
 //! Without it, an unindexed inner side is read once into a vector and every
-//! outer row walks the whole vector, which is what this engine did before
-//! task-1860 and is what `off` still selects.
+//! outer row walks the whole vector, which is what this engine used to always
+//! do and is what `off` still selects.
 
 use crate::expr::Expr;
 

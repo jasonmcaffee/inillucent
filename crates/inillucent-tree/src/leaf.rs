@@ -153,7 +153,7 @@ pub const FRAME_OF_REFERENCE: bool = true;
 /// pages simply say eight. Flipping this constant and rebuilding is the whole
 /// of the A/B, and it is left here so the measurement can be repeated.
 ///
-/// ## What it was measured at (task-1870, four 30-round gate runs each way)
+/// ## What it was measured at (four 30-round gate runs each way)
 ///
 /// | | wide | narrow |
 /// |---|---|---|
@@ -2536,7 +2536,7 @@ pub fn encode_extent_tagged(out: &mut Vec<u8>, reference: ExtentRef) {
 /// column-major - it writes every value of one mini-column, then the next - so
 /// a source that handed back whole rows would have to rebuild each row once per
 /// column. And a slice is what this exists to avoid: `CREATE INDEX` holds its
-/// entries in an arena, and before task-1869 it materialised a flat
+/// entries in an arena, and it used to materialise a flat
 /// `Vec<Datum>` in key order plus a `Vec<&[Datum]>` of slices into it purely so
 /// that a `&[R]` could be passed - 6.4 MiB of copies at a hundred thousand rows,
 /// of a statement whose whole resident cost was 28.9 MiB.
@@ -2711,8 +2711,8 @@ impl LeafBuilder {
     ///
     /// **The sizing half of [`LeafBuilder::pack_rows`], on its own.** A bulk
     /// build has to allocate its leaves as one contiguous run, so it has to know
-    /// how many leaves there will be before it writes the first one - and until
-    /// task-1869 the only way to find out was to pack every leaf into a
+    /// how many leaves there will be before it writes the first one - and the
+    /// only way to find out used to be to pack every leaf into a
     /// `Vec<Vec<u8>>` and count them, which is a whole copy of the tree held in
     /// memory for the sake of one integer. A `CREATE INDEX` over a hundred
     /// thousand rows spent 6.2 MiB that way.
@@ -2892,9 +2892,9 @@ impl LeafBuilder {
     /// @param count - how many rows
     ///
     /// **Unreachable since the narrow-slot pricing moved onto the width
-    /// arrays.** It is kept rather than deleted because task-1894 is not the
-    /// ticket that reviews it; it is listed for removal in that ticket's
-    /// comments so a person decides.
+    /// arrays.** It is kept rather than deleted because removing it is a
+    /// separate decision; it is flagged for removal elsewhere so a person
+    /// decides.
     #[allow(dead_code)]
     fn fixed_size(&self, count: usize) -> usize {
         let widths: Vec<usize> = self
@@ -3566,9 +3566,9 @@ fn narrow_floor(physical: PhysicalType, page_size: usize) -> usize {
 /// @param threshold - the longest value kept in the leaf
 ///
 /// **Unreachable since the narrow-slot pricing moved onto the width
-/// arrays.** It is kept rather than deleted because task-1894 is not the
-/// ticket that reviews it; it is listed for removal in that ticket's
-/// comments so a person decides.
+/// arrays.** It is kept rather than deleted because removing it is a
+/// separate decision; it is flagged for removal elsewhere so a person
+/// decides.
 #[allow(dead_code)]
 fn slot_need(
     physical: PhysicalType,
@@ -3594,9 +3594,9 @@ fn slot_need(
 /// @param class - the class the value classified as
 ///
 /// **Unreachable since the narrow-slot pricing moved onto the width
-/// arrays.** It is kept rather than deleted because task-1894 is not the
-/// ticket that reviews it; it is listed for removal in that ticket's
-/// comments so a person decides.
+/// arrays.** It is kept rather than deleted because removing it is a
+/// separate decision; it is flagged for removal elsewhere so a person
+/// decides.
 #[allow(dead_code)]
 fn slot_need_of(
     physical: PhysicalType,
@@ -3639,9 +3639,9 @@ fn slot_need_of(
 /// @param threshold - the longest value kept in the leaf
 ///
 /// **Unreachable since the narrow-slot pricing moved onto the width
-/// arrays.** It is kept rather than deleted because task-1894 is not the
-/// ticket that reviews it; it is listed for removal in that ticket's
-/// comments so a person decides.
+/// arrays.** It is kept rather than deleted because removing it is a
+/// separate decision; it is flagged for removal elsewhere so a person
+/// decides.
 #[allow(dead_code)]
 fn costs_at(
     physical: PhysicalType,
@@ -3717,9 +3717,9 @@ fn classify_at(physical: PhysicalType, value: &Datum<'_>, threshold: usize) -> V
 /// @param threshold - the longest value kept in the leaf
 ///
 /// **Unreachable since the narrow-slot pricing moved onto the width
-/// arrays.** It is kept rather than deleted because task-1894 is not the
-/// ticket that reviews it; it is listed for removal in that ticket's
-/// comments so a person decides.
+/// arrays.** It is kept rather than deleted because removing it is a
+/// separate decision; it is flagged for removal elsewhere so a person
+/// decides.
 #[allow(dead_code)]
 fn heap_cost_at(physical: PhysicalType, value: &Datum<'_>, threshold: usize) -> usize {
     heap_cost_of(physical, value, classify_at(physical, value, threshold))

@@ -11,7 +11,7 @@
 //! find a register that under-reports, because a register that under-reports
 //! answers every call correctly - it just does not admit that it can.
 //!
-//! task-1861's audit found exactly that, by enumerating rather than calling:
+//! An audit found exactly that, by enumerating rather than calling:
 //! `pragma_function_list` answered **161** names where SQLite answers **218**,
 //! and `pragma_module_list` **14** where SQLite answers **19**, while the
 //! functionality behind most of the difference was present and byte-identical.
@@ -29,7 +29,7 @@
 use inillucent_compat::differential::{compare, Step};
 
 /// Where this suite's scratch databases live.
-const AREA: &str = "task-1869/registers";
+const AREA: &str = "registers";
 
 /// Functions this engine has and the pinned **library** does not.
 ///
@@ -107,9 +107,9 @@ const OURS_ONLY_FUNCTIONS: &[&str] = &[
 /// stub that answered them would be a wrong answer rather than a missing one,
 /// and this project treats those as the more serious of the two.
 ///
-/// It was six before task-1869, which implemented `fts5_source_id()` and
-/// `optimize()` - both have faithful answers here - and named the fifty-one
-/// functions that were present and unlisted. `fts3_tokenizer` is the sixth and
+/// It was six before `fts5_source_id()` and `optimize()` were implemented -
+/// both have faithful answers here - and the fifty-one functions that were
+/// present and unlisted were named. `fts3_tokenizer` is the sixth and
 /// is absent from the pinned *library* too, so it is a difference against the
 /// shell only and is recorded in `docs/feature-comparison.md`.
 const STILL_ABSENT: &[&str] = &["fts5", "fts5_get_locale", "fts5_insttoken", "fts5_locale"];
@@ -218,8 +218,9 @@ fn listing(register: &str, allowed: &[&[&str]]) -> String {
 
 /// Every function both engines have is named by both engines' registers.
 ///
-/// This is the test that would have failed for every ticket before task-1869:
-/// fifty-seven names, all of them answering, none of them listed.
+/// This is the test that would have caught the under-reporting register
+/// before it was fixed: fifty-seven names, all of them answering, none of
+/// them listed.
 #[test]
 fn the_function_register_names_what_the_engine_answers() {
     let query = listing("function_list", &[STILL_ABSENT, OURS_ONLY_FUNCTIONS]);
@@ -293,8 +294,8 @@ fn the_collation_register_agrees_exactly() {
 /// they do not exist.
 ///
 /// Eleven window functions and the auxiliary functions read as twenty-three
-/// missing functions in task-1861's audit, because calling one outside its
-/// context answered `no such function`. Every one of them is present and
+/// missing functions in the enumeration audit, because calling one outside
+/// its context answered `no such function`. Every one of them is present and
 /// byte-identical when called properly, and the reference's own wording says
 /// which of the two things went wrong.
 #[test]

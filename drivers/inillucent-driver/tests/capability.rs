@@ -239,12 +239,12 @@ fn an_unimplemented_construct_refuses_by_name_and_a_typo_does_not() {
         .expect("the fixture is made");
 
     // **The example moves as the engine grows, and that is the point.** It was
-    // a `LEFT JOIN` until task-1838 implemented that, `ATTACH` until task-1844,
-    // `VACUUM` until task-1859, and a second `ON CONFLICT` clause until
-    // task-1860; the assertion is about the *classification*, so it is
-    // repointed at a construct that is still unimplemented rather than
-    // weakened. `ATTACH ... KEY` is one: it names an encryption extension this
-    // engine does not have, and SQLite's own answer in a build without one is
+    // a `LEFT JOIN`, then `ATTACH`, then `VACUUM`, then a second `ON CONFLICT`
+    // clause, each retired as the engine implemented it in turn; the assertion
+    // is about the *classification*, so it is repointed at a construct that is
+    // still unimplemented rather than weakened. `ATTACH ... KEY` is one: it
+    // names an encryption extension this engine does not have, and SQLite's
+    // own answer in a build without one is
     // to parse the key and quietly ignore it - which is the answer a caller who
     // asked for an encrypted file must not be given.
     let refused = connection

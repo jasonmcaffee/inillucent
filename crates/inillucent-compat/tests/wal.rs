@@ -5,12 +5,12 @@
 //! not a log.
 //!
 //! **The eight tests that read and wrote SQLite's log are gone, and are not
-//! deleted.** They asserted file-format interoperability, which task-1816
-//! dropped when this engine stopped writing SQLite files: they failed because
-//! the promise was withdrawn rather than because the engine was wrong. They now
-//! live in `_junk/wal_interop.rs`, out of `tests/` and out of git, and
-//! task-1838 §9 is where that ruling is written down. What is left here is this
-//! engine's own log: a commit that survives a reopen, a rollback that leaves
+//! deleted.** They asserted file-format interoperability, which the
+//! rearchitecture to a native storage format dropped when this engine
+//! stopped writing SQLite files: they failed because the promise was
+//! withdrawn rather than because the engine was wrong. They now live in
+//! `_junk/wal_interop.rs`, out of `tests/` and out of git. What is left here
+//! is this engine's own log: a commit that survives a reopen, a rollback that leaves
 //! nothing, a second connection that sees the commit, and a checkpoint that
 //! moves the data into the database.
 
@@ -22,7 +22,7 @@ use inillucent_value::Value;
 
 /// Returns a fresh scratch path, with every companion file removed.
 fn scratch(name: &str) -> PathBuf {
-    let directory = workspace_root().join("_agent_output/task-1788/wal");
+    let directory = workspace_root().join("_agent_output/wal");
     let _ = std::fs::create_dir_all(&directory);
     for suffix in ["", "-journal", "-wal", "-shm"] {
         let _ = std::fs::remove_file(directory.join(format!("{name}.db{suffix}")));

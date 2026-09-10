@@ -36,7 +36,7 @@ pub mod manifest;
 pub mod model;
 /// The rearchitected engine, which now lives in `inillucent-engine`.
 ///
-/// **Moved rather than copied**, by task-1834. Phases 1 to 4 built the new
+/// **Moved rather than copied.** Phases 1 to 4 built the new
 /// engine inside this crate because until Phase 5 there was nothing above it to
 /// be its caller; Phase 5 has callers - `inillucent-migrate`'s new target, and
 /// the connection - and neither may depend on a test crate. Every path a gate,

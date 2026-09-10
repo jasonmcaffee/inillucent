@@ -52,7 +52,7 @@ impl Rng {
 
 /// Returns the directory damaged files are written to.
 fn scratch() -> std::path::PathBuf {
-    let directory = workspace_root().join("_agent_output/task-1783/corruption");
+    let directory = workspace_root().join("_agent_output/corruption");
     let _ = std::fs::create_dir_all(&directory);
     directory
 }

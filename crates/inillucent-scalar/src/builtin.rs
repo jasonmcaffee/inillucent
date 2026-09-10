@@ -234,8 +234,8 @@ const SOURCE_ID: &str =
 /// an application that reads it is checking which FTS5 it is talking to, and a
 /// differently shaped string breaks the parse rather than informing anybody.
 /// The stamp itself is this engine's, because claiming a particular SQLite
-/// build's hash would be a false statement about what is running. task-1869
-/// added it: it was the one FTS name of the six the audit found absent that has
+/// build's hash would be a false statement about what is running. It was
+/// added as the one FTS name of the six the audit found absent that has
 /// a faithful answer here.
 const FTS5_SOURCE_ID: &str =
     "fts5: 2026-09-08 00:00:00 inillucent000000000000000000000000000000000000000000000000000000";

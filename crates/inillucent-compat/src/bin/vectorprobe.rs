@@ -114,7 +114,7 @@ fn main() -> ExitCode {
 /// @param k - how many neighbours a probe asks for
 /// @param probes - how many probes each arm runs
 fn run(rows: usize, dims: usize, k: usize, probes: usize) -> Result<(), String> {
-    let root = inillucent_compat::workspace_root().join("_agent_output/task-1838/vectorprobe");
+    let root = inillucent_compat::workspace_root().join("_agent_output/vectorprobe");
     std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
     let path: PathBuf = root.join(format!("{}.rdb", std::process::id()));
     let _ = std::fs::remove_file(&path);

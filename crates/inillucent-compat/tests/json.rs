@@ -16,7 +16,7 @@
 use inillucent_compat::differential::{compare_queries, Step};
 
 /// Where this suite's scratch databases live.
-const AREA: &str = "task-1789/json";
+const AREA: &str = "json";
 
 /// Runs a list of queries against both engines, failing on any difference.
 fn check(name: &str, queries: &[&'static str]) {

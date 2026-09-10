@@ -3,7 +3,7 @@
 //! Invariant: **an MCP request has a finite bound on rows, on bytes, on the
 //! size of what it sends, on the size of what it gets back, and on how long it
 //! runs, and hitting one is a structured refusal naming which.** Before
-//! task-1894 it had none of those. The `limit` argument's helper turned a
+//! this, it had none of those. The `limit` argument's helper turned a
 //! *negative* number into zero, and zero means every row - so `limit=-1`, which
 //! is how "no limit" is spelled in most other things and how an off-by-one in a
 //! client's arithmetic comes out, asked a confined server for the whole table.
@@ -21,7 +21,7 @@ use inillucent_compat::workspace_root;
 
 /// Where this suite's scratch databases live.
 fn area() -> PathBuf {
-    let path = workspace_root().join("_agent_output/task-1894/budgets");
+    let path = workspace_root().join("_agent_output/budgets");
     let _ = std::fs::create_dir_all(&path);
     path
 }
@@ -141,7 +141,7 @@ impl Server {
 
 /// A negative limit is refused rather than read as "every row".
 ///
-/// This is the reproduction from task-1892's review, inverted into a test:
+/// This is the reproduction from code review, inverted into a test:
 /// `limit_of` matched `Some(asked) if asked >= 0` and fell through to zero,
 /// and zero is unlimited.
 #[test]

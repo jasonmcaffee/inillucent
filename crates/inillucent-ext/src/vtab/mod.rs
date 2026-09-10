@@ -70,8 +70,8 @@ pub struct Context<'host> {
 /// are a module whose rows *are* a pragma's answer, and there must be one
 /// implementation of that answer rather than two.
 ///
-/// **It used to carry the pager set as well, and task-1894 removed it.** The
-/// accessor was the last thing making `inillucent-ext` - a crate the *new*
+/// **It used to carry the pager set as well; that accessor was removed.** It
+/// was the last thing making `inillucent-ext` - a crate the *new*
 /// engine links - depend on `inillucent-storage`, the storage model the
 /// rearchitecture retired. Every host now reaches its rows through
 /// [`Context::store`], including the old engine, whose implementation of that

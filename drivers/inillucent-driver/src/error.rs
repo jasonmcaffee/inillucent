@@ -6,8 +6,8 @@
 //! The engine is deliberately incomplete - it cannot enforce a foreign key,
 //! answer an outer join, or run a recursive CTE - and it refuses those rather
 //! than answering them wrongly, which is correct. But a refusal is only useful
-//! to an application that can recognise one, and until task-1837 every refusal
-//! left the engine as the same `SQLITE_MISUSE` a typo produces. `SELECT * FROM
+//! to an application that can recognise one, and before this driver existed
+//! every refusal left the engine as the same `SQLITE_MISUSE` a typo produces. `SELECT * FROM
 //! peple` and `SELECT * FROM people LEFT JOIN teams ON ...` differed only in
 //! prose, so an application that wanted to say "this engine cannot do that yet"
 //! rather than "check your spelling" had to match on a sentence.

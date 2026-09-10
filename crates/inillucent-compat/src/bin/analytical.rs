@@ -35,8 +35,8 @@
 //! keeping its own copy. This binary stays because the Phase 1 report quotes
 //! its output and a number nobody can reproduce is not evidence. It now runs on
 //! the Phase 2 engine - a real file behind a buffer pool - so its numbers are
-//! comparable to, and not identical with, the ones in
-//! `_agent_output/task-1816-phase1/`.
+//! comparable to, and not identical with, the ones the Phase 1 report
+//! captured.
 //!
 //! Usage: inillucent-analytical <sqlite fixture> [--rounds N] [--page-size N]
 

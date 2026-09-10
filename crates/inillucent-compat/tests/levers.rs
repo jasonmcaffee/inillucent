@@ -357,10 +357,9 @@ fn a_prepared_statement_keeps_the_arm_it_was_compiled_under() {
 /// pass the same integrity check. A bounded copy that dropped a frame would
 /// look exactly like a faster checkpoint until something read the page.
 ///
-/// The measurement says the bound buys nothing - see
-/// `_agent_output/task-1790/checkpoint/checkpoint.md` - so it is off by
-/// default. This is what keeps the mechanism honest anyway: a tunable nothing
-/// exercises is a tunable that quietly stops working.
+/// The measurement says the bound buys nothing, so it is off by default. This
+/// is what keeps the mechanism honest anyway: a tunable nothing exercises is
+/// a tunable that quietly stops working.
 #[test]
 fn the_checkpoint_arm_moves_the_same_pages() {
     let directory = std::env::temp_dir().join("inillucent-levers-checkpoint");

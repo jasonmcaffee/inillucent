@@ -7,7 +7,7 @@
 //! from the writer would hand recovery's row records to the wrong tree, which is
 //! a wrong answer rather than a refusal.
 //!
-//! Before task-1834 there were three numberings and none of them was in the
+//! There used to be three numberings and none of them was in the
 //! file: the import used the *source* SQLite file's root pages, DDL counted up
 //! from `FIRST_CREATED_ROOT` in a counter that restarted at every open, and an
 //! `open` numbered objects 1, 2, 3… in catalog order. They agreed only by
@@ -37,7 +37,7 @@ const PAGE_SIZE: usize = 32_768;
 ///
 /// @param name - the test's name
 fn scratch(name: &str) -> PathBuf {
-    let area = workspace_root().join("target/scratch/task-1834/identity");
+    let area = workspace_root().join("target/scratch/identity");
     let _ = std::fs::create_dir_all(&area);
     let path = area.join(format!("{name}.rdb"));
     let _ = std::fs::remove_file(&path);

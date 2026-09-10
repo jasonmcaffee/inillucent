@@ -205,7 +205,7 @@ impl ImportedDatabase {
             // rather than two. The promise is `follow_vector_indexes`: the
             // write path reports what it stored and removed for a table an
             // index a module owns is built over, and the engine applies both
-            // to the module inside the same transaction. task-1838 §7.
+            // to the module inside the same transaction.
             Directive::CreateIndex {
                 using: Some(module),
                 name,
@@ -257,7 +257,7 @@ impl ImportedDatabase {
                 exists,
                 if_not_exists,
             ),
-            // **Stored and fired, since task-1838.** It used to be refused,
+            // **Stored and fired.** It used to be refused,
             // and the refusal was right at the time: this engine could store a
             // trigger and list it in `sqlite_schema` but could not run one, and
             // a database whose triggers never fire is one whose invariants are
@@ -319,8 +319,9 @@ impl ImportedDatabase {
             // `begin_batch`, `commit_batch` and `rollback` are deliberately
             // tolerant - they are called at boundaries by code that does not
             // know whether a transaction is open - and the *statements* are
-            // not: SQLite reports all three of these, and until task-1850 this
-            // engine reported none of them. It is the same defect three times,
+            // not: SQLite reports all three of these, and before the write
+            // path had a statement boundary, this engine reported none of
+            // them. It is the same defect three times,
             // and it is how a caller finds out that an `OR ROLLBACK` ended the
             // transaction underneath it: the `COMMIT` that follows has nothing
             // left to commit and has to say so.
@@ -482,7 +483,7 @@ impl ImportedDatabase {
         // reads.** An index a module owns is published onto its table's
         // `indexes` list, and a catalog built before that happened describes a
         // table with no such index - so the one path that can use it is never
-        // offered (task-1838 §7).
+        // offered.
         self.refresh_vector_indexes();
         // **And the measurements, for the same reason.** `ANALYZE` writes
         // `sqlite_stat1` and then rebuilds the catalog; a snapshot taken before
@@ -542,7 +543,7 @@ impl ImportedDatabase {
         // already written to turn `FROM generate_series(1,10)` into `Eq`
         // constraints on their hidden columns. The one thing missing was
         // anything putting them in the catalog, so every one of them was
-        // `no such table` (task-1843). They go on last, so a real table of the
+        // `no such table`. They go on last, so a real table of the
         // same name shadows the module.
         if self.eponymous.is_empty() {
             self.eponymous = self.eponymous_tables();

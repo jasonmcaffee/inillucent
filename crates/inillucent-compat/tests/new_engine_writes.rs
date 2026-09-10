@@ -388,7 +388,7 @@ fn a_null_never_collides_in_a_unique_index() {
 
 /// An `UPDATE` is refused by a secondary `UNIQUE` index, and only by a real one.
 ///
-/// **This is the silent wrong answer task-1849 was filed for**, and it is worth
+/// **This is the silent wrong answer that was found**, and it is worth
 /// stating what "silent" bought: `UPDATE members SET email = 'ana@x' WHERE id =
 /// 2` was performed, answered success, and left `members_email` holding two
 /// entries under one key. Nothing failed. The next reader asking
@@ -961,11 +961,11 @@ fn the_window_functions_answer_what_sqlite_answers() {
 ///
 /// One buffer can only be sorted one way, and the operator computes each call's
 /// peer groups over a sequence it assumes is sorted by that call's ordering -
-/// so two windows with different frames were refused by name until task-1838,
-/// which groups the calls by frame and runs one pass per group. The answers are
-/// scattered back into the slot the binder numbered each call, which is what
-/// keeps a two-pass statement's projection reading the same columns a one-pass
-/// statement's does.
+/// so two windows with different frames were refused by name until the
+/// operator grouped the calls by frame and ran one pass per group. The
+/// answers are scattered back into the slot the binder numbered each call,
+/// which is what keeps a two-pass statement's projection reading the same
+/// columns a one-pass statement's does.
 ///
 /// Graded against the pinned shell, because the interesting half is that the
 /// *second* pass is right: a first pass that answered both calls would produce
@@ -1012,10 +1012,11 @@ fn two_different_windows_in_one_statement_are_both_computed() {
 /// `SELECT score, id ... ORDER BY score` - a projection the descending index
 /// covers, which is what made the planner reach for it.
 ///
-/// **Since task-1856 this grades the index rather than its absence.** task-1849
-/// closed it by dropping a descending index at the door, so from then until now
-/// the queries below were answered off the table and the index they are named
-/// after was not in the file at all. `members_score` is imported now, and
+/// **This now grades the index rather than its absence.** The import used to
+/// drop a descending index at the door rather than let it disagree with the
+/// catalog, so for a while the queries below were answered off the table and
+/// the index they are named after was not in the file at all. `members_score`
+/// is imported now, and
 /// `the_import_keeps_a_descending_index_and_answers_over_it` asserts that it is
 /// - so if it were ever dropped again, that test fails and these queries go
 /// back to proving nothing.
@@ -1062,7 +1063,7 @@ fn an_order_by_over_a_descending_index_is_not_reversed() {
 /// A descending index is imported, and answers the same as one `CREATE INDEX`
 /// built.
 ///
-/// **The two halves of task-1855, in one test, because the ticket is that they
+/// **The two halves, in one test, because the defect was that they
 /// disagreed.** An imported `DESC` index was dropped and named in `skipped`; a
 /// created one was built and the catalog then lied about it, so the planner
 /// inverted its range bounds and `WHERE c >= 10` answered one row of three.
@@ -1211,7 +1212,7 @@ fn created_descending_pair() -> Option<Pair> {
 
 /// A constraint's own `ON CONFLICT` clause decides which arm runs.
 ///
-/// **task-1853, and every one of its cases is a refusal where SQLite writes the
+/// **Every one of these cases is a refusal where SQLite writes the
 /// row** - the direction that is easy to miss, because a wrong answer looks
 /// like a working constraint. `a TEXT UNIQUE ON CONFLICT IGNORE` means the
 /// clause is on the *constraint*, so a plain `INSERT` that collides on `a`
@@ -1336,7 +1337,7 @@ fn a_constraints_own_conflict_clause_decides_the_arm() {
 /// A table-level `CHECK` takes an `ON CONFLICT` clause, and a column-level one
 /// does not.
 ///
-/// **The widest of task-1853's four, because it was a parse error rather than a
+/// **The widest of these four, because it was a parse error rather than a
 /// wrong answer**: `CONSTRAINT small CHECK(b < 9) ON CONFLICT FAIL` made the
 /// whole `CREATE TABLE` fail, and every statement after it said `no such
 /// table`. The table's `CREATE` text is stored and re-parsed on every open, so
@@ -1412,10 +1413,11 @@ fn a_table_level_check_takes_a_conflict_clause_and_ignores_it() {
 
 /// `REPLACE` stands a column's `DEFAULT` in for a NULL in a `NOT NULL` column.
 ///
-/// task-1853's fourth: SQLite's rule for a `NOT NULL` violation resolved as
-/// `REPLACE` is to substitute the column's default, and to fall back to `ABORT`
-/// only when there is none. This engine raised in both cases, so
-/// `UPDATE OR REPLACE t SET c = NULL` was refused where SQLite stores `'d'`.
+/// The fourth case in the same family: SQLite's rule for a `NOT NULL`
+/// violation resolved as `REPLACE` is to substitute the column's default, and
+/// to fall back to `ABORT` only when there is none. This engine raised in
+/// both cases, so `UPDATE OR REPLACE t SET c = NULL` was refused where
+/// SQLite stores `'d'`.
 ///
 /// The fallback is graded beside it, because a substitution that fires when
 /// there is nothing to substitute would store a NULL in a `NOT NULL` column -
@@ -1445,7 +1447,7 @@ fn or_replace_stands_a_default_in_for_a_null() {
         &[
             "CREATE TABLE rn(a TEXT UNIQUE, c TEXT NOT NULL)",
             "INSERT INTO rn VALUES ('x','p'),('y','q')",
-            // No default: ABORT, and task-1850's undo puts the row back.
+            // No default: ABORT, and the statement's undo puts the row back.
             "UPDATE OR REPLACE rn SET a = 'x', c = NULL WHERE a = 'y'",
         ],
         &["SELECT a, c FROM rn ORDER BY a", "SELECT count(*) FROM rn"],
@@ -1495,10 +1497,11 @@ fn or_replace_stands_a_default_in_for_a_null() {
 
 /// An `ON CONFLICT ... DO NOTHING` does not silence a `CHECK` or a `NOT NULL`.
 ///
-/// **Found while measuring task-1853, and it is a constraint silently not
-/// enforced.** The upsert clause is about a *key* collision on a named target;
-/// a missing value and a false predicate are neither, and SQLite raises for
-/// both. The write path was reading the upsert's arm for them, so
+/// **Found while testing the other `ON CONFLICT` cases, and it is a
+/// constraint silently not enforced.** The upsert clause is about a *key*
+/// collision on a named target; a missing value and a false predicate are
+/// neither, and SQLite raises for both. The write path was reading the
+/// upsert's arm for them, so
 /// `INSERT INTO t VALUES (2,20) ON CONFLICT DO NOTHING` on
 /// `b INTEGER CHECK(b < 9)` skipped the row and reported success - which reads,
 /// from the application's side, exactly like a row that collided.
@@ -1554,7 +1557,7 @@ fn do_nothing_does_not_silence_a_check_or_a_not_null() {
 /// `changes()`, `total_changes()` and `last_insert_rowid()` answer what SQLite
 /// answers.
 ///
-/// **task-1854, and it was a silent wrong answer on the *success* path.** The
+/// **A silent wrong answer on the *success* path.** The
 /// three exist as scalar functions in the dialect and the new engine answered
 /// every one of them `0`, for every statement, for ever - so an application
 /// reading `changes()` from SQL to decide whether an `UPDATE ... WHERE` matched
@@ -1700,7 +1703,7 @@ fn the_counters_after_a_failed_statement_are_sqlites() {
 
 /// `random()` answers a different number every time it is called.
 ///
-/// **Found while wiring task-1854's other three, and it is the same root
+/// **Found while wiring the other three, and it is the same root
 /// cause**: the new engine called the function library with a default context,
 /// and the default seed is zero - so `random()` answered one constant,
 /// `-2152535657050944081`, in every statement of every connection since the
@@ -1808,8 +1811,8 @@ fn ours_answer(pair: &mut Pair, sql: &str) -> Option<OwnedDatum> {
 
 /// `PRAGMA integrity_check` reports an index that disagrees with its table.
 ///
-/// **task-1851: the detector that would have caught task-1849's write bug.**
-/// That ticket's defect - an `UPDATE` that violated a secondary `UNIQUE` index
+/// **The detector that would have caught the earlier write bug.**
+/// That defect - an `UPDATE` that violated a secondary `UNIQUE` index
 /// was performed silently - left a database `integrity_check` then declared
 /// healthy: index `u` held two entries under `'x'`,
 /// `SELECT count(*) FROM t WHERE a='x'` answered 2 from the index and 1 from
@@ -1817,7 +1820,7 @@ fn ours_answer(pair: &mut Pair, sql: &str) -> Option<OwnedDatum> {
 /// what this is.
 ///
 /// **The damage is built by writing the index tree directly**, because no SQL
-/// statement can produce it any more - that is what task-1849 means - so
+/// statement can produce it any more now that the write bug is fixed - so
 /// `write_index_entry_unchecked` is the only way to put a database into the
 /// state the checker exists to find.
 ///
@@ -1833,7 +1836,8 @@ fn integrity_check_reports_an_index_that_disagrees_with_its_table() {
     let path = directory.join("damaged.db");
 
     // 1. Two entries under one key in a UNIQUE index. This is exactly the state
-    //    task-1849's `UPDATE t SET a='x' WHERE b=2` used to leave behind.
+    //    `UPDATE t SET a='x' WHERE b=2` used to leave behind before the write
+    //    bug was fixed.
     let mut engine =
         ImportedDatabase::create(path.clone(), 32_768, 4_096).expect("a fresh database");
     for sql in [
@@ -2005,7 +2009,7 @@ fn integrity(engine: &mut ImportedDatabase) -> String {
 /// a covering query months later.
 ///
 /// The probes are the caller's because these tables are the caller's: the
-/// fixture's `members` schema is not what the task-1850 repros are written
+/// fixture's `members` schema is not what the undo repros are written
 /// over, and each of them wants its own shape.
 ///
 /// @param pair - the two engines over the same data
@@ -2070,12 +2074,12 @@ fn probe_both(pair: &mut Pair, sql: &str, failures: &mut Vec<String>) {
 
 /// A statement that fails partway puts back everything it had written.
 ///
-/// **This is task-1850's defect, and it is one missing thing rather than a list
-/// of cases.** SQLite's default conflict algorithm is `ABORT`, which undoes the
-/// *statement* and keeps the transaction; this engine undid nothing, so a
-/// four-row `INSERT` that collided on its third row kept the first two and
-/// committed them - half a statement, durably, behind a diagnostic that said it
-/// failed.
+/// **This is one missing thing rather than a list of cases: there was no
+/// statement boundary in the write path.** SQLite's default conflict
+/// algorithm is `ABORT`, which undoes the *statement* and keeps the
+/// transaction; this engine undid nothing, so a four-row `INSERT` that
+/// collided on its third row kept the first two and committed them - half a
+/// statement, durably, behind a diagnostic that said it failed.
 ///
 /// The cases below are deliberately not all about uniqueness. The engine had no
 /// statement boundary at all, so every kind of failure leaked the same way, and

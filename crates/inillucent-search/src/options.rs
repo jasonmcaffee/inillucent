@@ -152,7 +152,7 @@ pub struct Options {
     /// able to work out on the next open which stores those are. Recording the
     /// source here puts it in `%_config`, which is written once and read back
     /// with everything else - so the association is durable without a second
-    /// place to keep a schema (task-1838 §7).
+    /// place to keep a schema.
     pub source: Option<Vec<u8>>,
     /// Which column of that table holds the vector.
     pub source_column: Option<Vec<u8>>,
@@ -161,7 +161,7 @@ pub struct Options {
     /// **A measurement affordance, not a tuning knob.** The default is every
     /// core the machine has, which is what a store wants; pinning it to one is
     /// how a build is measured against the sequential one it replaced, and how
-    /// a caller who needs the same graph twice gets it (task-1838 §8).
+    /// a caller who needs the same graph twice gets it.
     pub threads: Option<usize>,
 }
 

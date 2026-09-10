@@ -20,7 +20,7 @@ use inillucent_engine::connect::Database;
 /// Returns a scratch directory for one scenario, emptied first.
 fn scratch(name: &str) -> PathBuf {
     let directory = workspace_root()
-        .join("_agent_output/task-1844/participants")
+        .join("_agent_output/participants")
         .join(name);
     let _ = std::fs::remove_dir_all(&directory);
     let _ = std::fs::create_dir_all(&directory);

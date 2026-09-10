@@ -63,7 +63,7 @@ use crate::stats::{self, Paired, Verdict};
 ///
 /// The same hundredth of a point `grade` uses, and declared in the same place for
 /// the same reason: a threshold chosen after seeing the numbers is not a
-/// threshold. It is also the number the task-1815 gates G0 and G1 are written
+/// threshold. It is also the number gates G0 and G1 are written
 /// against, so moving it here would move a pre-declared gate.
 pub const RANKING_THRESHOLD: f64 = 0.01;
 

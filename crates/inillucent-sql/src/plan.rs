@@ -20,6 +20,8 @@ use crate::bind::{BoundExpr, BoundSelect, BoundSource, ColumnUse, SourceRows};
 use crate::catalog_view::{IndexInfo, TableInfo};
 use crate::cost;
 
+mod seek_union;
+
 /// A comparison an access path can enforce.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BoundKind {
@@ -40,6 +42,18 @@ pub struct RangeBound {
     pub kind: BoundKind,
     /// The value to compare against.
     pub value: BoundExpr,
+}
+
+/// One seek over an index, as a branch of an [`AccessPath::IndexSeekUnion`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct IndexSeekBranch {
+    /// The equality prefix this branch pins, one value per leading index
+    /// column.
+    pub equalities: Vec<BoundExpr>,
+    /// The lower bound on the column after the prefix, when there is one.
+    pub low: Option<RangeBound>,
+    /// The upper bound on that same column.
+    pub high: Option<RangeBound>,
 }
 
 /// How one FROM term's rows are produced.
@@ -116,6 +130,78 @@ pub enum AccessPath {
         /// for a rowid table, and the compiler reads it with `IdxRowid`.
         covering: Option<Vec<(u16, usize)>>,
     },
+    /// One row per key, found by rowid - several of
+    /// [`RowidSeek`](Self::RowidSeek), concatenated.
+    ///
+    /// What `WHERE rowid IN (a, b, c)` plans to on a rowid table: every branch
+    /// is the same one-row lookup `RowidSeek` uses alone, so the union is
+    /// nothing more than that lookup run once per key. A rowid is unique by
+    /// construction, so the only way two branches can name the same row is a
+    /// repeated key - a literal list is de-duplicated once, here, at plan
+    /// time; a key that is not a literal (a parameter, a correlated column)
+    /// cannot be compared this way, so the executor still checks each key
+    /// against the ones already probed before it seeks.
+    RowidSeekUnion {
+        /// The table B-tree's root page.
+        root: u32,
+        /// The keys to look up, in the order they are probed.
+        keys: Vec<BoundExpr>,
+    },
+    /// Rows found through one index - several seeks over the same tree,
+    /// concatenated.
+    ///
+    /// The branches are what a disjunction's terms become once each is
+    /// individually seekable: `x IN (a, b, c)` is every branch a bare
+    /// equality on the same column, and a keyset page's
+    /// `(a=? AND b>?) OR a>?` is two branches over the same composite index,
+    /// one an equality followed by a range and the other a range alone. The
+    /// fields outside `branches` describe the one index and table every
+    /// branch reads, because those never vary between branches - only the
+    /// equality prefix and the range do, which is exactly what a term of a
+    /// disjunction can differ in.
+    IndexSeekUnion {
+        /// The table B-tree's root page.
+        table_root: u32,
+        /// The index B-tree's root page.
+        index_root: u32,
+        /// The index's name, for the plan description.
+        index_name: Vec<u8>,
+        /// One seek per branch, in the order they run.
+        branches: Vec<IndexSeekBranch>,
+        /// The collation of each index column a branch can reach, in order.
+        ///
+        /// Sized to the deepest branch - the one whose equality prefix and
+        /// range together reach furthest into the index - because a
+        /// shallower branch simply does not read the columns past its own
+        /// depth.
+        collations: Vec<Collation>,
+        /// Whether each of those columns is stored descending.
+        descending: Vec<bool>,
+        /// Which table column each of those index columns holds.
+        columns: Vec<Option<u16>>,
+        /// Whether the table has no rowid, so the index key holds the key.
+        without_rowid: bool,
+        /// Where in each entry the row's primary key sits, for a `WITHOUT
+        /// ROWID` table read through a *secondary* index. Empty for a rowid
+        /// table, and empty when the index is the table's own key.
+        key_entry_slots: Vec<usize>,
+        /// Where in the index entry every column the query reads sits, when
+        /// the index holds all of them.
+        covering: Option<Vec<(u16, usize)>>,
+        /// Whether a row this union finds can also be found by a different
+        /// branch, and so has to be checked against the rows already
+        /// emitted before it is.
+        ///
+        /// `false` only when the branches are proven disjoint by
+        /// construction - the keyset-range shape, where each branch's
+        /// equality prefix pins a value no other branch's range can reach -
+        /// which is what lets that shape stream straight through a `LIMIT`
+        /// with nothing held back to be deduplicated. An `IN` list is always
+        /// `true`: a non-literal value (a parameter, a correlated column)
+        /// cannot be proven distinct from another at plan time, so the
+        /// executor has to check.
+        dedup: bool,
+    },
     /// Rows produced by a nested query, materialised and then scanned.
     Subquery {
         /// The plan that fills the store.
@@ -147,7 +233,7 @@ pub enum AccessPath {
     /// path carries the probe and the depth rather than a range: the module is
     /// asked for `k` candidates and the plan's own `ORDER BY` then rescores
     /// them exactly, which is what keeps the answer the answer an exhaustive
-    /// cosine gives (task-1838 §7).
+    /// cosine gives.
     VectorProbe {
         /// The table's root page, whose rows the candidates name.
         root: u32,
@@ -239,6 +325,12 @@ impl AccessPath {
             AccessPath::RowidRange { .. } => {
                 format!("SEARCH {table} USING INTEGER PRIMARY KEY (rowid>?)")
             }
+            // Every branch is the same one-row lookup, so one line describes
+            // all of them - which is also how a plain equality reads, and an
+            // `IN` list is nothing else once it has been turned into this.
+            AccessPath::RowidSeekUnion { .. } => {
+                format!("SEARCH {table} USING INTEGER PRIMARY KEY (rowid=?)")
+            }
             AccessPath::Recursive { .. } => format!("SCAN {table} USING RECURSIVE QUEUE"),
             AccessPath::RecursiveSelf { .. } => format!("SCAN {table}"),
             AccessPath::VectorProbe { index, depth, .. } => format!(
@@ -272,39 +364,98 @@ impl AccessPath {
                 } else {
                     "INDEX"
                 };
-                let keyed = info.and_then(|held| {
-                    held.indexes
-                        .iter()
-                        .find(|candidate| candidate.name == *index_name)
-                });
-                let named = |position: usize| -> String {
-                    keyed
-                        .and_then(|index| index.columns.get(position))
-                        .and_then(|key| key.column)
-                        .and_then(|at| info.and_then(|held| held.column(at)))
-                        .map(|column| String::from_utf8_lossy(&column.name).into_owned())
-                        .unwrap_or_else(|| "?".to_string())
-                };
-                let mut detail = String::new();
-                for index in 0..equalities.len() {
-                    if index > 0 {
-                        detail.push_str(" AND ");
-                    }
-                    detail.push_str(&format!("{}=?", named(index)));
-                }
-                if low.is_some() || high.is_some() {
-                    if !detail.is_empty() {
-                        detail.push_str(" AND ");
-                    }
-                    detail.push_str(&format!("{}>?", named(equalities.len())));
-                }
+                let detail = index_seek_detail(
+                    index_name,
+                    info,
+                    equalities.len(),
+                    low.is_some() || high.is_some(),
+                );
                 format!(
                     "SEARCH {table} USING {kind} {} ({detail})",
                     String::from_utf8_lossy(index_name)
                 )
             }
+            AccessPath::IndexSeekUnion {
+                index_name,
+                branches,
+                covering,
+                ..
+            } => {
+                let kind = if covering.is_some() {
+                    "COVERING INDEX"
+                } else {
+                    "INDEX"
+                };
+                // A branch with the same shape as one already rendered - the
+                // same equality-prefix depth and the same presence of a range
+                // - reads identically, so an `IN` list (every branch the same
+                // bare equality) collapses to the one line a plain equality
+                // would render. A genuine disjunction of differently shaped
+                // branches - the keyset-range case - gets one line per shape,
+                // in the order the branches run.
+                let mut lines: Vec<String> = Vec::new();
+                for branch in branches {
+                    let detail = index_seek_detail(
+                        index_name,
+                        info,
+                        branch.equalities.len(),
+                        branch.low.is_some() || branch.high.is_some(),
+                    );
+                    let line = format!(
+                        "SEARCH {table} USING {kind} {} ({detail})",
+                        String::from_utf8_lossy(index_name)
+                    );
+                    if !lines.contains(&line) {
+                        lines.push(line);
+                    }
+                }
+                lines.join(" OR ")
+            }
         }
     }
+}
+
+/// Returns the `(col=? AND col>?)` detail an index seek's description ends
+/// with, given how many leading columns of its equality prefix it pins and
+/// whether it also carries a range on the column after it.
+///
+/// Shared between [`AccessPath::IndexSeek`] and each branch of an
+/// [`AccessPath::IndexSeekUnion`], which differ only in how many branches
+/// there are - the naming of one branch's columns is exactly what a plain
+/// seek already does.
+fn index_seek_detail(
+    index_name: &[u8],
+    info: Option<&TableInfo>,
+    equalities: usize,
+    ranged: bool,
+) -> String {
+    let keyed = info.and_then(|held| {
+        held.indexes
+            .iter()
+            .find(|candidate| candidate.name == index_name)
+    });
+    let named = |position: usize| -> String {
+        keyed
+            .and_then(|index| index.columns.get(position))
+            .and_then(|key| key.column)
+            .and_then(|at| info.and_then(|held| held.column(at)))
+            .map(|column| String::from_utf8_lossy(&column.name).into_owned())
+            .unwrap_or_else(|| "?".to_string())
+    };
+    let mut detail = String::new();
+    for index in 0..equalities {
+        if index > 0 {
+            detail.push_str(" AND ");
+        }
+        detail.push_str(&format!("{}=?", named(index)));
+    }
+    if ranged {
+        if !detail.is_empty() {
+            detail.push_str(" AND ");
+        }
+        detail.push_str(&format!("{}>?", named(equalities)));
+    }
+    detail
 }
 
 /// One FROM term with the path chosen for it.
@@ -337,8 +488,8 @@ pub struct PlannedSource {
     pub on: Option<BoundExpr>,
     /// Whether the path this term is read by enforces the whole `ON` condition.
     ///
-    /// **What decides whether an outer join can be an index nested loop**
-    /// (task-1880 §14). That operator probes the inner tree by a key and
+    /// **What decides whether an outer join can be an index nested loop.**
+    /// That operator probes the inner tree by a key and
     /// null-extends when the probe finds nothing; it has nowhere to test a
     /// condition the key did not capture, so it may only be used when there is
     /// nothing left to test. When the key is the whole condition - which
@@ -534,8 +685,8 @@ impl Levers {
 
     /// Reusing a compiled program for SQL text already prepared.
     ///
-    /// `task-1816-rearchitecture-tdd.md` puts a plan cache in the new engine's
-    /// prepare path and asks for it measured on the existing one first, so the
+    /// The rearchitecture's design puts a plan cache in the new engine's
+    /// prepare path, and measures it here, on the existing one, first - so the
     /// mechanism is proved independently of the new storage. It is a lever
     /// rather than a constant because a speedup that cannot be switched off
     /// cannot be measured, and because "the cache made prepare six times
@@ -663,7 +814,7 @@ pub fn plan_select_with(select: BoundSelect, levers: Levers) -> PhysicalPlan {
         // a seek would do both wrong things at once: filter the rows before the
         // null extension, and mark the term consumed so it is never re-tested.
         //
-        // **Its own `ON` condition is a different question** (task-1880 §14).
+        // **Its own `ON` condition is a different question.**
         // An outer join's `ON` decides which inner rows *match*, and a row with
         // no match is null-extended by the join itself - so seeking the inner
         // side by an equality the `ON` states returns exactly the matches and
@@ -1127,6 +1278,38 @@ fn path_ordering(table: &TableInfo, path: &AccessPath) -> Option<PathOrdering> {
             columns.push((OrderedBy::Rowid, false, Collation::Binary));
             Some(PathOrdering { columns, pinned })
         }
+        // A branch that needs de-duplicating (an `IN` list) has no order:
+        // list values are probed in whatever order they were written, not
+        // index order. A branch that does not - the keyset-range shape,
+        // proven disjoint at plan time - runs each branch in the index's own
+        // order and the branches themselves in that same order, so the whole
+        // union reads exactly as an unconstrained walk of the index would: no
+        // column is pinned, because no column has one value across every
+        // branch.
+        AccessPath::IndexSeekUnion {
+            index_name,
+            dedup: false,
+            ..
+        } => {
+            let index = table
+                .indexes
+                .iter()
+                .find(|candidate| candidate.name == *index_name)?;
+            let mut columns: Vec<(OrderedBy, bool, Collation)> = Vec::new();
+            for key_column in &index.columns {
+                let Some(column) = key_column.column else {
+                    break;
+                };
+                let named = named_key(table, OrderedBy::Column(column));
+                let collation = collation_of(&key_column.collation);
+                columns.push((named, key_column.descending, collation));
+            }
+            columns.push((OrderedBy::Rowid, false, Collation::Binary));
+            Some(PathOrdering {
+                columns,
+                pinned: Vec::new(),
+            })
+        }
         _ => None,
     }
 }
@@ -1387,6 +1570,15 @@ fn path_cost(source: &BoundSource, path: &AccessPath) -> (f64, f64) {
             (cost::search_cost(rows, matches, true), matches)
         }
         AccessPath::RowidSeek { .. } => (cost::search_cost(rows, 1.0, true), 1.0),
+        // A search per key, each a descent of the same tree - which is
+        // exactly what running them one after another actually costs, and is
+        // why a list long enough to be worth a scan instead gets priced that
+        // way on its own, with no separate penalty needed for how many
+        // branches there are.
+        AccessPath::RowidSeekUnion { keys, .. } => {
+            let branches = keys.len().max(1) as f64;
+            (cost::search_cost(rows, 1.0, true) * branches, branches)
+        }
         AccessPath::RowidRange { low, high, .. } => {
             let bounds = usize::from(low.is_some()) + usize::from(high.is_some());
             let mut matches = rows;
@@ -1404,33 +1596,90 @@ fn path_cost(source: &BoundSource, path: &AccessPath) -> (f64, f64) {
             covering,
             ..
         } => {
-            let index = source
-                .table
-                .indexes
-                .iter()
-                .find(|candidate| candidate.name == *index_name);
             let bounds = usize::from(low.is_some()) + usize::from(high.is_some());
-            let matches = index_matches(index, rows, equalities.len(), bounds);
-            let Some(index) = index else {
-                return (cost::search_cost(rows, matches, false), matches);
-            };
-            if covering.is_none() {
-                return (cost::search_cost(rows, matches, false), matches);
+            index_seek_cost(
+                source,
+                rows,
+                index_name,
+                equalities.len(),
+                bounds,
+                covering.is_some(),
+            )
+        }
+        // A union is priced by summing one branch's cost over every branch -
+        // each is a full descent of the same tree, so the total is exactly
+        // what running them one after another costs, and a branch count large
+        // enough to make that expensive is a branch count large enough for a
+        // scan to win the comparison on its own.
+        AccessPath::IndexSeekUnion {
+            index_name,
+            branches,
+            covering,
+            ..
+        } => {
+            let mut total_cost = 0.0f64;
+            let mut total_matches = 0.0f64;
+            for branch in branches {
+                let bounds = usize::from(branch.low.is_some()) + usize::from(branch.high.is_some());
+                let (branch_cost, branch_matches) = index_seek_cost(
+                    source,
+                    rows,
+                    index_name,
+                    branch.equalities.len(),
+                    bounds,
+                    covering.is_some(),
+                );
+                total_cost += branch_cost;
+                total_matches += branch_matches;
             }
-            // A covering path reads entries rather than rows, and an entry is
-            // the indexed columns plus the key rather than the whole row. Cost
-            // is bytes touched, so the narrower shape is the saving - and it is
-            // the whole reason a covering scan of a two-column index beats a
-            // table scan of a five-column table when there is no predicate at
-            // all to narrow either of them.
-            let width = cost::entry_share(index.columns.len(), source.table.columns.len());
-            (cost::search_cost(rows, matches * width, true), matches)
+            (total_cost, total_matches.max(1.0))
         }
         // A materialised term is built once and then scanned; the build is
         // charged where it happens, which is the block that fills it.
         AccessPath::Subquery { .. } | AccessPath::Recursive { .. } => (cost::scan_cost(rows), rows),
         AccessPath::RecursiveSelf { .. } => (1.0, 1.0),
     }
+}
+
+/// Returns what one seek over an index costs, and how many rows it produces.
+///
+/// Shared by [`AccessPath::IndexSeek`] and each branch of an
+/// [`AccessPath::IndexSeekUnion`], which price identically - a union is
+/// priced by summing this over its branches.
+/// @param source - the FROM term the index belongs to
+/// @param rows - the table's estimated row count
+/// @param index_name - the index being priced
+/// @param equalities - how many leading columns the seek's equality prefix pins
+/// @param bounds - how many range bounds the seek carries after the prefix
+/// @param covering - whether the seek reads entries rather than fetching rows
+fn index_seek_cost(
+    source: &BoundSource,
+    rows: f64,
+    index_name: &[u8],
+    equalities: usize,
+    bounds: usize,
+    covering: bool,
+) -> (f64, f64) {
+    let index = source
+        .table
+        .indexes
+        .iter()
+        .find(|candidate| candidate.name == index_name);
+    let matches = index_matches(index, rows, equalities, bounds);
+    let Some(index) = index else {
+        return (cost::search_cost(rows, matches, false), matches);
+    };
+    if !covering {
+        return (cost::search_cost(rows, matches, false), matches);
+    }
+    // A covering path reads entries rather than rows, and an entry is the
+    // indexed columns plus the key rather than the whole row. Cost is bytes
+    // touched, so the narrower shape is the saving - and it is the whole
+    // reason a covering scan of a two-column index beats a table scan of a
+    // five-column table when there is no predicate at all to narrow either of
+    // them.
+    let width = cost::entry_share(index.columns.len(), source.table.columns.len());
+    (cost::search_cost(rows, matches * width, true), matches)
 }
 
 /// Returns how many rows a table is estimated to hold.
@@ -1447,7 +1696,7 @@ fn estimated_rows(table: &TableInfo) -> f64 {
 
 /// Returns how many rows an index search is estimated to return.
 fn index_matches(index: Option<&IndexInfo>, rows: f64, equalities: usize, bounds: usize) -> f64 {
-    // **A partial index walked whole returns what it holds** (task-1880 §13).
+    // **A partial index walked whole returns what it holds.**
     // With nothing to seek to, every other arm below prices this as a walk of
     // the table - which is what it would be for an ordinary index, and is not
     // what it is for one holding only the rows a predicate accepted.
@@ -2027,6 +2276,9 @@ fn rowid_path(
             key: value,
         });
     }
+    if let Some(path) = seek_union::rowid_in_list_path(id, position, ids, table, terms, consumed) {
+        return Some(path);
+    }
     // **A range is an outermost-term path only.** The physical pass drives an
     // inner term either by probing it per outer row or by reading it once into
     // a buffer, and neither of those is a walk between two bounds - so a range
@@ -2140,29 +2392,27 @@ fn index_path(
             // and would be a place for a wrong answer to live.
             continue;
         }
-        let Some((path, used)) = index_candidate(
+        // Three different candidates can come from the same index: the
+        // ordinary equality-prefix-and-range seek, a union of equality seeks
+        // when a disjunction is an `IN` list on the leading column, and a
+        // union of range seeks when a disjunction is a keyset page's tuple
+        // comparison. None of them rules another out - a statement can only
+        // ever use one of them here, but which one is cheapest is a cost
+        // question, so every one that matches is tried and the best kept.
+        if let Some((path, used)) = index_candidate(
             id, position, ids, table, index, computed, usable, terms, consumed, needed, levers,
-        ) else {
-            continue;
-        };
-        // The choice between two usable indexes is a cost, not a count of
-        // consumed terms. Two indexes that each satisfy one equality consume
-        // the same number of terms and can differ by orders of magnitude in
-        // how many rows they return - and taking the first one found made a
-        // query constrained on both a two-valued column and a four-hundred-
-        // valued one search the two-valued one.
-        let (cost, _) = path_cost(source, &path);
-        // A tie goes to the index declared later, which is what the reference
-        // does - it keeps a candidate that is no worse than the one it holds,
-        // so the last equal one wins. It matters because a query with no
-        // `ORDER BY` returns rows in whatever order its path produces, and two
-        // engines that broke ties differently would return the same rows in
-        // different orders for the same SQL.
-        let better = best
-            .as_ref()
-            .is_none_or(|(existing, _, _)| cost <= *existing + 1e-9);
-        if better {
-            best = Some((cost, path, used));
+        ) {
+            consider_index_candidate(source, &mut best, path, used);
+        }
+        if let Some((path, used)) = seek_union::in_list_union_path(
+            id, position, ids, table, index, usable, terms, consumed, needed, levers,
+        ) {
+            consider_index_candidate(source, &mut best, path, used);
+        }
+        if let Some((path, used)) = seek_union::keyset_range_union_path(
+            id, position, ids, table, index, usable, terms, consumed, needed, levers,
+        ) {
+            consider_index_candidate(source, &mut best, path, used);
         }
     }
     let (_, path, used) = best?;
@@ -2172,6 +2422,32 @@ fn index_path(
         }
     }
     Some(path)
+}
+
+/// Folds one more index candidate into whichever is cheapest so far.
+///
+/// The choice between candidates is a cost, not a count of consumed terms:
+/// two candidates that each satisfy one equality consume the same number of
+/// terms and can differ by orders of magnitude in how many rows they return -
+/// and taking the first one found made a query constrained on both a
+/// two-valued column and a four-hundred-valued one search the two-valued one.
+/// A tie goes to the later candidate, which is what the reference does - it
+/// keeps a candidate that is no worse than the one it holds, so the last
+/// equal one wins, which matters because a query with no `ORDER BY` returns
+/// rows in whatever order its path produces.
+fn consider_index_candidate(
+    source: &BoundSource,
+    best: &mut Option<(f64, AccessPath, Vec<usize>)>,
+    path: AccessPath,
+    used: Vec<usize>,
+) {
+    let (cost, _) = path_cost(source, &path);
+    let better = best
+        .as_ref()
+        .is_none_or(|(existing, _, _)| cost <= *existing + 1e-9);
+    if better {
+        *best = Some((cost, path, used));
+    }
 }
 
 /// Builds the best path over one index, or `None` if it cannot be used.
@@ -2276,8 +2552,8 @@ fn index_candidate(
         .has(Levers::COVERING_INDEX)
         .then(|| covering_slots(table, index, needed, usable))
         .flatten();
-    // **A partial index whose predicate the query implies is worth walking whole**
-    // (task-1880 §13). It holds only the rows its predicate accepted, so reading
+    // **A partial index whose predicate the query implies is worth walking whole.**
+    // It holds only the rows its predicate accepted, so reading
     // every entry of it reads exactly the rows the query asked for - even with
     // nothing to seek to and even when a lookup per entry is needed, which is
     // the case a covering test cannot see.

@@ -168,7 +168,7 @@ pub struct Engine {
     /// **Because nothing was collecting them at all.** `collect_versions` was
     /// written in Phase 3, tested, and then called by nothing but its own
     /// tests, so every before-image every write had ever published stayed for
-    /// the life of the connection. task-1869 measured the cost on the gate's write
+    /// the life of the connection. The cost was measured on the gate's write
     /// family: 7.5 MiB of a round, held by rows no snapshot could reach.
     ///
     /// It is a threshold rather than a collect-per-commit because collecting
@@ -201,7 +201,7 @@ pub struct EngineOptions {
 ///
 /// **A page's LSN has to be a position in the stream currently beside the file,
 /// and after a recovery whose chain was short of what the pages reflect it is
-/// not** (task-1885). Recovery applies a record to a page only when the page's
+/// not.** Recovery applies a record to a page only when the page's
 /// stamp is below the record's, so a page stamped by a stream that no longer
 /// exists silently swallows every later write to it: the record is skipped and
 /// nothing anywhere says a committed row was lost.
@@ -297,7 +297,7 @@ impl Engine {
         // every page write are both behind `&mut Database` and one record
         // cannot hold two mutable borrows of the same object.
         //
-        // **In log order** (task-1888): two passes, claims then releases, made
+        // **In log order.** Two passes, claims then releases, made
         // a page that was freed and allocated again inside the replayed range
         // come back free while it was live. See `Applier::free_map_changes`.
         for change in &free_map {
@@ -307,7 +307,7 @@ impl Engine {
             }
         }
         recover::truncate_after(vfs.as_ref(), path, &outcome)?;
-        // **The log resumes above every stamp the file carries** (task-1885).
+        // **The log resumes above every stamp the file carries.**
         // The one rule, in both open paths: a page's LSN has to be a position
         // in the stream beside the file, or the page-LSN rule discards every
         // later write to that page without saying so. See

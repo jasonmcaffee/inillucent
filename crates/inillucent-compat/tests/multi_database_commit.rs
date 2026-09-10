@@ -43,7 +43,7 @@ const NUMBERED: u64 = 64;
 /// Returns a scratch directory for one scenario, emptied first.
 fn scratch(name: &str) -> PathBuf {
     let directory = workspace_root()
-        .join("_agent_output/task-1844/multi-commit")
+        .join("_agent_output/multi-commit")
         .join(name);
     let _ = std::fs::remove_dir_all(&directory);
     let _ = std::fs::create_dir_all(&directory);

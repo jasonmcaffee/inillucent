@@ -8,8 +8,8 @@
 //!
 //! The TDD's Phase 1 acceptance asks for closure compilation measured against
 //! the old VM's expression evaluator. Timing the old VM end to end would answer
-//! a different question - task-1791 already did that, and its finding was that
-//! the VM was **not** where the scan time went: the full VM path measured
+//! a different question, already measured: the VM was **not** where the scan
+//! time went. The full VM path measured
 //! 156.5 ns/row and deleting the interpreter entirely left 140-195 ns/row,
 //! because the cost was in the storage layer underneath it. Repeating that
 //! measurement would tell us about the pager again.

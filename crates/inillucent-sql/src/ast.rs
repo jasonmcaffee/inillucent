@@ -771,7 +771,7 @@ pub enum TableConstraint {
     /// `CREATE` text is stored and re-parsed on every open, so the grammar has
     /// to accept everything the text can hold. Not accepting it did not cost
     /// one statement a clause - it made the `CREATE TABLE` a parse error, and
-    /// every statement after it said `no such table` (task-1853).
+    /// every statement after it said `no such table`.
     Check {
         /// The predicate.
         expr: ExprId,
@@ -1042,8 +1042,8 @@ pub enum Statement {
         ///
         /// SQLite has no `USING` on `CREATE INDEX`; PostgreSQL does, and it is
         /// how pgvector spells `USING hnsw`. This engine borrows the spelling
-        /// for the same purpose: an index whose structure is not a b-tree
-        /// (task-1838 §7). A plain `CREATE INDEX` leaves it `None` and nothing
+        /// for the same purpose: an index whose structure is not a b-tree.
+        /// A plain `CREATE INDEX` leaves it `None` and nothing
         /// downstream changes.
         using: Option<NameId>,
         /// The key columns.

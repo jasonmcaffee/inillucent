@@ -48,9 +48,9 @@
 /// subsystem and is compiled as one translation unit; a Rust workspace measured
 /// on the platform allocator is being measured on a build configuration rather
 /// than on an engine, which is the same reasoning that fixed fat LTO and one
-/// codegen unit in the release profile. task-1838 §5 measured the Windows CRT
-/// heap at 59% of a trivial compile and this size-classed free list at 17%
-/// overall, which is why Phase 3's Part E names it the cheapest first move.
+/// codegen unit in the release profile. The Windows C runtime heap was
+/// measured at 59% of a trivial compile and this size-classed free list at
+/// 17% overall, which is why Phase 3's Part E names it the cheapest first move.
 #[global_allocator]
 static ALLOCATOR: inillucent_alloc::Pooled = inillucent_alloc::Pooled;
 
@@ -152,13 +152,13 @@ fn settings_from(arguments: &[String]) -> Settings {
         // `Options::default` is 32 KiB, Phase 1 fixed it there after measuring
         // 16/32/64, and `readgate` - the harness every Phase 2 and Phase 3
         // number was taken with - defaults to it. This binary defaulted to
-        // 8 KiB, which is a size task-1819 measured on purpose and rejected,
-        // so every full-gate number from Phase 4 onwards was taken at a page
+        // 8 KiB, a page size that was measured on purpose and rejected, so
+        // every full-gate number from Phase 4 onwards was taken at a page
         // size the engine does not ship.
         //
-        // task-1834 isolated it from the memory budget rather than assuming,
-        // because the pool's bytes are frames times page size and moving one
-        // moves the other. Three configurations, ten paired rounds, medium:
+        // The page size effect was isolated from the memory budget rather
+        // than assumed, because the pool's bytes are frames times page size
+        // and moving one moves the other. Three configurations, ten paired rounds, medium:
         //
         // | | 8 KiB / 32 MiB | 32 KiB / **32 MiB** | 32 KiB / 128 MiB |
         // |---|---|---|---|
@@ -504,8 +504,8 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
             continue;
         }
         // The family is one log ratio per workload per round, weighted equally
-        // per workload - `writegate`'s rollup, which task-1832 arrived at after
-        // two wrong ones. Pooling raw pairs lets a workload with a hundred times
+        // per workload - `writegate`'s rollup, arrived at after two wrong ones.
+        // Pooling raw pairs lets a workload with a hundred times
         // the absolute time decide the family alone; collapsing each workload to
         // its median first makes a three-point bootstrap whose lower bound *is*
         // the minimum.
@@ -638,7 +638,7 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
     // fixture twice and imports one of the copies, so a medium run leaves
     // roughly a hundred megabytes behind - and this binary left all of it, once
     // per run, under a pid-named directory nothing ever came back for.
-    // task-1869 found 279 of them holding 60 GB in `%TEMP%`, and the
+    // 279 of them were found holding 60 GB in `%TEMP%`, and the
     // measurement itself pays for that: `txn.batched` is 200 commits and 200
     // syncs, and on a temp volume in that state it went from 47 ms to 240 ms on
     // *both* arms - the reference's own number moving with ours is what says it
@@ -953,7 +953,7 @@ struct RoundCost {
 /// What one workload asked of the write-ahead log.
 ///
 /// **Because a write family's ratio is a durability ratio, not a code one.**
-/// task-1838 §5 measured this engine three to four times slower on Linux than
+/// This engine measured three to four times slower on Linux than
 /// on Windows on exactly the three workloads that `fsync` per commit, and
 /// nowhere else - so "how many syncs, and how many bytes" is the question those
 /// numbers raise, and nothing printed it.

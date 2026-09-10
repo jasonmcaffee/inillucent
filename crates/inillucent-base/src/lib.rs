@@ -6,12 +6,12 @@
 //! page, a journal frame, a varint from a record - returns a `DbError` instead
 //! of indexing out of bounds or overflowing, and every allocation is fallible.
 //!
-//! This is the bottom of the dependency graph described in
-//! `tasks/task-1781-sqlite-feature-parity-tdd.md`. It has no internal
-//! dependencies and no third-party dependencies at all, so a bug in the layers
-//! above can never be blamed on something underneath them.
+//! This is the bottom of the crate dependency graph the SQLite feature-parity
+//! design lays out. It has no internal dependencies and no third-party
+//! dependencies at all, so a bug in the layers above can never be blamed on
+//! something underneath them.
 //!
-//! The TDD's crate table names `inillucent-value` and `inillucent-vfs` as the two
+//! That design's crate table names `inillucent-value` and `inillucent-vfs` as the two
 //! leaves. Phase 1 needs checked integers, varints, checksums, page arithmetic
 //! and the error table *before* values exist, and `inillucent-vfs` needs the same
 //! error table, so those primitives live here in a leaf below both rather than

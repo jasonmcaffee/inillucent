@@ -575,9 +575,9 @@ fn an_empty_statement_is_not_an_error() {
 /// in the same call that created the tables it is about, which is the natural
 /// way to write a schema and the way `sqlite3_exec` accepts.
 ///
-/// The parser already knew where the statement ended - `prepare_with_tail` had
-/// been asking it since task-1844 - so the batch path asks the same question
-/// now, and there is one opinion about statement boundaries instead of two.
+/// The parser already knew where the statement ended - `prepare_with_tail` has
+/// long asked it exactly that - so the batch path asks the same question now,
+/// and there is one opinion about statement boundaries instead of two.
 #[test]
 fn execute_batch_creates_a_trigger() {
     let (_path, database) = fresh("batch-trigger");

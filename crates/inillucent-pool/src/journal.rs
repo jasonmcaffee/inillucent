@@ -18,8 +18,10 @@
 //! journal leaves nothing on disk beside the database, which is what an
 //! application shipping a database as one file needs.
 //!
-//! task-1860 asked for the choice to be real rather than reported. The
-//! write-ahead log stays the default because it is faster - one sync per commit
+//! `PRAGMA journal_mode` used to accept either name without changing what
+//! recovery did; the choice was made real, so the two modes now differ in
+//! practice as well as on paper. The write-ahead log stays the default
+//! because it is faster - one sync per commit
 //! against two - and the rollback journal is what an application selects when it
 //! wants the file to stand alone.
 //!

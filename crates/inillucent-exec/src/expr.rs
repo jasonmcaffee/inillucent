@@ -262,7 +262,7 @@ pub enum Expr {
         ///
         /// The whole of the difference between `RAISE(ABORT)`, `RAISE(FAIL)`
         /// and `RAISE(ROLLBACK)`: they report the same code and the same
-        /// message and differ only here. It was dropped before task-1850, so
+        /// message and differ only here. It used to be dropped, so
         /// all three behaved as `RAISE(ABORT)` - which itself did not abort.
         unwind: Unwind,
     },
@@ -323,8 +323,7 @@ pub enum Expr {
         /// `changes()` in one statement is the same number, because SQLite
         /// moves the counters when a statement *finishes*. Reading it per row
         /// in the node would be a different answer wearing the same name - and
-        /// leaving it out is what made all four of them answer `0` for ever
-        /// (task-1854).
+        /// leaving it out is what made all four of them answer `0` for ever.
         context: crate::scalar::Context,
     },
     /// A call to one of the math functions.

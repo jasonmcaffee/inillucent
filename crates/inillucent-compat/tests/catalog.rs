@@ -19,7 +19,7 @@ use inillucent_sql::catalog_view::{CatalogView, TableKind};
 
 /// Returns the directory scratch databases are built in.
 fn scratch() -> PathBuf {
-    let path = workspace_root().join("_agent_output/task-1785-catalog");
+    let path = workspace_root().join("_agent_output/catalog");
     let _ = std::fs::create_dir_all(&path);
     path
 }
@@ -89,7 +89,7 @@ fn open(path: &Path) -> Database {
 /// the explanation only in `detail()` - which is suppressed unless the database
 /// was opened with diagnostics on - left `message()` answering the primary
 /// code's canned "database disk image is malformed" for a file whose bytes are
-/// perfectly fine. See task-1847.
+/// perfectly fine.
 #[test]
 fn unparseable_schema_sql_names_the_statement_and_the_reason() {
     let failure = table_from_create_sql(b"CREATE TABLE t(a,", 0, 2).expect_err("it must not parse");
@@ -106,8 +106,9 @@ fn unparseable_schema_sql_names_the_statement_and_the_reason() {
     assert!(failure.sql_offset().is_some(), "{failure:?}");
 }
 
-/// The reserved-word column names that started task-1847: `left` and `right`
-/// are ordinary column names in SQLite, and a schema SQLite writes has to load.
+/// The reserved-word column names this engine used to refuse: `left` and
+/// `right` are ordinary column names in SQLite, and a schema SQLite writes has
+/// to load.
 #[test]
 fn a_table_whose_columns_are_named_left_and_right_loads() {
     let table = table_from_create_sql(b"CREATE TABLE pairs (left TEXT, right TEXT)", 0, 2)
@@ -326,7 +327,7 @@ fn an_unchanged_schema_does_not_recompile() {
 /// says what was wrong with the text, in the field a caller reads.
 ///
 /// This used to assert `Corrupt` and a `detail()` naming the object, and both
-/// halves were the defect task-1847 fixed. `message()` - the field the driver
+/// halves were the defect that got fixed together. `message()` - the field the driver
 /// shows an application - answered "database disk image is malformed", which
 /// sends a reader to `PRAGMA integrity_check` on a file whose bytes are fine;
 /// and the object name was attached with `with_detail`, which *replaced* the

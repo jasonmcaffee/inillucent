@@ -25,7 +25,7 @@ inillucent-session = { workspace = true }
 inillucent-transaction = { workspace = true }
 inillucent = { workspace = true }
 inillucent-legacy = { workspace = true }
-# The rearchitected engine (task-1816), measured beside the old one.
+# The rearchitected engine, measured beside the old one.
 inillucent-pool = { workspace = true }
 inillucent-tree = { workspace = true }
 # The engine's own JSON reader, which `inillucent-testrun` parses cargo's
@@ -42,7 +42,7 @@ inillucent-cli = { workspace = true }
 inillucent-driver = { workspace = true }
 inillucent-engine = { workspace = true }
 inillucent-migrate = { workspace = true }
-# The gate's memory and processor accounting (task-1838 Part 6). The operating
+# The gate's memory and processor accounting. The operating
 # system is the only thing that can say what a *process* cost, and the
 # reference arm is a separate program this workspace cannot instrument.
 libc = { workspace = true }
@@ -117,7 +117,7 @@ path = "src/bin/fullgate.rs"
 name = "inillucent-searchgate"
 path = "src/bin/searchgate.rs"
 
-# What an ordinary write pays to keep a vector index current (task-1894, M8).
+# What an ordinary write pays to keep a vector index current (M8).
 [[bin]]
 name = "inillucent-foldgate"
 path = "src/bin/foldgate.rs"

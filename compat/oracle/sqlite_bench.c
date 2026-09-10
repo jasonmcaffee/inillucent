@@ -376,7 +376,7 @@ static int apply_settings(sqlite3 *db, const struct plan *plan) {
   /*
   ** Before journal_mode, because changing the locking mode after a journal
   ** mode has been set is refused while a lock is held. `normal` is the default
-  ** and is what every gate before task-1838 ran; `exclusive` is what the new
+  ** and is what every gate used to run; `exclusive` is what the new
   ** engine actually does - one process, no lock taken per statement - and the
   ** gate can now ask for either so the difference is a number rather than an
   ** argument.

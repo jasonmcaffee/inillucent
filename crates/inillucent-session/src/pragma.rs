@@ -604,7 +604,7 @@ pub fn collation_list(state: &mut ConnectionState) -> DbResult<PragmaRows> {
 /// provoked - which is why its own answer carries `pragma_module_list` and
 /// nothing else of the kind. Filtering them here makes this front-end agree
 /// with the reference and with the new engine's own `module_list`, which never
-/// listed them. task-1869.
+/// listed them.
 pub fn module_list(state: &mut ConnectionState) -> DbResult<PragmaRows> {
     let names = state.registry.module_names();
     let mut rows = Vec::new();

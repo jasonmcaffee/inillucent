@@ -267,7 +267,7 @@ fn a_pragma_with_one_setting_reports_it_and_refuses_any_other() {
             "{sql}"
         );
     }
-    // **Two of those three stopped being fixed in task-1860**, and the settings
+    // **Two of those three no longer report fixed values**, and the settings
     // they report are now the settings they hold rather than the only ones the
     // engine has. A rollback journal exists behind `journal_mode`, so asking for
     // one is answered with the mode that is now in force; the same is true of
@@ -310,7 +310,7 @@ fn an_unknown_pragma_is_silent_on_the_new_engine() {
     };
     // SQLite's own answer to a pragma it has never heard of: no rows, no error.
     //
-    // **Only a pragma nobody has heard of, since task-1859.** The pragmas on
+    // **Only a pragma nobody has heard of stays silent now.** The pragmas on
     // SQLite's own list used to answer this way too - 38 of them - and a caller
     // cannot tell a silent pragma from one that returned no rows. Each of them
     // now answers or refuses; this list is the two that stayed silent, which

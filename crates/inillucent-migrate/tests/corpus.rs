@@ -61,7 +61,7 @@ fn repository() -> PathBuf {
 /// Returns a fresh scratch directory.
 fn scratch(name: &str) -> PathBuf {
     let root = repository()
-        .join("_agent_output/task-1790/migrate")
+        .join("_agent_output/migrate")
         .join(name);
     let _ = std::fs::remove_dir_all(&root);
     let _ = std::fs::create_dir_all(&root);

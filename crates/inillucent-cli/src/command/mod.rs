@@ -423,7 +423,7 @@ impl Context {
     ///
     /// The check this replaced compared normalised path text against the root.
     /// A junction below the root passed it and opened a database outside the
-    /// root, which task-1892 reproduced.
+    /// root.
     ///
     /// @param path - the path a caller named
     pub fn confine(&self, path: &str) -> Result<PathBuf, Failed> {

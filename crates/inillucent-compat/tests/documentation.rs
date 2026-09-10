@@ -3,8 +3,8 @@
 //! Invariant: **a claim in `docs/` that names something checkable is checked.**
 //! Prose goes stale silently, which is what makes it different from code: a
 //! function that stops being called fails to compile, and a page that describes
-//! a command that no longer exists carries on reading perfectly well. The
-//! task-1892 review found exactly that - a case study still describing a
+//! a command that no longer exists carries on reading perfectly well. A docs
+//! review found exactly that - a case study still describing a
 //! recovery failure the engine had fixed, in a document a person reads while
 //! deciding whether to migrate.
 //!

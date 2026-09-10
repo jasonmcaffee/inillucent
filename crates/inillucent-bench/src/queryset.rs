@@ -889,8 +889,8 @@ fn sample_per_source(
 ///
 /// This used to call a `llama-server` child process over HTTP. Running the model
 /// in process instead removes the last thing the harness needed that was not in
-/// this repository, so a graded run needs no server. task-21 measured the two
-/// against each other: mean cosine 0.9860 over 200 chunks, with identical
+/// this repository, so a graded run needs no server. Measuring the two
+/// against each other gave mean cosine 0.9860 over 200 chunks, with identical
 /// success@1 and success@10 across 120 queries, so the substitution does not move
 /// the scores.
 #[allow(dead_code)]

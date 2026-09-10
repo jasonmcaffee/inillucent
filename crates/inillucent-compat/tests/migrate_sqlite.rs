@@ -1,4 +1,4 @@
-//! Migrating every task-1781 SQLite fixture into the new engine, verified.
+//! Migrating every SQLite fixture into the new engine, verified.
 //!
 //! Invariant: **a migration is verified by counts and digests, and by a third
 //! engine.** The tool computes both sides itself - the source through
@@ -12,7 +12,7 @@
 //! Three engines, then: SQLite's own b-tree code, the reader, and the new
 //! engine. A number all three agree on is not one implementation's opinion.
 //!
-//! The corpus is `compat/fixtures`, which task-1781 wrote with that same pinned
+//! The corpus is `compat/fixtures`, written with that same pinned
 //! binary: fifteen valid databases spanning page sizes 512 to 65536, both UTF-16
 //! encodings, overflow chains, `WITHOUT ROWID`, deep trees, freelists, both
 //! vacuum modes, an empty database and a collation corpus - and seventeen
@@ -28,7 +28,7 @@ use inillucent_migrate::sqlite;
 use inillucent_tree::datum::OwnedDatum;
 
 /// Where this suite's scratch databases live.
-const AREA: &str = "task-1834/migrate-sqlite";
+const AREA: &str = "migrate-sqlite";
 
 /// Returns a clean scratch directory for one test.
 ///
@@ -527,14 +527,15 @@ fn a_failed_migration_leaves_evidence_and_no_destination() {
 
 /// The whole of what an application's database carries, migrated and readable.
 ///
-/// **This is task-1859 Part D, and four things stopped it.** A source with a
+/// **Four things stopped this migration before it worked.** A source with a
 /// trigger refused the migration outright with "the new engine does not run
-/// triggers" - false since task-1838. A source with an FTS5 table refused it
-/// with "the declaration of `f_data` did not parse: database disk image is
-/// malformed", about a file that is neither malformed nor at fault. A view
-/// migrated, appeared in `sqlite_schema`, and then answered `no such table`.
-/// And `sqlite_sequence` was not carried, so an AUTOINCREMENT table whose high
-/// rows had been deleted reused their keys on the first insert afterwards.
+/// triggers" - false since triggers began firing. A source with an FTS5 table
+/// refused it with "the declaration of `f_data` did not parse: database disk
+/// image is malformed", about a file that is neither malformed nor at fault.
+/// A view migrated, appeared in `sqlite_schema`, and then answered `no such
+/// table`. And `sqlite_sequence` was not carried, so an AUTOINCREMENT table
+/// whose high rows had been deleted reused their keys on the first insert
+/// afterwards.
 ///
 /// So the source here carries all four, plus the things that already worked -
 /// a `WITHOUT ROWID` table, a generated column, a partial index and a foreign

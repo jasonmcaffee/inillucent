@@ -1,6 +1,6 @@
 # inillucent performance dashboard
 
-> **These are the `task-1791-release` gate's own output files, taken on the engine that came
+> **These are the `release` gate's own output files, taken on the engine that came
 > before the rearchitecture, and they are kept as that run's record. They are not the current
 > numbers and they are not edited by hand.** The engine measured here was slower than SQLite on
 > every family; the shipping engine is **326% faster** weighted over the same ten families, with
@@ -12,7 +12,7 @@ Platform `windows-x86_64`. Every number is the paired speed ratio, SQLite over i
 
 ## Scale `small`
 
-| workload | task-1791-release |
+| workload | release |
 |---|---:|
 | `*headline*` | 0.316x |
 | `*family* open.prepare` | 0.214x |
@@ -58,7 +58,7 @@ Platform `windows-x86_64`. Every number is the paired speed ratio, SQLite over i
 
 ## Scale `medium`
 
-| workload | task-1791-release |
+| workload | release |
 |---|---:|
 | `*headline*` | 0.232x |
 | `*family* open.prepare` | 0.209x |
@@ -104,7 +104,7 @@ Platform `windows-x86_64`. Every number is the paired speed ratio, SQLite over i
 
 ## Scale `large`
 
-| workload | task-1791-release |
+| workload | release |
 |---|---:|
 | `*headline*` | 0.260x |
 | `*family* open.prepare` | 0.203x |

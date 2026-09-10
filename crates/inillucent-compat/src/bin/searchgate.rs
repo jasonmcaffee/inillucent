@@ -40,9 +40,9 @@
 /// subsystem and is compiled as one translation unit; a Rust workspace measured
 /// on the platform allocator is being measured on a build configuration rather
 /// than on an engine, which is the same reasoning that fixed fat LTO and one
-/// codegen unit in the release profile. task-1838 §5 measured the Windows CRT
-/// heap at 59% of a trivial compile and this size-classed free list at 17%
-/// overall, which is why Phase 3's Part E names it the cheapest first move.
+/// codegen unit in the release profile. The Windows C runtime heap was
+/// measured at 59% of a trivial compile and this size-classed free list at
+/// 17% overall, which is why Phase 3's Part E names it the cheapest first move.
 #[global_allocator]
 static ALLOCATOR: inillucent_alloc::Pooled = inillucent_alloc::Pooled;
 
@@ -134,10 +134,7 @@ fn corpus(documents: usize) -> Vec<String> {
 /// @param documents - how many documents each arm indexes
 /// @param rounds - how many interleaved rounds to time
 fn run(documents: usize, rounds: usize) -> Result<bool, String> {
-    let area = workspace_root()
-        .join("_agent_output")
-        .join("task-1834-phase5")
-        .join("searchgate");
+    let area = workspace_root().join("_agent_output").join("searchgate");
     let _ = std::fs::create_dir_all(&area);
 
     println!("## configuration");

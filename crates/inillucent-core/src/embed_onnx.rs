@@ -406,7 +406,7 @@ impl OnnxEmbedder {
     /// Nothing calls it today. It stays because it is the one path that runs the
     /// model without the length grouping, so a test that suspects the grouping
     /// has something to compare against; `allow` rather than deletion says that
-    /// deliberately (task-1894).
+    /// deliberately.
     #[cfg(test)]
     #[allow(dead_code)]
     fn run_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {

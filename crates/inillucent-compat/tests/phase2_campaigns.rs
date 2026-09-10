@@ -667,10 +667,10 @@ fn the_physical_pass_refuses_what_it_cannot_run() {
     let fixture = fixture(200, 1_024, 256);
     // **This list shrinks as constructs are implemented, and each one moves to
     // `the_physical_pass_answers_what_it_implements` with an expected answer
-    // rather than being deleted.** task-1832 moved `HAVING`, an aggregate with
+    // rather than being deleted.** `HAVING`, an aggregate with
     // `DISTINCT`, a `VALUES` arm, a query with no FROM term, a subquery source
-    // and a keyless join out of it; what is left is what the pass still routes
-    // to the VM.
+    // and a keyless join have moved out of it; what is left is what the pass
+    // still routes to the VM.
     let refused = [
         (
             "a compound query",
@@ -680,7 +680,7 @@ fn the_physical_pass_refuses_what_it_cannot_run() {
             "a window function",
             "SELECT id, row_number() OVER () FROM t",
         ),
-        // An outer join left this list in task-1838: `NestedLoopJoin` reads the
+        // An outer join left this list: `NestedLoopJoin` reads the
         // inner side once and evaluates the `ON` over each pair, which is what
         // distinguishes "no partner" from "a partner that failed the condition"
         // and so what a null extension needs. It is graded against the pinned
@@ -715,7 +715,7 @@ fn the_physical_pass_answers_what_it_implements() {
         ("SELECT id FROM t WHERE id = 42", 1),
         ("SELECT id FROM t WHERE id BETWEEN 10 AND 19", 10),
         ("SELECT id FROM t WHERE id > 495", 4),
-        // Moved here from the refusal list by task-1832. Each one carries the
+        // Moved here from the refusal list. Each one carries the
         // answer rather than only the acceptance: a construct that stopped
         // being refused and started being wrong would otherwise read as
         // progress.

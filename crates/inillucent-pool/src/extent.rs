@@ -28,7 +28,7 @@
 //! | 44 | 4 | reserved, zero |
 //! | 48 | .. | payload |
 //!
-//! ## Why there is a second kind of extent page (task-1880 §4)
+//! ## Why there is a second kind of extent page
 //!
 //! A run is whole pages, and a value one byte over the spill threshold is
 //! therefore a whole page. Measured at the 32 KiB default, 1,000 rows per case,
@@ -108,7 +108,8 @@ pub struct ExtentRef {
     /// Which slot of a shared page holds it, when it is packed into one.
     ///
     /// `None` is a run of whole pages, which is what every reference written
-    /// before task-1880 §4 is and what a value too large for one page still is.
+    /// before shared blob pages existed is and what a value too large for one
+    /// page still is.
     pub slot: Option<u16>,
 }
 
@@ -548,7 +549,7 @@ mod tests {
 
     /// A packed reference round-trips, and a run's bytes still read as a run.
     ///
-    /// **The compatibility claim, checked rather than argued** (task-1880 §4).
+    /// **The compatibility claim, checked rather than argued.**
     /// A packed reference marks itself in the top bit of its length word and
     /// carries its slot in the fifteen bits below; a reference written before
     /// that existed has those bits clear, so the bytes a database already holds

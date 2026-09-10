@@ -19,7 +19,7 @@
 //! # Why the two forms share this
 //!
 //! `VACUUM` and `VACUUM INTO 'file'` differ in one line: where the rebuilt
-//! database ends up. Before task-1860 they shared nothing - `VACUUM`
+//! database ends up. They used to share nothing - `VACUUM`
 //! checkpointed and `VACUUM INTO` called `std::fs::copy` - and neither of them
 //! reclaimed a byte. A reader who asked "is the file smaller afterwards?" got
 //! "no" from both, which is not what either statement means.

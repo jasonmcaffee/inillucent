@@ -17,7 +17,7 @@
 //! That band is where extracted document text, JSON payloads and rendered
 //! vectors live, and it is why migrating Nikaya's 5,852 MB PostgreSQL database
 //! produced a 25.66 GB staged file: 601,862 rendered `halfvec` values at 9,513
-//! bytes each were 20.5 GB of it (task-1880 §4).
+//! bytes each were 20.5 GB of it.
 //!
 //! ## Why the bound is a ratio and not a number
 //!
@@ -44,7 +44,7 @@ const ROWS: usize = 1_000;
 ///
 /// @param name - the test's name
 fn scratch(name: &str) -> PathBuf {
-    let area = workspace_root().join("target/scratch/task-1880/packing");
+    let area = workspace_root().join("target/scratch/packing");
     let _ = std::fs::create_dir_all(&area);
     let path = area.join(format!("{name}.rdb"));
     remove(&path);

@@ -7,7 +7,7 @@
 //!
 //! ## Why it exists after file-format compatibility stopped being a goal
 //!
-//! `task-1816-rearchitecture-tdd.md` drops SQLite file-format compatibility as
+//! The rearchitecture plan drops SQLite file-format compatibility as
 //! a requirement, but two things still need to read a SQLite file:
 //!
 //! - **The correctness gate.** The differential harness compares inillucent against

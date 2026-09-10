@@ -24,8 +24,8 @@ pub enum Tokenizer {
     /// stems `unicode61`'s tokens and `tokenize='porter ascii'` stems `ascii`'s.
     /// It is what makes a search for `run` find `running`, and it was accepted
     /// and read as `unicode61` - a declaration the application trusts, doing
-    /// nothing, which is the same shape as `CHECK` before task-1845 and
-    /// `STRICT` before it.
+    /// nothing, which is the same shape `CHECK` and `STRICT` were in before
+    /// each was enforced.
     ///
     /// The stemmer is Snowball English, which is Porter2 rather than the
     /// original Porter that SQLite ships. They agree on the ordinary
@@ -202,7 +202,7 @@ impl Tokenizer {
     /// character, and describing it cost a heap allocation and a free. The gate
     /// tokenises fifty-five thousand characters per round of
     /// `extension.fts.build` and spent a fifth of the workload's module time
-    /// here (task-1856).
+    /// here.
     ///
     /// A character folds to more than one - the German sharp s lowercases to
     /// `ss` - so the shape has to stay one-to-many; it is the collection that

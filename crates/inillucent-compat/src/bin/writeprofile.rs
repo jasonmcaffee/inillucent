@@ -36,7 +36,7 @@ fn main() -> ExitCode {
 
 /// Returns a fresh database path.
 fn scratch(name: &str) -> PathBuf {
-    let directory = workspace_root().join("_agent_output/task-1790/writeprofile");
+    let directory = workspace_root().join("_agent_output/writeprofile");
     let _ = std::fs::create_dir_all(&directory);
     let path = directory.join(format!("{name}.db"));
     let _ = std::fs::remove_file(&path);

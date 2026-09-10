@@ -36,8 +36,8 @@ const DEFAULT_ITERATIONS: u32 = 20_000;
 
 /// How many allocations the process has made.
 ///
-/// **Because the nanoseconds alone do not say what to fix.** task-1838 §5
-/// measured a `SELECT 1` compile at 3.03 ms per four thousand on the Windows
+/// **Because the nanoseconds alone do not say what to fix.** A `SELECT 1`
+/// compile measured 3.03 ms per four thousand on the Windows
 /// CRT heap and 1.23 ms on a pooled allocator, and 1.31 / 1.11 on Linux - so
 /// nearly a microsecond of a Windows compile is `malloc` and nothing else. The
 /// count is what turns that into a list of things to stop allocating.
@@ -113,7 +113,7 @@ fn per(iterations: u32, mut body: impl FnMut() -> Result<(), String>) -> Result<
 /// A table is created so the profile can be pointed at a statement that reads
 /// one; `SELECT 1` never touches it.
 fn fixture() -> Result<ImportedDatabase, String> {
-    let root = inillucent_compat::workspace_root().join("_agent_output/task-1838/prepareprofile");
+    let root = inillucent_compat::workspace_root().join("_agent_output/prepareprofile");
     std::fs::create_dir_all(&root).map_err(|error| error.to_string())?;
     let path: PathBuf = root.join(format!("{}.rdb", std::process::id()));
     let _ = std::fs::remove_file(&path);

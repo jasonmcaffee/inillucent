@@ -338,7 +338,7 @@ pub struct ColumnSpec {
     /// descending order of `k`, which is what SQLite builds and what makes the
     /// two engines read the same rows in the same order - the trailing rowid
     /// stays ascending, so ties inside a descending column come out ascending
-    /// exactly as SQLite's do. It was flattened to `false` until task-1860, and
+    /// exactly as SQLite's do. It used to be flattened to `false`, and
     /// the visible cost of the flattening was that `ORDER BY k` over a `DESC`
     /// index answered its ties in the opposite order.
     ///

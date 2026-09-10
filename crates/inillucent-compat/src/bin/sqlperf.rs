@@ -118,7 +118,7 @@ fn oracle_path(root: &Path) -> Option<PathBuf> {
 /// somewhere; having the reference engine write it also means the file is the
 /// same shape a real one would be.
 fn build_database(root: &Path, rows: usize) -> Result<PathBuf, String> {
-    let path = root.join("_agent_output/task-1785-perf/perf.db");
+    let path = root.join("_agent_output/sqlperf/perf.db");
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|reason| reason.to_string())?;
     }

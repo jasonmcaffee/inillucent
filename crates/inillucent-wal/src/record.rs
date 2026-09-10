@@ -140,7 +140,7 @@ pub enum Body<'a> {
         image: &'a [u8],
         /// The LSN the page carried **before** the compaction ran.
         ///
-        /// **A diagnosis, not a gate** (task-1880 §7). A compaction with no
+        /// **A diagnosis, not a gate.** A compaction with no
         /// image asks recovery to re-run the pack over the page's own live
         /// rows, on the argument that redo replays in LSN order and the page is
         /// therefore in the state the record was written against. When that

@@ -107,7 +107,7 @@ impl Profile {
 }
 
 fn main() -> ExitCode {
-    let root = PathBuf::from("_agent_output/task-1791/hotprofile");
+    let root = PathBuf::from("_agent_output/hotprofile");
     match run(&root) {
         Ok(()) => ExitCode::SUCCESS,
         Err(failure) => {

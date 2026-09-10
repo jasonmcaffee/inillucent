@@ -44,7 +44,7 @@ fn pinned_shell() -> Option<PathBuf> {
 /// Returns a scratch directory for one scenario, emptied first.
 fn scratch(name: &str) -> PathBuf {
     let directory = workspace_root()
-        .join("_agent_output/task-1788/attach")
+        .join("_agent_output/attach")
         .join(name);
     let _ = std::fs::remove_dir_all(&directory);
     let _ = std::fs::create_dir_all(&directory);

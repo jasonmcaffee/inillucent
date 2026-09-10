@@ -317,10 +317,9 @@ fn the_reference_artifacts_match_their_pinned_checksums() {
     );
 }
 
-/// The retrieval engine must be byte-identical to the baseline this ticket
-/// captured. task-1782 builds a relational engine beside it and is not allowed
-/// to disturb it, and "we did not touch it" is a claim worth checking rather
-/// than asserting.
+/// The retrieval engine must be byte-identical to the baseline captured here.
+/// A new relational engine is being built beside it and must not disturb it,
+/// and "we did not touch it" is a claim worth checking rather than asserting.
 #[test]
 fn the_retrieval_baseline_is_unchanged() {
     let baseline = workspace_root().join("compat/baseline/inillucent-core-baseline.json");
@@ -398,9 +397,10 @@ fn the_production_dependency_tree_holds_no_engine() {
         // format it reads. `inillucent-sqlite-reader` is the read half of
         // `inillucent-storage` behind a narrow interface, kept so the differential
         // gate can import a fixture and `inillucent-migrate` can read a legacy
-        // file; it is first-party code and is exactly what the task-1816 triage
-        // says survives that crate's deletion. Skipping the lines that name a
-        // declared crate keeps the rule pointed at what it is for.
+        // file; it is first-party code, and it is exactly the piece the
+        // rearchitecture kept when the old engine was deleted. Skipping the
+        // lines that name a declared crate keeps the rule pointed at what it
+        // is for.
         let declared: Vec<&str> = contract.crates.keys().map(|name| name.as_str()).collect();
         let tree: String = String::from_utf8_lossy(&output.stdout)
             .to_ascii_lowercase()

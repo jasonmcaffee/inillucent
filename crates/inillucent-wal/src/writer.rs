@@ -77,7 +77,7 @@ pub const NORMAL_SYNC_BYTES: u64 = 64 << 20;
 /// How much unwritten log may sit in memory before it is handed to the file.
 ///
 /// **A buffer that is only ever drained by a commit is a buffer the size of the
-/// transaction.** task-1861 measured the consequence: one round of
+/// transaction.** The consequence was measured: one round of
 /// `write.update.indexed` writes 7,927 KiB of log, and because every byte of it
 /// was held until the commit, that round raised the process's high-water mark
 /// by 7.04 MiB - and the buffer is recycled rather than freed, so the capacity

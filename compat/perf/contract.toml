@@ -16,8 +16,9 @@
 # The unweighted table is published beside the weighted one, so a favourable mix
 # cannot hide a slow primitive.
 
-# task-1834 (Phase 5) raised both thresholds to the ones task-1816 sets. The
-# TDD states them as replacements rather than alternatives: "**Design target**:
+# The rearchitecture's Phase 5 raised both thresholds to the ones its design
+# document sets. The design states them as replacements rather than
+# alternatives: "**Design target**:
 # weighted geomean lower 95% bound at least **3.0x**" and "**Floor**: no family
 # below **1.0x** (lower bound), replacing 0.90x". They are written here rather
 # than in the analyser for the same reason the weights are, and they were
@@ -29,12 +30,12 @@ schema_version = 1
 headline = "3.00"
 floor = "1.00"
 
-# task-1869 added the two bars below, and added them **before** the work that
-# had to meet them. Until it did, this file held ten elapsed-time families and
-# nothing else, so an engine that doubled its resident set or its processor time
-# would still have passed the gate outright - which is exactly what happened:
-# task-1861 measured 102% more memory than SQLite on a contract that had no
-# opinion about memory at all.
+# The two bars below were added before the work that had to meet them. Until
+# then, this file held ten elapsed-time families and nothing else, so an engine
+# that doubled its resident set or its processor time would still have passed
+# the gate outright - which is exactly what happened: one review measured 102%
+# more memory than SQLite on a contract that had no opinion about memory at
+# all.
 #
 # Both are **ratios of SQLite's, on the same plan and the same budget**, rather
 # than absolute byte and millisecond counts, so they survive a bigger fixture, a
@@ -52,9 +53,9 @@ bar = "0.95"
 description = "peak resident set, one child process each, one round of the same plan, matched budget"
 
 [cpu]
-# **What today already reaches, so a regression fails.** task-1861 measured one
-# round of the whole plan at 422 ms of processor time against SQLite's 1,246 -
-# 34%. The bar is 0.40 rather than 0.34 so that ordinary run-to-run movement on
+# **What today already reaches, so a regression fails.** One round of the whole
+# plan measured 422 ms of processor time against SQLite's 1,246 - 34%. The bar
+# is 0.40 rather than 0.34 so that ordinary run-to-run movement on
 # a shared box is not a failure, and so that the memory work is not allowed to
 # buy residency with processor time.
 bar = "0.40"

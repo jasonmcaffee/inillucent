@@ -307,8 +307,8 @@ impl inillucent_vm::host::Host for ConnectionState {
 
 /// The connection, as a module is allowed to see it.
 ///
-/// **A borrow rather than the connection itself**, which is what task-1894
-/// changed. `Host::services` used to hand back `&mut ConnectionState`, and
+/// **A borrow rather than the connection itself.**
+/// `Host::services` used to hand back `&mut ConnectionState`, and
 /// `inillucent-ext` reached a pager back out of it through a `pager_set`
 /// accessor - one of the two edges that made a crate the *new* engine links
 /// depend on the retired storage engine. A module now reaches its rows through
@@ -757,7 +757,6 @@ impl Connection {
     /// because the TDD names checkpoint scheduling as a lever and a lever
     /// without an arm cannot be measured; the arm was measured and did not pay,
     /// so it is a tunable an application can reach rather than a default.
-    /// See `_agent_output/task-1790/checkpoint/checkpoint.md`.
     /// @param budget - the cap, or `None` for no cap
     pub fn set_checkpoint_budget(&self, budget: Option<u32>) -> DbResult<()> {
         self.with_state(|state| state.pager.set_checkpoint_budget(budget))

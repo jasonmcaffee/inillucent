@@ -307,7 +307,7 @@ fn error_position(arguments: &[Argument<'_>]) -> DbResult<Answer> {
 /// calls, because the entry point takes SQL values and values carry no memory.
 /// A caller that can prove its arguments have not changed - which a compiled
 /// expression can, by remembering the bytes it last saw - keeps both and calls
-/// this instead. task-1838 §4.
+/// this instead.
 ///
 /// @param node - the document, already parsed
 /// @param steps - the path, already parsed

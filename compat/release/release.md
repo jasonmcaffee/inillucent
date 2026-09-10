@@ -1,6 +1,6 @@
 # inillucent release candidate
 
-> **These are the `task-1791-release` gate's own output files, taken on the engine that came
+> **These are the `release` gate's own output files, taken on the engine that came
 > before the rearchitecture, and they are kept as that run's record. They are not the current
 > numbers and they are not edited by hand.** The engine measured here was slower than SQLite on
 > every family; the shipping engine is **326% faster** weighted over the same ten families, with

@@ -8,18 +8,18 @@
 //!
 //! ## Why this binary exists
 //!
-//! task-1791 measured the *existing* storage layer's ceiling on
+//! An earlier measurement found the *existing* storage layer's ceiling on
 //! `SELECT count(*), sum(key), max(category) FROM main_table` - `BTreeCursor`
 //! walked directly, no VM, no `Value`, no allocation per row - and found a best
 //! of 1.20x SQLite and a median of 0.78x. Its handoff argues that this is an
 //! upper bound on *any* engine built over that storage, because a real engine
 //! only adds work on top.
 //!
-//! task-1816's design says the bound does not transfer, because what it
-//! measures is the SQLite *record codec* - one header parse and two varint
-//! decodes per row - which the PAX leaf replaces with a contiguous run of
-//! 8-byte integers. Both readings are consistent with task-1791's numbers, and
-//! the disagreement reduces to exactly one quantity nobody has measured:
+//! The rearchitecture's design doc says the bound does not transfer, because
+//! what it measures is the SQLite *record codec* - one header parse and two
+//! varint decodes per row - which the PAX leaf replaces with a contiguous run
+//! of 8-byte integers. Both readings are consistent with that earlier
+//! measurement's numbers, and the disagreement reduces to exactly one quantity nobody has measured:
 //! nanoseconds per row for a raw scan over a PAX leaf.
 //!
 //! This binary measures it, before the executor, the MVCC, the WAL and the

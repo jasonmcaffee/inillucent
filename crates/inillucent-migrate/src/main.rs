@@ -14,12 +14,12 @@
 //! inillucent-migrate --from <postgres://…|mysql://…> <destination.rdb> [--batch N]
 //! ```
 //!
-//! The second is task-1834's: a SQLite database file into the new engine's
+//! The second migrates a SQLite database file into the new engine's
 //! trees, verified by counts and digests and published by a rename. It takes
 //! no `--no-publish`, because it never publishes anything it has not verified
 //! and always leaves the staging file behind when it does not.
 //!
-//! The third is task-1868's: a **running** PostgreSQL or MySQL server, read
+//! The third migrates from a **running** PostgreSQL or MySQL server, read
 //! over its own wire protocol inside one repeatable-read snapshot. It holds the
 //! same invariants for the same reasons, and it is also reachable as
 //! `inillucent migrate --kind postgres` from the command line and from MCP -

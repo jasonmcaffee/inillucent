@@ -8,8 +8,8 @@
 //! silently producing a table with no columns.
 //!
 //! **A statement this engine cannot parse is not a damaged file, and reporting
-//! it as one cost somebody an afternoon.** Until task-1847 every failure here
-//! was built with [`inillucent_base::error::corrupt`], which means *malformed
+//! it as one cost somebody an afternoon.** Every failure here used to be built
+//! with [`inillucent_base::error::corrupt`], which means *malformed
 //! persistent bytes* and attaches what it is given as `detail` rather than as
 //! `message` — so a caller reading `message()`, the field it is told to read,
 //! got the primary code's canned text, `database disk image is malformed`, for
@@ -194,7 +194,7 @@ pub fn apply_statistic(tables: &mut [TableInfo], table: &[u8], index: Option<&[u
     let partial = entry.partial_sql.is_some();
     entry.prefix_rows = prefixes;
     entry.analysed_rows = Some(rows);
-    // **A partial index's count is not the table's** (task-1880 §13). Every
+    // **A partial index's count is not the table's.** Every
     // `sqlite_stat1` row used to set the table's row count from its own leading
     // number, and a partial index's leading number is how many rows its
     // predicate *accepted*. So a table of 6,000 documents with a partial index
@@ -530,7 +530,7 @@ pub fn table_from_create_sql(sql: &[u8], database: usize, root: u32) -> DbResult
     info.indexes = automatic;
     // A table-level `PRIMARY KEY(id) ON CONFLICT REPLACE` over a rowid alias
     // has no index of its own, so its clause is recorded on the column - the
-    // same place a column-level one lands (task-1853).
+    // same place a column-level one lands.
     if let Some(column) = info
         .rowid_alias
         .map(usize::from)
@@ -974,7 +974,7 @@ fn automatic_indexes(
                     // `PRIMARY KEY` is the same constraint as one named on the
                     // column, and SQLite resolves a rowid collision by it
                     // either way - so the caller puts it on the column, which
-                    // is where the write path looks (task-1853).
+                    // is where the write path looks.
                     rowid_key_conflict = *on_conflict;
                     continue;
                 }
@@ -1155,8 +1155,8 @@ pub fn corrupt_schema(detail: impl Into<String>) -> DbError {
 /// **Not corruption.** The row's bytes were read; it is the statement that
 /// could not be understood, and the two are different facts about a file. A
 /// `CREATE TABLE` SQLite wrote and this parser refuses is a gap in this engine,
-/// not damage to the disk — `CREATE TABLE pairs (left TEXT, right TEXT)` was
-/// exactly that until task-1847, and it reported the file as malformed.
+/// not damage to the disk — `CREATE TABLE pairs (left TEXT, right TEXT)` used
+/// to be exactly that, and it reported the file as malformed.
 ///
 /// So the failure keeps the parser's own code, words and offset, and keeps the
 /// `Unsupported` marker when the parser set one. `inillucent-driver` reads that
@@ -1371,7 +1371,7 @@ mod tests {
     ///
     /// `inillucent-driver` reads exactly this marker to answer
     /// `Status::Unsupported` with the construct named, which is the shape
-    /// task-1847 asked schema failures to have.
+    /// schema failures are meant to have.
     #[test]
     fn an_unimplemented_construct_in_schema_sql_keeps_its_marker() {
         let error = trigger_from_create_sql(
@@ -1390,9 +1390,9 @@ mod tests {
         );
     }
 
-    /// The reserved-word column names that started task-1847. `left` and
-    /// `right` are ordinary names in SQLite - a diff table, a tree, a stereo
-    /// channel - and a schema SQLite writes has to load here.
+    /// Reserved-word column names: `left` and `right` are ordinary names in
+    /// SQLite - a diff table, a tree, a stereo channel - and a schema SQLite
+    /// writes has to load here.
     #[test]
     fn a_column_named_left_loads() {
         let table = table_from_create_sql(b"CREATE TABLE pairs (left TEXT, right TEXT)", 0, 2)
