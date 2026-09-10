@@ -327,6 +327,43 @@ handle refusing a write while still answering a read.
 
 ---
 
+## Both signups are behind a CAPTCHA, measured 2026-09-10
+
+Creating the accounts with browser automation was tried, with Playwright driving
+real Chrome. It does not work, and the reason is the same on both: the signup is
+guarded, and `~/.claude/CLAUDE.md` says never to click a CAPTCHA control from
+automation - report what it asked for and stop.
+
+| | what the signup page did |
+|---|---|
+| **npm** `/signup` | **HTTP 403**, no form rendered at all, and a DataDome challenge iframe from `geo.captcha-delivery.com` served instead |
+| **PyPI** `/account/register/` | HTTP 200, but the form carries a required `h-captcha-response` field and an hCaptcha challenge iframe |
+
+npm's 403 is not this network and not this machine. The same URL answers 403 to
+`curl` with its default user agent and to `curl` with a Chrome user agent, while
+`registry.npmjs.org` answers normally in the same second. It is the signup page
+refusing every programmatic client, so no different automation approach gets past
+it.
+
+PyPI has a second wall behind the first: two factor authentication is required
+before an upload, so even a solved CAPTCHA leaves an account whose second factor
+has to live on somebody's authenticator.
+
+**What this means in practice.** One minute of a person's time unblocks both, and
+nothing else does:
+
+- **npm** - either sign in and make a granular token at
+  <https://www.npmjs.com/settings/jasonmcaffee/tokens>, or create the Black
+  Rainbow Labs account through the website and make a token on that. Paste it
+  into `~/.npmrc` as `//registry.npmjs.org/:_authToken=…` and the five packages
+  publish in one command.
+- **PyPI** - register, enable 2FA on your own authenticator, mint an API token.
+
+Email was not the blocker either, so it is not worth chasing again: the account
+would have needed a mailbox, and the one Nikaya indexes was reachable, but the
+signup never got far enough to send anything.
+
+
 ## The order, and why it is the order
 
 1. **The GitHub release**, because the npm platform packages, the Homebrew
