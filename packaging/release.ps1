@@ -535,10 +535,17 @@ Compress-Archive -Path $stage -DestinationPath $archive -CompressionLevel Optima
 
 # One SHA256SUMS for the whole dist directory, rewritten each time, so an
 # installer can verify what it downloaded against one file.
+#
+# **Wrapped in @(...).** A single-match `ForEach-Object` pipeline unwraps to a
+# scalar string rather than a one-element array, so a dist directory holding
+# exactly one archive turned the later `$lines += ...` into string
+# concatenation instead of appending a line - SHA256SUMS came out as one line
+# with the provenance hash glued onto the end of the archive hash, and every
+# installer's checksum lookup failed to find either entry.
 $sums = Join-Path $dist 'SHA256SUMS'
-$lines = Get-ChildItem -Path $dist -Filter '*.zip' | ForEach-Object {
+$lines = @(Get-ChildItem -Path $dist -Filter '*.zip' | ForEach-Object {
     "$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
-}
+})
 Get-ChildItem -Path $dist -Filter '*.tar.gz' -ErrorAction SilentlyContinue | ForEach-Object {
     $lines += "$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
 }
