@@ -377,11 +377,14 @@ pub static CAPABILITIES: &[Capability] = &[
     },
     Capability {
         name: "cancel",
-        support: Support::No,
-        note: "A running statement cannot be stopped. The engine's statement materialises \
-               - it runs whole on its first step and then walks the rows it produced - so \
-               there is no loop in which a cancel flag would be read, and a cancel that \
-               set one would return success and do nothing. Do not draw a Stop button.",
+        support: Support::Partial,
+        note: "A running statement can be stopped, and the limit is *when*. `cancel` sets \
+               a flag the executor reads at every leaf of a scan and every batch a result \
+               collects, so a long scan, a large result and a slow join all stop with \
+               `interrupted` and leave the connection usable. What it does not interrupt is \
+               a single operator part-way through one indivisible piece of work: a sort of \
+               what it has already read finishes. Draw a Stop button; do not promise it is \
+               instant.",
         probe: Probe::Nothing,
     },
     Capability {

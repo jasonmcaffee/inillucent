@@ -62,6 +62,30 @@ codegen-units = 1
 panic = "abort"
 strip = true
 
+# The one lint this workspace turns off, and why.
+#
+# **`doc_lazy_continuation` fires on the house prose style.** This repository's
+# comments carry an argument rather than a description, so they are paragraphs,
+# and a paragraph that uses ` - ` as a mid-sentence dash puts that dash at the
+# start of a line whenever the wrap lands there. Markdown reads a line-initial
+# `- ` as a list item; clippy reads it as a list item with the wrong
+# indentation. Neither is what the sentence says.
+#
+# Nine of them were reflowed in task-1894 before this entry was written, and
+# reflowing the rest would be a large prose diff that re-breaks every time
+# somebody edits a paragraph - and the next person writing a comment in the
+# style `AGENTS.md` asks for would add another. A real list is still checked:
+# every other doc lint stays on.
+[workspace.lints.clippy]
+doc_lazy_continuation = "allow"
+
+[workspace.lints.rust]
+# `loom` is set by the operator with `RUSTFLAGS="--cfg loom"`, not by a Cargo
+# feature, because it has to replace the atomics in every crate in the build at
+# once. It lives here rather than in `inillucent-storage` because a crate cannot
+# both point at this table and carry a `[lints.rust]` of its own.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+
 [workspace.package]
 version = "0.1.0"
 repository = "https://github.com/jasonmcaffee/inillucent"
@@ -131,6 +155,10 @@ windows-sys = { version = "0.59", features = [
     "Win32_System_Memory",
     "Win32_System_SystemInformation",
     "Win32_Security_Cryptography",
+    # SSPI and SChannel, for verified TLS in `inillucent-remote` (task-1894).
+    "Win32_Security_Authentication_Identity",
+    "Win32_Security_Credentials",
+    "Win32_Networking_WinSock",
     "Win32_System_Threading",
     # `GetProcessMemoryInfo`, for the gate's memory accounting (task-1838).
     "Win32_System_ProcessStatus",

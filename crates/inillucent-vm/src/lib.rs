@@ -73,6 +73,7 @@ pub mod mathfn;
 pub mod pattern;
 pub mod printf;
 pub mod program;
+pub mod shadow_pager;
 pub mod sorter;
 pub mod verify;
 pub mod window;

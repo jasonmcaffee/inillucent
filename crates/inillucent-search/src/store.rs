@@ -66,6 +66,28 @@ pub mod state {
     pub const ROWS: &str = "rows";
     /// How far a rebuild got, so a resumed one knows where it was.
     pub const BUILD: &str = "build";
+    /// How many chunks the last generation build inserted into the graph.
+    ///
+    /// **This is the number the bound is stated in (task-1894, M8).** A
+    /// generation folded at commit inserts the rows that commit wrote; a
+    /// generation built by the `compact` or `rebuild` command inserts the whole
+    /// corpus. Reading it back is how an application, and the cost guard in
+    /// `crates/inillucent/tests/budget.rs`, tells the two apart without a
+    /// stopwatch.
+    pub const INSERTED: &str = "inserted";
+    /// How many folds the current generation lineage has taken.
+    ///
+    /// Reset to zero by `compact` and by `rebuild`, because both build the
+    /// graph in one pass from the rows. It rises by one per folded commit, and
+    /// a large number next to a large `chunks` minus `rows` is what says the
+    /// graph has accumulated enough tombstoned chunks to be worth rebuilding.
+    pub const FOLDS: &str = "folds";
+    /// How many chunks the current generation holds, live and tombstoned.
+    ///
+    /// `chunks` minus `rows` is the dead weight an incremental update leaves
+    /// behind: an update tombstones the old chunk and appends a new one, and
+    /// only a single-pass build removes the old one.
+    pub const CHUNKS: &str = "chunks";
 }
 
 /// What one delta row records.

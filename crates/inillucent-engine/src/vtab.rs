@@ -610,7 +610,7 @@ impl ImportedDatabase {
                 // the pages. Only the live connection was.
                 undo: Some(&self.undo),
             };
-            let mut store = WriteStore {
+            let store = WriteStore {
                 database: super::file_of(
                     &mut self.database,
                     &mut self.attached,
@@ -621,10 +621,9 @@ impl ImportedDatabase {
                 trees: &mut self.trees,
                 log: &mut log,
             };
-            let mut nowhere = Nowhere;
+            let mut nowhere = inillucent_ext::vtab::WithStore { store };
             let mut context = Context {
                 host: &mut nowhere,
-                store: Some(&mut store),
                 database: 0,
                 limits: &self.limits,
                 catalog: Some(&self.catalog),
@@ -703,14 +702,13 @@ impl ImportedDatabase {
             return Ok(None);
         };
         let mut table = found.connect(&arguments, false)?;
-        let mut nowhere = Nowhere;
-        let mut store = ReadStore {
+        let store = ReadStore {
             pool: self.database.pool(),
             trees: &self.trees,
         };
+        let mut nowhere = inillucent_ext::vtab::WithStore { store };
         let mut context = Context {
             host: &mut nowhere,
-            store: Some(&mut store),
             database: 0,
             limits: &self.limits,
             catalog: Some(&self.catalog),
@@ -815,7 +813,7 @@ impl ImportedDatabase {
             }
         };
         let specs: Vec<inillucent_sql::vtab::ConstraintSpec> =
-            offer.iter().map(|held| held.spec.clone()).collect();
+            offer.iter().map(|held| held.spec).collect();
         let mut query = IndexQuery::new(specs, order_by.clone());
         connected.table.best_index(&mut query)?;
         // **The caller's arguments win when it has any.** A lateral join has
@@ -844,14 +842,13 @@ impl ImportedDatabase {
             arguments,
         };
         let mut cursor = connected.table.open()?;
-        let mut nowhere = Nowhere;
-        let mut store = ReadStore {
+        let store = ReadStore {
             pool: self.database.pool(),
             trees: &self.trees,
         };
+        let mut nowhere = inillucent_ext::vtab::WithStore { store };
         let mut context = Context {
             host: &mut nowhere,
-            store: Some(&mut store),
             database: 0,
             limits: &self.limits,
             catalog: Some(&self.catalog),
@@ -997,11 +994,13 @@ impl ImportedDatabase {
             }
             cursor.next(&mut context)?;
         }
-        drop(context);
+        // `context` borrows the connection for the length of the scan; this
+        // ends the borrow so the emit below may take it again.
+        let _ = context;
         if !stopped && !rows.is_empty() {
             inillucent_exec::ops::emit_rows(&rows, downstream)?;
         }
-        return Ok(true);
+        Ok(true)
     }
 }
 
@@ -1396,7 +1395,7 @@ impl ImportedDatabase {
                 // the pages. Only the live connection was.
                 undo: Some(&self.undo),
             };
-            let mut store = WriteStore {
+            let store = WriteStore {
                 database: super::file_of(
                     &mut self.database,
                     &mut self.attached,
@@ -1407,10 +1406,9 @@ impl ImportedDatabase {
                 trees: &mut self.trees,
                 log: &mut log,
             };
-            let mut nowhere = Nowhere;
+            let mut nowhere = inillucent_ext::vtab::WithStore { store };
             let mut context = Context {
                 host: &mut nowhere,
-                store: Some(&mut store),
                 database: 0,
                 limits: &self.limits,
                 catalog: Some(&self.catalog),
@@ -1729,7 +1727,7 @@ impl ImportedDatabase {
                     // `ROLLBACK TO` an earlier point has to be able to undo.
                     undo: Some(&self.undo),
                 };
-                let mut store = WriteStore {
+                let store = WriteStore {
                     database: super::file_of(
                         &mut self.database,
                         &mut self.attached,
@@ -1740,10 +1738,9 @@ impl ImportedDatabase {
                     trees: &mut self.trees,
                     log: &mut log,
                 };
-                let mut nowhere = Nowhere;
+                let mut nowhere = inillucent_ext::vtab::WithStore { store };
                 let mut context = Context {
                     host: &mut nowhere,
-                    store: Some(&mut store),
                     database: 0,
                     limits: &self.limits,
                     catalog: Some(&self.catalog),
@@ -1831,7 +1828,7 @@ impl ImportedDatabase {
             wrote: false,
             undo: None,
         };
-        let mut store = WriteStore {
+        let store = WriteStore {
             database: super::file_of(
                 &mut self.database,
                 &mut self.attached,
@@ -1842,10 +1839,9 @@ impl ImportedDatabase {
             trees: &mut self.trees,
             log: &mut log,
         };
-        let mut nowhere = Nowhere;
+        let mut nowhere = inillucent_ext::vtab::WithStore { store };
         let mut context = Context {
             host: &mut nowhere,
-            store: Some(&mut store),
             database: 0,
             limits: &self.limits,
             catalog: Some(&self.catalog),

@@ -188,12 +188,13 @@ fn flag(arguments: &[String], name: &str) -> Option<PathBuf> {
 
 /// Runs every workload at one journal setting.
 fn run_suite(scratch: &Path, options: JournalOptions) -> Result<Vec<Measurement>, String> {
-    let mut measurements = Vec::new();
-    measurements.push(insert_workload(scratch, options, "insert-autocommit", 1)?);
-    measurements.push(insert_workload(scratch, options, "insert-batched", BATCH)?);
-    measurements.push(update_workload(scratch, options, "update-autocommit", 1)?);
-    measurements.push(update_workload(scratch, options, "update-batched", BATCH)?);
-    measurements.push(delete_workload(scratch, options, "delete-autocommit", 1)?);
+    let mut measurements = vec![
+        insert_workload(scratch, options, "insert-autocommit", 1)?,
+        insert_workload(scratch, options, "insert-batched", BATCH)?,
+        update_workload(scratch, options, "update-autocommit", 1)?,
+        update_workload(scratch, options, "update-batched", BATCH)?,
+        delete_workload(scratch, options, "delete-autocommit", 1)?,
+    ];
     measurements.push(delete_workload(scratch, options, "delete-batched", BATCH)?);
     measurements.push(savepoint_workload(scratch, options)?);
     measurements.push(recovery_workload(scratch, options)?);

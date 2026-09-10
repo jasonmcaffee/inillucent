@@ -117,6 +117,11 @@ path = "src/bin/fullgate.rs"
 name = "inillucent-searchgate"
 path = "src/bin/searchgate.rs"
 
+# What an ordinary write pays to keep a vector index current (task-1894, M8).
+[[bin]]
+name = "inillucent-foldgate"
+path = "src/bin/foldgate.rs"
+
 [[bin]]
 name = "inillucent-probeprofile"
 path = "src/bin/probeprofile.rs"
@@ -245,3 +250,7 @@ opcode-probe = [
     "inillucent-storage/opcode-probe",
     "inillucent-session/opcode-probe",
 ]
+
+# The workspace's lint table; see the note beside it in the root manifest.
+[lints]
+workspace = true

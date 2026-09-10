@@ -207,6 +207,11 @@ impl Ephemeral {
     }
 
     /// Moves the scan to the next live row, returning whether there is one.
+    ///
+    /// Named `next` and not an `Iterator`: a cursor is positioned rather than
+    /// consumed, and the row it is on is read through the cursor afterwards -
+    /// which is the opposite of what `Iterator::next` hands back.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> bool {
         let Some(position) = self.position else {
             return false;

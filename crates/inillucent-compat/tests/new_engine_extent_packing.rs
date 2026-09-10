@@ -249,7 +249,7 @@ fn values_sharing_a_page_read_back_after_a_reopen() {
             "row {nth} of {width} bytes did not read back byte for byte"
         );
     }
-    drop(connection);
+    let _ = connection;
     drop(database);
     remove(&path);
 }
@@ -286,7 +286,7 @@ fn deleting_every_packed_value_returns_the_pages() {
         "the free map went from {before} to {after} pages after deleting a thousand packed \\
          values, so the pages they were on did not come back"
     );
-    drop(connection);
+    let _ = connection;
     drop(database);
     remove(&path);
 }
@@ -409,7 +409,7 @@ fn churning_packed_values_leaves_every_tree_intact() {
             );
         }
     }
-    drop(connection);
+    let _ = connection;
     drop(database);
     remove(&path);
 }

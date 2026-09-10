@@ -75,8 +75,10 @@ impl Database {
         path: impl AsRef<Path>,
         timeout: std::time::Duration,
     ) -> DbResult<Database> {
-        let mut options = OpenOptions::default();
-        options.busy_timeout = timeout;
+        let options = OpenOptions {
+            busy_timeout: timeout,
+            ..OpenOptions::default()
+        };
         Database::open_with(path, options)
     }
 

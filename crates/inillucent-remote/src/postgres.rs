@@ -29,11 +29,55 @@ use inillucent_tree::datum::OwnedDatum;
 use crate::auth::{base64_decode, base64_encode, hmac_sha256, md5, pbkdf2_sha256, to_hex, xor};
 use crate::source::{Kind, RemoteSource, SourceColumn, SourceTable};
 use crate::stream::{be_i32, be_u16, be_u32, protocol, will_not, Stream};
-use crate::url::ConnectionUrl;
+use crate::url::{ConnectionUrl, Transport};
 use inillucent_base::hash::sha256;
 
 /// The protocol version this client speaks: 3.0, as `(3 << 16) | 0`.
 const PROTOCOL_VERSION: u32 = 196_608;
+
+/// The version number that means "this is an `SSLRequest`, not a startup".
+///
+/// `(1234 << 16) | 5679`, which is how the protocol carries a request that is
+/// not a protocol version: a server that does not recognise it answers with a
+/// single byte rather than closing, which is what makes the negotiation
+/// possible at all.
+const SSL_REQUEST_CODE: u32 = 80_877_103;
+
+/// Asks the server for TLS and upgrades the socket when it agrees.
+///
+/// **A refusal is a refusal, not a fallback.** A server that answers `N` has
+/// TLS turned off, and continuing in the clear would send this migration's
+/// password over the network with nothing said about it - which is the whole
+/// defect this replaces. The message names the two ways forward.
+///
+/// @param stream - the freshly connected socket, with nothing written on it
+/// @param url - where the host name and any named authority come from
+fn request_tls(stream: &mut Stream, url: &ConnectionUrl) -> DbResult<()> {
+    let mut packet: Vec<u8> = Vec::new();
+    packet.extend_from_slice(&8u32.to_be_bytes());
+    packet.extend_from_slice(&SSL_REQUEST_CODE.to_be_bytes());
+    stream.write_all(&packet)?;
+    match stream.read_u8()? {
+        b'S' => stream.upgrade(&url.host, url.root_certificate()),
+        b'N' => Err(will_not(format!(
+            "{} refused a TLS connection, so this migration stopped before it sent a password. \
+             Turn TLS on at the server (PostgreSQL's `ssl = on`), or - only for a loopback \
+             address or a network you trust - write sslmode=disable in the URL and pass \
+             --insecure-plaintext.",
+            url.address()
+        ))),
+        b'E' => Err(will_not(format!(
+            "{} answered the TLS request with an error, which is what a server older than 8.0 \
+             does. This client requires TLS unless it is told otherwise.",
+            url.address()
+        ))),
+        other => Err(protocol(format!(
+            "{} answered a TLS request with 0x{other:02x}, which is not one of the two bytes the \
+             protocol allows",
+            url.address()
+        ))),
+    }
+}
 
 /// How many rows one `FETCH` asks for.
 const FETCH_ROWS: usize = 10_000;
@@ -86,13 +130,34 @@ pub struct PostgresSource {
     in_snapshot: bool,
 }
 
+/// What a streaming read hands each row to: the columns it is shaped by, and
+/// the row's values, each absent for a SQL NULL.
+pub type RowSink<'s> = dyn FnMut(&[Field], &[Option<Vec<u8>>]) -> DbResult<()> + 's;
+
 impl PostgresSource {
     /// Connects, authenticates, and opens the read snapshot.
     ///
     /// @param url - where to connect and as who
     pub fn connect(url: &ConnectionUrl) -> DbResult<PostgresSource> {
-        url.refuse_unsupported_transport()?;
-        let stream = Stream::connect(&url.address(), Duration::from_secs(url.timeout_seconds()))?;
+        PostgresSource::connect_over(url, Transport::VerifiedTls)
+    }
+
+    /// Connects on a transport the caller's policy has already decided.
+    ///
+    /// **The upgrade happens before the startup packet.** PostgreSQL's own
+    /// `SSLRequest` is a whole message of its own, sent in the clear on a
+    /// freshly opened socket, and everything that identifies the connection -
+    /// the user name, the database, and then the password - comes after it. So
+    /// a refused or unverifiable certificate costs a socket and nothing else.
+    ///
+    /// @param url - where to connect and as who
+    /// @param transport - what the policy in `ConnectionUrl::transport` decided
+    pub fn connect_over(url: &ConnectionUrl, transport: Transport) -> DbResult<PostgresSource> {
+        let mut stream =
+            Stream::connect(&url.address(), Duration::from_secs(url.timeout_seconds()))?;
+        if transport == Transport::VerifiedTls {
+            request_tls(&mut stream, url)?;
+        }
         PostgresSource::over(stream, url)
     }
 
@@ -116,6 +181,11 @@ impl PostgresSource {
         source.start_up()?;
         source.open_snapshot()?;
         Ok(source)
+    }
+
+    /// Returns what the peer proved it was, when the connection is encrypted.
+    pub fn peer(&self) -> Option<&str> {
+        self.stream.peer()
     }
 
     /// Sends the startup packet and answers whatever authentication is asked for.
@@ -405,11 +475,7 @@ impl PostgresSource {
     ///
     /// @param sql - the query
     /// @param sink - what to do with each row
-    pub fn stream_query(
-        &mut self,
-        sql: &str,
-        sink: &mut dyn FnMut(&[Field], &[Option<Vec<u8>>]) -> DbResult<()>,
-    ) -> DbResult<u64> {
+    pub fn stream_query(&mut self, sql: &str, sink: &mut RowSink<'_>) -> DbResult<u64> {
         let mut message = sql.as_bytes().to_vec();
         message.push(0);
         self.send(b'Q', &message)?;
@@ -567,6 +633,11 @@ impl RemoteSource for PostgresSource {
     /// Returns what the server calls itself.
     fn server(&self) -> String {
         format!("PostgreSQL {}", self.version)
+    }
+
+    /// Returns what the peer's certificate proved, when encrypted.
+    fn peer(&self) -> Option<String> {
+        self.stream.peer().map(str::to_string)
     }
 
     /// Returns the objects that exist and are not carried.

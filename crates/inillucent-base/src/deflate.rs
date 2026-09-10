@@ -294,15 +294,11 @@ fn dynamic_trees(bits: &mut BitReader<'_>) -> DbResult<(Tree, Tree)> {
             }
             17 => {
                 let count = (bits.take(3)? as usize).saturating_add(3);
-                for _ in 0..count {
-                    lengths.push(0);
-                }
+                lengths.resize(lengths.len().saturating_add(count), 0);
             }
             18 => {
                 let count = (bits.take(7)? as usize).saturating_add(11);
-                for _ in 0..count {
-                    lengths.push(0);
-                }
+                lengths.resize(lengths.len().saturating_add(count), 0);
             }
             _ => return Err(corrupt("deflate: a code-length symbol that does not exist")),
         }
@@ -363,9 +359,15 @@ fn write_match(bits: &mut BitWriter, length: usize, distance: usize) {
 fn write_fixed(bits: &mut BitWriter, symbol: u16) {
     match symbol {
         0..=143 => bits.push_reversed(u32::from(symbol).saturating_add(0x30), 8),
-        144..=255 => bits.push_reversed(u32::from(symbol).saturating_sub(144) + 0x190, 9),
+        144..=255 => bits.push_reversed(
+            u32::from(symbol).saturating_sub(144).saturating_add(0x190),
+            9,
+        ),
         256..=279 => bits.push_reversed(u32::from(symbol).saturating_sub(256), 7),
-        _ => bits.push_reversed(u32::from(symbol).saturating_sub(280) + 0xc0, 8),
+        _ => bits.push_reversed(
+            u32::from(symbol).saturating_sub(280).saturating_add(0xc0),
+            8,
+        ),
     }
 }
 
@@ -595,11 +597,15 @@ impl Tree {
                 *slot = slot.saturating_add(1);
             }
         }
-        counts[0] = 0;
+        if let Some(zero) = counts.first_mut() {
+            *zero = 0;
+        }
         let mut offsets = [0u16; 16];
         let mut running = 0u16;
-        for length in 1..16 {
-            offsets[length] = running;
+        // Skipping length zero, which means "this symbol has no code" and whose
+        // offset is never read.
+        for (length, slot) in offsets.iter_mut().enumerate().skip(1) {
+            *slot = running;
             running = running.saturating_add(counts.get(length).copied().unwrap_or(0));
         }
         let mut symbols = vec![0u16; lengths.len()];

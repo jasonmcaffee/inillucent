@@ -459,17 +459,16 @@ pub fn real_to_i64(value: f64) -> i64 {
 
 /// Reports whether a double and an integer are the same value.
 ///
-/// This is `sqlite3RealSameAsInt`. The 2^51 bound is what stops a large double
-/// - whose integer neighbours are more than one apart - from being called
-/// equal to the integer it happens to convert to.
+/// This is `sqlite3RealSameAsInt`. The 2^51 bound is what stops a large double,
+/// whose integer neighbours are more than one apart, from being called equal to
+/// the integer it happens to convert to.
 pub fn real_same_as_int(real: f64, integer: i64) -> bool {
     if real == 0.0 {
         return true;
     }
     let round_trip = integer as f64;
     real.to_bits() == round_trip.to_bits()
-        && integer >= -SAME_AS_INT_BOUND
-        && integer < SAME_AS_INT_BOUND
+        && (-SAME_AS_INT_BOUND..SAME_AS_INT_BOUND).contains(&integer)
 }
 
 /// Renders an integer as text.
@@ -696,9 +695,7 @@ fn render_fixed(output: &mut Vec<u8>, digits: &[u8], decimal_point: i32) {
     }
     let mut fraction: Vec<u8> = Vec::new();
     if decimal_point < 0 {
-        for _ in 0..decimal_point.unsigned_abs() {
-            fraction.push(b'0');
-        }
+        fraction.resize(decimal_point.unsigned_abs() as usize, b'0');
     }
     let first = decimal_point.max(0) as usize;
     fraction.extend_from_slice(digits.get(first..).unwrap_or(&[]));
@@ -870,7 +867,7 @@ mod tests {
         assert!(parsed.is_number());
         assert_eq!(parsed.value, -12.5);
         let (value, syntax) = atoi64(
-            &encoding::from_utf8(b"-125", TextEncoding::Utf16Be).into_owned(),
+            &encoding::from_utf8(b"-125", TextEncoding::Utf16Be),
             TextEncoding::Utf16Be,
         );
         assert!(syntax.is_exact());

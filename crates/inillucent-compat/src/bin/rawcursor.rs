@@ -29,7 +29,7 @@
 //! It prints ns per scan and ns per row, and the aggregate it computed, so the
 //! answer can be checked against `sqlite3` on the same file.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -69,9 +69,9 @@ fn main() {
 }
 
 /// Opens the database, finds the table, and times the bare scan.
-fn run(path: &PathBuf, rounds: u32) -> DbResult<()> {
+fn run(path: &Path, rounds: u32) -> DbResult<()> {
     let vfs: Arc<dyn Vfs> = Arc::new(OsVfs::new());
-    let db = DbPath::new(path.clone());
+    let db = DbPath::new(path.to_path_buf());
     // Read-only: nothing here writes, and a writable open would attach a
     // journal whose cost has nothing to do with what is being measured.
     let options = DatabaseOptions {

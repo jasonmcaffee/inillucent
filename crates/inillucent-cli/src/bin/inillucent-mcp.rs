@@ -131,7 +131,7 @@ fn usage() {
     for line in [
         "  -d, --db PATH   the database to serve (or $INILLUCENT_DB; :memory: by default)",
         "      --readonly  refuse every statement that would change something",
-        "      --root DIR  refuse every path outside DIR",
+        "      --root DIR  refuse every path that resolves outside DIR (links followed)",
         "      --limit N   how many rows a call gets back when it does not say (default 200)",
         "  -V, --version   print the version and stop",
         "  -h, --help      print this",

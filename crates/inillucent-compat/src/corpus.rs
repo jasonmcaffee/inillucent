@@ -571,8 +571,7 @@ pub fn table_spec(sql: &str) -> TableSpec {
                 table_key = inner
                     .split(',')
                     .map(|name| {
-                        name.trim()
-                            .split_whitespace()
+                        name.split_whitespace()
                             .next()
                             .unwrap_or("")
                             .trim_matches('"')

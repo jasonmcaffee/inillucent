@@ -502,7 +502,7 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
-        if (cursor - body) % 2 != 0 {
+        if !(cursor - body).is_multiple_of(2) {
             return Err(LexError {
                 kind: LexErrorKind::MalformedBlob,
                 offset: start as u32,

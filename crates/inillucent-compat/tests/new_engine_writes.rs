@@ -1398,7 +1398,8 @@ fn a_table_level_check_takes_a_conflict_clause_and_ignores_it() {
             "a column-level CHECK's conflict clause was not refused by both:              sqlite {reference:?}, ours {ours:?}"
         ));
     }
-    for sql in ["SELECT count(*) FROM sqlite_master WHERE name = 'ch'"] {
+    {
+        let sql = "SELECT count(*) FROM sqlite_master WHERE name = 'ch'";
         compare(&mut pair, sql, &mut failures);
     }
 
@@ -2056,12 +2057,11 @@ fn probe_both(pair: &mut Pair, sql: &str, failures: &mut Vec<String>) {
         .send(&Op::Query(sql.to_string()))
         .expect("the oracle answers");
     if !reference.ok {
-        match pair.engine.execute_any(sql, &Params::new()) {
-            Ok(_) => failures.push(format!(
+        if pair.engine.execute_any(sql, &Params::new()).is_ok() {
+            failures.push(format!(
                 "{sql}\n  sqlite refused it: {}\n  ours   answered it",
                 reference.message
-            )),
-            Err(_) => {}
+            ))
         }
         return;
     }

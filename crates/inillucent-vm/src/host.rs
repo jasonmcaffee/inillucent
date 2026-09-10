@@ -31,7 +31,16 @@ pub trait Host {
     fn pagers(&mut self) -> &mut dyn PagerSet;
 
     /// Returns the connection as a module is allowed to see it.
-    fn services(&mut self) -> &mut dyn inillucent_ext::vtab::Host;
+    /// The module services this host offers: pragmas, and the page size.
+    ///
+    /// **Boxed rather than borrowed**, and that is what task-1894 changed. A
+    /// `&mut dyn` has to point at something the host already owns, and a
+    /// `Pager` owns no such field - so `inillucent-ext` carried an
+    /// `impl Host for Pager` to make one, which is one of the two edges that
+    /// made a crate the *new* engine links depend on the retired storage
+    /// engine. A box costs one allocation per statement that opens a virtual
+    /// table, which is a cost nothing measures.
+    fn services(&mut self) -> Box<dyn inillucent_ext::vtab::Host + '_>;
 
     /// Returns the schema the statement was compiled against.
     ///
@@ -70,9 +79,11 @@ impl Host for Pager {
         self
     }
 
-    /// A pager answers no pragmas, which the default already says.
-    fn services(&mut self) -> &mut dyn inillucent_ext::vtab::Host {
-        self
+    /// A pager answers no pragmas and reports its own page size.
+    fn services(&mut self) -> Box<dyn inillucent_ext::vtab::Host + '_> {
+        Box::new(PagerServices {
+            page: self.page_size().bytes() as usize,
+        })
     }
 
     /// Refuses: there is no registry here to look a module up in.
@@ -87,6 +98,25 @@ impl Host for Pager {
         _body: &mut dyn FnMut(&mut dyn VirtualTable, &mut Context<'_>) -> DbResult<VirtualAnswer>,
     ) -> DbResult<VirtualAnswer> {
         Err(no_modules(reference))
+    }
+}
+
+/// A pager's module services: no pragmas, and no page size worth reporting.
+///
+/// **It exists because `inillucent-ext` stopped knowing what a `Pager` is**
+/// (task-1894, M3). `impl inillucent_ext::vtab::Host for Pager` lived in that
+/// crate, and it was one of the two edges that made a crate the *new* engine
+/// links depend on the retired storage engine. A pager on its own is only the
+/// machine's own test host, so the honest implementation is the default one.
+struct PagerServices {
+    /// The pager's page size, read once when the services were built.
+    page: usize,
+}
+
+impl inillucent_ext::vtab::Host for PagerServices {
+    /// Reports the pager's page size, which is what the R-Tree sizes nodes to.
+    fn page_size(&mut self, _database: usize) -> Option<usize> {
+        Some(self.page)
     }
 }
 

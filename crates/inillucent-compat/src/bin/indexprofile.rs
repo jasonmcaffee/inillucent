@@ -64,7 +64,7 @@ fn main() -> ExitCode {
     // part of the statement before the scan - parsing, binding, allocating the
     // root, re-parsing the canonical SQL - which no stage times and which
     // subtraction is therefore the only way to see.
-    let mut stages: Vec<Vec<f64>> = vec![Vec::with_capacity(iterations); 8];
+    let mut stages: Vec<Vec<f64>> = (0..8).map(|_| Vec::with_capacity(iterations)).collect();
     for round in 0..iterations {
         if let Err(error) = database.execute_any(DROP, &Params::new()) {
             eprintln!("drop failed on round {round}: {}", error.message());

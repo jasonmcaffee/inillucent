@@ -9,3 +9,7 @@ description = "Deterministic simulator VFS, failure injection, crash modelling, 
 [dependencies]
 inillucent-base = { workspace = true }
 inillucent-vfs = { workspace = true }
+
+# The workspace's lint table; see the note beside it in the root manifest.
+[lints]
+workspace = true

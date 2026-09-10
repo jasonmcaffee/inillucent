@@ -36,6 +36,34 @@
  * 3. Every pointer you PASS IN is copied before the call returns. You may free
  *    your buffer on the next line.
  *
+ *
+ * DESTRUCTION ORDER: THERE IS ONLY ONE RULE, AND IT IS ABOUT inillucent_close
+ *
+ * A statement and a transaction share the connection they were made on. You
+ * may free the four handles in ANY order:
+ *
+ *   inillucent_conn_free(conn);          -- legal with a live stmt or txn
+ *   inillucent_stmt_execute(stmt, ...);  -- still works
+ *   inillucent_stmt_free(stmt);          -- the connection's state goes here
+ *
+ * The connection's state lives until the last of its handles is freed, so
+ * freeing it early releases the handle and nothing else. Nothing dangles and
+ * nothing needs a defined error, because there is no wrong order to report.
+ *
+ * inillucent_close is the exception, and it REFUSES rather than dangling.
+ * It returns INILLUCENT_INVALID_STATE, with a message, while any connection
+ * on the database is still alive - and a connection counts as alive while any
+ * statement or transaction made on it is alive, even if you already freed the
+ * inillucent_conn. The database is left open and usable; free the children and
+ * close again.
+ *
+ * A statement or transaction outliving its connection keeps the session that
+ * connection opened, so temp tables, ATTACHed databases and connection
+ * pragmas are all still there.
+ *
+ * inillucent_rows owns its data outright. It depends on nothing and can be
+ * freed at any time, before or after everything else.
+ *
  * Text is NOT guaranteed NUL-terminated - a text value may contain a NUL byte,
  * and pretending otherwise would truncate it silently. Byte pointers therefore
  * come with a length out-parameter. The few strings that ARE C strings say so
@@ -172,7 +200,9 @@ const char *inillucent_path(const inillucent_db *db);
 int32_t inillucent_connect(inillucent_db *db, inillucent_conn **out,
                            inillucent_error **error);
 
-/* Frees the connection. The database it came from must outlive it. */
+/* Frees the connection handle. Legal while a statement or transaction made on
+ * it is still alive: they share the connection's state, which lives until the
+ * last of them is freed. The database still refuses to close until then. */
 void inillucent_conn_free(inillucent_conn *conn);
 
 /* Runs one statement with nothing bound and collects every row it produced.
@@ -196,12 +226,19 @@ int32_t inillucent_in_transaction(inillucent_conn *conn);
  * know whether a cached table description is stale. */
 uint64_t inillucent_schema_cookie(inillucent_conn *conn);
 
-/* Asks a running statement to stop. ALWAYS returns INILLUCENT_UNSUPPORTED,
- * and inillucent_supports("cancel") says so up front: the engine runs a
- * statement whole rather than a row at a time, so there is no point at which
- * it could notice. Do not draw a Stop button. It is here rather than absent so
- * that a binding can wire it once and have it start working the day the
- * capability flips. */
+/* Asks a running statement to stop. Safe to call from another thread while a
+ * statement is running - it is the one call here that is - because it sets a
+ * flag rather than touching the statement. The statement then fails with
+ * INILLUCENT_INTERRUPTED and the connection stays usable.
+ *
+ * inillucent_supports("cancel") reports PARTIAL, and the limit it is reporting
+ * is WHEN rather than whether: the flag is read at every leaf of a scan and
+ * every batch a result collects, so a long scan, a large result and a slow join
+ * all stop, while a single operator part-way through one indivisible piece of
+ * work finishes it first. Draw a Stop button; do not promise it is instant.
+ *
+ * A cancel with nothing running cancels nothing: the next statement clears the
+ * flag as it starts. */
 int32_t inillucent_cancel(inillucent_conn *conn, inillucent_error **error);
 
 /* ------------------------------------------------------------------ */
@@ -211,6 +248,7 @@ int32_t inillucent_cancel(inillucent_conn *conn, inillucent_error **error);
 int32_t inillucent_prepare(inillucent_conn *conn, const char *sql,
                            inillucent_stmt **out, inillucent_error **error);
 
+/* Frees the statement. Legal before or after its connection is freed. */
 void inillucent_stmt_free(inillucent_stmt *stmt);
 
 /* Parameters are one-based, matching ?1, ?2 in the SQL. Binding an index past

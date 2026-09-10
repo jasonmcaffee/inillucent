@@ -26,3 +26,7 @@ inillucent-txn = { workspace = true }
 inillucent-exec = { workspace = true }
 inillucent-sqlite-reader = { workspace = true }
 inillucent-search = { workspace = true }
+
+# The workspace's lint table; see the note beside it in the root manifest.
+[lints]
+workspace = true

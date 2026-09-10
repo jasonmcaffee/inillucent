@@ -741,60 +741,6 @@ pub fn refused(name: &[u8], why: &str) -> inillucent_base::DbError {
     misuse(format!("PRAGMA {}: {why}", String::from_utf8_lossy(name)))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Every register row has a name and a set of columns.
-    #[test]
-    fn every_register_row_answers_something() {
-        for entry in REGISTER {
-            assert!(!entry.name.is_empty());
-            assert!(!columns(entry.name.as_bytes()).is_empty(), "{}", entry.name);
-        }
-    }
-
-    /// The register is in the order `pragma_list` reports.
-    #[test]
-    fn the_register_is_sorted() {
-        let mut previous = "";
-        for entry in REGISTER {
-            assert!(previous <= entry.name, "{previous} then {}", entry.name);
-            previous = entry.name;
-        }
-    }
-
-    /// A pragma whose columns are not listed answers with its own name.
-    #[test]
-    fn a_setting_answers_with_its_own_name() {
-        assert_eq!(columns(b"cache_size"), vec![b"cache_size".to_vec()]);
-        assert_eq!(
-            columns(b"index_info"),
-            vec![b"seqno".to_vec(), b"cid".to_vec(), b"name".to_vec()]
-        );
-    }
-
-    /// A name nobody registered is not a pragma.
-    #[test]
-    fn an_unknown_name_is_not_a_pragma() {
-        assert!(spec(b"nope").is_none());
-        assert!(spec(b"TABLE_INFO").is_some());
-    }
-
-    /// The boolean argument follows SQLite's rule, including the strange part.
-    #[test]
-    fn the_boolean_rule_is_sqlites() {
-        let name = |text: &str| PragmaArgument::Name(text.as_bytes().to_vec());
-        assert!(argument_boolean(&name("on")));
-        assert!(argument_boolean(&name("YES")));
-        assert!(argument_boolean(&name("1")));
-        assert!(!argument_boolean(&name("off")));
-        assert!(!argument_boolean(&name("0")));
-        // Anything it cannot read is false, which is why `= maybe` is off.
-        assert!(!argument_boolean(&name("maybe")));
-    }
-}
-
 /// Returns the rows `PRAGMA function_list` reports.
 pub fn function_list() -> DbResult<PragmaRows> {
     let mut rows: PragmaRows = Vec::new();
@@ -1012,4 +958,58 @@ fn database_file(state: &ConnectionState, index: usize) -> String {
         .get(index.saturating_sub(2))
         .map(|attached| attached.path.display().to_string())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every register row has a name and a set of columns.
+    #[test]
+    fn every_register_row_answers_something() {
+        for entry in REGISTER {
+            assert!(!entry.name.is_empty());
+            assert!(!columns(entry.name.as_bytes()).is_empty(), "{}", entry.name);
+        }
+    }
+
+    /// The register is in the order `pragma_list` reports.
+    #[test]
+    fn the_register_is_sorted() {
+        let mut previous = "";
+        for entry in REGISTER {
+            assert!(previous <= entry.name, "{previous} then {}", entry.name);
+            previous = entry.name;
+        }
+    }
+
+    /// A pragma whose columns are not listed answers with its own name.
+    #[test]
+    fn a_setting_answers_with_its_own_name() {
+        assert_eq!(columns(b"cache_size"), vec![b"cache_size".to_vec()]);
+        assert_eq!(
+            columns(b"index_info"),
+            vec![b"seqno".to_vec(), b"cid".to_vec(), b"name".to_vec()]
+        );
+    }
+
+    /// A name nobody registered is not a pragma.
+    #[test]
+    fn an_unknown_name_is_not_a_pragma() {
+        assert!(spec(b"nope").is_none());
+        assert!(spec(b"TABLE_INFO").is_some());
+    }
+
+    /// The boolean argument follows SQLite's rule, including the strange part.
+    #[test]
+    fn the_boolean_rule_is_sqlites() {
+        let name = |text: &str| PragmaArgument::Name(text.as_bytes().to_vec());
+        assert!(argument_boolean(&name("on")));
+        assert!(argument_boolean(&name("YES")));
+        assert!(argument_boolean(&name("1")));
+        assert!(!argument_boolean(&name("off")));
+        assert!(!argument_boolean(&name("0")));
+        // Anything it cannot read is false, which is why `= maybe` is off.
+        assert!(!argument_boolean(&name("maybe")));
+    }
 }

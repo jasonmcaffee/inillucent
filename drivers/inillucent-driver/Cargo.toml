@@ -13,3 +13,7 @@ description = "The driver: the stable surface an application uses to talk to the
 # `inillucent-engine` re-exports the two types a caller needs to name -
 # `BoundParams` and `Value` - so that this stays one edge rather than three.
 inillucent-engine = { workspace = true }
+
+# The workspace's lint table; see the note beside it in the root manifest.
+[lints]
+workspace = true

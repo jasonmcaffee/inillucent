@@ -1905,7 +1905,9 @@ impl Fts5Table {
                 continue;
             };
             for (position, token) in self.tokenizer.tokens(&text).into_iter().enumerate() {
-                sizes[index] = sizes[index].saturating_add(1);
+                if let Some(size) = sizes.get_mut(index) {
+                    *size = size.saturating_add(1);
+                }
                 postings.push((token, index, position as u32));
             }
         }
@@ -2434,7 +2436,7 @@ impl Fts5Cursor {
     ///
     /// @param context - the running statement
     fn resolve_offsets(&mut self, context: &Context<'_>) {
-        if self.external.is_some() && self.offsets.iter().any(|at| *at == usize::MAX) {
+        if self.external.is_some() && self.offsets.contains(&usize::MAX) {
             self.offsets =
                 content_offsets_named(self.external.as_deref(), &self.names, context.catalog);
         }
@@ -2494,7 +2496,9 @@ impl Fts5Cursor {
                 let fits = phrase.terms.iter().enumerate().all(|(offset, term)| {
                     spans
                         .get(at.saturating_add(offset))
-                        .is_some_and(|(token, _, _)| matches_a_term(token, &[term.clone()]))
+                        .is_some_and(|(token, _, _)| {
+                            matches_a_term(token, std::slice::from_ref(term))
+                        })
                 });
                 if !fits {
                     at = at.saturating_add(1);
@@ -2899,8 +2903,8 @@ impl VirtualCursor for Fts5Cursor {
             return Ok(Value::Real(0.0));
         }
         let mut weights = vec![1.0f64; self.columns];
-        for (index, argument) in arguments.iter().take(self.columns).enumerate() {
-            weights[index] = argument.as_real().unwrap_or(1.0);
+        for (slot, argument) in weights.iter_mut().zip(arguments.iter()) {
+            *slot = argument.as_real().unwrap_or(1.0);
         }
         // The hits are the query's, so the same maps score every row of it.
         self.ensure_hits(context)?;

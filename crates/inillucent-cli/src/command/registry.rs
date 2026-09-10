@@ -329,6 +329,18 @@ const MIGRATE_PARAMS: &[Param] = &[
                       10000. It changes how long the migration takes and nothing about what it \
                       produces.",
     },
+    Param {
+        name: "insecure-plaintext",
+        kind: Kind::Boolean,
+        required: false,
+        positional: false,
+        description: "Permit an unencrypted connection to a server. A migration to a host that \
+                      is not a loopback address uses verified TLS, and refuses rather than \
+                      falling back; this permits plaintext, and only together with \
+                      sslmode=disable in the URL. Both are needed because either one alone is \
+                      something people type without meaning it. The choice is recorded in the \
+                      migration report.",
+    },
 ];
 
 /// The parameters `search` takes.

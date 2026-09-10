@@ -704,7 +704,7 @@ fn declared_page_size(file: &dyn inillucent_vfs::VfsFile) -> Option<usize> {
     let mut size = [0u8; 4];
     size.copy_from_slice(head.get(12..16)?);
     let size = u32::from_le_bytes(size) as usize;
-    if size < crate::meta::META_BYTES || size > 1 << 20 {
+    if !(crate::meta::META_BYTES..=1 << 20).contains(&size) {
         return None;
     }
     Some(size)

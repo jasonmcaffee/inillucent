@@ -171,23 +171,153 @@ impl ConnectionUrl {
             .unwrap_or(30)
     }
 
-    /// Refuses a URL that asks for transport security this client cannot give.
+    /// Returns what the URL asked for, as this client's own vocabulary.
     ///
-    /// **Named, not silently downgraded.** A client that answered `sslmode=require`
-    /// by connecting in the clear would be doing the one thing the parameter
-    /// exists to forbid, and the operator would have no way to find out.
-    pub fn refuse_unsupported_transport(&self) -> DbResult<()> {
-        let asked = self
+    /// PostgreSQL spells it `sslmode` and MySQL spells it `ssl-mode`, and their
+    /// value sets overlap without matching. Both are read here so that one
+    /// policy covers both protocols; an unrecognised value is a refusal rather
+    /// than a default, because every way of getting this wrong ends with
+    /// credentials on a wire somebody can read.
+    fn asked_transport(&self) -> DbResult<Asked> {
+        let Some(written) = self
             .parameter("sslmode")
             .or_else(|| self.parameter("ssl-mode"))
-            .unwrap_or("disable");
-        match asked.to_ascii_lowercase().as_str() {
-            "disable" | "allow" | "prefer" | "disabled" | "preferred" => Ok(()),
-            other => Err(refusal(format!(
-                "sslmode={other} asks for a TLS connection, and this migration client speaks only \
-                 plaintext. Run the migration from a host you trust the network to - a loopback \
-                 address, or the database's own machine - and write sslmode=disable to say so."
+        else {
+            return Ok(Asked::Unstated);
+        };
+        match written.to_ascii_lowercase().as_str() {
+            "disable" | "disabled" => Ok(Asked::Plaintext),
+            // PostgreSQL's `allow` and `prefer`, and MySQL's `preferred`, all
+            // mean "encrypt if the server will". This client refuses them
+            // rather than implementing them: a mode that silently accepts
+            // plaintext is a mode whose security depends on a server setting
+            // nobody in the migration can see, and an operator reading
+            // `sslmode=prefer` in a runbook believes it did something.
+            "allow" | "prefer" | "preferred" => Err(refusal(format!(
+                "sslmode={written} means \"encrypt if the server happens to allow it\", so \
+                 whether your credentials crossed the network in the clear is decided by the \
+                 server and is not reported anywhere. Write sslmode=require for verified TLS, or \
+                 sslmode=disable together with --insecure-plaintext to say plaintext is what you \
+                 want."
             ))),
+            "require" | "required" | "verify-ca" | "verify-full" | "verify_ca"
+            | "verify_identity" | "verify-identity" => Ok(Asked::VerifiedTls),
+            other => Err(refusal(format!(
+                "sslmode={other} is not a transport this client knows. It takes 'require' for \
+                 verified TLS, or 'disable' for plaintext."
+            ))),
+        }
+    }
+
+    /// Reports whether the host is one this machine reaches without a network.
+    ///
+    /// A loopback address is the one case where plaintext carries no risk that
+    /// encryption would remove: nothing leaves the machine. It is decided from
+    /// the *address*, not from the name, so `localhost.evil.example` resolving
+    /// somewhere else is not loopback - and a name that does not parse as an
+    /// address is not loopback either, because a name is resolved later and by
+    /// something this check cannot see.
+    pub fn is_loopback(&self) -> bool {
+        match self.host.parse::<std::net::IpAddr>() {
+            Ok(address) => address.is_loopback(),
+            // The two spellings of the loopback name, which resolve to a
+            // loopback address on every platform this runs on and are what an
+            // operator actually types.
+            Err(_) => {
+                self.host.eq_ignore_ascii_case("localhost")
+                    || self.host.eq_ignore_ascii_case("localhost.")
+            }
+        }
+    }
+
+    /// Decides how this connection is made, and refuses the unsafe defaults.
+    ///
+    /// **Verified TLS unless the operator said otherwise in as many words.**
+    /// The rule this replaced accepted an absent `sslmode` and every mode that
+    /// permits plaintext, so the default for a URL naming a host across a
+    /// network was to send a password and then every row in the clear. The
+    /// documentation advised running it on a trusted host, which is advice
+    /// rather than a control.
+    ///
+    /// Plaintext now needs two things at once: the URL saying `sslmode=disable`
+    /// and the caller passing `insecure_plaintext`. One without the other is a
+    /// refusal, because each of them alone is a thing somebody types without
+    /// meaning it - a copied URL, or a flag added to get past an unrelated
+    /// error.
+    ///
+    /// @param insecure_plaintext - whether the operator passed the flag that
+    ///   permits an unencrypted connection
+    pub fn transport(&self, insecure_plaintext: bool) -> DbResult<Transport> {
+        let asked = self.asked_transport()?;
+        match (asked, insecure_plaintext) {
+            (Asked::VerifiedTls, _) => Ok(Transport::VerifiedTls),
+            // A loopback address is the exception that needs no flag: the bytes
+            // do not leave the machine, so there is no network to protect them
+            // from, and requiring a flag there would train an operator to pass
+            // it everywhere.
+            (Asked::Plaintext, _) if self.is_loopback() => Ok(Transport::Plaintext),
+            (Asked::Unstated, _) if self.is_loopback() => Ok(Transport::Plaintext),
+            (Asked::Plaintext, true) => Ok(Transport::Plaintext),
+            (Asked::Plaintext, false) => Err(refusal(format!(
+                "sslmode=disable would send this migration's credentials and every row it reads \
+                 to {} in the clear. Pass --insecure-plaintext as well if that is really what you \
+                 want, or drop sslmode=disable to use verified TLS.",
+                self.address()
+            ))),
+            (Asked::Unstated, true) => Err(refusal(format!(
+                "--insecure-plaintext was passed and the URL does not say sslmode=disable, so it \
+                 is not clear which you meant. Write sslmode=disable in the URL to connect to {} \
+                 in the clear, or drop --insecure-plaintext to use verified TLS.",
+                self.address()
+            ))),
+            (Asked::Unstated, false) => Ok(Transport::VerifiedTls),
+        }
+    }
+
+    /// Returns the certificate authority file the URL names, if it names one.
+    ///
+    /// PostgreSQL's own parameter name, and MySQL's, so an operator who has a
+    /// private authority already knows what to write. Without one the platform
+    /// trust store decides, which is the right default and the only one that
+    /// works with a public certificate.
+    pub fn root_certificate(&self) -> Option<&str> {
+        self.parameter("sslrootcert")
+            .or_else(|| self.parameter("ssl-ca"))
+            .filter(|value| !value.is_empty())
+    }
+}
+
+/// What a URL's `sslmode` asked for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Asked {
+    /// The URL said nothing about transport.
+    Unstated,
+    /// The URL asked for no encryption.
+    Plaintext,
+    /// The URL asked for encryption with the server's identity checked.
+    VerifiedTls,
+}
+
+/// How a connection is made, once the policy has decided.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Transport {
+    /// An unencrypted socket. Loopback, or an explicit choice.
+    Plaintext,
+    /// TLS with the server's certificate chain and host name checked.
+    VerifiedTls,
+}
+
+impl Transport {
+    /// Returns the word a report and a manifest record this choice by.
+    ///
+    /// It goes into the migration's own output so that "was this migration
+    /// encrypted" is answerable afterwards from the artifact rather than from
+    /// whoever ran it. A credential never accompanies it; the transport is not
+    /// a secret and the URL that carried it is redacted separately.
+    pub fn name(self) -> &'static str {
+        match self {
+            Transport::Plaintext => "plaintext",
+            Transport::VerifiedTls => "verified-tls",
         }
     }
 }
@@ -408,14 +538,121 @@ mod tests {
         assert_eq!(url.to_string(), "mysql://root@127.0.0.1:3306/app");
     }
 
-    /// A request for TLS is refused by name rather than answered in the clear.
+    /// A URL naming a host across a network gets verified TLS with nothing
+    /// said, which is the default this replaced.
+    ///
+    /// The rule before this accepted an absent `sslmode` and connected in the
+    /// clear, so a password and then every row crossed the network with
+    /// nothing recorded about it anywhere.
     #[test]
-    fn sslmode_require_is_refused_and_says_why() {
-        let url = ConnectionUrl::parse("postgres://u@h/d?sslmode=require").expect("parses");
-        let error = url.refuse_unsupported_transport().expect_err("refuses");
-        assert!(error.message().contains("plaintext"), "{}", error.message());
-        let allowed = ConnectionUrl::parse("postgres://u@h/d?sslmode=prefer").expect("parses");
-        assert!(allowed.refuse_unsupported_transport().is_ok());
+    fn a_remote_url_that_says_nothing_gets_verified_tls() {
+        let url = ConnectionUrl::parse("postgres://u@db.example:5432/d").expect("parses");
+        assert_eq!(
+            url.transport(false).expect("decides"),
+            Transport::VerifiedTls
+        );
+    }
+
+    /// `sslmode=require` is honoured rather than refused.
+    #[test]
+    fn sslmode_require_asks_for_verified_tls() {
+        for written in [
+            "postgres://u@h/d?sslmode=require",
+            "postgres://u@h/d?sslmode=verify-full",
+            "mysql://u@h/d?ssl-mode=REQUIRED",
+        ] {
+            let url = ConnectionUrl::parse(written).expect("parses");
+            assert_eq!(
+                url.transport(false).expect("decides"),
+                Transport::VerifiedTls,
+                "{written}"
+            );
+        }
+    }
+
+    /// **`sslmode=disable` alone is not enough**, and neither is the flag
+    /// alone. Both are needed, because each one on its own is something
+    /// somebody types without meaning it.
+    #[test]
+    fn plaintext_to_a_remote_host_needs_both_halves() {
+        let url =
+            ConnectionUrl::parse("postgres://u@db.example/d?sslmode=disable").expect("parses");
+        let refused = url.transport(false).expect_err("refuses");
+        assert!(
+            refused.message().contains("--insecure-plaintext"),
+            "{}",
+            refused.message()
+        );
+        assert_eq!(url.transport(true).expect("permits"), Transport::Plaintext);
+
+        let unstated = ConnectionUrl::parse("postgres://u@db.example/d").expect("parses");
+        let refused = unstated.transport(true).expect_err("refuses");
+        assert!(
+            refused.message().contains("sslmode=disable"),
+            "{}",
+            refused.message()
+        );
+    }
+
+    /// A mode that means "encrypt if the server feels like it" is refused.
+    ///
+    /// The alternative is a connection whose security is decided by a server
+    /// setting nobody in the migration can see, reported nowhere.
+    #[test]
+    fn a_mode_that_permits_a_silent_downgrade_is_refused() {
+        for written in ["prefer", "allow", "preferred"] {
+            let url = ConnectionUrl::parse(&format!("postgres://u@h/d?sslmode={written}"))
+                .expect("parses");
+            let refused = url.transport(false).expect_err("refuses");
+            assert!(
+                refused.message().contains("require"),
+                "{written}: {}",
+                refused.message()
+            );
+        }
+    }
+
+    /// A loopback address is plaintext with no flag, because nothing leaves
+    /// the machine - and the decision is made from the address, not the name.
+    #[test]
+    fn loopback_is_the_one_address_plaintext_needs_no_flag_for() {
+        for written in [
+            "postgres://u@127.0.0.1:5432/d",
+            "postgres://u@[::1]:5432/d",
+            "mysql://u@localhost/d",
+        ] {
+            let url = ConnectionUrl::parse(written).expect("parses");
+            assert_eq!(
+                url.transport(false).expect("decides"),
+                Transport::Plaintext,
+                "{written}"
+            );
+        }
+        // A name that merely begins with the loopback name is not loopback.
+        let url = ConnectionUrl::parse("postgres://u@localhost.evil.example/d").expect("parses");
+        assert_eq!(
+            url.transport(false).expect("decides"),
+            Transport::VerifiedTls
+        );
+    }
+
+    /// An `sslmode` this client does not know is refused rather than
+    /// defaulted, because every way of defaulting it wrongly ends the same.
+    #[test]
+    fn an_unknown_sslmode_is_refused() {
+        let url = ConnectionUrl::parse("postgres://u@h/d?sslmode=maybe").expect("parses");
+        assert!(url.transport(false).is_err());
+    }
+
+    /// The authority file is read from either protocol's own parameter name.
+    #[test]
+    fn a_named_authority_is_read_from_either_spelling() {
+        let url = ConnectionUrl::parse("postgres://u@h/d?sslrootcert=/etc/ca.pem").expect("parses");
+        assert_eq!(url.root_certificate(), Some("/etc/ca.pem"));
+        let url = ConnectionUrl::parse("mysql://u@h/d?ssl-ca=/etc/ca.pem").expect("parses");
+        assert_eq!(url.root_certificate(), Some("/etc/ca.pem"));
+        let url = ConnectionUrl::parse("mysql://u@h/d").expect("parses");
+        assert_eq!(url.root_certificate(), None);
     }
 
     /// A URL that names no database is refused, because the alternative is

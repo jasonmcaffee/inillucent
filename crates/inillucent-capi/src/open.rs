@@ -69,16 +69,15 @@ pub unsafe extern "C" fn sqlite3_open_v2(
     } else {
         name
     };
-    let mut options = inillucent_legacy::ConnectionOptions::default();
-    options.writable = flags & SQLITE_OPEN_READONLY == 0;
+    let options = inillucent_legacy::ConnectionOptions {
+        writable: flags & SQLITE_OPEN_READONLY == 0,
+        ..inillucent_legacy::ConnectionOptions::default()
+    };
     // A named VFS is the caller's, and an unknown name is an error rather than
     // a quiet fall back to the default - a caller that asked for its own file
     // system and silently got the operating system's would write the bytes
     // somewhere it is not looking.
-    let named = match c_str(vfs) {
-        Some(bytes) => Some(String::from_utf8_lossy(bytes).into_owned()),
-        None => None,
-    };
+    let named = c_str(vfs).map(|bytes| String::from_utf8_lossy(bytes).into_owned());
     // A built-in name means the engine's own file system, which is what the
     // ordinary path already opens: routing it back out through the C table
     // would be a longer way round to the same place.

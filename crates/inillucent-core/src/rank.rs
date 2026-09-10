@@ -210,7 +210,7 @@ pub fn separation(scores: &[f32]) -> f32 {
         return 0.0;
     }
     let first = scores[0];
-    if !(first > f32::EPSILON) {
+    if !first.is_finite() || first <= f32::EPSILON {
         return 0.0;
     }
     let rest: f32 = scores[1..].iter().sum::<f32>() / (scores.len() - 1) as f32;
@@ -233,7 +233,7 @@ impl Default for Fusion {
 /// from the query, which is not a partial match.
 fn max_scale(values: &[f32]) -> Vec<f32> {
     let max = values.iter().cloned().fold(f32::MIN, f32::max);
-    if !(max > f32::EPSILON) {
+    if !max.is_finite() || max <= f32::EPSILON {
         return vec![0.0; values.len()];
     }
     values.iter().map(|v| (v / max).clamp(0.0, 1.0)).collect()

@@ -264,7 +264,9 @@ impl Shell {
     /// Opens a shell on a database file, or on an in-memory one.
     pub fn open(path: &str) -> Result<Shell, String> {
         let mut connections: Vec<Option<Opened>> = (0..CONNECTIONS).map(|_| None).collect();
-        connections[0] = Some(Shell::open_one(path)?);
+        if let Some(first) = connections.first_mut() {
+            *first = Some(Shell::open_one(path)?);
+        }
         Ok(Shell {
             connections,
             active: 0,
@@ -393,6 +395,15 @@ impl Shell {
     ///
     /// The active slot is never closed: `.connection close` on it moves the
     /// shell back to slot zero, and slot zero is opened before the shell is.
+    ///
+    /// **The `expect` is the invariant, and the invariant is enforced twice.**
+    /// `Shell::open` fills slot zero before the shell exists, and
+    /// `.connection close` on the active slot moves back to slot zero rather
+    /// than closing it. The crate denies `expect_used` because a shell that
+    /// panics on a caller's SQL is unusable; this is not that - reaching it
+    /// would mean the shell had been constructed without a database, which no
+    /// path does.
+    #[allow(clippy::expect_used)]
     fn open_slot(&self) -> &Opened {
         self.connections
             .get(self.active)
@@ -891,23 +902,16 @@ fn complete_statement(_shell: &Shell, text: &str) -> Option<usize> {
                 at = skip_line_comment(bytes, at);
             }
             b'/' if bytes.get(at + 1) == Some(&b'*') => {
-                let Some(next) = skip_block_comment(bytes, at) else {
-                    // An unterminated block comment is more input to come.
-                    return None;
-                };
-                at = next;
+                // `?` rather than a `let ... else`: an unterminated block
+                // comment is more input to come, which is what `None` means all
+                // the way up this function.
+                at = skip_block_comment(bytes, at)?;
             }
             b'\'' | b'"' | b'`' => {
-                let Some(next) = skip_quoted(bytes, at, byte) else {
-                    return None;
-                };
-                at = next;
+                at = skip_quoted(bytes, at, byte)?;
             }
             b'[' => {
-                let Some(next) = skip_quoted(bytes, at, b']') else {
-                    return None;
-                };
-                at = next;
+                at = skip_quoted(bytes, at, b']')?;
             }
             b';' => {
                 at += 1;

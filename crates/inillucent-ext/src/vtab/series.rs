@@ -255,7 +255,6 @@ mod tests {
         let limits = Limits::default();
         let mut context = Context {
             host: &mut pagers,
-            store: None,
             database: 0,
             limits: &limits,
             catalog: None,

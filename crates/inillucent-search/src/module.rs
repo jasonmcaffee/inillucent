@@ -269,7 +269,7 @@ impl SearchTable {
     /// lock and lands in the transaction like any other.
     fn command(&mut self, context: &mut Context<'_>, command: &str) -> DbResult<()> {
         match command.trim().to_ascii_lowercase().as_str() {
-            "compact" => self.compact(context, true),
+            "compact" => self.compact(context),
             "rebuild" => self.rebuild(context),
             "drop-old-generations" => {
                 let current = self.store.state(context, state::GENERATION)?;
@@ -286,7 +286,24 @@ impl SearchTable {
         }
     }
 
-    /// Folds the delta log into a new immutable generation.
+    /// Folds the delta log into a new immutable generation, at commit.
+    ///
+    /// **The graph is not rebuilt here (task-1894, M8).** The built generation
+    /// is loaded and each pending entry is inserted into it, so the graph work
+    /// this commit pays is one insert per delta entry rather than one insert
+    /// per row in the table. Before M8 this path built the whole graph in one
+    /// pass, which made an ordinary `INSERT` pay nine and a half minutes on the
+    /// 598,560 chunk corpus this engine is deployed on - work an application
+    /// cannot schedule and cannot interrupt.
+    ///
+    /// The delta log's length is what the bound is stated in, and
+    /// [`Options::compact_threshold`] is what sets it: `compact = N` pins it at
+    /// `N` entries, so a table declared that way pays `N` graph inserts per
+    /// published generation however large it grows.
+    ///
+    /// The single-pass build is still the better graph and it is still
+    /// reachable; it is now only ever asked for, by the `compact` command or by
+    /// `rebuild`. [`Self::compact`] says what the difference costs.
     ///
     /// Every step is an ordinary write inside the caller's transaction: the new
     /// generation's rows are appended, the state rows are moved to name it, and
@@ -297,30 +314,90 @@ impl SearchTable {
     /// the separate `drop-old-generations` command, because a snapshot opened
     /// before the swap is still reading them.
     /// @param context - the module's reach into the database
-    /// @param force - whether to compact regardless of how short the log is
-    fn compact(&mut self, context: &mut Context<'_>, force: bool) -> DbResult<()> {
+    fn fold(&mut self, context: &mut Context<'_>) -> DbResult<()> {
         let covered = self.store.state(context, state::COVERED)?;
         let pending = self.store.deltas_above(context, covered)?;
         if pending.is_empty() {
             return Ok(());
         }
-        if !force {
-            let rows = self.store.state(context, state::ROWS)?.max(0) as u64;
-            let Some(threshold) = self.options.compact_threshold(rows) else {
-                return Ok(());
-            };
-            if (pending.len() as u64) < threshold {
-                return Ok(());
-            }
+        let rows = self.store.state(context, state::ROWS)?.max(0) as u64;
+        let Some(threshold) = self.options.compact_threshold(rows) else {
+            return Ok(());
+        };
+        if (pending.len() as u64) < threshold {
+            return Ok(());
         }
-        let highest = pending
-            .iter()
-            .map(|entry| entry.sequence)
-            .max()
-            .unwrap_or(covered);
+        let highest = highest_of(&pending, covered);
+        let generation = self.store.state(context, state::GENERATION)?;
+        let (index, inserted) =
+            merge::fold_generation(context, &self.store, &self.options, generation, &pending)?;
+        let folds = self.store.state(context, state::FOLDS)?.saturating_add(1);
+        self.publish(context, &index, highest, inserted, folds)
+    }
+
+    /// Builds a new generation in one pass over every row.
+    ///
+    /// **This is the batch rebuild workflow, and it is explicit.** It is what
+    /// `INSERT INTO docs(docs) VALUES('compact')` runs, and it costs the whole
+    /// corpus: every row is read, every chunk is inserted into a fresh graph,
+    /// and the tombstoned chunks that folding left behind are gone. Those chunks
+    /// going away is what an application is buying when it schedules this.
+    ///
+    /// It is a write like any other, so it lands in the caller's transaction
+    /// and is atomic with it: the new generation is either named by the state
+    /// rows or it is not, and a crash leaves the old one in place.
+    ///
+    /// **An empty delta log is not a reason to refuse.** It was, until M8, and
+    /// that was harmless while every automatic compaction also built in one
+    /// pass - there was nothing left to clean. Now that a commit folds, a table
+    /// whose log has just been folded away is exactly the table whose graph has
+    /// the most tombstoned chunks in it, and refusing there would leave an
+    /// application no way to ask for the clean graph at all.
+    /// @param context - the module's reach into the database
+    fn compact(&mut self, context: &mut Context<'_>) -> DbResult<()> {
+        let covered = self.store.state(context, state::COVERED)?;
+        let pending = self.store.deltas_above(context, covered)?;
+        let highest = highest_of(&pending, covered);
         let (index, rows) = merge::build_from_rows(context, &self.store, &self.options)?;
+        self.store.set_state(context, state::ROWS, rows as i64)?;
+        self.publish(context, &index, highest, rows, 0)
+    }
+
+    /// Rebuilds the whole index from the rows, discarding every generation.
+    ///
+    /// The recovery path when a generation is unreadable, and the way an index
+    /// built by an older layout is brought forward. `%_content` is the
+    /// authoritative copy of every row, so this needs nothing the database does
+    /// not already hold.
+    fn rebuild(&mut self, context: &mut Context<'_>) -> DbResult<()> {
+        let (index, rows) = merge::build_from_rows(context, &self.store, &self.options)?;
+        let ordinal = self.store.state(context, state::ORDINAL)?;
+        self.store.set_state(context, state::ROWS, rows as i64)?;
+        self.publish(context, &index, ordinal, rows, 0)
+    }
+
+    /// Writes one built index out as the next generation and names it.
+    ///
+    /// The one place a generation is published, so folding and building differ
+    /// in how they produce the index and in nothing else. The order matters:
+    /// the generation's rows are written before any state row names them, so a
+    /// crash between the two leaves rows nothing reads rather than a state row
+    /// pointing at a generation that is not there.
+    /// @param context - the module's reach into the database
+    /// @param index - the index to publish
+    /// @param highest - the delta sequence this generation now covers
+    /// @param inserted - how many chunks the build inserted into the graph
+    /// @param folds - how many folds this lineage has taken, zero for a build
+    fn publish(
+        &mut self,
+        context: &mut Context<'_>,
+        index: &inillucent_core::index::Index,
+        highest: i64,
+        inserted: usize,
+        folds: i64,
+    ) -> DbResult<()> {
         let mut bytes = Vec::new();
-        inillucent_core::persist::write_index(&index, &mut bytes).map_err(|error| {
+        inillucent_core::persist::write_index(index, &mut bytes).map_err(|error| {
             failure(format!(
                 "inillucent_search: cannot write a generation: {error}"
             ))
@@ -333,42 +410,31 @@ impl SearchTable {
         self.store
             .set_state(context, state::GENERATION, generation)?;
         self.store.set_state(context, state::COVERED, highest)?;
-        self.store.set_state(context, state::ROWS, rows as i64)?;
+        self.store
+            .set_state(context, state::INSERTED, inserted as i64)?;
+        self.store.set_state(context, state::FOLDS, folds)?;
+        self.store
+            .set_state(context, state::CHUNKS, index.store().n_chunks() as i64)?;
         self.store.forget_deltas(context, highest)?;
         self.store.set_state(context, state::BUILD, highest)?;
         self.cache.forget();
         Ok(())
     }
+}
 
-    /// Rebuilds the whole index from the rows, discarding every generation.
-    ///
-    /// The recovery path when a generation is unreadable, and the way an index
-    /// built by an older layout is brought forward. `%_content` is the
-    /// authoritative copy of every row, so this needs nothing the database does
-    /// not already hold.
-    fn rebuild(&mut self, context: &mut Context<'_>) -> DbResult<()> {
-        let (index, rows) = merge::build_from_rows(context, &self.store, &self.options)?;
-        let mut bytes = Vec::new();
-        inillucent_core::persist::write_index(&index, &mut bytes).map_err(|error| {
-            failure(format!(
-                "inillucent_search: cannot write a generation: {error}"
-            ))
-        })?;
-        let generation = self
-            .store
-            .state(context, state::GENERATION)?
-            .saturating_add(1);
-        let ordinal = self.store.state(context, state::ORDINAL)?;
-        self.store.write_generation(context, generation, &bytes)?;
-        self.store
-            .set_state(context, state::GENERATION, generation)?;
-        self.store.set_state(context, state::COVERED, ordinal)?;
-        self.store.set_state(context, state::ROWS, rows as i64)?;
-        self.store.forget_deltas(context, ordinal)?;
-        self.store.set_state(context, state::BUILD, ordinal)?;
-        self.cache.forget();
-        Ok(())
-    }
+/// Returns the highest sequence a batch of pending deltas carries.
+///
+/// The log is read in order, so this is the last entry's sequence; it is
+/// computed rather than assumed because a generation that claimed to cover a
+/// sequence the log never reached would drop rows on the next fold.
+/// @param pending - the delta entries about to be folded or built in
+/// @param covered - what the current generation already covers
+fn highest_of(pending: &[Delta], covered: i64) -> i64 {
+    pending
+        .iter()
+        .map(|entry| entry.sequence)
+        .max()
+        .unwrap_or(covered)
 }
 
 impl VirtualTable for SearchTable {
@@ -503,12 +569,16 @@ impl VirtualTable for SearchTable {
     /// generation's rows and the rows that made it necessary land in one
     /// transaction. Doing it here rather than inside the `INSERT` is what keeps
     /// the cost of a write bounded and predictable: a thousand-row transaction
-    /// compacts once, not a thousand times.
+    /// folds once, not a thousand times.
+    ///
+    /// [`SearchTable::fold`] is what it calls, and it is bounded by the rows
+    /// this transaction wrote. The single-pass build over the whole corpus is
+    /// never reached from here.
     fn sync(&mut self, context: &mut Context<'_>) -> DbResult<()> {
         if !self.touched {
             return Ok(());
         }
-        self.compact(context, false)
+        self.fold(context)
     }
 
     /// Ends the transaction.

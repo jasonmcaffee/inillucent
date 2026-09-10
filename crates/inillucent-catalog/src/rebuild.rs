@@ -60,7 +60,7 @@ fn published_rowid(rows: &[(i64, SchemaRow)]) -> Option<i64> {
     let final_pass = rows
         .iter()
         .any(|(_, row)| matches!(row.kind, SchemaKind::View | SchemaKind::Trigger));
-    final_pass.then(|| rows.len() as i64)
+    final_pass.then_some(rows.len() as i64)
 }
 
 /// Copies one object's B-tree, returning the row that describes it in the

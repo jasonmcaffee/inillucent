@@ -21,3 +21,7 @@ inillucent-remote = { workspace = true }
 [[bin]]
 name = "inillucent-migrate"
 path = "src/main.rs"
+
+# The workspace's lint table; see the note beside it in the root manifest.
+[lints]
+workspace = true

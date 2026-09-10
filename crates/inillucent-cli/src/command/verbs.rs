@@ -172,7 +172,7 @@ fn rows_to_outcome(
     let connection = context.shell().connection();
     let changes = connection.total_changes();
     let rowid = connection.last_insert_rowid();
-    drop(connection);
+    let _ = connection;
     let mut text = table(&columns, &cells, &context.null);
     if kept < total {
         text.push_str(&format!("\n({kept} of {total} rows)"));
@@ -198,12 +198,22 @@ fn rows_to_outcome(
 ///
 /// @param context - for the default
 /// @param arguments - what was passed
-fn limit_of(context: &Context, arguments: &Arguments) -> usize {
-    match arguments.integer("limit") {
-        Some(asked) if asked >= 0 => asked as usize,
-        Some(_) => 0,
+fn limit_of(context: &Context, arguments: &Arguments) -> Result<usize, Failed> {
+    let asked = match arguments.integer("limit") {
+        // **A negative limit used to become zero, and zero means every row.**
+        // So `limit=-1` - which is how a caller spells "no limit" in most other
+        // things, and how an off-by-one in a client's arithmetic comes out -
+        // asked a confined server for the whole table. It is a refusal now.
+        Some(asked) if asked < 0 => {
+            return Err(Failed::misuse(format!(
+                "limit={asked} is not a number of rows. Write 0 for every row, or a positive \
+                 count."
+            )))
+        }
+        Some(asked) => asked as usize,
         None => context.limit,
-    }
+    };
+    context.cap_rows(asked)
 }
 
 /// Refuses a script where one statement was asked for.
@@ -234,7 +244,7 @@ fn refuse_a_script(context: &mut Context, command: &str, sql: &str) -> Result<()
 pub fn query(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
     let sql = arguments.required_text("sql")?.to_string();
     let params = arguments.values("params");
-    let limit = limit_of(context, arguments);
+    let limit = limit_of(context, arguments)?;
     produce(context, "query", &sql, &params, limit)
 }
 
@@ -991,6 +1001,16 @@ fn migrate_remote(
     if let Some(batch) = arguments.integer("batch") {
         plan.batch = (batch.max(1)) as u64;
     }
+    plan.insecure_plaintext = arguments.flag("insecure-plaintext");
+    // **Asked before anything is dialled.** A refusal here has cost a URL parse
+    // and nothing else - no socket, no staging file, and no password on a
+    // wire. The message says which of the two halves of the policy is missing.
+    plan.transport().map_err(|error| {
+        Failed::said(
+            Status::InvalidState,
+            error.detail().unwrap_or_else(|| error.message()),
+        )
+    })?;
     let report = inillucent_remote::migrate::migrate(&plan).map_err(|error| {
         Failed::said(
             Status::Io,
@@ -1034,12 +1054,13 @@ fn migrate_remote(
     // and one table's digest is not is a different problem from knowing that
     // nothing arrived.
     let mut text = format!(
-        "{} -> {}\n{}, {} tables, {} rows\n",
+        "{} -> {}\n{}, {} tables, {} rows\ntransport: {}\n",
         report.source,
         to.display(),
         report.server,
         report.tables.len(),
-        report.rows()
+        report.rows(),
+        report.transport
     );
     for check in &report.checks {
         text.push_str(&format!("  {}\n", check.line()));
@@ -1055,6 +1076,9 @@ fn migrate_remote(
 
     Ok(Outcome::said("migrate", text)
         .with("destination", json::text(to.to_string_lossy()))
+        // How the connection was made, so the answer to "were those rows
+        // encrypted in transit" is in the result rather than in whoever ran it.
+        .with("transport", json::text(&report.transport))
         // The **redacted** URL: an MCP call's result is written into an agent
         // transcript, and the transcript outlives the run.
         .with("source", json::text(&report.source))

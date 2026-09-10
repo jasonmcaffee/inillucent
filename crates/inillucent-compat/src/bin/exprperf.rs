@@ -152,8 +152,8 @@ fn run(rounds: u32) -> DbResult<()> {
 
     println!("{ROWS} rows per batch, {rounds} rounds, nanoseconds per row");
     println!(
-        "  {:<32} {:>12} {:>12} {:>8}  {}",
-        "predicate", "compiled", "interpreted", "speedup", "matched"
+        "  {:<32} {:>12} {:>12} {:>8}  matched",
+        "predicate", "compiled", "interpreted", "speedup"
     );
     let mut speedups: Vec<f64> = Vec::new();
     for (name, expr) in &predicates {

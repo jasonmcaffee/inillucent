@@ -63,8 +63,11 @@ pub mod value;
 
 use std::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Instant;
 
+use inillucent_engine::base::budget::{self, Limits};
 use inillucent_engine::connect::{Database as EngineDatabase, Statement as EngineStatement};
 
 pub use capability::{capability, supports, Capability, Support, CAPABILITIES};
@@ -92,7 +95,10 @@ pub fn version() -> &'static str {
 }
 
 /// How a database is opened.
-#[derive(Clone, Copy, Debug)]
+// **No longer `Copy`**, because `limits` holds an optional `Duration` inside a
+// struct that may grow. A caller that passed `OpenOptions` twice now clones it,
+// which is what every caller in this workspace already did by writing it out.
+#[derive(Clone, Debug)]
 pub struct OpenOptions {
     /// Create the file when there is nothing at the path. Default `true`.
     pub create: bool,
@@ -111,6 +117,16 @@ pub struct OpenOptions {
     /// the detail. A caller that turns this on is asking for text it must not
     /// show a person or send to a shared log.
     pub diagnostics: bool,
+    /// What one statement on this database may spend.
+    ///
+    /// **Unbounded by default, and that is deliberate.** An application that
+    /// has linked this engine into its own process is not protecting itself
+    /// from itself, and a library that refused its owner's query at ten million
+    /// rows would be a library with an opinion about the application's data. A
+    /// *server* handing a database to somebody else is the case that needs a
+    /// bound, and `inillucent_base::budget::Limits::served` is what it asks
+    /// for - which is what `inillucent-mcp` does.
+    pub limits: Limits,
 }
 
 impl Default for OpenOptions {
@@ -121,6 +137,7 @@ impl Default for OpenOptions {
             read_only: false,
             cache_frames: 4_096,
             diagnostics: false,
+            limits: Limits::unbounded(),
         }
     }
 }
@@ -133,6 +150,14 @@ pub struct Database {
     engine: EngineDatabase,
     path: PathBuf,
     options: OpenOptions,
+    /// The flag [`Connection::cancel`] sets, read by the executor.
+    ///
+    /// One per database rather than one per statement, because a cancel arrives
+    /// from a thread that does not hold the statement - that is the whole point
+    /// of it - and the thing it can name is the database it was handed.
+    /// Arming a budget clears it, so a cancel that arrives between statements
+    /// stops nothing rather than stopping the next one.
+    cancel: Arc<AtomicBool>,
 }
 
 impl std::fmt::Debug for Database {
@@ -177,6 +202,7 @@ impl Database {
             engine,
             path,
             options,
+            cancel: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -197,6 +223,7 @@ impl Database {
             engine,
             path,
             options,
+            cancel: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -495,6 +522,12 @@ impl Connection<'_> {
     /// @param limit - how many rows to keep
     fn run(&self, sql: &str, params: &[Value], limit: usize) -> Result<Rows> {
         let started = Instant::now();
+        // Armed around the whole statement, including the prepare: a query
+        // whose *planning* is what runs long is still a query that has to stop.
+        let _budget = budget::arm(
+            self.database.options.limits.clone(),
+            Arc::clone(&self.database.cancel),
+        );
         let mut statement = self
             .engine
             .prepare(sql)
@@ -566,24 +599,25 @@ impl Connection<'_> {
 
     /// Asks another thread to stop a running statement.
     ///
-    /// **Always refused, and see `capability::supports("cancel")`.** The engine's
-    /// statement materialises - it runs whole on its first step and then walks
-    /// the rows it produced - so there is no loop in which a flag would be read.
-    /// A cancel that set one would return success and do nothing until the
-    /// statement finished of its own accord, which is a wrong answer wearing the
-    /// clothes of a feature.
+    /// **It sets a flag rather than stopping anything itself**, which is what
+    /// makes it safe to call from another thread while a statement is running.
+    /// The executor reads it at the two places a long statement passes through
+    /// often enough to matter: every leaf of a scan, and every batch a result
+    /// collects. The statement then fails with `Interrupted` and the connection
+    /// stays usable.
+    ///
+    /// **What it does not do is stop a statement between those points.** A
+    /// single enormous sort inside one operator runs to the end of that
+    /// operator. That is a bound on the latency of a cancel, not on whether it
+    /// works, and it is the honest description: the row this returns to
+    /// `capability::supports("cancel")` is `Partial` for exactly this reason.
+    ///
+    /// A cancel with nothing running sets the flag, and arming the next
+    /// statement's budget clears it - so it cancels nothing rather than
+    /// cancelling whatever comes next.
     pub fn cancel(&self) -> Result<()> {
-        Err(Error {
-            status: Status::Unsupported,
-            message: "this engine cannot stop a running statement: it runs a statement whole \
-                      rather than a row at a time, so there is no point at which it could \
-                      notice."
-                .to_owned(),
-            detail: None,
-            feature: Some("cancelling a running statement".to_owned()),
-            offset: None,
-            engine_code: 0,
-        })
+        self.database.cancel.store(true, Ordering::Relaxed);
+        Ok(())
     }
 
     /// Registers a function an application wrote, callable from SQL by name.

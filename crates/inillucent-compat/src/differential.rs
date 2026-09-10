@@ -11,6 +11,15 @@
 //! phase 11 needed it six more times. Copying it again would have meant six
 //! chances for one copy to compare less than the others and look green.
 
+// **This module may panic, and the crate-level deny does not reach it.** It is
+// the harness that starts the pinned SQLite oracle and this engine beside it,
+// and it lives in `src/` so that every `tests/*.rs` target can use it - which
+// means it is compiled without `cfg(test)` and the crate's test-only relaxation
+// does not apply. An oracle that will not open is a broken environment rather
+// than a result, and a suite that carried on would be comparing this engine
+// against nothing.
+#![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+
 use std::path::PathBuf;
 
 use crate::oracle::{Driver, Observation, Op, TaggedValue};

@@ -45,6 +45,37 @@ use crate::json::{self, Json};
 /// client that understands a later revision still understands this one.
 pub const PROTOCOL: &str = "2025-06-18";
 
+/// The most bytes one request line may hold.
+///
+/// **A megabyte, and the bound is on the line rather than on the parsed
+/// object**, because a reader that parsed first would have allocated whatever
+/// it was sent before it could decide. `BufRead::read_line` on a client that
+/// never sends a newline grows a `String` until the process dies, and this is
+/// the only place that can stop it.
+///
+/// A megabyte is far above any tool call - the largest thing one carries is a
+/// SQL statement and a parameter array - and far below a size that costs
+/// anything to refuse.
+pub const MAX_REQUEST_BYTES: usize = 1024 * 1024;
+
+/// The most bytes one answer may hold before it is refused rather than sent.
+///
+/// **Refused, not truncated.** A truncated JSON-RPC frame is not a smaller
+/// answer, it is an unparseable one, and a client that received one would
+/// report a broken server. So an answer that would be too large is replaced by
+/// a refusal that says which budget it was and what to do about it.
+pub const MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
+/// The most rows one MCP call hands back.
+///
+/// **Ten thousand, against the command line's absence of a ceiling**, which is
+/// the distinction the whole budget rests on: a person asking their own
+/// database for every row is asking for what they want, and an agent asking a
+/// served database for the same thing is what `--root` and `--readonly` already
+/// exist for. It is also well above what an agent can read: a model that is
+/// handed ten thousand rows is going to summarise the first fifty.
+pub const MAX_ROWS: usize = 10_000;
+
 /// What the server was started with.
 pub struct Settings {
     /// The database opened when a call does not name one.
@@ -55,6 +86,10 @@ pub struct Settings {
     pub root: Option<PathBuf>,
     /// How many rows a call gets back when it does not say.
     pub limit: usize,
+    /// The most rows one call may hand back.
+    pub max_rows: usize,
+    /// How long one call may run before it is stopped.
+    pub max_time: std::time::Duration,
 }
 
 impl Default for Settings {
@@ -65,6 +100,8 @@ impl Default for Settings {
             readonly: false,
             root: None,
             limit: 200,
+            max_rows: MAX_ROWS,
+            max_time: std::time::Duration::from_secs(60),
         }
     }
 }
@@ -161,23 +198,102 @@ pub fn serve(
 ) -> Result<(), String> {
     let mut context = Context::open(&settings.database, settings.readonly, settings.root.clone())
         .map_err(|failure| failure.message)?;
-    context.limit = settings.limit;
+    context.limit = settings.limit.min(settings.max_rows);
+    context.set_max_rows(Some(settings.max_rows));
+    // **The engine's own budget, armed for the life of the server rather than
+    // per call.** A row ceiling on the command surface bounds what a *tool
+    // call* hands back; this bounds what the engine does on the way there, so a
+    // `SELECT` whose `WHERE` rejects everything after scanning a hundred
+    // million rows still stops. The two are different questions and both need
+    // an answer.
+    context.set_limits(
+        inillucent_engine::base::budget::Limits::served().with_time(Some(settings.max_time)),
+    );
     let mut line = String::new();
     loop {
         line.clear();
-        match input.read_line(&mut line) {
+        match read_request(input, &mut line) {
             Ok(0) => return Ok(()),
             Ok(_) => {}
-            Err(error) => return Err(error.to_string()),
+            Err(TooLong) => {
+                // The connection is not recoverable: the rest of an over-long
+                // line is still in the stream and would be read as the next
+                // request. Saying so and stopping is the honest end.
+                let _ = writeln!(
+                    output,
+                    "{}",
+                    error_response(
+                        Json::Null,
+                        -32600,
+                        &format!(
+                            "a request may not be longer than {MAX_REQUEST_BYTES} bytes, and this \
+                             connection has sent one that is."
+                        )
+                    )
+                );
+                let _ = output.flush();
+                return Ok(());
+            }
         }
         if line.trim().is_empty() {
             continue;
         }
         if let Some(answer) = handle(&mut context, &line) {
+            let answer = match answer.len() > MAX_RESPONSE_BYTES {
+                false => answer,
+                true => error_response(
+                    Json::Null,
+                    -32603,
+                    &format!(
+                        "this answer would have been {} bytes, past the {MAX_RESPONSE_BYTES} a \
+                         reply may hold. Ask for fewer rows or fewer columns.",
+                        answer.len()
+                    ),
+                ),
+            };
             writeln!(output, "{answer}").map_err(|error| error.to_string())?;
             output.flush().map_err(|error| error.to_string())?;
         }
     }
+}
+
+/// A request line that ran past [`MAX_REQUEST_BYTES`].
+struct TooLong;
+
+/// Reads one request line, refusing one that is too long.
+///
+/// **Byte by byte up to the ceiling, rather than `read_line` and a check
+/// afterwards.** `read_line` on a client that never sends a newline grows the
+/// string until the process dies, so a check after it never runs. This is the
+/// same argument `inillucent-remote`'s `MAX_MESSAGE` makes about a length a
+/// server announces: a bound that is applied after the allocation is not a
+/// bound.
+///
+/// @param input - where requests arrive
+/// @param line - the buffer to fill
+fn read_request(input: &mut impl BufRead, line: &mut String) -> Result<usize, TooLong> {
+    let mut bytes: Vec<u8> = Vec::new();
+    loop {
+        let mut one = [0u8; 1];
+        match input.read(&mut one) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(_) => break,
+        }
+        let byte = one.first().copied().unwrap_or(b'\n');
+        if byte == b'\n' {
+            break;
+        }
+        if bytes.len() >= MAX_REQUEST_BYTES {
+            return Err(TooLong);
+        }
+        bytes.push(byte);
+    }
+    if bytes.is_empty() {
+        return Ok(0);
+    }
+    line.push_str(&String::from_utf8_lossy(&bytes));
+    Ok(line.len())
 }
 
 /// Answers one request, or returns nothing for a notification.

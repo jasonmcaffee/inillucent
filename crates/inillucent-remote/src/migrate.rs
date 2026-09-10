@@ -50,7 +50,7 @@ use inillucent_tree::datum::OwnedDatum;
 use crate::mysql::MysqlSource;
 use crate::postgres::PostgresSource;
 use crate::source::{quoted, RemoteSource, SourceTable};
-use crate::url::{ConnectionUrl, Scheme};
+use crate::url::{ConnectionUrl, Scheme, Transport};
 
 /// How many rows one destination transaction holds by default.
 pub const DEFAULT_BATCH: u64 = 10_000;
@@ -236,6 +236,15 @@ pub struct Report {
     pub checks: Vec<Check>,
     /// What exists in the source and did not come across.
     pub not_carried: Vec<(String, String)>,
+    /// How the connection was made: `verified-tls` or `plaintext`.
+    ///
+    /// **Recorded so the question is answerable from the artifact.** "Did that
+    /// migration send its rows over an encrypted connection" was previously
+    /// answerable only by asking whoever ran it, and the report is the thing
+    /// that outlives them.
+    pub transport: String,
+    /// What the peer's certificate proved, when the connection was encrypted.
+    pub peer: Option<String>,
 }
 
 impl Report {
@@ -263,11 +272,22 @@ impl Report {
     /// file most likely to be attached to a bug report.
     pub fn markdown(&self) -> String {
         let mut out = format!(
-            "# Migration report\n\nSource: `{}`\nServer: {}\nDestination: `{}`\n\n",
+            "# Migration report
+
+Source: `{}`
+Server: {}
+Destination: `{}`
+Transport: {}
+",
             self.source,
             self.server,
-            self.destination.display()
+            self.destination.display(),
+            self.transport
         );
+        if let Some(peer) = &self.peer {
+            out.push_str(&format!("Peer: {peer}\n"));
+        }
+        out.push('\n');
         out.push_str("## Tables\n\n| source | destination | rows | digest |\n|---|---|---|---|\n");
         for table in &self.tables {
             out.push_str(&format!(
@@ -302,6 +322,13 @@ pub struct Plan {
     pub batch: u64,
     /// Whether to write the report beside the destination.
     pub write_report: bool,
+    /// Whether the operator asked to permit an unencrypted connection.
+    ///
+    /// **Two things have to agree before a password crosses a network in the
+    /// clear**: this, and `sslmode=disable` in the URL. Neither alone is
+    /// enough. See `ConnectionUrl::transport`, which is where the pair is
+    /// resolved and where a loopback address is exempted from both.
+    pub insecure_plaintext: bool,
 }
 
 impl Plan {
@@ -315,17 +342,34 @@ impl Plan {
             destination: destination.as_ref().to_path_buf(),
             batch: DEFAULT_BATCH,
             write_report: true,
+            insecure_plaintext: false,
         }
+    }
+
+    /// Returns how this plan's connection will be made, or why it is refused.
+    ///
+    /// Asked before anything is dialled, so a refusal costs no socket and no
+    /// staging file.
+    pub fn transport(&self) -> DbResult<Transport> {
+        self.url.transport(self.insecure_plaintext)
     }
 }
 
-/// Connects to the server a URL names.
+/// Connects to the server a URL names, over verified TLS.
 ///
 /// @param url - which server, and as who
 pub fn connect(url: &ConnectionUrl) -> DbResult<Box<dyn RemoteSource>> {
+    connect_over(url, Transport::VerifiedTls)
+}
+
+/// Connects on a transport the caller's policy has already decided.
+///
+/// @param url - which server, and as who
+/// @param transport - what `ConnectionUrl::transport` decided
+pub fn connect_over(url: &ConnectionUrl, transport: Transport) -> DbResult<Box<dyn RemoteSource>> {
     match url.scheme {
-        Scheme::Postgres => Ok(Box::new(PostgresSource::connect(url)?)),
-        Scheme::Mysql => Ok(Box::new(MysqlSource::connect(url)?)),
+        Scheme::Postgres => Ok(Box::new(PostgresSource::connect_over(url, transport)?)),
+        Scheme::Mysql => Ok(Box::new(MysqlSource::connect_over(url, transport)?)),
     }
 }
 
@@ -337,8 +381,17 @@ pub fn connect(url: &ConnectionUrl) -> DbResult<Box<dyn RemoteSource>> {
 ///
 /// @param plan - what to migrate and where to put it
 pub fn migrate(plan: &Plan) -> DbResult<Report> {
-    let mut source = connect(&plan.url)?;
-    let outcome = run(plan, source.as_mut());
+    // The transport is decided before the socket, so a refusal costs nothing
+    // and - more to the point - so that a plan that would have gone in the
+    // clear never reaches the dialling code at all.
+    let transport = plan.transport()?;
+    let mut source = connect_over(&plan.url, transport)?;
+    let peer = source.peer();
+    let outcome = run(plan, source.as_mut()).map(|mut report| {
+        report.transport = transport.name().to_string();
+        report.peer = peer;
+        report
+    });
     source.finish();
     outcome
 }
@@ -496,7 +549,8 @@ pub fn run(plan: &Plan, source: &mut dyn RemoteSource) -> DbResult<Report> {
     if tables.is_empty() {
         checks.push(Check::passed("tables", "the source holds none"));
     }
-    drop(connection);
+    // Ends the borrow of the staged database so it can be closed and renamed.
+    let _ = connection;
     drop(opened);
 
     let mut report = Report {
@@ -507,6 +561,11 @@ pub fn run(plan: &Plan, source: &mut dyn RemoteSource) -> DbResult<Report> {
         tables: reports,
         checks,
         not_carried,
+        // Filled in by `migrate`, which is the only caller that knows how the
+        // connection was made. `run` takes an already-connected source, so a
+        // transport it invented here would be a claim rather than a record.
+        transport: String::new(),
+        peer: None,
     };
 
     if report.passed() {
@@ -867,6 +926,8 @@ mod tests {
             tables: Vec::new(),
             checks: Vec::new(),
             not_carried: Vec::new(),
+            transport: "verified-tls".to_string(),
+            peer: None,
         };
         assert!(!report.passed());
     }
@@ -889,9 +950,15 @@ mod tests {
             }],
             checks: vec![Check::passed("count.note", "3 rows")],
             not_carried: vec![("view".to_string(), "public.recent".to_string())],
+            transport: "verified-tls".to_string(),
+            peer: Some("a certificate trusted by this machine, for db".to_string()),
         };
         let markdown = report.markdown();
         assert!(!markdown.contains("hunter2"), "{markdown}");
+        // **How the connection was made is in the artifact**, so "were those
+        // rows encrypted in transit" is answerable without asking whoever ran
+        // it. The report is the thing that outlives them.
+        assert!(markdown.contains("Transport: verified-tls"), "{markdown}");
         assert!(markdown.contains("public.note"));
         assert!(markdown.contains("pass count.note"));
         assert!(markdown.contains("public.recent"));

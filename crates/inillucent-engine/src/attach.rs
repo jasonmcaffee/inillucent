@@ -102,8 +102,22 @@ impl ImportedDatabase {
         } else {
             let text = String::from_utf8_lossy(file).into_owned();
             let vfs: Arc<dyn Vfs> = Arc::new(OsVfs::new());
-            let path = DbPath::from(text.as_str());
-            (vfs, path, Some(PathBuf::from(text)))
+            // **A confined process refuses the path here, by name.** The VFS
+            // refuses it too, and that is the guarantee - but the VFS has only
+            // an extended result code to answer with, and an agent told
+            // "access permission denied" cannot tell a confinement from a file
+            // it lacks rights to. `ATTACH` is the statement task-1892 used to
+            // reach a database outside `--root`, so it is the one that says
+            // what happened.
+            let path = match inillucent_vfs::confine::process_root() {
+                None => DbPath::from(text.as_str()),
+                Some(root) => match root.admit(&text) {
+                    Ok(inside) => DbPath::new(inside),
+                    Err(refused) => return Err(refusal(refused.message())),
+                },
+            };
+            let held = path.as_path().to_path_buf();
+            (vfs, path, Some(held))
         };
         self.attach_file(vfs, path, held, name.to_vec(), None)
     }

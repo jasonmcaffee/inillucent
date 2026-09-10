@@ -362,7 +362,7 @@ impl Compiler {
         let defaults: Vec<Option<Operand>> = table
             .columns
             .iter()
-            .filter(|column| !(column.generated && !column.stored))
+            .filter(|column| !column.generated || column.stored)
             .map(|column| {
                 column
                     .default_sql
@@ -1321,8 +1321,7 @@ impl Compiler {
             left as i32,
             self.here().saturating_add(1),
             block as i32,
-        ))
-        .0;
+        ));
         if let Some(instruction) = self.instructions.last_mut() {
             instruction.p5 = width as u16;
         }
@@ -1598,7 +1597,7 @@ impl Compiler {
             .select
             .group_by
             .iter()
-            .map(|expr| inillucent_sql::bind::result_collation(expr))
+            .map(inillucent_sql::bind::result_collation)
             .collect();
         let step = InnerBody::GroupStream {
             previous,
@@ -1715,7 +1714,7 @@ impl Compiler {
             .select
             .group_by
             .iter()
-            .map(|expr| inillucent_sql::bind::result_collation(expr))
+            .map(inillucent_sql::bind::result_collation)
             .collect();
         let same = self.compile_group_key_equal(group_count, previous, current, &collations);
         self.emit(Instruction::new(
@@ -3817,11 +3816,10 @@ fn children_of(expr: &BoundExpr) -> Vec<BoundExpr> {
         | BoundExpr::Math { arguments, .. }
         | BoundExpr::Json { arguments, .. }
         | BoundExpr::Time { arguments, .. } => out.extend(arguments.iter().cloned()),
-        BoundExpr::Subquery { operand, .. } => {
-            if let Some(operand) = operand {
-                out.push((**operand).clone());
-            }
-        }
+        BoundExpr::Subquery {
+            operand: Some(operand),
+            ..
+        } => out.push((**operand).clone()),
         _ => {}
     }
     out
@@ -4199,7 +4197,7 @@ impl Compiler {
                 };
                 let column = if opcode == Opcode::VColumn {
                     // The declared position, not the record slot.
-                    &declared
+                    declared
                 } else {
                     column
                 };

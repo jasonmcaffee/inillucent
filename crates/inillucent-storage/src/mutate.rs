@@ -536,8 +536,8 @@ pub fn append_row(pager: &mut Pager, root: PageId, rowid: i64, payload: &[u8]) -
 /// comparing keys.
 pub fn append_entries(pager: &mut Pager, root: PageId, payloads: &[Vec<u8>]) -> DbResult<()> {
     let mut at = 0usize;
-    while at < payloads.len() {
-        let placed = append_run(pager, root, &payloads[at..])?;
+    while let Some(rest) = payloads.get(at..).filter(|rest| !rest.is_empty()) {
+        let placed = append_run(pager, root, rest)?;
         if placed > 0 {
             at = at.saturating_add(placed);
             continue;
@@ -1607,6 +1607,128 @@ fn compare_cell_to(
     record::compare_records(&left, probe, key)
 }
 
+/// Fills an index B-tree with an entry for every row of a table.
+///
+/// The values come straight out of each row's record, without affinity being
+/// applied again: a stored value has already had its column's affinity applied
+/// once, and applying it a second time is not idempotent for a text column
+/// holding a number. The rowid alias is the exception - it is not in the
+/// record at all, so it is read from the row's key.
+///
+/// Entries are appended in table order rather than inserted, which would be
+/// wrong for a general index; they are sorted first, so the append is into a
+/// tree that is already in key order. The sort is what makes the backfill of a
+/// large table one pass over the data rather than one descent per row.
+pub fn build_index(
+    pager: &mut Pager,
+    table_root: u32,
+    index_root: u32,
+    columns: &[u16],
+    key: &KeyInfo,
+    rowid_alias: Option<u16>,
+    trailing: &[u16],
+    table_key: Option<&KeyInfo>,
+) -> DbResult<()> {
+    let limits = Limits::default();
+    let table = PageId::from_persisted(table_root)?;
+    let index = PageId::from_persisted(index_root)?;
+    let encoding = pager.text_encoding();
+    let format = pager.header().schema_format.max(1);
+    // The entries are held as values and encoded *after* they are sorted, not
+    // before. Sorting encoded records meant re-parsing both sides on every
+    // comparison - two record parses per comparison, n log n comparisons - and
+    // that, rather than the writing, was what made building an index over a
+    // hundred thousand rows take five seconds where the reference takes fifty
+    // milliseconds. It also halves what the build holds: the values or the
+    // bytes, not both.
+    let mut entries: Vec<Vec<inillucent_value::Value<'static>>> = Vec::new();
+    // `trailing` names the slots an entry ends with instead of a rowid, which
+    // is how a WITHOUT ROWID table's secondary indexes locate a row. It also
+    // says which kind of b-tree the table is, because such a table's root is an
+    // index b-tree and a table cursor on it would ask its pages for rowids.
+    let keyed = !trailing.is_empty();
+    let mut cursor = match table_key {
+        Some(key) => crate::cursor::BTreeCursor::index(table, key.clone()),
+        None => crate::cursor::BTreeCursor::table(table),
+    };
+    let mut more = cursor.first(pager)?;
+    while more {
+        let rowid = if keyed { 0 } else { cursor.rowid()? };
+        let values = cursor.record_values(pager, &limits)?;
+        let mut fields: Vec<inillucent_value::Value<'static>> =
+            Vec::with_capacity(columns.len() + 1);
+        for column in columns {
+            if rowid_alias == Some(*column) {
+                fields.push(inillucent_value::Value::Integer(rowid));
+                continue;
+            }
+            fields.push(
+                values
+                    .get(*column as usize)
+                    .cloned()
+                    .unwrap_or(inillucent_value::Value::Null),
+            );
+        }
+        if keyed {
+            for slot in trailing {
+                fields.push(
+                    values
+                        .get(*slot as usize)
+                        .cloned()
+                        .unwrap_or(inillucent_value::Value::Null),
+                );
+            }
+        } else {
+            fields.push(inillucent_value::Value::Integer(rowid));
+        }
+        entries.push(fields);
+        more = cursor.next(pager)?;
+    }
+    entries.sort_by(|left, right| compare_key_values(left, right, key));
+    let encoded: Vec<Vec<u8>> = entries
+        .iter()
+        .map(|fields| record::encode_record(fields, encoding, format))
+        .collect::<DbResult<Vec<Vec<u8>>>>()?;
+    append_entries(pager, index, &encoded)?;
+    Ok(())
+}
+
+/// Compares two index entries, as values, the way the index orders them.
+///
+/// The same field-by-field walk `compare_records` does, over values that are
+/// already decoded. Every entry an index build produces has the same shape, so
+/// there is nothing to be learned from the encoding that the values do not
+/// already say - and a comparison that has to decode its operands first is a
+/// comparison paid for `n log n` times.
+/// @param left - one entry's fields
+/// @param right - the other's
+/// @param key - the collations and directions the index orders by
+fn compare_key_values(
+    left: &[inillucent_value::Value<'static>],
+    right: &[inillucent_value::Value<'static>],
+    key: &KeyInfo,
+) -> std::cmp::Ordering {
+    let shared = left.len().max(right.len());
+    for index in 0..shared {
+        let (Some(one), Some(other)) = (left.get(index), right.get(index)) else {
+            // A shorter entry sorts first, which is what comparing a missing
+            // field as NULL would say anyway.
+            return left.len().cmp(&right.len());
+        };
+        let column = key.column(index);
+        let ordering = inillucent_value::compare::compare_values(one, other, column.collation);
+        let ordering = if column.descending {
+            ordering.reverse()
+        } else {
+            ordering
+        };
+        if ordering != std::cmp::Ordering::Equal {
+            return ordering;
+        }
+    }
+    std::cmp::Ordering::Equal
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2343,126 +2465,4 @@ mod tests {
             }
         }
     }
-}
-
-/// Fills an index B-tree with an entry for every row of a table.
-///
-/// The values come straight out of each row's record, without affinity being
-/// applied again: a stored value has already had its column's affinity applied
-/// once, and applying it a second time is not idempotent for a text column
-/// holding a number. The rowid alias is the exception - it is not in the
-/// record at all, so it is read from the row's key.
-///
-/// Entries are appended in table order rather than inserted, which would be
-/// wrong for a general index; they are sorted first, so the append is into a
-/// tree that is already in key order. The sort is what makes the backfill of a
-/// large table one pass over the data rather than one descent per row.
-pub fn build_index(
-    pager: &mut Pager,
-    table_root: u32,
-    index_root: u32,
-    columns: &[u16],
-    key: &KeyInfo,
-    rowid_alias: Option<u16>,
-    trailing: &[u16],
-    table_key: Option<&KeyInfo>,
-) -> DbResult<()> {
-    let limits = Limits::default();
-    let table = PageId::from_persisted(table_root)?;
-    let index = PageId::from_persisted(index_root)?;
-    let encoding = pager.text_encoding();
-    let format = pager.header().schema_format.max(1);
-    // The entries are held as values and encoded *after* they are sorted, not
-    // before. Sorting encoded records meant re-parsing both sides on every
-    // comparison - two record parses per comparison, n log n comparisons - and
-    // that, rather than the writing, was what made building an index over a
-    // hundred thousand rows take five seconds where the reference takes fifty
-    // milliseconds. It also halves what the build holds: the values or the
-    // bytes, not both.
-    let mut entries: Vec<Vec<inillucent_value::Value<'static>>> = Vec::new();
-    // `trailing` names the slots an entry ends with instead of a rowid, which
-    // is how a WITHOUT ROWID table's secondary indexes locate a row. It also
-    // says which kind of b-tree the table is, because such a table's root is an
-    // index b-tree and a table cursor on it would ask its pages for rowids.
-    let keyed = !trailing.is_empty();
-    let mut cursor = match table_key {
-        Some(key) => crate::cursor::BTreeCursor::index(table, key.clone()),
-        None => crate::cursor::BTreeCursor::table(table),
-    };
-    let mut more = cursor.first(pager)?;
-    while more {
-        let rowid = if keyed { 0 } else { cursor.rowid()? };
-        let values = cursor.record_values(pager, &limits)?;
-        let mut fields: Vec<inillucent_value::Value<'static>> =
-            Vec::with_capacity(columns.len() + 1);
-        for column in columns {
-            if rowid_alias == Some(*column) {
-                fields.push(inillucent_value::Value::Integer(rowid));
-                continue;
-            }
-            fields.push(
-                values
-                    .get(*column as usize)
-                    .cloned()
-                    .unwrap_or(inillucent_value::Value::Null),
-            );
-        }
-        if keyed {
-            for slot in trailing {
-                fields.push(
-                    values
-                        .get(*slot as usize)
-                        .cloned()
-                        .unwrap_or(inillucent_value::Value::Null),
-                );
-            }
-        } else {
-            fields.push(inillucent_value::Value::Integer(rowid));
-        }
-        entries.push(fields);
-        more = cursor.next(pager)?;
-    }
-    entries.sort_by(|left, right| compare_key_values(left, right, key));
-    let encoded: Vec<Vec<u8>> = entries
-        .iter()
-        .map(|fields| record::encode_record(fields, encoding, format))
-        .collect::<DbResult<Vec<Vec<u8>>>>()?;
-    append_entries(pager, index, &encoded)?;
-    Ok(())
-}
-
-/// Compares two index entries, as values, the way the index orders them.
-///
-/// The same field-by-field walk `compare_records` does, over values that are
-/// already decoded. Every entry an index build produces has the same shape, so
-/// there is nothing to be learned from the encoding that the values do not
-/// already say - and a comparison that has to decode its operands first is a
-/// comparison paid for `n log n` times.
-/// @param left - one entry's fields
-/// @param right - the other's
-/// @param key - the collations and directions the index orders by
-fn compare_key_values(
-    left: &[inillucent_value::Value<'static>],
-    right: &[inillucent_value::Value<'static>],
-    key: &KeyInfo,
-) -> std::cmp::Ordering {
-    let shared = left.len().max(right.len());
-    for index in 0..shared {
-        let (Some(one), Some(other)) = (left.get(index), right.get(index)) else {
-            // A shorter entry sorts first, which is what comparing a missing
-            // field as NULL would say anyway.
-            return left.len().cmp(&right.len());
-        };
-        let column = key.column(index);
-        let ordering = inillucent_value::compare::compare_values(one, other, column.collation);
-        let ordering = if column.descending {
-            ordering.reverse()
-        } else {
-            ordering
-        };
-        if ordering != std::cmp::Ordering::Equal {
-            return ordering;
-        }
-    }
-    std::cmp::Ordering::Equal
 }

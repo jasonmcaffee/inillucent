@@ -264,10 +264,10 @@ pub fn sort_mode_for(sql: &str) -> &'static str {
         match bytes.get(index) {
             Some(b'(') => depth = depth.saturating_add(1),
             Some(b')') => depth = depth.saturating_sub(1),
-            Some(b'O') if depth == 0 => {
-                if upper.get(index..index.saturating_add(8)) == Some("ORDER BY") {
-                    return "nosort";
-                }
+            Some(b'O')
+                if depth == 0 && upper.get(index..index.saturating_add(8)) == Some("ORDER BY") =>
+            {
+                return "nosort";
             }
             _ => {}
         }

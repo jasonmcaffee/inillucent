@@ -154,12 +154,8 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
 
     let mut plan = plan_for(&settings.scale);
     plan.setup.clear();
-    plan.workloads.retain(|workload| {
-        settings
-            .families
-            .iter()
-            .any(|name| *name == workload.family)
-    });
+    plan.workloads
+        .retain(|workload| settings.families.contains(&workload.family));
     if let Some(repeat) = settings.repeat_override {
         for workload in &mut plan.workloads {
             workload.repeat = repeat;
@@ -362,8 +358,8 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
     println!();
     println!("## result");
     println!(
-        "  {:<24} {:>14} {:>14} {:>9} {:>9} {:>9}  {}",
-        "workload", "inillucent ns", "sqlite ns", "ratio", "low", "high", "agreed"
+        "  {:<24} {:>14} {:>14} {:>9} {:>9} {:>9}  agreed",
+        "workload", "inillucent ns", "sqlite ns", "ratio", "low", "high"
     );
     let mut passed = true;
     for entry in &measured {
@@ -391,8 +387,8 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
     println!();
     println!("## families");
     println!(
-        "  {:<14} {:>9} {:>9} {:>9} {:>8} {:>9}  {}",
-        "family", "ratio", "low", "high", "bar", "worst", "verdict"
+        "  {:<14} {:>9} {:>9} {:>9} {:>8} {:>9}  verdict",
+        "family", "ratio", "low", "high", "bar", "worst"
     );
     for (family, bar) in FAMILIES {
         if !settings.families.iter().any(|name| name == family) {

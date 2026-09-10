@@ -81,6 +81,7 @@ pub mod attach;
 pub mod connect;
 pub mod ddl;
 mod entries;
+pub(crate) mod import;
 mod inspect;
 mod introspect;
 pub mod multi;
@@ -103,6 +104,7 @@ pub use inillucent_base::DbResult;
 // can register `fsdir` and `zipfile`; the pattern matcher, so `.lint` and
 // `.sha3sum` fold a `LIKE` the same way the engine does; and the file systems,
 // so `.vfslist` names them.
+pub use inillucent_base as base;
 use inillucent_catalog::load::table_from_create_sql;
 use inillucent_catalog::paged::{
     attach_catalog, read_catalog, schema_create_sql, schema_layout, write_catalog, ObjectKind,
@@ -691,6 +693,10 @@ const TEMP: usize = 1;
 /// The first schema number an `ATTACH`ed database can take.
 const FIRST_ATTACHED: usize = 2;
 
+/// What a statement reads and writes: the objects it names, each with the kind
+/// it is, and the one table it writes to when it writes to one.
+pub(crate) type StatementTables = (Vec<(&'static str, Vec<u8>)>, Option<Vec<u8>>);
+
 impl ImportedDatabase {
     /// Starts this connection's transaction counter above a number a log holds.
     ///
@@ -1251,315 +1257,22 @@ impl ImportedDatabase {
         page_size: usize,
         frames: usize,
     ) -> DbResult<ImportedDatabase> {
-        let mut file = SqliteFile::open(path.clone())?;
-        // One schema reader, not two: `inillucent-catalog`'s loader parses every
-        // CREATE TABLE and CREATE INDEX and attaches each index to its table
-        // with its key columns, collations and descending flags. Re-deriving
-        // any of that here would be a second implementation that could
-        // disagree with the binder about what the schema says - and the binder
-        // is the thing whose plans this import has to satisfy.
-        let loaded = file.catalog(b"main")?;
-        // The `CREATE` text as SQLite stored it, keyed by folded name. The
-        // catalog view derives columns, collations and key order from this text
-        // but does not keep an index's copy of it, and the new file's catalog
-        // has to store the real declaration rather than one reconstructed from
-        // the derivation - a reconstruction that round-trips today is a
-        // reconstruction that stops round-tripping at the first syntax the
-        // renderer forgets.
-        let declarations: HashMap<(String, String), String> = file
-            .schema()?
-            .into_iter()
-            .map(|object| {
-                (
-                    (object.kind.clone(), object.name.to_ascii_lowercase()),
-                    object.sql,
-                )
-            })
-            .collect();
-        let mut catalog = StaticCatalog::empty();
-        // The same `TableInfo`s the catalog is built from, kept so that DDL can
-        // rebuild it after a `DROP` removes one.
-        let mut tables: Vec<TableInfo> = Vec::new();
-        let mut layouts = HashMap::new();
-        let mut covering: HashMap<u32, Vec<u32>> = HashMap::new();
-        let mut shapes: HashMap<u32, TreeShape> = HashMap::new();
-        // Tables the import could not take. They are named rather than
-        // silently absent, because "the query returned nothing" and "the table
-        // was never imported" are different failures and only one of them is
-        // a bug in the engine.
-        let mut skipped: Vec<String> = Vec::new();
-        // What goes into the file's own catalog tree. Built as the import runs,
-        // because a table's root page in *this* file is only known once it has
-        // been written - which is the whole difference between this catalog and
-        // the one it was imported from.
-        let mut entries: Vec<SchemaEntry> = Vec::new();
-        // The identifier each row's tree is registered under, in the same order
-        // as `entries`. For an imported object that is the fixture's SQLite root
-        // page, which is not the page the row's `rootpage` column names.
-        let mut identifiers: Vec<u32> = Vec::new();
-
-        let vfs: std::sync::Arc<dyn inillucent_vfs::Vfs> = std::sync::Arc::new(OsVfs::new());
-        let _ = std::fs::remove_file(&target);
-        let db_path = DbPath::new(target.to_string_lossy().as_ref());
-        let mut database = Database::create(
-            vfs.as_ref(),
-            &db_path,
-            Options::default()
-                .with_page_size(page_size)
-                .with_frames(frames.max(64)),
-        )?;
-
-        // The virtual tables the source declares, so the storage they own can
-        // be told from an application's own tables. A module's shadow tables
-        // are in SQLite's format and mean nothing to this engine's module of
-        // the same name; `inillucent-migrate` rebuilds a full-text table from
-        // its content instead. Importing them would also collide with the
-        // shadow tables that rebuild then tries to create.
-        let module_owners: Vec<Vec<u8>> = loaded
-            .tables
-            .iter()
-            .filter(|held| held.kind == inillucent_sql::catalog_view::TableKind::Virtual)
-            .map(|held| held.folded.clone())
-            .collect();
-        for info in &loaded.tables {
-            if info.root == 0 {
-                continue;
-            }
-            if is_shadow_of(&module_owners, &info.folded) {
-                continue;
-            }
-            // **`sqlite_sequence` is carried; the rest of the reserved prefix is
-            // not.** It is not bookkeeping this engine can rebuild: it holds
-            // the AUTOINCREMENT high-water mark, and a table whose high rows
-            // were deleted reuses their keys without it - which is the one
-            // thing AUTOINCREMENT exists to prevent, failing silently on the
-            // first insert after a migration. This engine keeps the same table
-            // under the same name (`inillucent_exec::sequence`), so importing
-            // it is importing a table rather than translating a concept.
-            //
-            // **`sqlite_stat1` is carried too**, because reading the other
-            // engine's statistics is a stated invariant of this one rather
-            // than a convenience - see `inillucent_catalog::analyze`. Dropping
-            // it on import made that invariant hold in one direction only: a
-            // file SQLite had `ANALYZE`d arrived here with no statistics at
-            // all, and the first join over it was planned by the estimates the
-            // measurements exist to replace. It is the same three-column table
-            // under the same name, so carrying it is carrying a table.
-            //
-            // The rest of the reserved prefix is indexes and shadow state this
-            // engine derives for itself, where a stale copy would be worse
-            // than a fresh derivation.
-            if info.name.starts_with(b"sqlite_")
-                && !info
-                    .name
-                    .eq_ignore_ascii_case(inillucent_exec::sequence::SEQUENCE_TABLE)
-                && !info
-                    .name
-                    .eq_ignore_ascii_case(inillucent_catalog::analyze::STAT1.as_bytes())
-            {
-                continue;
-            }
-            // A `WITHOUT ROWID` table is keyed by its primary key rather than
-            // by a rowid, so its pages are index pages and its rows are index
-            // entries. Phase 2 skipped it and named it in `skipped()`; Phase 3
-            // takes it, because thirteen of the read-only SLT corpus's
-            // thirty-seven refusals were the `teams` table and every query that
-            // joined it.
-            //
-            // The new format needs no special case at all - it is a tree whose
-            // key is more than one column, which every index already is. What
-            // it needs is the *reader* to know the record's field order, and
-            // SQLite records that in `primary_key_position`.
-            let imported = if info.without_rowid {
-                import_keyed_table(&mut database, &mut file, info)
-            } else {
-                import_table(&mut database, &mut file, info)
-            };
-            let (shape, layout) = match imported {
-                Ok(imported) => imported,
-                Err(_) => {
-                    skipped.push(String::from_utf8_lossy(&info.name).into_owned());
-                    continue;
-                }
-            };
-            entries.push(SchemaEntry {
-                kind: ObjectKind::Table,
-                name: info.name.clone(),
-                table: info.name.clone(),
-                root: shape.root,
-                sql: info.create_sql.clone(),
-                stats: stats_of(&shape),
-                // The identifier this tree is registered and logged under. The
-                // import numbers by the *source* file's root pages, which is
-                // arbitrary but stable, and putting it in the catalog is what
-                // makes it the number a later open derives rather than invents.
-                tree_id: u64::from(info.root),
-            });
-            identifiers.push(info.root);
-            shapes.insert(info.root, shape);
-            layouts.insert(info.root, std::rc::Rc::new(layout));
-            // **A descending index is imported descending**, which is how
-            // SQLite stores it and what makes the two engines read one in the
-            // same order.
-            //
-            // It used to be dropped and named in `skipped`, then imported
-            // *flattened* to ascending - both were workarounds for trees that
-            // could only be built one way round. task-1860 made the direction
-            // real (see `ColumnSpec::descending`), so the flattening became the
-            // lie: the schema text this file carries says `DESC`, a reopen
-            // parses it and the planner believes it, and a tree built ascending
-            // under a catalog that says descending is sorted by neither. It
-            // showed up as `SELECT k FROM t WHERE k > 1000` returning every row
-            // in the table. `in_key_order` sorts into the tree's own order,
-            // which now includes the direction.
-            for index in &info.indexes {
-                if index.root == 0 {
-                    continue;
-                }
-                // A `WITHOUT ROWID` table's primary-key index *is* the table:
-                // SQLite reports it at the table's own root page, because there
-                // is only one b-tree. Importing it as an index would overwrite
-                // the table's layout with one that carries the key columns and
-                // nothing else - which is what happened, and the symptom was
-                // `SELECT * FROM teams` refusing with "the tree read for FROM
-                // term 0 does not carry record slot 1".
-                if info.without_rowid && index.root == info.root {
-                    continue;
-                }
-                let (shape, layout) =
-                    import_index(&mut database, &mut file, info, index, index.root)?;
-                entries.push(SchemaEntry {
-                    kind: ObjectKind::Index,
-                    name: index.name.clone(),
-                    table: info.name.clone(),
-                    root: shape.root,
-                    tree_id: u64::from(index.root),
-                    // An automatic index - one a UNIQUE or PRIMARY KEY
-                    // constraint produced - has no CREATE text of its own in
-                    // SQLite either, and is reconstructed from the table's
-                    // declaration when the catalog is read back.
-                    sql: declarations
-                        .get(&(
-                            "index".to_string(),
-                            String::from_utf8_lossy(&index.name).to_ascii_lowercase(),
-                        ))
-                        .map(|sql| sql.as_bytes().to_vec())
-                        .unwrap_or_default(),
-                    stats: stats_of(&shape),
-                });
-                identifiers.push(index.root);
-                shapes.insert(index.root, shape);
-                layouts.insert(index.root, std::rc::Rc::new(layout));
-                if covers_every_row(index) {
-                    covering
-                        .entry(info.root)
-                        .or_insert_with(Vec::new)
-                        .push(index.root);
-                }
-            }
-            tables.push(info.clone());
-            catalog = catalog.with_table(info.clone());
-        }
-
-        // **The objects that have no tree**, which the loop above skipped
-        // because it skipped `info.root == 0`. A view and a trigger are rows in
-        // the schema and nothing else: a view is a query the binder resolves
-        // when a statement reads through it, and a trigger is a body the write
-        // path fires. Dropping them made an imported database answer
-        // `no such table: blue` for a view the fixture declared - which reads
-        // as a schema the source never had rather than as a refusal.
-        for info in &loaded.tables {
-            if info.kind != inillucent_sql::catalog_view::TableKind::View {
-                continue;
-            }
-            entries.push(SchemaEntry {
-                kind: ObjectKind::View,
-                name: info.name.clone(),
-                table: info.name.clone(),
-                root: PageId::NONE,
-                sql: info.create_sql.clone(),
-                stats: Default::default(),
-                // A view has no tree, so it has no identifier either. Zero is
-                // what `Recorded.root` documents for an object with none, and
-                // it is what a virtual table's row already carries.
-                tree_id: 0,
-            });
-            identifiers.push(0);
-            tables.push((*info).clone());
-            catalog = catalog.with_table((*info).clone());
-        }
-        // A trigger belongs to a table rather than to itself, so it is written
-        // out of the table it is attached to. The declaration comes from the
-        // source's own `sqlite_schema` text rather than from the parsed body:
-        // the text is the definition, and rendering one back would lose
-        // whatever the printer does not know how to write.
-        for info in &loaded.tables {
-            for trigger in &info.triggers {
-                let Some(sql) = declarations.get(&(
-                    "trigger".to_string(),
-                    String::from_utf8_lossy(&trigger.name).to_ascii_lowercase(),
-                )) else {
-                    skipped.push(String::from_utf8_lossy(&trigger.name).into_owned());
-                    continue;
-                };
-                entries.push(SchemaEntry {
-                    kind: ObjectKind::Trigger,
-                    name: trigger.name.clone(),
-                    table: info.name.clone(),
-                    root: PageId::NONE,
-                    sql: sql.as_bytes().to_vec(),
-                    stats: Default::default(),
-                    tree_id: 0,
-                });
-                identifiers.push(0);
-            }
-        }
-
-        // The catalog tree goes in last, because it names every root page the
-        // import allocated.
-        //
-        // It holds no row for itself, which is not an omission - SQLite's
-        // `sqlite_schema` has never listed `sqlite_schema`, because the reader
-        // has to be able to find the catalog before it can read anything, so
-        // the catalog's own location lives where the reader looks first. Here
-        // that is the meta page's `catalog_root`; in SQLite it is page 1. The
-        // table is still fully queryable: it is registered in the binder's
-        // catalog below from a declaration this crate holds, and the scan that
-        // answers a query against it is the ordinary one.
-        let catalog_tree = write_catalog(&mut database, &entries)?;
-        let catalog_shape = TreeShape {
-            root: catalog_tree.root(),
-            columns: schema_layout(),
-            key_columns: 1,
-            first_leaf: catalog_tree.first_leaf(),
-            leaf_count: catalog_tree.leaf_count(),
-            row_count: catalog_tree.row_count(),
-        };
-
-        // Load, checkpoint, close - the TDD's Phase 2 lifecycle, and the only
-        // way to know the format round-trips. Everything below this line reads
-        // a file it did not write.
-        database.checkpoint()?;
-        drop(database);
-        let database = Database::open(vfs.as_ref(), &db_path, frames.max(64))?;
-
-        // The schema comes back out of the file rather than out of the import,
-        // and the two are compared. That is what makes the catalog tree load
-        // bearing instead of decorative: if the file's own account of itself
-        // disagreed with what was written, this would say so here rather than
-        // in a query's wrong answer much later.
-        let stored = read_catalog(
-            database.pool(),
-            &attach_catalog(database.pool(), database.catalog_root())?,
-        )?;
-        if stored != entries {
-            return Err(inillucent_base::error::corrupt(
-                "the catalog read back from the file is not the one written to it",
-            ));
-        }
+        // **The seven phases, in the one order that works.** The reopen is what
+        // the order exists for: everything after it reads a file this process
+        // did not write, so the format round-trip is checked rather than
+        // assumed. Each phase is in `crate::import` with its own argument.
+        let mut source = crate::import::read_source(path)?;
+        let (vfs, db_path, mut database) =
+            crate::import::create_destination(&target, page_size, frames)?;
+        let mut carried = crate::import::Carried::new();
+        crate::import::carry_tables(&mut database, &mut source, &mut carried)?;
+        crate::import::carry_treeless(&source, &mut carried);
+        let catalog_shape = crate::import::write_schema(&mut database, &carried)?;
+        let database =
+            crate::import::reopen_and_verify(database, &vfs, &db_path, frames, &carried)?;
 
         let mut trees = HashMap::new();
-        for (root, shape) in &shapes {
+        for (root, shape) in &carried.shapes {
             let tree = PagedTree::attach(
                 database.pool(),
                 u64::from(*root),
@@ -1578,7 +1291,7 @@ impl ImportedDatabase {
         // path - there is no view machinery, because there does not need to be.
         let schema_root = SCHEMA_VIEW_ROOT;
         let schema_info = table_from_create_sql(schema_create_sql(), 0, schema_root)?;
-        layouts.insert(
+        carried.layouts.insert(
             schema_root,
             std::rc::Rc::new(SourceLayout {
                 tree_key: schema_root,
@@ -1611,8 +1324,8 @@ impl ImportedDatabase {
                 catalog_shape.row_count,
             )?,
         );
-        catalog = catalog.with_table(schema_info.clone());
-        catalog = catalog.with_table(schema_alias_of(&schema_info));
+        carried.catalog = carried.catalog.with_table(schema_info.clone());
+        carried.catalog = carried.catalog.with_table(schema_alias_of(&schema_info));
 
         // The log the write path describes every change in, opened on a file
         // that has just been checkpointed - so it starts empty, at the first
@@ -1632,7 +1345,7 @@ impl ImportedDatabase {
         // structure that covers the query. Sorting by bytes rather than by
         // column count is what makes it the right order: an index with more
         // columns but shorter values can still be the smaller scan.
-        for roots in covering.values_mut() {
+        for roots in carried.covering.values_mut() {
             roots.sort_by_key(|root| {
                 trees
                     .get(root)
@@ -1642,15 +1355,15 @@ impl ImportedDatabase {
         }
 
         let mut opened = ImportedDatabase {
-            catalog,
+            catalog: carried.catalog,
             database,
             trees,
-            layouts,
-            covering,
+            layouts: carried.layouts,
+            covering: carried.covering,
             page_size,
             frames,
             path: target,
-            skipped,
+            skipped: carried.skipped,
             limits: Limits::default(),
             wal,
             next_txn: std::cell::Cell::new(1),
@@ -1664,9 +1377,10 @@ impl ImportedDatabase {
             touched: 0,
             decided_over: std::cell::Cell::new(0),
             marks: Vec::new(),
-            entries: entries
+            entries: carried
+                .entries
                 .into_iter()
-                .zip(identifiers)
+                .zip(carried.identifiers)
                 .enumerate()
                 .map(|(nth, (entry, root))| Recorded {
                     rowid: nth.saturating_add(1) as i64,
@@ -1674,7 +1388,7 @@ impl ImportedDatabase {
                     entry,
                 })
                 .collect(),
-            tables,
+            tables: carried.tables,
             schema_info,
             next_root: FIRST_CREATED_ROOT,
             busy_timeout_ms: 0,
@@ -2362,10 +2076,7 @@ impl ImportedDatabase {
     /// view is reported as the view and the tables behind it are reported too.
     ///
     /// @param sql - the statement to describe
-    pub(crate) fn statement_tables(
-        &self,
-        sql: &str,
-    ) -> DbResult<(Vec<(&'static str, Vec<u8>)>, Option<Vec<u8>>)> {
+    pub(crate) fn statement_tables(&self, sql: &str) -> DbResult<StatementTables> {
         let parsed = self.parse_once(sql)?;
         let fallback = AllowAll;
         let authorizer: &dyn inillucent_sql::bind::Authorizer = match &self.authorizer {
@@ -2616,14 +2327,13 @@ impl ImportedDatabase {
             arguments,
         };
         let mut cursor = connected.table.open()?;
-        let mut nowhere = vtab::Nowhere;
-        let mut store = vtab::ReadStore {
+        let store = vtab::ReadStore {
             pool: self.database.pool(),
             trees: &self.trees,
         };
+        let mut nowhere = inillucent_ext::vtab::WithStore { store };
         let mut context = inillucent_ext::vtab::Context {
             host: &mut nowhere,
-            store: Some(&mut store),
             database: 0,
             limits: &self.limits,
             catalog: None,
@@ -3133,7 +2843,7 @@ impl ImportedDatabase {
             };
             let tree = PagedTree::attach(
                 database.pool(),
-                u64::from(held.entry.tree_id),
+                held.entry.tree_id,
                 held.entry.root,
                 columns,
                 key_columns,
@@ -3223,8 +2933,7 @@ impl ImportedDatabase {
             ObjectKind::Index => {
                 let owner = entries.iter().find(|other| {
                     other.entry.kind == ObjectKind::Table
-                        && other.entry.name.to_ascii_lowercase()
-                            == held.entry.table.to_ascii_lowercase()
+                        && other.entry.name.eq_ignore_ascii_case(&held.entry.table)
                 })?;
                 let table = table_from_create_sql(&owner.entry.sql, 0, owner.root).ok()?;
                 // An automatic index is declared by the *table's* text, and a
@@ -3553,6 +3262,11 @@ impl ImportedDatabase {
     /// race, which is the whole reason SQLite's backup API is incremental.
     ///
     /// @param path - where the copy goes
+    ///
+    /// **Unreachable since `VACUUM INTO` took over producing a verified copy.**
+    /// Kept rather than deleted because task-1894 is not the ticket that
+    /// reviews it; it is listed for removal in that ticket's comments.
+    #[allow(dead_code)]
     pub(crate) fn backup_into(&mut self, path: &std::path::Path) -> DbResult<()> {
         self.checkpoint()?;
         std::fs::copy(&self.path, path).map_err(|error| {
@@ -4364,11 +4078,7 @@ impl ImportedDatabase {
     ///
     /// @param sql - the statement text
     fn parse_once(&self, sql: &str) -> DbResult<inillucent_sql::parser::ParsedStatement> {
-        let arena = self
-            .scratch_ast
-            .borrow_mut()
-            .take()
-            .unwrap_or_else(inillucent_sql::ast::Ast::new);
+        let arena = self.scratch_ast.borrow_mut().take().unwrap_or_default();
         inillucent_sql::parser::parse_next_statement_into(sql.as_bytes(), 0, &self.limits, arena)
             .map_err(refused)
     }
@@ -6966,7 +6676,6 @@ fn writes_something(cached: &Cached) -> bool {
         }
         Cached::Ddl(sql) => {
             let head = sql
-                .trim_start()
                 .split_whitespace()
                 .next()
                 .unwrap_or_default()

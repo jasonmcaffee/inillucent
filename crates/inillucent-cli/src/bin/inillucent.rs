@@ -259,9 +259,8 @@ fn collect(command: &'static Command, rest: &[String]) -> Result<Arguments, Stri
             let explicit = walk
                 .peek()
                 .and_then(|next| parse_boolean(next))
-                .map(|value| {
+                .inspect(|_value| {
                     walk.next();
-                    value
                 })
                 .unwrap_or(true);
             arguments.set(param.name, Json::Bool(explicit));
@@ -320,6 +319,7 @@ fn serve(invocation: &Invocation) -> ExitCode {
         readonly: invocation.readonly,
         root: invocation.root.clone(),
         limit: invocation.limit,
+        ..mcp::Settings::default()
     };
     let mut input = std::io::stdin().lock();
     let mut output = std::io::stdout();
@@ -390,7 +390,7 @@ fn print_overview() {
         "      --json         print the whole result object instead of a table",
         "      --output WHICH text or json (--json means --output json)",
         "      --readonly     refuse every statement that would change something",
-        "      --root DIR     refuse every path outside DIR",
+        "      --root DIR     refuse every path that resolves outside DIR (links followed)",
         "      --limit N      how many rows to hand back (default 200; 0 for all)",
         "      --null TEXT    what to print where a value is null",
         "  -V, --version      print the version and stop",

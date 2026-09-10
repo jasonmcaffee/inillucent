@@ -618,27 +618,45 @@ fn within(spans: &[Vec<u32>], lengths: &[u32], distance: u32) -> bool {
         }
     }
     merged.sort_unstable();
+    // **Every index here is bounds-checked**, which is the crate's rule and is
+    // not a formality on this function: `merged` is built from positions a
+    // stored index supplied, and a sliding window whose two ends are indexed
+    // directly is exactly the shape that reads past the end when one of them
+    // has been damaged.
     let mut seen = vec![0usize; spans.len()];
     let mut covered = 0usize;
     let mut low = 0usize;
     for high in 0..merged.len() {
-        let (_, which) = merged[high];
-        if seen[which] == 0 {
+        let Some((_, which)) = merged.get(high).copied() else {
+            break;
+        };
+        let Some(count) = seen.get_mut(which) else {
+            continue;
+        };
+        if *count == 0 {
             covered += 1;
         }
-        seen[which] += 1;
+        *count += 1;
         while covered == spans.len() {
-            let (start, _) = merged[low];
-            let (end, last) = merged[high];
+            let (Some((start, _)), Some((end, last))) =
+                (merged.get(low).copied(), merged.get(high).copied())
+            else {
+                break;
+            };
             let window = end
                 .saturating_add(lengths.get(last).copied().unwrap_or(1))
                 .saturating_sub(start);
             if window <= total.saturating_add(distance) {
                 return true;
             }
-            let (_, dropped) = merged[low];
-            seen[dropped] -= 1;
-            if seen[dropped] == 0 {
+            let Some((_, dropped)) = merged.get(low).copied() else {
+                break;
+            };
+            let Some(count) = seen.get_mut(dropped) else {
+                break;
+            };
+            *count = count.saturating_sub(1);
+            if *count == 0 {
                 covered -= 1;
             }
             low += 1;

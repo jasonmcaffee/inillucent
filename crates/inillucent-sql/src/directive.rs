@@ -87,11 +87,10 @@ fn expression_children(ast: &crate::ast::Ast, expr: ast::ExprId) -> Vec<ast::Exp
                 out.push(*escape);
             }
         }
-        ast::Expr::Function { arguments, .. } => {
-            if let Some(arguments) = arguments {
-                out.extend(arguments.iter().copied());
-            }
-        }
+        ast::Expr::Function {
+            arguments: Some(arguments),
+            ..
+        } => out.extend(arguments.iter().copied()),
         _ => {}
     }
     out
@@ -109,10 +108,10 @@ fn mentions_name(sql: &[u8], folded: &[u8]) -> bool {
         };
         match token.kind {
             crate::lexer::TokenKind::EndOfInput => return false,
-            crate::lexer::TokenKind::Identifier { keyword: None, .. } => {
-                if token.span.slice(sql).to_ascii_lowercase() == folded {
-                    return true;
-                }
+            crate::lexer::TokenKind::Identifier { keyword: None, .. }
+                if token.span.slice(sql).to_ascii_lowercase() == folded =>
+            {
+                return true;
             }
             _ => {}
         }
@@ -1239,10 +1238,8 @@ impl<'a> Binder<'a> {
                         constant = false;
                     }
                 }
-                ast::ColumnConstraint::Generated { stored, .. } => {
-                    if *stored {
-                        generated_stored = true;
-                    }
+                ast::ColumnConstraint::Generated { stored, .. } if *stored => {
+                    generated_stored = true;
                 }
                 _ => {}
             }

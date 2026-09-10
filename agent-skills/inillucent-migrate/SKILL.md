@@ -74,12 +74,37 @@ A `numeric(38,10)` rounded into an IEEE double is still a number, still eight by
 anywhere would notice. Its digits, carried as text, are what `psql` prints and cannot lose anything
 they had. If you want it as a float in the destination, cast it there, knowingly.
 
-### The two limits, both refused by name rather than worked around
+### The connection is encrypted and verified, or it does not happen
 
-- **No TLS.** `sslmode=require` is refused with a message saying so. Run the migration from a host you
-  trust the network to — a loopback address, or the database's own machine.
+**A migration to anything that is not a loopback address uses TLS, with the certificate chain and
+host name checked, and refuses rather than falling back** — whether or not the URL says anything
+about transport.
+
+| what you write | what happens |
+|---|---|
+| nothing about transport, host is not loopback | verified TLS |
+| `sslmode=require` / `verify-full` / MySQL's `ssl-mode=REQUIRED` | verified TLS |
+| nothing, host is `127.0.0.1`, `::1` or `localhost` | plaintext |
+| `sslmode=disable` **and** `--insecure-plaintext` | plaintext |
+| either of those two on its own | refused |
+| `sslmode=prefer` or `allow` | refused |
+
+Plaintext across a network needs both halves because either one alone is something people type
+without meaning it. `prefer` is refused rather than implemented: it means "encrypt if the server
+happens to allow it", which puts the answer in a server setting nobody in the migration can see.
+
+The certificate is checked **before any credential is sent**, so a server that turns TLS down or
+presents a bad certificate gets no user name, no database and no password. A private authority goes
+in `sslrootcert=<file>` (or `ssl-ca=`), and naming one is stricter than the machine store: that
+authority becomes the only trusted root for the connection.
+
+The report beside the destination and the `transport` field of `--output json` say `verified-tls` or
+`plaintext`, so what happened is in the artifact.
+
+### The limit that is refused by name rather than worked around
+
 - **`caching_sha2_password` full authentication** (MySQL 8's default plugin, on an account the
-  server's cache does not hold) needs an RSA or TLS exchange this client does not speak. The refusal
+  server's cache does not hold) needs an RSA exchange this client does not speak. The refusal
   names the two ways out: connect once with the `mysql` client to prime the cache, or run the
   migration as an account created `IDENTIFIED WITH mysql_native_password`. Both are tested.
 

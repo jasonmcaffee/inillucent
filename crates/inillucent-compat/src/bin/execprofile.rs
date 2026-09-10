@@ -57,7 +57,7 @@ thread_local! {
     static ATTRIBUTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// One line per distinct call site, with how many allocations it made.
     static SITES: std::cell::RefCell<std::collections::BTreeMap<String, u64>> =
-        std::cell::RefCell::new(std::collections::BTreeMap::new());
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
 }
 
 /// Records the call site of one allocation, when attribution is switched on.
@@ -329,7 +329,7 @@ fn run(fixture: &Path, iterations: u32, page_size: usize) -> Result<(), String> 
         ATTRIBUTING.with(|held| held.set(false));
         let mut sites: Vec<(String, u64)> =
             SITES.with(|held| held.borrow().iter().map(|(k, v)| (k.clone(), *v)).collect());
-        sites.sort_by(|one, two| two.1.cmp(&one.1));
+        sites.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
         for (site, count) in sites.iter().take(12) {
             println!("      {count:>4}  {site}");
         }
@@ -458,7 +458,7 @@ fn reused_chain(fixture: &Path, iterations: u32, page_size: usize) -> Result<(),
         // get a warm pass of their own, and the whole pair runs twice with the
         // order reversed, so a warming advantage cancels instead of being
         // reported as a speed-up.
-        let mut run_rebuilt = |count: u32| -> Result<f64, String> {
+        let run_rebuilt = |count: u32| -> Result<f64, String> {
             let started = Instant::now();
             for iteration in 0..count {
                 let sink = Box::new(inillucent_exec::ops::CollectInto::new(std::rc::Rc::new(
@@ -473,7 +473,7 @@ fn reused_chain(fixture: &Path, iterations: u32, page_size: usize) -> Result<(),
             }
             Ok(started.elapsed().as_nanos() as f64 / f64::from(count.max(1)))
         };
-        let warm = iterations.min(500).max(1);
+        let warm = iterations.clamp(1, 500);
         run_rebuilt(warm)?;
         let rebuilt_first = run_rebuilt(iterations)?;
 

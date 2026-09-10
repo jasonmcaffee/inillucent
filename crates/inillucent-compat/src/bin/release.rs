@@ -446,13 +446,12 @@ fn arms(history: &History) -> String {
         history
             .entries
             .iter()
-            .filter(|entry| {
+            .rfind(|entry| {
                 entry.platform == platform
                     && entry.scale == "small"
                     && entry.workload == "*headline*"
                     && entry.arm == arm
             })
-            .next_back()
             .map(|entry| entry.ratio)
     };
     let Some(shipped) = headline("") else {
@@ -499,7 +498,7 @@ fn compatibility_gate() -> (String, bool, String) {
             .and_then(|at| text.get(at.saturating_add(needle.len())..))
             .and_then(|rest| {
                 rest.trim_start()
-                    .split(|character: char| character == ',' || character == '}')
+                    .split([',', '}'])
                     .next()
                     .and_then(|value| value.trim().parse::<usize>().ok())
             })

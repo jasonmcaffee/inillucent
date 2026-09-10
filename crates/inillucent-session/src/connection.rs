@@ -238,8 +238,14 @@ impl inillucent_vm::host::Host for ConnectionState {
     }
 
     /// The connection as a module is allowed to see it.
-    fn services(&mut self) -> &mut dyn inillucent_ext::vtab::Host {
-        self
+    fn services(&mut self) -> Box<dyn inillucent_ext::vtab::Host + '_> {
+        // `main` is the database a module's shadow tables live in unless a
+        // statement said otherwise, and a statement that said otherwise builds
+        // its own services with the number it meant.
+        Box::new(ConnectionServices {
+            state: self,
+            database: 0,
+        })
     }
 
     /// Opens a cursor on one virtual table, connecting it if it is not yet.
@@ -280,9 +286,12 @@ impl inillucent_vm::host::Host for ConnectionState {
             return Err(error::misuse("that virtual table is not connected"));
         };
         let outcome = {
+            let mut services = ConnectionServices {
+                state: self,
+                database,
+            };
             let mut context = inillucent_ext::vtab::Context {
-                host: self,
-                store: None,
+                host: &mut services,
                 database,
                 limits: &limits,
                 catalog: None,
@@ -296,9 +305,138 @@ impl inillucent_vm::host::Host for ConnectionState {
     }
 }
 
-impl inillucent_ext::vtab::Host for ConnectionState {
-    /// This host is the old engine, so its shadow tables are behind pagers.
-    fn pager_set(&mut self) -> Option<&mut dyn inillucent_storage::PagerSet> {
+/// The connection, as a module is allowed to see it.
+///
+/// **A borrow rather than the connection itself**, which is what task-1894
+/// changed. `Host::services` used to hand back `&mut ConnectionState`, and
+/// `inillucent-ext` reached a pager back out of it through a `pager_set`
+/// accessor - one of the two edges that made a crate the *new* engine links
+/// depend on the retired storage engine. A module now reaches its rows through
+/// `ShadowStore`, which this connection supplies as `PagerShadowStore`, and the
+/// only thing left on this side is a pragma and a page size.
+pub struct ConnectionServices<'s> {
+    /// The connection these services read.
+    pub state: &'s mut ConnectionState,
+    /// Which attached database the modules are working in.
+    pub database: usize,
+}
+
+/// The retired engine's shadow rows, reached one operation at a time.
+///
+/// **The pager is looked up per call rather than held**, and that is a borrow
+/// rather than a preference: the pager is borrowed from this connection, and a
+/// store that held it would hold this connection for as long as the module ran
+/// - which is exactly what `Host::pragma` on the same object also needs. One
+/// lookup is a slice index into the attached databases, and this is the engine
+/// that is being retired.
+impl inillucent_sql::vtab::ShadowStore for ConnectionServices<'_> {
+    /// Reads one row by rowid, or nothing when there is not one.
+    fn read_row(
+        &mut self,
+        root: u32,
+        rowid: i64,
+    ) -> DbResult<Option<Vec<inillucent_value::Value<'static>>>> {
+        self.with_store(|store| store.read_row(root, rowid))
+    }
+
+    /// Writes one row by rowid, replacing whatever was there.
+    fn write_row(
+        &mut self,
+        root: u32,
+        rowid: i64,
+        values: &[inillucent_value::Value<'static>],
+    ) -> DbResult<()> {
+        self.with_store(|store| store.write_row(root, rowid, values))
+    }
+
+    /// Removes one row by rowid, reporting nothing when there was not one.
+    fn delete_row(&mut self, root: u32, rowid: i64) -> DbResult<()> {
+        self.with_store(|store| store.delete_row(root, rowid))
+    }
+
+    /// Returns the largest rowid one shadow table holds.
+    fn max_rowid(&mut self, root: u32) -> DbResult<i64> {
+        self.with_store(|store| store.max_rowid(root))
+    }
+
+    /// Runs a body over every row of one shadow table, in rowid order.
+    fn scan(
+        &mut self,
+        root: u32,
+        body: &mut dyn FnMut(i64, &[inillucent_value::Value<'static>]) -> DbResult<bool>,
+    ) -> DbResult<()> {
+        self.with_store(|store| store.scan(root, body))
+    }
+
+    /// Reads one row of a keyed shadow table, or nothing when there is not one.
+    fn read_keyed(
+        &mut self,
+        root: u32,
+        key: &[inillucent_value::Value<'static>],
+        columns: usize,
+    ) -> DbResult<Option<Vec<inillucent_value::Value<'static>>>> {
+        self.with_store(|store| store.read_keyed(root, key, columns))
+    }
+
+    /// Writes one row of a keyed shadow table, replacing whatever was there.
+    fn write_keyed(
+        &mut self,
+        root: u32,
+        key_columns: usize,
+        values: &[inillucent_value::Value<'static>],
+    ) -> DbResult<()> {
+        self.with_store(|store| store.write_keyed(root, key_columns, values))
+    }
+
+    /// Removes one row of a keyed shadow table.
+    fn delete_keyed(
+        &mut self,
+        root: u32,
+        key: &[inillucent_value::Value<'static>],
+    ) -> DbResult<()> {
+        self.with_store(|store| store.delete_keyed(root, key))
+    }
+
+    /// Runs a body over every row of a keyed shadow table, in key order.
+    fn scan_keyed(
+        &mut self,
+        root: u32,
+        key_columns: usize,
+        body: &mut dyn FnMut(&[inillucent_value::Value<'static>]) -> DbResult<bool>,
+    ) -> DbResult<()> {
+        self.with_store(|store| store.scan_keyed(root, key_columns, body))
+    }
+}
+
+impl ConnectionServices<'_> {
+    /// Runs a body against a store built over this connection's pager.
+    ///
+    /// @param body - what to do with the store
+    fn with_store<T>(
+        &mut self,
+        body: impl FnOnce(&mut inillucent_vm::shadow_pager::PagerShadowStore<'_>) -> DbResult<T>,
+    ) -> DbResult<T> {
+        let limits = self.state.limits.clone();
+        let database = self.database;
+        let pager = inillucent_storage::PagerSet::pager(self.state, database)?;
+        let mut store = inillucent_vm::shadow_pager::PagerShadowStore::new(pager, limits);
+        body(&mut store)
+    }
+}
+
+impl inillucent_ext::vtab::Host for ConnectionServices<'_> {
+    /// Reports the page size the named database is on.
+    ///
+    /// The R-Tree sizes its nodes to fit a page, and this is the whole of what
+    /// it needed a pager for.
+    fn page_size(&mut self, database: usize) -> Option<usize> {
+        inillucent_storage::PagerSet::pager(self.state, database)
+            .ok()
+            .map(|pager| pager.page_size().bytes() as usize)
+    }
+
+    /// This host *is* the store: see the `ShadowStore` implementation on it.
+    fn shadow_store(&mut self) -> Option<&mut dyn inillucent_sql::vtab::ShadowStore> {
         Some(self)
     }
 
@@ -325,7 +463,7 @@ impl inillucent_ext::vtab::Host for ConnectionState {
                 inillucent_value::Value::Null => Vec::new(),
             })
         });
-        crate::pragma::read(self, database, name, argument.as_ref())
+        crate::pragma::read(self.state, database, name, argument.as_ref())
     }
 }
 
@@ -2086,7 +2224,8 @@ impl Connection {
 fn tell_virtual_tables(state: &mut ConnectionState, moment: crate::vtab::Moment) -> DbResult<()> {
     let tables = std::rc::Rc::clone(&state.virtual_tables);
     let limits = state.limits.clone();
-    crate::vtab::notify(&tables, state, &limits, moment)
+    let mut services = ConnectionServices { state, database: 0 };
+    crate::vtab::notify(&tables, &mut services, &limits, moment)
 }
 
 /// Turns WAL mode on, stamping the file format versions that say so.

@@ -34,7 +34,7 @@
 #![deny(clippy::expect_used)]
 #![deny(clippy::panic)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use inillucent_migrate::{migrate, sqlite, Plan};
@@ -140,7 +140,7 @@ fn main() -> ExitCode {
 ///
 /// @param source - the SQLite file to read, never written
 /// @param destination - where the verified database is published
-fn migrate_sqlite_file(source: &PathBuf, destination: &PathBuf) -> ExitCode {
+fn migrate_sqlite_file(source: &Path, destination: &Path) -> ExitCode {
     match sqlite::migrate(source, destination) {
         Ok(report) => {
             println!(

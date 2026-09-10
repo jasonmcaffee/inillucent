@@ -12,3 +12,7 @@ inillucent-engine = { workspace = true }
 inillucent-value = { workspace = true }
 inillucent-tree = { workspace = true }
 inillucent-sql = { workspace = true }
+
+# The workspace's lint table; see the note beside it in the root manifest.
+[lints]
+workspace = true

@@ -237,7 +237,6 @@ pub fn with_table<T>(
     let outcome = {
         let mut context = Context {
             host,
-            store: None,
             database,
             limits,
             catalog: None,

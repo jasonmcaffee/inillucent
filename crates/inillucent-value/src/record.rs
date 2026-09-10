@@ -842,7 +842,7 @@ mod tests {
     /// the header width rather than assuming one byte.
     #[test]
     fn a_long_record_widens_its_header_size_varint() {
-        let values: Vec<Value<'_>> = (0..200).map(|index| Value::Integer(index)).collect();
+        let values: Vec<Value<'_>> = (0..200).map(Value::Integer).collect();
         let encoded = encode_record(&values, TextEncoding::Utf8, 4).unwrap();
         let parsed = RecordRef::parse(&encoded, TextEncoding::Utf8).unwrap();
         assert_eq!(parsed.field_count(), 200);

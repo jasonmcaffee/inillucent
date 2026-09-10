@@ -63,13 +63,55 @@ pulling in the `postgres` and `mysql` crates would have put the feature behind a
 side project. [Dependency policy](dependency-policy.md) has the argument in full, and it is worked
 through as an example there.
 
-## Two limits, refused by name rather than worked around
+## The connection is encrypted and verified, or it does not happen
 
-**No TLS.** `sslmode=require` is refused with a message saying so. Run the migration from a host you
-trust the network to: a loopback address, or the database's own machine.
+**A migration to anything that is not a loopback address uses TLS, with the server's certificate
+chain and host name checked, and refuses rather than falling back.** That holds whether or not the
+URL says anything about transport: `postgres://user@db.example/corpus` gets verified TLS.
+
+| what you write | what happens |
+|---|---|
+| nothing about transport, host is not loopback | verified TLS |
+| `sslmode=require`, `verify-ca`, `verify-full`, MySQL's `ssl-mode=REQUIRED` | verified TLS |
+| nothing about transport, host is `127.0.0.1`, `::1` or `localhost` | plaintext |
+| `sslmode=disable` **and** `--insecure-plaintext` | plaintext |
+| `sslmode=disable` on its own | refused |
+| `--insecure-plaintext` on its own | refused |
+| `sslmode=prefer` or `allow` | refused |
+
+Two things have to agree before a password crosses a network in the clear, because either one alone
+is something people type without meaning it — a copied URL, or a flag added to get past an unrelated
+error. A loopback address needs neither: nothing leaves the machine, and requiring a flag there would
+train an operator to pass it everywhere. Loopback is decided from the *address*, so
+`localhost.evil.example` is not loopback.
+
+`sslmode=prefer` is refused rather than implemented. It means "encrypt if the server happens to allow
+it", so whether your credentials crossed the network in the clear is decided by a server setting
+nobody in the migration can see and is reported nowhere.
+
+**The certificate is checked before any credential is sent.** PostgreSQL's `SSLRequest` is a message
+of its own on a fresh socket, and MySQL's truncated handshake response carries nothing but capability
+flags — so a certificate that does not verify costs a socket rather than a password. A server that
+turns TLS down gets no startup packet at all, which the tests assert by looking at what the server
+received rather than at the error message.
+
+**A private authority** goes in `sslrootcert=<file>` (PostgreSQL's own parameter name; `ssl-ca=` also
+works). It is stricter than the machine trust store, not weaker: with one named, that authority is
+the only root trusted for the connection.
+
+**How the connection was made is in the report.** `migrate` writes `Transport: verified-tls` or
+`Transport: plaintext` into the markdown report beside the destination and into the `transport` field
+of `--output json`, so "were those rows encrypted in transit" is answerable from the artifact rather
+than from whoever ran it. The password is redacted everywhere, as it always was.
+
+TLS comes from the platform — SChannel on Windows, the system OpenSSL on Unix — rather than from a
+crate; [dependency policy](dependency-policy.md) has the argument. A machine with neither refuses and
+names what to install. It does not connect in the clear instead.
+
+## The limit that is refused by name rather than worked around
 
 **MySQL 8's `caching_sha2_password` full authentication**, on an account the server's cache does not
-hold, needs an RSA or TLS exchange this client does not speak. The refusal names the two ways out:
+hold, needs an RSA exchange this client does not speak. The refusal names the two ways out:
 connect once with the `mysql` client to prime the cache, or run the migration as an account created
 `IDENTIFIED WITH mysql_native_password`. Both are tested.
 

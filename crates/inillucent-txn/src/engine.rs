@@ -166,9 +166,9 @@ pub struct Engine {
     /// How many before-images the version log may hold before a commit collects.
     ///
     /// **Because nothing was collecting them at all.** `collect_versions` was
-    /// written in Phase 3, tested, and then called by nothing but its own tests
-    /// - so every before-image every write had ever published stayed for the
-    /// life of the connection. task-1869 measured the cost on the gate's write
+    /// written in Phase 3, tested, and then called by nothing but its own
+    /// tests, so every before-image every write had ever published stayed for
+    /// the life of the connection. task-1869 measured the cost on the gate's write
     /// family: 7.5 MiB of a round, held by rows no snapshot could reach.
     ///
     /// It is a threshold rather than a collect-per-commit because collecting
@@ -187,7 +187,7 @@ pub struct Engine {
 }
 
 /// How to open an engine.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct EngineOptions {
     /// The page size and pool size.
     pub database: Options,
@@ -195,16 +195,6 @@ pub struct EngineOptions {
     pub wal: WalOptions,
     /// How long a would-be writer waits for the writer slot.
     pub busy_timeout_ms: u64,
-}
-
-impl Default for EngineOptions {
-    fn default() -> EngineOptions {
-        EngineOptions {
-            database: Options::default(),
-            wal: WalOptions::default(),
-            busy_timeout_ms: 0,
-        }
-    }
 }
 
 /// Returns where the log resumes, raising it above every stamp the file carries.

@@ -1,10 +1,9 @@
 //! Reading a virtual table's declaration and a pragma's argument.
 //!
 //! Invariant: nothing here touches a database. These are four pure functions
-//! over types this crate already owns - a `Declaration` and a `PragmaArgument`
-//! - and they are here rather than in a connection crate because **both**
-//! engines need them and neither should have to depend on the other to get
-//! them.
+//! over types this crate already owns, a `Declaration` and a `PragmaArgument`,
+//! and they are here rather than in a connection crate because **both** engines
+//! need them and neither should have to depend on the other to get them.
 //!
 //! They lived in `inillucent-session`, which is the old engine's connection, and
 //! the new engine's statement path imported them from there. That was the last

@@ -402,7 +402,13 @@ impl OnnxEmbedder {
 
     /// Tokenizes and runs one batch with no length grouping. Kept for the tests,
     /// which hand it a handful of short strings where grouping changes nothing.
+    ///
+    /// Nothing calls it today. It stays because it is the one path that runs the
+    /// model without the length grouping, so a test that suspects the grouping
+    /// has something to compare against; `allow` rather than deletion says that
+    /// deliberately (task-1894).
     #[cfg(test)]
+    #[allow(dead_code)]
     fn run_batch(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
         let encodings = self
             .tokenizer
@@ -702,7 +708,7 @@ fn build_inputs<'a>(
             "position_ids" => {
                 let mut positions = Vec::with_capacity(batch * width);
                 for _ in 0..batch {
-                    positions.extend((0..width as i64).map(|i| i));
+                    positions.extend(0..width as i64);
                 }
                 Value::from_array(([batch, width], positions))?.into()
             }
@@ -855,11 +861,10 @@ impl Embedder for OnnxEmbedder {
 
     fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
         let prefixed = vec![format!("{}{text}", self.options.prefixes.query)];
-        Ok(self
-            .embed_prefixed(&prefixed)?
+        self.embed_prefixed(&prefixed)?
             .into_iter()
             .next()
-            .context("the model returned no embedding")?)
+            .context("the model returned no embedding")
     }
 
     fn dimensions(&self) -> usize {

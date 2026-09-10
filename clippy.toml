@@ -1,0 +1,25 @@
+# Clippy's thresholds for this workspace.
+#
+# Read with `rust-toolchain.toml`: the compiler is pinned so the lint set is
+# fixed, and this file is where the two thresholds that would otherwise be
+# answered by scattered `#[allow]` attributes are answered once.
+
+# **Eight, not seven.** Six functions in this workspace take eight arguments and
+# each one is eight independent facts about a page, an index or a plan: the
+# compaction in `inillucent-tree::write`, the index build in
+# `inillucent-storage::mutate`, the foreign-key planner, and three of the
+# planner's candidate builders. Grouping them into a struct moves the same eight
+# fields one indirection away and gives every caller a second thing to keep in
+# step with the signature.
+#
+# The threshold is raised by one rather than removed, so a ninth argument is
+# still a conversation.
+too-many-arguments-threshold = 8
+
+# **Two, not one.** `clippy::type_complexity`'s score counts nesting, and a
+# `DbResult<(Option<Vec<u8>>, Option<Vec<u8>>)>` scores past the default while
+# being perfectly readable. The aliases that were worth having - `KeyRange`,
+# `Repacked`, `ColumnOrigin`, `AuthorRuns`, `Writes` - were added in task-1894;
+# what is left is a handful of pairs whose alias would be a second name for a
+# thing that already reads.
+type-complexity-threshold = 350

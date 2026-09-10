@@ -1010,6 +1010,16 @@ fn strings(connection: &Connection<'_>, sql: &str) -> Result<Vec<String>, String
     Ok(rows)
 }
 
+/// Returns a datum's integer value, when it holds one.
+///
+/// @param value - the datum
+fn as_integer(value: &OwnedDatum) -> Option<i64> {
+    match value {
+        OwnedDatum::Int(number) => Some(*number),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1032,15 +1042,5 @@ mod tests {
             Check::pass("counts.chunk", "12 rows").line(),
             "counts.chunk ok 12 rows"
         );
-    }
-}
-
-/// Returns a datum's integer value, when it holds one.
-///
-/// @param value - the datum
-fn as_integer(value: &OwnedDatum) -> Option<i64> {
-    match value {
-        OwnedDatum::Int(number) => Some(*number),
-        _ => None,
     }
 }

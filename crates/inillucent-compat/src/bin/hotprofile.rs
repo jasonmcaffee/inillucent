@@ -329,7 +329,7 @@ fn opcode_costs() -> Vec<(String, u64, u64, u64)> {
         };
         rows.push((opcode_name(slot), runs, nanos, allocations));
     }
-    rows.sort_by(|left, right| right.2.cmp(&left.2));
+    rows.sort_by_key(|row| std::cmp::Reverse(row.2));
     rows
 }
 

@@ -18,3 +18,7 @@ windows-sys = { workspace = true }
 [[bin]]
 name = "inillucent-lock-probe"
 path = "src/bin/lock_probe.rs"
+
+# The workspace's lint table; see the note beside it in the root manifest.
+[lints]
+workspace = true

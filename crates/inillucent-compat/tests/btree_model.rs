@@ -29,7 +29,7 @@ use inillucent_base::page::PageSize;
 use inillucent_compat::model::{generate, ModelBTree, ModelKey, ModelKind, Op, Shape};
 use inillucent_compat::workspace_root;
 use inillucent_storage::check::{self, CheckOptions};
-use inillucent_storage::cursor::{BTreeCursor, SavedPosition, SeekBias};
+use inillucent_storage::cursor::{BTreeCursor, SeekBias};
 use inillucent_storage::header::VacuumMode;
 use inillucent_storage::mutate;
 use inillucent_storage::pager::{NewDatabase, Pager, PagerOptions};

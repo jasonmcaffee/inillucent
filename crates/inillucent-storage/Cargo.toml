@@ -21,7 +21,8 @@ opcode-probe = []
 # production graph the dependency-direction check walks.
 loom = "0.7"
 
-[lints.rust]
-# `loom` is set by the operator, not by a Cargo feature, because it has to
-# replace the atomics in every crate in the build at once.
-unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
+# The workspace's lint table; see the note beside it in the root manifest. The
+# `cfg(loom)` allowance that used to live here moved into that table, because a
+# crate cannot both point at it and carry a `[lints.rust]` of its own.
+[lints]
+workspace = true

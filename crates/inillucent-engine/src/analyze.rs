@@ -315,7 +315,7 @@ impl ImportedDatabase {
             .get_mut(&root)
             .ok_or_else(|| refusal("sqlite_stat1 has no tree"))?;
         for (table, index, stat) in rows {
-            let owned = vec![
+            let owned = [
                 OwnedDatum::Int(next),
                 OwnedDatum::Text(table.clone()),
                 match index {

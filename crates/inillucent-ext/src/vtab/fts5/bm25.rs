@@ -164,7 +164,7 @@ mod tests {
         let once = score_row(
             1,
             &[hits(1, 0, 1)],
-            &[phrase.clone()],
+            std::slice::from_ref(&phrase),
             &totals,
             &[10],
             &[1.0],
@@ -187,7 +187,7 @@ mod tests {
         let short = score_row(
             1,
             &[hits(1, 0, 2)],
-            &[phrase.clone()],
+            std::slice::from_ref(&phrase),
             &totals,
             &[5],
             &[1.0],

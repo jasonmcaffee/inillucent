@@ -8,3 +8,7 @@ description = "First-party values, affinities, collations, expression primitives
 
 [dependencies]
 inillucent-base = { workspace = true }
+
+# The workspace's lint table; see the note beside it in the root manifest.
+[lints]
+workspace = true

@@ -2,10 +2,10 @@
 //!
 //! Invariant: there is exactly one definition of the page header in the
 //! workspace. Phase 1 put it here, because `inillucent-tree` was the lowest crate
-//! that knew what a page was. Phase 2 introduced `inillucent-pool` *below* the tree
-//! - a page header is a property of the file format, not of the B+tree, and the
-//! pool has to read one before it knows whether the page is a leaf at all - so
-//! the module moved down and this is what is left of it.
+//! that knew what a page was. Phase 2 introduced `inillucent-pool` *below* the
+//! tree, because a page header is a property of the file format rather than of
+//! the B+tree and the pool has to read one before it knows whether the page is
+//! a leaf at all, so the module moved down and this is what is left of it.
 //!
 //! Nothing else changed: `inillucent_tree::page::PageId`, `write_common`,
 //! `read_u32` and the rest are the same items at the same paths, so every

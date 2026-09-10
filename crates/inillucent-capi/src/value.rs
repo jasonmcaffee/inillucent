@@ -446,7 +446,7 @@ pub unsafe extern "C" fn sqlite3_result_text(
     };
     match crate::handle::counted(text, length) {
         Some(bytes) => {
-            held.result = Value::owned_text(bytes).map_err(|error| error);
+            held.result = Value::owned_text(bytes);
         }
         None => held.result = Ok(Value::Null),
     }
@@ -584,6 +584,12 @@ unsafe fn finish(pointer: *const c_void, destructor: Option<crate::handle::Destr
     let Some(destructor) = destructor else {
         return;
     };
+    // **The sentinels are the reason this cast exists.** SQLite's ABI passes
+    // `SQLITE_STATIC` and `SQLITE_TRANSIENT` in the destructor argument as the
+    // integers 0 and -1, so telling them from a real function pointer means
+    // comparing the pointer's address - there is no other place the
+    // distinction lives.
+    #[allow(clippy::fn_to_numeric_cast_any, clippy::fn_to_numeric_cast)]
     let address = destructor as isize;
     if address == crate::bind::SQLITE_STATIC_VALUE || address == crate::bind::SQLITE_TRANSIENT_VALUE
     {

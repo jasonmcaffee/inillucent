@@ -307,6 +307,14 @@ may_test_with = ["inillucent-vfs"]
 # still may not reach is the catalog or the session; a module never resolves a
 # name or opens a transaction of its own, and is handed the roots of its shadow
 # tables by the host that already resolved them.
+# **task-1894 removed both edges into the retired engine.** A module reaches its
+# shadow rows through `inillucent_sql::vtab::ShadowStore`, which the new engine
+# implements over PAX trees and the old one implements in
+# `inillucent_vm::shadow_pager` - so the crate the *new* engine links no longer
+# names the storage model the rearchitecture retired. The `inillucent-transaction`
+# edge was never used by a line of code; the `inillucent-storage` one was two
+# things, a pager arm inside every `ShadowTables` method and an
+# `impl Host for Pager`, and both moved down to crates that are retired with it.
 [[crate]]
 name = "inillucent-ext"
 kind = "production"
@@ -314,8 +322,6 @@ layer = 6
 may_depend_on = [
   "inillucent-base",
   "inillucent-value",
-  "inillucent-storage",
-  "inillucent-transaction",
   "inillucent-sql",
   "inillucent-catalog",
   # The JSON built-ins moved down into `inillucent-scalar` in task-1833, for the
@@ -692,12 +698,17 @@ may_depend_on = ["inillucent-core", "inillucent-base"]
 [[external]]
 name = "libc"
 category = "os-boundary"
-allowed_in = ["inillucent-vfs", "inillucent-compat"]
+allowed_in = ["inillucent-vfs", "inillucent-compat", "inillucent-remote"]
 
+# task-1894 adds `inillucent-remote` to both rows, for TLS and nothing else:
+# SChannel through SSPI on Windows, the system OpenSSL through `dlopen` on Unix.
+# The argument is in `docs/dependency-policy.md` under "TLS, and why it is not a
+# crate either" - in short, the alternatives were a large production dependency
+# with its own cryptographic backend, or writing a TLS stack here.
 [[external]]
 name = "windows-sys"
 category = "os-boundary"
-allowed_in = ["inillucent-vfs", "inillucent-compat"]
+allowed_in = ["inillucent-vfs", "inillucent-compat", "inillucent-remote"]
 
 [[external]]
 name = "anyhow"

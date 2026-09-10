@@ -162,7 +162,9 @@ impl<'p> LeafMut<'p> {
             leaf.row_count(),
             leaf.has_tombstones(),
         );
-        drop(leaf);
+        // `LeafRef` is `Copy` and borrows the guard, so this ends the borrow
+        // rather than releasing anything.
+        let _ = leaf;
         if delta_count >= DELTA_LIMIT || encoded_len > u16::MAX as usize {
             return Ok(false);
         }
@@ -1491,7 +1493,7 @@ mod tests {
                 other => panic!("delta row {index} column 1 is {other:?}"),
             }
         }
-        drop(leaf);
+        let _ = leaf;
         assert_eq!(text_at(&page, 7), b"a much longer label indeed");
     }
 

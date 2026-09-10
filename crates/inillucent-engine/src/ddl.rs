@@ -167,7 +167,7 @@ impl ImportedDatabase {
         // application watching it must be able to rule out. Read back by
         // `PRAGMA schema_version`; a directive that failed does not move it.
         let changes_schema = schema_change(&directive);
-        let outcome = self.run_directive(directive, sql);
+        let outcome = self.run_directive(*directive, sql);
         self.ddl_schema = previous;
         if changes_schema && outcome.is_ok() {
             self.database.bump_schema_cookie();
@@ -180,9 +180,9 @@ impl ImportedDatabase {
     /// @param directive - the bound statement
     /// @param sql - the statement text, which the DDL cases slice the stored
     ///   `CREATE` text out of
-    fn run_directive(&mut self, directive: Box<Directive>, sql: &str) -> DbResult<Outcome> {
+    fn run_directive(&mut self, directive: Directive, sql: &str) -> DbResult<Outcome> {
         let source = sql.as_bytes();
-        match *directive {
+        match directive {
             Directive::CreateTable {
                 if_not_exists,
                 name,
@@ -413,6 +413,16 @@ impl ImportedDatabase {
                 if path.is_empty() {
                     return Err(refusal("VACUUM INTO needs a file to write"));
                 }
+                // The second statement that names a file of its own, and so
+                // the second one a confined process refuses by name rather
+                // than leaving to the VFS's result code. See `attach`.
+                let path = match inillucent_vfs::confine::process_root() {
+                    None => path,
+                    Some(root) => match root.admit(&path) {
+                        Ok(inside) => inside.to_string_lossy().into_owned(),
+                        Err(refused) => return Err(refusal(refused.message())),
+                    },
+                };
                 if std::path::Path::new(&path).exists() {
                     // SQLite's own rule, and the one that makes the statement
                     // safe to put in a backup script: it never overwrites.
@@ -2317,7 +2327,7 @@ impl ImportedDatabase {
                 AlterKind::RenameColumn { from, to } => {
                     if !owns {
                         let reads = rename::referenced_tables(&entry.sql);
-                        if !reads.iter().any(|name| *name == folded) {
+                        if !reads.contains(&folded) {
                             continue;
                         }
                         if reads.len() > 1 {
@@ -2673,7 +2683,7 @@ impl ImportedDatabase {
         let targets: Vec<(Vec<u8>, Vec<u8>)> = if named_table {
             self.tables
                 .iter()
-                .filter(|table| wanted.iter().any(|name| table.folded == *name))
+                .filter(|table| wanted.contains(&table.folded))
                 .flat_map(|table| {
                     table
                         .indexes

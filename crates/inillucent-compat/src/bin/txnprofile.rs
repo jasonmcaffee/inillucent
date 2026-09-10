@@ -141,7 +141,7 @@ fn report_opcodes() {
     if rows.is_empty() {
         return;
     }
-    rows.sort_by(|left, right| right.2.cmp(&left.2));
+    rows.sort_by_key(|row| std::cmp::Reverse(row.2));
     println!();
     println!("--- the last batch, by opcode ---");
     println!(

@@ -14,6 +14,7 @@ said it.
 | [Product overview](product-overview.md) | what inillucent is, who it is for, and the case for it against PostgreSQL with pgvector |
 | [Getting started](getting-started.md) | install it, run the four programs, make a database, read the exit codes |
 | [Architecture](architecture.md) | how the retrieval engine works, in plain terms and with no Rust in it |
+| [Relational architecture](relational-architecture.md) | the SQL half: storage, transactions, the log, recovery, backup, budgets and confinement, each with the test that checks it |
 
 ## Using it
 
@@ -56,4 +57,4 @@ prose; [Dependency policy](dependency-policy.md) explains what it says.
 
 | page | what it covers |
 |---|---|
-| [Removing PostgreSQL from a 5.8 GB Gmail assistant](real-world-use-cases/nikaya-postgres-to-inillucent.md) | 598,560 passages moved off PostgreSQL and pgvector, what got faster, the six query shapes that go quadratic here, and one recovery failure to read before a migration |
+| [Removing PostgreSQL from a 5.8 GB Gmail assistant](real-world-use-cases/nikaya-postgres-to-inillucent.md) | 598,560 passages moved off PostgreSQL and pgvector, what got faster, the six query shapes that go quadratic here, and two recovery failures — both since fixed, and kept because how they were diagnosed is the part worth having |

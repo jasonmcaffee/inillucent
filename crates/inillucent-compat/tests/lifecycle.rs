@@ -11,7 +11,7 @@
 //! shown to reject the programs it claims to.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use inillucent_base::limits::Limits;
@@ -301,18 +301,15 @@ fn breaks_an_invariant(program: &Program) -> bool {
             return true;
         }
         match instruction.opcode {
-            Opcode::Load => {
-                if instruction.p2 < 0 || instruction.p2 >= registers {
-                    return true;
-                }
+            Opcode::Load if (instruction.p2 < 0 || instruction.p2 >= registers) => {
+                return true;
             }
-            Opcode::ResultRow => {
-                if instruction.p1 < 0
+            Opcode::ResultRow
+                if (instruction.p1 < 0
                     || instruction.p2 < 0
-                    || instruction.p1.saturating_add(instruction.p2) > registers
-                {
-                    return true;
-                }
+                    || instruction.p1.saturating_add(instruction.p2) > registers) =>
+            {
+                return true;
             }
             _ => {}
         }

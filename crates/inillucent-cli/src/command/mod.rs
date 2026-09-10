@@ -25,9 +25,11 @@
 pub mod outcome;
 pub mod verbs;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use inillucent_driver::Status;
+use inillucent_engine::vfs::confine::{self, Root};
 
 use crate::json::Json;
 use crate::shell::Shell;
@@ -221,9 +223,23 @@ pub struct Context {
     /// Whether a statement that changes anything is refused.
     readonly: bool,
     /// The directory outside which no path may be named.
-    root: Option<PathBuf>,
+    ///
+    /// The same [`Root`] the whole process is confined to, so a refusal a
+    /// person reads and a refusal the file system enforces are one decision
+    /// rather than two that can disagree.
+    root: Option<Arc<Root>>,
     /// How many rows a command hands back when it was not told.
     pub limit: usize,
+    /// The most rows one call may hand back, when this surface has a ceiling.
+    max_rows: Option<usize>,
+    /// What one command may spend inside the engine.
+    ///
+    /// Different from `max_rows`, and both are needed. `max_rows` bounds what a
+    /// call *hands back*; this bounds what the engine does on the way there, so
+    /// a `SELECT` whose `WHERE` rejects everything after scanning a hundred
+    /// million rows still stops. A row ceiling alone would let that run to the
+    /// end and then report zero rows.
+    limits: inillucent_engine::base::budget::Limits,
     /// What to print where a value is null.
     pub null: String,
 }
@@ -235,15 +251,43 @@ impl Context {
     /// @param readonly - whether writes are refused
     /// @param root - the directory paths are confined to, if any
     pub fn open(path: &str, readonly: bool, root: Option<PathBuf>) -> Result<Context, Failed> {
-        let shell = Shell::open(path).map_err(|message| {
-            Failed::said(Status::Io, format!("could not open \"{path}\": {message}"))
+        // **The confinement is installed before the first file is opened.**
+        // The database this surface starts on is a path like any other, and
+        // installing the root afterwards would exempt exactly the one path an
+        // operator is most likely to have got wrong. It also puts the root
+        // where the VFS can see it, which is what confines every file the
+        // engine opens later without this module having to name them.
+        let root = match root {
+            None => None,
+            Some(directory) => {
+                confine::confine_process(&directory).map_err(|error| {
+                    Failed::said(Status::InvalidState, error.detail().to_string())
+                })?;
+                confine::process_root()
+            }
+        };
+        let opened = match &root {
+            Some(root) => root
+                .admit(path)
+                .map_err(|refused| Failed::said(Status::InvalidState, refused.message()))?
+                .to_string_lossy()
+                .into_owned(),
+            None => path.to_string(),
+        };
+        let shell = Shell::open(&opened).map_err(|message| {
+            Failed::said(
+                Status::Io,
+                format!("could not open \"{opened}\": {message}"),
+            )
         })?;
         Ok(Context {
             shell,
-            path: path.to_string(),
+            path: opened,
             readonly,
             root,
             limit: 200,
+            max_rows: None,
+            limits: inillucent_engine::base::budget::Limits::unbounded(),
             null: String::new(),
         })
     }
@@ -284,6 +328,51 @@ impl Context {
         self.readonly
     }
 
+    /// Refuses a row count past this surface's ceiling, when it has one.
+    ///
+    /// **The command line has no ceiling and the MCP server does**, which is
+    /// the whole distinction: a person running `inillucent query` against their
+    /// own database and asking for every row is asking for what they want, and
+    /// an agent doing the same thing to a served database is the case `--root`
+    /// and `--readonly` already exist for. Zero means every row and is refused
+    /// where a ceiling is set, because "every row" is precisely the request the
+    /// ceiling is about.
+    ///
+    /// @param asked - the row count the caller wants
+    pub fn cap_rows(&self, asked: usize) -> Result<usize, Failed> {
+        let Some(most) = self.max_rows else {
+            return Ok(asked);
+        };
+        match asked {
+            0 => Err(Failed::said(
+                Status::InvalidState,
+                format!(
+                    "limit=0 asks for every row, and this server hands back at most {most}. Ask \
+                     for a count, or narrow the query."
+                ),
+            )),
+            asked if asked > most => Err(Failed::said(
+                Status::InvalidState,
+                format!("limit={asked} is past the {most} rows this server hands back."),
+            )),
+            asked => Ok(asked),
+        }
+    }
+
+    /// Sets the ceiling on how many rows one call hands back.
+    ///
+    /// @param most - the ceiling, or `None` for the command line's absence of one
+    pub fn set_max_rows(&mut self, most: Option<usize>) {
+        self.max_rows = most;
+    }
+
+    /// Sets what one command may spend inside the engine.
+    ///
+    /// @param limits - the budget, or `Limits::unbounded` for a command line
+    pub fn set_limits(&mut self, limits: inillucent_engine::base::budget::Limits) {
+        self.limits = limits;
+    }
+
     /// Returns whether this surface was confined to a directory.
     ///
     /// **Confinement is about reach, not only about paths.** `--root` exists so
@@ -309,43 +398,40 @@ impl Context {
             shell,
             path: ":memory:".to_string(),
             readonly: false,
-            root,
+            // A test builds its own root rather than installing a process-wide
+            // one: the process root is set once for the life of the process,
+            // and a test that installed it would decide the confinement of
+            // every other test in the binary.
+            root: root.map(|directory| {
+                Arc::new(Root::resolved(confine::resolve_through_links(&directory)))
+            }),
             limit: 200,
+            max_rows: None,
+            limits: inillucent_engine::base::budget::Limits::unbounded(),
             null: String::new(),
         }
     }
 
     /// Refuses a path outside the root, when a root was set.
     ///
-    /// The check is on the *lexical* path after normalising `..`, and it is
-    /// applied before the file is opened - a check that resolved the path
-    /// through the file system would have to create it first, and a confinement
-    /// that has already touched the disk is not a confinement.
+    /// **The decision is not made here.** It is made by
+    /// [`inillucent_vfs::confine`], which resolves the path through the file
+    /// system rather than reading its text, and which the VFS consults again
+    /// at the moment the file is opened. This method exists so that a person
+    /// reading a refusal is told the path they typed and the directory they
+    /// confined to, neither of which survives as far as the VFS.
+    ///
+    /// The check this replaced compared normalised path text against the root.
+    /// A junction below the root passed it and opened a database outside the
+    /// root, which task-1892 reproduced.
     ///
     /// @param path - the path a caller named
     pub fn confine(&self, path: &str) -> Result<PathBuf, Failed> {
         let Some(root) = &self.root else {
             return Ok(PathBuf::from(path));
         };
-        if path == ":memory:" {
-            return Ok(PathBuf::from(path));
-        }
-        let joined = match Path::new(path).is_absolute() {
-            true => PathBuf::from(path),
-            false => root.join(path),
-        };
-        let normalised = normalise(&joined);
-        if normalised.starts_with(root) {
-            Ok(normalised)
-        } else {
-            Err(Failed::said(
-                Status::InvalidState,
-                format!(
-                    "\"{path}\" is outside {}, which this server is confined to.",
-                    root.display()
-                ),
-            ))
-        }
+        root.admit(path)
+            .map_err(|refused| Failed::said(Status::InvalidState, refused.message()))
     }
 
     /// Refuses a statement that changes something, when read-only.
@@ -388,23 +474,6 @@ impl Context {
         crate::shell::drive(&mut self.shell, lines.into_iter());
         self.shell.sink.take().unwrap_or_default()
     }
-}
-
-/// Resolves `.` and `..` without touching the file system.
-///
-/// @param path - the path to normalise
-fn normalise(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for part in path.components() {
-        match part {
-            std::path::Component::ParentDir => {
-                out.pop();
-            }
-            std::path::Component::CurDir => {}
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
 }
 
 /// Returns the command of a given name.
@@ -459,7 +528,17 @@ pub fn run(
         }
     }
     let started = std::time::Instant::now();
-    let mut produced = (command.run)(context, arguments)?;
+    // **Armed here, which is the one place every command on every surface goes
+    // through.** Arming it inside each verb would be arming it in nineteen
+    // places and forgetting it in the twentieth; arming it in the engine would
+    // put a server's policy inside a library an application also links.
+    let armed = inillucent_engine::base::budget::arm(
+        context.limits.clone(),
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
+    let outcome = (command.run)(context, arguments);
+    drop(armed);
+    let mut produced = outcome?;
     if produced.elapsed_ms == 0.0 {
         produced.elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
     }
@@ -484,7 +563,9 @@ const LIMIT: Param = Param {
     positional: false,
     description:
         "How many rows to hand back. The count in 'total' is still exact, and 'more' says \
-                  whether anything was cut off. Defaults to 200.",
+                  whether anything was cut off. Defaults to 200. Over MCP there is a ceiling \
+                  of 10000 rows and 0 (every row) is refused; on the command line there is \
+                  neither. A negative number is refused on both.",
 };
 
 /// The parameter that switches between the two renderings.
@@ -573,19 +654,76 @@ mod tests {
     }
 
     /// A confinement refuses a path that climbs out of the root.
+    ///
+    /// The root here is a directory that exists, because the service resolves
+    /// a candidate through the file system and a root that is not there would
+    /// make every case below pass for the wrong reason.
     #[test]
     fn confinement_refuses_a_path_that_climbs_out() {
+        let root = std::env::temp_dir().join("inillucent-cli-confine");
+        std::fs::create_dir_all(&root).unwrap();
         let context = Context {
             shell: Shell::open(":memory:").unwrap(),
             path: ":memory:".to_string(),
             readonly: false,
-            root: Some(PathBuf::from("C:/root")),
+            root: Some(Arc::new(Root::at(&root).unwrap())),
             limit: 200,
+            max_rows: None,
+            limits: inillucent_engine::base::budget::Limits::unbounded(),
             null: String::new(),
         };
         assert!(context.confine("inner/app.rdb").is_ok());
         assert!(context.confine("../outside.rdb").is_err());
         assert!(context.confine("C:/elsewhere/app.rdb").is_err());
         assert!(context.confine(":memory:").is_ok());
+    }
+
+    /// A path that reaches outside the root through a link is refused, and the
+    /// refusal names where it landed.
+    ///
+    /// The unit-level half of `crates/inillucent-compat/tests/confinement.rs`:
+    /// that suite proves the shipped binaries refuse it, and this one proves
+    /// the message a person reads says which of the two things went wrong.
+    #[test]
+    fn a_refusal_through_a_link_names_the_target() {
+        let base = std::env::temp_dir().join("inillucent-cli-confine-link");
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let link = root.join("escape");
+        if !link.exists() {
+            #[cfg(windows)]
+            let made = std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&link)
+                .arg(&outside)
+                .output()
+                .map(|produced| produced.status.success())
+                .unwrap_or(false);
+            #[cfg(unix)]
+            let made = std::os::unix::fs::symlink(&outside, &link).is_ok();
+            if !made {
+                return;
+            }
+        }
+        let context = Context {
+            shell: Shell::open(":memory:").unwrap(),
+            path: ":memory:".to_string(),
+            readonly: false,
+            root: Some(Arc::new(Root::at(&root).unwrap())),
+            limit: 200,
+            max_rows: None,
+            limits: inillucent_engine::base::budget::Limits::unbounded(),
+            null: String::new(),
+        };
+        let failure = context
+            .confine("escape/app.rdb")
+            .expect_err("a link out of the root is refused");
+        assert!(
+            failure.message.contains("resolves to"),
+            "the refusal did not say where the path landed: {}",
+            failure.message
+        );
     }
 }

@@ -215,6 +215,14 @@ fn keccak_f(state: &mut [u64; 25]) {
 }
 
 /// The theta step: mixes each column's parity into its neighbours.
+///
+/// **The arithmetic here is all lane addressing over a fixed 5x5 state**, so
+/// `column + 20` and `row * 5 + column` are bounded by 24 and cannot overflow a
+/// `usize`. The crate denies `arithmetic_side_effects` because a page offset or
+/// a record length that wraps is a corruption; a constant-bounded index into a
+/// 25-element array is not that, and writing each one as `saturating_add` would
+/// obscure the permutation FIPS 202 specifies without changing a value.
+#[allow(clippy::arithmetic_side_effects)]
 fn theta(state: &mut [u64; 25]) {
     let mut parity = [0u64; 5];
     for (column, slot) in parity.iter_mut().enumerate() {
@@ -237,6 +245,9 @@ fn theta(state: &mut [u64; 25]) {
 }
 
 /// The rho and pi steps: rotate each lane and move it to its new position.
+///
+/// Bounded lane addressing, as in `theta`.
+#[allow(clippy::arithmetic_side_effects)]
 fn rho_and_pi(state: &mut [u64; 25]) {
     let mut carried = lane(state, 1);
     for step in 0..24 {
@@ -251,6 +262,9 @@ fn rho_and_pi(state: &mut [u64; 25]) {
 }
 
 /// The chi step: a non-linear mix along each row.
+///
+/// Bounded lane addressing, as in `theta`.
+#[allow(clippy::arithmetic_side_effects)]
 fn chi(state: &mut [u64; 25]) {
     for row in 0..5 {
         let base = row * 5;

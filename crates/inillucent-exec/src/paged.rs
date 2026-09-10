@@ -122,6 +122,12 @@ impl<'t> FullScan<'t> {
     /// @param downstream - the head of the operator chain
     pub fn run(&self, pool: &Pool, downstream: &mut dyn Sink) -> DbResult<()> {
         self.tree.visit_leaves(pool, &mut |leaf| {
+            // **Checked per leaf, not per row.** A scan whose predicate rejects
+            // everything hands nothing to `Collect`, so the result budget never
+            // sees it - and a full scan of a large table is exactly the request
+            // a deadline exists for. A leaf is a few thousand rows, which makes
+            // this an atomic load and one clock read per few thousand rows.
+            inillucent_base::budget::check()?;
             // **The empty test is `has no live rows`, not `has no packed
             // rows`.** A leaf built empty and then written to holds every one of
             // its rows in the delta area with `row_count` still zero, which is

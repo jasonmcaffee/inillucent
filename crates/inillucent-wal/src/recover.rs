@@ -20,9 +20,9 @@
 //!    existed.
 //! 3. **A stamp that cannot have come from this log is refused rather than
 //!    obeyed.** Property 1 is only sound while a page's stamp is a position in
-//!    the stream beside the file. A page stamped by a stream that was abandoned
-//!    - segments moved aside, a chain stopping at a damaged segment - reads as
-//!    "already has it" for every record, so every later write to that page is
+//!    the stream beside the file. A page stamped by a stream that was
+//!    abandoned (segments moved aside, a chain stopping at a damaged segment)
+//!    reads as "already has it" for every record, so every later write to it is
 //!    discarded with no error at all. That is checked against `valid_end` in
 //!    `refuse_a_stamp_from_another_stream`, and the prevention that keeps a file
 //!    out of the state is `meta.high_water_lsn` and the resume above it.
@@ -407,11 +407,7 @@ fn analyse(chain: &Chain, start: &RecoveryStart) -> DbResult<Analysis> {
             0
         };
         valid_end = valid_end.max(first);
-        loop {
-            let tail = match body.get(at..) {
-                Some(tail) => tail,
-                None => break,
-            };
+        while let Some(tail) = body.get(at..) {
             let decoded = match Record::decode(tail) {
                 Ok(Some(record)) => record,
                 Ok(None) => break,

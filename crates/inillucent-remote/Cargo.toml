@@ -16,3 +16,16 @@ inillucent-base = { workspace = true }
 inillucent-vfs = { workspace = true }
 inillucent-tree = { workspace = true }
 inillucent-engine = { workspace = true }
+
+# The operating-system boundary, and only for TLS. See `src/tls/mod.rs` for why
+# a TLS crate was not the answer, and `docs/dependency-policy.md` for the row
+# these two already have.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+# The workspace's lint table; see the note beside it in the root manifest.
+[lints]
+workspace = true

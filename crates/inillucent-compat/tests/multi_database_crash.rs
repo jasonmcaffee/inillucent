@@ -236,7 +236,7 @@ fn every_short_write_of_a_two_database_commit_leaves_one_state_or_the_other() {
     };
     let (before, after) = expected_states(journal);
     let mut cuts = 0u64;
-    let mut reported = 0u64;
+    let _reported = 0u64;
     let mut report = String::new();
     for nth in 1..=400u64 {
         let vfs = built(journal, 5000 + nth);

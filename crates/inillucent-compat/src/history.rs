@@ -116,11 +116,7 @@ fn field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
     if let Some(quoted) = rest.strip_prefix('"') {
         return quoted.split('"').next();
     }
-    Some(
-        rest.split(|character: char| character == ',' || character == '}')
-            .next()?
-            .trim(),
-    )
+    Some(rest.split([',', '}']).next()?.trim())
 }
 
 /// Every recorded run, in the order they were written.
@@ -271,16 +267,12 @@ pub fn dashboard(history: &History, platform: &str) -> String {
         for workload in workloads {
             out.push_str(&format!("| `{workload}` |"));
             for label in &labels {
-                let found = history
-                    .entries
-                    .iter()
-                    .filter(|entry| {
-                        entry.platform == platform
-                            && entry.scale == *scale
-                            && entry.workload == workload
-                            && entry.label == *label
-                    })
-                    .next_back();
+                let found = history.entries.iter().rfind(|entry| {
+                    entry.platform == platform
+                        && entry.scale == *scale
+                        && entry.workload == workload
+                        && entry.label == *label
+                });
                 match found {
                     Some(entry) => out.push_str(&format!(" {:.3}x |", entry.ratio)),
                     None => out.push_str(" - |"),

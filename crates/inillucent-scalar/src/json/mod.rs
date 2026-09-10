@@ -216,7 +216,7 @@ fn build_array(arguments: &[Argument<'_>], binary: bool) -> DbResult<Answer> {
 
 /// `json_object(...)` and `jsonb_object(...)`.
 fn build_object(arguments: &[Argument<'_>], binary: bool) -> DbResult<Answer> {
-    if arguments.len() % 2 != 0 {
+    if !arguments.len().is_multiple_of(2) {
         return Err(failure(
             "json_object() requires an even number of arguments",
         ));

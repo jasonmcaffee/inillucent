@@ -88,6 +88,12 @@ impl Vfs for OsVfs {
 
     /// Opens a file with the requested access and creation behaviour.
     fn open(&self, path: &DbPath, options: OpenOptions) -> VfsResult<Box<dyn VfsFile>> {
+        // **The confinement backstop.** Every file this workspace opens is
+        // opened here, so a process started with `--root` cannot reach past it
+        // through a command nobody remembered to check, through a path that
+        // arrived inside a SQL statement, or through a file operation added
+        // after the check list was written. See `crate::confine`.
+        crate::confine::authorize(path)?;
         let mut fs_options = FsOpenOptions::new();
         fs_options.read(true);
         if !options.read_only {
@@ -113,6 +119,7 @@ impl Vfs for OsVfs {
     /// Deletes a file, optionally flushing the containing directory so that the
     /// deletion survives a power loss.
     fn delete(&self, path: &DbPath, sync_dir: bool) -> VfsResult<()> {
+        crate::confine::authorize(path)?;
         match std::fs::remove_file(path.as_path()) {
             Ok(()) => {}
             Err(removal) if removal.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -128,6 +135,12 @@ impl Vfs for OsVfs {
 
     /// Reports whether a path exists, and whether it is writable when asked.
     fn access(&self, path: &DbPath, mode: AccessMode) -> VfsResult<bool> {
+        // A confined process is told the file is not there rather than that it
+        // may not look, because "does `C:/Users/…/id_rsa` exist" is itself an
+        // answer a confined caller may not have.
+        if crate::confine::authorize(path).is_err() {
+            return Ok(false);
+        }
         let metadata = match std::fs::metadata(path.as_path()) {
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
@@ -173,7 +186,15 @@ impl Vfs for OsVfs {
     /// Returns a temporary path in the platform's temporary directory that does
     /// not currently exist.
     fn temp_path(&self, prefix: &str) -> VfsResult<DbPath> {
-        let directory = std::env::temp_dir();
+        // A confined process makes its temporaries inside the root. The
+        // platform's temporary directory is outside it, so a temporary taken
+        // from there would be authorized against the root and refused at the
+        // moment it was opened - a confinement that breaks the feature rather
+        // than confining it.
+        let directory = match crate::confine::process_root() {
+            Some(root) => root.directory().to_path_buf(),
+            None => std::env::temp_dir(),
+        };
         for _ in 0..10_000 {
             let counter = self.temp_counter.fetch_add(1, Ordering::Relaxed);
             let mut noise = [0u8; 8];

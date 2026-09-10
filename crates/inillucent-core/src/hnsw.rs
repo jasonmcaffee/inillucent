@@ -824,6 +824,14 @@ impl Hnsw {
 /// they almost never do. hnswlib and FAISS both build this way.
 type LockedLayer = Vec<std::sync::RwLock<Vec<u32>>>;
 
+/// The smallest batch [`Hnsw::insert_batch`] will insert in parallel.
+///
+/// Moving the layers into locks and back costs one move per node per layer over
+/// the whole graph, however few nodes are being added, so a batch of ten into a
+/// graph of six hundred thousand would spend far more on the representation than
+/// on the inserts. Above this the inserts dominate.
+const PARALLEL_INSERT_FLOOR: u32 = 256;
+
 impl Hnsw {
     /// Insert every vector using `build_threads` threads.
     ///
@@ -926,6 +934,157 @@ impl Hnsw {
             .collect();
         self.node_top = levels.iter().map(|l| *l as u8).collect();
         self.entry = Some(entry);
+    }
+
+    /// Insert a contiguous range of new nodes, using `build_threads` threads.
+    ///
+    /// **What an append pays when the graph is already large (task-1894, M8).**
+    /// `insert` is one node on one core. That is the right shape for a handful
+    /// of rows and the wrong shape for the batch a folded generation carries:
+    /// the single-pass build this replaced ran on every core, so a fold of
+    /// 1,337 nodes measured *slower* in wall clock than a rebuild of 10,699
+    /// that used twenty-four of them. The work was eight times smaller and the
+    /// wait was longer, which is not a fix.
+    ///
+    /// So a batch goes through the same locked layers `build_parallel` uses: a
+    /// lock per adjacency list, neighbours merged rather than assigned so a
+    /// concurrent insert's back edge is never erased. The existing graph is what
+    /// the batch is inserted into; nothing already in it is rebuilt.
+    ///
+    /// **The graph this produces is not the graph the sequential loop produces.**
+    /// Levels come from the same seeded generator, so the level distribution is
+    /// identical, but which node links to which depends on what the pool got to
+    /// first. Both are valid approximate graphs - the same property the parallel
+    /// build has, and the reason it is a setting rather than the default.
+    ///
+    /// One thread, or a batch too small to be worth the locked representation,
+    /// takes the sequential loop instead. The locked layers cost one move per
+    /// node per layer over the *whole* graph, not over the batch, which is why
+    /// there is a floor at all.
+    /// @param vectors - every vector, indexed by node, including the new ones
+    /// @param first - the first new node
+    /// @param last - one past the last new node
+    pub fn insert_batch(&mut self, vectors: &VectorSet, first: u32, last: u32) {
+        let batch = last.saturating_sub(first);
+        if self.params.build_threads <= 1
+            || batch < PARALLEL_INSERT_FLOOR
+            || self.entry.is_none()
+        {
+            for node in first..last {
+                self.insert(vectors, node);
+            }
+            return;
+        }
+        let levels: Vec<usize> = (first..last).map(|_| self.random_level()).collect();
+        self.make_room(last, levels.iter().copied().max().unwrap_or(0));
+        for (offset, level) in levels.iter().enumerate() {
+            let node = first as usize + offset;
+            self.node_top[node] = *level as u8;
+        }
+        let entry = self.entry.unwrap_or(first);
+        let entry_level = self.node_top[entry as usize] as usize;
+        self.insert_range_locked(vectors, first, last, &levels, entry, entry_level);
+        // The entry is promoted after the batch rather than during it, so every
+        // node in the batch descends from the same place. A node promoted this
+        // way has empty lists above the old entry's level, which is exactly what
+        // `insert` leaves behind when it promotes one.
+        if let Some((offset, _)) = levels
+            .iter()
+            .enumerate()
+            .filter(|(_, level)| **level > entry_level)
+            .max_by_key(|(offset, level)| (**level, std::cmp::Reverse(*offset)))
+        {
+            self.entry = Some(first + offset as u32);
+        }
+    }
+
+    /// Grows the layers and the level table to hold nodes up to `last`.
+    ///
+    /// @param last - one past the highest node identifier the graph will hold
+    /// @param level - the highest layer any new node occupies
+    fn make_room(&mut self, last: u32, level: usize) {
+        while self.layers.len() <= level {
+            self.layers.push(Vec::new());
+        }
+        for layer in self.layers.iter_mut() {
+            while layer.len() < last as usize {
+                layer.push(Vec::new());
+            }
+        }
+        while self.node_top.len() < last as usize {
+            self.node_top.push(0);
+        }
+    }
+
+    /// Inserts `first..last` into the locked representation of the layers.
+    ///
+    /// Split out of [`Hnsw::insert_batch`] so that the locking, the insertion
+    /// and the unwrapping read as one thing each. The layers are moved into
+    /// locks and moved back out, so the graph is never held twice.
+    /// @param vectors - every vector, indexed by node
+    /// @param first - the first new node
+    /// @param last - one past the last new node
+    /// @param levels - the level drawn for each new node, in order
+    /// @param entry - the node every descent starts from
+    /// @param entry_level - the layer that node occupies
+    fn insert_range_locked(
+        &mut self,
+        vectors: &VectorSet,
+        first: u32,
+        last: u32,
+        levels: &[usize],
+        entry: u32,
+        entry_level: usize,
+    ) {
+        let layers: Vec<LockedLayer> = std::mem::take(&mut self.layers)
+            .into_iter()
+            .map(|layer| layer.into_iter().map(std::sync::RwLock::new).collect())
+            .collect();
+        let insert_one = |node: u32| {
+            if node == entry {
+                return;
+            }
+            let query = vectors.copy_of(node);
+            let level = levels.get((node - first) as usize).copied().unwrap_or(0);
+            let mut current = entry;
+            for layer in (level + 1..=entry_level).rev() {
+                current = greedy_descend_locked(&layers[layer], vectors, &query, current);
+            }
+            for layer in (0..=level.min(entry_level)).rev() {
+                let candidates = search_layer_locked(
+                    &layers[layer],
+                    vectors,
+                    &query,
+                    current,
+                    self.params.ef_construction,
+                );
+                let selected = self.select_neighbours(vectors, &candidates, self.max_degree(layer));
+                self.publish_neighbours(&layers[layer], vectors, node, &selected, layer);
+                for neighbour in &selected {
+                    self.link_locked(&layers[layer], vectors, *neighbour, node, layer);
+                }
+                if let Some(best) = selected.first() {
+                    current = *best;
+                }
+            }
+        };
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(self.params.build_threads)
+            .build()
+            .expect("building the index thread pool");
+        pool.install(|| {
+            use rayon::prelude::*;
+            (first..last).into_par_iter().for_each(insert_one);
+        });
+        self.layers = layers
+            .into_iter()
+            .map(|layer| {
+                layer
+                    .into_iter()
+                    .map(|cell| cell.into_inner().unwrap_or_default())
+                    .collect()
+            })
+            .collect();
     }
 
     /// `link`, against the locked representation used during a parallel build.
@@ -1578,4 +1737,105 @@ mod tests {
         }
         assert!(total / 4.0 > 0.8, "recall fell to {}", total / 4.0);
     }
+
+    /// Appending a batch on several threads must be as accurate as appending it
+    /// one node at a time.
+    ///
+    /// The first half is inserted the same way in both graphs, so what is being
+    /// compared is the batch and only the batch. "As accurate" is measured
+    /// against the exhaustive scan, because the two graphs are not the same
+    /// graph and were never going to be.
+    #[test]
+    fn a_parallel_batch_insert_is_as_accurate_as_the_sequential_one() {
+        let (vectors, store) = fixture(6000, 32);
+        let base = HnswParams { exhaustive_below: 0, ..Default::default() };
+
+        let mut sequential = Hnsw::new(base);
+        sequential.force_graph_traversal();
+        for node in 0..3000u32 {
+            sequential.insert(&vectors, node);
+        }
+        for node in 3000..6000u32 {
+            sequential.insert(&vectors, node);
+        }
+
+        let mut parallel = Hnsw::new(HnswParams { build_threads: 4, ..base });
+        parallel.force_graph_traversal();
+        for node in 0..3000u32 {
+            parallel.insert(&vectors, node);
+        }
+        parallel.insert_batch(&vectors, 3000, 6000);
+
+        assert_eq!(parallel.len(), sequential.len());
+        let filter = CompiledFilter::compile(&Filter::default(), &store);
+        let mut sequential_recall = 0.0;
+        let mut parallel_recall = 0.0;
+        for probe in [7u32, 300, 1500, 2900, 4400, 5100] {
+            let q = vectors.copy_of(probe);
+            let exact = flat::search(&vectors, &store, &filter, &q, 10);
+            sequential_recall +=
+                recall(&sequential.search(&vectors, &store, &filter, &q, 10, Some(128)), &exact);
+            parallel_recall +=
+                recall(&parallel.search(&vectors, &store, &filter, &q, 10, Some(128)), &exact);
+        }
+        sequential_recall /= 6.0;
+        parallel_recall /= 6.0;
+        assert!(
+            parallel_recall >= sequential_recall - 0.05,
+            "batch recall {parallel_recall} against sequential {sequential_recall}"
+        );
+    }
+
+    /// Every appended node gets a neighbour list, whichever thread wrote it.
+    #[test]
+    fn a_parallel_batch_insert_leaves_no_appended_node_unlinked() {
+        let (vectors, _) = fixture(4000, 16);
+        let mut graph = Hnsw::new(HnswParams {
+            build_threads: 8,
+            exhaustive_below: 0,
+            ..Default::default()
+        });
+        for node in 0..2000u32 {
+            graph.insert(&vectors, node);
+        }
+        graph.insert_batch(&vectors, 2000, 4000);
+        let isolated = (2000..graph.len())
+            .filter(|node| graph.layers[0][*node].is_empty())
+            .count();
+        assert_eq!(isolated, 0, "{isolated} appended nodes have no layer-0 neighbours");
+    }
+
+    /// A batch below the floor is the sequential loop, exactly.
+    ///
+    /// The floor exists because the locked representation costs a move per node
+    /// per layer over the whole graph however small the batch is. A caller under
+    /// it must get the graph it would have got from `insert`, node for node -
+    /// same seed, same levels, same lists - or the floor is a behaviour change
+    /// wearing an optimisation's clothes.
+    #[test]
+    fn a_batch_below_the_floor_is_the_sequential_loop() {
+        let (vectors, _) = fixture(1200, 16);
+        let base = HnswParams {
+            build_threads: 8,
+            exhaustive_below: 0,
+            ..Default::default()
+        };
+
+        let mut looped = Hnsw::new(base);
+        for node in 0..1200u32 {
+            looped.insert(&vectors, node);
+        }
+
+        let mut batched = Hnsw::new(base);
+        for node in 0..1000u32 {
+            batched.insert(&vectors, node);
+        }
+        batched.insert_batch(&vectors, 1000, 1100);
+        batched.insert_batch(&vectors, 1100, 1200);
+
+        assert_eq!(batched.layers, looped.layers);
+        assert_eq!(batched.node_top, looped.node_top);
+        assert_eq!(batched.entry, looped.entry);
+    }
+
 }

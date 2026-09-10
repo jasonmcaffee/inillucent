@@ -10,36 +10,41 @@
 //! module's storage visible to `PRAGMA integrity_check`, to `VACUUM`, and to
 //! the other engine. FTS5 and R-Tree both keep their whole state this way, and
 //! it is why a database either of them writes can be opened by SQLite.
+//!
+//! ## One arm, not two (task-1894, M3)
+//!
+//! Every method here used to carry a second arm that reached a `Pager`
+//! directly, which is what made this crate - a crate the *new* engine links -
+//! depend on `inillucent-storage`, the storage model the rearchitecture
+//! retired. That arm is now `inillucent_vm::shadow_pager::PagerShadowStore`,
+//! an implementation of the same `ShadowStore` trait, so both engines reach
+//! their rows the same way and only the retired crates name the retired
+//! storage.
+//!
+//! What is left is a refusal for a caller that supplied no store at all. It
+//! cannot happen from either engine and it is a refusal rather than a panic,
+//! because a `Context` built for no engine is a caller's mistake and this
+//! crate answers a caller's mistake with an error.
 
 use std::collections::BTreeMap;
 
 use inillucent_base::ids::PageId;
 use inillucent_base::{error, DbResult};
-use inillucent_storage::cursor::{BTreeCursor, SeekBias};
-use inillucent_storage::mutate;
-use inillucent_value::{record, TextEncoding, Value};
+use inillucent_sql::vtab::ShadowStore;
+use inillucent_value::Value;
 
 use crate::vtab::{Context, ModuleArguments};
 
-/// Returns the pager one database's shadow tables live behind.
-///
-/// The old engine's arm of every method below. A host that has no pager reaches
-/// its rows through [`Context::store`] and never gets here, so arriving with
-/// neither a store nor a pager is a caller that built a `Context` for no engine
-/// at all.
+/// Returns the store a module's rows live in.
 ///
 /// @param context - the call's context
-fn pager_of<'c>(context: &'c mut Context<'_>) -> DbResult<&'c mut inillucent_storage::Pager> {
-    let database = context.database;
-    context
-        .host
-        .pager_set()
-        .ok_or_else(|| {
-            error::misuse(
-                "this host has no pager; a module reaches its shadow tables through the store",
-            )
-        })?
-        .pager(database)
+fn store_of<'c>(context: &'c mut Context<'_>) -> DbResult<&'c mut dyn ShadowStore> {
+    match context.host.shadow_store() {
+        Some(store) => Ok(store),
+        None => Err(error::misuse(
+            "this host has no shadow store, so a module has nowhere to keep its rows",
+        )),
+    }
 }
 
 /// The root pages of one module's shadow tables, by the suffix that names them.
@@ -103,24 +108,8 @@ impl ShadowTables {
         suffix: &[u8],
         rowid: i64,
     ) -> DbResult<Option<Vec<Value<'static>>>> {
-        // **The store answers when the caller gave one.** The old engine's
-        // rows are in b-trees behind a pager and the new engine's are in PAX
-        // trees; the modules above this file know about neither. The two arms
-        // are two *engines* rather than two implementations of one thing, and
-        // the pager arm goes when the old engine does.
-        if let Some(store) = context.store.as_deref_mut() {
-            return store.read_row(self.root_id(suffix)?, rowid);
-        }
-        let root = self.root(suffix)?;
-        let limits = context.limits.clone();
-        let pager = pager_of(context)?;
-        let mut cursor = BTreeCursor::table(root);
-        if !cursor.seek_rowid(pager, rowid, SeekBias::AtOrAfter)? || cursor.rowid()? != rowid {
-            return Ok(None);
-        }
-        let payload = cursor.payload(pager, &limits)?;
-        let record = record::RecordRef::parse(&payload, TextEncoding::Utf8)?;
-        Ok(Some(row_values(rowid, &record)?))
+        let root = self.root_id(suffix)?;
+        store_of(context)?.read_row(root, rowid)
     }
 
     /// Writes one row by rowid, replacing whatever was there.
@@ -131,61 +120,20 @@ impl ShadowTables {
         rowid: i64,
         values: &[Value<'static>],
     ) -> DbResult<()> {
-        // **The store answers when the caller gave one.** The old engine's
-        // rows are in b-trees behind a pager and the new engine's are in PAX
-        // trees; the modules above this file know about neither. The two arms
-        // are two *engines* rather than two implementations of one thing, and
-        // the pager arm goes when the old engine does.
-        if let Some(store) = context.store.as_deref_mut() {
-            return store.write_row(self.root_id(suffix)?, rowid, values);
-        }
-        let root = self.root(suffix)?;
-        // The first value is the rowid, which a rowid table stores as NULL in
-        // the record and reads back off the cell. Every shadow table here
-        // declares its first column `INTEGER PRIMARY KEY`, so this is the same
-        // record SQLite writes for the same row.
-        let mut stored = values.to_vec();
-        if let Some(first) = stored.first_mut() {
-            *first = Value::Null;
-        }
-        let payload = record::encode_record(&stored, TextEncoding::Utf8, 4)?;
-        let pager = pager_of(context)?;
-        mutate::insert_row(pager, root, rowid, &payload)
+        let root = self.root_id(suffix)?;
+        store_of(context)?.write_row(root, rowid, values)
     }
 
     /// Removes one row by rowid, reporting nothing when there was not one.
     pub fn delete_row(&self, context: &mut Context<'_>, suffix: &[u8], rowid: i64) -> DbResult<()> {
-        // **The store answers when the caller gave one.** The old engine's
-        // rows are in b-trees behind a pager and the new engine's are in PAX
-        // trees; the modules above this file know about neither. The two arms
-        // are two *engines* rather than two implementations of one thing, and
-        // the pager arm goes when the old engine does.
-        if let Some(store) = context.store.as_deref_mut() {
-            return store.delete_row(self.root_id(suffix)?, rowid);
-        }
-        let root = self.root(suffix)?;
-        let pager = pager_of(context)?;
-        mutate::delete_row(pager, root, rowid)?;
-        Ok(())
+        let root = self.root_id(suffix)?;
+        store_of(context)?.delete_row(root, rowid)
     }
 
     /// Returns the largest rowid one shadow table holds.
     pub fn max_rowid(&self, context: &mut Context<'_>, suffix: &[u8]) -> DbResult<i64> {
-        // **The store answers when the caller gave one.** The old engine's
-        // rows are in b-trees behind a pager and the new engine's are in PAX
-        // trees; the modules above this file know about neither. The two arms
-        // are two *engines* rather than two implementations of one thing, and
-        // the pager arm goes when the old engine does.
-        if let Some(store) = context.store.as_deref_mut() {
-            return store.max_rowid(self.root_id(suffix)?);
-        }
-        let root = self.root(suffix)?;
-        let pager = pager_of(context)?;
-        let mut cursor = BTreeCursor::table(root);
-        if !cursor.last(pager)? {
-            return Ok(0);
-        }
-        cursor.rowid()
+        let root = self.root_id(suffix)?;
+        store_of(context)?.max_rowid(root)
     }
 
     /// Runs a body over every row of one shadow table, in rowid order.
@@ -195,29 +143,8 @@ impl ShadowTables {
         suffix: &[u8],
         mut body: impl FnMut(i64, &[Value<'static>]) -> DbResult<bool>,
     ) -> DbResult<()> {
-        // The store answers when the caller gave one; see `read_row`.
-        if let Some(store) = context.store.as_deref_mut() {
-            return store.scan(self.root_id(suffix)?, &mut body);
-        }
-        let root = self.root(suffix)?;
-        let limits = context.limits.clone();
-        let pager = pager_of(context)?;
-        let mut cursor = BTreeCursor::table(root);
-        if !cursor.first(pager)? {
-            return Ok(());
-        }
-        loop {
-            let rowid = cursor.rowid()?;
-            let payload = cursor.payload(pager, &limits)?;
-            let record = record::RecordRef::parse(&payload, TextEncoding::Utf8)?;
-            let values = row_values(rowid, &record)?;
-            if !body(rowid, &values)? {
-                return Ok(());
-            }
-            if !cursor.next(pager)? {
-                return Ok(());
-            }
-        }
+        let root = self.root_id(suffix)?;
+        store_of(context)?.scan(root, &mut body)
     }
 }
 
@@ -234,42 +161,8 @@ impl ShadowTables {
         key: &[Value<'static>],
         columns: usize,
     ) -> DbResult<Option<Vec<Value<'static>>>> {
-        // The store answers when the caller gave one; see `read_row`.
-        if let Some(store) = context.store.as_deref_mut() {
-            return store.read_keyed(self.root_id(suffix)?, key, columns);
-        }
-        let root = self.root(suffix)?;
-        let info = key_info(key.len());
-        let limits = context.limits.clone();
-        let pager = pager_of(context)?;
-        let mut cursor = BTreeCursor::index(root, info);
-        if !cursor.seek_index(pager, key, SeekBias::AtOrAfter)? {
-            return Ok(None);
-        }
-        let payload = cursor.payload(pager, &limits)?;
-        let record = record::RecordRef::parse(&payload, TextEncoding::Utf8)?;
-        let values = record.values()?;
-        for (position, wanted) in key.iter().enumerate() {
-            let Some(found) = values.get(position) else {
-                return Ok(None);
-            };
-            if inillucent_value::compare::compare_values(
-                found,
-                wanted,
-                inillucent_value::Collation::Binary,
-            ) != core::cmp::Ordering::Equal
-            {
-                return Ok(None);
-            }
-        }
-        // `columns` may be `usize::MAX`, meaning "however many are there" - so
-        // the capacity is what the record actually holds, not what was asked
-        // for.
-        let mut owned = Vec::with_capacity(values.len().min(columns));
-        for value in values.into_iter().take(columns) {
-            owned.push(value.into_owned()?);
-        }
-        Ok(Some(owned))
+        let root = self.root_id(suffix)?;
+        store_of(context)?.read_keyed(root, key, columns)
     }
 
     /// Writes one row of a keyed shadow table, replacing whatever was there.
@@ -280,18 +173,8 @@ impl ShadowTables {
         key_columns: usize,
         values: &[Value<'static>],
     ) -> DbResult<()> {
-        // The store answers when the caller gave one; see `read_row`.
-        if let Some(store) = context.store.as_deref_mut() {
-            return store.write_keyed(self.root_id(suffix)?, key_columns, values);
-        }
-        let key: Vec<Value<'static>> = values.iter().take(key_columns).cloned().collect();
-        self.delete_keyed(context, suffix, &key)?;
-        let root = self.root(suffix)?;
-        let payload = record::encode_record(values, TextEncoding::Utf8, 4)?;
-        let info = key_info(key_columns);
-        let pager = pager_of(context)?;
-        mutate::insert_entry(pager, root, &info, &payload)?;
-        Ok(())
+        let root = self.root_id(suffix)?;
+        store_of(context)?.write_keyed(root, key_columns, values)
     }
 
     /// Removes one row of a keyed shadow table.
@@ -301,19 +184,8 @@ impl ShadowTables {
         suffix: &[u8],
         key: &[Value<'static>],
     ) -> DbResult<()> {
-        // The store answers when the caller gave one; see `read_row`.
-        if let Some(store) = context.store.as_deref_mut() {
-            return store.delete_keyed(self.root_id(suffix)?, key);
-        }
-        let Some(existing) = self.read_keyed(context, suffix, key, usize::MAX)? else {
-            return Ok(());
-        };
-        let root = self.root(suffix)?;
-        let payload = record::encode_record(&existing, TextEncoding::Utf8, 4)?;
-        let info = key_info(key.len());
-        let pager = pager_of(context)?;
-        mutate::delete_entry(pager, root, &info, &payload)?;
-        Ok(())
+        let root = self.root_id(suffix)?;
+        store_of(context)?.delete_keyed(root, key)
     }
 
     /// Runs a body over every row of a keyed shadow table, in key order.
@@ -324,62 +196,9 @@ impl ShadowTables {
         key_columns: usize,
         mut body: impl FnMut(&[Value<'static>]) -> DbResult<bool>,
     ) -> DbResult<()> {
-        // The store answers when the caller gave one; see `read_row`.
-        if let Some(store) = context.store.as_deref_mut() {
-            return store.scan_keyed(self.root_id(suffix)?, key_columns, &mut body);
-        }
-        let root = self.root(suffix)?;
-        let info = key_info(key_columns);
-        let limits = context.limits.clone();
-        let pager = pager_of(context)?;
-        let mut cursor = BTreeCursor::index(root, info);
-        if !cursor.first(pager)? {
-            return Ok(());
-        }
-        loop {
-            let payload = cursor.payload(pager, &limits)?;
-            let record = record::RecordRef::parse(&payload, TextEncoding::Utf8)?;
-            let mut values = Vec::new();
-            for value in record.values()? {
-                values.push(value.into_owned()?);
-            }
-            if !body(&values)? {
-                return Ok(());
-            }
-            if !cursor.next(pager)? {
-                return Ok(());
-            }
-        }
+        let root = self.root_id(suffix)?;
+        store_of(context)?.scan_keyed(root, key_columns, &mut body)
     }
-}
-
-/// Returns the ordering a keyed shadow table's b-tree is in.
-///
-/// Every key column compares as `BINARY` and ascending, which is what a
-/// `PRIMARY KEY` with no `COLLATE` and no `DESC` declares - and every shadow
-/// table here declares exactly that.
-fn key_info(columns: usize) -> record::KeyInfo {
-    record::KeyInfo {
-        columns: (0..columns)
-            .map(|_| record::KeyColumn {
-                collation: inillucent_value::Collation::Binary,
-                descending: false,
-            })
-            .collect(),
-    }
-}
-
-/// Returns one row's values, with the rowid in the first column.
-///
-/// A rowid table stores a NULL where its `INTEGER PRIMARY KEY` column would be
-/// and keeps the value on the cell instead, so the row a caller sees has to be
-/// put back together from the two.
-fn row_values(rowid: i64, record: &record::RecordRef<'_>) -> DbResult<Vec<Value<'static>>> {
-    let mut values = vec![Value::Integer(rowid)];
-    for value in record.values()?.into_iter().skip(1) {
-        values.push(value.into_owned()?);
-    }
-    Ok(values)
 }
 
 #[cfg(test)]

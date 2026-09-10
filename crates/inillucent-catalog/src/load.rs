@@ -237,7 +237,7 @@ pub fn schema_table_aliases(database: usize) -> Vec<TableInfo> {
     } else {
         &[b"sqlite_schema".as_slice(), b"sqlite_master".as_slice()]
     };
-    for name in names.iter().copied() {
+    for name in names {
         let Ok(mut table) = table_from_create_sql(
             SCHEMA_TABLE_SQL,
             database,

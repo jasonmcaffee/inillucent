@@ -1,0 +1,30 @@
+# The compiler this repository is built and graded with.
+#
+# **Pinned, and the pin is what makes a result repeatable.** Every number this
+# project publishes - the performance ratios in `docs/performance.md`, the
+# 416-case feature comparison, the peak resident set the gate grades against -
+# was produced by one compiler, and a machine that builds with a different one
+# is measuring something else. Before task-1894 there was no pin at all, so
+# `cargo clippy -D warnings` passed or failed depending on which Rust the person
+# running it happened to have.
+#
+# It also fixes the lint set. A new compiler brings new lints, and the strict
+# lint run is a required check: without a pin, a release that passed CI on
+# Tuesday fails it on Wednesday because rustup updated, and the failure is about
+# nothing the repository changed.
+#
+# ## Raising it
+#
+# Bump `channel`, run `cargo clippy --workspace --all-targets --all-features --
+# -D warnings` and fix or narrowly allow what the new compiler found, then
+# re-run the perf gate - a compiler change moves the numbers, and the history in
+# `tests/performance-history.tsv` has to record which compiler produced each row
+# or the series compares two different things.
+[toolchain]
+channel = "1.95.0"
+components = ["rustfmt", "clippy"]
+# The two targets release packaging builds. Naming them here means `rustup`
+# installs what a release needs on a fresh machine rather than failing part way
+# through `packaging/release.sh`.
+targets = ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu"]
+profile = "minimal"

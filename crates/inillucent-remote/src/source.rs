@@ -178,6 +178,16 @@ pub trait RemoteSource {
     /// Returns what the server calls itself, for the report.
     fn server(&self) -> String;
 
+    /// Returns what the peer's certificate proved, when the connection is
+    /// encrypted.
+    ///
+    /// `None` for a plaintext connection, which the report records separately -
+    /// so an absent peer means "there was nothing to verify" rather than "the
+    /// verification was skipped".
+    fn peer(&self) -> Option<String> {
+        None
+    }
+
     /// Returns the objects that exist in the source and are not carried.
     ///
     /// Named rather than omitted: a view, a sequence or a stored procedure that

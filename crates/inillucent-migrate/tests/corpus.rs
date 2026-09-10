@@ -301,7 +301,7 @@ fn a_release_sized_index_migrates_and_every_check_passes() {
     let (built, chunks) = build_source(&source_dir);
     let before = tree_digest(&source_dir);
 
-    let mut plan = Plan::new(&source_dir, root.join("corpus.db"));
+    let plan = Plan::new(&source_dir, root.join("corpus.db"));
     let outcome = migrate(&plan).expect("the migration runs");
 
     let failed: Vec<String> = outcome

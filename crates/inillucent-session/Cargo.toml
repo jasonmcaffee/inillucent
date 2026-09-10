@@ -22,3 +22,7 @@ inillucent-search = { workspace = true }
 # Brackets the stages of preparing a statement and records them in
 # `inillucent-base::probe`. Off by default and never on in a shipped build.
 opcode-probe = []
+
+# The workspace's lint table; see the note beside it in the root manifest.
+[lints]
+workspace = true

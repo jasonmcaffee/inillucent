@@ -608,7 +608,7 @@ impl TableInfo {
         let stored = |position: usize| {
             self.columns
                 .get(position)
-                .is_some_and(|column| !(column.generated && !column.stored))
+                .is_some_and(|column| !column.generated || column.stored)
         };
         if !self.without_rowid {
             return (0..self.columns.len())
@@ -631,7 +631,7 @@ impl TableInfo {
     pub fn record_width(&self) -> usize {
         self.columns
             .iter()
-            .filter(|column| !(column.generated && !column.stored))
+            .filter(|column| !column.generated || column.stored)
             .count()
     }
 

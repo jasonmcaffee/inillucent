@@ -20,3 +20,7 @@ inillucent-ext = { workspace = true }
 # how many heap allocations it made. Off by default and never on in a shipped
 # build: it puts a clock read and two atomic loads on the hottest path there is.
 opcode-probe = []
+
+# The workspace's lint table; see the note beside it in the root manifest.
+[lints]
+workspace = true

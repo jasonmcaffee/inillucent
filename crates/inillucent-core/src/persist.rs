@@ -1153,7 +1153,7 @@ mod tests {
 
         // And the document lookup rebuilds over live documents only, so a
         // tombstoned document stays tombstoned across a restart.
-        assert!(loaded.tombstone("slack", "d3") == false);
+        assert!(!loaded.tombstone("slack", "d3"));
         fs::remove_dir_all(&dir).ok();
     }
 

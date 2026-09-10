@@ -53,7 +53,7 @@ pub unsafe extern "C" fn sqlite3_data_count(handle: *mut sqlite3_stmt) -> c_int 
 }
 
 /// Returns the value at a column of the current row, or NULL past the end.
-fn value_at<'a>(held: &'a sqlite3_stmt, index: c_int) -> Option<&'a Value<'static>> {
+fn value_at(held: &sqlite3_stmt, index: c_int) -> Option<&Value<'static>> {
     if index < 0 {
         return None;
     }

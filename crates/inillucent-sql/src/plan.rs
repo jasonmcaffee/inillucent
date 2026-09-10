@@ -2176,7 +2176,6 @@ fn index_path(
 
 /// Builds the best path over one index, or `None` if it cannot be used.
 #[allow(clippy::too_many_arguments)]
-#[allow(clippy::too_many_arguments)]
 fn index_candidate(
     id: usize,
     position: usize,

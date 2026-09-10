@@ -332,8 +332,11 @@ fn run() -> Result<(), String> {
         let _ = std::hint::black_box(pager.edit_page(leaf, |raw| {
             // The smallest possible edit: put a byte back where it was.
             if let Some(slot) = raw.first_mut() {
-                let held = *slot;
-                *slot = held;
+                // Writing the byte back where it was, which is the smallest
+                // edit that still dirties the page. Written through
+                // `black_box` so the compiler cannot see that it changes
+                // nothing and delete the write this is timing.
+                *slot = std::hint::black_box(*slot);
             }
             Ok(())
         }));

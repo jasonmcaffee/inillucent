@@ -463,7 +463,7 @@ impl Machine {
         let Some(progress) = self.progress.as_ref() else {
             return false;
         };
-        if self.steps % progress.every != 0 {
+        if !self.steps.is_multiple_of(progress.every) {
             return false;
         }
         (progress.handler)()
@@ -2546,10 +2546,10 @@ impl Machine {
         // and puts the cost on the path that is being retired.
         let schema = host.schema();
         let flattened = schema.as_deref().map(flatten_snapshot);
+        let mut services = host.services();
         let outcome = {
             let mut context = inillucent_ext::vtab::Context {
-                host: host.services(),
-                store: None,
+                host: services.as_mut(),
                 database,
                 limits: &limits,
                 catalog: flattened.as_ref(),
@@ -2653,24 +2653,6 @@ pub fn storage_affinity(affinity: Affinity) -> Affinity {
     affinity
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A NULL or negative LIMIT means no limit, and a NULL OFFSET means none.
-    #[test]
-    fn limit_and_offset_normalise_the_way_sqlite_reads_them() {
-        assert_same!(normalise_limit(&Value::Null), Value::Integer(i64::MAX));
-        assert_same!(
-            normalise_limit(&Value::Integer(-1)),
-            Value::Integer(i64::MAX)
-        );
-        assert_same!(normalise_limit(&Value::Integer(3)), Value::Integer(3));
-        assert_same!(normalise_offset(&Value::Null), Value::Integer(0));
-        assert_same!(normalise_offset(&Value::Integer(-5)), Value::Integer(0));
-    }
-}
-
 /// Returns the binder's view of a catalog snapshot.
 ///
 /// Every table of every attached database, in attachment order, which is the
@@ -2696,4 +2678,22 @@ fn flatten_snapshot(
         }
     }
     catalog
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A NULL or negative LIMIT means no limit, and a NULL OFFSET means none.
+    #[test]
+    fn limit_and_offset_normalise_the_way_sqlite_reads_them() {
+        assert_same!(normalise_limit(&Value::Null), Value::Integer(i64::MAX));
+        assert_same!(
+            normalise_limit(&Value::Integer(-1)),
+            Value::Integer(i64::MAX)
+        );
+        assert_same!(normalise_limit(&Value::Integer(3)), Value::Integer(3));
+        assert_same!(normalise_offset(&Value::Null), Value::Integer(0));
+        assert_same!(normalise_offset(&Value::Integer(-5)), Value::Integer(0));
+    }
 }

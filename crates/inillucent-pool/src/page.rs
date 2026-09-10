@@ -75,6 +75,12 @@ impl PageSize {
     }
 
     /// Returns the size as a `usize`, which is what every slice index wants.
+    ///
+    /// **There is no `is_empty` beside it, and there will not be.** A page size
+    /// is one of four constants, none of them zero, so the question the
+    /// companion method answers has one answer and asking it would suggest
+    /// there was a case where a page had no bytes.
+    #[allow(clippy::len_without_is_empty)]
     pub fn len(self) -> usize {
         self.0 as usize
     }

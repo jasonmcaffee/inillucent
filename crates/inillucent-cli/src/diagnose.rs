@@ -280,7 +280,7 @@ pub fn limit(shell: &mut Shell, arguments: &[&str]) {
 /// @param shell - the shell
 /// @param arguments - unused; `--init` is refused rather than half-done
 pub fn selftest(shell: &mut Shell, arguments: &[&str]) {
-    if arguments.iter().any(|argument| *argument == "--init") {
+    if arguments.contains(&"--init") {
         shell.complain("Error: .selftest --init is not implemented by this engine");
         return;
     }

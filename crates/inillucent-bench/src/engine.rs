@@ -653,6 +653,9 @@ pub fn fuse_keyed(
         match how {
             Fusion::Convex { .. } => {
                 let max = values.iter().cloned().fold(f32::MIN, f32::max);
+                // Negated so a NaN maximum returns zeros rather than dividing
+                // by it, which is the rule `inillucent-core::rank` holds.
+                #[allow(clippy::neg_cmp_op_on_partial_ord)]
                 if !(max > f32::EPSILON) {
                     return vec![0.0; values.len()];
                 }

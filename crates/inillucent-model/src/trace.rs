@@ -102,9 +102,9 @@ pub struct Trace {
 /// A uniformly random trace over this vocabulary is nearly all noise. It opens
 /// transactions that write nothing, reads keys nobody has written, and crashes
 /// at points where the answer is obvious. The interesting states are the ones
-/// where two things are true at once - a transaction is open across a commit, a
-/// crash lands between a commit and the checkpoint that would have made it safe
-/// - and a uniform draw reaches those about as often as it reaches anything
+/// where two things are true at once (a transaction is open across a commit, a
+/// crash lands between a commit and the checkpoint that would have made it
+/// safe) and a uniform draw reaches those about as often as it reaches anything
 /// else, which is to say rarely.
 ///
 /// So the generator is skewed on purpose, and every skew is written down:

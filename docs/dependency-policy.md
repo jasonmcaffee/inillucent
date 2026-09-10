@@ -66,7 +66,7 @@ that quietly implements a piece of the engine".
 | Crate | Category | Reason |
 |---|---|---|
 | `libc` | OS boundary | `fcntl` byte-range locking in `inillucent-vfs`; `getrusage` in `inillucent-compat`'s `procstat.rs`, so the gate can report what each arm's process cost |
-| `windows-sys` | OS boundary | `LockFileEx`, `GetFileInformationByHandle`, `BCryptGenRandom` in `inillucent-vfs`; `GetProcessMemoryInfo` and `GetProcessTimes` in `inillucent-compat`'s `procstat.rs` |
+| `windows-sys` | OS boundary | `LockFileEx`, `GetFileInformationByHandle`, `BCryptGenRandom` in `inillucent-vfs`; `GetProcessMemoryInfo` and `GetProcessTimes` in `inillucent-compat`'s `procstat.rs`; SChannel and the certificate chain engine in `inillucent-remote`'s `tls` |
 
 Nothing else was added. SHA-256, SHA3-256, CRC-32, the WAL checksum, the varint
 codec, the deterministic generator, the TOML subset reader and the JSON the
@@ -107,9 +107,79 @@ in that file's own tests, because a hash that is subtly wrong does not produce a
 wrong answer - it produces "password authentication failed", which reads as the
 operator's mistake.
 
-The limits that choice accepts: no TLS
-(`sslmode=require` is refused by name), and no `caching_sha2_password` **full**
+The limit that choice still accepts is `caching_sha2_password` **full**
 authentication, whose RSA exchange is refused with the two ways around it.
+
+### TLS, and why it is not a crate either (task-1894)
+
+The first version of this had **no TLS**: `sslmode=require` was refused by name
+and a migration to a server across a network sent its password and then every
+row in the clear. The review that found it is `task-1892`, and the fix had three
+candidates.
+
+`rustls` is the obvious crate and it was rejected on the argument two paragraphs
+up: it is a large production dependency with a cryptographic backend of its own,
+in a crate `inillucent-cli` links. Writing TLS here is not a real option, and
+saying so is the point - a first-party X.509 chain builder and record layer
+would be a far larger security surface than the plaintext migration it replaced.
+
+What is left is the row already on this list. Every platform this ships on has
+an audited TLS implementation and a trust store somebody else keeps current, and
+reaching one is an FFI call:
+
+- **Windows** uses SChannel through SSPI. The chain and the host name are
+  checked by Windows, with the same code every other program on the machine
+  uses. `sslrootcert=` switches to a chain engine whose `hExclusiveRoot` is the
+  named authority, which is *stricter* than the machine store rather than
+  weaker - nothing else is trusted for that connection.
+- **Unix** uses the system OpenSSL, loaded with `dlopen` at run time rather than
+  linked. Linking it would make a machine without the development package unable
+  to build the engine; loading it moves "is TLS available" to run time, where the
+  answer actually lives. `SSL_set1_host` does the host name check, and a library
+  too old to have it is refused rather than used without it.
+
+No cryptography is implemented in this workspace by either. `inillucent-remote`
+carries `deny(unsafe_code)` rather than `forbid` for exactly the two files that
+make those calls, and every block in them has a SAFETY note that
+`crates/inillucent-compat/tests/policy.rs` checks.
+
+**A machine with no usable TLS refuses and says so.** It does not fall back:
+falling back is the defect this replaced, and a fallback nobody sees is worse
+than the refusal.
+
+## The edges into the retired engine, and the ratchet on them
+
+The rearchitecture (task-1816) replaced `inillucent-storage`, `inillucent-transaction`
+and `inillucent-vm` with `inillucent-pool`, `inillucent-tree`, `inillucent-wal`,
+`inillucent-txn` and `inillucent-exec`. Both sets are in the workspace until the
+old engine is deleted, and `docs/roadmap.md` has recorded that as unfinished work
+for several tickets — which is the problem. Prose does not stop a new edge: the
+way a crate acquires one is that somebody adds a line to a manifest because the
+type they wanted lives there, and nothing says no.
+
+So the crates that may still name a retired one are **listed by name in a test**
+(`policy.rs::no_new_crate_reaches_into_the_retired_engine`). A crate that is not
+on the list fails the moment it grows the edge, and the list only ever gets
+shorter: removing a name is the work, adding one is a decision somebody has to
+argue for in a review.
+
+| crate | why it is still there | what removing it needs |
+|---|---|---|
+| `inillucent-catalog` | its old-engine schema reader, which the new engine's `paged` module already replaces | deleting the arm, once nothing calls it |
+| `inillucent-sqlite-reader` | it reads **SQLite's** file format and uses the old pager *as* the format reader | a second b-tree reader, not a dependency edit |
+| `inillucent-session`, `inillucent-legacy` | they **are** the old engine's connection and facade | they go when it does |
+| `inillucent-capi` | the `sqlite3_*` ABI over that facade | it goes with them, which `layering.toml` already records |
+| `inillucent-compat` | test-only; comparing the two engines is what it is for | nothing — a test-only crate cannot put an edge in a shipped binary |
+
+**task-1894 removed `inillucent-ext`** from that list, which was the only entry
+the *new* engine links — and therefore the only one that put two storage models
+in a shipped binary rather than merely in the workspace. Its
+`inillucent-transaction` edge was never used by a line of code. Its
+`inillucent-storage` edge was two things: a pager arm inside every method of
+`ShadowTables`, and an `impl Host for Pager`. Both moved down into
+`inillucent-vm`, behind `inillucent_sql::vtab::ShadowStore` — the trait the new
+engine already implemented — so both engines now reach a module's shadow rows
+the same way and only the retired crates name the retired storage.
 
 ## The clean-reference workflow
 

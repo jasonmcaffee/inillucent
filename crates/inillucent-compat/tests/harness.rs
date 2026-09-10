@@ -174,11 +174,7 @@ fn the_registers_match_the_engine() {
                     path.display()
                 )
             })
-            .replace(
-                "
-", "
-",
-            );
+            .replace("\r\n", "\n");
         assert_eq!(
             found,
             expected,
@@ -405,11 +401,7 @@ fn the_production_dependency_tree_holds_no_engine() {
         // file; it is first-party code and is exactly what the task-1816 triage
         // says survives that crate's deletion. Skipping the lines that name a
         // declared crate keeps the rule pointed at what it is for.
-        let declared: Vec<&str> = contract
-            .crates
-            .iter()
-            .map(|(name, _)| name.as_str())
-            .collect();
+        let declared: Vec<&str> = contract.crates.keys().map(|name| name.as_str()).collect();
         let tree: String = String::from_utf8_lossy(&output.stdout)
             .to_ascii_lowercase()
             .lines()
