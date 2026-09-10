@@ -1,72 +1,63 @@
-# task-1895 — macOS and Linux builds, signed, driven from the Windows box
+# task-1895 — macOS and Linux releases, signed, across two machines
 
 ## Introduction
 
 inillucent ships one artifact today: `inillucent-0.1.0-x86_64-pc-windows-msvc.zip`, served from
 `https://inillucent.com/downloads/`. The download section of the site lists macOS as *"Not posted
-yet"* and has no Linux entry at all. `packaging/release.sh` already accepts `--target` and
-`packaging/macos/` already carries a `.pkg` recipe, but neither has ever run, because there is no Mac
-and no Linux machine here. This ticket asks for macOS and Linux artifacts that are signed and
-trusted, produced from the Windows machine that holds the Apple Developer account and its API key.
+yet"* and has no Linux entry at all. `packaging/install.sh`, the `curl | sh` line printed in
+`README.md`, downloaded from the GitHub releases of a repository that is private, so it failed for
+every reader on both platforms.
 
-Two findings shape the design, and both were measured on this box rather than assumed.
+The work splits along one line: **what only a Mac can do, and everything else.**
 
-1. **Every Apple signing step runs on Windows.** `rcodesign` builds universal binaries, signs them
-   with a Developer ID certificate under the hardened runtime, obtains a genuine Apple timestamp, and
-   submits to the Notary API. The Apple private key never has to leave this machine, which is what
-   the ticket asked for.
-2. **Linux needs nothing but this box.** `cargo-zigbuild` cross-compiles the full release profile to
-   `x86_64` and `aarch64` Linux with a chosen glibc floor of 2.28, in about 95 seconds per target,
-   and the result runs.
+- **The MacBook** builds, signs and notarises macOS. Apple's linker, `codesign`, `pkgbuild`,
+  `notarytool` and `stapler` run nowhere else, the Developer ID certificate belongs in its keychain,
+  and a Mach-O can only be *run* there.
+- **The Windows box** builds Windows and both Linux architectures, writes the `.deb` and the `.rpm`,
+  signs the checksums, verifies what the Mac sent, and publishes inillucent.com.
 
-macOS *compilation* is the one open choice. It also works here — the whole release profile
-cross-compiles to both Apple architectures in about 96 seconds with no Apple SDK — but two defects in
-zig's Mach-O linker sit on that path, one of which cannot be observed from a machine that cannot run
-a Mach-O. This document recommends compiling macOS on a GitHub Actions `macos-26` runner, which is
-already needed for the release smoke test, and keeping the local cross build as the measured
-alternative.
+Nothing is billed. Cross-compiling Linux takes about 95 seconds a target on the Windows box, the
+Linux packages are written by one Go executable with no `dpkg` and no container, and the macOS half
+is one command on hardware that is already owned. The Apple Developer Program membership at $99 a
+year is the only money in the design, and it is what issues the Developer ID certificate; there is no
+way to sign for macOS without it.
 
 ## Goals and non-goals
 
-**Goals.** Each one is checkable.
+**Goals.** Each is checkable, and each has a script that checks it.
 
 | # | Goal | How it is checked |
 |---|---|---|
-| G1 | One command on the Windows box produces the `x86_64-apple-darwin`, `aarch64-apple-darwin`, `x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` archives, with the layout and the `SHA256SUMS` the Windows archive already uses | `dist/` holds every archive and one `SHA256SUMS` |
-| G2 | The macOS archive carries one universal binary per program, both architectures | `rcodesign print-signature-info` lists `macho-index:0` and `macho-index:1` for each file |
-| G3 | Every macOS executable and `libinillucent_driver_capi.dylib` is signed with a Developer ID Application certificate, with the hardened runtime and a secure timestamp | `rcodesign print-signature-info` shows `chains_to_apple_root_ca: true`, `CodeSignatureFlags(RUNTIME)` and a `time_stamp_token` |
-| G4 | The macOS download is notarised, so a browser download from inillucent.com runs without a Gatekeeper refusal | `rcodesign notary-log` reports `status: Accepted`; `spctl -a -vvv -t exec` on a Mac says `source=Notarized Developer ID` |
-| G5 | The Linux binaries start on every distribution released since 2018 | the highest `GLIBC_` symbol version required is 2.28, read with `objdump -T` |
-| G6 | Linux artifacts can be verified by a stranger: a detached signature over `SHA256SUMS`, and `.deb` / `.rpm` signed with the project key | `minisign -V` passes; `dpkg-sig --verify` and `rpm -K` pass |
-| G7 | `packaging/install.sh` installs on macOS and Linux while the GitHub repository is private | the script runs end to end against `https://inillucent.com` in a container |
-| G8 | The exact published macOS artifact is executed on real macOS before the site links to it | the verification job runs `create`, `INSERT`, `SELECT` and the MCP tool list against the downloaded archive |
-| G9 | No Apple credential is stored anywhere but this machine | the CI workflows contain no Apple secret; the key lives in the Windows certificate store and the `.p8` in the DPAPI keystore |
+| G1 | One command on the Windows box produces the Windows archive and both Linux archives | `pwsh packaging/release-all.ps1`; `dist/` holds three archives and one `SHA256SUMS` |
+| G2 | The Linux binaries start on every distribution released since 2018 | `tools/release-verify-linux.sh` L1: the highest `GLIBC_` symbol version required is 2.28 |
+| G3 | The Linux archives and packages carry executable programs | L3, and `dpkg-deb -c` showing mode 0755 |
+| G4 | `.deb` and `.rpm` for both architectures, signed with the project's OpenPGP key | `packaging/linux/package-linux.ps1`; `rpm -K` and `dpkg-sig --verify` |
+| G5 | One command on the MacBook produces a universal, signed, notarised macOS release | `packaging/macos/release-macos.sh` |
+| G6 | The macOS artifacts reach the Windows box and are verified before publication | `packaging/fetch-macos-artifacts.ps1`: checksums, then the signature read back out of the Mach-O |
+| G7 | `SHA256SUMS` carries a detached signature a stranger can check | `packaging/sign-sums.ps1`, then `minisign -Vm SHA256SUMS -P …` |
+| G8 | `install.sh` works while the GitHub repository is private | it downloads from `https://inillucent.com/downloads` and reads `VERSION` there |
+| G9 | The exact published macOS artifact is run on a Mac before the site links to it | `packaging/macos/verify-macos.sh` against the staged download |
+| G10 | No credential is stored in the repository, and none is billed | the keychain holds the Developer ID; the OpenPGP and minisign keys are named by environment variable and never written inside the repository |
 
 **Non-goals.**
 
 - Making the `jasonmcaffee/inillucent` repository public. crates.io, `go install` and Packagist all
-  require that; `packaging/PUBLISHING.md` already records the decision.
+  require it; `packaging/PUBLISHING.md` records that decision.
 - A `.dmg`, an MSI, App Store distribution, Flatpak, Snap or AppImage.
-- Windows Authenticode signing. It is a separate purchase and `packaging/windows/README.md` already
+- Windows Authenticode signing. A separate purchase, and `packaging/windows/README.md` already
   records what it would cost.
-- A macOS `.pkg`. Deferred, with the reason under *Alternatives considered*.
 - Changing the archive layout. Same directories, same file names, same `SHA256SUMS`.
 
 ## Problem statement
 
 **Nothing is downloadable except on Windows.** The `get.downloads` array in
-`inillucent-site/src/data/content.ts` has one working entry and one whose `pending` text reads
-*"Not posted yet. Build it with cargo install inillucent-cli."* There is no Linux entry.
+`inillucent-site/src/data/content.ts` has one working entry and one whose `pending` text reads *"Not
+posted yet. Build it with cargo install inillucent-cli."* There is no Linux entry.
 
-**The install script cannot work for anybody.** `packaging/install.sh` builds its download URL from
-`https://github.com/jasonmcaffee/inillucent/releases/download/v$version` and resolves the version
+**The install script could not work for anybody.** It built its download URL from
+`https://github.com/jasonmcaffee/inillucent/releases/download/v$version` and resolved the version
 through `https://api.github.com/repos/.../releases/latest`. The repository is private, so an
-unauthenticated request answers 404. The `curl | sh` line printed in `README.md` fails for every
-reader, on both macOS and Linux.
-
-**The macOS packaging assumes a Mac.** `packaging/macos/build-pkg.sh` calls `lipo`, `pkgbuild` and
-`productbuild`; `packaging/macos/notarize.sh` calls `codesign` and `xcrun notarytool`. All five are
-macOS programs, and `packaging/macos/README.md` says so in its first paragraph.
+unauthenticated request answers 404.
 
 **"Trusted" means two different things, and only one of them is Apple's.**
 
@@ -74,15 +65,61 @@ macOS programs, and `packaging/macos/README.md` says so in its first paragraph.
   code, and refuses signed code that has not been notarised. Signing alone does not clear it. A
   notarisation ticket can be stapled to a `.dmg`, a `.pkg` or a `.app` bundle, but **not to a bare
   Mach-O executable**, so an unstapled binary needs Apple's servers reachable at first run. A file
-  fetched with `curl` is not quarantined at all, which is why the `curl | sh` path would work even
+  fetched with `curl` is not quarantined at all, which is why the `curl | sh` path works even
   unsigned.
-- **Linux.** There is no Gatekeeper and nothing to notarise. Trust is the HTTPS origin plus a
-  signature a person can check, and for `.deb` and `.rpm` it is a GPG signature the package manager
-  checks.
+- **Linux.** There is no Gatekeeper and nothing to notarise. Trust is the HTTPS origin, a signature a
+  person can check, and for `.deb` and `.rpm` an OpenPGP signature the package manager checks.
+
+## Architectural overview
+
+```mermaid
+flowchart TD
+    subgraph MAC["MacBook Pro M4 - everything Apple"]
+        MBUILD["cargo build, both Apple architectures"]
+        LIPO["lipo - one universal file per program"]
+        CS["codesign - Developer ID, hardened runtime, timestamp"]
+        PKG["pkgbuild + productsign - the .pkg"]
+        NOT["notarytool submit --wait, then stapler"]
+        SMOKE1["verify-macos.sh against the local archive"]
+        MBUILD --> LIPO --> CS --> PKG --> NOT --> SMOKE1
+    end
+    GH["GitHub release on the private repo
+    transport only, four files"]
+    SMOKE1 --> GH
+    subgraph WIN["Windows box - everything else, and the site"]
+        ZB["cargo-zigbuild - Linux x86_64 and aarch64, glibc floor 2.28"]
+        NATIVE["cargo - x86_64-pc-windows-msvc"]
+        ZB --> TGZ["tar.gz archives"]
+        NATIVE --> ZIPW["zip archive"]
+        ZB --> NF["nfpm - .deb and .rpm, OpenPGP signed"]
+        FETCH["fetch-macos-artifacts.ps1
+        checksums, then rcodesign reads the signature back"]
+        TGZ --> SUMS["SHA256SUMS"]
+        ZIPW --> SUMS
+        NF --> SUMS
+        FETCH --> SUMS
+        SUMS --> MINI["sign-sums.ps1 - minisign detached signature"]
+        MINI --> STAGE["publish-site.ps1 -Stage
+        files on inillucent.com, nothing linked yet"]
+    end
+    GH --> FETCH
+    STAGE --> GATE["verify-macos.sh on a Mac, against the published bytes"]
+    GATE -->|"pass"| LINK["publish-site.ps1 -Link
+    content.ts download entries + the Homebrew tap"]
+```
+
+Three properties of that picture are the design.
+
+1. **Each machine does only what it alone can do.** The Mac is not asked to publish a website and the
+   PC is not asked to sign for Apple.
+2. **The Developer ID certificate never leaves the MacBook's keychain**, and nothing in the release
+   passes a secret on a command line.
+3. **Publication is two steps with a Mac between them.** The artifacts are reachable before anything
+   links to them, so the gate runs against the bytes a reader will get.
 
 ## What was measured
 
-Everything below ran on this Windows box on 2026-09-09, against a clean `origin/main` tree extracted
+Everything below ran on the Windows box on 2026-09-09, against a clean `origin/main` tree extracted
 with `git archive`, so that another ticket's uncommitted work in the checkout could not affect the
 result. Times are for a full `--release --locked` build of the release profile, which is fat LTO with
 one codegen unit.
@@ -94,392 +131,257 @@ one codegen unit.
 | `aarch64-apple-darwin` | same, no Apple SDK | 1 m 35 s | four Mach-O programs and `libinillucent_driver_capi.dylib` |
 | `x86_64-apple-darwin` | same, no Apple SDK | 1 m 38 s | four Mach-O programs and the dylib |
 
-### Linux
+### Linux, which is finished
 
-**The binaries run, and their floor is glibc 2.28.** `objdump -T` on the x86-64 `inillucent` reports a
-highest required symbol version of `GLIBC_2.28`, and `ldd` lists only `libm`, `libpthread`, `libc`,
-`libdl` and the loader. Copied into WSL and driven end to end:
+`tools/release-verify-linux.sh` passes on both architectures, run from WSL against the archives
+`packaging/release-all.ps1` produced:
 
 ```
-inillucent 0.1.0
-created /tmp/probe.rdb
-ok. 0 rows changed.
-ok. 1 row changed.
-id  body
---  ------------------------
-1   hello from a cross build
+== x86_64-unknown-linux-gnu
+  ok    L1 needs at most glibc 2.28 (highest reference is 2.28)
+  ok    L2 links only the C library
+  ok    L3 the programs are executable
+  ok    L4 create, insert and select returned the row
+  ok    L5 inillucent-mcp listed its tools
+== aarch64-unknown-linux-gnu
+  ok    L1 needs at most glibc 2.28 (highest reference is 2.28)
+  ok    L2 links only the C library
+  ok    L3 the programs are executable
 ```
 
 glibc 2.28 covers Debian 10, Ubuntu 18.10, RHEL 8, Amazon Linux 2023 and everything newer. The
-aarch64 build links against the same floor; it was not executed here, because this box cannot run an
-aarch64 ELF.
+aarch64 archive was not executed, because that box cannot run an aarch64 ELF; L1 to L3 are what can
+be checked there and they pass.
 
-**Building in WSL instead would be a mistake.** WSL here is Ubuntu 24.04 with glibc 2.39. A binary
-linked there refuses to start on Debian 12, Ubuntu 22.04 or RHEL 9, all of which are current. The
+**Building in WSL instead would be a mistake.** WSL there is Ubuntu 24.04 with glibc 2.39. A binary
+linked in it refuses to start on Debian 12, Ubuntu 22.04 or RHEL 9, all of which are current. The
 floor has to be chosen deliberately, and cargo-zigbuild is what makes it choosable: it is the `.2.28`
 suffix on the target triple.
 
-**nfpm 2.47.0 builds Linux packages on Windows.** A `.deb` of 15,153,348 bytes and an `.rpm` of
-15,020,162 bytes were produced from the cross-built binaries by one Go executable, with no `dpkg` and
-no `rpmbuild`. The `.deb` was extracted inside WSL and `inillucent` ran straight out of its payload
-against a real database.
+**nfpm 2.47.0 writes both package formats on Windows**, with no `dpkg` and no `rpmbuild`. The `.deb`
+was extracted inside WSL and `inillucent` ran out of its payload.
 
-**One trap, found the hard way.** NTFS carries no execute bit, so nfpm's first `.deb` installed every
-program as `0664` and the package was inert: `Permission denied`. Every `contents` entry needs an
-explicit mode.
+**Two traps, both found by running the thing rather than by reading about it.**
 
-```yaml
-  - src: .../release/inillucent
-    dst: /usr/bin/inillucent
-    file_info:
-      mode: 0755
-```
-
-The same applies to `tar` on Windows, so the release script sets the mode when it stages rather than
-when it packages.
-
-### macOS
-
-**The cross-built binaries are real Mach-O and reference no Apple SDK.** `rcodesign extract
-macho-target` reads them back as `Platform: macOS, Minimum OS: 13.0.0`. zig carries its own libSystem
-stub files, which is also why the Xcode licence restriction that normally blocks cross-compiling to
-macOS does not arise here. Nothing in the workspace links an Apple framework; the only crate with a C
-dependency is `inillucent-bench`, which links PostgreSQL and is excluded from the release build.
-
-**rcodesign 0.29.0 does the whole Apple side on Windows.**
-
-- `macho-universal-create` replaced `lipo`: from a 25,307,360 byte arm64 file and a 26,605,552 byte
-  x86-64 file it wrote a 51,935,216 byte universal binary. Run over inillucent's own output it
-  produced a 14,086,272 byte universal `inillucent`.
-- `sign` signed a universal binary with the hardened runtime and reached Apple's timestamp authority
-  from this network. The embedded token is genuine: `CN=Timestamp Signer RNO1, O=Apple Inc., C=US`,
-  issued by `Apple Timestamp Certification Authority`.
-- `sign --for-notarization` **refused** a self-signed certificate before writing anything, naming the
-  reason: *"--for-notarization requires use of a Developer ID signing certificate"*. The check that
-  would otherwise fail at the notary happens locally, in about a second.
-
-**Two defects sit on the zig macOS path. One has a fix; the other cannot be observed from here.**
-
-*First:* an x86-64 Mach-O linked by zig has no `LC_CODE_SIGNATURE` load command and no room in its
-header to add one, so signing fails outright:
+*NTFS has no execute bit.* The first `.deb` built there installed every program at 0664 and did
+nothing at all when run: `Permission denied`. Every nfpm `contents` entry now carries an explicit
+`file_info.mode: 0755`, and the `.tar.gz` is written in two passes for the same reason — everything at
+0644 with directories traversable, then `bin/` and `lib/` appended at 0755 — because tar reads the
+mode from a filesystem that does not have one:
 
 ```
-Error: insufficient room to write code signature load command
+drwxr-xr-x 0/0    inillucent-0.1.0-x86_64-unknown-linux-gnu/
+-rw-r--r-- 0/0    inillucent-0.1.0-x86_64-unknown-linux-gnu/README.md
+-rwxr-xr-x 0/0    inillucent-0.1.0-x86_64-unknown-linux-gnu/bin/inillucent
+-rwxr-xr-x 0/0    inillucent-0.1.0-x86_64-unknown-linux-gnu/lib/libinillucent_driver_capi.so
 ```
 
-The arm64 binary from the same build signs without complaint, because Apple silicon requires a
-signature and zig's linker emits an ad-hoc one. The fix is a linker flag that reserves header space,
-and it was verified here: rebuilt with
+*Git's tar is an MSYS program.* Handed a Windows path it reads each backslash as an escape, so
+`...\66a6...` arrives as `...6a6...` and the directory does not exist. Every path passed to it is
+converted to forward slashes first, with `--force-local` so that `C:` is not read as a remote host.
 
-```
-RUSTFLAGS="-C link-arg=-Wl,-headerpad_max_install_names"
-```
+### macOS, and why the MacBook does it
 
-the x86-64 binary signs. Whichever way the macOS build is produced, that flag belongs in the release
-script. With it in place the whole chain ran here: all four programs and the dylib were rebuilt for
-both Apple architectures, joined into universal binaries and signed, and
-`rcodesign print-signature-info` reports `CodeSignatureFlags(RUNTIME)` and an Apple timestamp token on
-**both** `macho-index:0` and `macho-index:1` of every one of the five.
+**Signing a Mach-O from Windows works**, and the measurements are kept here because they are what a
+future reader will want if the Mac is ever unavailable. rcodesign 0.29.0 on the Windows box built a
+universal binary out of the two Apple builds, signed it with the hardened runtime, and embedded a
+genuine Apple timestamp token (`CN=Timestamp Signer RNO1, O=Apple Inc.`). `sign --for-notarization`
+refused a self-signed certificate before writing anything, naming the reason.
 
-A detail that came out of that run and belongs in the signing script: the two slices came back with
-**different signing identifiers** - `inillucent-c76f482a4bb30f2b` on the arm64 slice, which inherits
-the name from the ad-hoc signature zig wrote, and `inillucent` on the x86-64 slice, which rcodesign
-derived from the file name. Passing `--binary-identifier inillucent` makes both slices agree, and it
-was confirmed here.
+Two defects sit on that path and neither applies once the Mac is doing the work.
 
-*Second, and it is the reason for the recommendation below:* **ziglang/zig#23704, "x86_64 MachO is
-corrupted after codesigning", is open.** Instructions in the signed binary are reported to come out
-mangled, the corruption is specific to x86-64, and it reproduces with Apple's own `codesign` as well
-as with third party signers, so it is a linker defect rather than a signing one. The report is
-against a 0.15 development build and involves linked static objects, so it may well not touch a pure
-Rust binary. **It cannot be ruled out from a machine that cannot execute a Mach-O**, and the failure
-it describes is exactly the kind that reaches a user rather than a build log.
+1. A zig-linked x86-64 Mach-O has no `LC_CODE_SIGNATURE` and no room to add one, so signing fails
+   with `insufficient room to write code signature load command`. The fix, verified there, is
+   `-C link-arg=-Wl,-headerpad_max_install_names`.
+2. **ziglang/zig#23704 is open**: an x86-64 Mach-O linked by zig is reported corrupt *after*
+   codesigning, with Apple's own `codesign` as well as with third party signers. It is a linker
+   defect, and no machine that cannot execute a Mach-O can rule it out.
 
-**The one thing that cannot be done here at all.** No Windows machine can execute a Mach-O.
-Everything above proves the artifacts are *well formed*; none of it proves they *run*. That gap is why
-G8 exists and why it is a release gate rather than a nicety.
+Both disappear when Apple's linker produces the binary. That is the argument for the MacBook building
+macOS, and it is a stronger one than convenience.
 
-## Architectural overview
-
-```mermaid
-flowchart TD
-    subgraph GH["GitHub Actions - no Apple secrets"]
-        BUILD["macos-26 runner: cargo build for both Apple architectures"]
-        VERIFY["macos-26 runner: download the published archive, spctl, codesign --verify, run the database"]
-    end
-    subgraph WIN["This Windows box - all credentials, all signing"]
-        SRC["inillucent workspace"]
-        ZB["cargo-zigbuild + zig: Linux x86_64 and aarch64, glibc floor 2.28"]
-        SRC --> ZB
-        SRC -->|"git push"| BUILD
-        BUILD -->|"gh run download"| UNI["rcodesign macho-universal-create"]
-        UNI --> SIGN["rcodesign sign: Developer ID Application, hardened runtime, Apple timestamp"]
-        SIGN --> ZIP["inillucent-VERSION-universal-apple-darwin.zip"]
-        ZIP --> NOT["rcodesign notary-submit --wait"]
-        ZB --> TGZ["tar.gz archives"]
-        ZB --> NF["nfpm: .deb and .rpm, GPG signed"]
-        TGZ --> SUMS["SHA256SUMS + SHA256SUMS.minisig"]
-        NOT --> SUMS
-        NF --> SUMS
-        KEYS["Windows certificate store: Developer ID key
-        DPAPI keystore: App Store Connect .p8, minisign key, GPG key"]
-        KEYS --> SIGN
-        KEYS --> NOT
-    end
-    subgraph APPLE["Apple"]
-        NOTARY["Notary API"]
-        TSA["timestamp.apple.com"]
-    end
-    NOT <--> NOTARY
-    SIGN --> TSA
-    SUMS --> SITE["inillucent.com/downloads"]
-    SITE --> VERIFY
-    VERIFY -->|"pass"| LINK["content.ts download entries + the Homebrew tap"]
-```
-
-Three properties of that picture are the design.
-
-1. **No Apple credential ever leaves the Windows box.** The GitHub jobs receive source and produce
-   unsigned binaries; the verification job downloads a finished public artifact. Neither holds a
-   secret, so a compromise of the GitHub account cannot sign anything as inillucent.
-2. **The Mac is used for the two things only a Mac can do**: producing Mach-O with Apple's own linker,
-   and running the result.
-3. **Linux never leaves this box**, from compile to signed package.
+The Windows box keeps rcodesign for a single job: **reading a signature back**.
+`packaging/fetch-macos-artifacts.ps1` asserts, on every program the Mac sends, that it chains to an
+Apple root, that the certificate is a Developer ID Application certificate, that the hardened runtime
+flag is set, that a timestamp token is present, and that both architecture slices are there. A file
+that arrives unsigned or wrongly signed is rejected there rather than by a reader's Gatekeeper.
 
 ## Components and interfaces
 
-### Linux build: cargo-zigbuild
+### On the Windows box
 
-| | |
+| file | what it does |
 |---|---|
-| tools | `cargo-zigbuild` 0.23.4, `zig` 0.15.2 |
-| where they live | `tools/cross/`, fetched by a script that checks a pinned SHA-256 |
-| interface | `cargo zigbuild --release --locked --target <triple> -p inillucent-cli -p inillucent-migrate -p inillucent-driver-capi` |
-| the glibc floor | the `.2.28` suffix, e.g. `x86_64-unknown-linux-gnu.2.28`. It is a cargo-zigbuild feature, not a rustc one |
-| rust targets | `rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu` |
+| `tools/cross/fetch-toolchain.ps1` | fetches zig 0.15.2, cargo-zigbuild 0.23.4, rcodesign 0.29.0, nfpm 2.47.0 and minisign 0.12, each checked against a pinned SHA-256. `tools/cross/bin/` is ignored by git |
+| `packaging/stage-layout.ps1` | the one description of what an archive contains, dot-sourced rather than duplicated. Also the two-pass tar and the `SHA256SUMS` writer |
+| `packaging/release-all.ps1` | builds `x86_64-pc-windows-msvc` natively and the two Linux triples through cargo-zigbuild, then stages and archives each |
+| `packaging/linux/nfpm.template.yaml` | the `.deb` and `.rpm` metadata, with an explicit mode on every entry |
+| `packaging/linux/package-linux.ps1` | fills that template per architecture and runs nfpm. The OpenPGP key is exported from GnuPG to a temporary file for the length of the run and deleted in a `finally`, because nfpm signs from a file rather than through an agent |
+| `packaging/fetch-macos-artifacts.ps1` | collects the four macOS files from the GitHub release, or from a directory, and verifies them |
+| `packaging/sign-sums.ps1` | the minisign detached signature over `SHA256SUMS` |
+| `packaging/publish-site.ps1` | `-Stage` copies the artifacts, `SHA256SUMS`, its signature, the public key, `VERSION`, the two install scripts and `verify-macos.sh` into the site's `public/downloads`. `-Link` rewrites the download entries |
+| `packaging/site/update-downloads.mjs` | the one file that knows how the site's data file is shaped |
+| `tools/release-verify-linux.sh` | the L checks, from WSL or any Linux machine |
 
-`packaging/release.sh` keeps its shape; a new `packaging/release-all.ps1` calls it once per target and
-stages `dist/`.
+### On the MacBook
 
-### macOS build: a GitHub Actions macOS runner
+| file | what it does |
+|---|---|
+| `packaging/macos/release-macos.sh` | the whole macOS release: both architectures, `lipo`, `codesign`, the `.tar.gz` and the `.zip`, the `.pkg` built from the binaries it just signed, notarisation of both containers, `stapler` on the `.pkg`, the smoke test, and the upload |
+| `packaging/macos/verify-macos.sh` | the release gate. Runs on any Mac, needs nothing installed, and works against a local archive or the published one |
+| `packaging/macos/build-pkg.sh`, `notarize.sh` | the older `.pkg`-only path, left working and marked as superseded in the README |
 
-`.github/workflows/build-macos.yml`, triggered by hand with a version input, on `macos-26` (Apple
-silicon, and Xcode carries both SDKs so one runner builds both architectures):
+### Why three macOS artifacts
 
-```yaml
-- run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
-- run: cargo build --release --locked --target aarch64-apple-darwin -p inillucent-cli -p inillucent-migrate -p inillucent-driver-capi
-- run: cargo build --release --locked --target x86_64-apple-darwin  -p inillucent-cli -p inillucent-migrate -p inillucent-driver-capi
-- uses: actions/upload-artifact@v4
-```
-
-It holds no secrets. The Windows box collects the output with `gh run download`, which needs
-`gh auth login` once on this machine.
-
-### Signing and notarisation: rcodesign, on Windows
-
-| command | what it replaces | used for |
+| artifact | who fetches it | why it exists |
 |---|---|---|
-| `macho-universal-create` | `lipo` | one universal file per program |
-| `sign` | `codesign` | Developer ID Application signature, `--code-signature-flags runtime`, `--binary-identifier <program name>`, `--for-notarization`, Apple timestamp |
-| `notary-submit --wait` | `xcrun notarytool submit --wait` | the notarisation round trip |
-| `staple` | `xcrun stapler` | only if a `.pkg` is added later; a bare Mach-O cannot be stapled |
-| `print-signature-info` | `codesign -dv --verbose=4` | the assertions in the test plan |
+| `.tar.gz` | `install.sh`, Homebrew | the layout every other platform uses, and the only one that preserves modes |
+| `.zip` | Apple's notary, and a browser | the notary accepts `.zip`, `.pkg` and `.dmg`, and does not accept `.tar.gz` |
+| `.pkg` | somebody who would rather double-click | the only artifact that can carry a **stapled** ticket, so the only one that installs with Apple unreachable |
 
-Pin `apple-codesign` at 0.29.0 and check the download's SHA-256. The project is maintained (commits
-through August 2026) but 0.29.0 is its last tagged release, from November 2024. If a Notary API change
-ever breaks it, `cargo install --git https://github.com/indygreg/apple-platform-rs apple-codesign` is
-one escape hatch, and signing on the macOS runner with Apple's own `notarytool` is the other. The
-second one costs the property that keeps the key at home, so it is a fallback rather than a plan.
-
-### Linux packages: nfpm
-
-`nfpm` 2.47.0 is one Go executable. It writes `.deb`, `.rpm` and `.apk` on Windows with no `dpkg` and
-no `rpmbuild`, and signs `.deb` and `.rpm` with a passphrase-protected GPG key, the passphrase coming
-from `NFPM_DEB_PASSPHRASE` / `NFPM_RPM_PASSPHRASE`. `packaging/linux/nfpm.yaml` holds the metadata,
-and every `contents` entry carries `file_info.mode: 0755`.
-
-### Trust for the plain archives
-
-`SHA256SUMS` already exists and every downloader in `packaging/` already checks it. What is missing is
-a signature over `SHA256SUMS` itself, so the checksum file cannot be swapped along with the archive.
-Use **minisign**: one short public key that fits in the site's download section, one
-`SHA256SUMS.minisig`, and a verify command a reader can run without owning a keyring. The GPG key
-nfpm uses is separate, because package managers want OpenPGP.
-
-### install.sh
-
-Two changes:
-
-- a `--base-url` option, defaulting to `https://inillucent.com/downloads`, replacing the GitHub
-  releases URL as the default;
-- version resolution from `https://inillucent.com/downloads/VERSION` rather than the GitHub API.
-
-That takes the private repository out of the install path. The GitHub route stays as an option for
-the day the repository becomes public.
-
-### Homebrew
-
-The tap `jasonmcaffee/homebrew-inillucent` is a small public repository holding only the formula, so
-`jasonmcaffee/inillucent` can stay private. The formula's `url` fields point at
-`https://inillucent.com/downloads/...`, which is public already and serves range requests (verified:
-HTTP 206 on a ranged GET of the Windows archive). `packaging/homebrew/update.sh` fills the checksums
-from `dist/SHA256SUMS` and already refuses to finish while an archive is missing.
-
-### The site
-
-`inillucent-site/src/data/content.ts` gains a macOS entry and two Linux entries, each with its
-`sha256`, and the macOS `pending` note goes away. The static export in `out/` is served by the Rust
-server in `src-rust/`, so a new file under `public/downloads/` is all that is needed.
+Notarising the `.zip` matters even though it cannot be stapled: it registers the cdhash of every
+binary inside it with Apple, which is what Gatekeeper looks up when a program is run out of the
+tarball on a machine that is online.
 
 ## Credentials, and where each one lives
 
 | credential | how it is obtained | where it is kept |
 |---|---|---|
-| **Developer ID Application** certificate | `openssl genrsa -out devid.pem 2048`, then `rcodesign generate-certificate-signing-request --pem-file devid.pem --csr-pem-file devid-csr.pem`, then upload the CSR at developer.apple.com choosing profile type **G2 Sub-CA (Xcode 11.4.1 or later)**, download the `.cer`, and combine with `openssl pkcs12 -export`. **No Mac is involved at any point** | imported into the Windows certificate store with the private key marked non-exportable; rcodesign reads it with `--windows-store-name user` and a fingerprint |
-| **App Store Connect API key** | appstoreconnect.apple.com, Users and Access, Integrations, App Store Connect API. It **must be a Team key with at least the Developer role. An Individual key cannot notarise**, and the failure does not say so. It yields an Issuer ID, a Key ID and one `AuthKey_<KeyID>.p8` that can be downloaded exactly once | `rcodesign encode-app-store-connect-api-key` folds all three into one JSON file, which is sealed in the DPAPI keystore. Never in the repository, never in `.env` |
-| **minisign key** | `minisign -G` | secret key in the DPAPI keystore; public key published in the site's download section and in `README.md` |
-| **GPG key for .deb and .rpm** | `gpg --full-generate-key` | secret key in the DPAPI keystore; public key served at `https://inillucent.com/inillucent.asc` |
-| **Developer ID Installer** certificate | the same route as the Application certificate | only needed if the `.pkg` is built later |
+| **Developer ID Application** and **Developer ID Installer** certificates | enrol in the Apple Developer Program ($99/year), then Xcode → Settings → Accounts → Manage Certificates | the MacBook's login keychain. `release-macos.sh` reads the identity out of it rather than taking it as an argument, because the full string includes the team id and getting it wrong fails late |
+| **notarytool credential** | `xcrun notarytool store-credentials inillucent-notary --apple-id … --team-id … --password …` with an app-specific password from appleid.apple.com | a keychain profile on the MacBook. The profile name is the only thing in this repository, and it is not a secret |
+| **OpenPGP key** for `.deb` and `.rpm` | `gpg --full-generate-key` | GnuPG on the Windows box. `INILLUCENT_GPG_KEY` names it, `INILLUCENT_GPG_PASSPHRASE` unlocks it, and neither is ever a command line argument |
+| **minisign key** for `SHA256SUMS` | `minisign -G` | named by `INILLUCENT_MINISIGN_KEY`; the public half is committed as `packaging/inillucent.pub` and published on the site |
+| **gh** | `gh auth login`, once per machine | used only to carry the macOS artifacts between the two machines |
 
-The Apple Developer Program membership is $99 a year and is the only recurring cost in this design.
+Two keys rather than one, because the audiences differ: `apt` and `dnf` read OpenPGP and nothing
+else, and a reader checking a tarball should not have to own a keyring to do it.
 
 ## Data flows and security
 
 ```mermaid
 sequenceDiagram
+    participant M as MacBook
+    participant K as login keychain
+    participant A as Apple notary
+    participant G as GitHub release
     participant W as Windows box
-    participant WS as Windows certificate store
-    participant B as macos-26 build job
-    participant T as timestamp.apple.com
-    participant N as Apple Notary API
     participant S as inillucent.com
-    participant V as macos-26 verify job
 
-    W->>B: dispatch the build for a tag
-    B-->>W: unsigned Mach-O for both architectures
-    W->>W: macho-universal-create per program
-    W->>WS: sign - the private key stays in the store
-    W->>T: request a timestamp token
-    T-->>W: token, embedded in the CMS signature
-    W->>W: zip the signed archive
-    W->>N: notary-submit --wait, authenticated with the Team API key
-    N-->>W: Accepted, ticket published by Apple
-    W->>S: upload archives, SHA256SUMS, SHA256SUMS.minisig
-    V->>S: download the published macOS archive
-    V->>V: quarantine it, spctl, codesign --verify, then run the database
-    V-->>W: pass or fail, before the site links it
+    M->>M: cargo build x2, lipo
+    M->>K: codesign - the private key stays in the keychain
+    M->>A: notarytool submit --wait, .pkg then .zip
+    A-->>M: Accepted; ticket published, and stapled to the .pkg
+    M->>M: verify-macos.sh against the local archive
+    M->>G: gh release upload, four files
+    W->>G: gh release download
+    W->>W: checksums, then rcodesign reads the signature back
+    W->>W: build Windows and Linux, package, sign SHA256SUMS
+    W->>S: publish-site.ps1 -Stage
+    M->>S: verify-macos.sh --version, against the published bytes
+    M-->>W: pass or fail
+    W->>S: publish-site.ps1 -Link
 ```
 
 ### Risks
 
 | risk | why it matters | what this design does about it |
 |---|---|---|
-| ziglang/zig#23704: an x86-64 Mach-O linked by zig is reported corrupt after codesigning | it would ship a binary that crashes on Intel Macs, and no test on this box can see it | macOS is compiled with Apple's linker on a `macos-26` runner. The zig path stays documented and measured, gated behind G8 |
-| A cross-compiled Mach-O differs subtly from what Apple's toolchain emits | the difference could appear only at run time | G8 runs the exact published artifact on real macOS before the site links to it, whichever way it was compiled |
-| zig's x86-64 Mach-O has no room for a signature load command | signing fails outright, which at least fails loudly | `-C link-arg=-Wl,-headerpad_max_install_names`, verified here. The flag is in the release script for both compile routes |
-| A future dependency needs an Apple framework | zig's libSystem stubs do not cover frameworks, and `SDKROOT` would then be required, which brings Apple's SDK licence restriction with it | the macOS build already uses a real Mac; the dependency policy gates new crates |
-| apple-codesign has cut no release since November 2024 | a Notary API change could strand the release | pin and checksum 0.29.0; the git build and `notarytool` on the runner are both written down above |
-| The `.p8` key is downloadable exactly once | losing it means minting a new one | sealed in the DPAPI keystore at the moment it is created; the scripts read the encoded JSON form |
-| The Developer ID certificate expires, and Apple can revoke it | signatures made before expiry keep working **only because they are timestamped** | `--timestamp-url` is never set to `none`, and the test plan asserts a `time_stamp_token` is present |
-| `SHA256SUMS` substituted along with an archive | it is the file every installer trusts | a minisign signature over `SHA256SUMS`, with the public key on the site and in the readme |
-| A secret reaching the repository or a task comment | the standing rule in this repository | only public keys are ever written to disk here; private material lives in the Windows certificate store and the DPAPI keystore, and the CI workflows hold no Apple secret at all |
-| Notary rejection | the round trip is where a signing mistake surfaces | `sign --for-notarization` runs the same checks locally first, and `notary-log` is captured to `_agent_output/` on failure |
+| An artifact is published that nobody ran | it is the failure a reader finds, not the build | G9: the gate runs against the staged download, and `-Link` is a separate command |
+| The macOS artifacts are tampered with in transit | the transport is a third party | the Mac writes `SHA256SUMS-macos`, and the Windows box checks it *and* reads the Developer ID signature out of every Mach-O. A substituted binary fails both |
+| `SHA256SUMS` is replaced along with an archive | it is the file every installer trusts | a minisign detached signature, with the public key on the site and in `README.md` |
+| A Linux binary is built against too new a glibc | it fails to start, on machines nobody here has | L1 asserts the 2.28 floor on every archive, and the floor is set explicitly by the target triple |
+| A packaged program is not executable | NTFS has no execute bit, and it has already happened once | explicit modes in the tar and in every nfpm entry; L3 asserts it back out of the archive |
+| The Developer ID certificate expires, or Apple revokes it | signatures made before expiry keep working **only because they are timestamped** | `codesign --timestamp` on every binary; `fetch-macos-artifacts.ps1` asserts a timestamp token is present |
+| A secret reaches the repository | the standing rule | only public keys are ever written here. The Apple key is in a keychain, the OpenPGP and minisign keys are named by environment variable, and the exported OpenPGP key is deleted in a `finally` |
+| The site publishes a mixed release | a 0.1.0 Linux archive beside a 0.1.0 Windows archive built from a different commit | one `release-all.ps1` run produces all three, and `publish-site.ps1` names every artifact of one version and warns about each one that is missing |
 
 ## Alternatives considered
 
-| option | cost | verdict |
-|---|---|---|
-| **Compile macOS here with cargo-zigbuild, sign here** | free, 96 s per architecture | **Measured and working, and it is the alternative rather than the plan.** It needs `-headerpad_max_install_names` to be signable at all on x86-64, and zig#23704 sits unresolved on the same architecture. Adopt it if the GitHub dependency ever becomes unwelcome, and only behind a green macOS smoke test |
-| **Compile *and* sign macOS on the runner with `codesign` and `notarytool`** | $0.062 per minute, so well under a dollar per release | Rejected: it puts the Developer ID identity into GitHub Actions secrets, which is the opposite of what this ticket asked for. Retained as the fallback if rcodesign is ever stranded |
-| **rcodesign remote signing** (`sign --remote-signer`; CI initiates, the Windows box joins and holds the key) | free | Rejected for now. It keeps the key at home, but it needs this box awake and joined at the moment CI builds. More moving parts than downloading an artifact and signing it |
-| **Rent a Mac**: Scaleway Mac mini M4 at €0.22/hour with a 24 hour minimum, AWS `mac2.metal` at $0.65/hour with a 24 hour minimum, MacStadium at $119/month | about €5.30 or $16 per 24 hour block | Rejected as routine infrastructure; worth one block if a macOS problem ever needs interactive debugging |
-| **Buy a Mac mini** (M4, from about $599) | one payment | Rejected for this ticket. It is the right answer the day macOS becomes a development target rather than a build target |
-| **osxcross with an extracted Apple SDK** | free | **Rejected on licence grounds.** Apple's Xcode and SDK agreement restricts use of the SDK to Apple-branded hardware. The zig route avoids this by using zig's own libSystem stubs and never touching Apple's SDK |
-| **Build Linux in WSL** | free | Rejected: WSL here is glibc 2.39, so the result refuses to start on Debian 12, Ubuntu 22.04 and RHEL 9 |
-| **Build Linux in a `rockylinux:8` container** | free | A correct answer that reaches the same glibc 2.28 floor, and the fallback if zig ever stops working. Rejected as the default because it needs Docker Desktop running and takes minutes rather than 95 seconds |
-| **Static musl Linux binaries** | free | Rejected as the *default*. musl's allocator is markedly slower than glibc's under exactly the load a database puts on it, and this project publishes a performance number against SQLite. `crates/inillucent-alloc` recycles small blocks but forwards everything above its largest size class to the system allocator, which is where the page buffers land. If a musl artifact is ever added, the scorecard has to be re-run on musl before any number is claimed for it |
-| **A macOS `.pkg` built on Linux with bomutils and xar** (`ape-pkg` packages this) | free | **Deferred.** A `.pkg` is the only macOS artifact that can carry a stapled ticket, so it is the only one that installs with Apple unreachable. But `ape-pkg` has almost no users, and neither bomutils nor xar is in Ubuntu 24.04's repositories. If the `.pkg` is wanted later, building it on the `macos-26` runner with `pkgbuild` from already-signed binaries and signing it here with `rcodesign sign` is less work and less risk |
-| **Publish through GitHub Releases** | free | Blocked while the repository is private: a private repository's release assets are not public. inillucent.com already serves the Windows archive, so it is the distribution point |
+| option | verdict |
+|---|---|
+| **Sign macOS on the Windows box with rcodesign** | Measured and working, and now the fallback rather than the plan. It needs `-headerpad_max_install_names` to be signable at all on x86-64, and zig#23704 sits unresolved on the same architecture. With a MacBook in the room, Apple's own linker and signer are the better answer, and the certificate stays in a keychain instead of a file |
+| **GitHub Actions `macos-26` runners** | Rejected: billed on a private repository at $0.062 a minute, and the MacBook is free |
+| **Codemagic's free tier** (500 minutes a month on an Apple silicon M2) | Rejected now that there is a Mac, and worth remembering as a way to run `verify-macos.sh` if the MacBook is ever away for a while |
+| **macOS in a virtual machine on the Windows box** | Rejected. It would run — `/dev/kvm` is present inside WSL2 and `vmx` is exposed, so nested virtualisation is already on — but it can only ever be an *Intel* Mac, so the arm64 slice that most Mac users run would still never be executed. It is also outside Apple's licence, which permits virtual instances only "on each Apple-branded computer you own", and it cannot be automated: installing QEMU needs a root password and the macOS installer needs a desktop |
+| **osxcross with an extracted Apple SDK** | Rejected on licence grounds. Apple's SDK agreement restricts use to Apple-branded hardware. The zig route avoided this by using zig's own libSystem stubs; the MacBook makes the question moot |
+| **Build Linux in WSL** | Rejected: glibc 2.39 there, so the result refuses to start on Debian 12, Ubuntu 22.04 and RHEL 9 |
+| **Build Linux in a `rockylinux:8` container** | A correct answer that reaches the same floor, and the fallback if zig ever stops working. Rejected as the default because it needs Docker Desktop running and takes minutes rather than 95 seconds |
+| **Static musl Linux binaries** | Rejected as the default. musl's allocator is markedly slower than glibc's under exactly the load a database puts on it, and this project publishes a performance number against SQLite. `crates/inillucent-alloc` recycles small blocks but forwards everything above its largest size class to the system allocator, which is where the page buffers land. If a musl artifact is ever added, the scorecard has to be re-run on musl before any number is claimed for it |
+| **Publish through GitHub Releases** | Blocked while the repository is private: a private repository's release assets are not public. GitHub is used here only to carry four files between two machines Jason owns |
+| **A LAN copy instead of GitHub** | Supported: `fetch-macos-artifacts.ps1 -FromDirectory` takes the files from a folder. Not the default, because it needs both machines on one network and the Windows box runs no SSH server |
 
 ## Testing strategy
 
-All functional, all against artifacts rather than functions. Three scripts and two CI jobs.
+All functional, all against artifacts rather than functions.
 
-### `tools/release-verify-linux.sh` — containers, on this box
+### `tools/release-verify-linux.sh` — WSL, or any Linux machine
 
 | # | Test | Assertion |
 |---|---|---|
 | L1 | `objdump -T` over each ELF | no symbol requires a glibc newer than 2.28 |
-| L2 | `ldd` over each ELF | nothing outside libc, libm, libpthread, libdl and the loader |
-| L3 | Run the archive's `inillucent` in `debian:10`, `rockylinux:8`, `ubuntu:22.04`, `ubuntu:24.04` | `create`, `CREATE TABLE`, `INSERT`, `SELECT` return the inserted row in every one |
-| L4 | `dpkg -i` the `.deb` in `debian:12`, then run `/usr/bin/inillucent` | installs, and the program is mode 0755 |
-| L5 | `rpm -i` the `.rpm` in `rockylinux:9`, then run it | same |
-| L6 | `rpm -K` and `dpkg-sig --verify` after importing the public key | signature valid |
-| L7 | `inillucent-mcp` in each container | returns its tool list |
-| L8 | `minisign -V -p inillucent.pub -m SHA256SUMS` | valid |
-| L9 | `install.sh --base-url https://inillucent.com/downloads` in a bare container | four programs on `PATH`, and a query runs |
+| L2 | `objdump -p` NEEDED entries | nothing outside libc, libm, libdl, libpthread, librt and the loader |
+| L3 | the extracted archive | the four programs are executable |
+| L4 | run it | `create`, `CREATE TABLE`, `INSERT`, `SELECT` return the inserted row |
+| L5 | `inillucent-mcp` | returns its tool list |
+| L6 | a container each of `debian:10`, `rockylinux:8`, `ubuntu:22.04`, `ubuntu:24.04` | starts on all four. Skipped, with a message, when Docker is not running |
 
-### `tools/release-verify-macho.ps1` — on this box, no Mac needed
+### `packaging/fetch-macos-artifacts.ps1` — the Windows box, no Mac needed
 
 | # | Test | Assertion |
 |---|---|---|
-| M1 | `rcodesign print-signature-info` per program | both `macho-index:0` and `macho-index:1` are present, one arm64 and one x86_64 |
-| M2 | `rcodesign extract macho-target` | `Platform: macOS`, and the configured minimum OS |
-| M3 | `rcodesign print-signature-info` | `chains_to_apple_root_ca: true`, `apple_certificate_profile: developer-id-application` |
-| M4 | the same output | `flags: CodeSignatureFlags(RUNTIME)` |
-| M5 | the same output | a `time_stamp_token` issued by `Apple Timestamp Certification Authority` |
-| M6 | `rcodesign notary-log <submission>` | `status: Accepted`, with an empty issues list |
-| M7 | the archive's `SHA256SUMS` line | matches the file uploaded to the site |
+| F1 | every file against `SHA256SUMS-macos` | equal |
+| F2 | `rcodesign print-signature-info` per program | `chains_to_apple_root_ca: true` |
+| F3 | the same output | `apple_certificate_profile: developer-id-application` |
+| F4 | the same output | `CodeSignatureFlags(RUNTIME)` |
+| F5 | the same output | a `time_stamp_token` is present |
+| F6 | the same output | `macho-index:0` and `macho-index:1` are both present |
 
-### `.github/workflows/verify-macos.yml` — `macos-26`, no secrets
+A failure at any of these throws, so nothing that fails can reach `publish-site.ps1`.
 
-It downloads the published artifact from inillucent.com rather than receiving it from another job, so
-what it tests is what a reader gets.
+### `packaging/macos/verify-macos.sh` — the release gate, on any Mac
 
 | # | Test | Assertion |
 |---|---|---|
 | A1 | `shasum -a 256` against the published `SHA256SUMS` | equal |
-| A2 | `xattr -w com.apple.quarantine ...`, then `spctl -a -vvv -t exec inillucent` | `accepted`, `source=Notarized Developer ID` |
-| A3 | `codesign --verify --deep --strict --verbose=2` on each program and the dylib | `valid on disk`, `satisfies its Designated Requirement` |
-| A4 | run `inillucent`: create, `CREATE TABLE`, `INSERT`, `SELECT`, and a vector query | the rows come back |
-| A5 | `inillucent-mcp` | tool list returned |
-| A6 | `arch -x86_64 inillucent --version` under Rosetta on the Apple silicon runner | the x86-64 half runs, which is the assertion zig#23704 would break |
-| A7 | load `libinillucent_driver_capi.dylib` from the Python binding in `packages/python` | a query returns rows through the C ABI |
+| A2 | `xattr -w com.apple.quarantine …`, then `spctl -a -vvv -t exec` | `source=Notarized Developer ID` |
+| A3 | `codesign --verify --strict` on each program and the dylib | valid |
+| A4 | run it | `create`, `CREATE TABLE`, `INSERT`, `SELECT` return the row |
+| A5 | `inillucent-mcp` | returns its tool list |
+| A6 | `arch -x86_64 inillucent --version` under Rosetta | the x86-64 slice runs |
+| A7 | load the dylib through `ctypes` | the C ABI library loads |
 
-A2 and A6 are the two tests that cannot run anywhere but on macOS, and they are the reason the
-release procedure ends on a Mac rather than at the upload.
+A2 and A6 are the two tests that cannot run anywhere but on macOS, and they are why the release ends
+on a Mac rather than at the upload.
 
 ### The release procedure, end to end
 
 ```powershell
-# 1. macOS binaries, on Apple hardware, no secrets in the job.
-gh workflow run build-macos.yml -f version=0.1.0
-gh run download <run-id> --dir dist/macos-unsigned
-
-# 2. Linux, here, in about three minutes for both architectures.
-pwsh packaging/release-all.ps1 -Version 0.1.0 -Targets linux
-
-# 3. Universal binaries, then sign, with the key in the Windows certificate store.
-pwsh packaging/macos/sign-windows.ps1 -Version 0.1.0
-
-# 4. Notarise. Blocks for the round trip, usually a few minutes.
-rcodesign notary-submit --api-key-path $env:ASC_KEY_JSON --wait `
-  dist/inillucent-0.1.0-universal-apple-darwin.zip
-
-# 5. Linux packages and every signature.
-pwsh packaging/linux/package.ps1 -Version 0.1.0
-
-# 6. Everything this box can check, checked.
-pwsh tools/release-verify-macho.ps1 -Version 0.1.0
-bash tools/release-verify-linux.sh --version 0.1.0
-
-# 7. Publish to the site, then let the Mac verify what was published.
-pwsh packaging/publish-site.ps1 -Version 0.1.0
-gh workflow run verify-macos.yml -f version=0.1.0
-
-# 8. Only once that job is green: the download entries in content.ts, and the Homebrew tap.
+# --- Windows box ---------------------------------------------------------
+pwsh tools/cross/fetch-toolchain.ps1          # once
+pwsh packaging/release-all.ps1                # Windows + both Linux architectures
+pwsh packaging/linux/package-linux.ps1        # .deb and .rpm, signed
+bash tools/release-verify-linux.sh --version 0.1.0     # from WSL
 ```
 
-Step 8 comes last for the same reason `packaging/README.md` puts the GitHub release before the
-registries: a download link pointing at an artifact nobody has run is worse than no link at all.
+```sh
+# --- MacBook -------------------------------------------------------------
+./packaging/macos/release-macos.sh --version 0.1.0 --upload
+```
+
+```powershell
+# --- Windows box ---------------------------------------------------------
+pwsh packaging/fetch-macos-artifacts.ps1 -Version 0.1.0
+pwsh packaging/sign-sums.ps1
+pwsh packaging/publish-site.ps1 -Version 0.1.0 -Stage
+```
+
+```sh
+# --- any Mac, against what the site is now serving -----------------------
+curl -fsSL https://inillucent.com/downloads/verify-macos.sh | sh -s -- --version 0.1.0
+```
+
+```powershell
+# --- Windows box, only once that passes ----------------------------------
+pwsh packaging/publish-site.ps1 -Version 0.1.0 -Link
+npm --prefix ../inillucent-site run build     # then redeploy the site
+```

@@ -56,9 +56,9 @@ fill() {
 }
 
 echo "filling in checksums for $version:"
-fill aarch64-apple-darwin REPLACE_WITH_THE_AARCH64_DARWIN_SHA256
-fill x86_64-apple-darwin REPLACE_WITH_THE_X86_64_DARWIN_SHA256
+fill universal-apple-darwin REPLACE_WITH_THE_UNIVERSAL_DARWIN_SHA256
 fill x86_64-unknown-linux-gnu REPLACE_WITH_THE_X86_64_LINUX_SHA256
+fill aarch64-unknown-linux-gnu REPLACE_WITH_THE_AARCH64_LINUX_SHA256
 
 if [ -n "$tap" ]; then
   mkdir -p "$tap/Formula"

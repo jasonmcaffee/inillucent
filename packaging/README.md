@@ -31,6 +31,7 @@ dist/inillucent-<version>-<target>/
     agent-skills/ one page per job, for an AI agent
     README.md  AGENTS.md  DRIVER.md  LICENSE  VERSION
 dist/inillucent-<version>-<target>.zip   (or .tar.gz)
+dist/provenance.json
 dist/SHA256SUMS
 ```
 
@@ -42,34 +43,94 @@ The one exception is `cargo install inillucent-cli`, which builds from source
 because that is what cargo does. It is also the fallback the other five point at
 when a platform has no prebuilt archive.
 
+## What a release refuses, and why (task-1894)
+
+Before task-1894 the release scripts staged whatever was in the working tree and
+labelled it with whatever `--version` said. Four things were possible and none
+of them was detectable from the archive afterwards:
+
+- a release built from a **dirty checkout**, so the commit it records is not the
+  code inside it;
+- `--version 2.0.0` on a tree whose binaries answer `0.1.0`;
+- a **tag pointing at different code** than the commit that was built;
+- an archive **nobody opened** — a release that has only been checked for having
+  produced an archive.
+
+So a release now refuses unless the checkout is clean, `v<version>` exists and
+points at HEAD, the compiler is the one `rust-toolchain.toml` pins, and the
+staged archive **installs into an empty directory and works**. The smoke test
+runs the installed copy rather than `target/release`, because a library found by
+being beside the build passes there and fails on somebody's machine. It:
+
+1. runs `inillucent --version` and checks it answers with the version on the tin;
+2. creates a database, writes, **reopens** and reads — reopened, because a write
+   that never reached the file passes every check that does not close first;
+3. drives `inillucent-mcp` over JSON-RPC through `initialize`, `tools/list` and a
+   `tools/call`, which is the surface an agent is handed and the one nothing
+   else tests;
+4. compiles a C program against the **shipped** header and links the **shipped**
+   library, which is what every binding that is not Rust does with this archive.
+
+Each refusal has a named override — `-AllowDirty`, `-AllowUntagged`,
+`-AllowVersionMismatch`, `-SkipSmoke` — because a refusal nobody can get past on
+a bad afternoon is a refusal somebody deletes. **Every override used is recorded
+in `provenance.json`**, which `SHA256SUMS` covers, so a release made with one
+says so and a downloader who verified the archive has verified the claims about
+it too.
+
+`--smoke-only` builds, stages and smokes without any of the tag or
+clean-checkout requirements. That is what CI runs on every commit, so the
+packaging is checked continuously rather than once at a tag.
+
 ## Cutting a release
 
+Two machines, and each does only what it alone can do. The Windows box builds
+Windows and Linux, packages everything, signs the checksums and publishes the
+site. The MacBook builds, signs and notarises macOS, because Apple's linker,
+`codesign` and `notarytool` run nowhere else.
+
 ```powershell
-# 1. Build the archive for this platform.
-pwsh packaging/release.ps1
-
-# 2. Do the same on a Mac (both architectures) and on Linux, and collect the
-#    archives into one dist/ - every step below reads SHA256SUMS.
-#    ./packaging/release.sh --target aarch64-apple-darwin
-#    ./packaging/release.sh --target x86_64-apple-darwin
-#    ./packaging/release.sh --target x86_64-unknown-linux-gnu
-
-# 3. Tag and publish the GitHub release, with every archive and SHA256SUMS.
-git tag v0.1.0 ; git push --tags
-gh release create v0.1.0 dist/*.zip dist/*.tar.gz dist/SHA256SUMS
-
-# 4. The registries.
-pwsh packaging/cargo-publish.ps1                 # dry run first
-pwsh packaging/cargo-publish.ps1 -Execute
-node packages/npm/build.mjs --publish
-python packages/python/build.py --publish        # once per platform
-./packaging/homebrew/update.sh --tap ../homebrew-inillucent
+# --- on the Windows box -------------------------------------------------
+pwsh tools/cross/fetch-toolchain.ps1        # once: zig, cargo-zigbuild, rcodesign, nfpm, minisign
+pwsh packaging/release-all.ps1              # Windows and both Linux architectures
+pwsh packaging/linux/package-linux.ps1      # the .deb and the .rpm, signed
 ```
 
-Step 3 comes before step 4 and that ordering is not arbitrary: the npm platform
-packages, the Homebrew formula, the Go installer and the PHP installer all fetch
-from the GitHub release, so publishing them first publishes a package that
-cannot install.
+```sh
+# --- on the MacBook -----------------------------------------------------
+./packaging/macos/release-macos.sh --version 0.1.0 --upload
+```
+
+```powershell
+# --- back on the Windows box --------------------------------------------
+pwsh packaging/fetch-macos-artifacts.ps1 -Version 0.1.0   # collect and verify what the Mac made
+pwsh packaging/sign-sums.ps1                              # minisign over SHA256SUMS
+bash tools/release-verify-linux.sh --version 0.1.0        # from WSL
+pwsh packaging/publish-site.ps1 -Version 0.1.0 -Stage     # on the site, not yet linked
+```
+
+Then, on any Mac, against the bytes the site is now serving:
+
+```sh
+curl -fsSL https://inillucent.com/downloads/verify-macos.sh | sh -s -- --version 0.1.0
+```
+
+and only once that passes:
+
+```powershell
+pwsh packaging/publish-site.ps1 -Version 0.1.0 -Link
+```
+
+The order is the point. A download link that points at an artifact nobody has
+run is worse than no link, so the artifacts are staged where the verifier can
+reach them before anything on the site mentions them.
+
+**The distribution point is inillucent.com, not GitHub.** The repository is
+private, and a private repository's release assets are private too: an
+unauthenticated request for one answers 404. GitHub is used for exactly one
+thing here, which is carrying the macOS artifacts from the MacBook to the
+Windows box, and `packaging/fetch-macos-artifacts.ps1 -FromDirectory` skips even
+that when the two machines are on the same network.
 
 ## The two rules every installer here follows
 
@@ -87,14 +148,20 @@ location. The macOS `.pkg` is the exception, because a `.pkg` installs to
 
 ## What is not automated, and why
 
-- **Cross-compiling.** Each platform's archive is built on that platform. Cross
-  builds are possible and are a second thing that can be subtly wrong; a release
-  is cut rarely enough that running the script on three machines is cheaper than
-  maintaining a cross-compilation setup nobody exercises between releases.
-- **Signing.** Both the Windows and macOS stories need a certificate that costs
-  money and belongs to a person. `windows/README.md` and `macos/README.md` each
-  record exactly what theirs takes, so the decision can be made with the numbers
-  in front of whoever makes it.
+- **Running a macOS binary.** Everything else about a macOS build can be checked
+  from Windows - the architectures, the signature, the hardened runtime, the
+  timestamp - but whether it runs cannot be, and neither can whether Gatekeeper
+  accepts it. `packaging/macos/verify-macos.sh` is both of those checks and it is
+  the release gate.
+- **The registry uploads.** Every registry needs an interactive login: a browser,
+  an OAuth redirect, and for PyPI a mandatory second factor. That is deliberate on
+  their part and it is what stops somebody else publishing under your name.
+  `PUBLISHING.md` records where each one stands.
 - **A Linux `manylinux` wheel.** PyPI refuses a plain `linux_x86_64` wheel; the
   Linux one has to be built in a `manylinux` container. `packages/python/build.py`
   says so rather than uploading something that will be rejected after the fact.
+
+What *used* to be here, and is not any more: cross-compiling and signing. Both
+are automated now. `cargo-zigbuild` builds every Linux target on the Windows box
+with a chosen glibc floor of 2.28, and the macOS half is a single command on the
+MacBook.

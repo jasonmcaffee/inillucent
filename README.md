@@ -31,12 +31,12 @@ workloads that are slower than SQLite along with what each one costs.
 
 ```powershell
 # Windows
-irm https://raw.githubusercontent.com/jasonmcaffee/inillucent/main/packaging/install.ps1 | iex
+irm https://inillucent.com/downloads/install.ps1 | iex
 ```
 
 ```sh
 # macOS and Linux
-curl -fsSL https://raw.githubusercontent.com/jasonmcaffee/inillucent/main/packaging/install.sh | sh
+curl -fsSL https://inillucent.com/downloads/install.sh | sh
 ```
 
 Or from the package manager the project already uses:

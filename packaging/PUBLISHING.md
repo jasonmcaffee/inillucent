@@ -20,7 +20,7 @@ as it would go.
 | **npm** | ready; dry run clean, packages packed and installed from their tarballs | **Jason's npm password** (or a granular token). Not the OTP — see below |
 | **PyPI** | ready; wheel built and installed into a clean venv | **an account**, deliberately not created: it would need a password and a 2FA secret Jason would not hold |
 | **crates.io** | ready; `--workspace --dry-run` clean for all 30 crates | a token, **and the decision to make the source public** |
-| **Homebrew** | formula written, checksums scripted | a public repository, the tap, and the macOS/Linux archives |
+| **Homebrew** | formula written, checksums scripted, URLs pointed at inillucent.com | the tap repository, and a release staged on the site |
 | **Go** | verified; `go vet` clean, 5 tests pass | a public repository and one tag |
 | **Packagist** | verified; `composer install` works end to end | a public repository and a Packagist account |
 
@@ -48,34 +48,41 @@ that reach the most people fastest.
 
 ---
 
-## Step 0 — the release, which everything else reads
+## Step 0 - the release, which everything else reads
+
+Two machines. `packaging/README.md` has the full sequence; the short form is:
 
 ```powershell
-pwsh packaging/release.ps1                      # this machine: x86_64-pc-windows-msvc
+# the Windows box: Windows and both Linux architectures, then the packages
+pwsh tools/cross/fetch-toolchain.ps1
+pwsh packaging/release-all.ps1
+pwsh packaging/linux/package-linux.ps1
 ```
-
-and on the MacBook and a Linux box:
 
 ```sh
-./packaging/release.sh --target aarch64-apple-darwin
-./packaging/release.sh --target x86_64-apple-darwin
-./packaging/release.sh --target x86_64-unknown-linux-gnu
+# the MacBook: build, sign, notarise, verify, hand over
+./packaging/macos/release-macos.sh --version 0.1.0 --upload
 ```
 
-Collect every archive and the merged `SHA256SUMS` into one `dist/`, then:
-
-```sh
-git tag v0.1.0 && git push --tags
-gh release create v0.1.0 dist/*.zip dist/*.tar.gz dist/SHA256SUMS \
-  --title "inillucent 0.1.0" --notes-file packaging/release-notes.md
+```powershell
+# the Windows box again: collect, sign the checksums, publish
+pwsh packaging/fetch-macos-artifacts.ps1 -Version 0.1.0
+pwsh packaging/sign-sums.ps1
+pwsh packaging/publish-site.ps1 -Version 0.1.0 -Stage
+#   ... verify on the Mac, then:
+pwsh packaging/publish-site.ps1 -Version 0.1.0 -Link
 ```
 
-**Done here**: `dist/inillucent-0.1.0-x86_64-pc-windows-msvc.zip`, 13.5 MB,
-`SHA256SUMS` written, `install.ps1 -FromDist` tested against it end to end.
-**Still needed**: the three non-Windows archives, which have to be built on
-those platforms, and a GitHub release to hang them on.
+**The distribution point is inillucent.com.** A GitHub release cannot be one
+while the repository is private, because its assets are private too. GitHub
+carries the macOS artifacts from the MacBook to the Windows box and nothing else.
 
----
+**Done here**: every Linux and Windows artifact builds on the Windows box, and
+`tools/release-verify-linux.sh` passes on all of them - glibc floor 2.28, nothing
+linked outside the C library, the modes intact through the archive, and a
+database round trip.
+**Still needed**: the Developer ID certificate, so that the macOS half can be
+signed at all.
 
 ## crates.io
 
