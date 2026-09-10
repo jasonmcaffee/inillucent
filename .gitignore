@@ -94,3 +94,10 @@ __pycache__/
 # checkout. `tests/selection.toml` has a rule for it too, so a change to it
 # selects nothing rather than every suite in the workspace.
 /.unluminous/
+
+# The release toolchain tools/cross/fetch-toolchain.ps1 downloads: zig,
+# cargo-zigbuild, rcodesign, nfpm and minisign. Somebody else's binaries, pinned
+# by SHA-256 in that script and re-fetchable in a minute, so the pin is the
+# source and these are not.
+/tools/cross/bin/
+/tools/cross/cache/

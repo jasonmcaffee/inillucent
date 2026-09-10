@@ -1,46 +1,79 @@
-# macOS packaging — what is here, and what to finish on the MacBook
+# macOS packaging - what runs on the MacBook
 
-Everything in this directory runs. None of it can run on Windows, which is why
-it was written here and is finished there: `pkgbuild`, `productbuild`, `lipo`,
-`codesign` and `notarytool` are macOS-only programs, and notarisation needs an
-Apple Developer account that belongs to a person rather than to a repository.
+The macOS half of a release is built, signed and notarised on the MacBook and
+nowhere else. `lipo`, `codesign`, `pkgbuild`, `productbuild`, `notarytool` and
+`stapler` are macOS programs, the Developer ID certificate lives in the login
+keychain, and only a Mac can run a Mach-O to check that any of it worked.
 
-**There is already a working macOS install and it needs none of this.**
-`packaging/install.sh` downloads the release tarball, verifies its SHA-256 and
-puts the four programs in `~/.local/bin`. It needs no Apple account, no
-certificate, no notarisation and no `sudo`:
+**One command does all of it:**
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/jasonmcaffee/inillucent/main/packaging/install.sh | sh
+./packaging/macos/release-macos.sh --version 0.1.0 --upload
 ```
 
-The `.pkg` below is the convenience for somebody who would rather double-click,
-and `brew install jasonmcaffee/tap/inillucent` is the third road. Do not treat
-the `.pkg` as blocking anything.
+It builds both architectures, `lipo`s them into universal binaries, signs them
+with the hardened runtime and a trusted timestamp, writes the `.tar.gz` that
+install.sh and Homebrew fetch and the `.zip` that Apple's notary accepts, builds
+the `.pkg` from the binaries it just signed, notarises both containers, staples
+the ticket to the `.pkg`, runs the result, and uploads the four files to the
+GitHub release that carries them to the Windows machine.
+
+Then, on the Windows machine:
+
+```powershell
+pwsh packaging/fetch-macos-artifacts.ps1 -Version 0.1.0
+```
+
+which verifies the checksums and reads the signature back out of the binaries
+before letting them near the site. `packaging/README.md` has the whole sequence,
+both machines.
+
+**`verify-macos.sh` is the release gate**, and it is the reason the release ends
+on a Mac rather than at the upload:
+
+```sh
+curl -fsSL https://inillucent.com/downloads/verify-macos.sh | sh -s -- --version 0.1.0
+```
+
+It quarantines the published archive the way a browser would, asks `spctl`
+whether Gatekeeper accepts it, verifies every signature, runs a database round
+trip, asks the MCP server for its tool list, and runs the x86-64 slice under
+Rosetta. Nothing on the site links to a macOS download until that passes.
+
+**The install script needs none of this.** `packaging/install.sh` downloads the
+tarball, checks its SHA-256 and puts the four programs in `~/.local/bin`, with no
+Apple account, no `sudo` and no Gatekeeper prompt, because a file fetched with
+curl carries no quarantine attribute.
+
+```sh
+curl -fsSL https://inillucent.com/downloads/install.sh | sh
+```
+
+The `.pkg` is the convenience for somebody who would rather double-click, and it
+is the only artifact that can carry a stapled ticket, so it is also the only one
+that installs on a machine with no network.
 
 ---
 
-## The four steps, in order
+## The older scripts
 
-### 1. Build a universal binary — no account needed
+`build-pkg.sh` and `notarize.sh` predate `release-macos.sh` and still work. They
+build and notarise the `.pkg` alone, without the archives and without the smoke
+test. Use `release-macos.sh` for a release; reach for these two only when the
+`.pkg` is the only thing being rebuilt.
+
+## The one-time setup
+
+Three things, none of which is in this repository and none of which ever should
+be. `release-macos.sh` refuses to run until they exist and says which is missing.
+
+### 1. The Rust targets
 
 ```sh
-./packaging/macos/build-pkg.sh --version 0.1.0
+rustup target add aarch64-apple-darwin x86_64-apple-darwin
 ```
 
-It runs `packaging/release.sh` twice, once for `aarch64-apple-darwin` and once
-for `x86_64-apple-darwin`, `lipo`s each program and the C ABI dylib into one
-universal file, and stages `dist/pkgroot/usr/local/{bin,lib,include}`. Then it
-calls `pkgbuild` and `productbuild` and leaves
-`dist/inillucent-<version>.pkg`.
-
-It needs `rustup target add aarch64-apple-darwin x86_64-apple-darwin` first.
-The `.pkg` it produces installs and works. It is *unsigned*, so Gatekeeper
-refuses to open it by double-click and a person has to right-click → Open, or
-run `xattr -d com.apple.quarantine`. That is the whole difference steps 2 to 4
-buy.
-
-### 2. Get the two certificates — $99/year, one afternoon
+### 2. The two certificates - $99/year, one afternoon
 
 Enrol at <https://developer.apple.com/programs/> ($99/year, needs an Apple ID
 with two-factor on). Then, in Xcode → Settings → Accounts → Manage
@@ -52,7 +85,7 @@ Certificates, create both of:
 Both are needed. A `.pkg` signed with the wrong one of the two fails
 notarisation with a message that does not say which.
 
-### 3. Make an app-specific password for `notarytool`
+### 3. A notarytool credential, stored in the keychain
 
 At <https://appleid.apple.com> → Sign-In and Security → App-Specific Passwords.
 Then store it in the keychain once, so it is never on a command line or in this
@@ -68,41 +101,49 @@ xcrun notarytool store-credentials inillucent-notary \
 `--team-id` is on the membership page. `inillucent-notary` is the profile name
 `notarize.sh` looks for.
 
-### 4. Sign, notarise and staple
+### 4. gh, if the artifacts are to travel over a release
 
 ```sh
-./packaging/macos/notarize.sh --version 0.1.0 --identity "Developer ID Application: Your Name (ABCDE12345)"
+brew install gh && gh auth login
 ```
 
-It signs every binary with the hardened runtime, rebuilds and signs the `.pkg`
-with the installer identity, submits it with `notarytool submit --wait`, and
-staples the ticket so the result installs on a machine that is offline. The
-whole round trip is usually two to fifteen minutes; `--wait` blocks for it.
+`release-macos.sh --upload` puts the four files on the `v<version>` release of
+the private repository, and the Windows machine collects them with
+`packaging/fetch-macos-artifacts.ps1`. Without `--upload` the script prints the
+four paths and they can be copied across by any other means;
+`fetch-macos-artifacts.ps1 -FromDirectory` takes them from a folder.
 
-Then upload `dist/inillucent-<version>.pkg` to the GitHub release beside the
-tarballs.
+---
+
+## Then, on the Mac
+
+```sh
+./packaging/macos/release-macos.sh --version 0.1.0 --upload
+```
+
+`inillucent-notary` is the profile name it looks for, and the Developer ID
+identity is read out of the keychain rather than typed, because the full string
+includes the team id and getting it wrong fails late.
 
 ---
 
 ## What to check before publishing a macOS release
 
+Nothing by hand: `packaging/macos/verify-macos.sh` is that list, and it runs
+against the published bytes rather than against the build directory, so what it
+checks is what a reader gets.
+
 ```sh
-# The binary is genuinely both architectures.
-lipo -archs dist/pkgroot/usr/local/bin/inillucent
-# arm64 x86_64
-
-# The signature is valid and the runtime is hardened.
-codesign -dv --verbose=4 dist/pkgroot/usr/local/bin/inillucent 2>&1 | grep -E 'Authority|flags'
-
-# Gatekeeper agrees, which is the thing a user's machine will ask.
-spctl -a -vvv -t install dist/inillucent-0.1.0.pkg
-# should say: accepted, source=Notarized Developer ID
-
-# And it actually runs.
-/usr/local/bin/inillucent --version
-/usr/local/bin/inillucent create /tmp/probe.rdb
-/usr/local/bin/inillucent --db /tmp/probe.rdb exec "CREATE TABLE t (a)"
+curl -fsSL https://inillucent.com/downloads/verify-macos.sh | sh -s -- --version 0.1.0
 ```
+
+It asserts, in order: the archive matches the published `SHA256SUMS`; `spctl`
+reports `source=Notarized Developer ID` on a quarantined copy; every signature
+verifies `--strict`; a database round trip returns its row; the MCP server lists
+its tools; the x86-64 slice runs under Rosetta; and the C ABI library loads.
+
+`release-macos.sh` runs the same script against the local archive before it
+uploads anything, so a bad build is caught on the Mac that made it.
 
 ## A note on where it installs
 

@@ -14,7 +14,7 @@
 
     One line, from a fresh machine:
 
-        irm https://raw.githubusercontent.com/jasonmcaffee/inillucent/main/packaging/install.ps1 | iex
+        irm https://inillucent.com/downloads/install.ps1 | iex
 
 .PARAMETER Version
     A specific release to install. Defaults to the latest.
@@ -39,6 +39,7 @@
 [CmdletBinding()]
 param(
     [string] $Version,
+    [string] $BaseUrl = 'https://inillucent.com/downloads',
     [switch] $FromDist,
     [string] $Prefix,
     [switch] $NoPath,
@@ -46,7 +47,6 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$repository = 'jasonmcaffee/inillucent'
 if (-not $Prefix) { $Prefix = Join-Path $env:LOCALAPPDATA 'Programs\inillucent' }
 $binaries = Join-Path $Prefix 'bin'
 
@@ -111,11 +111,15 @@ function Get-Architecture {
 function Get-LatestVersion {
     <#
     .SYNOPSIS
-        Asks GitHub which release is newest.
+        Reads which release is current from VERSION, beside the archives.
+
+    .DESCRIPTION
+        One file on the same host as everything else here, rather than a second
+        service that has to be reachable and can answer differently. The GitHub
+        API is not usable for this anyway: the repository is private, so an
+        unauthenticated request for it answers 404.
     #>
-    $release = Invoke-RestMethod -Uri "https://api.github.com/repos/$repository/releases/latest" `
-        -Headers @{ 'User-Agent' = 'inillucent-install' }
-    return $release.tag_name -replace '^v', ''
+    return ((Invoke-WebRequest -Uri "$BaseUrl/VERSION" -UseBasicParsing).Content).Trim()
 }
 
 function Assert-Checksum {
@@ -184,7 +188,7 @@ try {
         Assert-Checksum -Archive $archive -Sums $sums
     } else {
         if (-not $Version) { $Version = Get-LatestVersion }
-        $base = "https://github.com/$repository/releases/download/v$Version"
+        $base = $BaseUrl.TrimEnd('/')
         $archive = Join-Path $temporary "inillucent-$Version-$target.zip"
         Write-Host "downloading inillucent $Version for $target..."
         Invoke-WebRequest -Uri "$base/inillucent-$Version-$target.zip" -OutFile $archive

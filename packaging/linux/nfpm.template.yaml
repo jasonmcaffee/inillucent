@@ -1,0 +1,64 @@
+# The .deb and .rpm metadata, filled in by packaging/linux/package-linux.ps1.
+#
+# @VERSION@, @ARCH@ and @STAGE@ are replaced before nfpm reads this. @STAGE@ is
+# an absolute path because nfpm resolves `src` against the working directory
+# rather than against this file.
+#
+# Every entry carries an explicit mode. NTFS has no execute bit, so a package
+# built on Windows from files staged on Windows installs every program at 0664
+# and does nothing at all when a user runs it. That is not a theory: it is what
+# the first .deb built here did.
+
+name: inillucent
+arch: @ARCH@
+platform: linux
+version: @VERSION@
+section: database
+priority: optional
+maintainer: Jason McAffee <jason@inillucent.com>
+description: |
+  An embedded database for agents.
+  Ordinary tables, full text search and vector search in one file, with no
+  server to start and no connection string. Ships four programs and a C ABI
+  library: inillucent, inillucent-shell, inillucent-mcp and inillucent-migrate.
+vendor: inillucent
+homepage: https://inillucent.com
+license: MIT
+
+contents:
+  - src: @STAGE@/bin/inillucent
+    dst: /usr/bin/inillucent
+    file_info:
+      mode: 0755
+  - src: @STAGE@/bin/inillucent-shell
+    dst: /usr/bin/inillucent-shell
+    file_info:
+      mode: 0755
+  - src: @STAGE@/bin/inillucent-mcp
+    dst: /usr/bin/inillucent-mcp
+    file_info:
+      mode: 0755
+  - src: @STAGE@/bin/inillucent-migrate
+    dst: /usr/bin/inillucent-migrate
+    file_info:
+      mode: 0755
+  - src: @STAGE@/lib/libinillucent_driver_capi.so
+    dst: /usr/lib/libinillucent_driver_capi.so
+    file_info:
+      mode: 0755
+  - src: @STAGE@/include/inillucent_driver.h
+    dst: /usr/include/inillucent_driver.h
+    file_info:
+      mode: 0644
+  - src: @STAGE@/README.md
+    dst: /usr/share/doc/inillucent/README.md
+    file_info:
+      mode: 0644
+  - src: @STAGE@/DRIVER.md
+    dst: /usr/share/doc/inillucent/DRIVER.md
+    file_info:
+      mode: 0644
+  - src: @STAGE@/LICENSE
+    dst: /usr/share/doc/inillucent/LICENSE
+    file_info:
+      mode: 0644

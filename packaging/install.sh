@@ -2,7 +2,7 @@
 #
 # Installs inillucent for the current user on macOS or Linux.
 #
-#   curl -fsSL https://raw.githubusercontent.com/jasonmcaffee/inillucent/main/packaging/install.sh | sh
+#   curl -fsSL https://inillucent.com/downloads/install.sh | sh
 #
 # It downloads the release archive for this machine, checks its SHA-256 against
 # the release's SHA256SUMS, unpacks it into ~/.local/share/inillucent and links
@@ -10,18 +10,25 @@
 # directory and nothing needs sudo.
 #
 #   --version X.Y.Z   install a specific release rather than the latest
+#   --base-url URL    download from somewhere else (default inillucent.com)
 #   --from-dist       install the archive in dist/ instead of downloading
 #   --prefix DIR      install somewhere else (default ~/.local/share/inillucent)
 #   --bin-dir DIR     link the programs somewhere else (default ~/.local/bin)
 #   --uninstall       remove what this installed
 #
-# On macOS this works with no Apple account and no notarisation, which is why
-# it is the road the README recommends and the .pkg is the convenience. See
-# packaging/macos/README.md.
+# It downloads from inillucent.com rather than from GitHub, because the
+# repository is private and a private repository's release assets are private
+# too: an unauthenticated request for one answers 404. The site is public and
+# serves the same bytes and the same SHA256SUMS.
+#
+# On macOS this needs no Apple account and no notarisation on the reader's side,
+# because a file fetched with curl carries no quarantine attribute. The signed
+# .pkg on the site is the convenience for somebody who would rather
+# double-click. See packaging/macos/README.md.
 
 set -euo pipefail
 
-repository="jasonmcaffee/inillucent"
+base_url="https://inillucent.com/downloads"
 version=""
 from_dist=0
 prefix="${HOME}/.local/share/inillucent"
@@ -31,11 +38,12 @@ uninstall=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --version) version="$2"; shift 2 ;;
+    --base-url) base_url="${2%/}"; shift 2 ;;
     --from-dist) from_dist=1; shift ;;
     --prefix) prefix="$2"; shift 2 ;;
     --bin-dir) bin_dir="$2"; shift 2 ;;
     --uninstall) uninstall=1; shift ;;
-    -h|--help) sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -57,8 +65,10 @@ fi
 kernel="$(uname -s)"
 machine="$(uname -m)"
 case "$kernel/$machine" in
-  Darwin/arm64)  target="aarch64-apple-darwin" ;;
-  Darwin/x86_64) target="x86_64-apple-darwin" ;;
+  # One universal archive covers both Apple architectures, so a machine never
+  # gets the half of the release it cannot also run under Rosetta.
+  Darwin/arm64)  target="universal-apple-darwin" ;;
+  Darwin/x86_64) target="universal-apple-darwin" ;;
   Linux/x86_64)  target="x86_64-unknown-linux-gnu" ;;
   Linux/aarch64) target="aarch64-unknown-linux-gnu" ;;
   *)
@@ -109,16 +119,17 @@ if [ "$from_dist" -eq 1 ]; then
   [ -f "$archive" ] || { echo "$archive does not exist. Run packaging/release.sh first." >&2; exit 1; }
   verify "$archive" "$dist/SHA256SUMS"
 else
+  # VERSION, beside the archives, is what says which release is current. It is
+  # one file on the same host as everything else here, so there is no second
+  # service to be reachable and no API that can answer differently.
   if [ -z "$version" ]; then
-    version="$(curl -fsSL "https://api.github.com/repos/$repository/releases/latest" \
-      | sed -n 's/.*"tag_name" *: *"v\{0,1\}\([^"]*\)".*/\1/p' | head -1)"
-    [ -n "$version" ] || { echo "could not work out the latest release; pass --version" >&2; exit 1; }
+    version="$(curl -fsSL "$base_url/VERSION" | tr -d '\r\n ')"
+    [ -n "$version" ] || { echo "could not read $base_url/VERSION; pass --version" >&2; exit 1; }
   fi
-  base="https://github.com/$repository/releases/download/v$version"
   archive="$work/inillucent-$version-$target.tar.gz"
   echo "downloading inillucent $version for $target..."
-  curl -fsSL "$base/inillucent-$version-$target.tar.gz" -o "$archive"
-  curl -fsSL "$base/SHA256SUMS" -o "$work/SHA256SUMS"
+  curl -fsSL "$base_url/inillucent-$version-$target.tar.gz" -o "$archive"
+  curl -fsSL "$base_url/SHA256SUMS" -o "$work/SHA256SUMS"
   verify "$archive" "$work/SHA256SUMS"
 fi
 

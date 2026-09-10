@@ -7,31 +7,37 @@
 # thirty-one crates. `head` builds from the repository for somebody who wants
 # what is on main.
 #
+# The URLs point at inillucent.com rather than at a GitHub release, because the
+# repository is private and a private repository's release assets are private
+# too: `brew install` would get a 404. The tap itself is a separate, public
+# repository holding only this file, so the source can stay private while the
+# formula is fetchable.
+#
 # To publish it: create the repository `jasonmcaffee/homebrew-inillucent` on
-# GitHub, put this file in `Formula/inillucent.rb`, and fill in the two sha256
+# GitHub, put this file in `Formula/inillucent.rb`, and fill in the sha256
 # values from the release's own SHA256SUMS. `packaging/homebrew/update.sh` does
 # both of those from a built dist/ so the numbers are never typed by hand.
 class Inillucent < Formula
   desc "Embedded SQL database with full-text and vector search, and an MCP server"
-  homepage "https://github.com/jasonmcaffee/inillucent"
+  homepage "https://inillucent.com"
   version "0.1.0"
   license "MIT"
 
+  # One universal archive covers both Apple architectures, so macOS needs no
+  # on_arm / on_intel split: the same file is correct either way.
   on_macos do
-    on_arm do
-      url "https://github.com/jasonmcaffee/inillucent/releases/download/v0.1.0/inillucent-0.1.0-aarch64-apple-darwin.tar.gz"
-      sha256 "REPLACE_WITH_THE_AARCH64_DARWIN_SHA256"
-    end
-    on_intel do
-      url "https://github.com/jasonmcaffee/inillucent/releases/download/v0.1.0/inillucent-0.1.0-x86_64-apple-darwin.tar.gz"
-      sha256 "REPLACE_WITH_THE_X86_64_DARWIN_SHA256"
-    end
+    url "https://inillucent.com/downloads/inillucent-0.1.0-universal-apple-darwin.tar.gz"
+    sha256 "REPLACE_WITH_THE_UNIVERSAL_DARWIN_SHA256"
   end
 
   on_linux do
     on_intel do
-      url "https://github.com/jasonmcaffee/inillucent/releases/download/v0.1.0/inillucent-0.1.0-x86_64-unknown-linux-gnu.tar.gz"
+      url "https://inillucent.com/downloads/inillucent-0.1.0-x86_64-unknown-linux-gnu.tar.gz"
       sha256 "REPLACE_WITH_THE_X86_64_LINUX_SHA256"
+    end
+    on_arm do
+      url "https://inillucent.com/downloads/inillucent-0.1.0-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "REPLACE_WITH_THE_AARCH64_LINUX_SHA256"
     end
   end
 
