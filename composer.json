@@ -1,14 +1,23 @@
 {
-    "name": "jasonmcaffee/inillucent",
+    "name": "black-rainbow-labs/inillucent",
     "description": "Embedded SQL database with full-text and vector search, a sqlite3-shaped shell, and an MCP server.",
-    "keywords": ["database", "sql", "sqlite", "vector", "embedding", "search", "mcp", "rag"],
-    "homepage": "https://github.com/jasonmcaffee/inillucent",
+    "keywords": [
+        "database",
+        "sql",
+        "sqlite",
+        "vector",
+        "embedding",
+        "search",
+        "mcp",
+        "rag"
+    ],
+    "homepage": "https://github.com/Black-Rainbow-Labs/Inillucent",
     "license": "MIT",
     "type": "library",
     "authors": [
         {
-            "name": "Jason McAffee",
-            "homepage": "https://github.com/jasonmcaffee"
+            "name": "Black Rainbow Labs",
+            "homepage": "https://blackrainbowlabs.com"
         }
     ],
     "require": {
@@ -28,8 +37,8 @@
         "packages/php/bin/inillucent-install"
     ],
     "support": {
-        "issues": "https://github.com/jasonmcaffee/inillucent/issues",
-        "source": "https://github.com/jasonmcaffee/inillucent"
+        "issues": "https://github.com/Black-Rainbow-Labs/Inillucent/issues",
+        "source": "https://github.com/Black-Rainbow-Labs/Inillucent"
     },
     "config": {
         "sort-packages": true

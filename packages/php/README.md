@@ -1,7 +1,7 @@
 # inillucent, from PHP
 
 ```sh
-composer require jasonmcaffee/inillucent
+composer require black-rainbow-labs/inillucent
 vendor/bin/inillucent-install          # downloads the binaries, checksum verified
 ```
 

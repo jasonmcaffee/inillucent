@@ -83,4 +83,4 @@ outside a directory.
 
 ## Licence
 
-MIT. Source: <https://github.com/jasonmcaffee/inillucent>
+MIT. Source: <https://github.com/Black-Rainbow-Labs/Inillucent>

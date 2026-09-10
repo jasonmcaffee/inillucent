@@ -13,7 +13,7 @@
 -->
 <installer-gui-script minSpecVersion="2">
     <title>inillucent</title>
-    <organization>com.jasonmcaffee</organization>
+    <organization>com.blackrainbowlabs</organization>
     <options customize="never" require-scripts="false" hostArchitectures="arm64,x86_64" />
 
     <welcome file="welcome.txt" mime-type="text/plain" />
@@ -29,16 +29,16 @@
 
     <choices-outline>
         <line choice="default">
-            <line choice="com.jasonmcaffee.inillucent" />
+            <line choice="com.blackrainbowlabs.inillucent" />
         </line>
     </choices-outline>
 
     <choice id="default" />
-    <choice id="com.jasonmcaffee.inillucent" visible="false">
-        <pkg-ref id="com.jasonmcaffee.inillucent" />
+    <choice id="com.blackrainbowlabs.inillucent" visible="false">
+        <pkg-ref id="com.blackrainbowlabs.inillucent" />
     </choice>
 
-    <pkg-ref id="com.jasonmcaffee.inillucent" version="@VERSION@" onConclusion="none">
+    <pkg-ref id="com.blackrainbowlabs.inillucent" version="@VERSION@" onConclusion="none">
         inillucent-component-@VERSION@.pkg
     </pkg-ref>
 </installer-gui-script>

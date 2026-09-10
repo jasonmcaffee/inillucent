@@ -4,11 +4,11 @@
 # Get the binaries. inillucent is Rust, so `go install` cannot build it - what
 # it can build is a small program that downloads the release for your machine,
 # verifies its SHA-256 and puts the four programs in GOBIN.
-go install github.com/jasonmcaffee/inillucent/packages/go/cmd/inillucent@latest
+go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent@latest
 inillucent
 
 # Then use it from Go.
-go get github.com/jasonmcaffee/inillucent/packages/go
+go get github.com/Black-Rainbow-Labs/Inillucent/packages/go
 ```
 
 ```go
@@ -18,7 +18,7 @@ import (
     "context"
     "fmt"
 
-    "github.com/jasonmcaffee/inillucent/packages/go"
+    "github.com/Black-Rainbow-Labs/Inillucent/packages/go"
 )
 
 func main() {
@@ -88,7 +88,7 @@ The module is in a subdirectory, so its import path carries that subdirectory
 and its tags carry the prefix Go requires:
 
 ```sh
-go get github.com/jasonmcaffee/inillucent/packages/go@packages/go/v0.1.0
+go get github.com/Black-Rainbow-Labs/Inillucent/packages/go@packages/go/v0.1.0
 ```
 
 `@latest` resolves it for you. The prefix is Go's own rule for a nested module,

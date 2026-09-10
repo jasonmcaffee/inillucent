@@ -44,7 +44,7 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $Version,
     [string] $FromDirectory,
-    [string] $Repository = 'jasonmcaffee/inillucent'
+    [string] $Repository = 'Black-Rainbow-Labs/Inillucent'
 )
 
 $ErrorActionPreference = 'Stop'

@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/jasonmcaffee/inillucent/packages/go"
+	"github.com/Black-Rainbow-Labs/Inillucent/packages/go"
 )
 
 // skipWithoutBinary skips a test when inillucent is not installed, and says how
@@ -24,7 +24,7 @@ func skipWithoutBinary(t *testing.T) {
 	}
 	if _, err := exec.LookPath("inillucent"); err != nil {
 		t.Skip("inillucent is not on PATH; install it with " +
-			"`go run ./cmd/inillucent` or see https://github.com/jasonmcaffee/inillucent#install")
+			"`go run ./cmd/inillucent` or see https://github.com/Black-Rainbow-Labs/Inillucent#install")
 	}
 }
 

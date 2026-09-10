@@ -31,7 +31,7 @@ version=""
 identity=""
 installer_identity=""
 profile="inillucent-notary"
-identifier="com.jasonmcaffee.inillucent"
+identifier="com.blackrainbowlabs.inillucent"
 
 while [ $# -gt 0 ]; do
   case "$1" in

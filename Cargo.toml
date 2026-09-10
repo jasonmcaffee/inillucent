@@ -88,7 +88,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 
 [workspace.package]
 version = "0.1.0"
-repository = "https://github.com/jasonmcaffee/inillucent"
+repository = "https://github.com/Black-Rainbow-Labs/Inillucent"
 readme = "README.md"
 edition = "2021"
 license = "MIT"

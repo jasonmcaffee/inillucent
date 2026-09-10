@@ -57,7 +57,7 @@ Each call is a process, so this is the right tool for the dozen calls a build
 script or a tool wrapper makes and the wrong one for a loop over a million rows.
 For that, write a binding over the C ABI — the header ships in this package's
 platform dependency under `include/`, and
-[`drivers/README.md`](https://github.com/jasonmcaffee/inillucent/blob/main/drivers/README.md)
+[`drivers/README.md`](https://github.com/Black-Rainbow-Labs/Inillucent/blob/main/drivers/README.md)
 is written to be followed.
 
 ## For an agent
@@ -79,4 +79,4 @@ never drift. `--readonly` refuses every statement that changes something, and
 
 ## Licence
 
-MIT. Source: <https://github.com/jasonmcaffee/inillucent>
+MIT. Source: <https://github.com/Black-Rainbow-Labs/Inillucent>

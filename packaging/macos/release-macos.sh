@@ -43,7 +43,7 @@ version=""
 identity=""
 installer_identity=""
 profile="inillucent-notary"
-identifier="com.jasonmcaffee.inillucent"
+identifier="com.blackrainbowlabs.inillucent"
 upload=0
 skip_notarize=0
 

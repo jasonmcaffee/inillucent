@@ -1,6 +1,6 @@
 // Command inillucent installs the inillucent binaries with `go install`.
 //
-//	go install github.com/jasonmcaffee/inillucent/packages/go/cmd/inillucent@latest
+//	go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent@latest
 //
 // inillucent is written in Rust, so `go install` cannot build it - what it can
 // do is build this, which downloads the release for the machine it is running
@@ -36,7 +36,7 @@ import (
 	"time"
 )
 
-const repository = "jasonmcaffee/inillucent"
+const repository = "Black-Rainbow-Labs/Inillucent"
 
 // programs are the four the release ships.
 var programs = []string{"inillucent", "inillucent-shell", "inillucent-mcp", "inillucent-migrate"}

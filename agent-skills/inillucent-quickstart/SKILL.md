@@ -12,17 +12,17 @@ file, and the programs below open it directly.
 ## Install
 
 ```powershell
-irm https://raw.githubusercontent.com/jasonmcaffee/inillucent/main/packaging/install.ps1 | iex   # Windows
+irm https://raw.githubusercontent.com/Black-Rainbow-Labs/Inillucent/main/packaging/install.ps1 | iex   # Windows
 ```
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/jasonmcaffee/inillucent/main/packaging/install.sh | sh  # macOS, Linux
+curl -fsSL https://raw.githubusercontent.com/Black-Rainbow-Labs/Inillucent/main/packaging/install.sh | sh  # macOS, Linux
 ```
 
 Or from whichever package manager the project already uses — `npm install -g inillucent`,
-`pip install inillucent`, `cargo install inillucent-cli`, `brew install jasonmcaffee/inillucent/inillucent`,
-`go install github.com/jasonmcaffee/inillucent/packages/go/cmd/inillucent@latest`,
-`composer require jasonmcaffee/inillucent`. Every one installs the same four programs and verifies the
+`pip install inillucent`, `cargo install inillucent-cli`, `brew install black-rainbow-labs/inillucent/inillucent`,
+`go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent@latest`,
+`composer require black-rainbow-labs/inillucent`. Every one installs the same four programs and verifies the
 release's published SHA-256 first.
 
 From a clone: `cargo build --release -p inillucent-cli`, and the binaries land in `target/release`.

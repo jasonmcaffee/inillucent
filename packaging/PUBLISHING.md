@@ -81,7 +81,7 @@ while the repository is private, because its assets are private too. GitHub
 carries the macOS artifacts from the MacBook to the Windows box and nothing else.
 
 **Done, on 2026-09-10.** `v0.1.0` is tagged at `ed41390` and the release is at
-<https://github.com/jasonmcaffee/inillucent/releases/tag/v0.1.0>, carrying the
+<https://github.com/Black-Rainbow-Labs/Inillucent/releases/tag/v0.1.0>, carrying the
 Windows archive, `SHA256SUMS` and `provenance.json`. The archive was downloaded
 back off the release and its SHA-256 compared against the published one: they
 match, byte for byte.
@@ -258,13 +258,13 @@ something that will be rejected after the fact.
 ## Homebrew
 
 ```sh
-# once: create the repository jasonmcaffee/homebrew-inillucent on GitHub
+# once: create the repository Black-Rainbow-Labs/homebrew-inillucent on GitHub
 ./packaging/homebrew/update.sh --tap ../homebrew-inillucent
 # then, in the tap:
 git add Formula/inillucent.rb && git commit -m "inillucent 0.1.0" && git push
 ```
 
-`brew install jasonmcaffee/inillucent/inillucent` after that.
+`brew install black-rainbow-labs/inillucent/inillucent` after that.
 
 **Ready**, except that `update.sh` fills the formula's checksums from
 `dist/SHA256SUMS` and **refuses to finish while an archive is missing** — so it
@@ -272,7 +272,7 @@ needs step 0's macOS and Linux archives first. It says which are missing rather
 than leaving a placeholder in a file somebody would push.
 
 **Missing**: the tap repository, the two macOS archives and the Linux one, and a
-public `jasonmcaffee/inillucent` for the formula's URLs to resolve.
+public `Black-Rainbow-Labs/Inillucent` for the formula's URLs to resolve.
 
 **Not verified here**: Homebrew does not run on Windows, so the formula has been
 written and reviewed but not executed. `brew audit --strict --new inillucent`
@@ -289,7 +289,7 @@ git tag packages/go/v0.1.0 && git push --tags
 ```
 
 That is the whole publish: Go has no registry, and `go install
-github.com/jasonmcaffee/inillucent/packages/go/cmd/inillucent@latest` reads the
+github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent@latest` reads the
 repository directly. The tag carries the `packages/go/` prefix because the
 module is in a subdirectory, which is Go's own rule for a nested module.
 
@@ -305,7 +305,7 @@ something a stranger can be asked to set.
 
 ## Packagist (Composer)
 
-Submit `https://github.com/jasonmcaffee/inillucent` at
+Submit `https://github.com/Black-Rainbow-Labs/Inillucent` at
 <https://packagist.org/packages/submit>, then add the GitHub webhook Packagist
 offers so a tag updates the package.
 
