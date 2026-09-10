@@ -32,9 +32,9 @@ sha256 = "6292bc36a9499995c1d89b909c4aa1ff2ca3cd457169680f1f2cd23bffa9d04f"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/engine.rs"
-ticket = "task-1807"
-reason = "task-1807 renamed the product from its working name to inillucent. Every change in these files is that substitution plus the crate and directory renames it implies: no logic, no format, no default and no measured number moved. persist.rs additionally accepts the pre-rename eight-byte file magic on read, so indexes already on disk still open."
-sha256 = "42145d6fae6611621d43ff0a53e99389fbd8bf5bfaf0da8e9b21577db00f3cd9"
+ticket = "task-1894"
+reason = "The strict lint set became a required check, and these are the findings it had in the retrieval engine. Every edit is local: bounds-checked division, a NaN comparison kept and explained, an identity map removed, a test module moved below the items it follows. No retrieval behaviour changes, and no file was reformatted - these two crates have never been formatted and doing it would move 35 files for no reason connected to a lint."
+sha256 = "404de86fc6b7471fd462dd47b1d0d1506a48003d112eea6d0daf889369e115d0"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/gradeembed.rs"
@@ -68,9 +68,9 @@ sha256 = "0248ed0dc494e9a815edcf5aa19166add598639b62640830bfcc1a3138925a32"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/queryset.rs"
-ticket = "task-1818"
-reason = "task-1818 generalises the grading harness from one embedding model to a head-to-head between several, which is what the task-1815 TDD's success criteria are graded by. A model is now a manifest (id, width, Matryoshka widths, four prefixes, pooling, token bound, backend, output, tokenizer and weights digests) instead of a set of constants; a cache carries a header naming the corpus digest, the model, the manifest digest and the truncation it performed; grade-embedding compares two or more caches and refuses before it starts unless they agree on corpus, chunk count and query seeds; and the embedder gained CLS and last-token pooling, graph-driven inputs, and a llama.cpp backend for the one model with no ONNX export. ModelManifest::nomic_v1_5() reproduces every constant it replaced: the fresh baseline cache agrees with the August run at cosine 1.000000 minimum over 5000 chunks, and grade's card is unchanged on every measurement row."
-sha256 = "b87422f68fd5d88bfcc0ed3449ffebbfbcac7fb332e1a54cf1551adb32451361"
+ticket = "task-1894"
+reason = "The strict lint set became a required check, and these are the findings it had in the retrieval engine. Every edit is local: bounds-checked division, a NaN comparison kept and explained, an identity map removed, a test module moved below the items it follows. No retrieval behaviour changes, and no file was reformatted - these two crates have never been formatted and doing it would move 35 files for no reason connected to a lint."
+sha256 = "2b016373543b72d64b1fc252e4c06d6826e0b7bcfc57347f871d77163c2a7444"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/report.rs"
@@ -86,15 +86,15 @@ sha256 = "ebf2bfe7c63a69fa70f864f026fa02d5548bab9d99db7abb35a73685f44de6cb"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/scenarios.rs"
-ticket = "task-1818"
-reason = "task-1818 generalises the grading harness from one embedding model to a head-to-head between several, which is what the task-1815 TDD's success criteria are graded by. A model is now a manifest (id, width, Matryoshka widths, four prefixes, pooling, token bound, backend, output, tokenizer and weights digests) instead of a set of constants; a cache carries a header naming the corpus digest, the model, the manifest digest and the truncation it performed; grade-embedding compares two or more caches and refuses before it starts unless they agree on corpus, chunk count and query seeds; and the embedder gained CLS and last-token pooling, graph-driven inputs, and a llama.cpp backend for the one model with no ONNX export. ModelManifest::nomic_v1_5() reproduces every constant it replaced: the fresh baseline cache agrees with the August run at cosine 1.000000 minimum over 5000 chunks, and grade's card is unchanged on every measurement row."
-sha256 = "fb023be81c47e9846dc4231271d552f219db84641d83b42ef001d4d80d5340c7"
+ticket = "task-1894"
+reason = "The strict lint set became a required check, and these are the findings it had in the retrieval engine. Every edit is local: bounds-checked division, a NaN comparison kept and explained, an identity map removed, a test module moved below the items it follows. No retrieval behaviour changes, and no file was reformatted - these two crates have never been formatted and doing it would move 35 files for no reason connected to a lint."
+sha256 = "2a16c2f9eb913dd41efb0b7ab212338900ce416d652b07d21dea52e218efbaef"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/synth.rs"
-ticket = "task-1818"
-reason = "task-1818 generalises the grading harness from one embedding model to a head-to-head between several, which is what the task-1815 TDD's success criteria are graded by. A model is now a manifest (id, width, Matryoshka widths, four prefixes, pooling, token bound, backend, output, tokenizer and weights digests) instead of a set of constants; a cache carries a header naming the corpus digest, the model, the manifest digest and the truncation it performed; grade-embedding compares two or more caches and refuses before it starts unless they agree on corpus, chunk count and query seeds; and the embedder gained CLS and last-token pooling, graph-driven inputs, and a llama.cpp backend for the one model with no ONNX export. ModelManifest::nomic_v1_5() reproduces every constant it replaced: the fresh baseline cache agrees with the August run at cosine 1.000000 minimum over 5000 chunks, and grade's card is unchanged on every measurement row."
-sha256 = "334211871710043d7f9546cb0403f5c4e63618d523dcc2b030c6c786449d9ebb"
+ticket = "task-1894"
+reason = "The strict lint set became a required check, and these are the findings it had in the retrieval engine. Every edit is local: bounds-checked division, a NaN comparison kept and explained, an identity map removed, a test module moved below the items it follows. No retrieval behaviour changes, and no file was reformatted - these two crates have never been formatted and doing it would move 35 files for no reason connected to a lint."
+sha256 = "98727e1c22c61c09fef9a0ae52fef3bf6dc8244de9c1e507dd8fee7c6a1a4cd1"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/tune.rs"
@@ -116,9 +116,9 @@ sha256 = "3ff5060ec3a6c985fc3f9dad0f91b7fa165f2d39a789e75952596e7ca6dd1023"
 
 [[amendment]]
 path = "crates/inillucent-core/src/embed_onnx.rs"
-ticket = "task-1818"
-reason = "task-1818 generalises the grading harness from one embedding model to a head-to-head between several, which is what the task-1815 TDD's success criteria are graded by. A model is now a manifest (id, width, Matryoshka widths, four prefixes, pooling, token bound, backend, output, tokenizer and weights digests) instead of a set of constants; a cache carries a header naming the corpus digest, the model, the manifest digest and the truncation it performed; grade-embedding compares two or more caches and refuses before it starts unless they agree on corpus, chunk count and query seeds; and the embedder gained CLS and last-token pooling, graph-driven inputs, and a llama.cpp backend for the one model with no ONNX export. ModelManifest::nomic_v1_5() reproduces every constant it replaced: the fresh baseline cache agrees with the August run at cosine 1.000000 minimum over 5000 chunks, and grade's card is unchanged on every measurement row."
-sha256 = "36828beae23d2a92f646cc90c2473f061a89b999a353703dd5ce38f50b639fd1"
+ticket = "task-1894"
+reason = "M8: targeted clippy fixes under the workspace lint table, re-applied after an accidental format pass was reverted"
+sha256 = "025ef1a5339933942e2b0069cee3f2a8034f9f83cf992e5ee377deeaf33d3bce"
 
 [[amendment]]
 path = "crates/inillucent-core/src/flat.rs"
@@ -128,15 +128,15 @@ sha256 = "15fcee15bf5dc8769c8e95df4a8ef5d7a49fc8eb7f71f3e3ad8c44331e7af632"
 
 [[amendment]]
 path = "crates/inillucent-core/src/hnsw.rs"
-ticket = "task-1876"
-reason = "The graph scores through VectorSet::with rather than a borrowed slice, so a filed set is scored without materialising it."
-sha256 = "66050178e7efcbeaab919868f9a07fe0710215307f123bb21721e03e45ed5e9a"
+ticket = "task-1894"
+reason = "M8: a folded generation inserts its batch on every core the caller asked for, so a bounded append is not slower in wall clock than the unbounded rebuild it replaced"
+sha256 = "07b0db20b11878f7890c68f734d5df183f84b1c009c7620b31940addf4e25842"
 
 [[amendment]]
 path = "crates/inillucent-core/src/index.rs"
-ticket = "task-1876"
-reason = "IndexConfig::resident_vectors, defaulting to false, and the plumbing that carries it. NIKAYA_RETRIEVAL_RESIDENT_VECTORS=1 asks for the old behaviour."
-sha256 = "55f2bc000496e68710ba073623e5f0bac252619d6ba8e5ac0d14c98550582663"
+ticket = "task-1894"
+reason = "M8: targeted clippy fixes under the workspace lint table, re-applied after an accidental format pass was reverted"
+sha256 = "a34d3e9962f03ee9a002c481e521d4279c4e7a91249c9d7ab421d8acb6011cf9"
 
 [[amendment]]
 path = "crates/inillucent-core/src/lib.rs"
@@ -152,9 +152,9 @@ sha256 = "cd89c11e1b0961d2b6875102712b463ef5fb335d87e9fe176f37920712e3f90d"
 
 [[amendment]]
 path = "crates/inillucent-core/src/persist.rs"
-ticket = "task-1876"
-reason = "Loading an index leaves vectors.bin on disk and opens it for positional reads instead of reading it into a buffer."
-sha256 = "11ddd3a4823be7436d191e4b23544e366f4ba97a6834780ed79a07995bde9f01"
+ticket = "task-1894"
+reason = "The strict lint set became a required check, and these are the findings it had in the retrieval engine. Every edit is local: bounds-checked division, a NaN comparison kept and explained, an identity map removed, a test module moved below the items it follows. No retrieval behaviour changes, and no file was reformatted - these two crates have never been formatted and doing it would move 35 files for no reason connected to a lint."
+sha256 = "a0fa8e3ee115b1488088b2e59745012dcf6d197c7b3e7a71a36a4ed52289f777"
 
 [[amendment]]
 path = "crates/inillucent-core/src/quantize.rs"
@@ -163,10 +163,16 @@ reason = "Quantisation reads its input through the vector set's accessor, so it 
 sha256 = "28f4bda2e54cc9a3acd710a9fce2ba9799f4197b7a1fdf8b2025aa6b012bf154"
 
 [[amendment]]
+path = "crates/inillucent-core/src/rank.rs"
+ticket = "task-1894"
+reason = "M8: targeted clippy fixes under the workspace lint table, re-applied after an accidental format pass was reverted"
+sha256 = "51d5e74fa721f236ec30f3ef6beb768c9667c118a195195a782c5e883518a129"
+
+[[amendment]]
 path = "crates/inillucent-core/src/vectors.rs"
-ticket = "task-1876"
-reason = "Vectors are filed rather than resident by default: a loaded index leaves them in vectors.bin and reads them as it scores, which took the Nikaya serving process from 3,975 MB to 2,215 MB with no measurable change in latency. VectorSet::get answers Option<&[f32]> because a filed set has no buffer to borrow from, and copy_of is what a caller that needs the values uses."
-sha256 = "94b9cfabd335227688c9e2b66f857002dc64eed3fa59831db4d3cf27fc8e7b94"
+ticket = "task-1894"
+reason = "The strict lint set became a required check, and these are the findings it had in the retrieval engine. Every edit is local: bounds-checked division, a NaN comparison kept and explained, an identity map removed, a test module moved below the items it follows. No retrieval behaviour changes, and no file was reformatted - these two crates have never been formatted and doing it would move 35 files for no reason connected to a lint."
+sha256 = "f9b947db82720cc05449c044f7915add1e0896c40c8b387be882b68ed63e118b"
 
 [[amendment]]
 path = "inillucent-scorecard.json"

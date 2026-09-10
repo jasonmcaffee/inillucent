@@ -25,8 +25,14 @@ pub struct Commit {
     /// The transaction's number, for the diagnostic.
     pub txn: u32,
     /// The keys it wrote, and what it wrote. `None` is a delete.
-    pub writes: Vec<((u32, u64), Option<Vec<u8>>)>,
+    pub writes: Vec<(Key, Written)>,
 }
+
+/// Which tree and which row: the whole of what this model calls a key.
+pub type Key = (u32, u64);
+
+/// What a write left at a key. `None` is a delete.
+pub type Written = Option<Vec<u8>>;
 
 /// One open transaction.
 #[derive(Clone, Debug)]
@@ -38,11 +44,14 @@ struct Open {
     /// not millions.
     snapshot: State,
     /// This transaction's own writes, newest wins.
-    writes: BTreeMap<(u32, u64), Option<Vec<u8>>>,
+    writes: Writes,
     /// The open savepoints, outermost first, each with the writes as they stood
     /// when it was taken.
-    savepoints: Vec<(String, BTreeMap<(u32, u64), Option<Vec<u8>>>)>,
+    savepoints: Vec<(String, Writes)>,
 }
+
+/// What a transaction has written, newest wins.
+type Writes = BTreeMap<Key, Written>;
 
 /// Something the engine did that the model says it should not have.
 #[derive(Clone, Debug, PartialEq, Eq)]

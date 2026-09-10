@@ -121,7 +121,7 @@ fn probe_with(name: &str, setup: &[&str], sql: &str, want_value: bool, register:
         }),
         Ok(_) => Outcome::Ran,
     };
-    drop(connection);
+    let _ = connection;
     drop(database);
     let _ = std::fs::remove_file(&path);
     outcome
@@ -274,7 +274,7 @@ fn an_unimplemented_construct_refuses_by_name_and_a_typo_does_not() {
     assert_eq!(malformed.status, Status::Syntax, "{malformed}");
     assert_eq!(malformed.feature, None);
 
-    drop(connection);
+    let _ = connection;
     drop(database);
     let _ = std::fs::remove_file(&path);
 }

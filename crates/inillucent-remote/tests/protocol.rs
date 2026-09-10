@@ -297,7 +297,7 @@ fn a_replayed_migration_publishes_the_same_values_a_live_one_did() {
         Some(&OwnedDatum::Blob(vec![0xde, 0xad, 0xbe, 0xef])),
         "bytea arrives as bytes rather than as the text \\xdeadbeef"
     );
-    drop(connection);
+    let _ = connection;
     drop(database);
     clean(&destination);
 }

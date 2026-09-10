@@ -507,12 +507,9 @@ fn find_end(bytes: &[u8]) -> Option<usize> {
     }
     let last = bytes.len().saturating_sub(END_LENGTH);
     let earliest = last.saturating_sub(65_535);
-    for at in (earliest..=last).rev() {
-        if long(bytes, at) == END_SIGNATURE {
-            return Some(at);
-        }
-    }
-    None
+    (earliest..=last)
+        .rev()
+        .find(|&at| long(bytes, at) == END_SIGNATURE)
 }
 
 /// Returns a little-endian sixteen-bit field.

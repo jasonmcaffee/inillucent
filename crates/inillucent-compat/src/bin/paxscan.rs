@@ -38,7 +38,7 @@
 //!
 //! Usage: inillucent-paxscan <sqlite fixture> [rounds] [page size...]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use inillucent_base::error::misuse;
@@ -91,9 +91,9 @@ fn main() {
 /// @param fixture - the SQLite database to import
 /// @param rounds - how many timed rounds per configuration
 /// @param sizes - the page sizes to sweep
-fn run(fixture: &PathBuf, rounds: u32, sizes: &[usize]) -> DbResult<()> {
+fn run(fixture: &Path, rounds: u32, sizes: &[usize]) -> DbResult<()> {
     let started = Instant::now();
-    let mut file = SqliteFile::open(fixture.clone())?;
+    let mut file = SqliteFile::open(fixture.to_path_buf())?;
     let table_object = file.object("table", "main_table")?;
     let table_columns = table_object.column_names()?;
     let index_object = file.object("index", "main_category")?;
@@ -320,10 +320,7 @@ fn scan(tree: &Tree, shape: Shape) -> DbResult<Aggregate> {
             // holds its own values.
             let mut key_bytes = keys.inline_bytes().chunks_exact(keys.width);
             let mut category_bytes = categories.inline_bytes().chunks_exact(categories.width);
-            loop {
-                let (Some(key), Some(category)) = (key_bytes.next(), category_bytes.next()) else {
-                    break;
-                };
+            while let (Some(key), Some(category)) = (key_bytes.next(), category_bytes.next()) {
                 sum_key = sum_key.wrapping_add(inillucent_tree::types::read_int_slot(key));
                 let value = inillucent_tree::types::read_int_slot(category);
                 if value > max_category {

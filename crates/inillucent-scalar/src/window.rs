@@ -487,7 +487,7 @@ fn range_bound(
 ) -> usize {
     let here = order_value(row);
     let offset = offset as f64;
-    let limit = if preceding == !descending {
+    let limit = if preceding != descending {
         here - offset
     } else {
         here + offset

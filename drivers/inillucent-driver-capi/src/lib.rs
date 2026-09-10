@@ -59,6 +59,7 @@
 use std::cell::Cell;
 use std::ffi::{c_char, CStr, CString};
 use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::rc::Rc;
 
 use inillucent_driver::capability::{Support, CAPABILITIES};
 use inillucent_driver::{Database, Error, OpenOptions, Rows, Status, Value};
@@ -105,8 +106,23 @@ pub struct inillucent_db {
     connections: Cell<usize>,
 }
 
-/// A connection to a database.
-pub struct inillucent_conn {
+/// What a connection *is*, shared by the handle and by everything prepared on
+/// it.
+///
+/// **Statements and transactions hold this rather than a pointer to the
+/// connection handle.** They used to hold the pointer, and
+/// [`inillucent_conn_free`] released the handle without asking whether any
+/// child still existed - so a caller who freed a connection and then stepped a
+/// statement dereferenced freed memory, in a language that cannot see it. The
+/// header did not forbid that order because the header did not mention it.
+///
+/// There is no order to get wrong now. The state lives as long as the last
+/// thing that names it, whichever that turns out to be, and the database's
+/// connection count follows the state rather than the handle - so
+/// [`inillucent_close`] still refuses while a statement prepared on a freed
+/// connection is alive, which is the case a count of *handles* would have
+/// missed.
+struct ConnState {
     /// The database it belongs to, which outlives it by [`inillucent_close`]'s
     /// refusal.
     database: *const inillucent_db,
@@ -127,10 +143,35 @@ pub struct inillucent_conn {
     session: u64,
 }
 
+impl Drop for ConnState {
+    /// Gives the connection back to the database it was counted against.
+    ///
+    /// This runs when the *last* of the connection handle, its statements and
+    /// its transactions is freed. The database cannot have been closed by then:
+    /// [`inillucent_close`] refuses while the count this decrements is not
+    /// zero.
+    fn drop(&mut self) {
+        // SAFETY: `database` was a live `inillucent_db` when this state was
+        // made, and `inillucent_close` refuses to free one while any state
+        // counted against it is alive - which this one is, until this line.
+        if let Some(database) = unsafe { held(self.database) } {
+            database
+                .connections
+                .set(database.connections.get().saturating_sub(1));
+        }
+    }
+}
+
+/// A connection to a database.
+pub struct inillucent_conn {
+    /// What the connection is, shared with its statements and transactions.
+    state: Rc<ConnState>,
+}
+
 /// A statement and the values bound to it.
 pub struct inillucent_stmt {
-    /// The connection it was prepared on.
-    connection: *const inillucent_conn,
+    /// The connection it was prepared on, shared rather than pointed at.
+    connection: Rc<ConnState>,
     /// The statement text.
     sql: String,
     /// The values bound so far, by one-based index.
@@ -151,8 +192,8 @@ pub struct inillucent_rows {
 
 /// An open transaction.
 pub struct inillucent_txn {
-    /// The connection it runs on.
-    connection: *const inillucent_conn,
+    /// The connection it runs on, shared rather than pointed at.
+    connection: Rc<ConnState>,
     /// Whether it has been committed or rolled back.
     ///
     /// A spent handle refuses further work rather than issuing a second
@@ -623,19 +664,32 @@ pub unsafe extern "C" fn inillucent_connect(
         if out.is_null() {
             return misused("inillucent_connect", error);
         }
+        // Counted against the database *before* the state exists, and given
+        // back by `ConnState::drop`. The count is of live states rather than
+        // of live handles, which is what makes `inillucent_close` refuse while
+        // a statement outlives the connection it was prepared on.
         database
             .connections
             .set(database.connections.get().saturating_add(1));
         *out = Box::into_raw(Box::new(inillucent_conn {
-            database: db as *const inillucent_db,
-            // Opened once, here, and continued by every call on this handle.
-            session: database.database.connect().session(),
+            state: Rc::new(ConnState {
+                database: db as *const inillucent_db,
+                // Opened once, here, and continued by every call on this
+                // handle and on everything prepared on it.
+                session: database.database.connect().session(),
+            }),
         }));
         INILLUCENT_OK
     })
 }
 
 /// Frees a connection.
+///
+/// **Any order is safe.** Freeing a connection while a statement or a
+/// transaction prepared on it is still alive releases this handle and nothing
+/// else: the state they share outlives it, so the child keeps working and the
+/// database keeps refusing to close until the last of them is freed. This used
+/// to release the state, and a statement stepped afterwards read freed memory.
 ///
 /// @param conn - the connection
 ///
@@ -647,12 +701,7 @@ pub unsafe extern "C" fn inillucent_conn_free(conn: *mut inillucent_conn) {
     if conn.is_null() {
         return;
     }
-    let held_conn = Box::from_raw(conn);
-    if let Some(database) = held(held_conn.database) {
-        database
-            .connections
-            .set(database.connections.get().saturating_sub(1));
-    }
+    drop(Box::from_raw(conn));
 }
 
 /// Returns the session a connection handle runs its calls in.
@@ -666,10 +715,7 @@ pub unsafe extern "C" fn inillucent_conn_free(conn: *mut inillucent_conn) {
 ///
 /// `conn` must be null or a live handle.
 unsafe fn session_of(conn: *const inillucent_conn) -> u64 {
-    if conn.is_null() {
-        return 0;
-    }
-    (*conn).session
+    held(conn).map_or(0, |connection| connection.state.session)
 }
 
 /// Returns the database a connection belongs to.
@@ -680,7 +726,22 @@ unsafe fn session_of(conn: *const inillucent_conn) -> u64 {
 ///
 /// `conn` must be null or a live handle.
 unsafe fn database_of<'a>(conn: *const inillucent_conn) -> Option<&'a inillucent_db> {
-    held(conn).and_then(|connection| held(connection.database))
+    held(conn).and_then(|connection| database_in(&connection.state))
+}
+
+/// Returns the database a shared connection state belongs to.
+///
+/// The form a statement or a transaction asks in: it holds the state rather
+/// than the connection handle, so that freeing the handle first cannot leave it
+/// pointing at freed memory.
+///
+/// @param state - the shared connection state
+///
+/// # Safety
+///
+/// `state` must be a live state, which holding an `Rc` to it proves.
+unsafe fn database_in<'a>(state: &ConnState) -> Option<&'a inillucent_db> {
+    held(state.database)
 }
 
 /// Runs one statement and collects what it produced.
@@ -893,8 +954,11 @@ pub unsafe extern "C" fn inillucent_prepare(
             report(error, &why, false);
             return status;
         }
+        let Some(handle) = held(conn as *const inillucent_conn) else {
+            return misused("inillucent_prepare", error);
+        };
         *out = Box::into_raw(Box::new(inillucent_stmt {
-            connection: conn as *const inillucent_conn,
+            connection: Rc::clone(&handle.state),
             sql: sql.to_owned(),
             params: Vec::new(),
         }));
@@ -1085,15 +1149,13 @@ pub unsafe extern "C" fn inillucent_stmt_execute(
         let Some(statement) = held(stmt as *const inillucent_stmt) else {
             return misused("inillucent_stmt_execute", error);
         };
-        let Some(database) = database_of(statement.connection) else {
+        let Some(database) = database_in(&statement.connection) else {
             return misused("inillucent_stmt_execute", error);
         };
         if out.is_null() {
             return misused("inillucent_stmt_execute", error);
         }
-        let connection = database
-            .database
-            .connect_as(session_of(statement.connection));
+        let connection = database.database.connect_as(statement.connection.session);
         match connection.query(&statement.sql, &statement.params, capped(limit)) {
             Ok(rows) => {
                 *out = Box::into_raw(Box::new(built(rows)));
@@ -1428,8 +1490,11 @@ pub unsafe extern "C" fn inillucent_txn_begin(
         if status != INILLUCENT_OK {
             return status;
         }
+        let Some(handle) = held(conn as *const inillucent_conn) else {
+            return misused("inillucent_txn_begin", error);
+        };
         *out = Box::into_raw(Box::new(inillucent_txn {
-            connection: conn as *const inillucent_conn,
+            connection: Rc::clone(&handle.state),
             spent: false,
         }));
         INILLUCENT_OK
@@ -1461,7 +1526,7 @@ pub unsafe extern "C" fn inillucent_txn_execute(
         let Some(transaction) = txn.as_mut() else {
             return misused("inillucent_txn_execute", error);
         };
-        let (Some(database), Some(sql)) = (database_of(transaction.connection), borrowed(sql))
+        let (Some(database), Some(sql)) = (database_in(&transaction.connection), borrowed(sql))
         else {
             return misused("inillucent_txn_execute", error);
         };
@@ -1476,9 +1541,7 @@ pub unsafe extern "C" fn inillucent_txn_execute(
             );
             return INILLUCENT_INVALID_STATE;
         }
-        let connection = database
-            .database
-            .connect_as(session_of(transaction.connection));
+        let connection = database.database.connect_as(transaction.connection.session);
         match connection.query(sql, &[], 0) {
             Ok(rows) => {
                 if !affected.is_null() {
@@ -1525,13 +1588,13 @@ pub unsafe extern "C" fn inillucent_txn_commit(
             );
             return INILLUCENT_INVALID_STATE;
         }
-        let Some(database) = database_of(transaction.connection) else {
+        let Some(database) = database_in(&transaction.connection) else {
             return misused("inillucent_txn_commit", error);
         };
         transaction.spent = true;
         let outcome = database
             .database
-            .connect_as(session_of(transaction.connection))
+            .connect_as(transaction.connection.session)
             .execute_batch("COMMIT");
         finish(outcome, error, false)
     })
@@ -1553,10 +1616,10 @@ pub unsafe extern "C" fn inillucent_txn_rollback(txn: *mut inillucent_txn) {
     if transaction.spent {
         return;
     }
-    if let Some(database) = database_of(transaction.connection) {
+    if let Some(database) = database_in(&transaction.connection) {
         let _ = database
             .database
-            .connect_as(session_of(transaction.connection))
+            .connect_as(transaction.connection.session)
             .execute_batch("ROLLBACK");
     }
 }

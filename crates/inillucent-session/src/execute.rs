@@ -209,7 +209,7 @@ fn create_virtual_table(
             },
         )
     })??;
-    connection.with_database(*database, |pager| ddl::bump_schema_cookie(pager))??;
+    connection.with_database(*database, ddl::bump_schema_cookie)??;
     // The schema is re-read before the module is connected, because the module
     // is about to be handed the roots of its shadow tables and those roots are
     // in the schema this statement has just written.
@@ -227,9 +227,12 @@ fn create_virtual_table(
         let (mut table, _, _) =
             crate::vtab::connect(&registry, &reference, b"main", shadows, true)?;
         {
+            let mut services = crate::connection::ConnectionServices {
+                state,
+                database: *database,
+            };
             let mut context = inillucent_ext::vtab::Context {
-                host: state,
-                store: None,
+                host: &mut services,
                 database: *database,
                 limits: &limits,
                 catalog: None,
@@ -357,8 +360,7 @@ fn create_table(
             // one would leave a second object claiming the same root page.
             continue;
         }
-        let root =
-            connection.with_database(*database, |pager| ddl::allocate_index_root(pager))??;
+        let root = connection.with_database(*database, ddl::allocate_index_root)??;
         let index_name = ddl::automatic_index_name(name, ordinal.saturating_add(1) as u32);
         let _ = index;
         connection.with_database(*database, |pager| {
@@ -380,7 +382,7 @@ fn create_table(
         // a root that already exists.
         sequence_root(connection)?;
     }
-    connection.with_database(*database, |pager| ddl::bump_schema_cookie(pager))??;
+    connection.with_database(*database, ddl::bump_schema_cookie)??;
     connection.refresh_catalog()?;
     Ok(Vec::new())
 }
@@ -445,7 +447,7 @@ fn alter_table(
         return Err(misuse("not an ALTER TABLE"));
     };
     let folded = table.to_ascii_lowercase();
-    let rows = connection.with_database(*database, |pager| ddl::read_schema_rows(pager))??;
+    let rows = connection.with_database(*database, ddl::read_schema_rows)??;
 
     // Every rewrite is computed first, and one that fails aborts the whole
     // statement before anything is written.
@@ -494,7 +496,7 @@ fn alter_table(
                 // refused rather than rewritten on a guess.
                 if !owns {
                     let reads = rename::referenced_tables(sql);
-                    if !reads.iter().any(|name| *name == folded) {
+                    if !reads.contains(&folded) {
                         continue;
                     }
                     if reads.len() > 1 {
@@ -555,7 +557,7 @@ fn alter_table(
             ddl::update_schema_row(pager, *rowid, row)
         })??;
     }
-    connection.with_database(*database, |pager| ddl::bump_schema_cookie(pager))??;
+    connection.with_database(*database, ddl::bump_schema_cookie)??;
     connection.refresh_catalog()?;
     Ok(Vec::new())
 }
@@ -914,7 +916,7 @@ fn analyze(connection: &Connection, directive: &Directive) -> DbResult<Directive
             rowid = rowid.saturating_add(1);
         }
     }
-    connection.with_database(*database, |pager| ddl::bump_schema_cookie(pager))??;
+    connection.with_database(*database, ddl::bump_schema_cookie)??;
     connection.refresh_catalog()?;
     Ok(Vec::new())
 }
@@ -987,7 +989,7 @@ fn create_view(
             },
         )
     })??;
-    connection.with_database(*database, |pager| ddl::bump_schema_cookie(pager))??;
+    connection.with_database(*database, ddl::bump_schema_cookie)??;
     connection.refresh_catalog()?;
     Ok(Vec::new())
 }
@@ -1031,7 +1033,7 @@ fn create_trigger(
             },
         )
     })??;
-    connection.with_database(*database, |pager| ddl::bump_schema_cookie(pager))??;
+    connection.with_database(*database, ddl::bump_schema_cookie)??;
     connection.refresh_catalog()?;
     Ok(Vec::new())
 }
@@ -1063,7 +1065,7 @@ fn create_index(
         "CREATE INDEX"
     };
     let sql = ddl::canonical_sql(keywords, source, *name_offset, source.len() as u32);
-    let root = connection.with_database(*database, |pager| ddl::allocate_index_root(pager))??;
+    let root = connection.with_database(*database, ddl::allocate_index_root)??;
     connection.with_database(*database, |pager| {
         ddl::insert_schema_row(
             pager,
@@ -1076,7 +1078,7 @@ fn create_index(
             },
         )
     })??;
-    connection.with_database(*database, |pager| ddl::bump_schema_cookie(pager))??;
+    connection.with_database(*database, ddl::bump_schema_cookie)??;
     connection.refresh_catalog()?;
     backfill_index(connection, *database, name)?;
     Ok(Vec::new())
@@ -1225,7 +1227,7 @@ fn drop_object(connection: &Connection, directive: &Directive) -> DbResult<Direc
         // from the dead one's numbers.
         forget_sequence(connection, &folded)?;
     }
-    connection.with_database(*database, |pager| ddl::bump_schema_cookie(pager))??;
+    connection.with_database(*database, ddl::bump_schema_cookie)??;
     connection.refresh_catalog()?;
     Ok(Vec::new())
 }
@@ -1427,12 +1429,11 @@ fn target(database: Option<usize>) -> usize {
     database.unwrap_or(inillucent_storage::MAIN_DATABASE)
 }
 
-/// Reads or writes one policy flag, which lives on the module registry.
-///
-/// They are there rather than beside the other settings because they are what
-/// the registry consults: whether a schema may name a function, whether a
-/// shadow table may be written, whether the schema table itself may be. A copy
-/// beside them would be a second answer to the same question.
+// The policy flags live on the module registry rather than beside the other
+// settings, because the registry is what consults them: whether a schema may
+// name a function, whether a shadow table may be written, whether the schema
+// table itself may be. A copy beside the other settings would be a second
+// answer to the same question.
 
 /// Runs `PRAGMA wal_checkpoint` and reports what it managed.
 ///
@@ -1462,9 +1463,6 @@ fn wal_checkpoint(
         Value::Integer(i64::from(outcome.checkpointed_frames)),
     ]])
 }
-
-/// Reads a pragma argument as the boolean SQLite accepts.
-///
 
 /// Reports every child row whose foreign key has no parent.
 ///

@@ -386,7 +386,11 @@ fn a_bulk_load_of_out_of_line_values_in_one_transaction_succeeds() {
     // carries short values, spilled values and multi-page spilled values at once.
     let rows = 2_000usize;
     let body = |id: usize| {
-        let units = if id % 83 == 0 { 250_000 } else { 1_000 };
+        let units = if id.is_multiple_of(83) {
+            250_000
+        } else {
+            1_000
+        };
         format!("{id:08}").repeat(units)
     };
     let total: usize = (1..=rows).map(|id| body(id).len()).sum();
@@ -430,7 +434,7 @@ fn a_bulk_load_of_out_of_line_values_in_one_transaction_succeeds() {
 
     // Read back from a fresh open, because a value answered out of the pool that
     // wrote it is not evidence that it reached the file.
-    drop(connection);
+    let _ = connection;
     database.checkpoint().expect("the log folds into the file");
     drop(database);
     let reopened = inillucent::Database::open(&path).expect("the file reopens");

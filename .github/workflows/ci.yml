@@ -1,0 +1,120 @@
+# The required checks, on both operating systems release packaging builds for.
+#
+# **Every job runs `tools/validate.*` rather than a list of its own**, so the
+# command a person runs before pushing and the command that decides whether a
+# commit is releasable are the same command. A workflow that grew its own list
+# would drift from the script the first time somebody added a check to one of
+# them, and the drift would show up as a release that passed CI and failed on a
+# desk.
+#
+# The toolchain is not named here either: `rust-toolchain.toml` names it, and
+# `dtolnay/rust-toolchain@stable` would install whatever stable is on the day,
+# which is the thing the pin exists to stop.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # So a release can require a green run against the exact commit it packages.
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # A backtrace costs nothing until something fails, and a CI failure with no
+  # backtrace is a second run to get one.
+  RUST_BACKTRACE: 1
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: validate (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    # Two hours: the full suite is about 155 seconds, and the crash and fault
+    # campaigns are the part that varies with the runner.
+    timeout-minutes: 120
+    strategy:
+      # **Not fail-fast.** A failure on one operating system and a pass on the
+      # other is the most useful thing this matrix can tell you, and cancelling
+      # the second job throws that away.
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      # `rust-toolchain.toml` decides the version, the components and the
+      # targets. This step exists to make rustup read it before the cache key
+      # is computed.
+      - name: install the pinned toolchain
+        run: |
+          rustup show active-toolchain
+          rustc --version
+          cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}
+
+      # A C compiler is a prerequisite of the C ABI conformance suite. Without
+      # one that suite reports success and `--strict` counts it, so this is
+      # what turns "the ABI was not exercised" into a visible fact rather than
+      # a green.
+      - name: install a C compiler (Unix)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y build-essential
+
+      - name: validate
+        shell: bash
+        run: |
+          chmod +x tools/validate.sh || true
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            pwsh tools/validate.ps1
+          else
+            bash tools/validate.sh
+          fi
+
+      # Kept whatever the outcome: the confinement, ABI and transport suites
+      # write what they built into `_agent_output/`, and a failure there is
+      # usually only readable from the artefact.
+      - name: keep what the suites produced
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: output-${{ matrix.os }}
+          path: _agent_output/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  packages:
+    name: package smoke (${{ matrix.os }})
+    needs: validate
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: package-${{ matrix.os }}
+
+      # **The packages are built and then installed and run**, because a
+      # release that produced an archive nobody opened is a release that has
+      # only been checked for having produced an archive. `packaging/release.*`
+      # runs the same steps; this job is what makes them a required check on
+      # every commit rather than a thing that happens once at a tag.
+      - name: build and smoke the packages
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            pwsh packaging/release.ps1 -SmokeOnly
+          else
+            bash packaging/release.sh --smoke-only
+          fi

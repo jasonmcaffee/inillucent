@@ -222,12 +222,8 @@ fn memory_round(database: &Path, settings: &Settings) -> Result<(), String> {
 fn filtered_plan(settings: &Settings) -> Result<inillucent_compat::perf::Plan, String> {
     let mut plan = plan_for(&settings.scale);
     plan.setup.clear();
-    plan.workloads.retain(|workload| {
-        settings
-            .families
-            .iter()
-            .any(|name| *name == workload.family)
-    });
+    plan.workloads
+        .retain(|workload| settings.families.contains(&workload.family));
     if let Some(repeat) = settings.repeat_override {
         for workload in &mut plan.workloads {
             workload.repeat = repeat;
@@ -438,8 +434,8 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
     println!();
     println!("## result");
     println!(
-        "  {:<24} {:>14} {:>14} {:>9} {:>9} {:>9}  {}",
-        "workload", "inillucent ns", "sqlite ns", "ratio", "low", "high", "agreed"
+        "  {:<24} {:>14} {:>14} {:>9} {:>9} {:>9}  agreed",
+        "workload", "inillucent ns", "sqlite ns", "ratio", "low", "high"
     );
     let mut passed = true;
     // **A family that produced no sample must not be renormalised away.**
@@ -487,8 +483,8 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
     println!();
     println!("## families");
     println!(
-        "  {:<16} {:>9} {:>9} {:>9} {:>8} {:>9}  {}",
-        "family", "ratio", "low", "high", "bar", "worst", "verdict"
+        "  {:<16} {:>9} {:>9} {:>9} {:>8} {:>9}  verdict",
+        "family", "ratio", "low", "high", "bar", "worst"
     );
     for (family, bar) in FAMILIES {
         if !settings.families.iter().any(|name| name == family) {
@@ -567,8 +563,8 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
         };
         let (flat_centre, flat_low, flat_high) = weighted_headline(&rounds, &flat, SEED);
         println!(
-            "  {:<26} {:>9} {:>9} {:>9} {:>8}  {}",
-            "geometric mean", "ratio", "low", "high", "bound", "verdict"
+            "  {:<26} {:>9} {:>9} {:>9} {:>8}  verdict",
+            "geometric mean", "ratio", "low", "high", "bound"
         );
         // **Only a run of the whole plan is a headline.** A families-filtered
         // run is an iteration aid: its weights do not sum to one and the number
@@ -589,8 +585,8 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
             }
         );
         println!(
-            "  {:<26} {flat_centre:>8.2}x {flat_low:>8.2}x {flat_high:>8.2}x {:>8}  {}",
-            "unweighted, family-equal", "-", "reported"
+            "  {:<26} {flat_centre:>8.2}x {flat_low:>8.2}x {flat_high:>8.2}x {:>8}  reported",
+            "unweighted, family-equal", "-"
         );
         println!(
             "  {} rounds contributed, each one weighted mean of that round's log ratios",
@@ -712,8 +708,8 @@ fn report_residency(
     let our_peak = mebibytes(round.cost.peak_working_set);
     let our_cpu = millis(round.cost.cpu_nanos());
     println!(
-        "  {:<28} {:>12} {:>12} {:>9} {:>8}  {}",
-        "quantity", "inillucent", "sqlite", "ratio", "bar", "verdict"
+        "  {:<28} {:>12} {:>12} {:>9} {:>8}  verdict",
+        "quantity", "inillucent", "sqlite", "ratio", "bar"
     );
     let mut met = true;
     for (label, ours, reference, bar, unit) in [

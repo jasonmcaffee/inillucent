@@ -47,7 +47,7 @@ use crate::parser::parse_expression;
 /// They are ordinary tables in every other respect: the rows are what they are,
 /// and a value written into one is used exactly as `ANALYZE` or the rowid
 /// allocator would have used the one it replaced.
-const WRITABLE_INTERNAL: [&'static [u8]; 2] = [b"sqlite_sequence", b"sqlite_stat1"];
+const WRITABLE_INTERNAL: [&[u8]; 2] = [b"sqlite_sequence", b"sqlite_stat1"];
 
 /// Where one column's value comes from in an INSERT.
 #[derive(Clone, Debug, PartialEq)]
@@ -275,8 +275,8 @@ pub struct BoundUpdate {
     ///
     /// **The rows being updated come from a join.** `UPDATE t SET v = s.v FROM s
     /// WHERE s.a = t.a` is the shape a migration writes to copy a column across
-    /// tables, and the values it assigns are not expressions over the target row
-    /// - they read a *different* row, one the join found. So the query that
+    /// tables, and the values it assigns are not expressions over the target
+    /// row: they read a *different* row, one the join found. So the query that
     /// finds the keys carries these terms too, and projects the assigned values
     /// beside the key; see [`crate::dml::BoundUpdate::joins`].
     ///
@@ -688,7 +688,7 @@ impl<'a> Binder<'a> {
             if !trigger.fires_for(&event, changed) {
                 continue;
             }
-            if self.firing.iter().any(|name| *name == trigger.folded) {
+            if self.firing.contains(&trigger.folded) {
                 continue;
             }
             if self.firing.len() >= crate::bind::MAX_TRIGGER_DEPTH {

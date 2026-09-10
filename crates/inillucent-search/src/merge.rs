@@ -20,10 +20,18 @@
 //! rebuilds - which is why the key is content-addressed rather than a sequence
 //! number, since a rolled-back transaction gives its sequence numbers back.
 //!
-//! Compaction is the other half: once the delta log passes its threshold the
-//! whole corpus is rebuilt in one pass into a new generation, which is both
-//! cheaper to load and - because an incrementally grown graph is not the graph
-//! a single-pass build produces - better connected.
+//! Publishing a new generation is the other half, and there are two ways to do
+//! it. A commit whose delta log has passed its threshold **folds**: the built
+//! generation is loaded and the pending entries are inserted into it one at a
+//! time, so the graph work is one insert per delta entry. The `compact` and
+//! `rebuild` commands **build in one pass** over every row, which is one insert
+//! per row and leaves no tombstoned chunks in the index.
+//!
+//! Automatic compaction used to take the second path, which meant one ordinary
+//! `INSERT` could pay a full graph build - nine and a half minutes on the
+//! 598,560 chunk corpus this engine is deployed on, in the middle of somebody
+//! else's transaction. task-1894 M8 made it fold; the single-pass build is now
+//! only ever asked for.
 
 use std::sync::Mutex;
 
@@ -314,11 +322,17 @@ pub fn embedding_of(row: &Row, dims: usize) -> Vec<f32> {
 
 /// Builds a whole index from every row a search table holds, in one pass.
 ///
-/// This is what compaction and `rebuild` both do. It is deliberately not the
-/// incremental path: a graph grown one insert at a time is not the graph a
-/// single-pass build produces, and the single-pass one is better connected -
-/// which is the reason compaction is worth its cost beyond shortening the
-/// delta log.
+/// This is what the `compact` and `rebuild` commands both do. It is deliberately
+/// not the incremental path: a graph grown one insert at a time is not the graph
+/// a single-pass build produces, and only the single-pass build drops the chunks
+/// an update tombstoned.
+///
+/// It used to say here that the single-pass graph is also better connected, and
+/// task-1894's gate did not find that. At 40,000 documents and 64 dimensions the
+/// folded graph answered 0.704 recall at ten against the rebuilt graph's 0.637.
+/// One reading over twenty-four probes is not a reversal of the claim, but it is
+/// enough to stop the claim being made: what a rebuild is known to buy is the
+/// tombstoned chunks going away.
 /// @param context - the module's reach into the database
 /// @param store - the shadow tables
 /// @param options - the table's declaration
@@ -342,6 +356,61 @@ pub fn build_from_rows(
     }
     index.commit();
     Ok((index, rows))
+}
+
+/// Folds a bounded batch of deltas into the generation that is already built.
+///
+/// **This is the automatic path, and the bound is the point (task-1894, M8).**
+/// The graph is not rebuilt. Each pending entry is one `replace_document`,
+/// which tombstones the old chunk and inserts one node through `Hnsw::insert` -
+/// a descent through the layers and one neighbour selection per layer. So the
+/// graph work is **one insert per entry in the delta log**, where the
+/// single-pass build it replaced was one insert per row in the table.
+///
+/// The delta log is a length the declaration sets. `compact = N` fixes it at
+/// `N`, and a table declared that way pays exactly `N` graph inserts per
+/// published generation however large it grows. The default rule is
+/// `max(1024, rows / 8)`, which grows with the corpus - it is a share rather
+/// than a constant because publishing a generation writes the whole serialised
+/// index, and a constant would write it far too often. An application that
+/// needs the write latency pinned names `compact` and accepts more generation
+/// writes; `docs/relational-architecture.md` publishes both sides.
+///
+/// Reading and writing the generation is still proportional to the corpus,
+/// because a generation is one serialised index. That is a byte copy rather
+/// than graph construction, and the two are reported separately for exactly
+/// that reason.
+///
+/// The graph this produces is not the graph a single-pass build produces. It is
+/// a valid approximate graph, and what it accumulates is tombstoned chunks: an
+/// update tombstones the old chunk and appends a new one, and only a single-pass
+/// build removes the old one. That is what the `compact` command is for, and
+/// what `state::FOLDS` and `state::CHUNKS` let an application see coming.
+///
+/// @param context - the module's reach into the database
+/// @param store - the shadow tables
+/// @param options - the table's declaration
+/// @param generation - the generation to fold into
+/// @param pending - the delta entries not yet covered
+pub fn fold_generation(
+    context: &mut Context<'_>,
+    store: &Store,
+    options: &Options,
+    generation: i64,
+    pending: &[Delta],
+) -> DbResult<(Index, usize)> {
+    let Some(bytes) = store.read_generation(context, generation)? else {
+        // Nothing to fold into. A first generation is built in one pass over
+        // the rows the transaction itself wrote, which is bounded by that
+        // transaction rather than by an index it is adding to.
+        let (index, _) = build_from_rows(context, store, options)?;
+        let inserted = index.store().n_chunks();
+        return Ok((index, inserted));
+    };
+    let mut index = inillucent_core::persist::read_index(&mut bytes.as_slice())
+        .map_err(|error| failure(format!("inillucent_search: unreadable generation: {error}")))?;
+    let inserted = apply(&mut index, context, store, options, pending)?;
+    Ok((index, inserted))
 }
 
 /// Brings the cached index up to the snapshot the statement is reading.
@@ -415,8 +484,9 @@ fn apply(
     store: &Store,
     options: &Options,
     entries: &[Delta],
-) -> DbResult<()> {
+) -> DbResult<usize> {
     let dims = options.dims.max(1);
+    let mut inserted = 0usize;
     for entry in entries {
         match entry.op {
             Op::Delete => {
@@ -434,11 +504,13 @@ fn apply(
                 };
                 let chunk = chunk_of(entry.id, &row);
                 let vector = embedding_of(&row, dims);
-                index.replace_document(SOURCE, &entry.id.to_string(), vec![chunk], &[vector]);
+                let stats =
+                    index.replace_document(SOURCE, &entry.id.to_string(), vec![chunk], &[vector]);
+                inserted = inserted.saturating_add(stats.chunks_added);
             }
         }
     }
-    Ok(())
+    Ok(inserted)
 }
 
 /// Returns how many live chunks an index holds.

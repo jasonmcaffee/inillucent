@@ -355,65 +355,6 @@ pub struct ModuleRef {
     pub arguments: Vec<Vec<u8>>,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The operator numbers are the ones the C surface publishes, because a
-    /// module written against the header compares against these constants.
-    #[test]
-    fn operator_codes_match_the_published_constants() {
-        assert_eq!(ConstraintOp::Eq.code(), 2);
-        assert_eq!(ConstraintOp::Gt.code(), 4);
-        assert_eq!(ConstraintOp::Le.code(), 8);
-        assert_eq!(ConstraintOp::Lt.code(), 16);
-        assert_eq!(ConstraintOp::Ge.code(), 32);
-        assert_eq!(ConstraintOp::Match.code(), 64);
-        assert_eq!(ConstraintOp::Is.code(), 72);
-    }
-
-    /// Argument positions are handed out in the order they are claimed, and
-    /// read back in that same order.
-    #[test]
-    fn argument_positions_are_claimed_in_order() {
-        let mut query = IndexQuery::new(
-            vec![
-                ConstraintSpec {
-                    column: 0,
-                    op: ConstraintOp::Eq,
-                    usable: true,
-                },
-                ConstraintSpec {
-                    column: 1,
-                    op: ConstraintOp::Gt,
-                    usable: true,
-                },
-            ],
-            Vec::new(),
-        );
-        assert_eq!(query.use_constraint(1, true), 1);
-        assert_eq!(query.use_constraint(0, false), 2);
-        assert_eq!(query.argument_order(), vec![1, 0]);
-        assert!(query.usage[1].omit);
-        assert!(!query.usage[0].omit);
-    }
-
-    /// A module that says nothing about cost must not win a join order.
-    #[test]
-    fn the_default_cost_is_deliberately_enormous() {
-        let query = IndexQuery::new(Vec::new(), Vec::new());
-        assert!(query.estimated_cost > 1.0e90);
-    }
-
-    /// The two null tests carry no value, so nothing is passed for them.
-    #[test]
-    fn the_null_tests_carry_no_value() {
-        assert!(!ConstraintOp::IsNull.has_value());
-        assert!(!ConstraintOp::IsNotNull.has_value());
-        assert!(ConstraintOp::Eq.has_value());
-    }
-}
-
 /// The rows of a module's shadow tables, whatever engine holds them.
 ///
 /// **This is the seam the TDD's "shadow tables become ordinary trees" needs.**
@@ -507,4 +448,63 @@ pub trait ShadowStore {
         key_columns: usize,
         body: &mut dyn FnMut(&[Value<'static>]) -> DbResult<bool>,
     ) -> DbResult<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The operator numbers are the ones the C surface publishes, because a
+    /// module written against the header compares against these constants.
+    #[test]
+    fn operator_codes_match_the_published_constants() {
+        assert_eq!(ConstraintOp::Eq.code(), 2);
+        assert_eq!(ConstraintOp::Gt.code(), 4);
+        assert_eq!(ConstraintOp::Le.code(), 8);
+        assert_eq!(ConstraintOp::Lt.code(), 16);
+        assert_eq!(ConstraintOp::Ge.code(), 32);
+        assert_eq!(ConstraintOp::Match.code(), 64);
+        assert_eq!(ConstraintOp::Is.code(), 72);
+    }
+
+    /// Argument positions are handed out in the order they are claimed, and
+    /// read back in that same order.
+    #[test]
+    fn argument_positions_are_claimed_in_order() {
+        let mut query = IndexQuery::new(
+            vec![
+                ConstraintSpec {
+                    column: 0,
+                    op: ConstraintOp::Eq,
+                    usable: true,
+                },
+                ConstraintSpec {
+                    column: 1,
+                    op: ConstraintOp::Gt,
+                    usable: true,
+                },
+            ],
+            Vec::new(),
+        );
+        assert_eq!(query.use_constraint(1, true), 1);
+        assert_eq!(query.use_constraint(0, false), 2);
+        assert_eq!(query.argument_order(), vec![1, 0]);
+        assert!(query.usage[1].omit);
+        assert!(!query.usage[0].omit);
+    }
+
+    /// A module that says nothing about cost must not win a join order.
+    #[test]
+    fn the_default_cost_is_deliberately_enormous() {
+        let query = IndexQuery::new(Vec::new(), Vec::new());
+        assert!(query.estimated_cost > 1.0e90);
+    }
+
+    /// The two null tests carry no value, so nothing is passed for them.
+    #[test]
+    fn the_null_tests_carry_no_value() {
+        assert!(!ConstraintOp::IsNull.has_value());
+        assert!(!ConstraintOp::IsNotNull.has_value());
+        assert!(ConstraintOp::Eq.has_value());
+    }
 }

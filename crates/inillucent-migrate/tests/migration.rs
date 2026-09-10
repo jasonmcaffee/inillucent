@@ -39,7 +39,12 @@ fn scratch(name: &str) -> PathBuf {
 /// Builds one chunk of the test corpus.
 fn chunk(document: usize, index: u32, text: &str, deleted: bool) -> ChunkInput {
     ChunkInput {
-        source: if document % 2 == 0 { "notes" } else { "mail" }.to_string(),
+        source: if document.is_multiple_of(2) {
+            "notes"
+        } else {
+            "mail"
+        }
+        .to_string(),
         external_doc_id: format!("doc-{document}"),
         chunk_index: index,
         heading_path: vec![format!("Section {index}")],
@@ -47,7 +52,14 @@ fn chunk(document: usize, index: u32, text: &str, deleted: bool) -> ChunkInput {
         title: format!("Document {document}"),
         url: format!("https://example.test/{document}"),
         space_key: Some("ENG".to_string()),
-        author: Some(if document % 3 == 0 { "Ada" } else { "Grace" }.to_string()),
+        author: Some(
+            if document.is_multiple_of(3) {
+                "Ada"
+            } else {
+                "Grace"
+            }
+            .to_string(),
+        ),
         author_id: Some(format!("u{}", document % 3)),
         updated_at: Some(1_700_000_000 + document as i64),
         external_chunk_id: Some(format!("doc-{document}-{index}")),
@@ -56,7 +68,7 @@ fn chunk(document: usize, index: u32, text: &str, deleted: bool) -> ChunkInput {
             "participant".to_string(),
             vec![format!("person{}@example.test", document % 4)],
         )],
-        flags: if document % 5 == 0 {
+        flags: if document.is_multiple_of(5) {
             vec!["has_attachment".to_string()]
         } else {
             Vec::new()
@@ -164,7 +176,7 @@ fn a_legacy_index_migrates_and_every_check_passes() {
     let built = build_source(&source_dir, 24, 3);
     let before = tree_digest(&source_dir);
 
-    let mut plan = Plan::new(&source_dir, root.join("corpus.db"));
+    let plan = Plan::new(&source_dir, root.join("corpus.db"));
     let outcome = migrate(&plan).expect("the migration runs");
 
     for check in &outcome.checks {

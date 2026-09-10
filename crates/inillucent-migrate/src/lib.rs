@@ -18,8 +18,10 @@
 //! 3. **Schema, then copy in bounded transactions**, each one checkpointed in
 //!    the manifest after it commits. An interruption resumes from the last
 //!    committed batch.
-//! 4. **Build the index**, which for a search table is compaction: the delta
-//!    log folds into one generation built in a single pass.
+//! 4. **Build the index**, which for a search table is the `compact` command:
+//!    one generation built in a single pass over every copied row. The table is
+//!    declared `compact = 0` for the copy, so nothing is published while the
+//!    rows are still arriving and the graph is built exactly once.
 //! 5. **Verify against the source** - counts, ordered digests, tombstones,
 //!    dictionaries, and the rankings and scores of a probe pack drawn from the
 //!    corpus.
@@ -257,7 +259,7 @@ pub fn migrate(plan: &Plan) -> Result<Outcome, String> {
     database
         .checkpoint()
         .map_err(|error| format!("cannot checkpoint the staged file: {}", error.message()))?;
-    drop(connection);
+    let _ = connection;
     drop(database);
 
     let mut checks = vec![structure_probe(&plan.staging)];

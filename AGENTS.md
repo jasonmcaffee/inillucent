@@ -63,7 +63,8 @@ inillucent help migrate         # one command, every parameter
 | how does it compare to pgvector? | [`docs/retrieval-quality.md`](docs/retrieval-quality.md) |
 | how do I search by meaning or by exact term? | [`docs/vector-search.md`](docs/vector-search.md) |
 | how do I bind this from Python / Node / Go / PHP / C? | [`drivers/README.md`](drivers/README.md) |
-| how does any of it work? | [`docs/architecture.md`](docs/architecture.md) |
+| how does the retrieval half work? | [`docs/architecture.md`](docs/architecture.md) |
+| how does the SQL half work? | [`docs/relational-architecture.md`](docs/relational-architecture.md) |
 | what is not built yet? | [`docs/roadmap.md`](docs/roadmap.md) |
 | where is everything? | [`docs/README.md`](docs/README.md), the documentation index |
 

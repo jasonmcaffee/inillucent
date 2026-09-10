@@ -62,7 +62,7 @@ pub fn compute(store: &mut Ephemeral, plan: &WindowPlan, encoding: TextEncoding)
             }
         }
     }
-    for (row, extra) in rows.into_iter().zip(values.into_iter()) {
+    for (row, extra) in rows.into_iter().zip(values) {
         let mut whole = row;
         whole.extend(extra);
         store.insert(whole);

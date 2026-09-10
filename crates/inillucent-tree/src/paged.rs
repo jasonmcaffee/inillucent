@@ -73,6 +73,10 @@ pub enum KeyEncoding {
     General,
 }
 
+/// The lowest and the highest key under a subtree, either absent when the
+/// subtree holds no live row.
+pub type KeyRange = (Option<Vec<u8>>, Option<Vec<u8>>);
+
 impl KeyEncoding {
     /// Chooses the encoding a column directory calls for.
     ///
@@ -2735,11 +2739,7 @@ impl PagedTree {
     ///
     /// @param pool - the buffer pool
     /// @param page - the subtree's root
-    fn key_range_under(
-        &self,
-        pool: &Pool,
-        page: PageId,
-    ) -> DbResult<(Option<Vec<u8>>, Option<Vec<u8>>)> {
+    fn key_range_under(&self, pool: &Pool, page: PageId) -> DbResult<KeyRange> {
         let mut lowest: Option<Vec<u8>> = None;
         let mut highest: Option<Vec<u8>> = None;
         self.visit_subtree(pool, page, 0, &mut |leaf| {

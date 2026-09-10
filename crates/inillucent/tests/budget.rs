@@ -139,7 +139,7 @@ fn build(path: &PathBuf) -> Database {
     connection
         .execute_batch("COMMIT")
         .expect("the transaction commits");
-    drop(connection);
+    let _ = connection;
     database
 }
 

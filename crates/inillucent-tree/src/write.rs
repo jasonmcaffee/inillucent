@@ -271,6 +271,12 @@ pub trait TreeLog {
 /// for a real spiller against in a test.
 struct Measuring;
 
+/// A leaf's live rows and, per row, the extent each oversized value lives in.
+///
+/// The two are parallel rather than one list of pairs because the rows are
+/// re-encoded as a block and the extents are followed one at a time.
+pub type Repacked = (Vec<Vec<OwnedDatum>>, Vec<Vec<Option<ExtentRef>>>);
+
 impl crate::leaf::Spill for Measuring {
     fn spill(
         &mut self,
@@ -926,7 +932,7 @@ impl PagedTree {
             // is needed - the page is genuinely full - because rows arriving in
             // order never come back to the page they left behind. See
             // `APPEND_FILL`.
-            let last_row: Option<Vec<Datum<'_>>> = (source.len() > 0).then(|| {
+            let last_row: Option<Vec<Datum<'_>>> = (!source.is_empty()).then(|| {
                 (0..self.key_columns())
                     .map(|column| source.value(source.len().saturating_sub(1), column))
                     .collect()
@@ -1442,7 +1448,7 @@ impl PagedTree {
 
         // Which half the caller's child ended up in decides which page it has to
         // stamp, and it is decided here rather than rediscovered afterwards.
-        let landed = if left_children.iter().any(|page| *page == right) {
+        let landed = if left_children.contains(&right) {
             parent
         } else {
             sibling
@@ -1738,11 +1744,7 @@ impl PagedTree {
     ///
     /// @param pool - the buffer pool
     /// @param page - the leaf
-    fn rows_to_repack(
-        &self,
-        pool: &Pool,
-        page: PageId,
-    ) -> DbResult<(Vec<Vec<OwnedDatum>>, Vec<Vec<Option<ExtentRef>>>)> {
+    fn rows_to_repack(&self, pool: &Pool, page: PageId) -> DbResult<Repacked> {
         let guard = pool.fetch(page)?;
         let leaf = LeafRef::parse(&guard)?
             .with_collations(self.collations())

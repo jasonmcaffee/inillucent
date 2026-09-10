@@ -270,8 +270,8 @@ fn by_prefix(prefix: &str, write: &mut dyn FnMut(&str)) -> usize {
         if !line.starts_with(prefix) {
             continue;
         }
-        if let Some(previous) = hit {
-            write(HELP[previous]);
+        if let Some(previous) = hit.and_then(|at| HELP.get(at)) {
+            write(previous);
         }
         hit = Some(index);
         count += 1;
@@ -280,7 +280,9 @@ fn by_prefix(prefix: &str, write: &mut dyn FnMut(&str)) -> usize {
         return 0;
     };
     if count > 1 {
-        write(HELP[index]);
+        if let Some(line) = HELP.get(index) {
+            write(line);
+        }
         return count;
     }
     if let Some(text) = usage_for(prefix) {
@@ -289,8 +291,10 @@ fn by_prefix(prefix: &str, write: &mut dyn FnMut(&str)) -> usize {
         }
         return count;
     }
-    write(HELP[index]);
-    for line in HELP.iter().skip(index + 1) {
+    if let Some(line) = HELP.get(index) {
+        write(line);
+    }
+    for line in HELP.iter().skip(index.saturating_add(1)) {
         if !is_detail(line) {
             break;
         }
@@ -312,12 +316,11 @@ fn containing(pattern: &str, write: &mut dyn FnMut(&str)) -> usize {
     let mut count = 0;
     let mut start = 0usize;
     let mut index = 0usize;
-    while index < HELP.len() {
-        let line = HELP[index];
+    while let Some(line) = HELP.get(index) {
         if line.starts_with(',') {
-            index += 1;
-            while index < HELP.len() && is_detail(HELP[index]) {
-                index += 1;
+            index = index.saturating_add(1);
+            while HELP.get(index).is_some_and(|line| is_detail(line)) {
+                index = index.saturating_add(1);
             }
             continue;
         }
@@ -325,11 +328,13 @@ fn containing(pattern: &str, write: &mut dyn FnMut(&str)) -> usize {
             start = index;
         }
         if line.to_ascii_lowercase().contains(&needle) {
-            write(HELP[start]);
-            let mut detail = start + 1;
-            while detail < HELP.len() && is_detail(HELP[detail]) {
-                write(HELP[detail]);
-                detail += 1;
+            if let Some(head) = HELP.get(start) {
+                write(head);
+            }
+            let mut detail = start.saturating_add(1);
+            while let Some(line) = HELP.get(detail).filter(|line| is_detail(line)) {
+                write(line);
+                detail = detail.saturating_add(1);
             }
             index = detail;
             count += 1;

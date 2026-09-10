@@ -1219,6 +1219,7 @@ fn hybrid(identity: &FamilyScores, headings: &FamilyScores) -> Scenario {
 /// - **multi-source** needs evidence from two documents in two sources, and is
 ///   scored on whether *both* arrived. Success@10 calls half an answer a success;
 ///   evidence recall does not.
+///
 /// @param passage - the passage evidence pack
 /// @param typo - the same pack with a transposition
 /// @param shorthand - the same pack reduced to keywords

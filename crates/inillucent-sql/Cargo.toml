@@ -9,3 +9,7 @@ description = "First-party lexer, parser, AST, binder, semantic rewrites, and lo
 [dependencies]
 inillucent-base = { workspace = true }
 inillucent-value = { workspace = true }
+
+# The workspace's lint table; see the note beside it in the root manifest.
+[lints]
+workspace = true

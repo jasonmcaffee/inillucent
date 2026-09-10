@@ -734,8 +734,6 @@ dependencies = [
  "inillucent-catalog",
  "inillucent-scalar",
  "inillucent-sql",
- "inillucent-storage",
- "inillucent-transaction",
  "inillucent-value",
  "rust-stemmers",
 ]
@@ -796,6 +794,8 @@ dependencies = [
  "inillucent-engine",
  "inillucent-tree",
  "inillucent-vfs",
+ "libc",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]

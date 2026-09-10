@@ -277,7 +277,7 @@ fn parse_coordinate_arguments(arguments: &[Vec<u8>]) -> DbResult<RTreeShape> {
             _ => coordinates.push(word.to_vec()),
         }
     }
-    if coordinates.len() < 3 || coordinates.len() > 11 || coordinates.len() % 2 == 0 {
+    if coordinates.len() < 3 || coordinates.len() > 11 || coordinates.len().is_multiple_of(2) {
         return Err(failure(
             "an rtree table needs an odd number of columns between 3 and 11",
         ));
@@ -448,12 +448,7 @@ impl RTreeTable {
         } else {
             self.dimensions.saturating_mul(2).saturating_add(1)
         };
-        let mut extra: Vec<Value<'static>> = values
-            .get(first..)
-            .unwrap_or_default()
-            .iter()
-            .cloned()
-            .collect();
+        let mut extra: Vec<Value<'static>> = values.get(first..).unwrap_or_default().to_vec();
         extra.resize(self.auxiliary, Value::Null);
         if let Ok(mut pending) = self.pending.lock() {
             pending.auxiliary.insert(rowid, extra);
@@ -711,9 +706,17 @@ struct Cell {
 impl Cell {
     /// Returns whether this box overlaps another.
     fn overlaps(&self, other: &[f64]) -> bool {
-        for pair in 0..self.box_.len() / 2 {
-            let (low, high) = (self.box_[pair * 2], self.box_[pair * 2 + 1]);
-            let (other_low, other_high) = (other[pair * 2], other[pair * 2 + 1]);
+        // Bounds-checked because `other` is a query's box and `self.box_` came
+        // off a page: a dimension count that disagrees between them is exactly
+        // what a damaged node looks like, and reading past either one is the
+        // failure this crate's `deny(indexing_slicing)` exists to stop.
+        for (mine, theirs) in self.box_.chunks_exact(2).zip(other.chunks_exact(2)) {
+            let (Some(low), Some(high)) = (mine.first(), mine.get(1)) else {
+                continue;
+            };
+            let (Some(other_low), Some(other_high)) = (theirs.first(), theirs.get(1)) else {
+                continue;
+            };
             if high < other_low || low > other_high {
                 return false;
             }
@@ -725,11 +728,13 @@ impl Cell {
     fn growth(&self, other: &Cell) -> f64 {
         let mut before = 1.0f64;
         let mut after = 1.0f64;
-        for pair in 0..self.box_.len() / 2 {
-            let (low, high) = (self.box_[pair * 2], self.box_[pair * 2 + 1]);
+        for (mine, theirs) in self.box_.chunks_exact(2).zip(other.box_.chunks_exact(2)) {
+            let (Some(low), Some(high)) = (mine.first().copied(), mine.get(1).copied()) else {
+                continue;
+            };
             before *= (high - low).max(0.0) + 1.0;
-            let low = low.min(other.box_[pair * 2]);
-            let high = high.max(other.box_[pair * 2 + 1]);
+            let low = low.min(theirs.first().copied().unwrap_or(low));
+            let high = high.max(theirs.get(1).copied().unwrap_or(high));
             after *= (high - low).max(0.0) + 1.0;
         }
         after - before
@@ -737,9 +742,18 @@ impl Cell {
 
     /// Grows this box to hold another.
     fn absorb(&mut self, other: &Cell) {
-        for pair in 0..self.box_.len() / 2 {
-            self.box_[pair * 2] = self.box_[pair * 2].min(other.box_[pair * 2]);
-            self.box_[pair * 2 + 1] = self.box_[pair * 2 + 1].max(other.box_[pair * 2 + 1]);
+        for (mine, theirs) in self
+            .box_
+            .chunks_exact_mut(2)
+            .zip(other.box_.chunks_exact(2))
+        {
+            let (low, high) = (theirs.first().copied(), theirs.get(1).copied());
+            if let (Some(slot), Some(value)) = (mine.first_mut(), low) {
+                *slot = slot.min(value);
+            }
+            if let (Some(slot), Some(value)) = (mine.get_mut(1), high) {
+                *slot = slot.max(value);
+            }
         }
     }
 }
@@ -749,8 +763,12 @@ fn write_header(node: &mut [u8], depth: u16, count: u16) {
     if node.len() < HEADER {
         return;
     }
-    node[0..2].copy_from_slice(&depth.to_be_bytes());
-    node[2..4].copy_from_slice(&count.to_be_bytes());
+    if let Some(slot) = node.get_mut(0..2) {
+        slot.copy_from_slice(&depth.to_be_bytes());
+    }
+    if let Some(slot) = node.get_mut(2..4) {
+        slot.copy_from_slice(&count.to_be_bytes());
+    }
 }
 
 /// Reads a node's four-byte header as `(depth, count)`.
@@ -758,9 +776,10 @@ fn read_header(node: &[u8]) -> (u16, u16) {
     if node.len() < HEADER {
         return (0, 0);
     }
+    let at = |position: usize| node.get(position).copied().unwrap_or(0);
     (
-        u16::from_be_bytes([node[0], node[1]]),
-        u16::from_be_bytes([node[2], node[3]]),
+        u16::from_be_bytes([at(0), at(1)]),
+        u16::from_be_bytes([at(2), at(3)]),
     )
 }
 
@@ -793,10 +812,14 @@ fn write_cell(node: &mut [u8], index: usize, cell: &Cell) {
     if node.len() < at + size {
         return;
     }
-    node[at..at + 8].copy_from_slice(&cell.key.to_be_bytes());
+    if let Some(slot) = node.get_mut(at..at.saturating_add(8)) {
+        slot.copy_from_slice(&cell.key.to_be_bytes());
+    }
     for (position, value) in cell.box_.iter().enumerate() {
-        let at = at + 8 + position * COORDINATE;
-        node[at..at + COORDINATE].copy_from_slice(&(*value as f32).to_be_bytes());
+        let at = at.saturating_add(8).saturating_add(position * COORDINATE);
+        if let Some(slot) = node.get_mut(at..at.saturating_add(COORDINATE)) {
+            slot.copy_from_slice(&(*value as f32).to_be_bytes());
+        }
     }
 }
 
@@ -833,17 +856,10 @@ fn node_size(
             return node.len();
         }
     }
-    // The old engine's page size when there is a pager to ask, and the
-    // fallback otherwise - which is the same answer a host with no pager
-    // already got, because the call returned an error and `unwrap_or` took
-    // this branch.
+    // The host's page size when it has one, and the fallback otherwise - which
+    // is the same answer a host that could not be asked already got.
     let database = context.database;
-    let page = context
-        .host
-        .pager_set()
-        .and_then(|pagers| pagers.pager(database).ok())
-        .map(|pager| pager.page_size().bytes() as usize)
-        .unwrap_or(4096);
+    let page = context.host.page_size(database).unwrap_or(4096);
     let usable = page.saturating_sub(64);
     let cells = (usable.saturating_sub(HEADER) / cell.max(1)).clamp(2, MAX_CELLS);
     HEADER + cells * cell
@@ -1103,9 +1119,14 @@ fn bounding(cells: &[Cell]) -> Vec<f64> {
     };
     let mut box_ = first.box_.clone();
     for cell in cells.iter().skip(1) {
-        for pair in 0..box_.len() / 2 {
-            box_[pair * 2] = box_[pair * 2].min(cell.box_[pair * 2]);
-            box_[pair * 2 + 1] = box_[pair * 2 + 1].max(cell.box_[pair * 2 + 1]);
+        for (mine, theirs) in box_.chunks_exact_mut(2).zip(cell.box_.chunks_exact(2)) {
+            let (low, high) = (theirs.first().copied(), theirs.get(1).copied());
+            if let (Some(slot), Some(value)) = (mine.first_mut(), low) {
+                *slot = slot.min(value);
+            }
+            if let (Some(slot), Some(value)) = (mine.get_mut(1), high) {
+                *slot = slot.max(value);
+            }
         }
     }
     box_
@@ -1119,8 +1140,13 @@ fn split(cells: &[Cell], dimensions: usize) -> (Vec<Cell>, Vec<Cell>) {
         let mut low = f64::MAX;
         let mut high = f64::MIN;
         for cell in cells {
-            low = low.min(cell.box_[dimension * 2]);
-            high = high.max(cell.box_[dimension * 2 + 1]);
+            low = low.min(cell.box_.get(dimension * 2).copied().unwrap_or(f64::MAX));
+            high = high.max(
+                cell.box_
+                    .get(dimension * 2 + 1)
+                    .copied()
+                    .unwrap_or(f64::MIN),
+            );
         }
         if high - low > spread {
             spread = high - low;
@@ -1128,10 +1154,14 @@ fn split(cells: &[Cell], dimensions: usize) -> (Vec<Cell>, Vec<Cell>) {
         }
     }
     let mut sorted = cells.to_vec();
+    let midpoint = |cell: &Cell| -> f64 {
+        let low = cell.box_.get(widest * 2).copied().unwrap_or(0.0);
+        let high = cell.box_.get(widest * 2 + 1).copied().unwrap_or(0.0);
+        low + high
+    };
     sorted.sort_by(|left, right| {
-        let left = left.box_[widest * 2] + left.box_[widest * 2 + 1];
-        let right = right.box_[widest * 2] + right.box_[widest * 2 + 1];
-        left.partial_cmp(&right)
+        midpoint(left)
+            .partial_cmp(&midpoint(right))
             .unwrap_or(core::cmp::Ordering::Equal)
     });
     let half = sorted.len().div_ceil(2);
@@ -1286,18 +1316,30 @@ impl VirtualCursor for RTreeCursor {
             let dimension = (column - 1) / 2;
             match op {
                 b'=' => {
-                    low[dimension] = low[dimension].max(value);
-                    high[dimension] = high[dimension].min(value);
+                    if let Some(slot) = low.get_mut(dimension) {
+                        *slot = slot.max(value);
+                    }
+                    if let Some(slot) = high.get_mut(dimension) {
+                        *slot = slot.min(value);
+                    }
                 }
-                b'>' | b'G' => low[dimension] = low[dimension].max(value),
-                b'<' | b'L' => high[dimension] = high[dimension].min(value),
+                b'>' | b'G' => {
+                    if let Some(slot) = low.get_mut(dimension) {
+                        *slot = slot.max(value);
+                    }
+                }
+                b'<' | b'L' => {
+                    if let Some(slot) = high.get_mut(dimension) {
+                        *slot = slot.min(value);
+                    }
+                }
                 _ => {}
             }
         }
         let mut query = Vec::with_capacity(self.dimensions * 2);
-        for dimension in 0..self.dimensions {
-            query.push(low[dimension]);
-            query.push(high[dimension]);
+        for (low, high) in low.iter().zip(high.iter()).take(self.dimensions) {
+            query.push(*low);
+            query.push(*high);
         }
         let mut stack = vec![ROOT];
         while let Some(number) = stack.pop() {

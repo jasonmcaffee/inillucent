@@ -1560,8 +1560,8 @@ impl<'p> LeafRef<'p> {
     ///
     /// **The allocation-free half of [`LeafRef::live`], and the one a compaction
     /// wants.** It also does asymptotically less work: the sorted region is
-    /// already in key order, so the delta rows - at most [`DELTA_LIMIT`] of them
-    /// - are merged into it by **binary search** rather than the whole leaf
+    /// already in key order, so the delta rows, at most [`DELTA_LIMIT`] of
+    /// them, are merged into it by **binary search** rather than the whole leaf
     /// being sorted again.
     ///
     /// The shadowing rules are `live`'s, and the two are checked against each
@@ -2832,8 +2832,8 @@ impl LeafBuilder {
     ///
     /// **Generic over the row's container, and that is the whole point.** A
     /// `Vec<Datum>` already implements `AsRef<[Datum]>`, so every caller that
-    /// holds owned rows - the compaction path in `write.rs`, the fixture import
-    /// - compiles unchanged; and a caller that has its rows in an arena passes
+    /// holds owned rows (the compaction path in `write.rs`, the fixture
+    /// import) compiles unchanged; and a caller that has its rows in an arena passes
     /// `&[&[Datum]]` and copies nothing. `CREATE INDEX` used to materialise a
     /// `Vec<Vec<Datum>>` of the whole input purely to call this, which was
     /// 4.2 ms of a 48 ms statement at a hundred thousand rows.
@@ -2890,6 +2890,12 @@ impl LeafBuilder {
     /// cost of one row.
     ///
     /// @param count - how many rows
+    ///
+    /// **Unreachable since the narrow-slot pricing moved onto the width
+    /// arrays.** It is kept rather than deleted because task-1894 is not the
+    /// ticket that reviews it; it is listed for removal in that ticket's
+    /// comments so a person decides.
+    #[allow(dead_code)]
     fn fixed_size(&self, count: usize) -> usize {
         let widths: Vec<usize> = self
             .columns
@@ -3558,6 +3564,12 @@ fn narrow_floor(physical: PhysicalType, page_size: usize) -> usize {
 /// @param physical - the column's layout
 /// @param value - the value being placed
 /// @param threshold - the longest value kept in the leaf
+///
+/// **Unreachable since the narrow-slot pricing moved onto the width
+/// arrays.** It is kept rather than deleted because task-1894 is not the
+/// ticket that reviews it; it is listed for removal in that ticket's
+/// comments so a person decides.
+#[allow(dead_code)]
 fn slot_need(
     physical: PhysicalType,
     value: &Datum<'_>,
@@ -3580,6 +3592,12 @@ fn slot_need(
 /// @param physical - the column's layout
 /// @param value - the value being placed
 /// @param class - the class the value classified as
+///
+/// **Unreachable since the narrow-slot pricing moved onto the width
+/// arrays.** It is kept rather than deleted because task-1894 is not the
+/// ticket that reviews it; it is listed for removal in that ticket's
+/// comments so a person decides.
+#[allow(dead_code)]
 fn slot_need_of(
     physical: PhysicalType,
     value: &Datum<'_>,
@@ -3619,6 +3637,12 @@ fn slot_need_of(
 /// @param physical - the column's layout
 /// @param value - the value being placed
 /// @param threshold - the longest value kept in the leaf
+///
+/// **Unreachable since the narrow-slot pricing moved onto the width
+/// arrays.** It is kept rather than deleted because task-1894 is not the
+/// ticket that reviews it; it is listed for removal in that ticket's
+/// comments so a person decides.
+#[allow(dead_code)]
 fn costs_at(
     physical: PhysicalType,
     value: &Datum<'_>,
@@ -3691,6 +3715,12 @@ fn classify_at(physical: PhysicalType, value: &Datum<'_>, threshold: usize) -> V
 /// @param physical - the column's layout
 /// @param value - the value to measure
 /// @param threshold - the longest value kept in the leaf
+///
+/// **Unreachable since the narrow-slot pricing moved onto the width
+/// arrays.** It is kept rather than deleted because task-1894 is not the
+/// ticket that reviews it; it is listed for removal in that ticket's
+/// comments so a person decides.
+#[allow(dead_code)]
 fn heap_cost_at(physical: PhysicalType, value: &Datum<'_>, threshold: usize) -> usize {
     heap_cost_of(physical, value, classify_at(physical, value, threshold))
 }
@@ -3994,13 +4024,12 @@ mod tests {
         assert_eq!(leaf.key_columns(), 1);
         assert!(leaf.is_clean());
         for (index, row) in rows.iter().enumerate() {
-            for column in 0..5 {
+            for (column, wanted) in row.iter().enumerate().take(5) {
                 let got = leaf.value(index, column).unwrap();
                 assert_eq!(
-                    got.compare(&row[column]),
+                    got.compare(wanted),
                     std::cmp::Ordering::Equal,
-                    "row {index} column {column}: {got:?} vs {:?}",
-                    row[column]
+                    "row {index} column {column}: {got:?} vs {wanted:?}"
                 );
             }
         }

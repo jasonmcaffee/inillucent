@@ -25,7 +25,7 @@ use inillucent_tree::datum::OwnedDatum;
 use crate::auth::{sha1, xor};
 use crate::source::{Kind, RemoteSource, SourceColumn, SourceTable};
 use crate::stream::{protocol, will_not, Stream};
-use crate::url::ConnectionUrl;
+use crate::url::{ConnectionUrl, Transport};
 
 /// The capabilities this client advertises.
 mod capability {
@@ -39,6 +39,8 @@ mod capability {
     pub const PROTOCOL_41: u32 = 0x0000_0200;
     /// Transactions, which the snapshot needs.
     pub const TRANSACTIONS: u32 = 0x0000_2000;
+    /// The rest of the connection is TLS.
+    pub const SSL: u32 = 0x0000_0800;
     /// The 4.1 authentication exchange.
     pub const SECURE_CONNECTION: u32 = 0x0000_8000;
     /// The handshake names its authentication plugin.
@@ -114,14 +116,34 @@ pub struct MysqlSource {
     in_snapshot: bool,
 }
 
+/// What a streaming read hands each row to: the columns it is shaped by, and
+/// the row's values, each absent for a SQL NULL.
+pub type RowSink<'s> = dyn FnMut(&[Field], &[Option<Vec<u8>>]) -> DbResult<()> + 's;
+
 impl MysqlSource {
     /// Connects, authenticates, and opens the read snapshot.
     ///
     /// @param url - where to connect and as who
     pub fn connect(url: &ConnectionUrl) -> DbResult<MysqlSource> {
-        url.refuse_unsupported_transport()?;
+        MysqlSource::connect_over(url, Transport::VerifiedTls)
+    }
+
+    /// Connects on a transport the caller's policy has already decided.
+    ///
+    /// **The upgrade is inside the handshake, not before it.** MySQL has no
+    /// separate request message: the client reads the server's greeting, sends
+    /// a *truncated* handshake response carrying nothing but the capability
+    /// flags with `CLIENT_SSL` set, upgrades the socket, and then sends the
+    /// real response - user name, database and password - over TLS. So the
+    /// order still puts every credential after the certificate check, which is
+    /// the property that matters, and the server's greeting is the only thing
+    /// that crosses in the clear.
+    ///
+    /// @param url - where to connect and as who
+    /// @param transport - what the policy in `ConnectionUrl::transport` decided
+    pub fn connect_over(url: &ConnectionUrl, transport: Transport) -> DbResult<MysqlSource> {
         let stream = Stream::connect(&url.address(), Duration::from_secs(url.timeout_seconds()))?;
-        MysqlSource::over(stream, url)
+        MysqlSource::over_transport(stream, url, transport)
     }
 
     /// Wraps an already-connected socket and runs the handshake on it.
@@ -134,6 +156,19 @@ impl MysqlSource {
     /// @param stream - a connected socket
     /// @param url - the credentials to authenticate with
     pub fn over(stream: Stream, url: &ConnectionUrl) -> DbResult<MysqlSource> {
+        MysqlSource::over_transport(stream, url, Transport::Plaintext)
+    }
+
+    /// The same, on a stated transport.
+    ///
+    /// @param stream - a connected socket
+    /// @param url - the credentials to authenticate with
+    /// @param transport - what the policy decided
+    pub fn over_transport(
+        stream: Stream,
+        url: &ConnectionUrl,
+        transport: Transport,
+    ) -> DbResult<MysqlSource> {
         let mut source = MysqlSource {
             stream,
             sequence: 0,
@@ -142,13 +177,20 @@ impl MysqlSource {
             url: url.clone(),
             in_snapshot: false,
         };
-        source.handshake()?;
+        source.handshake(transport)?;
         source.open_snapshot()?;
         Ok(source)
     }
 
+    /// Returns what the peer proved it was, when the connection is encrypted.
+    pub fn peer(&self) -> Option<&str> {
+        self.stream.peer()
+    }
+
     /// Reads the server's greeting and answers it.
-    fn handshake(&mut self) -> DbResult<()> {
+    ///
+    /// @param transport - whether to upgrade the socket before authenticating
+    fn handshake(&mut self, transport: Transport) -> DbResult<()> {
         let greeting = self.packet()?;
         let hello = Greeting::decode(&greeting)?;
         self.version = hello.version.clone();
@@ -166,6 +208,17 @@ impl MysqlSource {
         if hello.capabilities & capability::DEPRECATE_EOF != 0 {
             capabilities |= capability::DEPRECATE_EOF;
         }
+        if transport == Transport::VerifiedTls {
+            if hello.capabilities & capability::SSL == 0 {
+                return Err(will_not(format!(
+                    "{} does not offer TLS, so this migration stopped before it sent a password. \
+                     Turn TLS on at the server, or - only for a loopback address or a network you \
+                     trust - write ssl-mode=disable in the URL and pass --insecure-plaintext.",
+                    self.url.address()
+                )));
+            }
+            capabilities |= capability::SSL;
+        }
         self.capabilities = capabilities;
 
         let password = self.url.password.clone().or_else(|| {
@@ -175,14 +228,26 @@ impl MysqlSource {
         });
         let response = auth_response(&hello.plugin, password.as_deref(), &hello.scramble)?;
 
-        let mut body: Vec<u8> = Vec::new();
-        body.extend_from_slice(&capabilities.to_le_bytes());
+        // The 32-byte prefix every handshake response begins with. Sent on its
+        // own first when TLS was asked for: that truncated packet is how the
+        // protocol says "everything after this is encrypted", and the user
+        // name that would follow it is the first thing worth hiding.
+        let mut prefix: Vec<u8> = Vec::new();
+        prefix.extend_from_slice(&capabilities.to_le_bytes());
         // The largest packet this client will accept, which is the protocol's
         // own ceiling rather than a number of our own: a row wider than this is
         // split by the server, and `packet` reassembles it.
-        body.extend_from_slice(&0x0100_0000u32.to_le_bytes());
-        body.push(CHARSET_UTF8MB4);
-        body.extend_from_slice(&[0u8; 23]);
+        prefix.extend_from_slice(&0x0100_0000u32.to_le_bytes());
+        prefix.push(CHARSET_UTF8MB4);
+        prefix.extend_from_slice(&[0u8; 23]);
+        if transport == Transport::VerifiedTls {
+            self.write_packet(&prefix)?;
+            let host = self.url.host.clone();
+            let root = self.url.root_certificate().map(str::to_string);
+            self.stream.upgrade(&host, root.as_deref())?;
+        }
+
+        let mut body: Vec<u8> = prefix;
         body.extend_from_slice(self.url.user.as_bytes());
         body.push(0);
         body.extend_from_slice(&lenenc_int(response.len() as u64));
@@ -318,11 +383,7 @@ impl MysqlSource {
     ///
     /// @param sql - the query
     /// @param sink - what to do with each row
-    pub fn stream_query(
-        &mut self,
-        sql: &str,
-        sink: &mut dyn FnMut(&[Field], &[Option<Vec<u8>>]) -> DbResult<()>,
-    ) -> DbResult<u64> {
+    pub fn stream_query(&mut self, sql: &str, sink: &mut RowSink<'_>) -> DbResult<u64> {
         // Every command starts a new sequence.
         self.sequence = 0;
         let mut body = vec![COM_QUERY];
@@ -467,6 +528,11 @@ impl RemoteSource for MysqlSource {
         } else {
             format!("MySQL {}", self.version)
         }
+    }
+
+    /// Returns what the peer's certificate proved, when encrypted.
+    fn peer(&self) -> Option<String> {
+        self.stream.peer().map(str::to_string)
     }
 
     /// Returns the objects that exist and are not carried.
@@ -846,13 +912,7 @@ fn lenenc_int(value: u64) -> Vec<u8> {
         out
     } else if value <= 0x00ff_ffff {
         let mut out = vec![0xfd];
-        out.extend_from_slice(
-            &(value as u32)
-                .to_le_bytes()
-                .get(..3)
-                .unwrap_or(&[0, 0, 0])
-                .to_vec(),
-        );
+        out.extend_from_slice((value as u32).to_le_bytes().get(..3).unwrap_or(&[0, 0, 0]));
         out
     } else {
         let mut out = vec![0xfe];

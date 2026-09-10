@@ -116,7 +116,15 @@ impl Collect {
 }
 
 impl Sink for Collect {
+    /// Collects one batch, counting it against the request's budget.
+    ///
+    /// **This is where a result's size is bounded**, and it is the right place
+    /// because it is the one every row a caller receives passes through. The
+    /// batch is counted before it is copied, so a request that is already past
+    /// its budget does not pay for the copy that takes it further past.
     fn push(&mut self, batch: &Batch<'_>) -> DbResult<Flow> {
+        inillucent_base::budget::check()?;
+        inillucent_base::budget::spend(batch.live() as u64, batch_bytes(batch))?;
         for nth in 0..batch.live() {
             if let Some(limit) = self.limit {
                 if self.rows.len() >= limit {
@@ -1572,6 +1580,35 @@ impl Sink for Limit {
 
 /// Pushes materialised rows downstream in batch-sized chunks.
 ///
+/// Returns roughly how many bytes of row data a batch holds.
+///
+/// **Roughly, and that is the honest word for it.** The number bounds a
+/// *result*, so what it has to track is how much a caller is about to be handed
+/// rather than what the engine allocated on the way. A text value costs its
+/// bytes, a number costs its width, and a NULL costs the slot it occupies in
+/// the row. Counting the allocator's real footprint would mean asking every
+/// operator, and a budget nobody can compute is a budget nobody enforces.
+///
+/// @param batch - the batch about to be handed on
+fn batch_bytes(batch: &Batch<'_>) -> u64 {
+    let mut total = 0u64;
+    for nth in 0..batch.live() {
+        for column in 0..batch.columns.len() {
+            let cost = match batch.value(nth, column) {
+                Ok(Datum::Text(bytes)) | Ok(Datum::Blob(bytes)) => bytes.len() as u64,
+                Ok(_) => 8,
+                // A value that cannot be read is counted as a whole one rather
+                // than as nothing: the failure it is about to raise is a better
+                // report than an undercount, and an undercount here is the one
+                // way this budget could be walked past.
+                Err(_) => 8,
+            };
+            total = total.saturating_add(cost);
+        }
+    }
+    total
+}
+
 /// The one place a pipeline breaker turns owned rows back into batches. It
 /// transposes row-major storage into per-column vectors, which is why every
 /// breaker calls it rather than writing the transpose out again.
@@ -1926,7 +1963,7 @@ mod tests {
         grouped.push(&batch).unwrap();
         assert_eq!(grouped.groups.len(), 7);
         let mut total = 0i64;
-        for (_, (key, accumulators)) in &grouped.groups {
+        for (key, accumulators) in grouped.groups.values() {
             let count = accumulators[0].finish().unwrap().borrow().as_int().unwrap();
             let category = key[0].borrow().as_int().unwrap();
             assert_eq!(
@@ -2030,7 +2067,7 @@ mod tests {
                 outcomes[0], outcomes[1],
                 "run length {run_length}: dense and per-row disagreed"
             );
-            let groups = (4_000 + run_length - 1) / run_length;
+            let groups = 4_000_usize.div_ceil(run_length);
             assert_eq!(outcomes[0].len(), groups, "run length {run_length}");
             assert_eq!(
                 outcomes[0].iter().map(|(_, count, _)| count).sum::<i64>(),

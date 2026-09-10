@@ -93,13 +93,11 @@ fn check_shape(program: &Program, problems: &mut Vec<VerifyError>) {
                 ),
             ));
         }
-        if instruction.opcode.jumps() {
-            if instruction.p2 < 0 || instruction.p2 as usize > length {
-                problems.push(VerifyError::at(
-                    address,
-                    format!("jump target {} is outside the program", instruction.p2),
-                ));
-            }
+        if instruction.opcode.jumps() && (instruction.p2 < 0 || instruction.p2 as usize > length) {
+            problems.push(VerifyError::at(
+                address,
+                format!("jump target {} is outside the program", instruction.p2),
+            ));
         }
         check_operand_ranges(program, address, problems);
         check_store_range(program, address, problems);
@@ -520,9 +518,7 @@ fn check_registers(program: &Program, problems: &mut Vec<VerifyError>) {
 /// rather than a vector - and a vector here was an allocation per instruction
 /// per round of the dataflow pass.
 pub(crate) fn writes_of(program: &Program, address: usize) -> Option<u32> {
-    let Some(instruction) = program.instructions.get(address) else {
-        return None;
-    };
+    let instruction = program.instructions.get(address)?;
     let single = |value: i32| Some(value.max(0) as u32);
     match instruction.opcode {
         // The save direction fills its register; the restore direction reads it.

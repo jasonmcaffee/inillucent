@@ -491,10 +491,11 @@ fn check_failure(step: &Json, failure: &inillucent_driver::Error, wrong: &mut Ve
     }
     if let Some(fragment) = step.get("feature_contains").and_then(Json::text) {
         match failure.feature.as_deref() {
-            None => wrong.push(format!(
+            None => wrong.push(
                 "it named no construct, and a refusal that is `unsupported` has to name one \
                  or an application cannot say what it hit"
-            )),
+                    .to_string(),
+            ),
             Some(named) if !named.contains(fragment) => wrong.push(format!(
                 "it named {named:?} and should have named something holding {fragment:?}"
             )),
@@ -593,7 +594,7 @@ fn the_conformance_suite_passes() {
             }
         }
 
-        drop(hold);
+        let _ = hold;
         drop(database);
         let _ = std::fs::remove_file(&file);
         for problem in wrong {

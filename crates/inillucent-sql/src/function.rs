@@ -689,7 +689,7 @@ impl JsonFunc {
             | JsonFunc::SetB
             | JsonFunc::ArrayInsert
             | JsonFunc::ArrayInsertB => count % 2 == 1,
-            JsonFunc::Object | JsonFunc::ObjectB => count % 2 == 0,
+            JsonFunc::Object | JsonFunc::ObjectB => count.is_multiple_of(2),
             _ => true,
         }
     }

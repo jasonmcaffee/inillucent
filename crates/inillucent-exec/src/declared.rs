@@ -76,14 +76,14 @@ impl StrictClass {
     ///
     /// @param value - the value about to be written
     fn admits(self, value: &OwnedDatum) -> bool {
-        match (self, value) {
-            (_, OwnedDatum::Null) => true,
-            (StrictClass::Integer, OwnedDatum::Int(_)) => true,
-            (StrictClass::Real, OwnedDatum::Real(_)) => true,
-            (StrictClass::Text, OwnedDatum::Text(_)) => true,
-            (StrictClass::Blob, OwnedDatum::Blob(_)) => true,
-            _ => false,
-        }
+        matches!(
+            (self, value),
+            (_, OwnedDatum::Null)
+                | (StrictClass::Integer, OwnedDatum::Int(_))
+                | (StrictClass::Real, OwnedDatum::Real(_))
+                | (StrictClass::Text, OwnedDatum::Text(_))
+                | (StrictClass::Blob, OwnedDatum::Blob(_))
+        )
     }
 }
 

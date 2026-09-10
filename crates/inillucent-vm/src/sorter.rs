@@ -65,6 +65,11 @@ impl Sorter {
     }
 
     /// Advances to the next row, reporting whether there is one.
+    ///
+    /// Named `next` and not an `Iterator`, for the reason
+    /// `ephemeral::Cursor::next` gives: the row is read through the cursor
+    /// after it moves, rather than handed back by the move.
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> bool {
         let Some(position) = self.position else {
             return false;

@@ -23,7 +23,7 @@
 //! ever. `Wal::roll_segment` moves the boundary to the checkpoint point first,
 //! and nothing is deleted until after the data file holds the pages.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use inillucent_compat::newengine::ImportedDatabase;
 use inillucent_exec::physical::Params;
@@ -59,8 +59,8 @@ fn forget_files(path: &PathBuf) {
 ///
 /// @param path - the database file
 /// @param sequence - which segment
-fn segment_path(path: &PathBuf, sequence: u64) -> PathBuf {
-    let mut held = path.clone();
+fn segment_path(path: &Path, sequence: u64) -> PathBuf {
+    let mut held = path.to_path_buf();
     let name = path
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -72,7 +72,7 @@ fn segment_path(path: &PathBuf, sequence: u64) -> PathBuf {
 /// Returns every log segment beside a database, and how many bytes they hold.
 ///
 /// @param path - the database file
-fn segments(path: &PathBuf) -> (usize, u64) {
+fn segments(path: &Path) -> (usize, u64) {
     let mut count = 0usize;
     let mut bytes = 0u64;
     for sequence in 1..64u64 {

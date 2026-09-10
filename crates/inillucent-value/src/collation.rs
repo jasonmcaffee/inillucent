@@ -723,7 +723,7 @@ mod tests {
                 (0..len)
                     .map(|index| {
                         let byte = (seed >> (index % 8 * 8)) as u8;
-                        if byte % 3 == 0 {
+                        if byte.is_multiple_of(3) {
                             b' '
                         } else {
                             byte

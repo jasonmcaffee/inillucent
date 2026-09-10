@@ -80,6 +80,12 @@ enum Expect {
     /// Byte-for-byte the same output.
     Agrees,
     /// Still different, and named in this file's own header.
+    ///
+    /// **Constructed by no case today**, and kept because the header this file
+    /// carries is a list of the constructs that once differed: a variant that
+    /// went when the last of them was fixed would take the vocabulary with it,
+    /// and the next divergence would be recorded as a comment instead.
+    #[allow(dead_code)]
     Differs,
 }
 

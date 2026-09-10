@@ -172,9 +172,10 @@ impl Eq for ScalarBody {}
 /// Every row of the group, in order, rather than a running accumulator - see
 /// [`crate::aggregate::AggregateKind::External`] for why.
 #[derive(Clone)]
-pub struct AggregateBody(
-    pub std::sync::Arc<dyn Fn(&[Vec<Value<'static>>]) -> DbResult<Value<'static>> + Send + Sync>,
-);
+pub struct AggregateBody(pub std::sync::Arc<AggregateFn>);
+
+/// What a registered aggregate is: every row of the group in, one value out.
+pub type AggregateFn = dyn Fn(&[Vec<Value<'static>>]) -> DbResult<Value<'static>> + Send + Sync;
 
 impl core::fmt::Debug for AggregateBody {
     fn fmt(&self, out: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {

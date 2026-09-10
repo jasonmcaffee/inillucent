@@ -130,7 +130,9 @@ pub fn write(
     };
     let borrowed: Vec<Datum<'_>> = row.iter().map(OwnedDatum::borrow).collect();
     if mark.rowid.is_some() {
-        tree.delete(database, log, &borrowed[..1])?;
+        if let Some(key) = borrowed.get(..1) {
+            tree.delete(database, log, key)?;
+        }
     }
     tree.insert(database, log, &borrowed)?;
     Ok(())

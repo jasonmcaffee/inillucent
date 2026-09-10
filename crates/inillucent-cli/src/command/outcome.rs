@@ -245,7 +245,7 @@ impl Outcome {
             ("last_insert_rowid", Json::Int(self.last_insert_rowid)),
             ("elapsed_ms", Json::Real(self.elapsed_ms)),
         ];
-        let mut object = json::object(pairs.drain(..).collect());
+        let mut object = json::object(std::mem::take(&mut pairs));
         if let Json::Object(members) = &mut object {
             for (name, value) in &self.extra {
                 members.push((name.clone(), value.clone()));

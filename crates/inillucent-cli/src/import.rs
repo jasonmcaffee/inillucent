@@ -64,7 +64,7 @@ fn insert(shell: &mut Shell, table: &str, rows: &[Vec<String>], path: &str) {
     if width == 0 {
         return;
     }
-    let marks: Vec<&str> = std::iter::repeat("?").take(width).collect();
+    let marks: Vec<&str> = std::iter::repeat_n("?", width).collect();
     let sql = format!(
         "INSERT INTO {} VALUES({})",
         quote_identifier(table),

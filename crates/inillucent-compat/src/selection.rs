@@ -691,7 +691,7 @@ pub fn seeds_of(
     }
     // Longest prefix first, so `drivers/inillucent-driver-capi/` is not eaten
     // by `drivers/inillucent-driver/`.
-    by_directory.sort_by(|left, right| right.0.len().cmp(&left.0.len()));
+    by_directory.sort_by_key(|(directory, _)| std::cmp::Reverse(directory.len()));
 
     let mut choice = Choice::default();
     for path in changed {

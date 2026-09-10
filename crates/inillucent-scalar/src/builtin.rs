@@ -71,7 +71,7 @@ pub fn call_with(
         ScalarFunc::VectorMultiply => vector_zip(arguments, |one, two| one * two),
         ScalarFunc::VectorConcat => vector_concat(arguments),
         ScalarFunc::GeopolyArea => geopoly_measure(arguments, |shape| Value::Real(shape.area())),
-        ScalarFunc::GeopolyBlob => geopoly_shape(arguments, |shape| Some(shape)),
+        ScalarFunc::GeopolyBlob => geopoly_shape(arguments, Some),
         ScalarFunc::GeopolyJson => geopoly_measure(arguments, |shape| {
             Value::owned_text(shape.to_json().as_bytes()).unwrap_or(Value::Null)
         }),
@@ -120,7 +120,7 @@ pub fn call_with(
         ScalarFunc::SqlarUncompress => sqlar_uncompress(arguments),
         ScalarFunc::Printf => crate::printf::format(arguments, encoding),
         ScalarFunc::OctetLength => octet_length(arguments.first()),
-        ScalarFunc::Random => Value::Integer(scramble(context.seed) as i64),
+        ScalarFunc::Random => Value::Integer(scramble(context.seed)),
         ScalarFunc::RandomBlob => random_blob(arguments.first(), context.seed),
         ScalarFunc::Changes => Value::Integer(context.changes),
         ScalarFunc::TotalChanges => Value::Integer(context.total_changes),
@@ -257,7 +257,7 @@ fn octet_length(value: Option<&Value<'static>>) -> Value<'static> {
 
 /// `randomblob(n)`: n pseudo-random bytes, at least one.
 fn random_blob(value: Option<&Value<'static>>, seed: u64) -> Value<'static> {
-    let wanted = value.map_or(1, cast::integer_value).max(1).min(1_000_000) as usize;
+    let wanted = value.map_or(1, cast::integer_value).clamp(1, 1_000_000) as usize;
     let mut bytes = Vec::with_capacity(wanted);
     let mut state = seed;
     while bytes.len() < wanted {
@@ -319,7 +319,7 @@ fn sign(value: Value<'static>) -> Value<'static> {
         Value::Integer(integer) => Value::Integer(integer.signum()),
         Value::Real(real) if real > 0.0 => Value::Integer(1),
         Value::Real(real) if real < 0.0 => Value::Integer(-1),
-        Value::Real(real) if real == 0.0 => Value::Integer(0),
+        Value::Real(0.0) => Value::Integer(0),
         _ => Value::Null,
     }
 }
@@ -646,7 +646,7 @@ fn unhex(arguments: &[Value<'static>], encoding: TextEncoding) -> Value<'static>
         .into_iter()
         .filter(|byte| !ignored.contains(byte))
         .collect();
-    if filtered.len() % 2 != 0 {
+    if !filtered.len().is_multiple_of(2) {
         return Value::Null;
     }
     let mut out = Vec::with_capacity(filtered.len() / 2);
@@ -1003,182 +1003,6 @@ pub fn result_affinity(_func: ScalarFunc) -> Option<Affinity> {
     None
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Calls a function with owned arguments, for the tests.
-    fn run(func: ScalarFunc, arguments: Vec<Value<'static>>) -> Value<'static> {
-        call(func, &arguments, Collation::Binary, TextEncoding::Utf8)
-    }
-
-    /// `length` counts characters in text and bytes in a blob, which is the
-    /// distinction people most often get wrong.
-    #[test]
-    fn length_counts_characters_in_text_and_bytes_in_a_blob() {
-        let text = Value::owned_text("héllo".as_bytes()).expect("owned");
-        assert_same!(run(ScalarFunc::Length, vec![text]), Value::Integer(5));
-        let blob = Value::owned_blob("héllo".as_bytes()).expect("owned");
-        assert_same!(run(ScalarFunc::Length, vec![blob]), Value::Integer(6));
-    }
-
-    /// `substr` counts from one, and its negative forms work.
-    #[test]
-    fn substr_counts_from_one_and_accepts_negatives() {
-        let text = || Value::owned_text(b"abcdef").expect("owned");
-        assert_same!(
-            run(
-                ScalarFunc::Substr,
-                vec![text(), Value::Integer(2), Value::Integer(3)]
-            ),
-            Value::owned_text(b"bcd").expect("owned")
-        );
-        assert_same!(
-            run(ScalarFunc::Substr, vec![text(), Value::Integer(-2)]),
-            Value::owned_text(b"ef").expect("owned")
-        );
-        assert_same!(
-            run(
-                ScalarFunc::Substr,
-                vec![text(), Value::Integer(4), Value::Integer(-2)]
-            ),
-            Value::owned_text(b"bc").expect("owned")
-        );
-    }
-
-    /// The scalar `max` is NULL if any argument is NULL, which is the opposite
-    /// of the aggregate.
-    #[test]
-    fn scalar_max_is_null_if_any_argument_is_null() {
-        assert_same!(
-            run(
-                ScalarFunc::Max,
-                vec![Value::Integer(1), Value::Null, Value::Integer(3)]
-            ),
-            Value::Null
-        );
-        assert_same!(
-            run(ScalarFunc::Max, vec![Value::Integer(1), Value::Integer(3)]),
-            Value::Integer(3)
-        );
-    }
-
-    /// `concat` skips NULLs instead of propagating them, unlike `||`.
-    #[test]
-    fn concat_skips_nulls() {
-        assert_same!(
-            run(
-                ScalarFunc::Concat,
-                vec![
-                    Value::owned_text(b"a").expect("owned"),
-                    Value::Null,
-                    Value::owned_text(b"b").expect("owned")
-                ]
-            ),
-            Value::owned_text(b"ab").expect("owned")
-        );
-    }
-
-    /// `round` rounds half away from zero.
-    #[test]
-    fn round_rounds_half_away_from_zero() {
-        assert_same!(
-            run(ScalarFunc::Round, vec![Value::Real(2.5)]),
-            Value::Real(3.0)
-        );
-        assert_same!(
-            run(ScalarFunc::Round, vec![Value::Real(-2.5)]),
-            Value::Real(-3.0)
-        );
-        assert_same!(
-            run(
-                ScalarFunc::Round,
-                vec![Value::Real(2.345), Value::Integer(2)]
-            ),
-            Value::Real(2.35)
-        );
-    }
-
-    /// `quote` renders each class the way the SQL literal for it is written.
-    #[test]
-    fn quote_renders_sql_literals() {
-        assert_same!(
-            run(ScalarFunc::Quote, vec![Value::Null]),
-            Value::owned_text(b"NULL").expect("owned")
-        );
-        assert_same!(
-            run(
-                ScalarFunc::Quote,
-                vec![Value::owned_text(b"it's").expect("owned")]
-            ),
-            Value::owned_text(b"'it''s'").expect("owned")
-        );
-        assert_same!(
-            run(
-                ScalarFunc::Quote,
-                vec![Value::owned_blob(&[0x41, 0x0a]).expect("owned")]
-            ),
-            Value::owned_text(b"X'410A'").expect("owned")
-        );
-    }
-
-    /// `typeof` names the storage class, not the declared type - and it names
-    /// it for NULL too, which is why it does not propagate NULL.
-    #[test]
-    fn typeof_names_the_storage_class() {
-        assert_same!(
-            run(ScalarFunc::TypeOf, vec![Value::Integer(1)]),
-            Value::owned_text(b"integer").expect("owned")
-        );
-        assert_same!(
-            run(ScalarFunc::TypeOf, vec![Value::Null]),
-            Value::owned_text(b"null").expect("owned")
-        );
-    }
-
-    /// The four built-ins that answer a question about their argument answer it
-    /// for NULL as well, rather than returning NULL.
-    #[test]
-    fn the_reflective_builtins_do_not_propagate_null() {
-        assert_same!(
-            run(ScalarFunc::Quote, vec![Value::Null]),
-            Value::owned_text(b"NULL").expect("owned")
-        );
-        assert_same!(
-            run(ScalarFunc::Hex, vec![Value::Null]),
-            Value::owned_text(b"").expect("owned")
-        );
-        assert_same!(
-            run(ScalarFunc::ZeroBlob, vec![Value::Null]),
-            Value::owned_blob(b"").expect("owned")
-        );
-        // And the ones that compute *with* their argument still do propagate.
-        assert_same!(run(ScalarFunc::Abs, vec![Value::Null]), Value::Null);
-        assert_same!(run(ScalarFunc::Lower, vec![Value::Null]), Value::Null);
-    }
-
-    /// `instr` counts characters from one and returns zero when absent.
-    #[test]
-    fn instr_counts_characters_from_one() {
-        let haystack = Value::owned_text("héllo".as_bytes()).expect("owned");
-        let needle = Value::owned_text(b"llo").expect("owned");
-        assert_same!(
-            run(ScalarFunc::Instr, vec![haystack, needle]),
-            Value::Integer(3)
-        );
-        assert_same!(
-            run(
-                ScalarFunc::Instr,
-                vec![
-                    Value::owned_text(b"abc").expect("owned"),
-                    Value::owned_text(b"z").expect("owned")
-                ]
-            ),
-            Value::Integer(0)
-        );
-    }
-}
-
 /// A vector, as this engine stores one: little-endian `f32` in a blob.
 ///
 /// **The same bytes `inillucent_search` writes**, which is what makes a column
@@ -1296,8 +1120,8 @@ pub fn refusal_for(func: ScalarFunc, arguments: &[Value<'static>]) -> Option<Str
     let scaling = matches!(
         func,
         ScalarFunc::VectorAdd | ScalarFunc::VectorSubtract | ScalarFunc::VectorMultiply
-    ) && (matches!(number_of(arguments.first()), Some(_))
-        || matches!(number_of(arguments.get(1)), Some(_)));
+    ) && (number_of(arguments.first()).is_some()
+        || number_of(arguments.get(1)).is_some());
     if scaling {
         return None;
     }
@@ -1819,5 +1643,181 @@ fn number_of(value: Option<&Value<'static>>) -> Option<f32> {
         Some(Value::Integer(number)) => Some(*number as f32),
         Some(Value::Real(number)) => Some(*number as f32),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Calls a function with owned arguments, for the tests.
+    fn run(func: ScalarFunc, arguments: Vec<Value<'static>>) -> Value<'static> {
+        call(func, &arguments, Collation::Binary, TextEncoding::Utf8)
+    }
+
+    /// `length` counts characters in text and bytes in a blob, which is the
+    /// distinction people most often get wrong.
+    #[test]
+    fn length_counts_characters_in_text_and_bytes_in_a_blob() {
+        let text = Value::owned_text("héllo".as_bytes()).expect("owned");
+        assert_same!(run(ScalarFunc::Length, vec![text]), Value::Integer(5));
+        let blob = Value::owned_blob("héllo".as_bytes()).expect("owned");
+        assert_same!(run(ScalarFunc::Length, vec![blob]), Value::Integer(6));
+    }
+
+    /// `substr` counts from one, and its negative forms work.
+    #[test]
+    fn substr_counts_from_one_and_accepts_negatives() {
+        let text = || Value::owned_text(b"abcdef").expect("owned");
+        assert_same!(
+            run(
+                ScalarFunc::Substr,
+                vec![text(), Value::Integer(2), Value::Integer(3)]
+            ),
+            Value::owned_text(b"bcd").expect("owned")
+        );
+        assert_same!(
+            run(ScalarFunc::Substr, vec![text(), Value::Integer(-2)]),
+            Value::owned_text(b"ef").expect("owned")
+        );
+        assert_same!(
+            run(
+                ScalarFunc::Substr,
+                vec![text(), Value::Integer(4), Value::Integer(-2)]
+            ),
+            Value::owned_text(b"bc").expect("owned")
+        );
+    }
+
+    /// The scalar `max` is NULL if any argument is NULL, which is the opposite
+    /// of the aggregate.
+    #[test]
+    fn scalar_max_is_null_if_any_argument_is_null() {
+        assert_same!(
+            run(
+                ScalarFunc::Max,
+                vec![Value::Integer(1), Value::Null, Value::Integer(3)]
+            ),
+            Value::Null
+        );
+        assert_same!(
+            run(ScalarFunc::Max, vec![Value::Integer(1), Value::Integer(3)]),
+            Value::Integer(3)
+        );
+    }
+
+    /// `concat` skips NULLs instead of propagating them, unlike `||`.
+    #[test]
+    fn concat_skips_nulls() {
+        assert_same!(
+            run(
+                ScalarFunc::Concat,
+                vec![
+                    Value::owned_text(b"a").expect("owned"),
+                    Value::Null,
+                    Value::owned_text(b"b").expect("owned")
+                ]
+            ),
+            Value::owned_text(b"ab").expect("owned")
+        );
+    }
+
+    /// `round` rounds half away from zero.
+    #[test]
+    fn round_rounds_half_away_from_zero() {
+        assert_same!(
+            run(ScalarFunc::Round, vec![Value::Real(2.5)]),
+            Value::Real(3.0)
+        );
+        assert_same!(
+            run(ScalarFunc::Round, vec![Value::Real(-2.5)]),
+            Value::Real(-3.0)
+        );
+        assert_same!(
+            run(
+                ScalarFunc::Round,
+                vec![Value::Real(2.345), Value::Integer(2)]
+            ),
+            Value::Real(2.35)
+        );
+    }
+
+    /// `quote` renders each class the way the SQL literal for it is written.
+    #[test]
+    fn quote_renders_sql_literals() {
+        assert_same!(
+            run(ScalarFunc::Quote, vec![Value::Null]),
+            Value::owned_text(b"NULL").expect("owned")
+        );
+        assert_same!(
+            run(
+                ScalarFunc::Quote,
+                vec![Value::owned_text(b"it's").expect("owned")]
+            ),
+            Value::owned_text(b"'it''s'").expect("owned")
+        );
+        assert_same!(
+            run(
+                ScalarFunc::Quote,
+                vec![Value::owned_blob(&[0x41, 0x0a]).expect("owned")]
+            ),
+            Value::owned_text(b"X'410A'").expect("owned")
+        );
+    }
+
+    /// `typeof` names the storage class, not the declared type - and it names
+    /// it for NULL too, which is why it does not propagate NULL.
+    #[test]
+    fn typeof_names_the_storage_class() {
+        assert_same!(
+            run(ScalarFunc::TypeOf, vec![Value::Integer(1)]),
+            Value::owned_text(b"integer").expect("owned")
+        );
+        assert_same!(
+            run(ScalarFunc::TypeOf, vec![Value::Null]),
+            Value::owned_text(b"null").expect("owned")
+        );
+    }
+
+    /// The four built-ins that answer a question about their argument answer it
+    /// for NULL as well, rather than returning NULL.
+    #[test]
+    fn the_reflective_builtins_do_not_propagate_null() {
+        assert_same!(
+            run(ScalarFunc::Quote, vec![Value::Null]),
+            Value::owned_text(b"NULL").expect("owned")
+        );
+        assert_same!(
+            run(ScalarFunc::Hex, vec![Value::Null]),
+            Value::owned_text(b"").expect("owned")
+        );
+        assert_same!(
+            run(ScalarFunc::ZeroBlob, vec![Value::Null]),
+            Value::owned_blob(b"").expect("owned")
+        );
+        // And the ones that compute *with* their argument still do propagate.
+        assert_same!(run(ScalarFunc::Abs, vec![Value::Null]), Value::Null);
+        assert_same!(run(ScalarFunc::Lower, vec![Value::Null]), Value::Null);
+    }
+
+    /// `instr` counts characters from one and returns zero when absent.
+    #[test]
+    fn instr_counts_characters_from_one() {
+        let haystack = Value::owned_text("héllo".as_bytes()).expect("owned");
+        let needle = Value::owned_text(b"llo").expect("owned");
+        assert_same!(
+            run(ScalarFunc::Instr, vec![haystack, needle]),
+            Value::Integer(3)
+        );
+        assert_same!(
+            run(
+                ScalarFunc::Instr,
+                vec![
+                    Value::owned_text(b"abc").expect("owned"),
+                    Value::owned_text(b"z").expect("owned")
+                ]
+            ),
+            Value::Integer(0)
+        );
     }
 }

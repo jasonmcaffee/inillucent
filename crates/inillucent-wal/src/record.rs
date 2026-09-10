@@ -2,8 +2,8 @@
 //!
 //! Invariant: `decode` is a decoder reading bytes a crash wrote. Every field it
 //! reads is bounds checked against the record's own declared length before it
-//! is used, every length it reads is checked against what remains, and no input
-//! - truncated, reordered, or hostile - produces a panic or a value derived
+//! is used, every length it reads is checked against what remains, and no
+//! input (truncated, reordered, or hostile) produces a panic or a value derived
 //! from bytes outside the record. The acceptance for this module is **100%
 //! branch coverage**, held to the same bar as the interior and key codecs,
 //! because a branch here is only ever taken by a file that has already been
@@ -323,7 +323,7 @@ impl<'a> Record<'a> {
         let start = out.len();
         out.extend_from_slice(&[0u8; HEADER_BYTES]);
         encode_body(&self.body, out)?;
-        while (out.len().saturating_sub(start)) % ALIGN != 0 {
+        while !(out.len().saturating_sub(start)).is_multiple_of(ALIGN) {
             out.push(0);
         }
         let length = out.len().saturating_sub(start);
@@ -372,7 +372,7 @@ impl<'a> Record<'a> {
             // ordinary way a scan finds the end.
             return Ok(None);
         }
-        if length < HEADER_BYTES || length % ALIGN != 0 || length > MAX_RECORD_BYTES {
+        if length < HEADER_BYTES || !length.is_multiple_of(ALIGN) || length > MAX_RECORD_BYTES {
             return Err(corrupt(format!(
                 "a log record declares {length} bytes, which is not a legal record length"
             )));

@@ -153,9 +153,14 @@ fn per_class(class: usize) -> usize {
 
 thread_local! {
     /// The head of each class's intrusive free list, or null.
-    static HEADS: [Cell<*mut u8>; CLASSES] = [const { Cell::new(std::ptr::null_mut()) }; CLASSES];
+    ///
+    /// `const` on the whole initialiser, not only on the elements: it removes
+    /// the lazy-initialisation check from every access, and an allocator's
+    /// per-call cost is the thing this crate exists to keep small.
+    static HEADS: [Cell<*mut u8>; CLASSES] =
+        const { [const { Cell::new(std::ptr::null_mut()) }; CLASSES] };
     /// How many blocks each class is holding.
-    static HELD: [Cell<usize>; CLASSES] = [const { Cell::new(0) }; CLASSES];
+    static HELD: [Cell<usize>; CLASSES] = const { [const { Cell::new(0) }; CLASSES] };
 }
 
 /// Returns the size class an allocation falls in, if any.

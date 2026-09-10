@@ -450,8 +450,7 @@ fn shell_nanos(iterations: u32, statement: &str) -> Option<f64> {
         return None;
     }
     let shell = shell_binary_reference()?;
-    let script: String = std::iter::repeat(statement)
-        .take(iterations as usize)
+    let script: String = std::iter::repeat_n(statement, iterations as usize)
         .collect::<Vec<&str>>()
         .join("\n");
     // The baseline is one statement in the same shell, so what is subtracted is

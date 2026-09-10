@@ -952,6 +952,13 @@ impl Params {
     ///
     /// @param index - the one-based parameter number
     /// @param value - the value
+    ///
+    /// **The error type is `()` on purpose.** There is exactly one way this
+    /// fails - the index is zero or past a declared count - and the caller
+    /// turns it into the engine's own refusal with the parameter number it
+    /// already has. An error type carrying that number would be the same number
+    /// twice.
+    #[allow(clippy::result_unit_err)]
     pub fn try_set(&mut self, index: u32, value: OwnedDatum) -> Result<(), ()> {
         if index == 0 {
             return Err(());
@@ -2211,7 +2218,7 @@ fn build_chain<'t>(
         Vec::new()
     } else {
         let mut widened = space.types.to_vec();
-        widened.extend(std::iter::repeat(StaticType::Unknown).take(correlations.len()));
+        widened.extend(std::iter::repeat_n(StaticType::Unknown, correlations.len()));
         widened
     };
     let scan_types: &[StaticType] = if correlations.is_empty() {
@@ -2242,7 +2249,7 @@ fn build_chain<'t>(
         projected.push(translate_post(
             &column.expr,
             select,
-            &space,
+            space,
             params,
             group_width,
         )?);
@@ -2250,7 +2257,7 @@ fn build_chain<'t>(
     let result_width = projected.len();
     let mut sort_keys: Vec<SortKey> = Vec::new();
     for term in &select.order_by {
-        let translated = translate_post(&term.expr, select, &space, params, group_width)?;
+        let translated = translate_post(&term.expr, select, space, params, group_width)?;
         let existing = projected
             .iter()
             .position(|held| same_expr(held, &translated));
@@ -2289,7 +2296,7 @@ fn build_chain<'t>(
     let group_exprs = select
         .group_by
         .iter()
-        .map(|expr| translate_scan(expr, &space, params))
+        .map(|expr| translate_scan(expr, space, params))
         .collect::<DbResult<Vec<Expr>>>()?;
     // `GROUP BY team` on a `COLLATE NOCASE` column has one group for `blue`
     // and `Blue`; grouping by bytes has two, and the counts are then wrong
@@ -2450,7 +2457,7 @@ fn build_chain<'t>(
     let projection_input_types = if plan.aggregation == AggregationMode::None {
         scan_types.to_vec()
     } else {
-        aggregate_output_types(select, &space, params)?
+        aggregate_output_types(select, space, params)?
     };
     // A skip scan hands up exactly the projected key columns, already in
     // output order, so the projection over it reads column i for column i.
@@ -2472,7 +2479,7 @@ fn build_chain<'t>(
     // away the columns it needs. Building it here rather than beside the
     // `WHERE` filters is the whole of the difference between the two clauses.
     if let Some(having) = &select.having {
-        let translated = translate_post(having, select, &space, params, group_width)?;
+        let translated = translate_post(having, select, space, params, group_width)?;
         chain = Box::new(Filter::new(
             compile(&translated, &projection_input_types)?,
             chain,
@@ -2484,7 +2491,7 @@ fn build_chain<'t>(
         AggregationMode::None => {}
         AggregationMode::Whole => {
             chain = Box::new(SimpleAggregate::new(
-                aggregate_specs(select, &space, params, scan_types)?,
+                aggregate_specs(select, space, params, scan_types)?,
                 chain,
             ));
             operators.push("AGGREGATE".to_string());
@@ -2494,7 +2501,7 @@ fn build_chain<'t>(
                 .iter()
                 .map(|expr| compile(expr, scan_types))
                 .collect::<DbResult<Vec<_>>>()?;
-            let specs = aggregate_specs(select, &space, params, scan_types)?;
+            let specs = aggregate_specs(select, space, params, scan_types)?;
             chain = if grouped_walk {
                 operators.push("GROUP STREAM".to_string());
                 Box::new(StreamAggregate::new(
@@ -2526,12 +2533,12 @@ fn build_chain<'t>(
     // The operator chain in `Shape::operators` is what showed this: it printed
     // `RANGE tree 3 -> FILTER -> AGGREGATE` and the `FILTER` had nothing to do.
     if let Some(constant) = &plan.constant_filter {
-        let translated = translate_scan(constant, &space, params)?;
+        let translated = translate_scan(constant, space, params)?;
         chain = Box::new(Filter::new(compile(&translated, scan_types)?, chain));
         operators.push("FILTER CONSTANT".to_string());
     }
     for residual in plan.residuals.iter().flatten() {
-        let translated = translate_scan(residual, &space, params)?;
+        let translated = translate_scan(residual, space, params)?;
         chain = Box::new(Filter::new(compile(&translated, scan_types)?, chain));
         operators.push("FILTER RESIDUAL".to_string());
     }
@@ -2558,7 +2565,7 @@ fn build_chain<'t>(
             .stages
             .get(index)
             .ok_or_else(|| misuse("a stage vanished while building"))?;
-        chain = build_nested(plan, catalog, &space, params, stage, index, chain)?;
+        chain = build_nested(plan, catalog, space, params, stage, index, chain)?;
         operators.push(format!(
             "{} tree {}{}",
             stage.kind.describe(),
@@ -3712,6 +3719,7 @@ fn run_recursive(
 /// @param rows - the rows a pass produced
 /// @param collations - the collation of each column
 /// @param seen - the rows already produced, extended with the ones kept
+#[allow(clippy::ptr_arg)]
 fn distinct_rows(
     rows: Vec<Vec<OwnedDatum>>,
     collations: &[Collation],
@@ -4747,7 +4755,7 @@ pub fn run_windowed(
         .iter()
         .map(|row| {
             let mut whole = row.clone();
-            whole.extend(std::iter::repeat(OwnedDatum::Null).take(select.windows.len()));
+            whole.extend(std::iter::repeat_n(OwnedDatum::Null, select.windows.len()));
             whole
         })
         .collect();
@@ -5938,7 +5946,7 @@ fn aggregate_output_types(
     );
     for key in &select.group_by {
         let translated = translate_scan(key, space, params)?;
-        types.push(static_type_of(&translated, &space.types));
+        types.push(static_type_of(&translated, space.types));
     }
     for call in &select.aggregates {
         // `count` is always an integer; the rest depend on their input and on
@@ -5994,9 +6002,7 @@ fn bare_columns(select: &BoundSelect) -> Vec<BoundExpr> {
                 continue;
             }
             if matches!(node, BoundExpr::Column { .. } | BoundExpr::Rowid { .. }) {
-                if !select.group_by.iter().any(|key| *key == node)
-                    && !found.iter().any(|held| *held == node)
-                {
+                if !select.group_by.contains(&node) && !found.contains(&node) {
                     found.push(node);
                 }
                 continue;
@@ -6367,7 +6373,7 @@ fn name_of(expr: &BoundExpr) -> &'static str {
                 .split(|c: char| !c.is_alphanumeric())
                 .next()
                 .unwrap_or("an expression");
-            return Box::leak(format!("a {name} expression").into_boxed_str());
+            Box::leak(format!("a {name} expression").into_boxed_str())
         }
     }
 }

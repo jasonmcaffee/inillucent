@@ -78,6 +78,12 @@ pub trait Authorizer {
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AllowAll;
 
+/// Where a result column came from: database, table, and column name.
+///
+/// Absent for an expression, which has no single column behind it - which is
+/// exactly what `sqlite3_column_database_name` and its two siblings report.
+pub type ColumnOrigin = (Vec<u8>, Vec<u8>, Vec<u8>);
+
 impl Authorizer for AllowAll {
     /// Reports that nothing this authorizer is asked can be refused.
     fn allows_everything(&self) -> bool {
@@ -802,10 +808,10 @@ impl BoundExpr {
     /// Returns which FROM terms the expression reads.
     pub fn sources_used(&self, into: &mut Vec<usize>) {
         match self {
-            BoundExpr::Column { source, .. } | BoundExpr::Rowid { source } => {
-                if !into.contains(source) {
-                    into.push(*source);
-                }
+            BoundExpr::Column { source, .. } | BoundExpr::Rowid { source }
+                if !into.contains(source) =>
+            {
+                into.push(*source);
             }
             BoundExpr::Unary { operand, .. }
             | BoundExpr::Not(operand)
@@ -3288,7 +3294,7 @@ impl<'a> Binder<'a> {
     }
 
     /// Returns the origin triple and declared type of a bound column.
-    fn column_origin(&self, expr: &BoundExpr) -> (Option<(Vec<u8>, Vec<u8>, Vec<u8>)>, Vec<u8>) {
+    fn column_origin(&self, expr: &BoundExpr) -> (Option<ColumnOrigin>, Vec<u8>) {
         // A rowid alias is a column, and `SELECT a FROM t` where `a` is the
         // INTEGER PRIMARY KEY binds to the rowid rather than to a record slot.
         // It still has an origin and a declared type, and reporting neither
@@ -3814,7 +3820,7 @@ impl<'a> Binder<'a> {
                     return Err(unsupported("RAISE outside a trigger", span));
                 }
                 Ok(BoundExpr::Raise {
-                    action: action.clone(),
+                    action,
                     message: message.clone(),
                     foreign_key: false,
                 })
@@ -4008,9 +4014,7 @@ impl<'a> Binder<'a> {
                     // `ambiguous column name: k`, and why four of the five join
                     // spellings failed on one message. A qualified `b.k` still
                     // reaches the right-hand copy, which is what SQLite does.
-                    if table_folded.is_none()
-                        && u16::try_from(index).is_ok_and(|slot| source.suppressed.contains(&slot))
-                    {
+                    if table_folded.is_none() && source.suppressed.contains(&index) {
                         continue;
                     }
                     if found.is_some() {

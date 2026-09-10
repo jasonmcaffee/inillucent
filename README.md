@@ -188,7 +188,10 @@ To serve a database to an agent over MCP:
 
 The 27 MCP tools are generated from the same command table the command line reads, so the two cannot
 drift apart. `--readonly` refuses every statement that changes something, decided by the binder
-rather than by reading the text. `--root DIR` refuses every path outside one directory.
+rather than by reading the text. `--root DIR` refuses every path that *resolves* outside one
+directory — junctions and symbolic links followed, and enforced in the VFS, so `ATTACH DATABASE`,
+`VACUUM INTO`, `backup`, `import` and every other file a request opens are covered by the same
+decision.
 
 ## In production
 

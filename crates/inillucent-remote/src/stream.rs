@@ -26,14 +26,75 @@ use inillucent_base::DbResult;
 /// bad four bytes exhaust the machine.
 pub const MAX_MESSAGE: usize = 256 * 1024 * 1024;
 
+/// What the bytes actually travel on.
+///
+/// **The upgrade happens in place, part way through the connection.** Both
+/// protocols open in the clear, ask the server for TLS in their own way and
+/// then continue on the same socket, so a `Stream` has to be able to become
+/// encrypted without the reader above it knowing - and without a buffered byte
+/// being left on the plaintext side, which is why [`Stream::upgrade`] refuses
+/// while anything is buffered.
+pub enum Transport {
+    /// An unencrypted socket.
+    Plain(TcpStream),
+    /// A verified TLS session over one.
+    Secure(Box<crate::tls::Session>),
+    /// Neither, which is what a stream holds for the length of an upgrade and
+    /// after one that failed.
+    ///
+    /// It exists because moving the socket out to hand it to the TLS layer
+    /// leaves a hole, and a hole with a plausible-looking socket in it would be
+    /// a stream that reads plaintext after a handshake this client refused. A
+    /// stream in this state fails every read and write by name; the callers all
+    /// abandon it, and this is what makes abandoning it safe.
+    Broken,
+}
+
+impl Read for Transport {
+    /// Reads from whichever transport this is.
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Transport::Plain(socket) => socket.read(output),
+            Transport::Secure(session) => session.read(output),
+            Transport::Broken => Err(std::io::Error::other(
+                "this connection was abandoned part way through a TLS upgrade",
+            )),
+        }
+    }
+}
+
+impl Write for Transport {
+    /// Writes to whichever transport this is.
+    fn write(&mut self, input: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Transport::Plain(socket) => socket.write(input),
+            Transport::Secure(session) => session.write(input),
+            Transport::Broken => Err(std::io::Error::other(
+                "this connection was abandoned part way through a TLS upgrade",
+            )),
+        }
+    }
+
+    /// Flushes whichever transport this is.
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Transport::Plain(socket) => socket.flush(),
+            Transport::Secure(session) => session.flush(),
+            Transport::Broken => Ok(()),
+        }
+    }
+}
+
 /// A connected socket with a small read buffer.
 pub struct Stream {
-    /// The socket itself.
-    socket: TcpStream,
+    /// What the bytes travel on.
+    socket: Transport,
     /// Bytes read from the socket and not yet handed out.
     buffer: Vec<u8>,
     /// How far into `buffer` the reader has got.
     at: usize,
+    /// What the peer proved it was, when the session is encrypted.
+    peer: Option<String>,
 }
 
 impl Stream {
@@ -60,10 +121,59 @@ impl Stream {
         // server's reply to it.
         let _ = socket.set_nodelay(true);
         Ok(Stream {
-            socket,
+            socket: Transport::Plain(socket),
             buffer: Vec::new(),
             at: 0,
+            peer: None,
         })
+    }
+
+    /// Replaces the plaintext socket with a verified TLS session over it.
+    ///
+    /// **Refused while anything is buffered.** A byte read from the plaintext
+    /// socket and held here would be a byte the TLS session never sees, and the
+    /// record stream would be off by that much for the rest of the connection.
+    /// Both protocols call this immediately after a one-byte or one-packet
+    /// reply, with nothing outstanding, so the refusal is a guard rather than a
+    /// limitation.
+    ///
+    /// @param host - the name to check the certificate against
+    /// @param root - a certificate authority file, when the URL named one
+    pub fn upgrade(&mut self, host: &str, root: Option<&str>) -> DbResult<()> {
+        if self.at < self.buffer.len() {
+            return Err(protocol(
+                "the server sent bytes after agreeing to TLS and before the handshake, which \
+                 this client will not read",
+            ));
+        }
+        let taken = std::mem::replace(&mut self.socket, Transport::Broken);
+        let socket = match taken {
+            Transport::Plain(socket) => socket,
+            other => {
+                self.socket = other;
+                return Err(protocol("this connection is already encrypted"));
+            }
+        };
+        // A failure leaves the stream `Broken` on purpose. The socket is gone -
+        // the TLS layer owns it and drops it - and putting anything else here
+        // would be putting back a connection whose handshake this client
+        // refused.
+        let session = crate::tls::connect(socket, host, root)?;
+        self.peer = Some(session.description());
+        self.socket = Transport::Secure(Box::new(session));
+        self.buffer.clear();
+        self.at = 0;
+        Ok(())
+    }
+
+    /// Returns what the peer proved it was, when this connection is encrypted.
+    pub fn peer(&self) -> Option<&str> {
+        self.peer.as_deref()
+    }
+
+    /// Reports whether this connection is encrypted.
+    pub fn is_encrypted(&self) -> bool {
+        matches!(self.socket, Transport::Secure(_))
     }
 
     /// Wraps an already-connected socket, which is what the tests hand it.
@@ -71,9 +181,10 @@ impl Stream {
     /// @param socket - a connected stream
     pub fn from_socket(socket: TcpStream) -> Stream {
         Stream {
-            socket,
+            socket: Transport::Plain(socket),
             buffer: Vec::new(),
             at: 0,
+            peer: None,
         }
     }
 
@@ -171,7 +282,13 @@ impl Stream {
     /// A close that fails has nothing left to protect: the caller is finished
     /// with the connection either way, and the operating system will reclaim it.
     pub fn close(&mut self) {
-        let _ = self.socket.shutdown(std::net::Shutdown::Both);
+        match &mut self.socket {
+            Transport::Plain(socket) => {
+                let _ = socket.shutdown(std::net::Shutdown::Both);
+            }
+            Transport::Secure(session) => session.shutdown(),
+            Transport::Broken => {}
+        }
     }
 }
 

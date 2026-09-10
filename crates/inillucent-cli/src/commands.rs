@@ -440,7 +440,7 @@ pub fn imposter(shell: &mut Shell, arguments: &[&str]) {
             {
                 Ok(Some(sql)) => shell.say(&sql),
                 Ok(None) => {}
-                Err(reason) => shell.complain(&reason.message().to_string()),
+                Err(reason) => shell.complain(reason.message()),
             }
         }
         _ => {

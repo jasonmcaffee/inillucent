@@ -25,3 +25,7 @@ crate-type = ["lib", "cdylib", "staticlib"]
 # would be a marshalling layer that could start deciding something, and then
 # there would be two answers to every question in `capability.rs`.
 inillucent-driver = { workspace = true }
+
+# The workspace's lint table; see the note beside it in the root manifest.
+[lints]
+workspace = true

@@ -109,10 +109,27 @@ processes and no lost writes. Threads inside one process do not. The engine is s
 construction — its pool and trees use `RefCell`, a connection borrows the database, and there is no
 parallel scan. The retrieval engine's graph build is the one thing that uses every core.
 
-## 10. Incremental insert into the vector graph
+## 10. A generation is one blob, so publishing one still costs the whole corpus
 
-Adding content to a retrieval index rebuilds the graph, on one thread: 132.6 s over 185,078 passages,
-and about nine and a half minutes over 598,560.
+Adding content no longer rebuilds the graph. task-1894 made a commit **fold**: the published
+generation is loaded and each entry of the delta log is inserted into it, which is one graph insert
+per row written rather than one per row in the table. The nine and a half minutes over 598,560
+passages that used to sit here was a single-pass build running inside somebody's `INSERT`; that build
+now happens only when it is asked for, by `INSERT INTO t(t) VALUES('compact')`.
+
+What is still proportional to the corpus is **publishing**. A generation is one serialised index, so
+writing a new one reads and writes the whole thing however few rows changed. That is why the default
+delta log is a share of the table, `max(1024, rows / 8)`, rather than a constant: a constant would
+publish the generation far too often. It also means the default lets one commit in every eight rows
+pay `rows / 8` graph inserts, so write latency under the default still rises with the table.
+
+The thing that is not built is **segmented generations** - many small immutable segments merged at
+read time, the way an LSM tree works - which would make both the graph work and the bytes written
+proportional to the batch rather than to the corpus. Until then a table that needs its write latency
+pinned declares `compact = N`, which fixes the delta log at `N` entries and therefore fixes the graph
+work per published generation, at the price of writing the generation every `N` rows.
+[Keeping a vector index current](relational-architecture.md#10-keeping-a-vector-index-current)
+publishes the measured range and how to choose `N`.
 
 ## 11. A second metric on the vector index
 

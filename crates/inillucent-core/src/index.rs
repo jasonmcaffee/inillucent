@@ -529,11 +529,16 @@ impl Index {
         let last_chunk = self.store.n_chunks() as u32;
 
         // Node identifiers are vector ordinals, which are chunk identifiers, so an
-        // appended chunk's node is the one `insert` is about to create.
+        // appended chunk's node is the one the insert is about to create.
+        //
+        // `insert_batch` rather than a loop over `insert`, because a batch large
+        // enough to be worth it goes in on every core the caller asked for -
+        // which is what stops a bounded append being slower in wall clock than
+        // the unbounded rebuild it replaced (task-1894, M8). A batch below the
+        // floor, or a caller who left `build_threads` at one, gets exactly the
+        // loop it always got.
         if let Some(graph) = self.graph.as_mut() {
-            for node in first_chunk..last_chunk {
-                graph.insert(&self.vectors, node);
-            }
+            graph.insert_batch(&self.vectors, first_chunk, last_chunk);
         }
         let new_terms = match self.lexical.as_mut() {
             Some(lexical) => {
@@ -1547,7 +1552,10 @@ mod tests {
     fn an_appended_chunk_is_reachable_by_its_own_vector() {
         let mut index = build(2000, 32, IndexConfig { hnsw: HnswParams { exhaustive_below: 0, ..Default::default() }, ..Default::default() });
         let v = vector(32, 11.0);
-        index.append(vec![chunk("appended", 0, "vector reachable")], &[v.clone()]);
+        index.append(
+            vec![chunk("appended", 0, "vector reachable")],
+            std::slice::from_ref(&v),
+        );
 
         let f = index.compile(&Filter::default());
         let hits = index.vector_search(&v, &f, 5, Some(200));
@@ -1642,7 +1650,7 @@ mod tests {
         assert_eq!(index.store().live_chunks_for_source(source), per_source_before - 2);
         // The chunks are still there, and still visible to a scan that has to
         // reject them.
-        assert_eq!(index.store().chunks_of_source(source).len() as u32 >= 2, true);
+        assert!(index.store().chunks_of_source(source).len() as u32 >= 2);
         let empty = index.compile(&Filter::default());
         assert_eq!(empty.pass_count(), index.store().live_chunks as usize);
     }

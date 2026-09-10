@@ -159,19 +159,9 @@ impl VectorSet {
 
     pub fn len(&self) -> usize {
         match &self.backing {
-            Backing::Resident(data) => {
-                if self.dims == 0 {
-                    0
-                } else {
-                    data.len() / self.dims
-                }
-            }
+            Backing::Resident(data) => data.len().checked_div(self.dims).unwrap_or(0),
             Backing::Filed { count, tail, .. } => {
-                if self.dims == 0 {
-                    *count
-                } else {
-                    count + tail.len() / self.dims
-                }
+                count + tail.len().checked_div(self.dims).unwrap_or(0)
             }
         }
     }

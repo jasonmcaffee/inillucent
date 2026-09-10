@@ -6,7 +6,8 @@ machine learning. Read it top to bottom; each section only uses ideas the earlie
 inillucent has two engines. This page is the **retrieval** one: semantic search, keyword search,
 filters, and the ranking that combines them. The **relational** engine — SQLite's SQL on B+trees, a
 page pool, a redo log, snapshot isolation and a vectorised executor — is a separate subject, and
-[SQL support](sql.md) and [Performance](performance.md) are its pages.
+[Relational architecture](relational-architecture.md) is its page, with
+[SQL support](sql.md) and [Performance](performance.md) beside it.
 [Vector search](vector-search.md) is where the two meet: a `VECTOR(N)` column and an HNSW index
 reachable from ordinary SQL.
 

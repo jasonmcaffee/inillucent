@@ -433,7 +433,9 @@ fn run_one(connection: &Connection, workload: &Workload, rows: u32) -> Result<Sa
     }
     match workload.grouping {
         Grouping::Single => commit(connection)?,
-        Grouping::Every(size) if size > 0 && workload.repeat % size != 0 => commit(connection)?,
+        Grouping::Every(size) if size > 0 && !workload.repeat.is_multiple_of(size) => {
+            commit(connection)?
+        }
         _ => {}
     }
     let elapsed = started.elapsed();

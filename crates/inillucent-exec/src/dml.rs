@@ -346,9 +346,10 @@ impl RowSpace {
             .enumerate()
             .map(|(position, id)| (*id, base.saturating_add(position)))
             .collect();
-        self.held
-            .types
-            .extend(std::iter::repeat(crate::expr::StaticType::Unknown).take(ids.len()));
+        self.held.types.extend(std::iter::repeat_n(
+            crate::expr::StaticType::Unknown,
+            ids.len(),
+        ));
         self
     }
 
@@ -1925,7 +1926,7 @@ pub fn update_at_cached(
         let Some(before) = read_row(table, target, key)? else {
             continue;
         };
-        let answers = answer_correlations(&correlated, target, params, &before)?;
+        let answers = answer_correlations(correlated, target, params, &before)?;
         let mut after = before.clone();
         if *joined {
             // The values sit after the key columns of the row the keys query
@@ -1974,7 +1975,7 @@ pub fn update_at_cached(
             target,
             &after,
             Some(&before),
-            IndexExprs::new(&declarations, &space),
+            IndexExprs::new(declarations, space),
         )? {
             // The constraint's own clause, when the statement wrote none -
             // `a TEXT UNIQUE ON CONFLICT REPLACE` replaces under a plain
@@ -1995,7 +1996,7 @@ pub fn update_at_cached(
                         target,
                         &clash.key,
                         &held,
-                        IndexExprs::new(&declarations, &space),
+                        IndexExprs::new(declarations, space),
                     )?;
                 }
                 _ => {
@@ -2032,18 +2033,11 @@ pub fn update_at_cached(
         // is two thousand updates in one transaction and paid for two thousand
         // of them (task-1838 §4).
         let resolution = resolution_of(statement.on_conflict);
-        if !declarations_are_met(
-            table,
-            &layout,
-            &declarations,
-            &space,
-            &mut after,
-            resolution,
-        )? {
+        if !declarations_are_met(table, &layout, declarations, space, &mut after, resolution)? {
             continue;
         }
         declarations.types_are_met(table, &after)?;
-        if !declarations.checks_are_met(&space, &after, resolution == Resolution::Skip)? {
+        if !declarations.checks_are_met(space, &after, resolution == Resolution::Skip)? {
             continue;
         }
         let reread = if statement.triggers.is_empty() {
@@ -2061,7 +2055,7 @@ pub fn update_at_cached(
             target,
             current,
             &after,
-            IndexExprs::new(&declarations, &space),
+            IndexExprs::new(declarations, space),
         )?;
         count_row(&mut changes, target, depth);
         if captured {
@@ -2841,7 +2835,7 @@ fn unique_indexes(table: &TableInfo) -> impl Iterator<Item = (usize, &IndexInfo)
 /// @param entry - the entry: the keys, then the rowid
 fn distinct_prefix(index: &IndexInfo, entry: &[OwnedDatum]) -> Option<Vec<OwnedDatum>> {
     let prefix: Vec<OwnedDatum> = entry.iter().take(index.columns.len()).cloned().collect();
-    if prefix.is_empty() || prefix.iter().any(|value| *value == OwnedDatum::Null) {
+    if prefix.is_empty() || prefix.contains(&OwnedDatum::Null) {
         return None;
     }
     Some(prefix)

@@ -28,6 +28,7 @@
     )
 )]
 
+pub mod confine;
 pub mod conformance;
 pub mod contract;
 pub mod error;
@@ -37,6 +38,7 @@ pub mod os;
 pub mod path;
 pub mod shm_locks;
 
+pub use confine::{authorize, confine_process, process_root, Refused, Root};
 pub use contract::{
     AccessMode, DeviceCharacteristics, FileIdentity, FileKind, FileLock, OpenOptions, SharedMemory,
     ShmLockRequest, ShmRegion, SyncMode, Vfs, VfsFile, SHM_LOCK_COUNT,

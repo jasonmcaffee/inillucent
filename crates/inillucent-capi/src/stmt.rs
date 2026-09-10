@@ -215,10 +215,8 @@ pub unsafe extern "C" fn sqlite3_finalize(handle: *mut sqlite3_stmt) -> c_int {
 /// Each destructor must be one the caller passed to a `bind` entry point and
 /// must not have been called already, which is what the `Option` records.
 unsafe fn call_destructors(held: &sqlite3_stmt) {
-    for slot in &held.destructors {
-        if let Some((destructor, pointer)) = slot {
-            destructor(*pointer);
-        }
+    for (destructor, pointer) in held.destructors.iter().flatten() {
+        destructor(*pointer);
     }
 }
 

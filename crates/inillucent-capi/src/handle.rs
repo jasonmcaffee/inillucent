@@ -152,6 +152,14 @@ pub struct sqlite3_stmt {
     /// C strings handed out for this row, freed on the next step.
     pub(crate) held: Vec<Vec<u8>>,
     /// Value wrappers handed out for this row, freed with the statement.
+    ///
+    /// **Boxed, and clippy is wrong about it.** `sqlite3_column_value` hands
+    /// the caller a pointer into this list and the header promises it stays
+    /// valid until the statement is finalised. Holding the values inline would
+    /// move every one of them the next time the vector grew, and every pointer
+    /// already handed out would dangle - which is a use-after-free in a
+    /// language that cannot see it.
+    #[allow(clippy::vec_box)]
     pub(crate) values: Vec<Box<crate::value::sqlite3_value>>,
     /// The SQL text, kept so `sqlite3_sql` can return a pointer to it.
     pub(crate) sql: CString,

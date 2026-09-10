@@ -8,6 +8,13 @@ This is what that took, on a real mailbox rather than a fixture: **64,378 messag
 602,022 chunks, 12,485 attachments, 5,852 MB of PostgreSQL**. It is written for someone deciding
 whether to do the same thing, so it leads with what went wrong.
 
+**Read section 2 as history.** Both failures it describes are fixed: the recovery ordering that
+corrupted a database when a `CREATE TABLE` followed a reopen went in task-1888, and each is now
+pinned by a test named where it is described. The section is kept rather than deleted because what
+it says about *how* a corruption of that shape is diagnosed — restoring log segments one at a time
+and reading after each — is the part worth having, and because a report that quietly dropped its
+worst finding once it was fixed would be a report nobody could trust the rest of.
+
 Everything here was measured on the box it ran on, a Windows 11 workstation with 127.5 GB of memory
 and an NVMe SSD, while several other things were running. The arms are interleaved for that reason.
 
@@ -82,9 +89,36 @@ Segment 334 is the one holding the `CREATE TABLE`. Every earlier one replays cle
 is to park that single segment, and **nothing is lost**: the database read back 66,793 documents,
 602,022 chunks, 602,022 vectors and 64,378 live messages, including a sync that had run that morning.
 
-The consequence for the application is larger than the incident: **Nikaya cannot add a table.** The
-queue that would remove its worst remaining regression is written, reconciled against the real corpus
-and deliberately not shipped, because shipping it corrupts the corpus.
+The consequence for the application was larger than the incident: **Nikaya could not add a table.**
+The queue that would remove its worst remaining regression was written, reconciled against the real
+corpus and deliberately not shipped, because shipping it corrupted the corpus.
+
+#### Fixed in task-1888, and this is what it was
+
+Recovery collected the `AllocPage` records it replayed into one list and the `FreePage` records into
+another, then claimed every page in the first list and released every page in the second. The frees
+therefore had the last word whatever order the log put them in — so a page **freed and then allocated
+again inside the replayed range** came back from the recovery marked free while it was live. The next
+allocation was handed a page something else already owned.
+
+The corpus above is where it was diagnosed. Segment 318 of Nikaya's log holds, in order,
+`AllocPage 211519`, `FreePage 211519` and `AllocPage 211519` again. After the reopen, one
+`CREATE TABLE` took pages 211519 and 211520 for its two roots and wrote over a `document` row's
+6,040-byte out-of-line value. That is exactly the shape reported above: `count(*)` answers, a
+key-only projection answers, and a projection that decodes every column does not.
+
+It is silent at write time, which is why nothing caught it earlier: the statement that takes the page
+reports success, and nothing is wrong until something reads a row whose value lived there. A free-map
+bit carries no LSN, so nothing below recovery can catch a wrong answer about which pages are free.
+
+Recovery now replays the two record kinds **in log order**, so the last record about a page decides.
+`crates/inillucent-compat/tests/new_engine_free_map_recovery.rs` pins it, with a second arm that frees
+nothing after the checkpoint and therefore cannot disagree — which is what makes the first arm a
+diagnosis rather than a guess: the variable is the page freed and taken again inside the replayed
+range, not the checkpoint, the reopen, the wide value or the `CREATE TABLE`.
+
+`ANALYZE` reached the same ending through `sqlite_stat1`, which is a `CREATE TABLE` wearing a
+different hat, and is covered by the same fix.
 
 ### A killed writer left the database unopenable
 
@@ -289,7 +323,7 @@ The application's answer to that is the same one it used for the embedding backl
 queue table written by the transactions that create the work and drained by the ones that finish it
 turns the empty case into one seek. It is written, it reconciles against the real corpus correctly
 (66,793 documents checked, none queued), **and it is not shipped**, because the `CREATE TABLE` that
-creates it corrupts the database. That is section 2.
+created it corrupted the database. That was section 2, and task-1888 fixed it.
 
 `status.counts` is five `count(*)` over 600,000 row tables. PostgreSQL spreads that across parallel
 workers; this engine walks a covering index on one core. There is no application-side trick for it

@@ -104,7 +104,8 @@ fn reopen_and_check(path: &PathBuf) -> Database {
         "ok",
         "the engine's own check disagrees with `Database::check`"
     );
-    drop(connection);
+    // Ends the borrow of `database`, which is what lets it be returned.
+    let _ = connection;
     database
 }
 

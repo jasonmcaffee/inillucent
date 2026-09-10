@@ -118,9 +118,9 @@ pub const MAX_FRAGMENTS: u8 = 60;
 
 /// The fewest bytes a cell may occupy on a page.
 ///
-/// A cell can decode to fewer - an index entry holding one NULL is three bytes
-/// - but the space it occupies is rounded up to four, because a freeblock has
-/// to hold a two-byte next pointer and a two-byte length and a shorter hole
+/// A cell can decode to fewer (an index entry holding one NULL is three
+/// bytes), but the space it occupies is rounded up to four, because a freeblock
+/// has to hold a two-byte next pointer and a two-byte length and a shorter hole
 /// could not be represented. SQLite does the same rounding inside its own cell
 /// parser (`if( nSize<4 ) nSize = 4`), so a page laid out by either engine
 /// accounts for the same bytes and each one's integrity check accepts the

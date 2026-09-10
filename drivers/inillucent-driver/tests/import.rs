@@ -168,7 +168,7 @@ fn a_table_whose_columns_are_named_left_and_right_imports() {
             vec![Value::Text("c".to_string()), Value::Text("d".to_string())],
         ]
     );
-    drop(connection);
+    let _ = connection;
     drop(database);
     clean_up(&source, Some(&imported));
 }
@@ -215,7 +215,7 @@ fn the_join_keywords_are_names_in_every_position_sqlite_allows() {
             Value::Text("x".to_string()),
         ]]
     );
-    drop(connection);
+    let _ = connection;
     drop(database);
     clean_up(&source, Some(&imported));
 }
@@ -260,7 +260,7 @@ fn a_left_join_is_still_read_as_a_join() {
             );
         }
     }
-    drop(connection);
+    let _ = connection;
     drop(database);
     clean_up(&source, Some(&imported));
 }

@@ -309,8 +309,8 @@ fn run(
     println!();
     println!("## result");
     println!(
-        "  {:<16} {:>12} {:>12} {:>9} {:>9} {:>9}  {}",
-        "workload", "inillucent ns", "sqlite ns", "ratio", "low", "high", "agreed"
+        "  {:<16} {:>12} {:>12} {:>9} {:>9} {:>9}  agreed",
+        "workload", "inillucent ns", "sqlite ns", "ratio", "low", "high"
     );
     let mut all_ratios: Vec<f64> = Vec::new();
     let mut passed = true;

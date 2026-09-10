@@ -223,7 +223,7 @@ fn a_verified_migration_publishes_and_reads_back() {
         OwnedDatum::Text(b"12345678901234567890.1234567890".to_vec()),
         "the wide decimal kept every digit"
     );
-    drop(connection);
+    let _ = connection;
     drop(database);
     clean(&destination);
 }

@@ -1151,7 +1151,7 @@ fn report(outcomes: &[Outcome], wall: Duration, map: &Map, strict: bool) {
     );
 
     let mut slowest: Vec<&Outcome> = outcomes.iter().collect();
-    slowest.sort_by(|left, right| right.elapsed.cmp(&left.elapsed));
+    slowest.sort_by_key(|outcome| std::cmp::Reverse(outcome.elapsed));
     println!("slowest:");
     for outcome in slowest.iter().take(8) {
         println!(

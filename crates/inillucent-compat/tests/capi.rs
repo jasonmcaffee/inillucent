@@ -117,7 +117,8 @@ fn compile(name: &str, headers: &Path, library: &Path) -> Option<PathBuf> {
         }
         // The executable finds its library in its own directory, not the
         // working one, so the dynamic library goes beside it.
-        for shared in ["inillucent_capi.dll"] {
+        {
+            let shared = "inillucent_capi.dll";
             let from = target_directory().join(shared);
             if from.is_file() {
                 let _ = std::fs::copy(&from, out.join(shared));

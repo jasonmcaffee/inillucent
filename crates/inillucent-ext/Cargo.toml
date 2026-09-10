@@ -10,8 +10,10 @@ description = "Scalar, aggregate, and window functions, collations, virtual tabl
 rust-stemmers.workspace = true
 inillucent-base = { workspace = true }
 inillucent-value = { workspace = true }
-inillucent-storage = { workspace = true }
-inillucent-transaction = { workspace = true }
 inillucent-sql = { workspace = true }
 inillucent-catalog = { workspace = true }
 inillucent-scalar = { workspace = true }
+
+# The workspace's lint table; see the note beside it in the root manifest.
+[lints]
+workspace = true

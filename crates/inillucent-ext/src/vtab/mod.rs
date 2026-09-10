@@ -28,7 +28,6 @@ pub mod zipfile;
 
 use inillucent_base::limits::Limits;
 use inillucent_base::{DbError, DbResult};
-use inillucent_storage::PagerSet;
 use inillucent_value::{Collation, Value};
 
 pub use inillucent_sql::vtab::{
@@ -46,18 +45,6 @@ pub use inillucent_sql::vtab::{
 pub struct Context<'host> {
     /// The connection, as a module is allowed to see it.
     pub host: &'host mut dyn Host,
-    /// Where the module's own shadow tables live.
-    ///
-    /// **A trait rather than a pager, because the engine underneath is not
-    /// fixed.** The TDD's Phase 4 puts FTS5 and the R-Tree over the new engine's
-    /// PAX trees, and the modules reach their storage only through
-    /// [`crate::shadow::ShadowTables`] - so pointing that at a different store
-    /// is the whole of the port, and the tokenizers, the ranking, the segment
-    /// merges and the R-Tree's node logic are not touched at all.
-    ///
-    /// `None` means the caller is the old engine and the pager below `host` is
-    /// the store, which is what every existing call site is.
-    pub store: Option<&'host mut dyn ShadowStore>,
     /// Which one this table lives in.
     pub database: usize,
     /// The run-time limits.
@@ -79,19 +66,18 @@ pub struct Context<'host> {
 
 /// What a module may ask the connection for.
 ///
-/// The pragma register, because the `pragma_*` table-valued functions are a
-/// module whose rows *are* a pragma's answer - and there must be one
-/// implementation of that answer, not two - and, for the old engine only, the
-/// pager set its shadow tables live behind.
+/// The pragma register, and nothing else: the `pragma_*` table-valued functions
+/// are a module whose rows *are* a pragma's answer, and there must be one
+/// implementation of that answer rather than two.
 ///
-/// **`PagerSet` was a supertrait and is now an optional accessor.** A host that
-/// has no pager could not be written while it was a supertrait: the new engine's
-/// pages are behind a buffer pool and its rows behind a tree, so its host had to
-/// implement `PagerSet` and return an error from every method - a trait
-/// implemented in order to refuse it. That also made `inillucent-ext`'s dependency
-/// on `inillucent-storage` structural rather than incidental. Now a host that
-/// reaches its rows through [`Context::store`] says so by not answering, which
-/// is what it means, and the arm below it goes when the old engine does.
+/// **It used to carry the pager set as well, and task-1894 removed it.** The
+/// accessor was the last thing making `inillucent-ext` - a crate the *new*
+/// engine links - depend on `inillucent-storage`, the storage model the
+/// rearchitecture retired. Every host now reaches its rows through
+/// [`Context::store`], including the old engine, whose implementation of that
+/// trait is `inillucent_vm::shadow_pager::PagerShadowStore`. One interface,
+/// two engines behind it, and only the retired crates name the retired
+/// storage.
 pub trait Host {
     /// Answers a pragma that only reads, or `None` when there is no such thing.
     ///
@@ -106,21 +92,51 @@ pub trait Host {
         Ok(None)
     }
 
-    /// The pagers this host's shadow tables live behind, when it has any.
+    /// The page size this database uses, when the host knows one.
     ///
-    /// The default is `None`, which is the honest answer for a host whose rows
-    /// are in the new engine's trees: it reaches them through
-    /// [`Context::store`] instead, and a pager it does not have is not
-    /// something it should have to write a refusal for.
-    fn pager_set(&mut self) -> Option<&mut dyn PagerSet> {
+    /// **A number rather than the pager it came from**, which is the whole
+    /// difference: the R-Tree sizes its nodes to fit a page, and asking for a
+    /// pager to read one field off it is what made this crate depend on the
+    /// retired storage engine. A number is not a dependency.
+    ///
+    /// `None` means "use the default", which is what a host with no file
+    /// behind it can honestly say.
+    ///
+    /// @param _database - which attached database is being asked about
+    fn page_size(&mut self, _database: usize) -> Option<usize> {
+        None
+    }
+
+    /// Where this host's modules keep their shadow rows.
+    ///
+    /// **On the host rather than beside it**, and that is the borrow rather
+    /// than the taste: the retired engine's host and its store are both derived
+    /// from one connection, and a `Context` carrying two `&mut` cannot be built
+    /// from one. It is also the shape the `pager_set` accessor this replaces
+    /// already had, with the retired storage engine taken out of the type.
+    ///
+    /// `None` is a host with nowhere to keep rows, which every module answers
+    /// by refusing.
+    fn shadow_store(&mut self) -> Option<&mut dyn ShadowStore> {
         None
     }
 }
 
-/// A pager on its own is a host with no pragmas.
-impl Host for inillucent_storage::Pager {
-    fn pager_set(&mut self) -> Option<&mut dyn PagerSet> {
-        Some(self)
+/// A host that answers nothing, wrapped around a store.
+///
+/// The new engine's hosts are `Nowhere` - it has no pragmas to answer through
+/// this path and no page size to report - and its rows are in a store built
+/// beside them. This is the two put together, so that one object satisfies the
+/// one accessor.
+pub struct WithStore<S> {
+    /// The store the modules' rows live in.
+    pub store: S,
+}
+
+impl<S: ShadowStore> Host for WithStore<S> {
+    /// Hands the modules the store this host was built around.
+    fn shadow_store(&mut self) -> Option<&mut dyn ShadowStore> {
+        Some(&mut self.store)
     }
 }
 

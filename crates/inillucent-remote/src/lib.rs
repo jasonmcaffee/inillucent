@@ -39,12 +39,22 @@
 //! | [`url`] | one connection URL, two schemes, and a `Display` that redacts the password |
 //! | [`auth`] | MD5, SHA-1, HMAC-SHA-256, PBKDF2-HMAC-SHA-256 and base64 |
 //! | [`stream`] | the socket, and the bounded reading both protocols are written against |
+//! | [`tls`] | verified TLS, through the platform's own implementation |
 //! | [`postgres`] | the version 3 frontend/backend protocol |
 //! | [`mysql`] | the MySQL and MariaDB client protocol |
 //! | [`source`] | what a source database looks like from here, and the type map |
 //! | [`migrate`] | inventory, stage, copy, verify by count and digest, publish by rename |
 
-#![forbid(unsafe_code)]
+// **`deny` rather than `forbid`, for one module.** `tls::windows` and
+// `tls::unix` reach SChannel and OpenSSL, which is an FFI call and nothing
+// else: no cryptography is implemented in this workspace, the certificate is
+// handed to the platform and the platform's answer is acted on. `forbid` cannot
+// be relaxed anywhere, and the alternative to relaxing it was a TLS
+// implementation written here, which would be a far larger security surface
+// than the plaintext migration this replaces. Every `unsafe` block in those two
+// files carries its own SAFETY note, which
+// `crates/inillucent-compat/tests/policy.rs` checks.
+#![deny(unsafe_code)]
 #![deny(missing_docs)]
 #![deny(clippy::indexing_slicing)]
 #![deny(clippy::unwrap_used)]
@@ -66,6 +76,7 @@ pub mod mysql;
 pub mod postgres;
 pub mod source;
 pub mod stream;
+pub mod tls;
 pub mod url;
 
 pub use migrate::{Check, Plan, Report, RowDigest, TableReport};
@@ -73,4 +84,4 @@ pub use mysql::MysqlSource;
 pub use postgres::PostgresSource;
 pub use source::{Kind, RemoteSource, SourceColumn, SourceTable};
 pub use stream::Stream;
-pub use url::{ConnectionUrl, Scheme};
+pub use url::{ConnectionUrl, Scheme, Transport};

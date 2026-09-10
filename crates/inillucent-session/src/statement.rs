@@ -761,8 +761,6 @@ fn databases_written(program: &inillucent_vm::program::Program) -> Vec<usize> {
     databases
 }
 
-/// Lexes, parses, binds, plans, compiles and verifies one statement.
-
 /// Records one bracketed stage of `compile_sql`, in a profiling build.
 ///
 /// A no-op unless the `opcode-probe` feature is on, which it never is in a

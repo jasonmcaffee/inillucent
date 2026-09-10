@@ -45,7 +45,14 @@ const SMALLEST: usize = 4 + 6 * 4;
 const MOST_SIDES: i64 = 1000;
 
 /// The reference's own value of pi, to the digit.
-const PI: f64 = 3.1415926535897932385;
+///
+/// Spelled out rather than `std::f64::consts::PI` because it is the reference
+/// implementation's constant, and `geopoly_regular` has to place its vertexes
+/// where SQLite's does to the last bit. The two happen to agree today; naming
+/// the standard one would make that agreement an assumption rather than a
+/// transcription.
+#[allow(clippy::approx_constant)]
+const PI: f64 = 3.141_592_653_589_793;
 
 impl Polygon {
     /// Returns the polygon a value holds, when it holds one.
@@ -83,6 +90,7 @@ impl Polygon {
     /// `Ok(None)` is the stored-with-an-empty-box case.
     ///
     /// @param value - the column's value
+    #[allow(clippy::result_unit_err)]
     pub fn parse_for_index(value: Option<&Value<'static>>) -> Result<Option<Polygon>, ()> {
         match value {
             Some(Value::Blob(blob)) if blob.raw().len() >= SMALLEST => {
@@ -150,10 +158,7 @@ impl Polygon {
         while scan.skip_space() == Some(b'[') {
             scan.at += 1;
             let mut seen = 0usize;
-            loop {
-                let Some(number) = scan.number() else {
-                    break;
-                };
+            while let Some(number) = scan.number() {
                 if seen < 2 {
                     flat.push(number as f32);
                 }

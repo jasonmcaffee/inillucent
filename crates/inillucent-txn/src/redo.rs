@@ -716,9 +716,9 @@ impl<R: RowRedo> Redo for Applier<'_, R> {
             Body::CompactLeaf {
                 tree,
                 page,
-                image,
+                image: [],
                 from_lsn,
-            } if image.is_empty() => {
+            } => {
                 self.rows
                     .compact_leaf(self.database, tree, PageId(page), lsn, from_lsn)?;
                 self.stats.images = self.stats.images.saturating_add(1);

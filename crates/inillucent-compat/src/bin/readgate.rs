@@ -171,7 +171,7 @@ impl Settings {
 fn why(error: &inillucent_base::DbError) -> String {
     match error.detail() {
         Some(detail) => detail.to_string(),
-        None => why(&error),
+        None => why(error),
     }
 }
 
@@ -199,12 +199,8 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
     // The plan both arms read, from the scorecard's own table.
     let mut plan = plan_for(&settings.scale);
     plan.setup.clear();
-    plan.workloads.retain(|workload| {
-        settings
-            .families
-            .iter()
-            .any(|name| *name == workload.family)
-    });
+    plan.workloads
+        .retain(|workload| settings.families.contains(&workload.family));
     if let Some(repeat) = settings.repeat_override {
         for workload in &mut plan.workloads {
             workload.repeat = repeat;
@@ -474,8 +470,8 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
     println!();
     println!("## result");
     println!(
-        "  {:<18} {:>14} {:>14} {:>9} {:>9} {:>9}  {}",
-        "workload", "inillucent ns", "sqlite ns", "ratio", "low", "high", "agreed"
+        "  {:<18} {:>14} {:>14} {:>9} {:>9} {:>9}  agreed",
+        "workload", "inillucent ns", "sqlite ns", "ratio", "low", "high"
     );
     let mut passed = refused.is_empty();
     if !refused.is_empty() {
@@ -509,8 +505,8 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
     println!();
     println!("## families");
     println!(
-        "  {:<18} {:>9} {:>9} {:>9} {:>8}  {}",
-        "family", "ratio", "low", "high", "bar", "verdict"
+        "  {:<18} {:>9} {:>9} {:>9} {:>8}  verdict",
+        "family", "ratio", "low", "high", "bar"
     );
     for (family, bar) in FAMILIES {
         if !settings.families.iter().any(|name| name == family) {

@@ -29,7 +29,7 @@ use inillucent_exec::physical::{ForcePlan, Params, SourceLayout, TreeCatalog};
 use inillucent_exec::StaticType;
 use inillucent_pool::interior::{self, InteriorRef};
 use inillucent_pool::meta::Meta;
-use inillucent_pool::{Database, Options, PageId, Pool};
+use inillucent_pool::{Database, Options, Pool};
 use inillucent_tree::datum::{Datum, OwnedDatum};
 use inillucent_tree::leaf::LeafRef;
 use inillucent_tree::types::{ColumnSpec, PhysicalType};

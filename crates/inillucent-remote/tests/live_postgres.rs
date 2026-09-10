@@ -218,7 +218,7 @@ fn a_live_postgres_database_migrates_verified_and_reads_back() {
         "the trigger should be reported as not carried: {named:?}"
     );
 
-    drop(connection);
+    let _ = connection;
     drop(database);
     let _ = std::fs::remove_file(&destination);
     let report_path = destination.with_file_name(format!(

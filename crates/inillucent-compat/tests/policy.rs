@@ -361,3 +361,172 @@ fn the_dependency_policy_covers_what_the_contract_allows() {
         "the policy has lost its ownership rule"
     );
 }
+
+/// The retired engine's crates are named by a shrinking list, and the list is
+/// the test.
+///
+/// **A ratchet rather than a rule.** `docs/roadmap.md` has recorded the removal
+/// of the old engine as unfinished work for several tickets, and prose does not
+/// stop a new edge: the way a crate acquires one is that somebody adds a line to
+/// a manifest because the type they wanted lives there, and nothing says no. So
+/// the crates that may still name `inillucent-storage`, `inillucent-transaction`
+/// and `inillucent-vm` are listed here by name, and a crate that is not on the
+/// list fails this test the moment it grows the edge.
+///
+/// The list only ever gets shorter. Removing a name is the work; adding one is
+/// a decision somebody has to argue for in a review, which is exactly the
+/// difference between this and a comment.
+///
+/// task-1894 removed `inillucent-ext`, which was the only crate on it that the
+/// *new* engine links - and therefore the only entry that put two storage models
+/// in a shipped binary rather than merely in the workspace.
+#[test]
+fn no_new_crate_reaches_into_the_retired_engine() {
+    /// The crates the rearchitecture retires, whose consumers are counted.
+    const RETIRED: [&str; 3] = [
+        "inillucent-storage",
+        "inillucent-transaction",
+        "inillucent-vm",
+    ];
+
+    /// Who may still name one, and why each is still there.
+    ///
+    /// - the retired crates themselves, and each other;
+    /// - `inillucent-catalog`, whose old-engine schema reader is the arm the new
+    ///   engine's `paged` module replaces - it goes when the old engine does;
+    /// - `inillucent-sqlite-reader`, which reads *SQLite's* file format and uses
+    ///   the old pager as the format reader it is, so removing this edge means
+    ///   writing a second b-tree reader rather than deleting a dependency;
+    /// - `inillucent-session` and `inillucent-legacy`, which *are* the old
+    ///   engine's connection and facade;
+    /// - `inillucent-capi`, the `sqlite3_*` ABI over that facade, which
+    ///   `docs/invariants/layering.toml` records as going with them.
+    const ALLOWED: [&str; 8] = [
+        "inillucent-storage",
+        "inillucent-transaction",
+        "inillucent-vm",
+        "inillucent-catalog",
+        "inillucent-sqlite-reader",
+        "inillucent-session",
+        "inillucent-legacy",
+        "inillucent-capi",
+    ];
+
+    let root = workspace_root();
+    let mut offenders: Vec<String> = Vec::new();
+    for crate_name in GOVERNED.iter().chain(
+        [
+            "inillucent-remote",
+            "inillucent-migrate",
+            "inillucent-driver",
+        ]
+        .iter(),
+    ) {
+        // The harness links both engines on purpose: comparing them is what it
+        // is for, and a test-only crate cannot put an edge in a shipped binary.
+        if ALLOWED.contains(crate_name) || *crate_name == "inillucent-compat" {
+            continue;
+        }
+        let manifest = root.join("crates").join(crate_name).join("Cargo.toml");
+        let Ok(text) = std::fs::read_to_string(&manifest) else {
+            continue;
+        };
+        // Only the production section: a dev-dependency on a retired crate is a
+        // test comparing the two engines, which is the thing that proves the
+        // replacement works.
+        let production = text
+            .split("[dev-dependencies]")
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        for retired in RETIRED {
+            if production.contains(&format!("{retired} = ")) {
+                offenders.push(format!("{crate_name} -> {retired}"));
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "these crates reach into the retired engine and are not on the list that may:\n{}\n\
+         The list is in this test and it only gets shorter. If the edge is genuinely needed, \
+         say why in a review and add the name; if it is not, the type you wanted is probably \
+         behind a trait the new engine also implements.",
+        offenders.join("\n")
+    );
+}
+
+/// No module grows past the size it is recorded at, and the record only comes
+/// down.
+///
+/// **A ratchet, for the same reason the retired-engine one is.** The review
+/// named five files of several thousand lines each and asked for the
+/// responsibilities inside them to be split out. Splitting one is work; keeping
+/// it split is a different problem, because the way a module gets to eight
+/// thousand lines is that every individual addition to it was reasonable.
+///
+/// So each large module's line count is written down here and a file that grows
+/// past its number fails. Adding to one of these means either extracting
+/// something first or lowering somebody else's number - which is a conversation
+/// in a review rather than a diff nobody notices.
+///
+/// **The numbers only go down.** A file that shrinks below its entry is
+/// recorded at its new size in the same change, so the ceiling follows the work
+/// rather than the other way round.
+#[test]
+fn no_module_grows_past_the_size_it_is_recorded_at() {
+    /// Every module over 2,500 lines, with the ceiling it is held to.
+    ///
+    /// task-1894 moved `ImportedDatabase::import_into` - 493 lines that did
+    /// seven things - into `inillucent-engine/src/import.rs` as seven named
+    /// phases, which is what took `lib.rs` from 8,415 to its number here.
+    const CEILINGS: [(&str, usize); 14] = [
+        ("crates/inillucent-engine/src/lib.rs", 8_130),
+        ("crates/inillucent-exec/src/physical.rs", 6_390),
+        ("crates/inillucent-sql/src/bind.rs", 5_315),
+        ("crates/inillucent-tree/src/leaf.rs", 5_315),
+        ("crates/inillucent-vm/src/compile.rs", 4_885),
+        ("crates/inillucent-tree/src/paged.rs", 3_685),
+        ("crates/inillucent-vm/src/compile_dml.rs", 3_320),
+        ("crates/inillucent-exec/src/dml.rs", 3_240),
+        ("crates/inillucent-ext/src/vtab/fts5/mod.rs", 3_135),
+        ("crates/inillucent-engine/src/ddl.rs", 2_950),
+        ("crates/inillucent-session/src/connection.rs", 2_855),
+        ("crates/inillucent-vm/src/machine.rs", 2_700),
+        ("crates/inillucent-sql/src/plan.rs", 2_630),
+        ("crates/inillucent-bench/src/synth.rs", 2_600),
+    ];
+
+    let root = workspace_root();
+    let mut over: Vec<String> = Vec::new();
+    let mut shrunk: Vec<String> = Vec::new();
+    for (named, ceiling) in CEILINGS {
+        let path = root.join(named);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            over.push(format!("{named} is not there any more; remove its row"));
+            continue;
+        };
+        let lines = text.lines().count();
+        if lines > ceiling {
+            over.push(format!("{named}: {lines} lines, past its {ceiling}"));
+        }
+        // 200 lines of slack, so an ordinary edit does not send somebody back
+        // here to move a number by three.
+        if lines.saturating_add(200) < ceiling {
+            shrunk.push(format!("{named}: {lines} lines, recorded at {ceiling}"));
+        }
+    }
+    assert!(
+        over.is_empty(),
+        "these modules grew past the size they are recorded at:\n{}\n\
+         Extract something rather than raising the number: the way a module reaches eight \
+         thousand lines is that every individual addition to it was reasonable.",
+        over.join("\n")
+    );
+    assert!(
+        shrunk.is_empty(),
+        "these modules are well under the size they are recorded at, so lower the numbers in \
+         this test:\n{}\n\
+         The ceiling follows the work rather than the other way round.",
+        shrunk.join("\n")
+    );
+}

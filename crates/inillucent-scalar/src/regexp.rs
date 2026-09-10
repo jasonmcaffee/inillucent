@@ -256,7 +256,7 @@ impl Compiler<'_> {
         let mut value = 0u32;
         for offset in 1..=count {
             let digit = self.text.get(self.at + offset).copied()?;
-            value = value * 16 + u32::from(char::from(digit).to_digit(16)?);
+            value = value * 16 + char::from(digit).to_digit(16)?;
         }
         Some(value)
     }

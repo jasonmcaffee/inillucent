@@ -165,6 +165,11 @@ mod at {
     /// The one visible column.
     pub const BODY: i32 = 0;
     /// The table's own hidden query column, which an `ivfflat` never matches.
+    ///
+    /// Declared rather than used: the column exists in the schema this module
+    /// publishes, so the position has to be named here even though no code
+    /// path reads it. Removing it would renumber every constant below.
+    #[allow(dead_code)]
     pub const QUERY: i32 = 1;
     /// How many neighbours the caller wants.
     pub const K: i32 = 2;
@@ -822,14 +827,14 @@ mod tests {
         let two = vec![0.0f32, 1.0, 0.0, 0.0];
         assert!(cosine_distance(&one, &one) < 1e-6);
         assert!((cosine_distance(&one, &two) - 1.0).abs() < 1e-6);
-        assert!((cosine_distance(&one, &vec![-1.0, 0.0, 0.0, 0.0]) - 2.0).abs() < 1e-6);
+        assert!((cosine_distance(&one, &[-1.0, 0.0, 0.0, 0.0]) - 2.0).abs() < 1e-6);
     }
 
     /// A vector of zeroes is no nearer to one thing than another.
     #[test]
     fn a_vector_with_no_length_is_one_away_from_everything() {
         let zero = vec![0.0f32; 4];
-        assert!((cosine_distance(&zero, &vec![1.0, 0.0, 0.0, 0.0]) - 1.0).abs() < 1e-6);
+        assert!((cosine_distance(&zero, &[1.0, 0.0, 0.0, 0.0]) - 1.0).abs() < 1e-6);
     }
 
     /// The clustering separates two obvious groups, and does it the same way

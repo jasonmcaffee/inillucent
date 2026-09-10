@@ -611,6 +611,16 @@ kind = "test"
 name = "protocol"
 tier = "engine"
 
+# Verified TLS against a real TLS server (task-1894). It needs a Python with an
+# `ssl` module and an `openssl` to generate certificates with, neither of which
+# this workspace builds, so it reports success when they are absent.
+[[target]]
+package = "inillucent-remote"
+kind = "test"
+name = "transport"
+tier = "e2e"
+requires = ["python", "openssl"]
+
 # The whole procedure against a running PostgreSQL, and against a running
 # MySQL. Each skips with `; skipping` when its URL is unset, which is what lets
 # `--strict` count the skip instead of reading it as a pass.
@@ -1070,6 +1080,16 @@ kind = "test"
 name = "abi"
 tier = "e2e"
 
+# The same ABI, called from C rather than compared as three lists (task-1894).
+# It needs a C compiler, which this workspace cannot build, so it reports
+# success when there is none and `--strict` is what names it.
+[[target]]
+package = "inillucent-driver-capi"
+kind = "test"
+name = "conformance"
+tier = "e2e"
+requires = ["cc"]
+
 # --- perf: the cost guards, so a regression fails a test rather than a benchmark
 
 [[target]]
@@ -1135,6 +1155,32 @@ kind = "test"
 name = "command_parity"
 tier = "tooling"
 covers = ["inillucent-cli"]
+
+# `--root` against the file system rather than against path text (task-1894).
+# It drives the two shipped front ends, because the defect it guards was not in
+# the check's arithmetic - it was in which file operations reached the check.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "budgets"
+tier = "e2e"
+covers = ["inillucent-cli"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "confinement"
+tier = "e2e"
+covers = ["inillucent-cli"]
+
+# The documentation, checked against the engine beside it (task-1894). Prose
+# goes stale silently, which is what makes it different from code.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "documentation"
+tier = "tooling"
+covers = ["inillucent-compat"]
 
 [[target]]
 package = "inillucent-compat"

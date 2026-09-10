@@ -38,6 +38,7 @@
     )
 )]
 
+pub mod budget;
 pub mod buffer;
 pub mod bytes;
 pub mod checksum;
@@ -100,5 +101,5 @@ pub const COMPILE_OPTIONS: &[&str] = &[
 /// @param name - the option, with or without the `SQLITE_` prefix
 pub fn compile_option_used(name: &str) -> bool {
     let wanted = name.strip_prefix("SQLITE_").unwrap_or(name);
-    COMPILE_OPTIONS.iter().any(|entry| *entry == wanted)
+    COMPILE_OPTIONS.contains(&wanted)
 }

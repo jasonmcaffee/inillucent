@@ -39,7 +39,11 @@ agreement, and every one of the seven differences named with what it measures.
   an existing destination rather than replacing it. Choose another path; the file that is there is
   untouched.
 - **`… is outside <DIR>, which this server is confined to.`** — the surface was started with
-  `--root`. The check is lexical after normalising `..`, and it runs before the file is opened.
+  `--root`, and the path you named is not under it.
+- **`… resolves to <PATH>, which is outside <DIR>, which this server is confined to.`** — the path
+  you named *is* under `--root` and the file is not. Something on the way is a Windows junction or a
+  Unix symbolic link pointing out of the root. The message names where it actually lands, which is
+  what tells a junction apart from a typo.
 - **`this surface is confined to a directory with --root, and a migration from a server reaches a
   host and a port`** — `--root` is about reach, not only about paths. Run the remote migration from
   an unconfined command line.

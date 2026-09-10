@@ -478,7 +478,7 @@ impl Sink for HashJoin<'_> {
                     if matches.is_empty() {
                         if kind.keeps_probe() {
                             let mut row = materialise(batch, nth, width)?;
-                            row.extend(std::iter::repeat(OwnedDatum::Null).take(build_width));
+                            row.extend(std::iter::repeat_n(OwnedDatum::Null, build_width));
                             produced.push(row);
                         }
                     } else {
@@ -511,9 +511,8 @@ impl Sink for HashJoin<'_> {
                 if self.table.matched.get(position).copied().unwrap_or(false) {
                     continue;
                 }
-                let mut row: Vec<OwnedDatum> = std::iter::repeat(OwnedDatum::Null)
-                    .take(self.probe_width)
-                    .collect();
+                let mut row: Vec<OwnedDatum> =
+                    std::iter::repeat_n(OwnedDatum::Null, self.probe_width).collect();
                 row.extend(build.iter().cloned());
                 produced.push(row);
             }
@@ -1073,7 +1072,7 @@ impl Sink for NestedLoopJoin<'_> {
                 JoinKind::Anti if matched == 0 => produced.push(outer),
                 _ if self.kind.keeps_probe() && matched == 0 => {
                     let mut row = outer;
-                    row.extend(std::iter::repeat(OwnedDatum::Null).take(inner_width));
+                    row.extend(std::iter::repeat_n(OwnedDatum::Null, inner_width));
                     produced.push(row);
                 }
                 _ => {}
@@ -1096,9 +1095,8 @@ impl Sink for NestedLoopJoin<'_> {
                 if self.matched.get(position).copied().unwrap_or(false) {
                     continue;
                 }
-                let mut row: Vec<OwnedDatum> = std::iter::repeat(OwnedDatum::Null)
-                    .take(self.outer_width)
-                    .collect();
+                let mut row: Vec<OwnedDatum> =
+                    std::iter::repeat_n(OwnedDatum::Null, self.outer_width).collect();
                 row.extend(inner.iter().cloned());
                 produced.push(row);
             }

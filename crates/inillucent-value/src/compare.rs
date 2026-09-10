@@ -88,6 +88,13 @@ pub enum Truth {
 
 impl Truth {
     /// Returns the three-valued negation. `NOT unknown` is unknown.
+    ///
+    /// **Named `not` rather than implementing `std::ops::Not`**, and that is the
+    /// point: `!` on a `Truth` would read as two-valued negation to anybody who
+    /// has met `!` before, and `NOT unknown` is `unknown` rather than `known`.
+    /// A reader who has to look the operator up has been told something; a
+    /// reader who assumes has been told nothing.
+    #[allow(clippy::should_implement_trait)]
     pub fn not(self) -> Truth {
         match self {
             Truth::False => Truth::True,

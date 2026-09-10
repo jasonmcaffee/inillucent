@@ -36,10 +36,19 @@ Tools arrive named `inillucent_query`, `inillucent_exec`, `inillucent_describe`,
   *binder's* — whether the statement binds as a query — not a scan of the text, so
   `SELECT … ; DROP TABLE …` does not slip through and a `SELECT` that happens to contain the word
   "delete" is not refused.
-- **`--root DIR` refuses every path outside a directory.** The check is lexical, after normalising
-  `..`, and it happens **before** the file is opened — a check that resolved the path through the
-  file system would have to create it first, and a confinement that has already touched the disk is
-  not one.
+- **`--root DIR` refuses every path that *resolves* outside a directory.** Resolves, not spells:
+  every component is followed through the file system as it is appended, so a Windows junction or a
+  Unix symbolic link placed below the root is replaced by what it points at before the check
+  happens. A path that does not exist yet stops the resolution at its deepest existing ancestor,
+  which is what lets the same check authorise a file about to be created, and the VFS checks the
+  target again at the moment it is opened.
+
+  The policy covers **every** file the request causes to be opened, not only the one in the `db`
+  argument: `create`, `import`, `export`, `backup`, `restore`, `migrate`, the database the server
+  was started on, and the two statements that name a file of their own, `ATTACH DATABASE` and
+  `VACUUM INTO`. It is enforced in the VFS, which is the only thing in the workspace that opens a
+  file, so a command added later is confined without anybody remembering to add it to a list.
+  Temporary files a confined process makes are made inside the root.
 
 **`--root` also refuses a migration from a server.** `migrate --kind postgres` dials a host and a
 port, and the confinement is about *reach*, not only about paths — a verb that could open a socket

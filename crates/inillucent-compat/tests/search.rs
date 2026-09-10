@@ -653,3 +653,238 @@ fn hex(vector: &[f32]) -> String {
     }
     out
 }
+
+// --- M8: what an ordinary write pays for the graph (task-1894) ---
+//
+// The finding these guard is that an incremental vector insert rebuilt the
+// whole HNSW graph. It did: automatic compaction ran `build_from_rows`, which
+// reads every row and inserts every chunk into a fresh graph, and it ran inside
+// the committing transaction - so one `INSERT` into a 598,560 chunk table paid
+// a nine and a half minute build.
+//
+// The bound is stated as a count rather than as a clock. `%_state`'s `inserted`
+// row says how many chunks the last generation build put into the graph, so a
+// fold that started reading the corpus again fails these on any machine under
+// any load, which a stopwatch cannot promise.
+
+/// Returns the integer a `%_state` row holds.
+///
+/// @param connection - the database
+/// @param table - the search table's name
+/// @param key - the state key to read
+fn state(connection: &Connection, table: &str, key: &str) -> i64 {
+    column(
+        connection,
+        &format!("SELECT v FROM {table}_state WHERE k = '{key}'"),
+    )
+    .first()
+    .map(|text| text.parse::<i64>().unwrap_or(-1))
+    .unwrap_or(-1)
+}
+
+/// Opens a database that is already there, without emptying it first.
+///
+/// @param path - the file to open
+fn open_at(path: &std::path::Path) -> Connection {
+    let database = inillucent_session::connection::SessionDatabase::open_with_options(
+        path,
+        inillucent_session::connection::OpenOptions {
+            busy_timeout: std::time::Duration::from_secs(5),
+            ..inillucent_session::connection::OpenOptions::default()
+        },
+    )
+    .expect("the database opens");
+    database.connect().expect("it connects")
+}
+
+/// Writes `count` rows, each in its own transaction, from `first`.
+///
+/// One row per commit on purpose: the fold runs at commit, so this is the shape
+/// that puts the most folds into a run, and it is the shape an application
+/// syncing a mailbox actually has.
+///
+/// @param connection - the database
+/// @param first - the first rowid to write
+/// @param count - how many rows to write
+fn write_rows(connection: &Connection, first: i64, count: i64) {
+    for offset in 0..count {
+        let id = first + offset;
+        exec(
+            connection,
+            &format!(
+                "INSERT INTO docs(rowid, title, body) VALUES \
+                 ({id}, 'title {id}', 'the discount applies to eligible accounts number {id}')"
+            ),
+        );
+    }
+}
+
+/// A fold inserts the rows the commit wrote, not the rows the table holds.
+#[test]
+fn a_fold_inserts_what_the_commit_wrote_and_not_the_corpus() {
+    let connection = start_inillucent(AREA, "fold-bounded");
+    exec(
+        &connection,
+        "CREATE VIRTUAL TABLE docs USING inillucent_search(title, body, compact = 8)",
+    );
+
+    // The first fold has no generation to fold into, so it builds the eight
+    // rows the table holds - which is still only what has been written.
+    write_rows(&connection, 1, 8);
+    assert_eq!(state(&connection, "docs", "generation"), 1);
+    assert_eq!(state(&connection, "docs", "inserted"), 8);
+    assert_eq!(state(&connection, "docs", "folds"), 1);
+
+    // Eight times the corpus later, a fold is still eight inserts. This is the
+    // whole finding: before M8 the second number was 64.
+    write_rows(&connection, 9, 56);
+    assert_eq!(state(&connection, "docs", "rows"), 64);
+    assert_eq!(
+        state(&connection, "docs", "inserted"),
+        8,
+        "a fold's graph work must not grow with the corpus it folds into"
+    );
+    assert_eq!(state(&connection, "docs", "folds"), 8);
+    assert_eq!(state(&connection, "docs", "generation"), 8);
+}
+
+/// The `compact` command is the one that reads every row.
+#[test]
+fn the_compact_command_builds_from_every_row() {
+    let connection = start_inillucent(AREA, "fold-compact");
+    exec(
+        &connection,
+        "CREATE VIRTUAL TABLE docs USING inillucent_search(title, body, compact = 8)",
+    );
+    write_rows(&connection, 1, 64);
+    assert_eq!(state(&connection, "docs", "inserted"), 8);
+
+    exec(&connection, "INSERT INTO docs(docs) VALUES ('compact')");
+    assert_eq!(
+        state(&connection, "docs", "inserted"),
+        64,
+        "an explicit compaction is the batch rebuild, and it costs the corpus"
+    );
+    assert_eq!(
+        state(&connection, "docs", "folds"),
+        0,
+        "a single-pass build starts the lineage again"
+    );
+}
+
+/// An empty delta log does not stop a caller asking for a clean graph.
+///
+/// It used to. That was invisible while automatic compaction also built in one
+/// pass; now that a commit folds, the table with an empty log is precisely the
+/// one whose graph has the most tombstoned chunks in it.
+#[test]
+fn compaction_is_available_after_the_log_has_been_folded_away() {
+    let connection = start_inillucent(AREA, "fold-empty-log");
+    exec(
+        &connection,
+        "CREATE VIRTUAL TABLE docs USING inillucent_search(title, body, compact = 8)",
+    );
+    write_rows(&connection, 1, 16);
+    assert_eq!(
+        column(&connection, "SELECT count(*) FROM docs_delta"),
+        vec!["0".to_string()],
+        "the log was folded away"
+    );
+    let before = state(&connection, "docs", "generation");
+    exec(&connection, "INSERT INTO docs(docs) VALUES ('compact')");
+    assert_eq!(state(&connection, "docs", "generation"), before + 1);
+    assert_eq!(state(&connection, "docs", "inserted"), 16);
+}
+
+/// Folding changes no answer, and neither does the rebuild after it.
+#[test]
+fn folding_and_rebuilding_answer_the_same_query_the_same_way() {
+    const QUERY: &str = "SELECT rowid FROM docs WHERE docs MATCH 'eligible accounts' \
+                         AND k = 10 ORDER BY rank";
+
+    let unfolded = {
+        let connection = start_inillucent(AREA, "fold-answers-plain");
+        exec(
+            &connection,
+            "CREATE VIRTUAL TABLE docs USING inillucent_search(title, body, compact = 0)",
+        );
+        write_rows(&connection, 1, 40);
+        column(&connection, QUERY)
+    };
+
+    let folded = start_inillucent(AREA, "fold-answers-folded");
+    exec(
+        &folded,
+        "CREATE VIRTUAL TABLE docs USING inillucent_search(title, body, compact = 8)",
+    );
+    write_rows(&folded, 1, 40);
+    assert!(state(&folded, "docs", "folds") >= 4, "it folded");
+    assert_eq!(
+        column(&folded, QUERY),
+        unfolded,
+        "folding changed the ranking"
+    );
+
+    exec(&folded, "INSERT INTO docs(docs) VALUES ('compact')");
+    assert_eq!(
+        column(&folded, QUERY),
+        unfolded,
+        "the rebuild after the folds changed the ranking"
+    );
+}
+
+/// An update folded in leaves the chunk it replaced behind until a rebuild.
+///
+/// This is the price of not rebuilding, and it is stated as a number an
+/// application can read: `chunks` counts what the graph holds and `rows` counts
+/// what the table holds, so the difference is the dead weight folding left.
+#[test]
+fn an_update_leaves_a_dead_chunk_until_the_rebuild_removes_it() {
+    let connection = start_inillucent(AREA, "fold-tombstones");
+    exec(
+        &connection,
+        "CREATE VIRTUAL TABLE docs USING inillucent_search(title, body, compact = 8)",
+    );
+    write_rows(&connection, 1, 16);
+    assert_eq!(state(&connection, "docs", "chunks"), 16);
+
+    for id in 1..=8 {
+        exec(
+            &connection,
+            &format!("UPDATE docs SET body = 'a revised eligible account {id}' WHERE rowid = {id}"),
+        );
+    }
+    assert_eq!(state(&connection, "docs", "rows"), 16);
+    assert_eq!(
+        state(&connection, "docs", "chunks"),
+        24,
+        "the eight replaced chunks are still in the graph"
+    );
+
+    exec(&connection, "INSERT INTO docs(docs) VALUES ('compact')");
+    assert_eq!(
+        state(&connection, "docs", "chunks"),
+        16,
+        "the rebuild is what removes them"
+    );
+}
+
+/// A folded index survives being closed and opened again.
+#[test]
+fn a_folded_index_reopens_and_answers() {
+    const QUERY: &str = "SELECT rowid FROM docs WHERE docs MATCH 'eligible accounts' \
+                         AND k = 10 ORDER BY rank";
+    let path = scratch(AREA, "fold-reopen", "inillucent");
+    let expected = {
+        let connection = open_at(&path);
+        exec(
+            &connection,
+            "CREATE VIRTUAL TABLE docs USING inillucent_search(title, body, compact = 8)",
+        );
+        write_rows(&connection, 1, 40);
+        column(&connection, QUERY)
+    };
+    let reopened = open_at(&path);
+    assert_eq!(column(&reopened, QUERY), expected);
+    assert_eq!(state(&reopened, "docs", "folds"), 5);
+}

@@ -700,7 +700,7 @@ pub fn unanswerable_queries(
             // Rare, but not unique: a token appearing once is an identifier, and
             // an identifier makes the query obviously unanswerable rather than
             // plausibly so.
-            if rarity < 3 || rarity > 400 {
+            if !(3..=400).contains(&rarity) {
                 continue;
             }
             words.push((w, rarity));

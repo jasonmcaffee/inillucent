@@ -871,8 +871,8 @@ mod tests {
     /// refused by every reader of it, including the one that does not parse.
     ///
     /// The count is the first thing a corrupt page lies about, and the
-    /// directory it implies runs past the end of the buffer. `parse` checks it
-    /// - that much was already covered - but `swip_offsets_of` reads the count
+    /// directory it implies runs past the end of the buffer. `parse` checks
+    /// it, and that much was already covered; `swip_offsets_of` reads the count
     /// straight out of a raw image without parsing, because writeback calls it
     /// on a page it is about to translate. That check was the one no test had
     /// ever taken, and it is the one standing between a corrupt count and a

@@ -583,10 +583,9 @@ fn truncation_removes_the_tail_and_the_later_segments() {
         path.as_path().parent(),
         outcome.sequence + 1,
     );
-    assert_eq!(
-        vfs.access(&past, inillucent_vfs::AccessMode::Exists)
+    assert!(
+        !vfs.access(&past, inillucent_vfs::AccessMode::Exists)
             .unwrap(),
-        false,
         "a segment past the recovered prefix was left behind"
     );
 }

@@ -16,3 +16,7 @@ inillucent-wal = { workspace = true }
 
 [dev-dependencies]
 inillucent-sim = { workspace = true }
+
+# The workspace's lint table; see the note beside it in the root manifest.
+[lints]
+workspace = true
