@@ -275,8 +275,7 @@ fn campaign(name: &str, mode: JournalMode, failure: Failure, cuts_wanted: u64) -
 
 /// Writes one campaign's report beside the others.
 fn record(name: &str, report: &str) {
-    let directory =
-        inillucent_compat::workspace_root().join("_agent_output/search-crash");
+    let directory = inillucent_compat::workspace_root().join("_agent_output/search-crash");
     let _ = std::fs::create_dir_all(&directory);
     let _ = std::fs::write(directory.join(format!("{name}.tsv")), report);
 }

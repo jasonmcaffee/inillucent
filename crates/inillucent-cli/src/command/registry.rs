@@ -439,6 +439,70 @@ const HELP_PARAMS: &[Param] = &[
     FORMAT,
 ];
 
+/// The parameters `setup-embeddings` takes.
+const SETUP_PARAMS: &[Param] = &[
+    Param {
+        name: "component",
+        kind: Kind::Text,
+        required: false,
+        positional: true,
+        description: "Which half to install: 'all' (the default), 'runtime' for the ONNX Runtime \
+                      shared library on its own, or 'model' for the weights on their own.",
+    },
+    Param {
+        name: "status",
+        kind: Kind::Boolean,
+        required: false,
+        positional: false,
+        description: "Say what is installed, where, and which residency profile is in force, and \
+                      download nothing.",
+    },
+    Param {
+        name: "residency",
+        kind: Kind::Text,
+        required: false,
+        positional: false,
+        description: "When the model is in memory: 'resident' keeps it for the life of the process, \
+                      'on-demand' loads it per call and drops it, 'idle' or 'idle:90s' loads it on \
+                      use and drops it after a quiet period. Recorded for this machine; \
+                      INILLUCENT_EMBED_RESIDENCY overrides it for one process.",
+    },
+    Param {
+        name: "gpu",
+        kind: Kind::Boolean,
+        required: false,
+        positional: false,
+        description: "Install the ONNX Runtime build carrying the CUDA execution provider, which \
+                      exists for Windows and Linux on x86-64 only. It is a much larger download and \
+                      it needs a CUDA install of its own to be usable.",
+    },
+    Param {
+        name: "force",
+        kind: Kind::Boolean,
+        required: false,
+        positional: false,
+        description: "Fetch and install again even when the files are already there and their \
+                      digests match.",
+    },
+    Param {
+        name: "onnxruntime-version",
+        kind: Kind::Text,
+        required: false,
+        positional: false,
+        description: "The ONNX Runtime version to install. Defaults to the one this build pins a \
+                      digest for; any other version is fetched and reported as unverified.",
+    },
+    Param {
+        name: "dir",
+        kind: Kind::Text,
+        required: false,
+        positional: false,
+        description: "Install somewhere other than the per-user directory. INILLUCENT_HOME does the \
+                      same thing for every command at once.",
+    },
+    FORMAT,
+];
+
 /// The parameters `version` takes.
 const VERSION_PARAMS: &[Param] = &[FORMAT];
 
@@ -711,6 +775,29 @@ pub static COMMANDS: &[Command] = &[
         cli_only: None,
         writes: true,
         run: verbs::migrate,
+    },
+    Command {
+        name: "setup-embeddings",
+        summary: "Download and install the embedding model and the runtime it needs.",
+        detail: "One command, on Windows, macOS and Linux. It fetches ONNX Runtime and the \
+                 nomic-embed-text-v1.5 weights into a per-user directory, checks every byte \
+                 against a digest pinned in this build, and leaves the engine able to answer \
+                 embed(TEXT) with nothing exported by hand - so a mismatch is a refusal that \
+                 names both digests rather than a shared library that loads and misbehaves. \
+                 Name what you want: 'all' installs both halves, 'runtime' and 'model' one \
+                 each. Run with no component at all and it reports what is installed and \
+                 downloads nothing, which is what stops a 620 MB fetch being a surprise; \
+                 '--status' does the same explicitly. About 620 MB the first time and \
+                 nothing on a later run. '--residency' chooses when the model is in memory: \
+                 'resident' keeps it, which is about 1.9 GB held and 12 to 36 ms a query; \
+                 'on-demand' loads it per call, which holds nothing and costs about 0.8 s a \
+                 query; 'idle' or 'idle:90s' loads it on use and drops it after a quiet \
+                 period, which is the default and pays the load once for a burst of \
+                 questions.",
+        params: SETUP_PARAMS,
+        cli_only: None,
+        writes: true,
+        run: crate::setup::setup_embeddings,
     },
     Command {
         name: "version",

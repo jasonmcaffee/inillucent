@@ -12,7 +12,9 @@ pub mod rank;
 pub mod embed;
 pub mod model;
 pub mod index;
+pub mod install;
 pub mod persist;
+pub mod residency;
 #[cfg(feature = "onnx")]
 pub mod embed_onnx;
 

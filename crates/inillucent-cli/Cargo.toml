@@ -38,6 +38,12 @@ embed = ["inillucent-engine/embed"]
 [dependencies]
 inillucent-alloc = { workspace = true }
 inillucent-base = { workspace = true }
+# `setup-embeddings` reaches two modules here: `install`, which is the one
+# definition of where the weights and the ONNX Runtime library go, and
+# `residency`, which is the one definition of what the profiles mean. Neither
+# links a machine learning runtime, and the crate is already in this binary's
+# dependency graph through `inillucent-engine -> inillucent-search`.
+inillucent-core = { workspace = true }
 inillucent-driver = { workspace = true }
 inillucent-engine = { workspace = true }
 # The remote migration sources. It depends on base, vfs, tree and

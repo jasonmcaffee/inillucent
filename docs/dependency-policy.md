@@ -147,6 +147,41 @@ make those calls, and every block in them has a SAFETY note that
 falling back is the defect this replaced, and a fallback nobody sees is worse
 than the refusal.
 
+### The HTTP client, and the two archive formats (task-1900)
+
+`inillucent setup-embeddings` downloads ONNX Runtime from GitHub and the weights from Hugging Face,
+verifies both against pinned SHA-256 digests, and takes one shared library out of a zip or a gzipped
+tar. None of that added a dependency, and the reasoning is the same as the paragraph above.
+
+**An HTTP client crate was the obvious answer and is the wrong one here.** Every one of them brings a
+TLS backend, and the popular ones bring an async runtime, into a binary whose peak resident set is a
+published number — for a command that runs once per machine. The argument the `postgres` client lost
+is the argument this one loses.
+
+**And the pieces were already here.** `inillucent-remote` has the socket with bounded reads and the
+platform's own verified TLS, because the migration clients needed both.
+`inillucent_base::deflate::inflate` is the whole of zip's and gzip's decompression and is already
+checked against the format. What was left to write is a `GET`, two body framings, redirects, a
+`Range` header, and two container formats — a zip central directory and a tar header — and none of
+those is a place where a third-party crate carries knowledge this repository does not have.
+
+What is deliberately **not** implemented is as much of the argument as what is. No proxies, no
+cookies, no authentication, no compression negotiation — `Accept-Encoding: identity` is sent
+precisely so the bytes on the wire are the bytes being digested. No zip64, no encryption, no
+compression method beyond stored and deflated, no tar extension past the GNU long-name record. Each
+of those is refused by name if it appears, so an archive this cannot read is a message rather than a
+wrong file.
+
+Two properties are worth stating because they are what a downloader gets wrong:
+
+- **A file that fails its digest is not left on disk.** The download is written to a `.part` beside
+  the destination and renamed only once the digest matches, so an interrupted run leaves something a
+  later run resumes and never leaves a complete-looking file that is not.
+- **An archive member whose name escapes the destination stops the extraction.** Not sanitised into
+  something harmless-looking: stripping the `..` out of `../../etc/passwd` produces a file nobody
+  asked for under a name that looks deliberate. A test builds an archive with `../escape` in it.
+
+
 ## The edges into the retired engine, and the ratchet on them
 
 The rearchitecture (task-1816) replaced `inillucent-storage`, `inillucent-transaction`

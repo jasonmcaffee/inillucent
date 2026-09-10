@@ -1156,6 +1156,17 @@ name = "command_parity"
 tier = "tooling"
 covers = ["inillucent-cli"]
 
+# The install command, driven as a program, with nothing downloaded. It is here
+# rather than as a unit test because the defect it guards - a bare invocation
+# fetching 620 MB - is about what the process does, and a function that returns
+# the right value while writing half a gigabyte beside it would pass a unit test.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "setup_embeddings"
+tier = "e2e"
+covers = ["inillucent-cli"]
+
 # `--root` against the file system rather than against path text.
 # It drives the two shipped front ends, because the defect it guards was not in
 # the check's arithmetic - it was in which file operations reached the check.

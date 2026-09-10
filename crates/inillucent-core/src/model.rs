@@ -218,6 +218,34 @@ impl ModelManifest {
         }
     }
 
+    /// The name of the manifest file inside a model directory.
+    pub const FILE: &'static str = "model.json";
+
+    /// Reads a model directory's manifest.
+    ///
+    /// One reader, because a manifest read two ways is a manifest that two
+    /// callers can disagree about - and the disagreement would be about
+    /// prefixes and pooling, which decide what the vectors mean rather than how
+    /// fast they arrive.
+    ///
+    /// @param dir - the model directory
+    pub fn read(dir: &std::path::Path) -> Result<ModelManifest, String> {
+        let path = dir.join(Self::FILE);
+        let text = std::fs::read_to_string(&path)
+            .map_err(|error| format!("reading {}: {error}", path.display()))?;
+        serde_json::from_str(&text).map_err(|error| format!("parsing {}: {error}", path.display()))
+    }
+
+    /// Writes this manifest into a model directory.
+    ///
+    /// @param dir - the model directory
+    pub fn write(&self, dir: &std::path::Path) -> Result<(), String> {
+        let path = dir.join(Self::FILE);
+        let text = serde_json::to_string_pretty(self)
+            .map_err(|error| format!("serializing the manifest: {error}"))?;
+        std::fs::write(&path, text).map_err(|error| format!("writing {}: {error}", path.display()))
+    }
+
     /// Apply the document prefix.
     pub fn document_prefix(&self, text: &str) -> String {
         format!("{}{}", self.prefixes.document, text)

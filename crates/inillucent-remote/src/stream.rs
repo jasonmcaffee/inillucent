@@ -277,6 +277,71 @@ impl Stream {
         Ok(*self.buffer.get(self.at).unwrap_or(&0))
     }
 
+    /// Reads whatever is available, up to the size of the caller's buffer.
+    ///
+    /// [`read_exact`](Self::read_exact) is the right shape for a protocol whose
+    /// messages carry their own length, which is both of the ones this crate
+    /// speaks. A body being streamed to a file is the other shape: the caller
+    /// wants to write out whatever has arrived rather than wait for a count it
+    /// was never told. Zero means the peer closed, which is a legitimate end of
+    /// a body that had no length in front of it.
+    ///
+    /// @param out - where the bytes go
+    pub fn read_some(&mut self, out: &mut [u8]) -> DbResult<usize> {
+        if self.at < self.buffer.len() {
+            let available = self.buffer.len().saturating_sub(self.at);
+            let taking = available.min(out.len());
+            let (from, to) = (self.at, self.at.saturating_add(taking));
+            let source = self.buffer.get(from..to).unwrap_or(&[]).to_vec();
+            if let Some(slot) = out.get_mut(..taking) {
+                slot.copy_from_slice(&source);
+            }
+            self.at = to;
+            return Ok(taking);
+        }
+        loop {
+            return match self.socket.read(out) {
+                Ok(read) => Ok(read),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(error) => Err(cannot_open(format!("the connection failed: {error}"))),
+            };
+        }
+    }
+
+    /// Reads one line ending in CRLF, without the terminator.
+    ///
+    /// **Bounded**, because a status line or a header from something that is not
+    /// a web server is a stream with no newline in it, and a reader with no
+    /// ceiling would hold the whole of it. The bound is named in the refusal so
+    /// a reader can tell "this is not HTTP" from "this header is unusually long".
+    ///
+    /// A bare LF is accepted as a terminator as well as CRLF: the specification
+    /// asks for CRLF and a small number of real servers send LF, and refusing
+    /// those would be strictness nobody benefits from.
+    ///
+    /// @param max - the longest line this will hold
+    pub fn read_line(&mut self, max: usize) -> DbResult<String> {
+        let mut line: Vec<u8> = Vec::new();
+        loop {
+            // Peeking is what fills the buffer, so the byte-at-a-time read below
+            // is a buffer index rather than a socket call.
+            self.peek_u8()?;
+            let byte = self.read_u8()?;
+            if byte == b'\n' {
+                if line.last() == Some(&b'\r') {
+                    line.pop();
+                }
+                return Ok(String::from_utf8_lossy(&line).into_owned());
+            }
+            if line.len() >= max {
+                return Err(protocol(format!(
+                    "a line ran past {max} bytes with no end to it; this is not an HTTP response"
+                )));
+            }
+            line.push(byte);
+        }
+    }
+
     /// Shuts the socket down in both directions, ignoring a failure.
     ///
     /// A close that fails has nothing left to protect: the caller is finished

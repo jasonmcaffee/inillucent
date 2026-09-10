@@ -9,6 +9,7 @@
 //!   grade        run every scenario against both engines and write the score card
 //!   grade-embedding  compare two or more embedding models over the same corpus
 //!   models       write or reseal a model manifest
+//!   embed-residency  what loading the embedding model costs, and what moves it
 
 mod arm;
 mod corpus;
@@ -21,6 +22,7 @@ mod metrics;
 mod models;
 mod queryset;
 mod report;
+mod residency;
 mod scenarios;
 mod runs;
 mod stats;
@@ -421,6 +423,34 @@ enum Command {
         /// query side of an asymmetric model are covered too.
         #[arg(long, default_value_t = false)]
         as_queries: bool,
+    },
+    /// Measure what opening the embedding model costs, and what moves that cost.
+    ///
+    /// The number this exists for is the one that decides whether an
+    /// application can load the model per query and drop it again, or has to
+    /// keep it resident. `docs/embeddings.md` prints what it found.
+    EmbedResidency {
+        /// The model directory, which must hold a manifest.
+        #[arg(long, default_value = DEFAULT_MODEL_DIR)]
+        model_dir: String,
+        /// Where a pre-optimized graph is written and read back from. It is a
+        /// second copy of the weights, so it is not written under the model
+        /// directory by default.
+        #[arg(long)]
+        optimized_dir: Option<PathBuf>,
+        /// Processors to run every arm on, comma separated.
+        #[arg(long, default_value = "cpu")]
+        devices: String,
+        /// Load and drop cycles per arm. The median of these is reported.
+        #[arg(long, default_value_t = 5)]
+        repeats: usize,
+        /// Embeddings taken through an already-open session, per cycle.
+        #[arg(long, default_value_t = 20)]
+        steady: usize,
+        /// Skip writing and measuring the pre-optimized graph, which costs a
+        /// second copy of the weights on disk.
+        #[arg(long, default_value_t = false)]
+        skip_optimized: bool,
     },
     /// Write or reseal a model's manifest, filling in the weights and tokenizer
     /// digests from the files on disk.
@@ -968,6 +998,37 @@ fn main() -> Result<()> {
             }
             vector_file.flush()?;
             eprintln!("wrote {} and {}", texts_out.display(), vectors_out.display());
+        }
+        Command::EmbedResidency {
+            model_dir,
+            optimized_dir,
+            devices,
+            repeats,
+            steady,
+            skip_optimized,
+        } => {
+            let dir = expand_home(&model_dir)?;
+            let dir = std::path::Path::new(&dir);
+            let model = models::resolve_dir(dir, "model.onnx")?;
+            let optimized_dir = optimized_dir
+                .unwrap_or_else(|| std::env::temp_dir().join("inillucent-optimized-graph"));
+            if !skip_optimized {
+                match residency::prepare_optimized(dir, &model.manifest, &optimized_dir) {
+                    Ok(path) => eprintln!("optimized graph at {}", path.display()),
+                    Err(err) => eprintln!("no pre-optimized arm: {err:#}"),
+                }
+            }
+            let devices = parse_devices(&devices)?;
+            let arms = residency::arms(dir, &optimized_dir, &devices);
+            let mut measurements = Vec::new();
+            for arm in &arms {
+                eprintln!("measuring {}", arm.name);
+                match residency::measure(arm, &model.manifest, repeats, steady) {
+                    Ok(m) => measurements.push(m),
+                    Err(err) => eprintln!("  skipped: {err:#}"),
+                }
+            }
+            residency::report(&measurements);
         }
         Command::Models { dir } => {
             let mut model = models::resolve_dir(&dir, "model.onnx")?;

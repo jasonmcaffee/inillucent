@@ -4,6 +4,198 @@ The retrieval engine takes vectors. It does not require you to produce them here
 the grading harness hand two engines identical vectors — but it can produce them, in your own
 process, with no embedding server and no socket.
 
+## Installing it
+
+```sh
+inillucent setup-embeddings all
+```
+
+That is the whole of it, on Windows, macOS and Linux. It downloads ONNX Runtime and
+`nomic-embed-text-v1.5` into a per-user directory, checks every byte against a digest pinned in the
+build, prints a progress bar, and leaves the engine able to embed with **nothing exported by hand**:
+
+```sh
+inillucent --db notes.rdb query "SELECT length(embed('hello'))"
+3072
+```
+
+About 620 MB the first time and nothing on a later run. Run it with no component at all and it
+reports what is installed and downloads nothing, which is what stops the fetch being a surprise.
+
+| | |
+|---|---|
+| `inillucent setup-embeddings all` | the runtime and the weights |
+| `inillucent setup-embeddings runtime` | just ONNX Runtime, 69 MB |
+| `inillucent setup-embeddings model` | just the weights, 522 MB |
+| `inillucent setup-embeddings --status` | what is there, where, and how it is configured |
+| `--residency resident`, `on-demand`, `idle:90s` | when the model is in memory; see below |
+| `--gpu` | the build carrying the CUDA execution provider, Windows and Linux on x86-64 |
+| `--dir <path>` | somewhere other than the per-user directory |
+
+It is one row in the command table every front end is generated from, so it is also an MCP tool
+called `inillucent_setup-embeddings`, with the same parameters and the same description.
+
+### Where it goes
+
+| | |
+|---|---|
+| Windows | `%LOCALAPPDATA%\inillucent` |
+| macOS | `~/Library/Application Support/inillucent` |
+| Linux | `$XDG_DATA_HOME/inillucent`, else `~/.local/share/inillucent` |
+
+`INILLUCENT_HOME` overrides it, and inside it:
+
+```
+runtime/onnxruntime-1.22.0/lib/onnxruntime.dll     the shared library, and nothing else from the archive
+models/nomic-embed-text-v1.5/                      model.onnx tokenizer.json model.json config.json ...
+embeddings.json                                    what is installed, and the residency profile
+```
+
+The engine finds both without being told. `OnnxEmbedder` hands the installed library to
+`ort::init_from` before it opens its first session, so `ORT_DYLIB_PATH` is an override rather than a
+requirement, and `INILLUCENT_ONNX_DIR` still names a model directory for a machine that keeps its
+weights somewhere the installer would never have put them.
+
+`INILLUCENT_ONNX_DIR` is only used for the model it actually holds. It names one directory and a
+caller asks for one model id, so a build that honoured it unconditionally would hand a caller asking
+for one model a directory holding another. Nothing would error: the session opens, vectors come out,
+and every neighbour they are ever compared against was made by something else.
+
+### What is pinned, and why by digest
+
+A version pins what was asked for; a digest pins what arrived. The two differ whenever a release
+asset is replaced, a content network serves a truncated body, or something in between rewrites it —
+and the failure mode of the first two is a shared library that loads and misbehaves rather than one
+that refuses. So every archive and every weights file is checked against a SHA-256 in the source, a
+mismatch deletes what it fetched and names both digests, and a download is written to a `.part` file
+that is renamed only once it matches.
+
+**ONNX Runtime 1.22.0**, rather than the newest release, for two reasons: it is the version this
+page's numbers were taken on, and it is the last release Microsoft publishes a `universal2` macOS
+archive for. After it, macOS is two archives and an installer that guesses wrong on one of them is a
+support question. `--onnxruntime-version` installs another; a version with no pinned digest is
+fetched and **reported as unverified**, in the output and in the state file, rather than refused.
+
+**The fp32 export**, `onnx/model.onnx`. That repository publishes seven other exports whose names
+differ by a suffix, and one of them — `model_int8.onnx` — produces a query vector that agrees with
+this one at 0.9727 cosine. That is a retrieval change wearing the clothes of a speed change, which is
+why the file is named in a test rather than assembled from a pattern.
+
+**No new dependency was added to fetch any of this.** The download is a `GET` over the platform's own
+verified TLS, which `inillucent-remote` already reaches for the PostgreSQL and MySQL clients, and the
+zip and gzip reading is over the inflate that is already in `inillucent-base`.
+[The dependency policy](dependency-policy.md) carries the argument.
+
+### Where `embed(TEXT)` can be called
+
+In a projection, in a `WHERE` predicate, in an `ORDER BY` and in an `INSERT ... SELECT`:
+
+```sql
+INSERT INTO note (body, v) SELECT ?1, embed(?1);
+SELECT id, body FROM note
+ORDER BY vector_distance_cos(v, embed('what time is my plane')) LIMIT 10;
+```
+
+Not in an `INSERT ... VALUES` row, an `UPDATE ... SET`, or a `RETURNING` clause. Those are refused
+with the `unsupported` status and exit code 3, because the write path compiles its expressions
+against a space built from a table's layout rather than from a catalog and there is no function body
+to look up there. It is a gap rather than a design, [the roadmap](roadmap.md) records what closing it
+takes, and `INSERT ... SELECT` is the shape to use in the meantime.
+
+## When the model is in memory
+
+The model is 522 MB of weights. Opening a session on it costs **650 to 800 ms**, and an embedding
+through an already-open one costs **12 to 36 ms**. So holding it is worth about a factor of thirty on
+a query and costs about 1.9 GB of a machine, and which of those matters depends entirely on what the
+process is.
+
+```sh
+inillucent setup-embeddings --residency idle:5m       # the default, recorded for this machine
+INILLUCENT_EMBED_RESIDENCY=on-demand inillucent ...   # for one process
+```
+
+| | first query after a quiet period | second query straight after | held between queries | what it is for |
+|---|---|---|---|---|
+| `resident` | 12 to 36 ms | 12 to 36 ms | about 1.9 GB | an ingestion run, a server that searches constantly |
+| `on-demand` | about 800 ms | about 800 ms | nothing | a process that answers one question and exits |
+| `idle:<t>` | about 800 ms | 12 to 36 ms | 1.9 GB until the timer | a person asking questions |
+
+`idle:5m` is the default. Somebody searching their mail for a flight asks two or three questions in a
+row and then stops: they pay the load once, get the resident latency for the rest, and the machine
+gets the memory back a few minutes later. Neither of the other two does that.
+
+`on-demand` is not a fallback. An agent's MCP transport is spawned per session, usually answers two
+or three questions and exits, and there can be several at once — paying 800 ms in a process that was
+going to exit anyway is cheaper than holding 1.9 GB per session. That is the argument
+[vector residency](vector-residency.md) already makes about the vectors, applied to the weights.
+
+In precedence order: `INILLUCENT_EMBED_RESIDENCY`, then what `setup-embeddings --residency` recorded,
+then `idle:5m`. The environment first, because one process wanting a different answer from the
+machine's is the common case and it should not have to rewrite a file to get it.
+
+The manager counts what it did — loads, evictions, time spent loading, time spent embedding — because
+a profile whose numbers say it loaded the model four hundred times is a profile chosen wrongly, and
+that has to be visible without a profiler.
+
+## What loading the model costs, and what does not move it
+
+Measured with `inillucent-bench embed-residency` on this box — Windows, an RTX 5090, weights on a
+local volume — five load-and-drop cycles per arm, twenty embeddings through each open session,
+medians reported. Re-runnable:
+
+```sh
+./target/release/inillucent-bench embed-residency \
+  --model-dir ~/.cache/inillucent-models/nomic-embed-text-v1.5 \
+  --devices cpu,cuda:0 --repeats 5 --steady 20
+```
+
+| arm | weights | open | first embed | later embed | drop | load per query | resident per query | agrees with fp32 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| fp32, all optimizations, cpu | 522 MB | 793 ms | 70.7 ms | 36.4 ms | 66 ms | **929 ms** | 36.4 ms | 1.0000 |
+| fp32, extended optimizations, cpu | 522 MB | 787 ms | 74.5 ms | 41.0 ms | 63 ms | 924 ms | 41.0 ms | 1.0000 |
+| fp32, basic optimizations, cpu | 522 MB | 698 ms | 62.1 ms | 33.4 ms | 50 ms | 810 ms | 33.4 ms | 1.0000 |
+| fp32, no optimization, cpu | 522 MB | 681 ms | 60.2 ms | 38.9 ms | 50 ms | 792 ms | 38.9 ms | 1.0000 |
+| fp32, pre-optimized graph, cpu | 522 MB | 673 ms | 61.4 ms | 38.5 ms | 49 ms | **784 ms** | 38.5 ms | 1.0000 |
+| fp32, 1 intra-op thread, cpu | 522 MB | 734 ms | 55.4 ms | 54.4 ms | 48 ms | 838 ms | 54.4 ms | 1.0000 |
+| fp32, 4 intra-op threads, cpu | 522 MB | 731 ms | 20.8 ms | 21.4 ms | 55 ms | 806 ms | **21.4 ms** | 1.0000 |
+| fp16, cpu | 261 MB | 469 ms | 287.9 ms | 116.0 ms | 77 ms | 834 ms | 116.0 ms | 1.0000 |
+| int8, cpu | 131 MB | 477 ms | 34.5 ms | 18.7 ms | 32 ms | **543 ms** | 18.7 ms | **0.9727** |
+| fp32, all optimizations, cuda:0 | 522 MB | 774 ms | 15.5 ms | 12.0 ms | 28 ms | 818 ms | **12.0 ms** | 1.0000 |
+| fp32, pre-optimized graph, cuda:0 | 522 MB | 665 ms | 13.5 ms | 12.0 ms | 29 ms | **707 ms** | 12.0 ms | 1.0000 |
+| fp16, cuda:0 | 261 MB | 753 ms | 18.6 ms | 17.4 ms | 27 ms | 799 ms | 17.4 ms | 1.0000 |
+| int8, cuda:0 | 131 MB | 712 ms | 55.9 ms | 28.9 ms | 35 ms | 804 ms | 28.9 ms | **0.9669** |
+
+**The load is reading and materializing half a gigabyte of weights, and nothing available moves it
+much.** Turning off every graph optimization saves about 15%. Serializing the optimized graph and
+loading that instead saves the same 15% and keeps the fast inference, which makes it the best of the
+load-time levers and still leaves 673 ms on the clock. That one number is what makes three residency
+profiles necessary rather than one.
+
+Four other things the run found.
+
+**Four intra-op threads is the free win on the processor.** 21.4 ms an embedding against 36.4 ms at
+the default and 54.4 ms pinned to one thread, at no load-time cost. It describes the machine rather
+than the model, so it is `OnnxOptions::intra_threads` rather than a manifest field.
+
+**fp16 on the processor is a trap.** 116 ms an embedding, three times slower than the fp32 export it
+was meant to speed up, because there are no fp16 kernels there and every weight is converted. On a
+card it is fine and still not better than fp32.
+
+**int8 is fast and is not free.** 543 ms load-per-query and 18.7 ms resident, against 929 ms and
+36.4 ms — and a query vector that agrees with fp32 at 0.9727. This repository already has the
+machinery to price a retrieval change properly ([retrieval quality](retrieval-quality.md), and
+`grade-embedding` below); until somebody runs it, int8 is a file you can name and not a default.
+
+**The first CUDA session in a process costs about 1.6 s** rather than 774 ms, because the driver
+context is built with it. A profile that unloads and reloads on a card pays a different first load
+from its later ones.
+
+One correctness note that only appears at the top of that table: `Optimization::All` maps to ONNX
+Runtime's `ORT_ENABLE_ALL` and not to `ort`'s `Level3`. `Level3` is `ORT_ENABLE_LAYOUT`, which is the
+value 3 and was only added to the C API in ONNX Runtime 1.23; an older runtime refuses it outright
+with `graph_optimization_level is not valid` and the session never opens. `ORT_ENABLE_ALL` is 99 and
+has meant "every pass" since the enum existed.
+
 ## The model in your process
 
 `embed_onnx.rs` runs `nomic-embed-text-v1.5` through ONNX Runtime, in process, at full precision. It
@@ -18,21 +210,10 @@ size and the load time to every caller, and most callers supply their own vector
 `embed.rs` defines the boundary. It carries the `search_document: ` and `search_query: ` prefixes the
 model is trained with, and the narrowed widths the model supports.
 
-### What it needs
-
-```sh
-brew install onnxruntime
-export ORT_DYLIB_PATH=/opt/homebrew/lib/libonnxruntime.dylib
-
-# the weights, in ~/.cache/inillucent-models/nomic-embed-text-v1.5/
-#   model.onnx  tokenizer.json  tokenizer_config.json
-#   special_tokens_map.json  config.json
-```
-
-One shared library file, not a process. Nothing has to be running.
-
-`ort` uses `load-dynamic` because its system linking strategy wants a static library and Homebrew
-ships only a dynamic one.
+`ort` uses `load-dynamic` because its system linking strategy wants a static library and the platform
+packages ship only a dynamic one. That is also what lets the installed runtime be chosen at run time
+rather than at build time: a machine with no runtime installed still builds, and every command that
+does not embed still runs.
 
 ### Was replacing the server actually safe
 
@@ -58,6 +239,17 @@ embedders running over the same text and this repository no longer ships the ser
 measurement that justified removing the server, and this repository cannot re-run them. What it *can*
 check is that the vectors in a cache were produced from the text in that cache, which is a different
 question and a necessary one — see [embed-check](#embed-check).
+
+### A model that has no ONNX export
+
+Not every model can be run this way, and the application this engine was built for is the example.
+Nikaya embeds with `nomic-embed-text-v2-moe`, whose Hugging Face repository publishes safetensors and
+a sentencepiece tokenizer and **no `onnx/` directory at all** — it is a mixture of experts, which is
+the class hardest to export. So its `model.json` says `"backend": "llama_cpp"`, and that is what
+decides how it is run rather than a flag somebody has to keep in step with the model. A model with no
+export is not something to work around; it is something the manifest describes honestly, and running
+it in process would mean running a different model and rebuilding every vector in the corpus.
+
 
 ## Embedding a corpus
 

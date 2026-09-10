@@ -67,6 +67,78 @@ impl Device {
     }
 }
 
+/// How much work ONNX Runtime does on the graph while a session loads.
+///
+/// It is a knob rather than a constant because the two things it trades against
+/// are both real and pull in opposite directions: every optimizer pass costs
+/// wall clock at load, and several of them - operator fusion above all - are
+/// what make the inference that follows fast. A process that loads the model
+/// once and then embeds a corpus wants all of them. A process that loads the
+/// model to embed one query and then drops it is paying for passes whose
+/// benefit it will use exactly once, and `docs/embeddings.md` prints what each
+/// level costs on this model.
+///
+/// The names are ONNX Runtime's own, so a reader can look up which passes are
+/// in which level without translating.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Optimization {
+    /// No passes at all. The graph is run as it was exported.
+    Disable,
+    /// Constant folding, redundant-node elimination and the other passes that
+    /// need no knowledge of the execution provider.
+    Basic,
+    /// Basic, plus the provider-aware passes: attention fusion is the one that
+    /// matters for a transformer encoder.
+    Extended,
+    /// Everything, including the layout passes. ONNX Runtime's default, and this
+    /// module's.
+    All,
+}
+
+impl Optimization {
+    /// Parses `disable`, `basic`, `extended` or `all`.
+    /// @param text - the level as written on a command line
+    pub fn parse(text: &str) -> Result<Optimization> {
+        match text.trim().to_ascii_lowercase().as_str() {
+            "disable" | "none" | "off" => Ok(Optimization::Disable),
+            "basic" | "level1" => Ok(Optimization::Basic),
+            "extended" | "level2" => Ok(Optimization::Extended),
+            "all" | "level3" => Ok(Optimization::All),
+            other => anyhow::bail!(
+                "unknown optimization level {other}, expected disable, basic, extended or all"
+            ),
+        }
+    }
+
+    /// A short label for a report column.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Optimization::Disable => "disable",
+            Optimization::Basic => "basic",
+            Optimization::Extended => "extended",
+            Optimization::All => "all",
+        }
+    }
+
+    /// The ONNX Runtime level this stands for.
+    fn level(&self) -> ort::session::builder::GraphOptimizationLevel {
+        use ort::session::builder::GraphOptimizationLevel;
+        match self {
+            Optimization::Disable => GraphOptimizationLevel::Disable,
+            Optimization::Basic => GraphOptimizationLevel::Level1,
+            Optimization::Extended => GraphOptimizationLevel::Level2,
+            // `All`, not `Level3`. ort maps `Level3` to `ORT_ENABLE_LAYOUT`,
+            // which is the value 3 and was only added to the C API in ONNX
+            // Runtime 1.23 - an older runtime refuses it outright with
+            // "graph_optimization_level is not valid" and the session never
+            // opens. `ORT_ENABLE_ALL` is 99 and has meant "every pass" since
+            // the enum existed, so it is the one value that opens a session on
+            // every runtime this can be pointed at.
+            Optimization::All => GraphOptimizationLevel::All,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct OnnxOptions {
     /// Width to keep. 768 is the full output; 512, 256, 128 and 64 are the
@@ -120,6 +192,15 @@ pub struct OnnxOptions {
     /// on one card: the first grows into all the free memory and the second then
     /// cannot allocate its attention buffer.
     pub device_memory_limit: Option<usize>,
+    /// How much graph optimization to do while loading.
+    pub optimization: Optimization,
+    /// Where to write the optimized graph, when the caller wants one written.
+    ///
+    /// ONNX Runtime can serialize the graph it produced after its passes ran.
+    /// Loading *that* file at [`Optimization::Disable`] is the same computation
+    /// with the passes already paid for, which is the one strategy that makes a
+    /// repeated load cheaper without changing what the model computes.
+    pub optimized_model_path: Option<PathBuf>,
 }
 
 impl Default for OnnxOptions {
@@ -138,6 +219,8 @@ impl Default for OnnxOptions {
             device: Device::Cpu,
             max_batch_cells: 24_000_000,
             device_memory_limit: None,
+            optimization: Optimization::All,
+            optimized_model_path: None,
         }
     }
 }
@@ -296,7 +379,17 @@ impl OnnxEmbedder {
         let model_path = dir.join(model_file);
         let tokenizer_path = dir.join("tokenizer.json");
 
+        use_installed_runtime();
+
         let mut builder = Session::builder().context("creating an ONNX session builder")?;
+        builder = builder
+            .with_optimization_level(options.optimization.level())
+            .map_err(|e| anyhow::anyhow!("setting the ONNX graph optimization level: {e}"))?;
+        if let Some(path) = options.optimized_model_path.as_ref() {
+            builder = builder.with_optimized_model_path(path).map_err(|e| {
+                anyhow::anyhow!("asking for the optimized graph at {}: {e}", path.display())
+            })?;
+        }
         if let Some(threads) = options.intra_threads {
             // ort's builder returns its error carrying the builder itself, which is
             // not a plain error type, so the message is rebuilt rather than wrapped.
@@ -821,6 +914,42 @@ fn plan_batches(lengths: &[usize], batch_size: usize, max_cells: usize) -> Vec<V
 /// order, which is what a machine with CUDA already on PATH wants. Runs once:
 /// ort's preloader intentionally leaks its handles, so repeating it per session
 /// would leak per session.
+/// Points `ort` at the ONNX Runtime `inillucent setup-embeddings` installed,
+/// when nothing has already said where to find one.
+///
+/// This is what makes the setup command's promise true. `ort` under
+/// `load-dynamic` resolves the shared library the first time any of its APIs is
+/// used: `ORT_DYLIB_PATH` if it is set, and otherwise the bare file name handed
+/// to the system loader, which finds a copy on `PATH` or does not. Neither of
+/// those knows about a per-user install directory, so without this a person who
+/// ran the setup command would still have to export a variable before the
+/// engine could use what they installed.
+///
+/// It runs once and it never overrules a caller. `install::runtime_library`
+/// returns whatever `ORT_DYLIB_PATH` names when that is set, so an operator who
+/// has pinned a specific library keeps it; and a failure to load the installed
+/// one is left to the session to report, because the loader's own message names
+/// the file and a message from here would only name the attempt.
+fn use_installed_runtime() {
+    use std::sync::OnceLock;
+    static ONCE: OnceLock<()> = OnceLock::new();
+    ONCE.get_or_init(|| {
+        if std::env::var("ORT_DYLIB_PATH").is_ok_and(|value| !value.trim().is_empty()) {
+            return;
+        }
+        let Some(library) = crate::install::runtime_library() else { return };
+        match ort::init_from(&library) {
+            Ok(builder) => {
+                builder.commit();
+            }
+            Err(error) => eprintln!(
+                "warning: the ONNX Runtime at {} would not load ({error}); falling back to the                  system loader",
+                library.display()
+            ),
+        }
+    });
+}
+
 fn preload_cuda_dylibs() {
     use std::sync::OnceLock;
     static ONCE: OnceLock<()> = OnceLock::new();

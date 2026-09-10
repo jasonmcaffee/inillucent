@@ -67,9 +67,9 @@ Four programs come out of an install or a build:
 
 | | |
 |---|---|
-| `inillucent` | the command line: 29 verbs, and `--output json` on every one of them |
+| `inillucent` | the command line: 30 verbs, and `--output json` on every one of them |
 | `inillucent-shell` | an interactive shell shaped like `sqlite3`, with 63 of its 65 dot commands |
-| `inillucent-mcp` | 27 of the same commands served to an AI agent over MCP |
+| `inillucent-mcp` | 28 of the same commands served to an AI agent over MCP |
 | `inillucent-migrate` | builds a database from a SQLite file, a running PostgreSQL or MySQL server, or a legacy retrieval index |
 
 [Getting started](docs/getting-started.md) covers all four, the exit codes, and the JSON a binding
@@ -144,9 +144,12 @@ bounds, separate from the score that ordered the list. Asked questions the corpu
 PostgreSQL with pgvector returns a confident top result every single time; inillucent does it on
 about one question in a hundred. → [Retrieval quality](docs/retrieval-quality.md#abstention)
 
-**The embedding model inside your process.** `nomic-embed-text-v1.5` at full precision through the
-ONNX runtime, on the processor or across several GPUs. No embedding server, no socket, no second
-thing to keep alive. → [Embeddings](docs/embeddings.md)
+**The embedding model inside your process.** One command installs it on Windows, macOS or Linux —
+`inillucent setup-embeddings all` fetches ONNX Runtime and `nomic-embed-text-v1.5`, checks every byte
+against a pinned digest, and leaves `embed(TEXT)` answering with nothing exported by hand. Full
+precision, on the processor or across several GPUs. No embedding server, no socket, no second thing
+to keep alive — and three profiles for when the weights are in memory, because loading them costs
+800 ms and an embedding costs 12 ms. → [Embeddings](docs/embeddings.md)
 
 **A way in from whatever you already have.** `inillucent migrate` reads a SQLite file, or a running
 PostgreSQL or MySQL server over its own wire protocol inside one repeatable read snapshot, so every

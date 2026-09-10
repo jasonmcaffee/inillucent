@@ -1235,6 +1235,24 @@ mod source_tests {
     use super::*;
     use crate::shell::Shell;
 
+    /// Serializes the cases that move `INILLUCENT_SOURCE_URL`.
+    ///
+    /// An environment variable is process-wide and `cargo test` runs the cases in
+    /// one binary on several threads, so two of these racing is not a
+    /// possibility - it is what happens. Three of the five below set the
+    /// variable and three clear it, and a run of the five on their own failed
+    /// four times out of five: a case that had just set the variable read the
+    /// empty value another case had cleared, and the failure named the refusal
+    /// rather than the race.
+    ///
+    /// The lock is poison-tolerant on purpose. A case that panics with it held
+    /// has already failed and reported why; turning that into a second failure
+    /// in every later case would bury the message that matters.
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Returns a surface, confined or not.
     ///
     /// @param root - the directory to confine to, when the case wants one
@@ -1260,6 +1278,7 @@ mod source_tests {
     /// and an argument is in the process list for the whole run.
     #[test]
     fn the_environment_supplies_a_source_that_was_not_an_argument() {
+        let _held = env_guard();
         let context = context(None);
         std::env::set_var(SOURCE_URL_VARIABLE, "postgres://user:secret@host/db");
         let held = resolve_source(&context, None).expect("the variable is read");
@@ -1270,6 +1289,7 @@ mod source_tests {
     /// With nothing anywhere, the refusal names all three ways to say it.
     #[test]
     fn no_source_anywhere_is_refused_by_name() {
+        let _held = env_guard();
         let context = context(None);
         std::env::remove_var(SOURCE_URL_VARIABLE);
         let error = resolve_source(&context, None).expect_err("there is no source");
@@ -1285,6 +1305,7 @@ mod source_tests {
     /// would consume the transport rather than a URL.
     #[test]
     fn a_confined_surface_refuses_to_read_standard_input() {
+        let _held = env_guard();
         let context = context(Some(std::env::temp_dir()));
         std::env::remove_var(SOURCE_URL_VARIABLE);
         let error = resolve_source(&context, Some("-")).expect_err("a confined surface refuses");
@@ -1299,6 +1320,7 @@ mod source_tests {
     /// variable should not block on a transport nobody is writing to.
     #[test]
     fn the_environment_wins_over_reading_standard_input() {
+        let _held = env_guard();
         let context = context(None);
         std::env::set_var(SOURCE_URL_VARIABLE, "mysql://user@host/db");
         let held = resolve_source(&context, Some("-")).expect("the variable is read");

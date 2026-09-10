@@ -56,9 +56,9 @@ sha256 = "c606a322fe69ffecb0e7ebc0f58771217a3fda556f24940ea9a580c575e2db31"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/main.rs"
-ticket = "vector access through the file"
-reason = "The harness follows the VectorSet API change: index.vectors().copy_of(n) where it borrowed a slice."
-sha256 = "4d34031acedc57bbed51f7631679b522159dd3b7804cc85106d31f7a8daa15c3"
+ticket = "task-1900"
+reason = "the embed-residency subcommand"
+sha256 = "b00e8bdab93494bb74fc2262bac65bdfc22b1efc0d35cc981db617a08947edf8"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/models.rs"
@@ -77,6 +77,12 @@ path = "crates/inillucent-bench/src/report.rs"
 ticket = "embedding model head to head grading"
 reason = "The grading harness was generalised from one embedding model to a head-to-head between several, matching the success criteria the design document set for that comparison. A model is now a manifest (id, width, Matryoshka widths, four prefixes, pooling, token bound, backend, output, tokenizer and weights digests) instead of a set of constants; a cache carries a header naming the corpus digest, the model, the manifest digest and the truncation it performed; grade-embedding compares two or more caches and refuses before it starts unless they agree on corpus, chunk count and query seeds; and the embedder gained CLS and last-token pooling, graph-driven inputs, and a llama.cpp backend for the one model with no ONNX export. ModelManifest::nomic_v1_5() reproduces every constant it replaced: the fresh baseline cache agrees with the August run at cosine 1.000000 minimum over 5000 chunks, and grade's card is unchanged on every measurement row."
 sha256 = "01190f4138afa9c926334e4ad64e3a9a36f033171f7b73284f00bd721cbee627"
+
+[[amendment]]
+path = "crates/inillucent-bench/src/residency.rs"
+ticket = "task-1900"
+reason = "new: the measurement that decided the residency profiles, re-runnable as embed-residency"
+sha256 = "08852e9b21b170ecc1787b4f5d78e962bee825911ecb7dcc1e675fda0910d27b"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/runs.rs"
@@ -116,9 +122,9 @@ sha256 = "3ff5060ec3a6c985fc3f9dad0f91b7fa165f2d39a789e75952596e7ca6dd1023"
 
 [[amendment]]
 path = "crates/inillucent-core/src/embed_onnx.rs"
-ticket = "strict lint remediation"
-reason = "M8: targeted clippy fixes under the workspace lint table, re-applied after an accidental format pass was reverted"
-sha256 = "025ef1a5339933942e2b0069cee3f2a8034f9f83cf992e5ee377deeaf33d3bce"
+ticket = "task-1900"
+reason = "graph optimization level as an option, and the installed runtime handed to ort::init_from so no variable has to be exported"
+sha256 = "df2e6457fb96a18a2bd84827c7bf45965590e8539f5f7c1a54505cefe400acf3"
 
 [[amendment]]
 path = "crates/inillucent-core/src/flat.rs"
@@ -139,16 +145,22 @@ reason = "M8: targeted clippy fixes under the workspace lint table, re-applied a
 sha256 = "a34d3e9962f03ee9a002c481e521d4279c4e7a91249c9d7ab421d8acb6011cf9"
 
 [[amendment]]
+path = "crates/inillucent-core/src/install.rs"
+ticket = "task-1900"
+reason = "new: one definition of where the installer puts the ONNX runtime and the weights, read by both the setup command and the engine"
+sha256 = "67143bb1b55c9dc0ae1ae6fef9dcc8e8106e8f1a9810b3b5347a193cab8806e7"
+
+[[amendment]]
 path = "crates/inillucent-core/src/lib.rs"
-ticket = "embedding model head to head grading"
-reason = "The grading harness was generalised from one embedding model to a head-to-head between several, matching the success criteria the design document set for that comparison. A model is now a manifest (id, width, Matryoshka widths, four prefixes, pooling, token bound, backend, output, tokenizer and weights digests) instead of a set of constants; a cache carries a header naming the corpus digest, the model, the manifest digest and the truncation it performed; grade-embedding compares two or more caches and refuses before it starts unless they agree on corpus, chunk count and query seeds; and the embedder gained CLS and last-token pooling, graph-driven inputs, and a llama.cpp backend for the one model with no ONNX export. ModelManifest::nomic_v1_5() reproduces every constant it replaced: the fresh baseline cache agrees with the August run at cosine 1.000000 minimum over 5000 chunks, and grade's card is unchanged on every measurement row."
-sha256 = "dc6f22c3ffd84a93dfaf499332f424d847daa32306601095b967580f4c09f667"
+ticket = "task-1900"
+reason = "declares the two new modules"
+sha256 = "9bfa4a57827eeea253e226ababa9c821ce63188f0b60748c9b8d7a6491156db6"
 
 [[amendment]]
 path = "crates/inillucent-core/src/model.rs"
-ticket = "embedding model head to head grading"
-reason = "The grading harness was generalised from one embedding model to a head-to-head between several, matching the success criteria the design document set for that comparison. A model is now a manifest (id, width, Matryoshka widths, four prefixes, pooling, token bound, backend, output, tokenizer and weights digests) instead of a set of constants; a cache carries a header naming the corpus digest, the model, the manifest digest and the truncation it performed; grade-embedding compares two or more caches and refuses before it starts unless they agree on corpus, chunk count and query seeds; and the embedder gained CLS and last-token pooling, graph-driven inputs, and a llama.cpp backend for the one model with no ONNX export. ModelManifest::nomic_v1_5() reproduces every constant it replaced: the fresh baseline cache agrees with the August run at cosine 1.000000 minimum over 5000 chunks, and grade's card is unchanged on every measurement row."
-sha256 = "cd89c11e1b0961d2b6875102712b463ef5fb335d87e9fe176f37920712e3f90d"
+ticket = "task-1900"
+reason = "ModelManifest::read and write, so a manifest is read one way rather than three"
+sha256 = "c37a0472de14fd72bb3c352626b7d898fa3f459849b2014725c3dae80dca289b"
 
 [[amendment]]
 path = "crates/inillucent-core/src/persist.rs"
@@ -167,6 +179,12 @@ path = "crates/inillucent-core/src/rank.rs"
 ticket = "strict lint remediation"
 reason = "M8: targeted clippy fixes under the workspace lint table, re-applied after an accidental format pass was reverted"
 sha256 = "51d5e74fa721f236ec30f3ef6beb768c9667c118a195195a782c5e883518a129"
+
+[[amendment]]
+path = "crates/inillucent-core/src/residency.rs"
+ticket = "task-1900"
+reason = "new: resident, on-demand and idle profiles for when the 522 MB model is in memory"
+sha256 = "81026d0f20007ef65eb5c690e89098b95a0b978ebade7999ab95a2c8ccbc957c"
 
 [[amendment]]
 path = "crates/inillucent-core/src/vectors.rs"

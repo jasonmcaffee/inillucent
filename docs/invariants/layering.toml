@@ -577,6 +577,24 @@ may_depend_on = [
   # and adds no third-party dependency to either shipped binary, which is the
   # whole reason the wire clients are first-party.
   "inillucent-remote",
+  # `setup-embeddings` (task-1900). The edge declares a link that already
+  # exists: `inillucent-engine` depends on `inillucent-search`
+  # unconditionally, and `inillucent-search` depends on `inillucent-core`
+  # unconditionally, so `inillucent-core` is in every shipped binary's
+  # dependency graph today and this adds no code to any of them.
+  #
+  # What it buys is one definition of where the embedder is installed.
+  # `inillucent_core::install` says where the weights and the ONNX Runtime
+  # library go; the setup command writes into those directories and
+  # `inillucent-search`'s `embed(TEXT)` reads out of them. Without the edge the
+  # command would have to carry a second copy of that rule, and a second copy
+  # of a path rule is a machine where the installer reports success and the
+  # engine reports that no model is loaded, with neither message naming the
+  # other's directory.
+  #
+  # It reaches `install` and `residency` and nothing else. The retrieval engine
+  # itself is still reached the way it always was, through the facade.
+  "inillucent-core",
 ]
 
 [[crate]]
