@@ -9,7 +9,7 @@ and the commands that produce them are given so they can be taken again.
 
 ---
 
-## 1. The six rules
+## 1. The seven rules
 
 Everything else here follows from these. They are written as rules because each
 one was arrived at by finding a test that broke it.
@@ -79,6 +79,48 @@ a query difference. `new_engine_writes.rs` is built entirely on this, and
 version of it over the public API.
 
 ---
+
+### 1.7 A test asserts a count, not a duration
+
+A wall-clock reading is a measurement of the machine as much as of the code, and
+on this box the machine is four agent terminals, a training run, and the
+runner's own 24-wide pool. Six assertions in three files were decided that way
+and every one of them eventually failed on a working engine:
+
+| file | what it asserted | what it read under load |
+|---|---|---|
+| `crates/inillucent/tests/budget.rs` | one transaction beats 2,000, ≥ 2x | 1.3x |
+| the same | re-preparing is cached, ≤ 4x | 6.6x, "the cache is not being consulted" |
+| `crates/inillucent-compat/tests/new_engine_vtab_stream.rs` | a bounded series answers in < 500 ms | 636 ms |
+| `crates/inillucent-txn/tests/transactions.rs` | a refused writer gave up in < 50 ms | — |
+
+**Widening the number is not the answer.** It has a floor — the ratio reaches
+1.0, where it asserts nothing — and it reaches it: that guard went 4x, 2x, 1.3x.
+Neither is running the tier alone, which the runner already does and which says
+nothing about the rest of the box.
+
+**Ask what the claim counts.** Almost every cost claim is a count in disguise,
+and the count reads the same on an idle machine and on a saturated one — which
+was checked, at 100% processor load, with byte-identical results:
+
+| the claim | the count |
+|---|---|
+| batching a commit is cheaper | log writes: 1 against 2,000 |
+| the plan cache answers a second prepare | statements compiled: 1 for 200 prepares |
+| an index beats a scan | pages fetched: 33 against 2 |
+| a `LIMIT` stops the scan below it | whether it returns at all, over a series too long to walk |
+| a `busy_timeout` of zero refuses rather than waits | the slot's `timed_out`, with `waited` unmoved |
+
+Where a count genuinely cannot see the defect — a quadratic that does no extra
+I/O — a clock is allowed, as a **ceiling** with three orders of magnitude of
+headroom and a comment saying what the headroom is against. The worst load
+factor measured in this repository is about 50x. A bound that a 50x machine can
+cross is a bound the machine decides.
+
+**And an assertion reports its measurement rather than naming a cause.** The
+plan-cache guard printed "the cache is not being consulted" while the cache was
+fine, and would have sent its reader hunting a defect that did not exist. Print
+the two numbers and what was expected of them.
 
 ## 2. The shape of the suite
 
@@ -289,29 +331,40 @@ performance claim becomes untrustworthy.
 ### 5.1 The cost guards — `crates/inillucent/tests/budget.rs`, tier `perf`
 
 Ordinary tests, run with the suite, that assert the **shape of the cost curve**
-rather than a time:
+rather than a time. Every one of them is a ratio between two counts taken in the
+same run:
 
-- an index makes a point lookup cheaper than a scan (measured ~200x; asserted 5x);
-- one transaction around 2,000 inserts costs less than 2,000 transactions
-  (measured ~40x; asserted 2x);
-- preparing the same statement again is answered from the plan cache
-  (measured 1.08x re-binding; asserted ≤4x) **and does not grow the cache**;
-- rewriting the same 5,000 rows ten times does not grow the file (asserted ≤3x);
-- a full scan of 20,000 rows finishes at all (asserted under 10 s).
+| guard | what it counts | measured here | asserted |
+|---|---|---|---|
+| an index makes a point lookup cheaper than a scan | pages fetched | 33 against 2 | scan ≥ 4x seek |
+| one transaction around 2,000 inserts beats 2,000 of them | log writes | 1 against 2,000 | batched ≤ 1/100 of singly |
+| preparing the same statement 200 times is answered from the plan cache | statements compiled | 1 | ≤ 1, **and** the cache grows by ≤ 1 entry |
+| a keyset page costs the same wherever it starts | pages fetched | 502 against 502 | start ≤ 4x end |
+| rewriting the same 5,000 rows ten times does not grow the file | bytes on disk | — | ≤ 3x |
+| a full scan of 20,000 rows stays proportional to the table | pages fetched, **and** the clock | 20 pages, 2.99 ms | ≤ 200 pages, under 10 s |
 
 Every threshold is a fraction of what it measures. That is the trade: these
 catch a change of *kind* — an index dropped, a commit per row, a cache turned
 off — and deliberately do not notice twenty per cent.
 
-**A guard that flaps gets widened, never tightened.** "One transaction beats
-many" was written at 4x, read 3.5x with 24 binaries in flight and **1.3x** under
-a full run, because at saturation both arms are dominated by scheduling. The
-number that matters is the distance from 1.0, not from 40.
+**These used to be wall-clock ratios, and widening them was the wrong answer.**
+This section used to say "a guard that flaps gets widened, never tightened",
+and that advice has a floor it reaches: "one transaction beats many" went from
+4x to 2x and then read **1.3x** under a full run, where the next step down
+asserts nothing. §7.3 has the whole history, including the second attempt — a
+median of interleaved rounds, which is a better clock and is still a clock.
+
+The rule that replaced it is §1.7. `budget.rs` now reads a count everywhere it
+can, and the one place it cannot — a quadratic that does no extra I/O, which
+no count in the file can see — keeps a clock at 3,300x headroom and says so.
 
 **And the tier runs alone.** `perf` is declared `exclusive = true` in the map;
-the runner finishes everything else and then runs it one binary at a time. That
-is the real fix for the flapping — no threshold separates "batching works" from
-"batching was removed" on a saturated machine. It costs about nine seconds.
+the runner finishes everything else, then runs it one binary at a time and with
+one thread inside each binary. That second half was missing until task-1886, so
+the tier's six guards ran two at a time against each other. It costs about half
+a minute. It is worth having and it is not the fix: four agent terminals and a
+training run are outside the runner's reach, and that is the load that failed
+these guards twice.
 
 ### 5.2 The history — `inillucent-perfhistory`, `tests/performance-history.tsv`
 
@@ -433,8 +486,10 @@ against 146 s wall parallel.
 
 ## 7. What this standard found
 
-The suite described here found four defects while it was being written; reviewing the fixes found three more, in the fixes. All seven are
-fixed, and each is now a test that asserts the fix.
+The suite described here found four defects while it was being written; reviewing the fixes found three more, in the fixes; and running it
+under load found three more after that, all of them in the gate rather than in
+the engine. All ten are fixed, and each is now a test that asserts the fix. The
+first seven are below, the last three are in 7.3.
 **Virtual tables did not participate in their transaction.** A rolled-back
 insert into an `fts5` or `rtree` table stayed, a rolled-back delete was gone, and
 `ROLLBACK TO` did nothing — so one query answered differently before and after a
@@ -512,6 +567,47 @@ test for the third finding was checked the same way and does go red.
 fixed were introduced by fixing the other four, and every one of them was in
 error handling - the paths the tests exercise least. A review pass over the diff
 is part of finishing, not a formality.
+
+### 7.3 The gate itself, three times over
+
+The three faults after those seven were all in the machinery that decides
+whether a run proved anything, and none of them was in the engine.
+
+**A `--strict` skip could never be detected.** The runner matched on
+`has not been built`, `is not available` and `no reference`; what the suites
+actually print is `the pinned SQLite oracle is not built; skipping` and its
+siblings, so the standard and the code had been describing two different lists.
+On a machine without the oracle, thirty-odd differential suites skipped every
+case and the run reported `ok`. `; skipping` is the phrase that carries it now,
+because it is the one §9 tells authors to print.
+
+**A target was recorded FAILED with all 156 of its tests passing.** The runner
+read the exit status and nothing else, and `inillucent-bench` sometimes dies in
+the ONNX runtime's teardown after libtest has printed its summary. That is not a
+contradiction to be discarded — it is a process that died after its tests passed
+— so `inillucent_compat::verdict` now reads the transcript and the status
+together and has three answers, the third being "the runner could not tell", with
+its reason named. A target it could not read is run once more, alone; a target
+that failed a test is never re-run. The `FAILED:` list prints each exit status
+beside the name, which is the one fact that separates the two cases and which
+somebody had to work out by hand the first time.
+
+**Six assertions were decided by the machine rather than by the code.** This is
+§1.7, and it is the one that took three attempts. The first answer was to widen
+the threshold: 4x to 2x, and then a 1.3x reading under a full run. The second was
+to keep the clock and make it fair — five interleaved rounds, median taken, so a
+load spike lands on both arms — and the next contended run moved the failure to a
+different test in the same file, which read 6.6x against a bound of 4 and printed
+`the cache is not being consulted` about a cache that was fine. The third answer
+was to stop reading a clock. Every one of those assertions is now a count, and
+the counts were re-read at 100% processor load with the same digits.
+
+**Fixing the named test is not fixing the defect.** `budget.rs` had eight
+measurement sites; the first report named one of them, and the second run failed
+on a different one. The sweep that followed found the same shape in
+`new_engine_vtab_stream.rs` and `transactions.rs` — one of which then failed, on
+a working engine, during this ticket's own verification run. A defect in how a
+gate decides is worth grepping the whole tree for.
 
 ---
 

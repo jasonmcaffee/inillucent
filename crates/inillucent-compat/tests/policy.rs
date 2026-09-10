@@ -501,6 +501,21 @@ fn no_module_grows_past_the_size_it_is_recorded_at() {
     /// small: `literal_value` and `rowid_seek_key` would move cleanly, and they
     /// are named by path from twelve call sites in `inillucent-engine`, so it is
     /// a cross-crate rename in a file this ticket otherwise has no business in.
+    /// task-1886 needed one counter and one accessor on `ImportedDatabase` -
+    /// how many statements a connection has compiled, which is what the plan
+    /// cache guard in `crates/inillucent/tests/budget.rs` asserts on now that it
+    /// no longer asserts on a stopwatch. `lib.rs` was two lines under its
+    /// ceiling, so there was no version of that addition this test would take.
+    ///
+    /// The extraction it asked for was available and was one idea: the plan
+    /// cache. `plan_key`, `cacheable`, `compiled`, `cached_plan_count` and the
+    /// new `compiled_statement_count` are all about *whether* to compile, and
+    /// they moved to `crates/inillucent-engine/src/plans.rs`; `compile`, which
+    /// is about *how*, stayed with the parser and binder plumbing it is written
+    /// in terms of. `lib.rs` went from 8,128 to 8,068, and its number here is
+    /// left where it is rather than followed down to 8,070 - a ceiling two lines
+    /// above the file is what sent somebody here in the first place, and this
+    /// test's own slack rule allows 200.
     const CEILINGS: [(&str, usize); 14] = [
         ("crates/inillucent-engine/src/lib.rs", 8_130),
         ("crates/inillucent-exec/src/physical.rs", 6_691),

@@ -130,7 +130,8 @@ struct Options {
 }
 
 impl Options {
-    /// Copies the options, so the exclusive pass can differ in `jobs` alone.
+    /// Copies the options, so the exclusive pass can differ in how much of the
+    /// machine it takes and in nothing else.
     ///
     /// @param other - the options to copy
     fn from(other: &Options) -> Options {
@@ -404,14 +405,25 @@ fn run(options: &Options) -> Result<bool, String> {
         if alone.is_empty() {
             String::new()
         } else {
-            format!("; {} of them alone at the end", alone.len())
+            format!(
+                "; {} of them alone at the end, one thread each",
+                alone.len()
+            )
         }
     );
     let started = Instant::now();
     let mut outcomes = execute(shared, options);
     if !alone.is_empty() {
+        // **One binary at a time, and one thread inside it.** `jobs: 1` alone
+        // gave an exclusive target the machine to itself among the *binaries*
+        // and then still ran its own tests two at a time against each other -
+        // so `inillucent::budget`, whose six guards are the reason this tier
+        // exists, was measuring one guard while another ran beside it. That is
+        // the same contention the tier is declared exclusive to avoid, at a
+        // smaller scale, and it is the half the tier can actually fix.
         let solo = Options {
             jobs: 1,
+            test_threads: 1,
             ..Options::from(options)
         };
         outcomes.extend(execute(alone, &solo));
@@ -1200,13 +1212,33 @@ fn report(outcomes: &[Outcome], wall: Duration, map: &Map, strict: bool) {
     }
 
     if failures.is_empty() && unread.is_empty() {
+        // **`ok` is what a reader remembers, so it is not printed on a run that
+        // is about to exit 1.** Under `--strict` a suite whose prerequisite is
+        // absent fails the run, and the summary said `ok` over the top of it.
+        // That is the same defect as the skip phrases that let a green with
+        // nothing installed pass for evidence, and as a target recorded FAILED
+        // with all 156 of its tests passing: the report and the exit status
+        // have to agree, or one of them stops being read.
+        if strict && !hollow.is_empty() {
+            println!(
+                "\nnot ok - every test passed, and {} suite(s) evidenced nothing",
+                hollow.len()
+            );
+            return;
+        }
         println!("\nok");
         return;
     }
     if !failures.is_empty() {
         println!("\nFAILED:");
         for failure in &failures {
-            println!("  {}", failure.target.label());
+            // **With the exit status, which is the one fact that separates the
+            // two things this list is used to mean.** A target here either
+            // failed a test or died after its tests passed, and a reader given
+            // only the name cannot tell which - which is exactly the question
+            // somebody had to answer by hand when `inillucent-bench` printed
+            // `156 passed; 0 failed` and the run recorded it FAILED.
+            println!("  {:<44} {}", failure.target.label(), failure.status);
         }
     }
     if !unread.is_empty() {
