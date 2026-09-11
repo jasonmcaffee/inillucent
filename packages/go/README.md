@@ -4,8 +4,8 @@
 # Get the binaries. inillucent is Rust, so `go install` cannot build it - what
 # it can build is a small program that downloads the release for your machine,
 # verifies its SHA-256 and puts the four programs in GOBIN.
-go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent@latest
-inillucent
+go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent-install@latest
+inillucent-install
 
 # Then use it from Go.
 go get github.com/Black-Rainbow-Labs/Inillucent/packages/go
@@ -85,14 +85,18 @@ cannot do that yet" instead of "check your spelling".
 ## Versioning
 
 The module is in a subdirectory, so its import path carries that subdirectory
-and its tags carry the prefix Go requires:
+and the git tag that releases it carries the same prefix: `packages/go/v0.1.0`.
+That prefix is Go's own rule for a nested module, not a choice made here.
+
+The prefix belongs to the tag. The version you ask for is the plain version:
 
 ```sh
-go get github.com/Black-Rainbow-Labs/Inillucent/packages/go@packages/go/v0.1.0
+go get github.com/Black-Rainbow-Labs/Inillucent/packages/go@v0.1.0
 ```
 
-`@latest` resolves it for you. The prefix is Go's own rule for a nested module,
-not a choice made here.
+`@packages/go/v0.1.0` is rejected - `invalid version: version
+"packages/go/v0.1.0" invalid: disallowed version string`. `@latest` works too
+and resolves to the newest prefixed tag.
 
 ## Running the tests
 
@@ -100,5 +104,5 @@ They skip when inillucent is not installed, rather than failing on a machine
 that never had it:
 
 ```sh
-go install ./cmd/inillucent && go test ./...
+go install ./cmd/inillucent-install && go test ./...
 ```

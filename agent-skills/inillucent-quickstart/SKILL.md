@@ -21,7 +21,7 @@ curl -fsSL https://raw.githubusercontent.com/Black-Rainbow-Labs/Inillucent/main/
 
 Or from whichever package manager the project already uses — `npm install -g inillucent`,
 `pip install inillucent`, `cargo install inillucent-cli`, `brew install black-rainbow-labs/inillucent/inillucent`,
-`go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent@latest`,
+`go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent-install@latest`,
 `composer require black-rainbow-labs/inillucent`. Every one installs the same four programs and verifies the
 release's published SHA-256 first.
 

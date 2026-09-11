@@ -1,6 +1,6 @@
 // Command inillucent installs the inillucent binaries with `go install`.
 //
-//	go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent@latest
+//	go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent-install@latest
 //
 // inillucent is written in Rust, so `go install` cannot build it - what it can
 // do is build this, which downloads the release for the machine it is running

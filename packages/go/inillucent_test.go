@@ -24,7 +24,7 @@ func skipWithoutBinary(t *testing.T) {
 	}
 	if _, err := exec.LookPath("inillucent"); err != nil {
 		t.Skip("inillucent is not on PATH; install it with " +
-			"`go run ./cmd/inillucent` or see https://github.com/Black-Rainbow-Labs/Inillucent#install")
+			"`go run ./cmd/inillucent-install` or see https://github.com/Black-Rainbow-Labs/Inillucent#install")
 	}
 }
 

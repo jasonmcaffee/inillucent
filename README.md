@@ -63,7 +63,7 @@ cargo build --release -p inillucent-cli
 | **pip** | `pip install inillucent` — the wheel carries the programs and an in process driver |
 | **cargo** | `cargo install inillucent-cli` — builds from source, and the fallback on any platform with no prebuilt archive |
 | **Homebrew** | `brew install black-rainbow-labs/inillucent/inillucent` |
-| **Go** | `go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent@latest` |
+| **Go** | `go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent-install@latest` |
 | **Composer** | `composer require black-rainbow-labs/inillucent && vendor/bin/inillucent-install` |
 
 None of those six answers yet — each is waiting on an account, a CAPTCHA a person
