@@ -12,20 +12,42 @@ decision that is not a script's to make.
 
 ## Where it stands, at a glance
 
-Updated 2026-09-10. **The GitHub release is cut**: `v0.1.0`, tagged at `201d0b9` on Black-Rainbow-Labs/Inillucent,
-with the Windows archive, `SHA256SUMS` and `provenance.json` attached, and the
-archive verified by downloading it back off the release and comparing its SHA-256.
-No registry package is published yet.
+Updated 2026-09-11. **Both one-line installers work**, verified by running them as
+written: Windows, and Ubuntu 24.04. A Linux archive is built and published beside
+the Windows one. No package manager is published yet.
 
 | route | state | what it is waiting on |
 |---|---|---|
-| **GitHub release** | **done** - `v0.1.0`, Windows archive attached, checksum verified end to end | the macOS and Linux archives, and the decision on repository visibility |
-| **npm** | ready; dry run clean, packages packed and installed from their tarballs | **Jason's npm password** (or a granular token). Not the OTP — see below |
-| **PyPI** | ready; wheel built and installed into a clean venv | **an account**, deliberately not created: it would need a password and a 2FA secret Jason would not hold |
-| **crates.io** | ready; `--workspace --dry-run` clean for all 30 crates | a token, **and the decision to make the source public** |
-| **Homebrew** | formula written, checksums scripted, URLs pointed at inillucent.com | the tap repository, and a release staged on the site |
-| **Go** | verified; `go vet` clean, 5 tests pass | a public repository and one tag |
-| **Packagist** | verified; `composer install` works end to end | a public repository and a Packagist account |
+| **inillucent.com, Windows** | **live** - `irm .../install.ps1 \| iex` installs and runs | nothing |
+| **inillucent.com, Linux** | **live** - `curl -fsSL .../install.sh \| sh` installs and runs | nothing |
+| **inillucent.com, macOS** | archive not built | a Mac: `packaging/release.sh --target aarch64-apple-darwin`, then `lipo` |
+| **GitHub release** | done - `v0.1.0` at `201d0b9` with the Windows archive | the macOS archive |
+| **npm** | packages built and installed from their tarballs | **the signup page answers 403 to every client** - see below |
+| **PyPI** | wheel built and installed into a clean venv | an account; the form carries an hCaptcha and uploads need 2FA |
+| **crates.io** | `--workspace --dry-run` clean for all 30 crates | a token, **and the decision to make the source public** |
+| **Homebrew** | formula carries the real Linux checksum | the macOS archive, then the tap repository |
+| **Go** | `go vet` clean, 5 tests pass | a public repository and one tag |
+| **Packagist** | `composer install` works end to end | a public repository and a Packagist account |
+
+### What the site publishing took, and two defects it found
+
+The site was already serving `/downloads/` publicly. It had a stale archive and
+none of the scripts, and two things were broken underneath:
+
+- **`.ps1` was served as `application/octet-stream`**, because `mime_guess` has no
+  entry for it. Against that, `Invoke-RestMethod` hands back a byte array rather
+  than a script, so `irm ... | iex` died with *"[System.Byte] does not contain a
+  method named 'Trim'"*. Fixed in the site's static handler.
+- **`install.sh` used `set -o pipefail` and `${BASH_SOURCE[0]}`**, both bash-only.
+  The documented command pipes into `sh`, which on Debian and Ubuntu is dash, and
+  dash answered *"Illegal option -o pipefail"* and stopped before downloading
+  anything. The script is POSIX now and `dash -n` parses it clean.
+
+A third was found while testing macOS: `curl -fsSL` on an archive that is not
+published exits non-zero with no output, and `set -e` then ended the script in
+silence. It now reads SHA256SUMS first and names the platforms that were
+published.
+
 
 ## The decision that comes first
 
