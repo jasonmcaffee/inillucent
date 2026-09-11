@@ -26,7 +26,13 @@
 # .pkg on the site is the convenience for somebody who would rather
 # double-click. See packaging/macos/README.md.
 
-set -euo pipefail
+set -eu
+# `pipefail` is not POSIX. The documented install is `curl ... | sh`, and on
+# Debian and Ubuntu that `sh` is dash, which answers `set: Illegal option -o
+# pipefail` and stops before anything is downloaded. So it is enabled only where
+# the shell has it, in a subshell that cannot take the script down with it.
+# shellcheck disable=SC3040
+(set -o pipefail 2>/dev/null) && set -o pipefail || true
 
 base_url="https://inillucent.com/downloads"
 version=""
@@ -108,7 +114,10 @@ work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
 if [ "$from_dist" -eq 1 ]; then
-  root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  # `$0` rather than `${BASH_SOURCE[0]}`: the latter is a bash array and dash
+  # cannot read it. This branch only runs for a script on disk, which is the
+  # case where `$0` is that script.
+  root="$(cd "$(dirname "$0")/.." && pwd)"
   dist="$root/dist"
   if [ -z "$version" ]; then
     found="$(ls "$dist"/inillucent-*-"$target".tar.gz 2>/dev/null | head -1 || true)"
