@@ -33,7 +33,7 @@ class Inillucent < Formula
   on_linux do
     on_intel do
       url "https://inillucent.com/downloads/inillucent-0.1.0-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "REPLACE_WITH_THE_X86_64_LINUX_SHA256"
+      sha256 "dbbcc8594ea63f5709a8b7298cdf55474a1421155b9f96fc8569a7a0d911285d"
     end
     on_arm do
       url "https://inillucent.com/downloads/inillucent-0.1.0-aarch64-unknown-linux-gnu.tar.gz"

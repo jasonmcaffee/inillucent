@@ -136,9 +136,26 @@ else
     [ -n "$version" ] || { echo "could not read $base_url/VERSION; pass --version" >&2; exit 1; }
   fi
   archive="$work/inillucent-$version-$target.tar.gz"
-  echo "downloading inillucent $version for $target..."
-  curl -fsSL "$base_url/inillucent-$version-$target.tar.gz" -o "$archive"
+  name="inillucent-$version-$target.tar.gz"
+
+  # SHA256SUMS lists every archive this release published, and it is fetched
+  # anyway to verify the download - so it is fetched *first*, and used to answer
+  # "is there a build for this machine" before asking for one. Without this a
+  # platform that is not published yet gets `curl -fsSL` failing on a 404, which
+  # under `set -e` ends the script with nothing printed at all.
   curl -fsSL "$base_url/SHA256SUMS" -o "$work/SHA256SUMS"
+  if ! awk -v want="$name" '$NF == want { found = 1 } END { exit !found }' "$work/SHA256SUMS"; then
+    echo "inillucent $version has no build for $target yet." >&2
+    echo "  published in this release:" >&2
+    awk '{ print "    " $NF }' "$work/SHA256SUMS" >&2
+    echo "  Build it from source instead:" >&2
+    echo "    git clone https://github.com/Black-Rainbow-Labs/Inillucent" >&2
+    echo "    cargo build --release -p inillucent-cli" >&2
+    exit 1
+  fi
+
+  echo "downloading inillucent $version for $target..."
+  curl -fsSL "$base_url/$name" -o "$archive"
   verify "$archive" "$work/SHA256SUMS"
 fi
 
