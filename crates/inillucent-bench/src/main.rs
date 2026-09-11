@@ -377,6 +377,11 @@ enum Command {
         /// the corpus answers the question, on its own calibrated threshold.
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         abstention: bool,
+        /// BM25 with no embedding model at all, so the card says what the
+        /// lexical half of the shipped pipeline is worth on its own. Scored
+        /// inside the hybrid lane, so it measures nothing when hybrid is off.
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        lexical: bool,
         /// Distinct chunks re-embedded to time each model.
         #[arg(long, default_value_t = 2000)]
         cost_samples: usize,
@@ -879,6 +884,7 @@ fn main() -> Result<()> {
             cost,
             matryoshka,
             abstention,
+            lexical,
             cost_samples,
             cost_devices,
             cost_repeats,
@@ -899,6 +905,7 @@ fn main() -> Result<()> {
                 cost,
                 matryoshka,
                 abstention,
+                lexical,
                 cost_samples,
                 cost_devices: if cost { parse_devices(&cost_devices)? } else { Vec::new() },
                 cost_repeats,

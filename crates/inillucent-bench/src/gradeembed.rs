@@ -117,6 +117,11 @@ pub struct EmbeddingGradeOptions {
     /// The lane gate G4 is read from: how often each model answers confidently
     /// when nothing in the corpus answers the question.
     pub abstention: bool,
+    /// BM25 with no embedding model at all, so the card says what the lexical
+    /// half of the shipped pipeline is worth on its own. Scored inside the
+    /// hybrid lane, on the index that lane already builds, so it measures
+    /// nothing when `hybrid` is off.
+    pub lexical: bool,
     /// Chunks re-embedded to time each model. Distinct chunks, spread across the
     /// corpus: timing a model on repeated text measures a cache rather than a
     /// model, which is a mistake this box has already made once.
@@ -676,6 +681,8 @@ pub fn run(options: &EmbeddingGradeOptions) -> Result<EmbeddingCard> {
     let mut dense: BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<f64>>>> = BTreeMap::new();
     let mut hybrid: BTreeMap<String, BTreeMap<String, BTreeMap<String, Vec<f64>>>> = BTreeMap::new();
     let mut mrl: BTreeMap<String, BTreeMap<String, f64>> = BTreeMap::new();
+    // family -> metric -> per-query scores, for BM25 with no model at all.
+    let mut lexical: BTreeMap<String, BTreeMap<String, Vec<f64>>> = BTreeMap::new();
     // model -> family -> the top result's confidence on each of its queries.
     let mut confidences: BTreeMap<String, BTreeMap<String, Vec<f64>>> = BTreeMap::new();
 
@@ -813,6 +820,36 @@ pub fn run(options: &EmbeddingGradeOptions) -> Result<EmbeddingCard> {
             // query, which is a harness decision rather than an engine default and
             // is the same number `grade` uses.
             let filter = Filter::default();
+
+            // Scored on the first arm only. The lexical ranking reads the
+            // corpus text and the query and nothing else, and both are the same
+            // for every arm, so the later arms would print the same numbers.
+            if options.lexical && lexical.is_empty() {
+                for (name, qs) in families.named.iter() {
+                    let started = Instant::now();
+                    let mut search = |q: &GradedQuery, _index: usize| -> Result<Vec<Hit>> {
+                        engine.lexical_search(&q.text, &filter, K)
+                    };
+                    let scored = score_family(
+                        LEXICAL_COLUMN,
+                        "lexical",
+                        qs,
+                        &mut search,
+                        per_doc_cap,
+                        &mut writer,
+                    )?;
+                    eprintln!(
+                        "    BM25 alone, {name}: {} queries in {:.1}s, nDCG@10 {:.4}",
+                        qs.len(),
+                        started.elapsed().as_secs_f64(),
+                        mean(scored.get(M_NDCG))
+                    );
+                    for (metric, values) in scored {
+                        lexical.entry(name.clone()).or_default().insert(metric, values);
+                    }
+                }
+            }
+
             for ((name, qs), qvs) in families.named.iter().zip(&query_vectors) {
                 let started = Instant::now();
                 let mut search = |q: &GradedQuery, index: usize| -> Result<Vec<Hit>> {
@@ -989,6 +1026,9 @@ pub fn run(options: &EmbeddingGradeOptions) -> Result<EmbeddingCard> {
     }
     if options.abstention {
         lanes.push(abstention_lane(&confidences));
+    }
+    if options.lexical && !lexical.is_empty() {
+        lanes.push(lexical_lane(&lexical));
     }
     if options.cost {
         lanes.push(cost_lane(&arm_facts));
@@ -1460,6 +1500,67 @@ fn abstention_lane(confidences: &BTreeMap<String, BTreeMap<String, Vec<f64>>>) -
     }
 }
 
+/// The column name the lexical lane prints under. Not a model id, because
+/// there is no model: the ranking is BM25 over the corpus text.
+const LEXICAL_COLUMN: &str = "BM25 alone, no model";
+
+/// The same query families through BM25 with no embedding model.
+///
+/// One column, because the ranking depends only on the corpus text and the
+/// query. Every row is diagnostic: there is no baseline model in this lane to
+/// compare against, so nothing here is judged. What it answers is a question
+/// the other lanes cannot: how much of what the shipped pipeline finds would
+/// be found with no embedding model at all.
+/// @param lexical - family to metric to the per-query scores BM25 produced
+fn lexical_lane(lexical: &BTreeMap<String, BTreeMap<String, Vec<f64>>>) -> Lane {
+    let mut rows = Vec::new();
+    let row = |family: String, values: &[f64]| EmbeddingRow {
+        family,
+        metric: M_NDCG.to_string(),
+        higher_is_better: true,
+        role: Role::Diagnostic,
+        values: [(
+            LEXICAL_COLUMN.to_string(),
+            values.iter().sum::<f64>() / values.len().max(1) as f64,
+        )]
+        .into_iter()
+        .collect(),
+        series: BTreeMap::new(),
+    };
+    let per_family: BTreeMap<String, Vec<f64>> = lexical
+        .iter()
+        .filter_map(|(f, m)| m.get(M_NDCG).map(|v| (f.clone(), v.clone())))
+        .collect();
+    // Both composites the other lanes print, so a reader comparing this lane
+    // against the hybrid lane is comparing the same quantity.
+    for (label, families) in [
+        (format!("composite, declared ({})", HEADLINE.join(" + ")), HEADLINE),
+        (format!("composite, promoted ({} families)", PROMOTED.len()), PROMOTED),
+    ] {
+        let values = composite(&per_family, families);
+        if !values.is_empty() {
+            rows.push(row(label, &values));
+        }
+    }
+    for (family, values) in &per_family {
+        rows.push(row(family.clone(), values));
+    }
+    Lane {
+        name: "lexical only".to_string(),
+        rationale:
+            "The same families through BM25 with no embedding model, over the index the \
+             hybrid lane builds and with every ranking setting left as the shipped \
+             defaults. One column, because the ranking reads the corpus text and the \
+             query and nothing else, so each arm would produce the same numbers. Every \
+             row is diagnostic: there is no model in this lane, so there is no baseline \
+             to judge against. Read it against the hybrid lane. The difference between \
+             the two is what the embedding model adds to the pipeline Inillucent ships, \
+             and it is the only place on this card that quantity appears."
+                .to_string(),
+        rows,
+    }
+}
+
 fn cost_lane(arms: &[ArmFacts]) -> Lane {
     let mut rows = Vec::new();
     let mut devices: Vec<String> =
@@ -1906,12 +2007,58 @@ mod tests {
             cost: false,
             matryoshka: false,
             abstention: false,
+            lexical: false,
             cost_samples: 8,
             cost_devices: vec![],
             cost_repeats: 3,
             matryoshka_chunks: 8,
             arm_options: crate::arm::ArmOptions::default(),
         }
+    }
+
+
+    /// The lexical lane has one column and no judgement, because there is no
+    /// model in it. A second column would be the same ranking printed twice, and
+    /// a judgement would need a baseline model this lane does not have.
+    #[test]
+    fn the_lexical_lane_prints_one_column_and_is_never_judged() {
+        let mut lexical: BTreeMap<String, BTreeMap<String, Vec<f64>>> = BTreeMap::new();
+        for (family, scores) in [
+            ("document identity", vec![1.0, 0.5]),
+            ("heading", vec![0.0, 0.5]),
+            ("passage evidence", vec![0.25]),
+        ] {
+            lexical.entry(family.to_string()).or_default().insert(M_NDCG.to_string(), scores);
+        }
+        let lane = lexical_lane(&lexical);
+
+        let mut columns: Vec<&String> = lane.rows.iter().flat_map(|r| r.values.keys()).collect();
+        columns.sort();
+        columns.dedup();
+        assert_eq!(columns.len(), 1, "one column, because no model changes this ranking");
+        assert_eq!(columns[0], LEXICAL_COLUMN);
+
+        assert!(
+            lane.rows.iter().all(|r| r.role == Role::Diagnostic && r.series.is_empty()),
+            "nothing in this lane is judged, so no row is primary and none carries a series"
+        );
+        assert!(
+            judge(std::slice::from_ref(&lane), LEXICAL_COLUMN, 1).is_empty(),
+            "a lane with no baseline model produces no judgements"
+        );
+
+        // Each composite concatenates only the families it is declared over, so
+        // the declared one leaves passage evidence out and reads 0.5 where the
+        // promoted one includes it and reads 0.45.
+        let value = |prefix: &str| {
+            lane.rows
+                .iter()
+                .find(|r| r.family.starts_with(prefix))
+                .unwrap_or_else(|| panic!("{prefix} is on the card"))
+                .values[LEXICAL_COLUMN]
+        };
+        assert_eq!(value("composite, declared"), 0.5);
+        assert_eq!(value("composite, promoted"), 0.45);
     }
 
     fn seeds_now() -> String {
