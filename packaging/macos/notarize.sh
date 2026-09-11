@@ -2,7 +2,7 @@
 #
 # Signs, notarises and staples the macOS package.
 #
-#   ./packaging/macos/notarize.sh --version 0.1.0 \
+#   ./packaging/macos/notarize.sh --version 0.1.1 \
 #       --identity "Developer ID Application: Your Name (ABCDE12345)"
 #
 # It needs the two things packaging/macos/README.md steps 2 and 3 set up:

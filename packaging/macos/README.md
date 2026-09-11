@@ -8,7 +8,7 @@ keychain, and only a Mac can run a Mach-O to check that any of it worked.
 **One command does all of it:**
 
 ```sh
-./packaging/macos/release-macos.sh --version 0.1.0 --upload
+./packaging/macos/release-macos.sh --version 0.1.1 --upload
 ```
 
 It builds both architectures, `lipo`s them into universal binaries, signs them
@@ -21,7 +21,7 @@ GitHub release that carries them to the Windows machine.
 Then, on the Windows machine:
 
 ```powershell
-pwsh packaging/fetch-macos-artifacts.ps1 -Version 0.1.0
+pwsh packaging/fetch-macos-artifacts.ps1 -Version 0.1.1
 ```
 
 which verifies the checksums and reads the signature back out of the binaries
@@ -32,7 +32,7 @@ both machines.
 on a Mac rather than at the upload:
 
 ```sh
-curl -fsSL https://inillucent.com/downloads/verify-macos.sh | sh -s -- --version 0.1.0
+curl -fsSL https://inillucent.com/downloads/verify-macos.sh | sh -s -- --version 0.1.1
 ```
 
 It quarantines the published archive the way a browser would, asks `spctl`
@@ -118,7 +118,7 @@ four paths and they can be copied across by any other means;
 ## Then, on the Mac
 
 ```sh
-./packaging/macos/release-macos.sh --version 0.1.0 --upload
+./packaging/macos/release-macos.sh --version 0.1.1 --upload
 ```
 
 `inillucent-notary` is the profile name it looks for, and the Developer ID
@@ -134,7 +134,7 @@ against the published bytes rather than against the build directory, so what it
 checks is what a reader gets.
 
 ```sh
-curl -fsSL https://inillucent.com/downloads/verify-macos.sh | sh -s -- --version 0.1.0
+curl -fsSL https://inillucent.com/downloads/verify-macos.sh | sh -s -- --version 0.1.1
 ```
 
 It asserts, in order: the archive matches the published `SHA256SUMS`; `spctl`

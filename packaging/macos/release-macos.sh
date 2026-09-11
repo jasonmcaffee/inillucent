@@ -2,7 +2,7 @@
 #
 # The whole macOS release, on the MacBook, in one command.
 #
-#   ./packaging/macos/release-macos.sh --version 0.1.0
+#   ./packaging/macos/release-macos.sh --version 0.1.1
 #
 # It builds both architectures, joins them into universal binaries, signs them
 # with the Developer ID, produces the three artifacts the site and the package

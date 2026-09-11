@@ -2,8 +2,8 @@
 #
 # Runs a macOS release the way a reader will, and refuses it if anything is off.
 #
-#   ./packaging/macos/verify-macos.sh --archive dist/inillucent-0.1.0-universal-apple-darwin.tar.gz
-#   ./packaging/macos/verify-macos.sh --version 0.1.0        # fetch the published one
+#   ./packaging/macos/verify-macos.sh --archive dist/inillucent-0.1.1-universal-apple-darwin.tar.gz
+#   ./packaging/macos/verify-macos.sh --version 0.1.1        # fetch the published one
 #
 # This is the release gate. Everything else about a macOS build can be checked
 # from Windows - the architectures, the signature, the hardened runtime, the
