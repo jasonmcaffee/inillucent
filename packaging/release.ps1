@@ -96,6 +96,27 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
+
+# --------------------------------------------------------------------------
+# The cmdlets this script cannot do its job without.
+#
+# An agent terminal can inherit a PSModulePath where the PowerShell 7 module
+# directories shadow Microsoft.PowerShell.Utility. Cmdlets from it then resolve
+# to nothing, the script carries on, and it exits 0 - so a SHA256SUMS comes out
+# empty and the release reports success. Checked here, before anything is
+# built, because a silent failure is only discovered by someone downloading the
+# result.
+# --------------------------------------------------------------------------
+$required = @('Get-FileHash', 'Get-ChildItem', 'Set-Content', 'Copy-Item', 'ConvertTo-Json')
+$absent = @($required | Where-Object { -not (Get-Command $_ -ErrorAction SilentlyContinue) })
+if ($absent.Count -gt 0) {
+    throw @"
+these cmdlets are not resolvable in this session: $($absent -join ', ')
+PSModulePath is shadowing the module they live in, and they would silently do nothing rather than
+fail. Start pwsh with -NoProfile and a PSModulePath that reaches
+C:\Program Files\PowerShell\7\Modules, then run this again.
+"@
+}
 $waived = @()
 
 function Get-WorkspaceVersion {

@@ -67,7 +67,7 @@ The macOS archive is the single artifact that blocks the most: the macOS
 installer, the Homebrew formula, and two of the four npm platform packages all
 wait on it and on nothing else.
 
-### What the site publishing took, and two defects it found
+### What the site publishing took, and the defects it found
 
 The site was already serving `/downloads/` publicly. It had a stale archive and
 none of the scripts, and two things were broken underneath:
@@ -85,6 +85,54 @@ A third was found while testing macOS: `curl -fsSL` on an archive that is not
 published exits non-zero with no output, and `set -e` then ended the script in
 silence. It now reads SHA256SUMS first and names the platforms that were
 published.
+
+### The rule: run every command the release ships, from the release
+
+0.1.0 passed every check above and still shipped four commands that fail,
+because the checks were run against the repository and the commands ship inside
+the archive. Fixing the source tree does not change the artifact. These came out
+of running each one from what the site actually serves.
+
+- **SHA256SUMS was written with CRLF.** `Set-Content` uses the platform's line
+  ending, so a file produced on Windows ends every line with `\r\n`. Linux `awk`
+  keeps that carriage return in `$NF`, so `curl -fsSL .../install.sh | sh` on
+  Ubuntu answered *"inillucent 0.1.1 has no build for x86_64-unknown-linux-gnu
+  yet"* and then listed `inillucent-0.1.1-x86_64-unknown-linux-gnu.tar.gz` as
+  published, on the next line. Windows `awk` opens files in text mode and drops
+  the `\r`, which is why every run on the machine that produced the file passed.
+  `release.ps1` writes LF now, and `install.sh` strips carriage returns before
+  reading, in both the download path and `--from-dist`.
+- **Two one-liners pointed at `raw.githubusercontent.com`.** That path serves
+  files out of the repository, and the repository is private, so both answered
+  404 for everybody. They were in `docs/getting-started.md` and the quickstart
+  skill, which both travel inside the archive, and in
+  `packaging/windows/README.md`. All three point at inillucent.com now.
+- **The Go row named a command that had been renamed.** `cmd/inillucent` became
+  `cmd/inillucent-install`, and the archives still said the old one, so
+  `@latest` resolved to a module where that directory does not exist.
+- **The client libraries section listed eight packages that do not exist**, under
+  a link to a repository that answers 404. PyPI is the one that can be checked
+  without a browser and its API answers `{"message": "Not Found"}`.
+
+Every `http` URL in the documents that travel inside the archive was then
+requested. The eighteen that remain all answer.
+
+### One more thing that can fail silently
+
+An agent terminal can inherit a `PSModulePath` in which the PowerShell 7 module
+directories shadow `Microsoft.PowerShell.Utility`. Cmdlets from it - `Get-FileHash`
+among them - resolve to nothing, the script keeps going, and it exits 0. Applied
+to `release.ps1` that produces a SHA256SUMS that looks written and is empty.
+
+`release.ps1` and `publish-site.ps1` now check for the cmdlets they need before
+doing anything, and stop with the reason rather than succeeding at nothing.
+
+**The acceptance test for staging is not the script's exit code.** It is
+downloading what the site serves and hashing it with a tool that is not
+PowerShell, then comparing that against the published SHA256SUMS. That is the
+only check a vanished cmdlet cannot fake, and it is what was run for 0.1.1:
+`sha256sum` over the three served files returns exactly the three values in the
+served SHA256SUMS.
 
 
 ## The decision that comes first
