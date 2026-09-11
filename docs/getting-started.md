@@ -27,7 +27,7 @@ Or through a package manager:
 | **pip** | `pip install inillucent` — the wheel carries the four programs and an in process driver |
 | **cargo** | `cargo install inillucent-cli` — builds from source, and the fallback on any platform with no prebuilt archive |
 | **Homebrew** | `brew install black-rainbow-labs/inillucent/inillucent` |
-| **Go** | `go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent@latest` |
+| **Go** | `go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent-install@latest` |
 | **Composer** | `composer require black-rainbow-labs/inillucent && vendor/bin/inillucent-install` |
 
 Each of them installs the same four programs, and each downloader checks the release's published

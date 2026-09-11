@@ -69,14 +69,46 @@ function writeManifest(platform, into) {
 }
 
 /**
+ * Returns the unpacked release directory for one platform, unpacking the
+ * archive first when only the archive is there.
+ *
+ * packaging/release.ps1 leaves both the directory and the .zip behind, so on
+ * the machine that built a release the directory is already present. An archive
+ * that arrived from another machine - the Linux tarball built in WSL, a macOS
+ * one built on the MacBook - is only the archive, and skipping it meant the
+ * release could not be staged anywhere except the machine that built it.
+ *
+ * @param platform - the platform entry
+ */
+function unpacked(platform) {
+  const directory = join(dist, `inillucent-${version}-${platform.target}`);
+  if (existsSync(directory)) return directory;
+
+  for (const extension of ['.tar.gz', '.zip']) {
+    const name = `inillucent-${version}-${platform.target}${extension}`;
+    if (!existsSync(join(dist, name))) continue;
+    // tar reads both, on Windows 10 1803 and later as well as on macOS and
+    // Linux, so there is one command rather than one per platform.
+    //
+    // It is given the archive's plain name and run with dist/ as its working
+    // directory rather than an absolute path, because GNU tar reads a path
+    // starting `C:` as a host to connect to and answers `Cannot connect to C:
+    // resolve failed`. A name with no colon in it is unambiguous to every tar.
+    execFileSync('tar', ['--extract', '--file', name], { cwd: dist, stdio: 'inherit' });
+    if (existsSync(directory)) return directory;
+  }
+  return null;
+}
+
+/**
  * Stages one platform package from its release archive directory.
  *
  * @param platform - the platform entry
  */
 function stage(platform) {
-  const source = join(dist, `inillucent-${version}-${platform.target}`);
-  if (!existsSync(source)) {
-    console.log(`  ${platform.npm}: no ${source}, skipped`);
+  const source = unpacked(platform);
+  if (source === null) {
+    console.log(`  ${platform.npm}: no release archive for ${platform.target}, skipped`);
     return null;
   }
   const into = join(staged, platform.npm.replace('@', '').replace('/', '-'));

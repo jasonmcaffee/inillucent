@@ -4,9 +4,18 @@ Everything in this repository is built, tested and verified up to the upload.
 This file is the last mile: what each registry needs, in what order, and which
 credential is missing.
 
-**Nothing here has been published.** All six routes are built and verified;
-every one of them stops at a credential that belongs to a person, or at one
-decision that is not a script's to make.
+**One of the six is published: Go.** It needed no account and no token, only a
+git tag, so it was tagged. The other five stop at a credential that belongs to a
+person, or at one decision that is not a script's to make - and they are not all
+in the same state behind that credential, so the table below says which.
+
+Two readiness states, and they are not the same thing:
+
+- **Token is the only step.** The artifact exists on disk, it was installed from
+  that artifact on a clean machine, and it was run. The upload command is
+  written out below and nothing else has to be built.
+- **Work remains after the token.** Something still has to be built, and the
+  credential arriving does not finish it.
 
 ---
 
@@ -16,18 +25,37 @@ Updated 2026-09-11. **Both one-line installers work**, verified by running them 
 written: Windows, and Ubuntu 24.04. A Linux archive is built and published beside
 the Windows one. No package manager is published yet.
 
-| route | state | what it is waiting on |
+| route | readiness | what it is waiting on |
 |---|---|---|
 | **inillucent.com, Windows** | **live** - `irm .../install.ps1 \| iex` installs and runs | nothing |
 | **inillucent.com, Linux** | **live** - `curl -fsSL .../install.sh \| sh` installs and runs | nothing |
-| **inillucent.com, macOS** | archive not built | a Mac: `packaging/release.sh --target aarch64-apple-darwin`, then `lipo` |
+| **inillucent.com, macOS** | work remains - no archive | a Mac: `packaging/release.sh --target aarch64-apple-darwin`, then `lipo` |
 | **GitHub release** | done - `v0.1.0` at `201d0b9` with the Windows archive | the macOS archive |
-| **npm** | packages built and installed from their tarballs | **the signup page answers 403 to every client** - see below |
-| **PyPI** | wheel built and installed into a clean venv | an account; the form carries an hCaptcha and uploads need 2FA |
-| **crates.io** | `--workspace --dry-run` clean for all 30 crates | a token, **and the decision to make the source public** |
-| **Homebrew** | formula carries the real Linux checksum | the macOS archive, then the tap repository |
-| **Go** | `go vet` clean, 5 tests pass | a public repository and one tag |
-| **Packagist** | `composer install` works end to end | a public repository and a Packagist account |
+| **Go** | **published** - tag `packages/go/v0.1.1` | nothing, except that a private repository limits who can install it |
+| **npm** | **token is the only step** - three tarballs packed, installed and run | **the signup page answers 403 to every client** - see below |
+| **PyPI** | **token is the only step** - wheel installed into a clean venv and run | an account; the form carries an hCaptcha and uploads need 2FA |
+| **crates.io** | **token is the only step** - `--workspace --dry-run` clean for all 30 crates | a token, **and the decision to make the source public** |
+| **Packagist** | **token is the only step** - `composer install` works end to end | a Packagist account (GitHub OAuth), and a public repository |
+| **Homebrew** | **work remains after the token** - and there is no token | the macOS archive, which does not exist; then the tap repository |
+
+Read across that table one more way, because it is the part that decides what to
+chase:
+
+- **npm, PyPI, crates.io and Packagist are finished except for the upload.** The
+  artifact is on disk, a clean machine installed from that exact artifact, and
+  the installed thing ran. `npm publish`, `twine upload`, `cargo publish` and the
+  Packagist submit form are the only commands left. Each is written out below.
+- **Homebrew is not waiting on a credential at all** - a formula is a pull
+  request and needs no account. It is waiting on the macOS archive, which needs
+  a Mac. A token would change nothing.
+- **Go is published**, and its one caveat is not a credential either: the
+  repository is private, so `sum.golang.org` cannot read the module and the
+  public proxy answers 404. A collaborator with `GOPRIVATE` set installs it
+  today; a stranger cannot until the repository is public.
+
+The macOS archive is the single artifact that blocks the most: the macOS
+installer, the Homebrew formula, and two of the four npm platform packages all
+wait on it and on nothing else.
 
 ### What the site publishing took, and two defects it found
 
@@ -308,24 +336,69 @@ database, writes to it, reads it back and asks the MCP server for its tool list.
 
 ---
 
-## Go
+## Go - published
 
 ```sh
-git tag packages/go/v0.1.0 && git push --tags
+git tag packages/go/v0.1.1 && git push brl packages/go/v0.1.1
 ```
 
-That is the whole publish: Go has no registry, and `go install
-github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent@latest` reads the
-repository directly. The tag carries the `packages/go/` prefix because the
-module is in a subdirectory, which is Go's own rule for a nested module.
+That is the whole publish. Go has no registry and no account: `go install` reads
+the repository directly, and a tag is the release. The tag carries the
+`packages/go/` prefix because the module is in a subdirectory, which is Go's own
+rule for a nested module.
 
-**Ready and verified.** `go vet` is clean and all five tests pass against the
-installed binary, including one that proves a bound parameter is not
-interpolated and one that proves a read-only handle refuses a write while still
-allowing a read.
+```sh
+go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent-install@v0.1.1
+inillucent-install
+```
 
-**Missing**: a public repository. `go install` clones it, and `GOPRIVATE` is not
-something a stranger can be asked to set.
+**The prefix belongs to the tag and not to the version argument.** Passing the
+tag name there is rejected outright:
+
+```
+go: ...cmd/inillucent-install@packages/go/v0.1.0: invalid version:
+    version "packages/go/v0.1.0" invalid: disallowed version string
+```
+
+Every document in this repository said `@packages/go/v0.1.0` until it was run.
+`@v0.1.1` is what works, and `@latest` resolves to the newest prefixed tag.
+
+**Verified**, on this machine, with Go 1.25.1: `go build ./...` and `go vet
+./...` clean, `go test ./...` passing, `go install` resolving the published tag,
+and the installed `inillucent-install` downloading the release from
+inillucent.com, checking its SHA-256, writing all four programs, and those
+programs then creating a database, running a statement, returning a row and
+answering an MCP `initialize` handshake.
+
+### The two defects publishing it found
+
+- **The command installed over itself.** The directory was `cmd/inillucent`, so
+  `go install` put a program called `inillucent` in GOBIN - and that program's
+  job is to put a program called `inillucent` in GOBIN. On Windows it failed at
+  the last of the four files with *"The process cannot access the file because
+  it is being used by another process"*, leaving three installed and the CLI
+  missing. The command's own help text already called it `inillucent-install`;
+  only the directory disagreed, and the directory is what names the binary. It
+  is `cmd/inillucent-install` now, which is also what the Composer package calls
+  the same program.
+- **The documented version argument was invalid**, as above.
+
+Neither was reachable without installing it the way a stranger would. `go build`
+and `go test` were both clean the whole time.
+
+**The one thing still missing** is not a credential: the repository is private.
+`go install` through the public proxy fails at the checksum database, which
+cannot read a private repository:
+
+```
+verifying module: ... reading https://sum.golang.org/lookup/...: 404 Not Found
+    not found: ... invalid version: git ls-remote ... exit status 128:
+    fatal: could not read Username for 'https://github.com'
+```
+
+A collaborator installs it today by setting `GOPRIVATE=github.com/Black-Rainbow-Labs/*`,
+which is the normal way to consume a private Go module and is verified working.
+Making the repository public is the same decision crates.io waits on.
 
 ---
 
