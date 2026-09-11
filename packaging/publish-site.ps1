@@ -97,7 +97,12 @@ if ($Stage) {
 
     # install.sh reads VERSION to find out what the current release is, and
     # SHA256SUMS to check what it downloaded.
-    foreach ($extra in @('SHA256SUMS', 'SHA256SUMS.minisig')) {
+    #
+    # provenance.json is here because SHA256SUMS names it. release.ps1 puts it
+    # in the sums so that verifying the sums verifies the provenance too, and
+    # publishing the sums without the file they name leaves a line that cannot
+    # be checked.
+    foreach ($extra in @('SHA256SUMS', 'SHA256SUMS.minisig', 'provenance.json')) {
         $from = Join-Path $dist $extra
         if (Test-Path -LiteralPath $from) {
             Copy-Item -LiteralPath $from -Destination $downloads -Force
