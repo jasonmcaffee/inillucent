@@ -21,17 +21,27 @@ Two readiness states, and they are not the same thing:
 
 ## Where it stands, at a glance
 
-Updated 2026-09-11. **Both one-line installers work**, verified by running them as
-written: Windows, and Ubuntu 24.04. A Linux archive is built and published beside
-the Windows one. No package manager is published yet.
+Updated 2026-09-11, at **0.1.1**. **Both one-line installers work**, verified by
+running them as written against the live site: Windows, and Ubuntu 24.04. A Linux
+archive is published beside the Windows one.
+
+**0.1.0 was withdrawn, not patched.** Its archives carried `README.md`,
+`docs/getting-started.md` and `agent-skills/inillucent-quickstart/SKILL.md` from
+before the Go command was renamed, so all three told a reader to run
+`go install .../packages/go/cmd/inillucent@latest` - and `@latest` resolves to a
+module where that directory no longer exists. The archive the site handed out
+contained an install command that failed. Replacing those archives in place would
+have left two different archives both called 0.1.0, and the Homebrew formula
+already recorded the 0.1.0 Linux checksum, which would have stopped matching with
+nothing to say so. The 0.1.0 archives are removed from the site and answer 404.
 
 | route | readiness | what it is waiting on |
 |---|---|---|
 | **inillucent.com, Windows** | **live** - `irm .../install.ps1 \| iex` installs and runs | nothing |
 | **inillucent.com, Linux** | **live** - `curl -fsSL .../install.sh \| sh` installs and runs | nothing |
 | **inillucent.com, macOS** | work remains - no archive | a Mac: `packaging/release.sh --target aarch64-apple-darwin`, then `lipo` |
-| **GitHub release** | done - `v0.1.0` at `201d0b9` with the Windows archive | the macOS archive |
-| **Go** | **published** - tag `packages/go/v0.1.1` | nothing, except that a private repository limits who can install it |
+| **GitHub release** | stale - still `v0.1.0`, which is withdrawn | a GitHub token; it is not the distribution point |
+| **Go** | **published** - tag `packages/go/v0.1.2` | nothing, except that a private repository limits who can install it |
 | **npm** | **token is the only step** - three tarballs packed, installed and run | **the signup page answers 403 to every client** - see below |
 | **PyPI** | **token is the only step** - wheel installed into a clean venv and run | an account; the form carries an hCaptcha and uploads need 2FA |
 | **crates.io** | **token is the only step** - `--workspace --dry-run` clean for all 30 crates | a token, **and the decision to make the source public** |
@@ -130,15 +140,27 @@ pwsh packaging/publish-site.ps1 -Version 0.1.0 -Link
 while the repository is private, because its assets are private too. GitHub
 carries the macOS artifacts from the MacBook to the Windows box and nothing else.
 
-**Done, on 2026-09-10.** `v0.1.0` is tagged at `201d0b9` and the release is at
-<https://github.com/Black-Rainbow-Labs/Inillucent/releases/tag/v0.1.0>, carrying the
-Windows archive, `SHA256SUMS` and `provenance.json`. The archive was downloaded
-back off the release and its SHA-256 compared against the published one: they
-match, byte for byte.
+**The GitHub release still names v0.1.0, and that is not what the site serves.**
+The release at
+<https://github.com/Black-Rainbow-Labs/Inillucent/releases/tag/v0.1.0> carries the
+withdrawn 0.1.0 archives. It is not the distribution point and never was, because
+a private repository's release assets are private - but it should be replaced with
+a v0.1.1 release for tidiness, and that needs a GitHub token this terminal does not
+have (`gh auth status` reports no host logged in, while `git push` works through
+the Windows credential manager).
+
+`v0.1.1` is tagged and pushed. Creating the release from it is one command once a
+token exists:
+
+```sh
+gh release create v0.1.1 --repo Black-Rainbow-Labs/Inillucent \
+  dist/inillucent-0.1.1-*.zip dist/inillucent-0.1.1-*.tar.gz \
+  dist/SHA256SUMS dist/provenance.json
+```
 
 An earlier v0.1.0 was cut on the old `jasonmcaffee/inillucent` repository and then
 removed: it named the wrong organisation and its archive carried the README whose
-install table was not true. The release below replaces it.
+install table was not true.
 
 `provenance.json` records the commit, the tag, the toolchain and the six checks
 the release script made - clean checkout, tag matches HEAD, version agrees, built

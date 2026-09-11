@@ -55,7 +55,19 @@ git clone https://github.com/Black-Rainbow-Labs/Inillucent
 cargo build --release -p inillucent-cli
 ```
 
-### The package managers are not published yet
+### From Go
+
+```sh
+go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent-install@latest
+inillucent-install
+```
+
+`go install` builds a small program that downloads the release for your machine,
+checks its SHA-256 and puts the four programs in `GOBIN`. It needs
+`GOPRIVATE=github.com/Black-Rainbow-Labs/*` set, because the repository is
+private and Go's public checksum database cannot read it.
+
+### The other five package managers are not published yet
 
 | | |
 |---|---|
@@ -63,10 +75,9 @@ cargo build --release -p inillucent-cli
 | **pip** | `pip install inillucent` — the wheel carries the programs and an in process driver |
 | **cargo** | `cargo install inillucent-cli` — builds from source, and the fallback on any platform with no prebuilt archive |
 | **Homebrew** | `brew install black-rainbow-labs/inillucent/inillucent` |
-| **Go** | `go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent-install@latest` |
 | **Composer** | `composer require black-rainbow-labs/inillucent && vendor/bin/inillucent-install` |
 
-None of those six answers yet — each is waiting on an account, a CAPTCHA a person
+None of those five answers yet — each is waiting on an account, a CAPTCHA a person
 has to solve, or the macOS archive. `packaging/PUBLISHING.md` says which, per
 registry, and what unblocks it. Use the two commands at the top meanwhile.
 
@@ -95,8 +106,9 @@ sees.
 
 ## Client libraries
 
-An application calls the engine in its own process, through client libraries for eight languages in
-[**jasonmcaffee/inillucent-clients**](https://github.com/jasonmcaffee/inillucent-clients):
+An application calls the engine in its own process through the C ABI. **The eight client libraries
+are not published**: there is no `inillucent-clients` repository and none of the eight packages below
+exists on its registry, so none of these lines works today. They are what the packages will be named.
 
 | | |
 |---|---|
@@ -104,10 +116,18 @@ An application calls the engine in its own process, through client libraries for
 | JavaScript | `npm install inillucent-client` |
 | Python | `pip install inillucent-client` |
 | Rust | `cargo add inillucent-client` |
-| Go | `go get github.com/jasonmcaffee/inillucent-clients/go` |
+| Go | `go get github.com/Black-Rainbow-Labs/inillucent-clients/go` |
 | Java | `com.inillucent:inillucent-client` |
 | C# | `dotnet add package Inillucent.Client` |
 | PHP | `composer require inillucent/client` |
+
+What exists today, and is installed by every route in [Install](#install):
+
+- **The C ABI**, `libinillucent_driver_capi`, with its header in the archive's `include/`.
+  [The driver](drivers/README.md) documents it.
+- **A reference Python binding** at `drivers/bindings/python/inillucent.py`, which the `pip` package
+  ships as its in process driver.
+- **The Go module** at `packages/go`, which is published.
 
 ```ts
 import { connect } from 'inillucent-client';
@@ -126,17 +146,14 @@ for (const person of db.query('SELECT first_name, last_name, email FROM person')
 db.close();
 ```
 
-The API is the same in all eight: rows come back as objects keyed by column name, values stay typed,
-`NULL` is never the empty string, and a result carries an exact `total` beside the rows a limit
-handed back. A statement the engine has not implemented fails as `unsupported` and names the
+The API is meant to be the same in all eight: rows come back as objects keyed by column name, values
+stay typed, `NULL` is never the empty string, and a result carries an exact `total` beside the rows a
+limit handed back. A statement the engine has not implemented fails as `unsupported` and names the
 construct, instead of failing as though the SQL were wrong.
 
-All eight are graded by [`drivers/conformance/suite.json`](drivers/conformance/suite.json), the same
-17 cases this repository's own Rust driver runs, so a client passes when it agrees with the engine.
-
-[Client libraries](https://inillucent.com/docs#clients) has an install line and a worked example for
-each language. [The driver](drivers/README.md) is the C ABI underneath them, for anybody writing a
-ninth.
+[`drivers/conformance/suite.json`](drivers/conformance/suite.json) is how a binding is graded: the
+same 17 cases this repository's own Rust driver runs, so a binding passes when it agrees with the
+engine. [The driver](drivers/README.md) is the C ABI underneath, for anybody writing one.
 
 ## What it does
 

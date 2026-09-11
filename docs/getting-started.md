@@ -11,15 +11,26 @@ expected output printed beside every command.
 
 ```powershell
 # Windows
-irm https://raw.githubusercontent.com/Black-Rainbow-Labs/Inillucent/main/packaging/install.ps1 | iex
+irm https://inillucent.com/downloads/install.ps1 | iex
 ```
 
 ```sh
 # macOS and Linux
-curl -fsSL https://raw.githubusercontent.com/Black-Rainbow-Labs/Inillucent/main/packaging/install.sh | sh
+curl -fsSL https://inillucent.com/downloads/install.sh | sh
 ```
 
-Or through a package manager:
+Or from Go, which is published:
+
+```sh
+go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent-install@latest
+inillucent-install
+```
+
+It needs `GOPRIVATE=github.com/Black-Rainbow-Labs/*`, because the repository is private and Go's
+public checksum database cannot read it.
+
+The other five package managers are not published yet. This is what each will be, and
+`packaging/PUBLISHING.md` says what each is waiting on:
 
 | | |
 |---|---|
@@ -27,7 +38,6 @@ Or through a package manager:
 | **pip** | `pip install inillucent` — the wheel carries the four programs and an in process driver |
 | **cargo** | `cargo install inillucent-cli` — builds from source, and the fallback on any platform with no prebuilt archive |
 | **Homebrew** | `brew install black-rainbow-labs/inillucent/inillucent` |
-| **Go** | `go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent-install@latest` |
 | **Composer** | `composer require black-rainbow-labs/inillucent && vendor/bin/inillucent-install` |
 
 Each of them installs the same four programs, and each downloader checks the release's published

@@ -12,18 +12,22 @@ file, and the programs below open it directly.
 ## Install
 
 ```powershell
-irm https://raw.githubusercontent.com/Black-Rainbow-Labs/Inillucent/main/packaging/install.ps1 | iex   # Windows
+irm https://inillucent.com/downloads/install.ps1 | iex   # Windows
 ```
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Black-Rainbow-Labs/Inillucent/main/packaging/install.sh | sh  # macOS, Linux
+curl -fsSL https://inillucent.com/downloads/install.sh | sh  # macOS, Linux
 ```
 
-Or from whichever package manager the project already uses — `npm install -g inillucent`,
-`pip install inillucent`, `cargo install inillucent-cli`, `brew install black-rainbow-labs/inillucent/inillucent`,
-`go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent-install@latest`,
-`composer require black-rainbow-labs/inillucent`. Every one installs the same four programs and verifies the
-release's published SHA-256 first.
+Or from Go, which is published —
+`go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent-install@latest`, then run
+`inillucent-install`. It needs `GOPRIVATE=github.com/Black-Rainbow-Labs/*` set, because the repository is
+private.
+
+`npm install -g inillucent`, `pip install inillucent`, `cargo install inillucent-cli`,
+`brew install black-rainbow-labs/inillucent/inillucent` and `composer require black-rainbow-labs/inillucent`
+are what the other five will be, and none of them answers yet. Use the two commands above meanwhile.
+Every route installs the same four programs and verifies the release's published SHA-256 first.
 
 From a clone: `cargo build --release -p inillucent-cli`, and the binaries land in `target/release`.
 
