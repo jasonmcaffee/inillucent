@@ -2,7 +2,7 @@
 #
 # Builds a universal macOS installer package.
 #
-#   ./packaging/macos/build-pkg.sh --version 0.1.0
+#   ./packaging/macos/build-pkg.sh --version 0.1.1
 #
 # Two `cargo build`s, one per architecture, `lipo`'d into one universal file per
 # program, staged under a package root rooted at /usr/local, then `pkgbuild` and

@@ -34,8 +34,8 @@
     The inillucent-site checkout. Defaults to a sibling of this repository.
 
 .EXAMPLE
-    pwsh packaging/publish-site.ps1 -Version 0.1.0 -Stage
-    pwsh packaging/publish-site.ps1 -Version 0.1.0 -Link
+    pwsh packaging/publish-site.ps1 -Version 0.1.1 -Stage
+    pwsh packaging/publish-site.ps1 -Version 0.1.1 -Link
 #>
 [CmdletBinding()]
 param(

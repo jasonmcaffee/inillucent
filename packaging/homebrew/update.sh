@@ -38,7 +38,14 @@ sums="$root/dist/SHA256SUMS"
 [ -f "$sums" ] || { echo "$sums does not exist. Run packaging/release.sh first." >&2; exit 1; }
 
 formula="$(cat "$root/packaging/homebrew/inillucent.rb")"
-formula="${formula//0.1.0/$version}"
+
+# The version to replace is the one the template declares, read out of the
+# template. Substituting a version literal written into this script instead
+# meant that the moment the template was bumped, --version stopped having any
+# effect and the formula kept pointing at the previous release's archives.
+template="$(printf '%s\n' "$formula" | sed -n 's/^  version "\(.*\)"/\1/p' | head -1)"
+[ -n "$template" ] || { echo "the formula declares no version" >&2; exit 1; }
+formula="${formula//$template/$version}"
 
 missing=0
 fill() {

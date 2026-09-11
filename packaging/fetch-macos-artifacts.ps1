@@ -14,8 +14,8 @@
     a network. The repository is private, so the assets are private too, which is
     correct - inillucent.com is the public distribution point, not GitHub.
 
-        on the MacBook:  ./packaging/macos/release-macos.sh --version 0.1.0 --upload
-        here:            pwsh packaging/fetch-macos-artifacts.ps1 -Version 0.1.0
+        on the MacBook:  ./packaging/macos/release-macos.sh --version 0.1.1 --upload
+        here:            pwsh packaging/fetch-macos-artifacts.ps1 -Version 0.1.1
 
     -FromDirectory skips GitHub entirely, for when the two machines are on the
     same network and a copy is simpler than a round trip.
@@ -36,8 +36,8 @@
     owner/name of the GitHub repository holding the release.
 
 .EXAMPLE
-    pwsh packaging/fetch-macos-artifacts.ps1 -Version 0.1.0
-    pwsh packaging/fetch-macos-artifacts.ps1 -Version 0.1.0 -FromDirectory D:\from-macbook
+    pwsh packaging/fetch-macos-artifacts.ps1 -Version 0.1.1
+    pwsh packaging/fetch-macos-artifacts.ps1 -Version 0.1.1 -FromDirectory D:\from-macbook
 #>
 [CmdletBinding()]
 param(
