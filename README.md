@@ -29,35 +29,33 @@ workloads that are slower than SQLite along with what each one costs.
 
 ## Install
 
-**None of the package managers below is published yet, and the download site is
-not serving the installers yet.** Checked on 2026-09-10: `npm`, PyPI, crates.io,
-the Homebrew tap, the Go module proxy and Packagist all answer 404, and so do
-`https://inillucent.com/downloads/install.ps1` and `install.sh`. What follows is
-what the install will be, kept here so the shape is reviewable. To get inillucent
-today, build it:
+**Windows**
+
+```powershell
+irm https://inillucent.com/downloads/install.ps1 | iex
+```
+
+**macOS and Linux**
+
+```sh
+curl -fsSL https://inillucent.com/downloads/install.sh | sh
+```
+
+Both download the archive for the machine, check its SHA-256 against the published
+`SHA256SUMS`, and put the four programs on `PATH`. Nothing is written outside your
+home directory and neither needs administrator rights.
+
+Verified on 2026-09-11 by running each command as written: Windows installs and
+runs, and so does Ubuntu 24.04. **macOS has no prebuilt archive yet**, so the
+second command works on Linux today and reports that there is no release for
+Darwin; building it needs a Mac. Until then, macOS builds from source:
 
 ```sh
 git clone https://github.com/Black-Rainbow-Labs/Inillucent
 cargo build --release -p inillucent-cli
 ```
 
-and the four programs are in `target/release`. `packaging/install.ps1 -FromDist`
-installs a locally built archive on Windows, and `packaging/release.ps1` is what
-builds one.
-
-### What it will be, once the packages are out
-
-```powershell
-# Windows
-irm https://inillucent.com/downloads/install.ps1 | iex
-```
-
-```sh
-# macOS and Linux
-curl -fsSL https://inillucent.com/downloads/install.sh | sh
-```
-
-Or from the package manager the project already uses:
+### The package managers are not published yet
 
 | | |
 |---|---|
@@ -68,9 +66,9 @@ Or from the package manager the project already uses:
 | **Go** | `go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent@latest` |
 | **Composer** | `composer require black-rainbow-labs/inillucent && vendor/bin/inillucent-install` |
 
-Every one of them installs the same four programs, and every downloader checks the release's
-published SHA-256 before it unpacks anything. `packaging/PUBLISHING.md` tracks what each one is
-still waiting on.
+None of those six answers yet — each is waiting on an account, a CAPTCHA a person
+has to solve, or the macOS archive. `packaging/PUBLISHING.md` says which, per
+registry, and what unblocks it. Use the two commands at the top meanwhile.
 
 
 ## A first database
