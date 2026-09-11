@@ -24,7 +24,6 @@ import (
 	"compress/gzip"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -37,6 +36,11 @@ import (
 )
 
 const repository = "Black-Rainbow-Labs/Inillucent"
+
+// Where the archives live. The repository is private, so a GitHub release
+// cannot be the distribution point - its assets are private too. The site is,
+// and install.ps1 and install.sh both read from here.
+const downloads = "https://inillucent.com/downloads"
 
 // programs are the four the release ships.
 var programs = []string{"inillucent", "inillucent-shell", "inillucent-mcp", "inillucent-migrate"}
@@ -65,22 +69,14 @@ func target() (string, error) {
 
 // latest asks GitHub which release is newest.
 func latest() (string, error) {
-	client := &http.Client{Timeout: 30 * time.Second}
-	response, err := client.Get("https://api.github.com/repos/" + repository + "/releases/latest")
+	// VERSION, beside the archives, is what says which release is current. One
+	// file on the same host as everything else, so there is no second service to
+	// be reachable and no API that can answer differently.
+	body, err := fetch(downloads + "/VERSION")
 	if err != nil {
 		return "", err
 	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("GitHub answered %s when asked for the latest release", response.Status)
-	}
-	var release struct {
-		TagName string `json:"tag_name"`
-	}
-	if err := json.NewDecoder(response.Body).Decode(&release); err != nil {
-		return "", err
-	}
-	return strings.TrimPrefix(release.TagName, "v"), nil
+	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(string(body)), "v")), nil
 }
 
 // fetch downloads a URL into memory, refusing anything that is not a 200.
@@ -118,6 +114,34 @@ func verify(archive []byte, sums []byte, name string) error {
 		}
 	}
 	return fmt.Errorf("SHA256SUMS does not list %s", name)
+}
+
+// listed reports whether SHA256SUMS names one archive.
+//
+// @param sums - the SHA256SUMS body
+// @param name - the archive file name
+func listed(sums []byte, name string) bool {
+	for _, published := range names(sums) {
+		if published == name {
+			return true
+		}
+	}
+	return false
+}
+
+// names returns every file SHA256SUMS lists, in the order it lists them.
+//
+// @param sums - the SHA256SUMS body
+func names(sums []byte) []string {
+	var out []string
+	scanner := bufio.NewScanner(strings.NewReader(string(sums)))
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) >= 2 {
+			out = append(out, fields[len(fields)-1])
+		}
+	}
+	return out
 }
 
 // install writes one program out of the archive into the destination.
@@ -259,17 +283,32 @@ func main() {
 		extension = ".zip"
 	}
 	name := fmt.Sprintf("inillucent-%s-%s%s", *version, triple, extension)
-	base := fmt.Sprintf("https://github.com/%s/releases/download/v%s", repository, *version)
 
-	fmt.Printf("downloading inillucent %s for %s\n", *version, triple)
-	archive, err := fetch(base + "/" + name)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "%v\n", err)
-		os.Exit(1)
-	}
-	sums, err := fetch(base + "/SHA256SUMS")
+	// SHA256SUMS lists every archive the release published, and it is needed to
+	// verify the download anyway - so it is fetched first and used to answer
+	// whether this machine has a build at all. Asking for the archive first
+	// makes an unpublished platform a bare 404 instead of a sentence.
+	sums, err := fetch(downloads + "/SHA256SUMS")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "could not fetch SHA256SUMS: %v\n", err)
+		os.Exit(1)
+	}
+	if !listed(sums, name) {
+		fmt.Fprintf(os.Stderr, "inillucent %s has no build for %s yet.\n", *version, triple)
+		fmt.Fprintln(os.Stderr, "  published in this release:")
+		for _, published := range names(sums) {
+			fmt.Fprintf(os.Stderr, "    %s\n", published)
+		}
+		fmt.Fprintln(os.Stderr, "  Build it from source instead:")
+		fmt.Fprintf(os.Stderr, "    git clone https://github.com/%s\n", repository)
+		fmt.Fprintln(os.Stderr, "    cargo build --release -p inillucent-cli")
+		os.Exit(1)
+	}
+
+	fmt.Printf("downloading inillucent %s for %s\n", *version, triple)
+	archive, err := fetch(downloads + "/" + name)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)
 	}
 	if err := verify(archive, sums, name); err != nil {
