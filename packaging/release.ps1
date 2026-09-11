@@ -138,6 +138,28 @@ function Copy-Artifact {
     Copy-Item -LiteralPath $From -Destination $Into -Force
 }
 
+function Write-Sums {
+    <#
+    .SYNOPSIS
+        Writes SHA256SUMS with LF line endings, whatever platform this is.
+
+    .DESCRIPTION
+        The file is read by sha256sum, shasum and awk on machines that are not
+        this one. A carriage return becomes part of the file name those tools
+        see, so the entry matches nothing and the installer reports that the
+        platform was never published while listing it.
+
+    .PARAMETER Path
+        The SHA256SUMS file.
+
+    .PARAMETER Lines
+        The lines, without terminators.
+    #>
+    param([string] $Path, [string[]] $Lines)
+    $text = ($Lines -join "`n") + "`n"
+    [System.IO.File]::WriteAllText($Path, $text, (New-Object System.Text.UTF8Encoding $false))
+}
+
 function Get-PinnedToolchain {
     <#
     .SYNOPSIS
@@ -536,6 +558,12 @@ Compress-Archive -Path $stage -DestinationPath $archive -CompressionLevel Optima
 # One SHA256SUMS for the whole dist directory, rewritten each time, so an
 # installer can verify what it downloaded against one file.
 #
+# **Written with LF, on every platform.** Set-Content uses the platform's line
+# ending, and a CRLF SHA256SUMS is read by `awk` in packaging/install.sh on
+# Linux - where `$NF` then carries a trailing carriage return and matches
+# nothing. Windows awk opens files in text mode and drops the \r, so the whole
+# class of failure was invisible from the machine that produced the file.
+#
 # **Wrapped in @(...).** A single-match `ForEach-Object` pipeline unwraps to a
 # scalar string rather than a one-element array, so a dist directory holding
 # exactly one archive turned the later `$lines += ...` into string
@@ -549,7 +577,7 @@ $lines = @(Get-ChildItem -Path $dist -Filter '*.zip' | ForEach-Object {
 Get-ChildItem -Path $dist -Filter '*.tar.gz' -ErrorAction SilentlyContinue | ForEach-Object {
     $lines += "$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
 }
-Set-Content -Path $sums -Value $lines
+Write-Sums -Path $sums -Lines $lines
 
 # --------------------------------------------------------------------------
 # Provenance: what this archive is, and what was checked before it existed.
@@ -590,7 +618,7 @@ $record | ConvertTo-Json -Depth 5 | Set-Content -Path $provenance
 # The provenance goes into SHA256SUMS as well, so a downloader who verified the
 # archive has also verified the claims made about it.
 $lines += "$((Get-FileHash -LiteralPath $provenance -Algorithm SHA256).Hash.ToLower())  provenance.json"
-Set-Content -Path $sums -Value $lines
+Write-Sums -Path $sums -Lines $lines
 
 Write-Host ''
 Write-Host "staged     $stage"

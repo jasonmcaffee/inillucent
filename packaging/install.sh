@@ -91,7 +91,10 @@ verify() {
   archive="$1"
   sums="$2"
   name="$(basename "$archive")"
-  expected="$(awk -v want="$name" '$NF == want { print $1 }' "$sums" | head -1)"
+  # tr -d '' because a SHA256SUMS written on Windows arrives with CRLF, and
+  # awk on Linux keeps the carriage return in $NF - so the name never matches
+  # and a correct download is reported as unpublished.
+  expected="$(tr -d '' < "$sums" | awk -v want="$name" '$NF == want { print $1 }' | head -1)"
   if [ -z "$expected" ]; then
     echo "SHA256SUMS does not list $name" >&2
     exit 1
@@ -143,7 +146,11 @@ else
   # "is there a build for this machine" before asking for one. Without this a
   # platform that is not published yet gets `curl -fsSL` failing on a 404, which
   # under `set -e` ends the script with nothing printed at all.
-  curl -fsSL "$base_url/SHA256SUMS" -o "$work/SHA256SUMS"
+  curl -fsSL "$base_url/SHA256SUMS" -o "$work/SHA256SUMS.raw"
+  # A SHA256SUMS produced on Windows arrives with CRLF, and awk on Linux keeps
+  # the carriage return in the file name - so every lookup below fails while the
+  # listing prints names that look exactly right. Strip it once, here.
+  tr -d '\r' < "$work/SHA256SUMS.raw" > "$work/SHA256SUMS"
   if ! awk -v want="$name" '$NF == want { found = 1 } END { exit !found }' "$work/SHA256SUMS"; then
     echo "inillucent $version has no build for $target yet." >&2
     echo "  published in this release:" >&2
