@@ -43,17 +43,37 @@ wrong — item 6 has the numbers.
 
 ## 3. The operator chain is rebuilt on every execution
 
-Measured, both arms warmed and the order reversed so a warm cache could not flatter either: reusing a
-compiled chain is worth **738 ns to 358** on `SELECT 1`, **1,413 to 786** on a point lookup, and
-**71,672 to 59,983** on the 200-row range scan that `join.range` and `range.lookaside` are shaped
-like — which is the 14-15% those two sit under SQLite.
+Measured, both arms warmed and the order reversed so a warm cache could not flatter either. Re-measured
+in task-1911 on a quiet box, and the prize is larger than it was recorded at:
+
+| statement | rebuilt | reused | saved |
+|---|---:|---:|---:|
+| `SELECT 1` | 921 ns | 401 ns | 130% faster |
+| a point lookup by rowid | 2,340 ns | 858 ns | 173% faster |
+| a 200-row range scan | 110,759 ns | 100,042 ns | 11% faster |
+
+The last line is the one that matters for the bars in item 2: `join.range` and `range.lookaside` are
+that shape and sit 14-15% under SQLite, so 11% is most of the distance.
+`inillucent-execprofile` prints this table, and the arms differ in the chain build and nothing else.
 
 `physical::build_statement` already holds a chain across executions and rebuilds only the source, and
-nothing calls it. What stops it is ownership rather than effort: an index nested loop holds a borrow
-of the tree it reads, and the engine keeps its trees in a map whose write path takes them mutably, so
-caching a chain means reference counting the trees. The failure mode of getting that borrow
-discipline wrong is a runtime panic on a shape as ordinary as an `UPDATE` that reads the table it
-writes, which is why it wants its own run at it with the discipline designed rather than discovered.
+nothing in the engine's execution path calls it — `Cached::Select` goes through `run_any_prepared`,
+which builds afresh every time.
+
+**What stops it is a lifetime, and naming it precisely is what the work needs.**
+`build_statement` returns `Statement<'t>` borrowed from `&'t dyn TreeCatalog`, and the catalog is the
+connection. Caching one on the connection is therefore a self-referential structure, which is not a
+borrow discipline problem but a shape Rust does not have. The catalog has to be reached by a
+reference-counted handle instead of a borrow, and `&'t dyn TreeCatalog` is threaded through
+`physical.rs`, `Source<'t>` and `Space<'_>`, so that is a change to the execution layer's ownership
+model rather than a change to one function.
+
+Underneath it is the borrow discipline the old note described: an index nested loop holds a borrow of
+the tree it reads, and the engine keeps its trees in a map whose write path takes them mutably. The
+failure mode of getting that wrong is a runtime panic on a shape as ordinary as an `UPDATE` that
+reads the table it writes — and the governed crates forbid a panic on any path that reads a page, so
+the write path has to take the borrow fallibly and refuse by name rather than unwind. It wants its
+own run at it with the discipline designed rather than discovered.
 
 ## 4. Linux
 
