@@ -22,18 +22,14 @@ they share no words with it.
 
 ```sh
 inillucent --db greek-philosophy.rdb query \
-  "SELECT p.title, p.url, p.body
-   FROM passage p, (SELECT embed('search_query: ' || ?1) AS q) AS probe
-   ORDER BY vector_distance_cos(p.v, probe.q) LIMIT 5" \
+  "SELECT title, url, body FROM passage
+   ORDER BY vector_distance_cos(v, embed('search_query: ' || ?1)) LIMIT 5" \
   --params '["who was Seneca"]' --output json
 ```
 
-Three parts of that are not optional. **Copy the statement as it is written**, changing only the
+Two parts of that are not optional. **Copy the statement as it is written**, changing only the
 question in `--params`.
 
-- **The `(SELECT embed(...)) AS probe` subquery.** It is what makes the question get embedded once.
-  Writing `embed(...)` directly inside the `ORDER BY` instead embeds it **once per passage** — 2,661
-  times — and the same question then takes 65 seconds rather than 0.9. Both return the same rows.
 - **`'search_query: ' || ?1`.** The model was trained with `search_query: ` on questions and the
   passages here were stored with `search_document: `. Leaving the prefix off still returns rows, and
   they are quietly worse. Never leave it off.
@@ -67,7 +63,8 @@ passages that actually answer it.**
   are. Five passages come back for "what did Kant think about the categories of understanding" as
   readily as for "who was Seneca", and there is no Kant in this corpus at all.
 
-  Adding `vector_distance_cos(p.v, probe.q) AS distance` to the projection gives you a number, and
+  Adding `vector_distance_cos(v, embed('search_query: ' || ?1)) AS distance` to the projection
+  gives you a number, and
   the number only catches one of the two cases. Measured on this corpus: questions it answers sit at
   **0.15 to 0.24**; questions from another subject entirely — Kubernetes, sourdough, the 1994 World
   Cup — sit at **0.44 to 0.53**; and the Kant question sits at **0.19**, right in the answerable

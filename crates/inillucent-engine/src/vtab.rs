@@ -260,6 +260,70 @@ fn walk(
     }
 }
 
+/// Walks a shadow table's rows in key order, starting at a given rowid.
+///
+/// **A seek to `from`, not a scan of the whole tree.** `PagedTree::visit_range`
+/// descends once to the leaf that could hold `from` and walks right from
+/// there, which is what turns `deltas_above` from a read of the whole delta
+/// log - every entry a base generation has already folded, decoded and
+/// thrown away, on every commit - into a read of only the entries that
+/// arrived since. A rowid table's rows are already in key order, so nothing
+/// below `from` is worth visiting at all.
+///
+/// @param pool - the buffer pool
+/// @param tree - the shadow table
+/// @param from - the smallest rowid to visit
+/// @param body - what to do with each row, stopping when it says so
+fn walk_from(
+    pool: &Pool,
+    tree: &PagedTree,
+    from: i64,
+    body: &mut dyn FnMut(&[Value<'static>]) -> DbResult<bool>,
+) -> DbResult<()> {
+    let low = tree.encode_key(&[Datum::Int(from)]);
+    let mut stop = false;
+    let mut failure: Option<inillucent_base::DbError> = None;
+    tree.visit_range(pool, &low, &mut |leaf| {
+        for row in leaf.live()? {
+            // The leaf `visit_range` lands on is the one that *could* hold
+            // `from` - it may still open below it, since a leaf's range is
+            // bounded by its neighbours' keys rather than by `from` itself -
+            // so what a seek does not do for free is done here instead,
+            // once per row rather than once per tree.
+            if let Some(Datum::Int(rowid)) = row.first().copied() {
+                if rowid < from {
+                    continue;
+                }
+            }
+            let owned: Vec<OwnedDatum> = row.iter().map(OwnedDatum::from_datum).collect();
+            let values = match as_values(&owned) {
+                Ok(values) => values,
+                Err(error) => {
+                    failure = Some(error);
+                    return Ok(false);
+                }
+            };
+            match body(&values) {
+                Ok(true) => {}
+                Ok(false) => {
+                    stop = true;
+                    return Ok(false);
+                }
+                Err(error) => {
+                    failure = Some(error);
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    })?;
+    let _ = stop;
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
 /// Returns the largest rowid a shadow table holds.
 ///
 /// @param pool - the buffer pool
@@ -319,6 +383,24 @@ impl ShadowStore for ReadStore<'_> {
             return Ok(());
         };
         walk(self.pool, tree, &mut |values| {
+            let rowid = match values.first() {
+                Some(Value::Integer(number)) => *number,
+                _ => 0,
+            };
+            body(rowid, values)
+        })
+    }
+
+    fn scan_from(
+        &mut self,
+        root: u32,
+        from: i64,
+        body: &mut dyn FnMut(i64, &[Value<'static>]) -> DbResult<bool>,
+    ) -> DbResult<()> {
+        let Some(tree) = self.trees.get(&root) else {
+            return Ok(());
+        };
+        walk_from(self.pool, tree, from, &mut |values| {
             let rowid = match values.first() {
                 Some(Value::Integer(number)) => *number,
                 _ => 0,
@@ -419,6 +501,24 @@ impl ShadowStore for WriteStore<'_> {
             return Ok(());
         };
         walk(self.database.pool(), tree, &mut |values| {
+            let rowid = match values.first() {
+                Some(Value::Integer(number)) => *number,
+                _ => 0,
+            };
+            body(rowid, values)
+        })
+    }
+
+    fn scan_from(
+        &mut self,
+        root: u32,
+        from: i64,
+        body: &mut dyn FnMut(i64, &[Value<'static>]) -> DbResult<bool>,
+    ) -> DbResult<()> {
+        let Some(tree) = self.trees.get(&root) else {
+            return Ok(());
+        };
+        walk_from(self.database.pool(), tree, from, &mut |values| {
             let rowid = match values.first() {
                 Some(Value::Integer(number)) => *number,
                 _ => 0,

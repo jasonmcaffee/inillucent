@@ -952,6 +952,8 @@ fn automatic_indexes(
                 conflict,
                 prefix_rows: Vec::new(),
                 analysed_rows: None,
+                // A constraint-generated index is a b-tree, never a vector one.
+                metric: None,
             });
         }
     }
@@ -1016,6 +1018,8 @@ fn automatic_indexes(
             conflict,
             prefix_rows: Vec::new(),
             analysed_rows: None,
+            // A constraint-generated index is a b-tree, never a vector one.
+            metric: None,
         });
     }
     (indexes, rowid_key_conflict)
@@ -1128,6 +1132,10 @@ pub fn index_from_create_sql(sql: &[u8], table: &TableInfo, root: u32) -> DbResu
         conflict: None,
         prefix_rows: Vec::new(),
         analysed_rows: None,
+        // A `CREATE INDEX` parsed from `sqlite_schema` is a b-tree; a vector
+        // index never reaches the catalog this way - see
+        // `inillucent-engine/src/vectors.rs::refresh_vector_indexes`.
+        metric: None,
     })
 }
 

@@ -22,11 +22,37 @@
 //! - `%_docsize(id, sz)` holds one varint per column: how many tokens it had.
 //!   `bm25` needs it and nothing else does.
 //! - `%_data(id, block)` holds row 1, the totals - the document count and the
-//!   token count per column - and one row per term, holding that term's whole
-//!   doclist.
-//! - `%_idx(segid, term, pgno)` is the term dictionary: `segid` is always zero,
-//!   `term` is the term's bytes, and `pgno` is the `%_data` row that holds its
-//!   doclist. Reading a term is therefore one seek and one row.
+//!   token count per column - and nothing else that this build writes. A file
+//!   written before task-1911 also has one row per term here; see below.
+//! - `%_idx(segid, term, doclist)` is the term dictionary **and** the term's
+//!   whole doclist, in one row: `segid` is always zero, `term` is the term's
+//!   bytes, and `doclist` is the postings this build used to keep in a
+//!   separate `%_data` row. Reading or writing a term is one row.
+//!
+//! ## One row per term, not two
+//!
+//! Building the index used to cost two tree writes per term touched - the
+//! dictionary row naming a `%_data` page, and that page's doclist - because
+//! the dictionary was designed to point at a segment the way SQLite's does,
+//! and this index never grew the segments that would have made the
+//! indirection earn its keep. Measured on `extension.fts.build`'s 500-document
+//! corpus, the dictionary write and the doclist write together were about 2.9
+//! of the workload's 10.97 ms. Folding them into the one row a term's key
+//! already identifies removes one of the two writes and, for the common path
+//! of a term already open this transaction, one of the two reads.
+//!
+//! **A row is self-describing, not the table.** `%_idx`'s third column holds
+//! an `Integer` for a page number when an older build wrote the row and this
+//! build has not touched it since, or a `Blob` for the doclist inline when
+//! this build wrote it. [`term_value`] is where that is decided, and it is
+//! decided per row rather than by a schema version in `%_config`, because the
+//! truth is per row: a file can hold both kinds side by side while it is being
+//! written to gradually, and every write from this build replaces whatever it
+//! touches with the inline form. A term that is never written again keeps
+//! answering through the old indirection for as long as the file exists; the
+//! `rebuild` command converts every row at once, on request, because it
+//! already reads every row out of `%_content` and writes the index from
+//! scratch.
 //!
 //! A doclist is a run of entries, each: the rowid as a delta from the previous
 //! one, then per column that has a position, the column number, how many
@@ -35,6 +61,7 @@
 //! one row.
 
 pub mod bm25;
+mod doclist;
 pub mod expr;
 pub mod tokenize;
 pub mod vocab;
@@ -42,7 +69,7 @@ pub mod vocab;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use inillucent_base::{varint, DbResult};
+use inillucent_base::DbResult;
 use inillucent_value::Value;
 
 use super::{
@@ -51,14 +78,16 @@ use super::{
 };
 use crate::shadow::ShadowTables;
 
+use self::doclist::{
+    append_doclist_entry, decode_doclist, doclist_rows, encode_doclist, last_doclist_rowid,
+    read_varint, write_varint, DocEntry,
+};
 use self::expr::Phrase;
 use self::expr::Query;
 use self::tokenize::Tokenizer;
 
 /// The `%_data` row that holds the totals.
 const TOTALS: i64 = 1;
-/// The first `%_data` row a term's doclist may use.
-const FIRST_TERM_ROW: i64 = 16;
 /// The segment number the term dictionary uses.
 ///
 /// SQLite's `%_idx` keys a term by the segment it is in; this index has one
@@ -265,9 +294,14 @@ impl Module for Fts5Module {
             },
             ShadowTable {
                 suffix: b"idx".to_vec(),
-                create_sql: "CREATE TABLE \"%_idx\"(segid, term, pgno, PRIMARY KEY(segid, term)) \
-                             WITHOUT ROWID"
-                    .to_string(),
+                // The third column is untyped, so it takes an integer page
+                // number from a file an older build wrote just as readily as
+                // the blob doclist this build writes - see the module's own
+                // doc comment for why the two coexist.
+                create_sql:
+                    "CREATE TABLE \"%_idx\"(segid, term, doclist, PRIMARY KEY(segid, term)) \
+                     WITHOUT ROWID"
+                        .to_string(),
                 owner: None,
             },
             match &options.content {
@@ -738,8 +772,8 @@ impl VirtualTable for Fts5Table {
     }
 
     fn integrity(&mut self, context: &mut Context<'_>) -> DbResult<Option<String>> {
-        // The check reads `%_data` rows rather than doclists, so it is the one
-        // reader the buffer cannot answer: written out first.
+        // The check reads `%_idx` rows rather than staged doclists, so it is
+        // the one reader the buffer cannot answer: written out first.
         flush_doclists(context, &self.shadows, &self.pending)?;
         let mut problems = Vec::new();
         let mut rows = Vec::new();
@@ -757,30 +791,22 @@ impl VirtualTable for Fts5Table {
                 problems.push(format!("row {rowid} has no size"));
             }
         }
-        let mut terms = Vec::new();
+        let mut terms: Vec<(Vec<u8>, Vec<Value<'static>>)> = Vec::new();
         self.shadows.scan_keyed(context, b"idx", 2, |values| {
-            let term = values
-                .get(1)
-                .and_then(Value::as_blob)
-                .map(|blob| blob.raw().to_vec());
-            let page = values.get(2).and_then(Value::as_integer);
-            if let (Some(term), Some(page)) = (term, page) {
-                terms.push((term, page));
+            if let Some(term) = values.get(1).and_then(Value::as_blob) {
+                terms.push((term.raw().to_vec(), values.to_vec()));
             }
             Ok(true)
         })?;
-        for (term, page) in &terms {
-            let Some(row) = self.shadows.read_row(context, b"data", *page)? else {
+        for (term, row) in &terms {
+            let Some(bytes) = resolve_doclist(context, &self.shadows, row)? else {
                 problems.push(format!(
                     "the term {} has no doclist",
                     String::from_utf8_lossy(term)
                 ));
                 continue;
             };
-            let Some(blob) = row.get(1).and_then(Value::as_blob) else {
-                continue;
-            };
-            for entry in decode_doclist(blob.raw()) {
+            for entry in decode_doclist(&bytes) {
                 if !rows.contains(&entry.rowid) {
                     problems.push(format!(
                         "the term {} names row {} which is not in the content",
@@ -927,218 +953,6 @@ impl Totals {
     }
 }
 
-/// Reads one varint, advancing the offset.
-fn read_varint(bytes: &[u8], at: &mut usize) -> u64 {
-    let Some(rest) = bytes.get(*at..) else {
-        return 0;
-    };
-    let Ok(decoded) = varint::decode(rest) else {
-        *at = bytes.len();
-        return 0;
-    };
-    *at = at.saturating_add(decoded.len);
-    decoded.value
-}
-
-/// Appends one varint.
-fn write_varint(out: &mut Vec<u8>, value: u64) {
-    let mut buffer = [0u8; 9];
-    if let Ok(used) = varint::encode(&mut buffer, value) {
-        out.extend_from_slice(buffer.get(..used).unwrap_or(&[]));
-    }
-}
-
-/// One row's appearance in one term's doclist.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DocEntry {
-    /// Which row.
-    pub rowid: i64,
-    /// The positions the term appears at, by column.
-    pub columns: Vec<(usize, Vec<u32>)>,
-}
-
-impl DocEntry {
-    /// Returns how many times the term appears in one column.
-    pub fn count_in(&self, column: usize) -> usize {
-        self.columns
-            .iter()
-            .find(|(index, _)| *index == column)
-            .map(|(_, positions)| positions.len())
-            .unwrap_or(0)
-    }
-
-    /// Returns how many times the term appears anywhere in the row.
-    pub fn count(&self) -> usize {
-        self.columns
-            .iter()
-            .map(|(_, positions)| positions.len())
-            .sum()
-    }
-}
-
-/// Encodes a doclist.
-fn encode_doclist(entries: &[DocEntry]) -> Vec<u8> {
-    let mut out = Vec::new();
-    let mut previous = 0i64;
-    for entry in entries {
-        write_varint(&mut out, entry.rowid.wrapping_sub(previous) as u64);
-        previous = entry.rowid;
-        write_varint(&mut out, entry.columns.len() as u64);
-        for (column, positions) in &entry.columns {
-            write_varint(&mut out, *column as u64);
-            write_varint(&mut out, positions.len() as u64);
-            let mut last = 0u32;
-            for position in positions {
-                write_varint(&mut out, u64::from(position.wrapping_sub(last)));
-                last = *position;
-            }
-        }
-    }
-    out
-}
-
-/// Returns the last rowid in an encoded doclist, without decoding it.
-///
-/// Walks the same structure `decode_doclist` walks and allocates nothing: it
-/// keeps the running rowid and steps over each entry's varints. It answers
-/// `None` unless the walk consumes the blob exactly, which is what makes it
-/// safe to act on - a doclist this cannot account for byte-for-byte is one the
-/// caller falls back to decoding, rather than one it appends to on a guess.
-fn last_doclist_rowid(bytes: &[u8]) -> Option<i64> {
-    let mut at = 0usize;
-    let mut rowid = 0i64;
-    let mut seen = false;
-    while at < bytes.len() {
-        rowid = rowid.wrapping_add(read_varint(bytes, &mut at) as i64);
-        let columns = read_varint(bytes, &mut at) as usize;
-        if columns > 4096 || at > bytes.len() {
-            return None;
-        }
-        for _ in 0..columns {
-            let _column = read_varint(bytes, &mut at);
-            let count = read_varint(bytes, &mut at) as usize;
-            if count > 1 << 24 || at > bytes.len() {
-                return None;
-            }
-            for _ in 0..count {
-                let _delta = read_varint(bytes, &mut at);
-            }
-            if at > bytes.len() {
-                return None;
-            }
-        }
-        seen = true;
-    }
-    if at == bytes.len() && seen {
-        Some(rowid)
-    } else {
-        None
-    }
-}
-
-/// Appends one entry to an encoded doclist, given its rowid delta.
-///
-/// The bytes it writes are exactly the bytes `encode_doclist` would write for
-/// the same entry in the same position, which is the property that lets the
-/// fast path below produce a doclist indistinguishable from a re-encoded one.
-fn append_doclist_entry(out: &mut Vec<u8>, delta: i64, entry: &DocEntry) {
-    write_varint(out, delta as u64);
-    write_varint(out, entry.columns.len() as u64);
-    for (column, positions) in &entry.columns {
-        write_varint(out, *column as u64);
-        write_varint(out, positions.len() as u64);
-        let mut last = 0u32;
-        for position in positions {
-            write_varint(out, u64::from(position.wrapping_sub(last)));
-            last = *position;
-        }
-    }
-}
-
-/// Decodes a doclist.
-pub fn decode_doclist(bytes: &[u8]) -> Vec<DocEntry> {
-    let mut entries = Vec::new();
-    let mut at = 0usize;
-    let mut rowid = 0i64;
-    while at < bytes.len() {
-        rowid = rowid.wrapping_add(read_varint(bytes, &mut at) as i64);
-        let columns = read_varint(bytes, &mut at) as usize;
-        if columns > 4096 {
-            break;
-        }
-        let mut per_column = Vec::with_capacity(columns);
-        for _ in 0..columns {
-            let column = read_varint(bytes, &mut at) as usize;
-            let count = read_varint(bytes, &mut at) as usize;
-            if count > 1 << 24 {
-                return entries;
-            }
-            let mut positions = Vec::with_capacity(count.min(4096));
-            let mut last = 0u32;
-            for _ in 0..count {
-                last = last.wrapping_add(read_varint(bytes, &mut at) as u32);
-                positions.push(last);
-            }
-            per_column.push((column, positions));
-        }
-        entries.push(DocEntry {
-            rowid,
-            columns: per_column,
-        });
-        if at >= bytes.len() {
-            break;
-        }
-    }
-    entries
-}
-
-/// Collects the rows a doclist names, without decoding their positions.
-///
-/// A row is collected when it has a position in a column the caller asked for
-/// and that the table declares - the same test [`expr::phrase_hits`] applies at
-/// offset zero, decided by walking the varints rather than by building the
-/// vectors that would prove it.
-///
-/// @param bytes - the doclist as `%_data` holds it
-/// @param wanted - the column a `column:term` filter named, if any
-/// @param columns - how many columns the table declares
-/// @param out - where the rowids are appended, in doclist order
-pub fn doclist_rows(bytes: &[u8], wanted: Option<usize>, columns: usize, out: &mut Vec<i64>) {
-    let mut at = 0usize;
-    let mut rowid = 0i64;
-    while at < bytes.len() {
-        rowid = rowid.wrapping_add(read_varint(bytes, &mut at) as i64);
-        let count = read_varint(bytes, &mut at) as usize;
-        if count > 4096 {
-            break;
-        }
-        let mut matched = false;
-        for _ in 0..count {
-            let column = read_varint(bytes, &mut at) as usize;
-            let positions = read_varint(bytes, &mut at) as usize;
-            if positions > 1 << 24 {
-                return;
-            }
-            for _ in 0..positions {
-                let _ = read_varint(bytes, &mut at);
-            }
-            if positions == 0 || column >= columns {
-                continue;
-            }
-            if wanted.is_some_and(|asked| asked != column) {
-                continue;
-            }
-            matched = true;
-        }
-        if matched {
-            out.push(rowid);
-        }
-        if at >= bytes.len() {
-            break;
-        }
-    }
-}
-
 /// Reads the totals row.
 fn get_totals(context: &mut Context<'_>, shadows: &ShadowTables, columns: usize) -> Totals {
     let Ok(Some(row)) = shadows.read_row(context, b"data", TOTALS) else {
@@ -1210,49 +1024,33 @@ fn put_totals(context: &mut Context<'_>, shadows: &ShadowTables, totals: &Totals
 /// this a buffer rather than a delayed write.
 #[derive(Default)]
 pub struct Pending {
-    /// The `%_data` page a doclist belongs in, and the doclist.
-    doclists: BTreeMap<i64, Staged>,
-    /// How many bytes the doclists hold, so the buffer can be bounded.
-    bytes: usize,
-    /// The highest `%_data` page handed out, staged rows included.
+    /// A term's doclist, keyed by the term itself.
     ///
-    /// A staged row is not in the table yet, so `max_rowid` cannot see it and
-    /// two new terms in one transaction would be given the same page.
-    highest: i64,
-    /// The `%_idx` rows this transaction has made and not yet written.
+    /// **The dictionary row and the doclist are the same row now, so the
+    /// cache of one is the cache of the other.** A term this transaction has
+    /// looked up - to append to it or merely to answer a query - is staged
+    /// here whether or not its bytes have changed, which is what lets a
+    /// document that repeats a common word skip a second read of `%_idx` for
+    /// it: the map holds the one row `%_idx` would otherwise be asked for
+    /// again.
     ///
-    /// **A dictionary row per term, written in term order at the flush rather
-    /// than one at a time as the terms arrive.** `%_idx` is an index tree keyed
-    /// by the term, and the terms of a document arrive in whatever order the
-    /// text put them in - so writing each as it appears is a descent and a
-    /// possible split per term, into a tree that is growing under it. Held here
-    /// and written in key order, the same run of terms is a walk to the right
-    /// of the tree.
-    ///
-    /// It was measured before it was done, which is the rule this file's own
-    /// history argues for: `extension.fts.build` spent 1.8 of its 9.4 ms
-    /// writing 507 of these one at a time, against 0.5 ms reading them and
-    /// 1.2 ms writing every doclist.
-    ///
-    /// A `BTreeMap` because the order it iterates in *is* the key order the
-    /// write wants; sorting a vector at the flush would be the same thing done
-    /// later and worse, since the map is also what a lookup needs.
+    /// **A `BTreeMap` because the order it iterates in *is* the key order the
+    /// flush wants.** `%_idx` is an index tree keyed by the term, and the
+    /// terms of a document arrive in whatever order the text put them in - so
+    /// writing each as it appears is a descent and a possible split per term,
+    /// into a tree that is growing under it. Held here and written in key
+    /// order at the flush, the same run of terms is a walk to the right of the
+    /// tree instead. It was measured before it was done: `extension.fts.build`
+    /// spent 1.8 of its 9.4 ms writing 507 dictionary rows one at a time,
+    /// against 0.5 ms reading them and 1.2 ms writing every doclist - and
+    /// those two writes are now one.
     ///
     /// **Every reader that scans `%_idx` flushes first.** A staged row is
     /// invisible to a scan, and the scans are `expr.rs`'s prefix search,
-    /// `integrity`, the delete-all command and `remove`.
-    staged_terms: BTreeMap<Vec<u8>, i64>,
-    /// Which `%_data` page each term's doclist is in, for the terms this
-    /// transaction has looked up.
-    ///
-    /// **The dictionary is asked once per term, not once per occurrence.**
-    /// Indexing a document looks up every token it holds, so a twelve-word
-    /// document costs twelve keyed descents into `%_idx` and five hundred of
-    /// them cost six thousand - over a dictionary of ten terms. Only found
-    /// terms are cached: a term that is not there yet is created through this
-    /// same function, which is what would otherwise have to invalidate a
-    /// remembered absence.
-    terms: BTreeMap<Vec<u8>, i64>,
+    /// `integrity`, `rebuild` and `remove`.
+    doclists: BTreeMap<Vec<u8>, Staged>,
+    /// How many bytes the doclists hold, so the buffer can be bounded.
+    bytes: usize,
     /// The totals row, read once and written once per transaction.
     ///
     /// **One `%_data` row, and it was being rewritten per document.** `add`
@@ -1299,7 +1097,7 @@ pub struct Pending {
 /// it introduced brought the walk back one level down.
 #[derive(Default)]
 struct Staged {
-    /// The doclist as `%_data` will hold it.
+    /// The doclist as `%_idx` will hold it.
     bytes: Vec<u8>,
     /// The rowid the last entry names, when there is one.
     last: Option<i64>,
@@ -1353,28 +1151,87 @@ fn note_content_rowid(buffer: &Buffer, rowid: i64) {
     }
 }
 
-/// Returns a term's doclist, from the buffer when it is staged there.
+/// What a `%_idx` row's third column holds.
+///
+/// Self-describing rather than versioned - see the module's own doc comment
+/// for the argument. A row this build wrote, or has rewritten since a reopen,
+/// carries its doclist inline; a row an older build wrote and this build has
+/// not touched yet still names a `%_data` page.
+enum TermValue {
+    /// The doclist, exactly as `%_idx` holds it.
+    Inline(Vec<u8>),
+    /// The `%_data` row an older build left the doclist in.
+    Page(i64),
+}
+
+/// Reads a `%_idx` row's third column, telling the two layouts apart by the
+/// value's own type: an `Integer` is a page an older build wrote, a `Blob` or
+/// `Text` is this build's doclist.
+///
+/// @param values - one `%_idx` row, as `scan_keyed` or `read_keyed` hands it
+fn term_value(values: &[Value<'static>]) -> Option<TermValue> {
+    match values.get(2) {
+        Some(Value::Integer(page)) => Some(TermValue::Page(*page)),
+        Some(Value::Blob(blob)) => Some(TermValue::Inline(blob.raw().to_vec())),
+        Some(Value::Text(text)) => Some(TermValue::Inline(text.utf8_bytes().into_owned())),
+        _ => None,
+    }
+}
+
+/// Returns a `%_idx` row's doclist, wherever it actually lives.
+///
+/// One read for a row this build wrote; one read plus the `%_data` row an
+/// older build's indirection still names, for a row it has not touched yet.
+///
+/// @param context - the host
+/// @param shadows - the table's shadow tables
+/// @param values - the `%_idx` row
+fn resolve_doclist(
+    context: &mut Context<'_>,
+    shadows: &ShadowTables,
+    values: &[Value<'static>],
+) -> DbResult<Option<Vec<u8>>> {
+    match term_value(values) {
+        Some(TermValue::Inline(bytes)) => Ok(Some(bytes)),
+        Some(TermValue::Page(page)) => {
+            Ok(shadows.read_row(context, b"data", page)?.and_then(|row| {
+                row.get(1)
+                    .and_then(Value::as_blob)
+                    .map(|blob| blob.raw().to_vec())
+            }))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Returns a term's doclist, from the buffer when this transaction has
+/// staged it, or read from `%_idx` otherwise.
+///
+/// **A read-only accessor.** Unlike [`term_row`], it never stages what it
+/// reads - the query path this serves does not necessarily hold a write
+/// transaction to stage into, and does not need to: it asks for a term once
+/// per query rather than once per document.
 ///
 /// @param context - the host
 /// @param shadows - the table's shadow tables
 /// @param buffer - the staged doclists
-/// @param page - the `%_data` row the doclist lives in
+/// @param term - the term
 fn read_doclist(
     context: &mut Context<'_>,
     shadows: &ShadowTables,
     buffer: &Buffer,
-    page: i64,
+    term: &[u8],
 ) -> DbResult<Option<Vec<u8>>> {
     if let Ok(held) = buffer.lock() {
-        if let Some(staged) = held.doclists.get(&page) {
+        if let Some(staged) = held.doclists.get(term) {
             return Ok(Some(staged.bytes.clone()));
         }
     }
-    Ok(shadows.read_row(context, b"data", page)?.and_then(|row| {
-        row.get(1)
-            .and_then(Value::as_blob)
-            .map(|b| b.raw().to_vec())
-    }))
+    let key = [Value::Integer(SEGMENT), Value::owned_blob(term)?];
+    match shadows.read_keyed(context, b"idx", &key, 3)? {
+        Some(row) => resolve_doclist(context, shadows, &row),
+        None => Ok(None),
+    }
 }
 
 /// What [`append_in_one_lock`] managed.
@@ -1414,10 +1271,7 @@ fn append_in_one_lock(
     let Ok(mut held) = buffer.lock() else {
         return Appended::No;
     };
-    let Some(page) = held.terms.get(term).copied() else {
-        return Appended::No;
-    };
-    let Some(staged) = held.doclists.get_mut(&page) else {
+    let Some(staged) = held.doclists.get_mut(term) else {
         return Appended::No;
     };
     let Some(last) = staged.last else {
@@ -1509,13 +1363,13 @@ fn columns_of(run: &[(Vec<u8>, usize, u32)]) -> Vec<(usize, Vec<u32>)> {
 /// after everything already there; the caller then takes the general path.
 ///
 /// @param buffer - the staged doclists
-/// @param page - the `%_data` row the doclist belongs in
+/// @param term - the term whose doclist this is
 /// @param entry - the entry to append
-fn append_staged(buffer: &Buffer, page: i64, entry: &DocEntry) -> bool {
+fn append_staged(buffer: &Buffer, term: &[u8], entry: &DocEntry) -> bool {
     let Ok(mut held) = buffer.lock() else {
         return false;
     };
-    let Some(staged) = held.doclists.get_mut(&page) else {
+    let Some(staged) = held.doclists.get_mut(term) else {
         return false;
     };
     // The remembered end, rather than a walk to find it. See `Staged`.
@@ -1536,9 +1390,9 @@ fn append_staged(buffer: &Buffer, page: i64, entry: &DocEntry) -> bool {
 /// Stages a doclist to be written when the buffer is next flushed.
 ///
 /// @param buffer - the staged doclists
-/// @param page - the `%_data` row it belongs in
+/// @param term - the term it belongs to
 /// @param bytes - the whole doclist
-fn stage_doclist(buffer: &Buffer, page: i64, bytes: Vec<u8>) {
+fn stage_doclist(buffer: &Buffer, term: &[u8], bytes: Vec<u8>) {
     // The walk happens here, once per whole-list rewrite, rather than on every
     // append: this is the path a list reaches when it is read back or built
     // from scratch, and it is the only place the end is not already known.
@@ -1546,21 +1400,21 @@ fn stage_doclist(buffer: &Buffer, page: i64, bytes: Vec<u8>) {
     if let Ok(mut held) = buffer.lock() {
         let was = held
             .doclists
-            .get(&page)
+            .get(term)
             .map(|staged| staged.bytes.len())
             .unwrap_or(0);
         held.bytes = held.bytes.saturating_sub(was).saturating_add(bytes.len());
-        held.doclists.insert(page, Staged { bytes, last });
+        held.doclists.insert(term.to_vec(), Staged { bytes, last });
     }
 }
 
 /// Forgets a staged doclist, for one whose row is being deleted.
 ///
 /// @param buffer - the staged doclists
-/// @param page - the `%_data` row
-fn forget_doclist(buffer: &Buffer, page: i64) {
+/// @param term - the term
+fn forget_doclist(buffer: &Buffer, term: &[u8]) {
     if let Ok(mut held) = buffer.lock() {
-        if let Some(staged) = held.doclists.remove(&page) {
+        if let Some(staged) = held.doclists.remove(term) {
             held.bytes = held.bytes.saturating_sub(staged.bytes.len());
         }
     }
@@ -1595,6 +1449,12 @@ fn flush_doclists(
 
 /// Writes every staged doclist and empties the buffer, without the timing.
 ///
+/// **One write per term, not two.** Every entry the buffer holds is a term's
+/// whole `%_idx` row - the dictionary key and the doclist together - so
+/// writing it out in key order is the same walk to the right of the tree this
+/// used to spend on the dictionary alone, and there is no second pass over a
+/// separate `%_data` table behind it.
+///
 /// @param context - the host
 /// @param shadows - the table's shadow tables
 /// @param buffer - the staged doclists
@@ -1603,17 +1463,18 @@ fn flush_doclists_timed(
     shadows: &ShadowTables,
     buffer: &Buffer,
 ) -> DbResult<()> {
-    // **The dictionary first, in term order.** `%_idx` is keyed by the term,
-    // so taking the `BTreeMap` in its own order writes the run as a walk to the
-    // right of the tree rather than a descent per term into a growing one.
-    let terms: Vec<(Vec<u8>, i64)> = match buffer.lock() {
-        Ok(mut held) => core::mem::take(&mut held.staged_terms)
-            .into_iter()
-            .collect(),
+    // **In term order.** `%_idx` is keyed by the term, so taking the
+    // `BTreeMap` in its own order writes the run as a walk to the right of the
+    // tree rather than a descent per term into a growing one.
+    let staged: Vec<(Vec<u8>, Staged)> = match buffer.lock() {
+        Ok(mut held) => {
+            held.bytes = 0;
+            core::mem::take(&mut held.doclists).into_iter().collect()
+        }
         Err(_) => return Ok(()),
     };
     let started = std::time::Instant::now();
-    for (term, page) in terms {
+    for (term, doclist) in staged {
         shadows.write_keyed(
             context,
             b"idx",
@@ -1621,27 +1482,12 @@ fn flush_doclists_timed(
             &[
                 Value::Integer(SEGMENT),
                 Value::owned_blob(&term)?,
-                Value::Integer(page),
+                Value::owned_blob(&doclist.bytes)?,
             ],
         )?;
     }
     let spent = started.elapsed().as_nanos();
     record_stage(|stages| stages.dictionary_write = stages.dictionary_write.saturating_add(spent));
-    let staged: Vec<(i64, Staged)> = match buffer.lock() {
-        Ok(mut held) => {
-            held.bytes = 0;
-            core::mem::take(&mut held.doclists).into_iter().collect()
-        }
-        Err(_) => return Ok(()),
-    };
-    for (page, doclist) in staged {
-        shadows.write_row(
-            context,
-            b"data",
-            page,
-            &[Value::Null, Value::owned_blob(&doclist.bytes)?],
-        )?;
-    }
     // The totals go out with them, once, rather than once per document. The
     // buffered copy is kept: a reader inside the same transaction has to see
     // what the transaction wrote, which is what makes this a buffer.
@@ -1658,6 +1504,23 @@ fn flush_doclists_timed(
     Ok(())
 }
 
+/// Resolves a term's dictionary entry, staging its doclist for reuse.
+///
+/// **One table now, so finding a term and reading its doclist are the same
+/// row.** They used to be two: `%_idx` named a `%_data` page and a second
+/// descent read it, so every term this transaction had not already staged
+/// cost two tree reads whether or not the caller was about to change it. The
+/// row `%_idx` returns now carries the doclist already - inline if this build
+/// wrote it, or through the `%_data` indirection an older build left, which
+/// [`resolve_doclist`] follows - so it is staged here the moment it is found
+/// and a caller never reads it twice.
+///
+/// @param context - the host
+/// @param shadows - the table's shadow tables
+/// @param buffer - the staged doclists
+/// @param term - the term
+/// @param create - whether a term with no row yet is reported as fresh rather
+///   than absent
 fn term_row(
     context: &mut Context<'_>,
     shadows: &ShadowTables,
@@ -1666,11 +1529,8 @@ fn term_row(
     create: bool,
 ) -> DbResult<Option<Term>> {
     if let Ok(held) = buffer.lock() {
-        if let Some(page) = held.terms.get(term) {
-            return Ok(Some(Term {
-                page: *page,
-                fresh: false,
-            }));
+        if held.doclists.contains_key(term) {
+            return Ok(Some(Term { fresh: false }));
         }
     }
     let probed = std::time::Instant::now();
@@ -1678,59 +1538,24 @@ fn term_row(
     let found = shadows.read_keyed(context, b"idx", &key, 3)?;
     let probe_ns = probed.elapsed().as_nanos();
     record_stage(|stages| stages.dictionary_read = stages.dictionary_read.saturating_add(probe_ns));
-    if let Some(row) = found {
-        if let Some(page) = row.get(2).and_then(Value::as_integer) {
-            if let Ok(mut held) = buffer.lock() {
-                held.terms.insert(term.to_vec(), page);
-            }
-            return Ok(Some(Term { page, fresh: false }));
-        }
-    }
-    if !create {
-        return Ok(None);
-    }
-    // The buffer's highest is consulted because a staged row is not in the
-    // table yet: `max_rowid` cannot see it, and two new terms in one
-    // transaction would otherwise be given the same page.
-    //
-    // **And once it holds one, the table is not asked again.** `max_rowid` is a
-    // descent per new term, and after the first the buffer's mark is already at
-    // or above the table's: every page it has handed out is above every page in
-    // the table, and a flush writes them at exactly those numbers. Asking
-    // anyway was a tree walk per term of a bulk load's vocabulary - 500 of them
-    // in `extension.fts.build`, which is 500 unique tokens.
-    let staged = buffer.lock().map(|held| held.highest).unwrap_or(0);
-    let floor = if staged > 0 {
-        staged
-    } else {
-        shadows
-            .max_rowid(context, b"data")?
-            .max(FIRST_TERM_ROW.saturating_sub(1))
+    let Some(row) = found else {
+        return Ok(create.then_some(Term { fresh: true }));
     };
-    let next = floor.saturating_add(1);
-    if let Ok(mut held) = buffer.lock() {
-        held.highest = held.highest.max(next);
-        held.terms.insert(term.to_vec(), next);
-        // Written at the flush, in term order. See `Pending::staged_terms`.
-        held.staged_terms.insert(term.to_vec(), next);
-    }
-    Ok(Some(Term {
-        page: next,
-        fresh: true,
-    }))
+    let bytes = resolve_doclist(context, shadows, &row)?.unwrap_or_default();
+    stage_doclist(buffer, term, bytes);
+    Ok(Some(Term { fresh: false }))
 }
 
-/// A term's `%_data` page, and whether this call is what created it.
+/// Whether a term's dictionary row was found, and staged, by [`term_row`].
 ///
-/// **`fresh` is what lets the caller skip a read it knows will miss.** A term
-/// whose dictionary row was written a moment ago has no doclist, and looking
-/// for one is a descent per new term - which on a bulk load is a descent per
-/// word of the vocabulary.
+/// **`fresh` is what lets the caller skip a decode it knows will miss.** A
+/// term with no row yet has no doclist to merge into, so building its first
+/// entry from scratch is the whole job; one `term_row` found has already been
+/// staged, and the caller's own retry of the fast append path is what uses it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Term {
-    /// The `%_data` row its doclist lives in.
-    page: i64,
-    /// Whether the row was created by the call that returned this.
+    /// Whether the row was created by the call that returned this, rather
+    /// than found on disk or already staged.
     fresh: bool,
 }
 
@@ -1807,13 +1632,15 @@ impl Fts5Table {
     /// possible at all, and what makes it the repair for an index that has
     /// drifted.
     fn rebuild(&mut self, context: &mut Context<'_>) -> DbResult<()> {
-        // Every `%_data` row is about to go, staged ones included: a doclist
-        // left in the buffer would be written back after the wipe.
+        // Every row is about to go, staged ones included: a doclist left in
+        // the buffer would be written back after the wipe. This is also the
+        // one place every remaining `%_data` term row - the ones an older
+        // build left and nothing has touched since - is cleared in one pass,
+        // because everything `rebuild` writes from here on goes through
+        // `%_idx` directly.
         if let Ok(mut held) = self.pending.lock() {
             held.doclists.clear();
             held.bytes = 0;
-            held.highest = 0;
-            held.terms.clear();
         }
         let width = self.options.columns.len();
         let offsets = self.offsets(context);
@@ -2029,56 +1856,49 @@ impl Fts5Table {
     }
 
     /// Adds one entry to a term's doclist, keeping it in rowid order.
+    ///
+    /// **`term_row` staging what it finds is what makes the fast path apply
+    /// twice.** `append_staged` is tried before `term_row` because a term
+    /// this transaction has already staged answers there directly; it is
+    /// tried again straight after, because `term_row` - when the term
+    /// exists - has just staged what it read, and the ordinary case for a
+    /// bulk load is a document whose rowid sorts after everything already in
+    /// the list, which is exactly what the retried fast path handles without
+    /// a decode. What is left after both tries is a term with no row yet, or
+    /// one whose new entry does not sort last - and both go through the
+    /// general decode-and-reinsert path below.
     fn merge_term(&self, context: &mut Context<'_>, term: &[u8], entry: DocEntry) -> DbResult<()> {
-        let Some(held) = term_row(context, &self.shadows, &self.pending, term, true)? else {
-            return Ok(());
-        };
-        let page = held.page;
-        // The ordinary case of a bulk load: the term is already staged and the
-        // document sorts after every other, so the entry is written straight
-        // into the buffer.
-        if append_staged(&self.pending, page, &entry) {
+        if append_staged(&self.pending, term, &entry) {
             if buffer_is_full(&self.pending) {
                 flush_doclists(context, &self.shadows, &self.pending)?;
             }
             return Ok(());
         }
-        // A term whose dictionary row was created a moment ago has no doclist,
-        // and asking for one is a descent that is certain to miss.
+        let Some(held) = term_row(context, &self.shadows, &self.pending, term, true)? else {
+            return Ok(());
+        };
+        if !held.fresh && append_staged(&self.pending, term, &entry) {
+            if buffer_is_full(&self.pending) {
+                flush_doclists(context, &self.shadows, &self.pending)?;
+            }
+            return Ok(());
+        }
+        // A term whose dictionary row was created a moment ago has no
+        // doclist to merge into; one that failed the retry above has an
+        // entry that does not sort last. Decoding the whole doclist to
+        // insert in the middle and then re-encoding it costs time and
+        // allocation proportional to how many documents already contain the
+        // term, so a bulk index build was quadratic: measured at 100, 200,
+        // 400, 800 and 1,600 documents sharing a vocabulary, the cost of one
+        // insert rose 1.00x, 1.36x, 2.03x, 3.32x, 6.24x, and the total went
+        // from 19 ms to 1,925 ms for sixteen times the documents. That is the
+        // cost of an out-of-order document, not of the ordinary bulk load the
+        // fast path above already leaves this branch for.
         let existing: Option<Vec<u8>> = if held.fresh {
             None
         } else {
-            read_doclist(context, &self.shadows, &self.pending, page)?
+            read_doclist(context, &self.shadows, &self.pending, term)?
         };
-
-        // The ordinary case is a new document whose rowid is above every one
-        // already in this term's list, and it is worth its own path. Decoding
-        // the whole doclist to insert at the end and then re-encoding it costs
-        // time and allocation proportional to how many documents already
-        // contain the term, so a bulk index build was quadratic: measured at
-        // 100, 200, 400, 800 and 1,600 documents sharing a vocabulary, the cost
-        // of one insert rose 1.00x, 1.36x, 2.03x, 3.32x, 6.24x, and the total
-        // went from 19 ms to 1,925 ms for sixteen times the documents.
-        //
-        // Appending writes the bytes `encode_doclist` would have written for
-        // the same entry, so the row is byte-for-byte the one the slow path
-        // produces. It is taken only when the existing blob can be walked
-        // exactly - anything else falls through and is decoded.
-        if let Some(bytes) = existing.as_deref() {
-            if let Some(last) = last_doclist_rowid(bytes) {
-                if entry.rowid > last {
-                    let mut out = Vec::with_capacity(bytes.len().saturating_add(16));
-                    out.extend_from_slice(bytes);
-                    append_doclist_entry(&mut out, entry.rowid.wrapping_sub(last), &entry);
-                    stage_doclist(&self.pending, page, out);
-                    if buffer_is_full(&self.pending) {
-                        flush_doclists(context, &self.shadows, &self.pending)?;
-                    }
-                    return Ok(());
-                }
-            }
-        }
-
         let mut entries = match existing.as_deref() {
             Some(bytes) => decode_doclist(bytes),
             None => Vec::new(),
@@ -2092,7 +1912,7 @@ impl Fts5Table {
             Err(position) => entries.insert(position, entry),
         }
         let encoded = encode_doclist(&entries);
-        stage_doclist(&self.pending, page, encoded);
+        stage_doclist(&self.pending, term, encoded);
         if buffer_is_full(&self.pending) {
             flush_doclists(context, &self.shadows, &self.pending)?;
         }
@@ -2124,43 +1944,53 @@ impl Fts5Table {
         terms.sort();
         terms.dedup();
         for term in &terms {
-            let Some(page) =
-                term_row(context, &self.shadows, &self.pending, term, false)?.map(|held| held.page)
-            else {
-                continue;
-            };
-            let Some(bytes) = read_doclist(context, &self.shadows, &self.pending, page)? else {
-                continue;
+            // The buffer first: a term this transaction has already staged
+            // has no on-disk `%_idx` row to read, whether it is brand new or
+            // already rewritten in the inline form.
+            let staged = self
+                .pending
+                .lock()
+                .ok()
+                .and_then(|held| held.doclists.get(term.as_slice()).map(|s| s.bytes.clone()));
+            // The `%_data` page a legacy row still names, freed below only
+            // when this pass is the one that reads it - a row already staged
+            // this transaction was resolved, and its legacy page freed, the
+            // first time it was touched.
+            let (bytes, legacy_page) = match staged {
+                Some(bytes) => (bytes, None),
+                None => {
+                    let key = [Value::Integer(SEGMENT), Value::owned_blob(term)?];
+                    let Some(row) = self.shadows.read_keyed(context, b"idx", &key, 3)? else {
+                        continue;
+                    };
+                    let legacy_page = match term_value(&row) {
+                        Some(TermValue::Page(page)) => Some(page),
+                        _ => None,
+                    };
+                    let Some(bytes) = resolve_doclist(context, &self.shadows, &row)? else {
+                        continue;
+                    };
+                    (bytes, legacy_page)
+                }
             };
             let mut entries = decode_doclist(&bytes);
             entries.retain(|entry| entry.rowid != rowid);
             if entries.is_empty() {
                 // Staged as well as stored: the row may exist only in the
                 // buffer, and a delete that left it there would write it back.
-                forget_doclist(&self.pending, page);
-                if let Ok(mut held) = self.pending.lock() {
-                    held.terms.remove(term.as_slice());
-                }
-                // A term whose dictionary row is only staged is dropped
-                // from the buffer rather than deleted from a table that does
-                // not hold it yet - a staged row a delete did not see would be
-                // written at the flush and resurrect the term.
-                let was_staged = match self.pending.lock() {
-                    Ok(mut held) => held.staged_terms.remove(term.as_slice()).is_some(),
-                    Err(_) => false,
-                };
-                self.shadows.delete_row(context, b"data", page)?;
-                if !was_staged {
-                    self.shadows.delete_keyed(
-                        context,
-                        b"idx",
-                        &[Value::Integer(SEGMENT), Value::owned_blob(term)?],
-                    )?;
+                forget_doclist(&self.pending, term);
+                self.shadows.delete_keyed(
+                    context,
+                    b"idx",
+                    &[Value::Integer(SEGMENT), Value::owned_blob(term)?],
+                )?;
+                if let Some(page) = legacy_page {
+                    self.shadows.delete_row(context, b"data", page)?;
                 }
                 continue;
             }
             let encoded = encode_doclist(&entries);
-            stage_doclist(&self.pending, page, encoded);
+            stage_doclist(&self.pending, term, encoded);
         }
 
         let sizes = match self.shadows.read_row(context, b"docsize", rowid)? {
@@ -2991,23 +2821,6 @@ fn matches_a_term(token: &[u8], wanted: &[expr::Term]) -> bool {
 mod tests {
     use super::*;
 
-    /// A doclist round-trips, positions and all.
-    #[test]
-    fn a_doclist_round_trips() {
-        let entries = vec![
-            DocEntry {
-                rowid: 1,
-                columns: vec![(0, vec![0, 3, 9])],
-            },
-            DocEntry {
-                rowid: 40,
-                columns: vec![(0, vec![2]), (1, vec![0, 1])],
-            },
-        ];
-        let encoded = encode_doclist(&entries);
-        assert_eq!(decode_doclist(&encoded), entries);
-    }
-
     /// The totals round-trip.
     #[test]
     fn the_totals_round_trip() {
@@ -3116,18 +2929,5 @@ mod tests {
         ];
         assert_eq!(columns_of(&run), vec![(0, vec![1, 4]), (2, vec![0])]);
         assert!(columns_of(&[]).is_empty());
-    }
-
-    /// A doclist entry counts its term per column and overall.
-    #[test]
-    fn an_entry_counts_per_column() {
-        let entry = DocEntry {
-            rowid: 1,
-            columns: vec![(0, vec![1, 2]), (2, vec![5])],
-        };
-        assert_eq!(entry.count_in(0), 2);
-        assert_eq!(entry.count_in(1), 0);
-        assert_eq!(entry.count_in(2), 1);
-        assert_eq!(entry.count(), 3);
     }
 }

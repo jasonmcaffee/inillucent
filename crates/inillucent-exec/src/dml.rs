@@ -61,7 +61,6 @@ use inillucent_sql::bind::{
 use inillucent_sql::catalog_view::{IndexInfo, IndexOrigin, TableInfo, TableKind};
 use inillucent_sql::dml::{
     codes, rowid_message, unique_message, BoundDelete, BoundInsert, BoundInsertSource, BoundUpdate,
-    ColumnSource,
 };
 use inillucent_tree::datum::{Datum, OwnedDatum};
 use inillucent_tree::leaf::LeafRef;
@@ -72,7 +71,10 @@ use inillucent_value::collation::Collation;
 use crate::batch::{Batch, Vector};
 use crate::declared::{IndexExprs, WriteDeclarations};
 use crate::expr::{compile, Eval};
-use crate::physical::{translate_scan, AccessKind, HeldSpace, Params, PreparedStage, SourceLayout};
+use crate::insert_plan::InsertPlan;
+use crate::physical::{
+    translate_scan, AccessKind, HeldSpace, Params, PreparedStage, SourceLayout, TreeCatalog,
+};
 use crate::trigger::{self, Depth};
 
 /// One row in a tree's own column order.
@@ -277,9 +279,14 @@ pub struct RowSpace {
     /// The layouts and static types those stages define.
     held: HeldSpace,
     /// How many columns one image holds.
-    width: usize,
+    ///
+    /// `pub(crate)` for `insert_plan::InsertPlan::build_row`, which sizes a
+    /// fresh row image against it.
+    pub(crate) width: usize,
     /// Which column of an image holds its rowid.
-    rowid: Option<usize>,
+    ///
+    /// `pub(crate)` for the same reason `width` is.
+    pub(crate) rowid: Option<usize>,
     /// Which cell each correlated subquery's answer sits in.
     ///
     /// Appended after every row image, which is why they are numbered from the
@@ -360,10 +367,27 @@ impl RowSpace {
 
     /// Compiles one bound expression against this space.
     ///
+    /// **The catalog is a parameter, not a field.** A `RowSpace` is carried
+    /// through every write-path signature that builds or evaluates one, and
+    /// giving it a borrowed catalog of its own would put that borrow's
+    /// lifetime on all of them - which is why a registered function used to
+    /// refuse by name here (`docs/roadmap.md` item 13): the physical pass
+    /// resolves a registered function's body through the catalog, and this
+    /// space carried none. Every caller already holds a [`WriteTarget`], and
+    /// [`WriteTarget::catalog`] is exactly the view [`translate_scan`] needs -
+    /// handed in for the one call it is needed on rather than stored.
+    ///
     /// @param expr - the bound expression
     /// @param params - the bound parameters
-    pub fn compile(&self, expr: &BoundExpr, params: &Params) -> DbResult<Box<dyn Eval>> {
-        let space = self.held.view_with(&self.stages, &self.correlations);
+    /// @param catalog - where a registered function's body is looked up
+    pub fn compile(
+        &self,
+        expr: &BoundExpr,
+        params: &Params,
+        catalog: &dyn TreeCatalog,
+    ) -> DbResult<Box<dyn Eval>> {
+        let mut space = self.held.view_with(&self.stages, &self.correlations);
+        space.catalog = Some(catalog);
         let translated = translate_scan(expr, &space, params)?;
         compile(&translated, &self.held.types)
     }
@@ -722,7 +746,12 @@ pub fn insert_at(
         sources.push(EXCLUDED_SOURCE);
     }
     let space = RowSpace::new(&sources, &layout);
-    let plan = InsertPlan::compile(statement, &layout, &space, params)?;
+    // **The catalog the write path's own registered-function lookups read.**
+    // `target` already exposes one for a trigger body's queries
+    // (`WriteTarget::catalog`) - see `docs/roadmap.md` item 13 for why a
+    // `VALUES` row calling `embed(?1)` needs the same view.
+    let catalog = target.catalog();
+    let plan = InsertPlan::compile(statement, &layout, &space, params, catalog)?;
     // What the table's declarations require of every row, compiled once: the
     // affinities that convert a value on the way in, the `STRICT` type classes,
     // and the `CHECK` predicates. All three were collected by the catalog and
@@ -735,6 +764,7 @@ pub fn insert_at(
         &statement.index_exprs,
         &space,
         params,
+        catalog,
     )?;
 
     let rows: Vec<Row> = match &statement.source {
@@ -743,7 +773,7 @@ pub fn insert_at(
             for row in values {
                 let mut cells = Vec::with_capacity(row.len());
                 for expr in row {
-                    let eval = space.compile(expr, params)?;
+                    let eval = space.compile(expr, params, catalog)?;
                     cells.push(space.evaluate(eval.as_ref(), &[])?);
                 }
                 built.push(cells);
@@ -912,14 +942,15 @@ fn insert_into_view(
     let table = &statement.table;
     let layout = view_layout(table);
     let space = RowSpace::new(&[statement.target_source], &layout);
-    let plan = InsertPlan::compile(statement, &layout, &space, params)?;
+    let catalog = target.catalog();
+    let plan = InsertPlan::compile(statement, &layout, &space, params, catalog)?;
     let rows: Vec<Row> = match &statement.source {
         BoundInsertSource::Values(values) => {
             let mut built = Vec::with_capacity(values.len());
             for row in values {
                 let mut cells = Vec::with_capacity(row.len());
                 for expr in row {
-                    let eval = space.compile(expr, params)?;
+                    let eval = space.compile(expr, params, catalog)?;
                     cells.push(space.evaluate(eval.as_ref(), &[])?);
                 }
                 built.push(cells);
@@ -978,220 +1009,6 @@ pub fn view_layout(table: &TableInfo) -> std::rc::Rc<SourceLayout> {
         width: table.columns.len(),
         key_columns: Vec::new(),
     })
-}
-
-/// The expressions an `INSERT` evaluates, compiled once for the statement.
-///
-/// Compiling per row is what made the old engine's insert path build a closure
-/// tree per row of a `VALUES` list. The expressions depend on the parameters
-/// and not on the row, so they are compiled with the statement.
-struct InsertPlan {
-    /// For each table column, where its value comes from.
-    columns: Vec<PlannedColumn>,
-    /// Where the rowid comes from.
-    rowid: Option<PlannedRowid>,
-    /// The `DO UPDATE` assignments, by tree column.
-    upsert: Vec<CompiledUpsert>,
-    /// The `RETURNING` expressions.
-    returning: Vec<Box<dyn Eval>>,
-}
-
-/// Where one table column's value comes from, resolved to a tree column.
-struct PlannedColumn {
-    /// Which tree column it lands in, when the tree carries it.
-    slot: Option<usize>,
-    /// How its value is produced.
-    from: PlannedValue,
-}
-
-/// How one value is produced.
-enum PlannedValue {
-    /// Position in the source row the statement supplied.
-    Supplied(usize),
-    /// An expression that reads nothing, which is what a `DEFAULT` is.
-    Constant(Box<dyn Eval>),
-    /// An expression that reads the rest of the row, computed last.
-    Generated(Box<dyn Eval>),
-}
-
-/// Where an `INSERT`'s rowid comes from.
-enum PlannedRowid {
-    /// Position in the supplied row.
-    Supplied(usize),
-    /// An expression.
-    Expr(Box<dyn Eval>),
-}
-
-impl InsertPlan {
-    /// Compiles every expression an insert evaluates.
-    ///
-    /// @param statement - the bound insert
-    /// @param layout - the table tree's layout
-    /// @param space - the row space the expressions read
-    /// @param params - the bound parameters
-    fn compile(
-        statement: &BoundInsert,
-        layout: &SourceLayout,
-        space: &RowSpace,
-        params: &Params,
-    ) -> DbResult<InsertPlan> {
-        let mut columns = Vec::with_capacity(statement.columns.len());
-        for (column, source) in statement.columns.iter().enumerate() {
-            let slot = layout.slots.get(column).copied().flatten();
-            let from = match source {
-                ColumnSource::Row(index) => PlannedValue::Supplied(*index),
-                ColumnSource::Expr(expr) => PlannedValue::Constant(space.compile(expr, params)?),
-                ColumnSource::Generated(expr) => {
-                    PlannedValue::Generated(space.compile(expr, params)?)
-                }
-            };
-            columns.push(PlannedColumn { slot, from });
-        }
-        let rowid = match (&statement.rowid, statement.named_rowid) {
-            (Some(ColumnSource::Row(index)), _) => Some(PlannedRowid::Supplied(*index)),
-            (Some(ColumnSource::Expr(expr) | ColumnSource::Generated(expr)), _) => {
-                Some(PlannedRowid::Expr(space.compile(expr, params)?))
-            }
-            (None, Some(index)) => Some(PlannedRowid::Supplied(index)),
-            (None, None) => None,
-        };
-        // **One compiled arm per written clause.** Which of them runs is a
-        // run-time question - it depends on which constraint the row actually
-        // collided with - so all of them are compiled and the choice is made
-        // per conflict.
-        let mut upsert = Vec::with_capacity(statement.upsert.len());
-        for clause in &statement.upsert {
-            let mut assignments = Vec::new();
-            let mut filter = None;
-            if clause.do_update {
-                for assignment in &clause.assignments {
-                    if let Some(slot) = layout
-                        .slots
-                        .get(usize::from(assignment.column))
-                        .copied()
-                        .flatten()
-                    {
-                        assignments.push((slot, space.compile(&assignment.value, params)?));
-                    }
-                }
-                if let Some(written) = &clause.filter {
-                    filter = Some(space.compile(written, params)?);
-                }
-            }
-            upsert.push(CompiledUpsert {
-                assignments,
-                filter,
-            });
-        }
-        let mut returning = Vec::with_capacity(statement.returning.len());
-        for column in &statement.returning {
-            returning.push(space.compile(&column.expr, params)?);
-        }
-        Ok(InsertPlan {
-            columns,
-            rowid,
-            upsert,
-            returning,
-        })
-    }
-
-    /// Builds one row image in tree-column order.
-    ///
-    /// The generated columns are computed in a second pass, because a generated
-    /// column reads the row it is part of and the row is not a row until every
-    /// supplied column is in it.
-    ///
-    /// @param supplied - the values the statement's source produced
-    /// @param space - the row space the expressions read
-    /// @param next_rowid - the largest rowid handed out so far, advanced here
-    /// @param highest - what the first allocation counts up from
-    /// @param autoincrement - the table, when it never reuses a key
-    fn build_row(
-        &self,
-        supplied: &[OwnedDatum],
-        space: &RowSpace,
-        next_rowid: &mut Option<i64>,
-        highest: impl FnOnce() -> DbResult<i64>,
-        autoincrement: Option<&TableInfo>,
-    ) -> DbResult<Row> {
-        let mut row: Row = vec![OwnedDatum::Null; space.width];
-        for planned in &self.columns {
-            let Some(slot) = planned.slot else { continue };
-            let value = match &planned.from {
-                PlannedValue::Supplied(index) => {
-                    supplied.get(*index).cloned().unwrap_or(OwnedDatum::Null)
-                }
-                PlannedValue::Constant(eval) => space.evaluate(eval.as_ref(), &[])?,
-                PlannedValue::Generated(_) => continue,
-            };
-            if let Some(cell) = row.get_mut(slot) {
-                *cell = value;
-            }
-        }
-        let supplied_key = match &self.rowid {
-            Some(PlannedRowid::Supplied(index)) => {
-                supplied.get(*index).cloned().unwrap_or(OwnedDatum::Null)
-            }
-            Some(PlannedRowid::Expr(eval)) => space.evaluate(eval.as_ref(), &[])?,
-            None => OwnedDatum::Null,
-        };
-        if let Some(slot) = space.rowid {
-            // **A supplied rowid takes INTEGER affinity first.** `INSERT INTO
-            // t(id) VALUES ('42')` on an `INTEGER PRIMARY KEY` stores row 42 in
-            // SQLite, because the key is a value like any other and affinity is
-            // applied to it on the way in; only what survives the conversion
-            // still un-integral is a mismatch. Applying it here rather than in
-            // `WriteDeclarations` keeps one rule for the key rather than two.
-            let supplied_key = crate::declared::to_key_affinity(supplied_key);
-            let rowid = match supplied_key {
-                OwnedDatum::Int(number) => number,
-                // A rowid the statement left out is one past the largest the
-                // table holds, which is SQLite's rule for a table that is not
-                // `AUTOINCREMENT`: deleted numbers are reused.
-                OwnedDatum::Null => {
-                    let held = match *next_rowid {
-                        Some(held) => held,
-                        None => highest()?,
-                    };
-                    // An `AUTOINCREMENT` table that has reached `i64::MAX` has
-                    // no next key, and handing one out would mean handing out
-                    // one that is already there. SQLite reports `SQLITE_FULL`.
-                    let allocated = match autoincrement {
-                        Some(table) => crate::sequence::allocate(table, held)?,
-                        None => held.saturating_add(1),
-                    };
-                    *next_rowid = Some(allocated);
-                    allocated
-                }
-                // `INSERT INTO t(rowid) VALUES ('x')` is a mismatch rather than
-                // a conversion, which is what SQLite reports too.
-                other => {
-                    return Err(DbError::new(ExtendedCode(codes::MISMATCH))
-                        .with_message("datatype mismatch")
-                        .with_detail(format!("a rowid must be an integer, not {other:?}")))
-                }
-            };
-            // A statement that supplies its own keys still moves the mark, so a
-            // later row that supplies none does not collide with it.
-            if let Some(held) = *next_rowid {
-                *next_rowid = Some(held.max(rowid));
-            }
-            if let Some(cell) = row.get_mut(slot) {
-                *cell = OwnedDatum::Int(rowid);
-            }
-        }
-        // The generated columns, now that the rest of the row exists.
-        for planned in &self.columns {
-            let (Some(slot), PlannedValue::Generated(eval)) = (planned.slot, &planned.from) else {
-                continue;
-            };
-            let value = space.evaluate(eval.as_ref(), &[row.as_slice()])?;
-            if let Some(cell) = row.get_mut(slot) {
-                *cell = value;
-            }
-        }
-        Ok(row)
-    }
 }
 
 /// Writes one already-built row, applying the conflict algorithm.
@@ -1408,11 +1225,11 @@ fn resolution_of(action: Option<ConflictAction>) -> Resolution {
 /// time. `ON CONFLICT(k) DO UPDATE ... ON CONFLICT(id) DO UPDATE ...` runs the
 /// second arm when the row collided on `id` and the first when it collided on
 /// `k`, and nothing but the collision can decide which.
-struct CompiledUpsert {
+pub(crate) struct CompiledUpsert {
     /// The assignments, by tree-column slot.
-    assignments: Vec<(usize, Box<dyn Eval>)>,
+    pub(crate) assignments: Vec<(usize, Box<dyn Eval>)>,
     /// The `WHERE` on the `DO UPDATE`.
-    filter: Option<Box<dyn Eval>>,
+    pub(crate) filter: Option<Box<dyn Eval>>,
 }
 
 /// A conflict a row would cause, with the error it would report.
@@ -1900,7 +1717,7 @@ pub fn update_at_cached(
         return update_view(statement, target, params, keys, depth);
     }
     let layout = layout_of(target, table)?;
-    let held = update_setup(cache, statement, &layout, params)?;
+    let held = update_setup(cache, statement, &layout, params, target.catalog())?;
     let UpdateSetup {
         space,
         correlated,
@@ -2109,11 +1926,13 @@ pub fn update_at_cached(
 /// @param statement - the bound statement
 /// @param layout - the table's layout, as the catalog holds it now
 /// @param params - the values bound to `?1`, `?2`, ...
+/// @param catalog - where a registered function's body is looked up
 fn update_setup(
     cache: &UpdateCache,
     statement: &BoundUpdate,
     layout: &std::rc::Rc<SourceLayout>,
     params: &Params,
+    catalog: &dyn TreeCatalog,
 ) -> DbResult<std::rc::Rc<UpdateSetup>> {
     if let Some(held) = cache.borrow().as_ref() {
         if held.reusable && std::rc::Rc::ptr_eq(&held.layout, layout) {
@@ -2122,7 +1941,7 @@ fn update_setup(
         }
     }
     let before = params.reads();
-    let built = std::rc::Rc::new(build_update_setup(statement, layout, params)?);
+    let built = std::rc::Rc::new(build_update_setup(statement, layout, params, catalog)?);
     if built.reusable {
         *cache.borrow_mut() = Some(std::rc::Rc::clone(&built));
     }
@@ -2153,10 +1972,12 @@ fn adopt_bindings(bindings: &crate::physical::Bindings, params: &Params) {
 /// @param statement - the bound statement
 /// @param layout - the table's layout
 /// @param params - the values bound to `?1`, `?2`, ...
+/// @param catalog - where a registered function's body is looked up
 fn build_update_setup(
     statement: &BoundUpdate,
     layout: &std::rc::Rc<SourceLayout>,
     params: &Params,
+    catalog: &dyn TreeCatalog,
 ) -> DbResult<UpdateSetup> {
     let before = params.reads();
     // **Only the images the statement can actually read.** A row space costs a
@@ -2197,11 +2018,11 @@ fn build_update_setup(
             continue;
         }
         let Some(slot) = slot else { continue };
-        assignments.push((slot, space.compile(&assignment.value, params)?));
+        assignments.push((slot, space.compile(&assignment.value, params, catalog)?));
     }
     let mut projected = Vec::with_capacity(statement.returning.len());
     for column in &statement.returning {
-        projected.push(space.compile(&column.expr, params)?);
+        projected.push(space.compile(&column.expr, params, catalog)?);
     }
     let declarations = WriteDeclarations::compile(
         &statement.table,
@@ -2211,6 +2032,7 @@ fn build_update_setup(
         &statement.index_exprs,
         &space,
         params,
+        catalog,
     )?;
     Ok(UpdateSetup {
         layout: std::rc::Rc::clone(layout),
@@ -2317,6 +2139,7 @@ pub fn delete_at(
     }
     let layout = layout_of(target, table)?;
     let space = RowSpace::new(&sources_for(statement.source, &statement.triggers), &layout);
+    let catalog = target.catalog();
     // A delete declares no `CHECK` to meet, but it does have to know which of
     // the table's indexes hold the row it is removing: an entry only comes out
     // of a partial index if the predicate accepted the row, and an index key the
@@ -2330,10 +2153,11 @@ pub fn delete_at(
         &statement.index_exprs,
         &space,
         params,
+        catalog,
     )?;
     let mut projected = Vec::with_capacity(statement.returning.len());
     for column in &statement.returning {
-        projected.push(space.compile(&column.expr, params)?);
+        projected.push(space.compile(&column.expr, params, catalog)?);
     }
 
     let mut changes = Changes::default();
@@ -2980,6 +2804,7 @@ fn update_view(
     let table = &statement.table;
     let layout = view_layout(table);
     let space = RowSpace::new(&sources_for(statement.source, &statement.triggers), &layout);
+    let catalog = target.catalog();
     let mut assignments = Vec::with_capacity(statement.assignments.len());
     for assignment in &statement.assignments {
         let Some(slot) = layout
@@ -2990,7 +2815,7 @@ fn update_view(
         else {
             continue;
         };
-        assignments.push((slot, space.compile(&assignment.value, params)?));
+        assignments.push((slot, space.compile(&assignment.value, params, catalog)?));
     }
     let mut changes = Changes::default();
     for before in rows {

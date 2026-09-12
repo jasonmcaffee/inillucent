@@ -570,6 +570,13 @@ covers = ["inillucent-engine", "inillucent-search"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
+name = "vector_metric"
+tier = "engine"
+covers = ["inillucent-engine", "inillucent-search"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
 name = "vtab"
 tier = "engine"
 covers = ["inillucent-session"]
@@ -740,6 +747,13 @@ name = "fts5"
 tier = "differential"
 covers = ["inillucent-session"]
 requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "fts5_legacy_layout"
+tier = "engine"
+covers = ["inillucent-ext"]
 
 [[target]]
 package = "inillucent-compat"

@@ -258,26 +258,23 @@ impl VirtualCursor for VocabCursor {
         self.rows.clear();
         self.at = 0;
         self.columns = column_names(context, &self.target);
-        // `%_idx(segid, term, pgno)`, keyed on the first two.
-        let mut dictionary: Vec<(Vec<u8>, i64)> = Vec::new();
+        // `%_idx(segid, term, doclist)`, keyed on the first two - or, for a
+        // row an older build wrote and nothing has rewritten since, `doclist`
+        // is still the page number that build left it under. `resolve_doclist`
+        // tells the two apart.
+        let mut dictionary: Vec<(Vec<u8>, Vec<Value<'static>>)> = Vec::new();
         self.shadows.scan_keyed(context, b"idx", 2, |values| {
             let term = match values.get(1) {
                 Some(Value::Text(text)) => text.utf8_bytes().into_owned(),
                 Some(Value::Blob(blob)) => blob.raw().to_vec(),
                 _ => return Ok(true),
             };
-            let page = values.get(2).and_then(Value::as_integer).unwrap_or(0);
-            dictionary.push((term, page));
+            dictionary.push((term, values.to_vec()));
             Ok(true)
         })?;
-        for (term, page) in dictionary {
-            let Some(row) = self.shadows.read_row(context, b"data", page)? else {
+        for (term, row) in dictionary {
+            let Some(doclist) = super::resolve_doclist(context, &self.shadows, &row)? else {
                 continue;
-            };
-            let doclist = match row.get(1) {
-                Some(Value::Blob(blob)) => blob.raw().to_vec(),
-                Some(Value::Text(text)) => text.utf8_bytes().into_owned(),
-                _ => continue,
             };
             self.expand(&term, &doclist);
         }

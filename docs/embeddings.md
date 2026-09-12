@@ -94,19 +94,43 @@ zip and gzip reading is over the inflate that is already in `inillucent-base`.
 
 ### Where `embed(TEXT)` can be called
 
-In a projection, in a `WHERE` predicate, in an `ORDER BY` and in an `INSERT ... SELECT`:
+Everywhere an expression goes: a projection, a `WHERE` predicate, an `ORDER BY`, a `VALUES` row, an
+`UPDATE ... SET`, a `RETURNING` clause and an `INSERT ... SELECT`.
 
 ```sql
-INSERT INTO note (body, v) SELECT ?1, embed(?1);
+INSERT INTO note (body, v) VALUES (?1, embed(?1));
+UPDATE note SET v = embed(body) WHERE v IS NULL;
 SELECT id, body FROM note
 ORDER BY vector_distance_cos(v, embed('what time is my plane')) LIMIT 10;
 ```
 
-Not in an `INSERT ... VALUES` row, an `UPDATE ... SET`, or a `RETURNING` clause. Those are refused
-with the `unsupported` status and exit code 3, because the write path compiles its expressions
-against a space built from a table's layout rather than from a catalog and there is no function body
-to look up there. It is a gap rather than a design, [the roadmap](roadmap.md) records what closing it
-takes, and `INSERT ... SELECT` is the shape to use in the meantime.
+The three write shapes were refused with the `unsupported` status and exit code 3 until task-1911:
+the write path compiled its expressions against a space built from a table's layout rather than from
+a catalog, so the function body was not there to be found and the translation refused by name. It now
+takes the catalog as a parameter, which is why a `RowSpace` still carries no lifetime.
+
+### It is called once for the statement, not once for each row
+
+`ORDER BY vector_distance_cos(v, embed('search_query: ' || ?1)) LIMIT 5` embeds the question **once**,
+however many rows the table holds. That is the ordinary rule for a deterministic function with
+constant arguments — [SQLite states it the same way](https://sqlite.org/deterministic.html) — and
+`embed` is registered deterministic because the same text through the same weights gives the same
+vector.
+
+It is worth knowing how much this is worth, because the query looks identical either way. Over the
+2,661 passages of `examples/rag-agent`, before this was read: **105.7 seconds**, of which all but one
+and a half were 2,661 embeddings of one sentence. After: **1.50 seconds**.
+
+The fold happens in two places, and the difference matters if you register a function of your own. A
+call whose arguments are all literals is folded once when the statement is compiled. A call that
+reads a bound parameter is folded **once per execution**, at setup, because a compiled chain is
+re-bound and re-run — folding a parameter at compile time would make the chain correct only for the
+values it was built against. A call that reads a column is not folded at all, because it genuinely
+differs per row.
+
+A function you register yourself is folded only if you set `FunctionFlags::deterministic`. The
+default for anything registered from outside is `false`, which is the safe assumption about code this
+engine did not write: folding `random()` would make a whole scan return one number.
 
 ## When the model is in memory
 

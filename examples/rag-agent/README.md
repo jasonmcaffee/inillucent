@@ -24,7 +24,10 @@ agent:  $ inillucent --db greek-philosophy.rdb query \
 ```
 
 That is what a local Qwen answered the first time it was asked, through opencode, with nothing to go
-on but `AGENTS.md` and the question — screenshots below.
+on but `AGENTS.md` and the question — screenshots below. It is reproduced as it ran, which is why the
+query has the question in a subquery: until task-1911, writing `embed` directly in the `ORDER BY`
+called the model once per row and took 105 seconds instead of one and a half. Both shapes still
+return the same five passages; the plain one is the one to write now.
 
 ## Setup
 
@@ -97,9 +100,8 @@ it is a list of titles rather than a rule.
 
 ```sh
 inillucent --db greek-philosophy.rdb query \
-  "SELECT p.title, p.url, p.body
-   FROM passage p, (SELECT embed('search_query: ' || ?1) AS q) AS probe
-   ORDER BY vector_distance_cos(p.v, probe.q) LIMIT 5" \
+  "SELECT title, url, body FROM passage
+   ORDER BY vector_distance_cos(v, embed('search_query: ' || ?1)) LIMIT 5" \
   --params '["what did the Stoics believe about death"]'
 ```
 
@@ -111,32 +113,18 @@ Heraclitus without the word Heraclitus appearing in the question.
 stored with the second one. Leaving the prefix off still returns rows. They are quietly worse, which
 is the kind of mistake that never announces itself.
 
-### Why the query looks like that
+### There is no HNSW index on this table
 
-The obvious way to write it is the way `docs/vector-search.md` writes it:
+That is the other thing [vector search](../../docs/vector-search.md) tells you to build, and it is
+left off here on purpose: 2,661 passages is an exhaustive cosine over 8 MB of vectors, and that page
+already says to build the index when the search is slow rather than before it is.
 
-```sql
-SELECT title FROM passage ORDER BY vector_distance_cos(v, embed('search_query: ' || ?1)) LIMIT 5;
-```
-
-That returns the same five passages and takes **65 seconds**. Nothing folds a constant call to a
-registered function, so `embed` runs once per row — 2,661 embeddings of the same sentence, 64 of
-those 65 seconds. Putting the question in a subquery that produces one row embeds it once:
-
-```sql
-SELECT p.title FROM passage p, (SELECT embed('search_query: ' || ?1) AS q) AS probe
-ORDER BY vector_distance_cos(p.v, probe.q) LIMIT 5;   -- 0.9 s
-```
-
-**There is also no HNSW index on this table**, which is the other thing the documentation tells you
-to build. On this engine, building it makes the search return nothing at all. The store keeps what it
-is given only until the file is reopened — an index built over a table that already holds rows
-reports those rows in the session that built it and holds none the next time the database is opened —
-and an empty vector index answers zero rows rather than failing. `docs/roadmap.md` items 14 and 15
-carry both of these with their reproductions.
-
-Neither costs anything here. 2,661 passages is an exhaustive cosine over 8 MB of vectors, and
-`docs/vector-search.md` already says to build the index when it is slow rather than before.
+Building one works. Until task-1911 it did not, and the way it failed is the reason
+`scripts/verify-indexed.sh` exists: an index built over a table that already held rows reported those
+rows in the session that built it and held none the next time the file was opened, and an empty
+vector index answers zero rows rather than failing — so `CREATE INDEX` silently turned a working
+search into one that returned nothing. `scripts/verify-indexed.sh` asks the ten questions below
+through an index built over this same corpus, and requires the same articles.
 
 ### By word
 
@@ -157,8 +145,8 @@ The obvious defence is the distance:
 
 ```sh
 inillucent --db greek-philosophy.rdb query \
-  "SELECT round(min(vector_distance_cos(p.v, probe.q)), 4) AS nearest
-   FROM passage p, (SELECT embed('search_query: ' || ?1) AS q) AS probe" \
+  "SELECT round(min(vector_distance_cos(v, embed('search_query: ' || ?1))), 4) AS nearest
+   FROM passage" \
   --params '["who was Seneca"]'
 ```
 

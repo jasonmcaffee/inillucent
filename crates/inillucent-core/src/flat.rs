@@ -9,6 +9,8 @@
 
 use rayon::prelude::*;
 
+#[cfg(test)]
+use crate::distance::Metric;
 use crate::filter::CompiledFilter;
 use crate::store::Store;
 use crate::vectors::{Scorer, VectorSet};
@@ -57,7 +59,8 @@ pub fn search(
 /// @param vectors - the filed vector set
 /// @param store - the chunk metadata the filter reads
 /// @param filter - the compiled predicate
-/// @param query - the query vector, already normalized
+/// @param query - the query vector, in the form this set's metric expects -
+///   already normalized, under cosine
 /// @param k - how many neighbours to return
 fn streaming_search(
     vectors: &VectorSet,
@@ -91,7 +94,12 @@ fn streaming_search(
                         continue;
                     }
                     let stored = &buffer[at * dims..(at + 1) * dims];
-                    top.push(Neighbour { chunk, distance: 1.0 - crate::distance::dot(stored, query) });
+                    // Was a hardcoded `1.0 - dot(stored, query)`, which is
+                    // cosine distance whatever this set's metric actually is.
+                    // `distance_of` reads the metric this set was constructed
+                    // with, the same one `Scorer::distance` (used by every
+                    // other path here) reads.
+                    top.push(Neighbour { chunk, distance: vectors.distance_of(stored, query) });
                 }
                 (top, buffer)
             },
@@ -112,7 +120,7 @@ fn streaming_search(
 /// @param scorer - full precision vectors, or the int8 codes
 /// @param store - the chunk metadata the filter reads
 /// @param filter - the compiled predicate
-/// @param query - the query vector, already normalized
+/// @param query - the query vector, in the form the scorer's metric expects
 /// @param k - how many neighbours to return
 pub fn search_with<S: Scorer + Sync>(
     scorer: &S,
@@ -551,6 +559,7 @@ mod tests {
         .expect("the vectors are written");
         let filed = VectorSet::from_file(
             resident.dims(),
+            resident.metric(),
             resident.len(),
             std::fs::File::open(&path).expect("it opens"),
             0,
@@ -570,6 +579,51 @@ mod tests {
                 assert_eq!(left, right, "{name}, k={k}: the same neighbours in the same order");
             }
         }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Pins the defect the streaming path had: it computed `1.0 - dot(stored,
+    /// query)` unconditionally, which is cosine distance whatever metric the
+    /// set was actually built under. A filed, unfiltered, L2 set is exactly
+    /// the combination that reaches `streaming_search` rather than
+    /// `search_with`, and the two vectors here are picked so cosine and L2
+    /// disagree about which is nearer - the case that proves the metric was
+    /// actually read rather than merely not crashing.
+    #[test]
+    fn a_filed_l2_set_streams_through_the_l2_metric_not_cosine() {
+        let dims = 4usize;
+        let mut resident = VectorSet::with_metric(dims, Metric::L2);
+        let mut store = Store::default();
+        store.add_chunks(vec![
+            ChunkInput { source: "s".into(), external_doc_id: "0".into(), content: "0".into(), ..Default::default() },
+            ChunkInput { source: "s".into(), external_doc_id: "1".into(), content: "1".into(), ..Default::default() },
+        ]);
+        // Aligned with the query but twice as far; close to the query but
+        // slightly off axis. Cosine prefers chunk 0, L2 prefers chunk 1.
+        resident.push(&[2.0, 0.0, 0.0, 0.0]);
+        resident.push(&[0.9, 0.1, 0.0, 0.0]);
+        let query = [1.0f32, 0.0, 0.0, 0.0];
+
+        let directory = std::env::temp_dir().join(format!(
+            "inillucent-flat-l2-streaming-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::create_dir_all(&directory);
+        let path = directory.join("vectors.raw");
+        std::fs::write(&path, bytemuck::cast_slice(resident.raw().expect("resident"))).expect("written");
+        // No candidate list for this filter, and not resident: exactly the
+        // condition `search` routes to `streaming_search` rather than the
+        // `Scorer`-driven `search_with`.
+        let filed = VectorSet::from_file(dims, Metric::L2, resident.len(), std::fs::File::open(&path).expect("opens"), 0);
+        let filter = CompiledFilter::compile(&Filter::default(), &store);
+
+        let hits = search(&filed, &store, &filter, &query, 1);
+        assert_eq!(
+            hits.first().map(|n| n.chunk),
+            Some(1),
+            "the streaming path answered by cosine, not by the L2 metric this set was built under"
+        );
         let _ = std::fs::remove_file(&path);
     }
 }

@@ -23,7 +23,7 @@
 use std::fs::File;
 use std::io;
 
-use crate::distance::{dot, normalize};
+use crate::distance::{dot, normalize, Metric};
 
 /// How many vectors one block of a streaming scan holds.
 ///
@@ -66,6 +66,11 @@ enum Backing {
 #[derive(Default)]
 pub struct VectorSet {
     dims: usize,
+    /// Which distance this set's vectors are stored to answer. Decided at
+    /// construction and never changed, because it decides whether `push`
+    /// normalizes - a set that switched metric partway through would hold
+    /// vectors two different distances were computed for.
+    metric: Metric,
     backing: Backing,
 }
 
@@ -120,22 +125,43 @@ fn read_vectors(file: &File, offset: u64, dims: usize, first: u32, output: &mut 
 }
 
 impl VectorSet {
+    /// A cosine set: vectors normalized to unit length at insert. Every
+    /// existing caller of this constructor answers for cosine, so it keeps
+    /// its old behaviour unchanged; `with_metric` is the one to reach for
+    /// when the width is not the only thing being decided.
+    /// @param dims - how wide a vector is
     pub fn new(dims: usize) -> Self {
-        VectorSet { dims, backing: Backing::Resident(Vec::new()) }
+        VectorSet { dims, metric: Metric::Cosine, backing: Backing::Resident(Vec::new()) }
     }
 
-    /// Wraps a file of already normalized vectors, without reading them.
+    /// A set that stores its vectors to answer the given metric: normalized
+    /// at insert for cosine, raw for L2, since L2 measures the magnitude
+    /// normalizing would destroy.
+    /// @param dims - how wide a vector is
+    /// @param metric - which distance this set's vectors will be compared by
+    pub fn with_metric(dims: usize, metric: Metric) -> Self {
+        VectorSet { dims, metric, backing: Backing::Resident(Vec::new()) }
+    }
+
+    /// Wraps a file of vectors already stored in the form this metric needs -
+    /// normalized for cosine, raw for L2 - without reading them.
     ///
     /// The bytes stay where they are. This is what a load produces by default,
     /// and it is why opening an index of this size costs megabytes rather than
     /// gigabytes.
     ///
     /// @param dims - how wide a vector is
+    /// @param metric - which distance these vectors were stored to answer
     /// @param count - how many there are
     /// @param file - the file, open for reading
     /// @param offset - the byte offset of the first vector
-    pub fn from_file(dims: usize, count: usize, file: File, offset: u64) -> Self {
-        VectorSet { dims, backing: Backing::Filed { file, offset, count, tail: Vec::new() } }
+    pub fn from_file(dims: usize, metric: Metric, count: usize, file: File, offset: u64) -> Self {
+        VectorSet { dims, metric, backing: Backing::Filed { file, offset, count, tail: Vec::new() } }
+    }
+
+    /// Which distance this set's vectors are stored to answer.
+    pub fn metric(&self) -> Metric {
+        self.metric
     }
 
     /// Reports whether this set is holding its vectors on the heap.
@@ -170,26 +196,36 @@ impl VectorSet {
         self.len() == 0
     }
 
-    /// Append a vector, normalizing it. Returns its ordinal, which callers keep
-    /// aligned with chunk identifiers.
+    /// Append a vector, normalizing it when this set's metric needs that.
+    /// Returns its ordinal, which callers keep aligned with chunk identifiers.
+    ///
+    /// **Cosine normalizes; L2 must not.** Normalizing sets a vector's length
+    /// to one, which is exactly the magnitude L2 distance measures - an L2 set
+    /// that normalized at insert would answer every query with the angle
+    /// between two vectors and never their actual distance apart.
     ///
     /// A filed set appends onto its heap tail, which the next save folds into the file.
     pub fn push(&mut self, v: &[f32]) -> usize {
         assert_eq!(v.len(), self.dims, "vector width does not match the set");
         let dims = self.dims;
+        let normalizes = self.metric.normalizes();
         match &mut self.backing {
             Backing::Resident(data) => {
                 let id = data.len() / dims;
                 let start = data.len();
                 data.extend_from_slice(v);
-                normalize(&mut data[start..]);
+                if normalizes {
+                    normalize(&mut data[start..]);
+                }
                 id
             }
             Backing::Filed { count, tail, .. } => {
                 let id = *count + tail.len() / dims;
                 let start = tail.len();
                 tail.extend_from_slice(v);
-                normalize(&mut tail[start..]);
+                if normalizes {
+                    normalize(&mut tail[start..]);
+                }
                 id
             }
         }
@@ -256,26 +292,43 @@ impl VectorSet {
         self.with(id, |v| v.to_vec())
     }
 
+    /// The raw dot product of a stored vector and a query. Only meaningful as
+    /// a similarity under cosine, where both sides are unit length; kept
+    /// under its own name because `quantize.rs`'s int8 pass is graded against
+    /// it directly.
     #[inline]
     pub fn similarity(&self, id: u32, query: &[f32]) -> f32 {
         self.with(id, |v| dot(v, query))
     }
 
-    /// Distance in the same orientation as pgvector's `<=>`: smaller is nearer.
+    /// Distance from a stored vector to a query, under this set's own metric.
+    ///
+    /// In the same orientation as pgvector's `<=>` for cosine: smaller is
+    /// nearer, either way.
     #[inline]
     pub fn distance(&self, id: u32, query: &[f32]) -> f32 {
-        1.0 - self.similarity(id, query)
+        self.with(id, |v| self.metric.distance(v, query))
     }
 
-    /// Cosine distance between two stored vectors, for the times a caller needs
-    /// to know how similar two results are to each other rather than to a query.
-    /// Diversity selection is the one that does.
+    /// The distance between two raw vectors under this set's metric, without
+    /// an ordinal lookup - what a block scan already holding both sides in a
+    /// buffer uses instead of paying for a second `with`.
+    /// @param a - one vector, this set's width
+    /// @param b - the other
+    #[inline]
+    pub fn distance_of(&self, a: &[f32], b: &[f32]) -> f32 {
+        self.metric.distance(a, b)
+    }
+
+    /// Distance between two stored vectors, under this set's own metric, for
+    /// the times a caller needs to know how similar two results are to each
+    /// other rather than to a query. Diversity selection is the one that does.
     /// @param a - a chunk ordinal
     /// @param b - another chunk ordinal
     #[inline]
     pub fn distance_between(&self, a: u32, b: u32) -> f32 {
         let left = self.copy_of(a);
-        self.with(b, |right| 1.0 - dot(&left, right))
+        self.with(b, |right| self.metric.distance(&left, right))
     }
 
     /// The whole buffer, for a resident set.
@@ -318,13 +371,18 @@ impl VectorSet {
         }
     }
 
-    /// Wrap an already normalized buffer, as read back from disk. Does not
-    /// renormalize: the values were normalized when they were first inserted, and
-    /// normalizing twice would be a second rounding step for no gain.
-    pub fn from_raw(dims: usize, data: Vec<f32>) -> Self {
+    /// Wrap a buffer already stored in the form this metric needs - normalized
+    /// for cosine, raw for L2 - as read back from disk. Does not normalize:
+    /// the values were put in their final form when they were first inserted,
+    /// and normalizing a cosine buffer twice would be a second rounding step
+    /// for no gain, while normalizing an L2 buffer at all would be wrong.
+    /// @param dims - how wide a vector is
+    /// @param metric - which distance these vectors were stored to answer
+    /// @param data - the vectors, `dims` floats each
+    pub fn from_raw(dims: usize, metric: Metric, data: Vec<f32>) -> Self {
         assert!(dims > 0, "a vector set needs a positive width");
         assert_eq!(data.len() % dims, 0, "buffer length is not a multiple of the width");
-        VectorSet { dims, backing: Backing::Resident(data) }
+        VectorSet { dims, metric, backing: Backing::Resident(data) }
     }
 
     /// Reads this set into memory, so a caller that asked for resident vectors gets them.
@@ -443,7 +501,7 @@ mod tests {
         let path = directory.join("vectors.raw");
         let raw = resident.raw().expect("a resident set has a buffer");
         std::fs::write(&path, bytemuck::cast_slice(raw)).expect("the vectors are written");
-        let filed = VectorSet::from_file(dims, count, File::open(&path).expect("it opens"), 0);
+        let filed = VectorSet::from_file(dims, Metric::Cosine, count, File::open(&path).expect("it opens"), 0);
 
         assert_eq!(filed.len(), resident.len());
         assert!(!filed.is_resident());
@@ -472,11 +530,63 @@ mod tests {
         assert_eq!(read, 10);
         assert_eq!(&block[..10 * dims], &resident.raw().expect("resident")[490 * dims..]);
 
-        let mut promoted = VectorSet::from_file(dims, count, File::open(&path).expect("it opens"), 0);
+        let mut promoted =
+            VectorSet::from_file(dims, Metric::Cosine, count, File::open(&path).expect("it opens"), 0);
         promoted.make_resident().expect("it reads");
         assert!(promoted.is_resident());
         assert_eq!(promoted.raw().expect("resident"), resident.raw().expect("resident"));
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// `new` and its old callers keep answering for cosine, unchanged.
+    #[test]
+    fn the_default_constructor_is_still_cosine() {
+        let vs = VectorSet::new(4);
+        assert_eq!(vs.metric(), Metric::Cosine);
+    }
+
+    /// An L2 set keeps the vector it was given rather than the direction of it.
+    #[test]
+    fn an_l2_set_does_not_normalize_on_push() {
+        let mut vs = VectorSet::with_metric(4, Metric::L2);
+        vs.push(&[2.0, 0.0, 0.0, 0.0]);
+        assert_eq!(vs.copy_of(0), vec![2.0, 0.0, 0.0, 0.0], "L2 must not normalize a stored vector");
+    }
+
+    /// The same two candidates order oppositely under the two metrics - the
+    /// case that proves an L2 set is actually minimising L2 rather than
+    /// silently still comparing directions.
+    #[test]
+    fn cosine_and_l2_sets_order_the_same_pair_oppositely() {
+        let query = [1.0f32, 0.0, 0.0, 0.0];
+        let aligned_but_far = [2.0f32, 0.0, 0.0, 0.0];
+        let close_but_off_axis = [0.9f32, 0.1, 0.0, 0.0];
+
+        let mut cosine = VectorSet::new(4);
+        cosine.push(&aligned_but_far);
+        cosine.push(&close_but_off_axis);
+        assert!(
+            cosine.distance(0, &query) < cosine.distance(1, &query),
+            "cosine should rank the aligned vector first"
+        );
+
+        let mut l2 = VectorSet::with_metric(4, Metric::L2);
+        l2.push(&aligned_but_far);
+        l2.push(&close_but_off_axis);
+        assert!(
+            l2.distance(0, &query) > l2.distance(1, &query),
+            "L2 should rank the close-but-off-axis vector first"
+        );
+    }
+
+    /// `distance_of` is what a streaming scan uses on bytes it already holds;
+    /// it has to agree with `distance`, which looks the vector up itself.
+    #[test]
+    fn distance_of_agrees_with_distance_by_ordinal() {
+        let mut vs = VectorSet::with_metric(4, Metric::L2);
+        vs.push(&[1.0, 2.0, 3.0, 4.0]);
+        let query = [0.5f32, 0.5, 0.5, 0.5];
+        assert_eq!(vs.distance(0, &query), vs.distance_of(&vs.copy_of(0), &query));
     }
 }

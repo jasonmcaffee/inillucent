@@ -387,10 +387,22 @@ impl Store {
     }
 
     /// Returns every delta entry above a sequence, in order.
+    ///
+    /// **A seek to `covered + 1`, not a scan of the whole log filtered by
+    /// it.** `%_delta` is keyed by `seq`, which is handed out in ascending
+    /// order, so the log is already in the order this wants and every entry
+    /// at or below `covered` is one a base generation has already folded in -
+    /// dead weight this used to read and decode on every call regardless.
+    /// `fold` and `compact` reach this once per commit, so a full-table scan
+    /// here read and threw away the whole delta log's history on every
+    /// commit a table made, however small the pending batch actually was.
     pub fn deltas_above(&self, context: &mut Context<'_>, covered: i64) -> DbResult<Vec<Delta>> {
         let mut found = Vec::new();
-        self.tables.scan(context, b"delta", |sequence, values| {
-            if sequence > covered {
+        self.tables.scan_from(
+            context,
+            b"delta",
+            covered.saturating_add(1),
+            |sequence, values| {
                 found.push(Delta {
                     sequence,
                     commit: values.get(1).and_then(Value::as_integer).unwrap_or(0),
@@ -398,9 +410,9 @@ impl Store {
                     op: Op::from_code(values.get(3).and_then(Value::as_integer).unwrap_or(2)),
                     digest: values.get(4).and_then(Value::as_integer).unwrap_or(0),
                 });
-            }
-            Ok(true)
-        })?;
+                Ok(true)
+            },
+        )?;
         Ok(found)
     }
 
@@ -665,5 +677,193 @@ mod tests {
         assert!(content.create_sql.contains("c1"));
         assert!(!content.create_sql.contains("c2"));
         assert_eq!(tables.len(), SUFFIXES.len());
+    }
+
+    /// A `ShadowStore` over one in-memory rowid table, for testing
+    /// `deltas_above` without a real engine.
+    ///
+    /// **What it counts is the point.** Every row `scan` or `scan_from` hands
+    /// to the caller's body increments `visited`, so the difference between a
+    /// scan-then-filter and a seek shows up as a difference in this count
+    /// rather than in a clock: `scan` always starts at the first row this
+    /// store holds, and `scan_from` starts at `from` by using `BTreeMap`'s own
+    /// range, the in-memory equivalent of the tree descent `visit_range`
+    /// makes on a real store.
+    #[derive(Default)]
+    struct CountingStore {
+        rows: std::collections::BTreeMap<i64, Vec<Value<'static>>>,
+        /// How many rows a scan of either kind has handed to a body, across
+        /// every call this store has answered.
+        visited: usize,
+    }
+
+    impl inillucent_ext::vtab::ShadowStore for CountingStore {
+        fn read_row(&mut self, _root: u32, rowid: i64) -> DbResult<Option<Vec<Value<'static>>>> {
+            Ok(self.rows.get(&rowid).cloned())
+        }
+
+        fn write_row(&mut self, _root: u32, rowid: i64, values: &[Value<'static>]) -> DbResult<()> {
+            self.rows.insert(rowid, values.to_vec());
+            Ok(())
+        }
+
+        fn delete_row(&mut self, _root: u32, rowid: i64) -> DbResult<()> {
+            self.rows.remove(&rowid);
+            Ok(())
+        }
+
+        fn max_rowid(&mut self, _root: u32) -> DbResult<i64> {
+            Ok(self.rows.keys().next_back().copied().unwrap_or(0))
+        }
+
+        fn scan(
+            &mut self,
+            _root: u32,
+            body: &mut dyn FnMut(i64, &[Value<'static>]) -> DbResult<bool>,
+        ) -> DbResult<()> {
+            let rows: Vec<(i64, Vec<Value<'static>>)> =
+                self.rows.iter().map(|(k, v)| (*k, v.clone())).collect();
+            for (rowid, values) in rows {
+                self.visited = self.visited.saturating_add(1);
+                if !body(rowid, &values)? {
+                    break;
+                }
+            }
+            Ok(())
+        }
+
+        fn scan_from(
+            &mut self,
+            _root: u32,
+            from: i64,
+            body: &mut dyn FnMut(i64, &[Value<'static>]) -> DbResult<bool>,
+        ) -> DbResult<()> {
+            let rows: Vec<(i64, Vec<Value<'static>>)> = self
+                .rows
+                .range(from..)
+                .map(|(k, v)| (*k, v.clone()))
+                .collect();
+            for (rowid, values) in rows {
+                self.visited = self.visited.saturating_add(1);
+                if !body(rowid, &values)? {
+                    break;
+                }
+            }
+            Ok(())
+        }
+
+        fn read_keyed(
+            &mut self,
+            _root: u32,
+            _key: &[Value<'static>],
+            _columns: usize,
+        ) -> DbResult<Option<Vec<Value<'static>>>> {
+            Ok(None)
+        }
+
+        fn write_keyed(
+            &mut self,
+            _root: u32,
+            _key_columns: usize,
+            _values: &[Value<'static>],
+        ) -> DbResult<()> {
+            Ok(())
+        }
+
+        fn delete_keyed(&mut self, _root: u32, _key: &[Value<'static>]) -> DbResult<()> {
+            Ok(())
+        }
+
+        fn scan_keyed(
+            &mut self,
+            _root: u32,
+            _key_columns: usize,
+            _body: &mut dyn FnMut(&[Value<'static>]) -> DbResult<bool>,
+        ) -> DbResult<()> {
+            Ok(())
+        }
+    }
+
+    /// `deltas_above` seeks to `covered + 1` rather than reading and
+    /// discarding everything at or below it.
+    ///
+    /// **A count, not a stopwatch** - the testing standard's rule 1.7. A
+    /// scan-then-filter implementation visits every row in the delta log on
+    /// every call, so a call with a low watermark and one with a high
+    /// watermark over the *same* thousand-row log would visit the same
+    /// thousand rows both times. A seek visits only what is above the
+    /// watermark, so the second call here visits one row, not a thousand.
+    /// Reverting `deltas_above` to `self.tables.scan(...)` filtered on
+    /// `sequence > covered` makes this fail: it reports `2_000` visited in
+    /// total where the seek reports `1_001`, and the message names the
+    /// thousand it should not have read.
+    #[test]
+    fn deltas_above_seeks_past_the_watermark_instead_of_scanning_it() {
+        let mut backing = CountingStore::default();
+        for sequence in 1..=1_000i64 {
+            backing.rows.insert(
+                sequence,
+                vec![
+                    Value::Integer(sequence),
+                    Value::Integer(sequence),
+                    Value::Integer(1),
+                    Value::Integer(Op::Put.code()),
+                    Value::Integer(0),
+                ],
+            );
+        }
+        let arguments = ModuleArguments {
+            database: 0,
+            schema: b"main".to_vec(),
+            table: b"t".to_vec(),
+            module: b"inillucent_search".to_vec(),
+            arguments: Vec::new(),
+            shadows: SUFFIXES
+                .iter()
+                .enumerate()
+                .map(|(index, suffix)| inillucent_ext::vtab::ShadowRoot {
+                    suffix: suffix.to_vec(),
+                    root: index as u32 + 1,
+                })
+                .collect(),
+        };
+        let table_store = Store::of(&arguments, 1).expect("store built");
+        let mut host = inillucent_ext::vtab::WithStore { store: backing };
+        let limits = inillucent_base::limits::Limits::default();
+
+        let low = table_store
+            .deltas_above(
+                &mut Context {
+                    host: &mut host,
+                    database: 0,
+                    limits: &limits,
+                    catalog: None,
+                },
+                0,
+            )
+            .expect("scanned from the very start");
+        assert_eq!(low.len(), 1_000, "everything above sequence 0 is every row");
+        assert_eq!(
+            host.store.visited, 1_000,
+            "reading from the start visits every row once"
+        );
+
+        let high = table_store
+            .deltas_above(
+                &mut Context {
+                    host: &mut host,
+                    database: 0,
+                    limits: &limits,
+                    catalog: None,
+                },
+                999,
+            )
+            .expect("scanned from near the end");
+        assert_eq!(high.len(), 1, "only the last row sorts above sequence 999");
+        assert_eq!(
+            host.store.visited, 1_001,
+            "a seek to sequence 1000 visits the one row above it, not the \
+             thousand a scan-then-filter would have read again to find it"
+        );
     }
 }

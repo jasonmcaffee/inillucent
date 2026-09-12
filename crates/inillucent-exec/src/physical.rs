@@ -338,6 +338,25 @@ pub trait TreeCatalog {
         None
     }
 
+    /// Reports whether a registered scalar promises `FunctionFlags::deterministic`
+    /// - the same answer for the same arguments within one statement.
+    ///
+    /// **This is what tells a call worth folding apart from one that has to run
+    /// per row.** `embed(TEXT)` is deterministic and `ORDER BY
+    /// vector_distance_cos(v, embed('search_query: ' || ?1))` calls it with the
+    /// same argument for every row of the scan - roadmap item 15 measured 2,661
+    /// calls to embed the same sentence, 64 of 65 seconds, before anything read
+    /// this flag. A function this answers `false` for - the default, and every
+    /// registration until it opts in - is left alone and evaluated per row,
+    /// which is the only correct answer for one that is not promised to repeat.
+    ///
+    /// @param name - the folded name the call used
+    /// @param argc - how many arguments the call passed
+    fn user_scalar_is_deterministic(&self, name: &[u8], argc: usize) -> bool {
+        let _ = (name, argc);
+        false
+    }
+
     /// Returns the body of an aggregate an application registered.
     ///
     /// @param name - the folded name the call used
@@ -447,6 +466,10 @@ impl TreeCatalog for WithQueue<'_> {
 
     fn user_scalar(&self, name: &[u8], argc: usize) -> Option<crate::expr::ScalarBody> {
         self.inner.user_scalar(name, argc)
+    }
+
+    fn user_scalar_is_deterministic(&self, name: &[u8], argc: usize) -> bool {
+        self.inner.user_scalar_is_deterministic(name, argc)
     }
 
     fn user_aggregate(&self, name: &[u8], argc: usize) -> Option<crate::expr::AggregateBody> {
@@ -3536,6 +3559,26 @@ fn reads_a_column(expr: &BoundExpr) -> bool {
 /// The limit on terms in one statement, which is what bounds the loop above.
 const MAX_SOURCES: usize = 64;
 
+/// Reports whether an expression reads a bound parameter anywhere in it.
+///
+/// The line between the two folds a deterministic registered function's
+/// argument gets - `docs/roadmap.md` item 15's table. An argument that is
+/// every literal is a constant regardless of which execution asked, so
+/// [`translate`] folds it once and never again. An argument that reads `?N`
+/// is a constant only for the execution now binding it, and folding it the
+/// same way would bake one execution's answer into a chain a later execution
+/// could reuse - so [`translate`] calls [`Params::note_execution_constant`]
+/// whenever this answers `true`, the same guard a folded `now()` already
+/// relies on to keep such a chain from being re-run against new values.
+///
+/// @param expr - the argument expression
+fn reads_a_parameter(expr: &BoundExpr) -> bool {
+    if matches!(expr, BoundExpr::Parameter(_)) {
+        return true;
+    }
+    expr.children().iter().any(|child| reads_a_parameter(child))
+}
+
 /// Builds an inner stage as a module driven once per outer row.
 ///
 /// @param plan - the planner's output
@@ -5714,21 +5757,53 @@ fn translate(
         // A call to a scalar an application registered. The body is resolved
         // here, once, and carried by the compiled node - see `user_scalar`.
         BoundExpr::External { name, arguments } => {
-            let Some(body) = space
-                .catalog
-                .and_then(|catalog| catalog.user_scalar(name, arguments.len()))
-            else {
+            let Some(catalog) = space.catalog else {
                 return unsupported(&format!(
                     "a call to the registered function {} from here",
                     String::from_utf8_lossy(name)
                 ));
             };
+            let Some(body) = catalog.user_scalar(name, arguments.len()) else {
+                return unsupported(&format!(
+                    "a call to the registered function {} from here",
+                    String::from_utf8_lossy(name)
+                ));
+            };
+            let translated_arguments = arguments
+                .iter()
+                .map(|expr| translate(expr, space, params, frame))
+                .collect::<DbResult<Vec<Expr>>>()?;
+            // **A deterministic call over arguments that read no column
+            // answers the same value for every row, so it is worth answering
+            // once instead of once per row.** `docs/roadmap.md` item 15:
+            // `embed('search_query: ' || ?1)` in an `ORDER BY` used to call
+            // the embedding model once per row of the scan - 2,661 calls to
+            // embed the same sentence, 64 of a 65-second query, because
+            // nothing here distinguished it from `embed(body)`, which does
+            // read a column and has to run per row. `user_scalar_is_deterministic`
+            // is what tells the two apart, and `reads_a_column` - already used
+            // for a table-valued function's constant argument - is the same
+            // question asked of this call's arguments.
+            if catalog.user_scalar_is_deterministic(name, arguments.len())
+                && arguments.iter().all(|argument| !reads_a_column(argument))
+            {
+                // A call whose arguments are every one of them literal folds
+                // to the same value regardless of which execution asked, and
+                // is safe to keep in a chain forever. A call that reads a
+                // bound parameter is a constant only for the execution now
+                // building this chain - see `reads_a_parameter`.
+                if arguments.iter().any(reads_a_parameter) {
+                    params.note_execution_constant();
+                }
+                let folded = Expr::External {
+                    body,
+                    arguments: translated_arguments,
+                };
+                return Ok(Expr::Literal(crate::constant::evaluated_constant(&folded)?));
+            }
             Expr::External {
                 body,
-                arguments: arguments
-                    .iter()
-                    .map(|expr| translate(expr, space, params, frame))
-                    .collect::<DbResult<Vec<Expr>>>()?,
+                arguments: translated_arguments,
             }
         }
         BoundExpr::Column { source, column, .. } => {

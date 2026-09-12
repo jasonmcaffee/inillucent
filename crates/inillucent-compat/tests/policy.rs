@@ -526,17 +526,62 @@ fn no_module_grows_past_the_size_it_is_recorded_at() {
     /// `crates/inillucent-exec/src/constant.rs`. 6,742 back to 6,563. `physical`
     /// re-exports `literal_value`, so the twelve call sites in
     /// `inillucent-engine` that name it by path did not move.
+    /// task-1911's second extraction is `crates/inillucent-ext/src/vtab/fts5`.
+    /// Merging the dictionary row and the doclist row into one - `%_idx` now
+    /// carries the doclist where it used to carry an integer naming a `%_data`
+    /// row - touches every reader of both, and `mod.rs` was 80 lines under its
+    /// ceiling before it started. The doclist's encoding and decoding is one
+    /// idea and moved to `fts5/doclist.rs`, which took `mod.rs` to 2,933 and is
+    /// recorded here at that rather than at the 3,135 it was allowed.
+    ///
+    /// task-1911 is the third. Fixing the vector index that answered zero rows
+    /// after a reopen needed a transaction number on the connection, a `seal`,
+    /// and a flush - a few lines each, in two files that were both at their
+    /// ceiling. What moved is one idea, *the engine's half of a vector index a
+    /// module owns*: `follow_vector_indexes`, `nearest_rowids`, `probe_module`
+    /// and `refresh_vector_indexes` out of `lib.rs`, and `create_vector_index`
+    /// out of `ddl.rs`, into `crates/inillucent-engine/src/vectors.rs`. They
+    /// name each other and nothing else names them but the write path and the
+    /// planner's one question. `lib.rs` 8,128 to 7,876 and `ddl.rs` 2,975 to
+    /// 2,806, both recorded here at their new sizes.
+    ///
+    /// Closing roadmap items 13 and 15 is the fourth. Both needed a catalog
+    /// parameter threaded onto `RowSpace::compile` and the write-path callers
+    /// that reach it, so a registered function stopped refusing by name in a
+    /// `VALUES` row, an `UPDATE` assignment and a `RETURNING` clause - three
+    /// or four lines each, at a dozen call sites, in a file that was 34 lines
+    /// from its ceiling before any of them landed. What moved is one idea,
+    /// *what one `INSERT`'s row looks like before any row exists to write*:
+    /// `InsertPlan` and the two structs and two enums it alone uses, out of
+    /// `dml.rs` into `crates/inillucent-exec/src/insert_plan.rs`. It is named
+    /// from exactly the three functions in `dml.rs` that compile or drive it,
+    /// and nothing else needs to see inside it. `dml.rs` 3,274 to 3,060,
+    /// recorded here at its new size.
+    ///
+    /// `lib.rs` also moves, by thirteen lines, and nothing there extracts.
+    /// `WriteView` - the write path's own view of the trees, which is what
+    /// `WriteTarget::catalog` hands `RowSpace::compile` - answered `None` for
+    /// every registered function, because `TreeCatalog::user_scalar` defaults
+    /// to that and nothing had ever overridden it on this type. The catalog
+    /// parameter item 13 threads through was therefore reaching a catalog
+    /// that could never resolve anything, which is the second half of why a
+    /// `VALUES` row calling a registered scalar kept refusing after the first
+    /// half was fixed. `WriteView` needed a reference to the registry and the
+    /// two methods that read it - thirteen lines with their comments trimmed
+    /// to one line each, which is as far as trimming goes without losing the
+    /// argument. There is no second copy of this logic anywhere in the file to
+    /// fold into it, so the number moves instead.
     const CEILINGS: [(&str, usize); 14] = [
-        ("crates/inillucent-engine/src/lib.rs", 8_130),
+        ("crates/inillucent-engine/src/lib.rs", 7_893),
         ("crates/inillucent-exec/src/physical.rs", 6_691),
         ("crates/inillucent-sql/src/bind.rs", 5_315),
         ("crates/inillucent-tree/src/leaf.rs", 5_315),
         ("crates/inillucent-vm/src/compile.rs", 5_070),
         ("crates/inillucent-tree/src/paged.rs", 3_685),
         ("crates/inillucent-vm/src/compile_dml.rs", 3_335),
-        ("crates/inillucent-exec/src/dml.rs", 3_240),
-        ("crates/inillucent-ext/src/vtab/fts5/mod.rs", 3_135),
-        ("crates/inillucent-engine/src/ddl.rs", 2_950),
+        ("crates/inillucent-exec/src/dml.rs", 3_060),
+        ("crates/inillucent-ext/src/vtab/fts5/mod.rs", 2_935),
+        ("crates/inillucent-engine/src/ddl.rs", 2_810),
         ("crates/inillucent-session/src/connection.rs", 2_855),
         ("crates/inillucent-vm/src/machine.rs", 2_700),
         ("crates/inillucent-sql/src/plan.rs", 2_910),
