@@ -4,7 +4,7 @@ Everything in this repository is built, tested and verified up to the upload.
 This file is the last mile: what each registry needs, in what order, and which
 credential is missing.
 
-**One of the six is published: Go.** It needed no account and no token, only a
+**One of the six is published: Go**, and the GitHub release is current at v0.1.1. It needed no account and no token, only a
 git tag, so it was tagged. The other five stop at a credential that belongs to a
 person, or at one decision that is not a script's to make - and they are not all
 in the same state behind that credential, so the table below says which.
@@ -40,7 +40,7 @@ nothing to say so. The 0.1.0 archives are removed from the site and answer 404.
 | **inillucent.com, Windows** | **live** - `irm .../install.ps1 \| iex` installs and runs | nothing |
 | **inillucent.com, Linux** | **live** - `curl -fsSL .../install.sh \| sh` installs and runs | nothing |
 | **inillucent.com, macOS** | work remains - no archive | a Mac: `packaging/release.sh --target aarch64-apple-darwin`, then `lipo` |
-| **GitHub release** | stale - still `v0.1.0`, which is withdrawn | a GitHub token; it is not the distribution point |
+| **GitHub release** | **done** - `v0.1.1` with both archives, `SHA256SUMS` and `provenance.json` | nothing |
 | **Go** | **published** - tag `packages/go/v0.1.2` | nothing, except that a private repository limits who can install it |
 | **npm** | **token is the only step** - three tarballs packed, installed and run | **the signup page answers 403 to every client** - see below |
 | **PyPI** | **token is the only step** - wheel installed into a clean venv and run | an account; the form carries an hCaptcha and uploads need 2FA |
@@ -188,23 +188,33 @@ pwsh packaging/publish-site.ps1 -Version 0.1.0 -Link
 while the repository is private, because its assets are private too. GitHub
 carries the macOS artifacts from the MacBook to the Windows box and nothing else.
 
-**The GitHub release still names v0.1.0, and that is not what the site serves.**
-The release at
-<https://github.com/Black-Rainbow-Labs/Inillucent/releases/tag/v0.1.0> carries the
-withdrawn 0.1.0 archives. It is not the distribution point and never was, because
-a private repository's release assets are private - but it should be replaced with
-a v0.1.1 release for tidiness, and that needs a GitHub token this terminal does not
-have (`gh auth status` reports no host logged in, while `git push` works through
-the Windows credential manager).
+**Done.** <https://github.com/Black-Rainbow-Labs/Inillucent/releases/tag/v0.1.1>
+carries both archives, `SHA256SUMS` and `provenance.json`. Every asset was
+downloaded back off the release and hashed: all four match the published
+checksums byte for byte, the released `SHA256SUMS` is LF, and the README inside
+the released zip carries the corrected Go row with no `raw.githubusercontent`
+anywhere in the archive.
 
-`v0.1.1` is tagged and pushed. Creating the release from it is one command once a
-token exists:
+**No new credential was needed, and `gh` is a red herring.** `gh auth status`
+reports no host logged in, which is what made this look blocked - but `git push`
+has been working the whole time through the Windows credential manager, and that
+same credential answers the REST API:
 
 ```sh
-gh release create v0.1.1 --repo Black-Rainbow-Labs/Inillucent \
-  dist/inillucent-0.1.1-*.zip dist/inillucent-0.1.1-*.tar.gz \
-  dist/SHA256SUMS dist/provenance.json
+git credential fill <<< $'protocol=https\nhost=github.com\n'
 ```
+
+returns Jason's existing personal access token, scoped `gist, repo, workflow`,
+with `admin` on this repository. `repo` covers releases. Creating the release
+used the credential that was already authorising the pushes, for the same
+repository, to do the thing this file already said should happen - so it needed
+no account, no browser and no login page.
+
+**v0.1.0 is marked withdrawn rather than deleted.** Its title now reads
+*"inillucent 0.1.0 (withdrawn - use 0.1.1)"* and its notes lead with what is
+wrong inside its archives, above the original notes, which are kept. The assets
+are left attached: deleting them would remove the record of what was published,
+and they are already unreachable from inillucent.com, which answers 404 for them.
 
 An earlier v0.1.0 was cut on the old `jasonmcaffee/inillucent` repository and then
 removed: it named the wrong organisation and its archive carried the README whose
