@@ -38,9 +38,9 @@ sha256 = "404de86fc6b7471fd462dd47b1d0d1506a48003d112eea6d0daf889369e115d0"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/gradeembed.rs"
-ticket = "amendment recorded again after drift"
-reason = "An earlier change left the crates the formatting policy does not govern unformatted, so this file matched neither the recorded baseline nor its prior amendment, and every run since has reported it as moved. The content is the one that has been committed and building since 6b4a96a; this re-records it under that content rather than changing the file, which is what the amendment mechanism is for."
-sha256 = "44dcdff3eaf6585ce4612bf665973f237234016f869dfda12a3201c115f09c46"
+ticket = "task-1909"
+reason = "The committed lexical retrieval lane adds BM25 only measurements to the grading card. It changes the benchmark harness only and does not change the retrieval engine, database format, or product defaults."
+sha256 = "f5c9bdf9e78be688bc1ef2acbfd3046b3d6c8d0ef99dae3bf86b217faa6f3a2f"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/http.rs"
@@ -56,9 +56,9 @@ sha256 = "c606a322fe69ffecb0e7ebc0f58771217a3fda556f24940ea9a580c575e2db31"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/main.rs"
-ticket = "task-1900"
-reason = "the embed-residency subcommand"
-sha256 = "b00e8bdab93494bb74fc2262bac65bdfc22b1efc0d35cc981db617a08947edf8"
+ticket = "task-1909"
+reason = "The committed bench command wiring exposes the reviewed grading options for the lexical retrieval lane. It changes the benchmark entry point only and does not change the retrieval engine, database format, or product defaults."
+sha256 = "842d244348c2676dea0a9e35468f621fdd4b57d7998a2cf072bc86825d846bf3"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/models.rs"
@@ -121,6 +121,12 @@ reason = "The product was renamed from its working name to inillucent. Every cha
 sha256 = "3ff5060ec3a6c985fc3f9dad0f91b7fa165f2d39a789e75952596e7ca6dd1023"
 
 [[amendment]]
+path = "crates/inillucent-core/src/distance.rs"
+ticket = "task-1911"
+reason = "A second distance, L2, was added to the vector index alongside cosine. Cosine remains the default: Metric::default() is Cosine, IndexConfig::default() sets metric: Metric::Cosine, and a generation saved before this field existed has no metric key in its config.bin at all, which SavedConfig::metric reads as cosine rather than refusing (a_generation_with_no_stored_metric_reads_as_cosine proves it, and an_index_declares_cosine_by_default proves the same for a table that never named a metric). No FORMAT_VERSION bump: bumping it would refuse every existing generation outright, the opposite of reading the old one as cosine. VectorSet now carries its metric and normalizes at push only for cosine, since L2 needs the raw magnitude a normalized vector would have thrown away. flat.rs::streaming_search had a real bug this surfaced: it computed 1.0 - dot(stored, query) unconditionally, which is cosine distance whatever metric the set was actually built under, so an L2 set read through the filed, unfiltered scan path was silently scored as cosine. It now calls vectors.distance_of(stored, query), which reads the set's own metric the way every other path already did; a_filed_l2_set_streams_through_the_l2_metric_not_cosine pins it."
+sha256 = "21690ac3916cb680f690ec8496ea9c4ae0b04c75339c4b926f63dc957180ef7d"
+
+[[amendment]]
 path = "crates/inillucent-core/src/embed_onnx.rs"
 ticket = "task-1900"
 reason = "graph optimization level as an option, and the installed runtime handed to ort::init_from so no variable has to be exported"
@@ -128,9 +134,9 @@ sha256 = "df2e6457fb96a18a2bd84827c7bf45965590e8539f5f7c1a54505cefe400acf3"
 
 [[amendment]]
 path = "crates/inillucent-core/src/flat.rs"
-ticket = "vector access through the file"
-reason = "The exhaustive scan reads its vectors from the file in blocks rather than from the heap, which is the other half of the filed-by-default change."
-sha256 = "15fcee15bf5dc8769c8e95df4a8ef5d7a49fc8eb7f71f3e3ad8c44331e7af632"
+ticket = "task-1911"
+reason = "A second distance, L2, was added to the vector index alongside cosine. Cosine remains the default: Metric::default() is Cosine, IndexConfig::default() sets metric: Metric::Cosine, and a generation saved before this field existed has no metric key in its config.bin at all, which SavedConfig::metric reads as cosine rather than refusing (a_generation_with_no_stored_metric_reads_as_cosine proves it, and an_index_declares_cosine_by_default proves the same for a table that never named a metric). No FORMAT_VERSION bump: bumping it would refuse every existing generation outright, the opposite of reading the old one as cosine. VectorSet now carries its metric and normalizes at push only for cosine, since L2 needs the raw magnitude a normalized vector would have thrown away. flat.rs::streaming_search had a real bug this surfaced: it computed 1.0 - dot(stored, query) unconditionally, which is cosine distance whatever metric the set was actually built under, so an L2 set read through the filed, unfiltered scan path was silently scored as cosine. It now calls vectors.distance_of(stored, query), which reads the set's own metric the way every other path already did; a_filed_l2_set_streams_through_the_l2_metric_not_cosine pins it."
+sha256 = "c4792393d0125e39981850b77196cb6085726b3ac871ec29097b8af27814ab1e"
 
 [[amendment]]
 path = "crates/inillucent-core/src/hnsw.rs"
@@ -140,9 +146,9 @@ sha256 = "07b0db20b11878f7890c68f734d5df183f84b1c009c7620b31940addf4e25842"
 
 [[amendment]]
 path = "crates/inillucent-core/src/index.rs"
-ticket = "strict lint remediation"
-reason = "M8: targeted clippy fixes under the workspace lint table, re-applied after an accidental format pass was reverted"
-sha256 = "a34d3e9962f03ee9a002c481e521d4279c4e7a91249c9d7ab421d8acb6011cf9"
+ticket = "task-1911"
+reason = "A second distance, L2, was added to the vector index alongside cosine. Cosine remains the default: Metric::default() is Cosine, IndexConfig::default() sets metric: Metric::Cosine, and a generation saved before this field existed has no metric key in its config.bin at all, which SavedConfig::metric reads as cosine rather than refusing (a_generation_with_no_stored_metric_reads_as_cosine proves it, and an_index_declares_cosine_by_default proves the same for a table that never named a metric). No FORMAT_VERSION bump: bumping it would refuse every existing generation outright, the opposite of reading the old one as cosine. VectorSet now carries its metric and normalizes at push only for cosine, since L2 needs the raw magnitude a normalized vector would have thrown away. flat.rs::streaming_search had a real bug this surfaced: it computed 1.0 - dot(stored, query) unconditionally, which is cosine distance whatever metric the set was actually built under, so an L2 set read through the filed, unfiltered scan path was silently scored as cosine. It now calls vectors.distance_of(stored, query), which reads the set's own metric the way every other path already did; a_filed_l2_set_streams_through_the_l2_metric_not_cosine pins it."
+sha256 = "8b2a8ffa9339ef5797ba46d2d430dab41d46cdbfb993a219c6f6567d1b4afb3f"
 
 [[amendment]]
 path = "crates/inillucent-core/src/install.rs"
@@ -164,9 +170,9 @@ sha256 = "c37a0472de14fd72bb3c352626b7d898fa3f459849b2014725c3dae80dca289b"
 
 [[amendment]]
 path = "crates/inillucent-core/src/persist.rs"
-ticket = "strict lint remediation"
-reason = "The strict lint set became a required check, and these are the findings it had in the retrieval engine. Every edit is local: bounds-checked division, a NaN comparison kept and explained, an identity map removed, a test module moved below the items it follows. No retrieval behaviour changes, and no file was reformatted - these two crates have never been formatted and doing it would move 35 files for no reason connected to a lint."
-sha256 = "a0fa8e3ee115b1488088b2e59745012dcf6d197c7b3e7a71a36a4ed52289f777"
+ticket = "task-1911"
+reason = "A second distance, L2, was added to the vector index alongside cosine. Cosine remains the default: Metric::default() is Cosine, IndexConfig::default() sets metric: Metric::Cosine, and a generation saved before this field existed has no metric key in its config.bin at all, which SavedConfig::metric reads as cosine rather than refusing (a_generation_with_no_stored_metric_reads_as_cosine proves it, and an_index_declares_cosine_by_default proves the same for a table that never named a metric). No FORMAT_VERSION bump: bumping it would refuse every existing generation outright, the opposite of reading the old one as cosine. VectorSet now carries its metric and normalizes at push only for cosine, since L2 needs the raw magnitude a normalized vector would have thrown away. flat.rs::streaming_search had a real bug this surfaced: it computed 1.0 - dot(stored, query) unconditionally, which is cosine distance whatever metric the set was actually built under, so an L2 set read through the filed, unfiltered scan path was silently scored as cosine. It now calls vectors.distance_of(stored, query), which reads the set's own metric the way every other path already did; a_filed_l2_set_streams_through_the_l2_metric_not_cosine pins it."
+sha256 = "b18a630c0c03ccd004fe10a1c84d49aba36998019a001c30c4345898598c6f8e"
 
 [[amendment]]
 path = "crates/inillucent-core/src/quantize.rs"
@@ -188,9 +194,9 @@ sha256 = "81026d0f20007ef65eb5c690e89098b95a0b978ebade7999ab95a2c8ccbc957c"
 
 [[amendment]]
 path = "crates/inillucent-core/src/vectors.rs"
-ticket = "strict lint remediation"
-reason = "The strict lint set became a required check, and these are the findings it had in the retrieval engine. Every edit is local: bounds-checked division, a NaN comparison kept and explained, an identity map removed, a test module moved below the items it follows. No retrieval behaviour changes, and no file was reformatted - these two crates have never been formatted and doing it would move 35 files for no reason connected to a lint."
-sha256 = "f9b947db82720cc05449c044f7915add1e0896c40c8b387be882b68ed63e118b"
+ticket = "task-1911"
+reason = "A second distance, L2, was added to the vector index alongside cosine. Cosine remains the default: Metric::default() is Cosine, IndexConfig::default() sets metric: Metric::Cosine, and a generation saved before this field existed has no metric key in its config.bin at all, which SavedConfig::metric reads as cosine rather than refusing (a_generation_with_no_stored_metric_reads_as_cosine proves it, and an_index_declares_cosine_by_default proves the same for a table that never named a metric). No FORMAT_VERSION bump: bumping it would refuse every existing generation outright, the opposite of reading the old one as cosine. VectorSet now carries its metric and normalizes at push only for cosine, since L2 needs the raw magnitude a normalized vector would have thrown away. flat.rs::streaming_search had a real bug this surfaced: it computed 1.0 - dot(stored, query) unconditionally, which is cosine distance whatever metric the set was actually built under, so an L2 set read through the filed, unfiltered scan path was silently scored as cosine. It now calls vectors.distance_of(stored, query), which reads the set's own metric the way every other path already did; a_filed_l2_set_streams_through_the_l2_metric_not_cosine pins it."
+sha256 = "eb4540b34c928902dc7b3ea5adb75973cd35181b1b62334fe6d71af79b423a05"
 
 [[amendment]]
 path = "inillucent-scorecard.json"

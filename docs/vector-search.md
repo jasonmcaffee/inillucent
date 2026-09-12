@@ -48,9 +48,30 @@ pgvector's operator spellings `<->`, `<#>`, `<=>`, `<+>`, `<~>` and `<%>` all pa
 its distance and vector function names, and `CREATE INDEX ... USING ivfflat` builds a second index
 structure beside the graph. That means a query written for pgvector usually runs here unchanged.
 
-**The ordering the planner puts on the index is cosine only.** A second metric goes in a
-`WITH (metric = ...)` clause on the index, which is not built yet. The distance functions themselves
-answer for every metric; it is the index probe that assumes cosine.
+### Which metric the index minimises
+
+Cosine, unless the index says otherwise:
+
+```sql
+CREATE INDEX passage_v ON passage USING inillucent_hnsw (v) WITH (metric = 'l2');
+```
+
+`'cosine'` is the default and `'l2'` is Euclidean. The metric decides more than the comparison — a
+cosine index normalises every vector it stores to unit length, and an L2 index must not, because
+normalising destroys the magnitude L2 measures. So it is fixed when the index is built, recorded in
+the generation, and a generation whose metric disagrees with the table's declaration is refused
+naming both rather than searched.
+
+**The planner probes the index only when the `ORDER BY` function matches the metric the index was
+built under.** `ORDER BY vector_distance_l2(...)` over a cosine index, or `vector_distance_cos` over
+an L2 one, falls back to the exhaustive scan and a temporary tree. That is a correct answer rather
+than a refusal, and it is slower — if a query is scanning where you expected a probe, the metric is
+the first thing to check.
+
+An index built before this existed reads as cosine, which is what it was.
+
+`vector_dot` has no index of its own: an inner product ordering plans as a scan whatever the index
+says.
 
 ## From the library
 
@@ -195,12 +216,17 @@ whatever this is set to.
 
 ## Limits
 
-- **Adding content rebuilds the graph**, on one thread. 132.6 s over 185,078 passages, and about nine
-  and a half minutes over 598,560. There is no incremental insert into the graph yet.
+- **Adding content folds into the graph rather than rebuilding it.** A commit loads the published
+  generation and inserts each entry of the delta log into it, so the cost is one graph insert per row
+  written rather than one per row in the table. Publishing the new generation is still proportional
+  to the corpus, because a generation is one serialised index; [the roadmap](roadmap.md) has what is
+  left. The single-pass build over everything is still reachable, by
+  `INSERT INTO t(t) VALUES('compact')`.
 - **The graph and the keyword postings are held in memory.** The vectors are not, by default. A
   3.1 GB index of 600,589 chunks serves from 1.3 GB resident with the vectors filed.
-- **The index probe orders by cosine.** The distance functions answer for every metric; a second
-  metric on the index needs the `WITH (metric = ...)` clause, which is not built.
+- **The index probe orders by the metric the index was built under**, cosine by default and L2 when
+  the index says `WITH (metric = 'l2')`. The distance functions answer for every metric whether or
+  not an index does; an ordering by one the index was not built under plans as a scan.
 
 ## Where to go next
 

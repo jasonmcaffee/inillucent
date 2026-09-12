@@ -407,6 +407,43 @@ pub trait ShadowStore {
         body: &mut dyn FnMut(i64, &[Value<'static>]) -> DbResult<bool>,
     ) -> DbResult<()>;
 
+    /// Runs a body over every row whose rowid is at least `from`, in rowid
+    /// order, stopping when it says so.
+    ///
+    /// **A seek, not a scan with a filter, when an implementor has one.** A
+    /// rowid table's rows are already in key order, so a caller that only
+    /// wants what is above a watermark - a delta log's `deltas_above`, chief
+    /// among them - does not need every row below it decoded and thrown
+    /// away; it needs the store to descend to `from` once and walk right
+    /// from there.
+    ///
+    /// **The default is correct rather than fast, and that is deliberate.**
+    /// It is [`Self::scan`] with a callback that skips what is below `from`,
+    /// which costs the whole table exactly as a hand-written filter would -
+    /// so an implementor with no cheap way to position by key is still right
+    /// by doing nothing, and one that can descend directly to a key
+    /// overrides this with that descent. Every rowid tree the new engine
+    /// keeps can; the retired engine's b-trees, reached only from the
+    /// differential suites that still exercise it, are left on the default
+    /// because a seek there is not worth building for a store on its way out.
+    ///
+    /// @param root - the shadow table's root
+    /// @param from - the smallest rowid to visit
+    /// @param body - what to do with each row
+    fn scan_from(
+        &mut self,
+        root: u32,
+        from: i64,
+        body: &mut dyn FnMut(i64, &[Value<'static>]) -> DbResult<bool>,
+    ) -> DbResult<()> {
+        self.scan(root, &mut |rowid, values| {
+            if rowid < from {
+                return Ok(true);
+            }
+            body(rowid, values)
+        })
+    }
+
     /// Reads one row of a keyed shadow table, or nothing when there is not one.
     ///
     /// @param root - the shadow table's root

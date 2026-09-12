@@ -88,6 +88,8 @@ pub mod multi;
 mod plans;
 pub mod pragma;
 mod rebuild;
+/// The engine's half of a vector index a module owns.
+mod vectors;
 pub mod vtab;
 
 use std::collections::HashMap;
@@ -214,6 +216,29 @@ pub struct ImportedDatabase {
     wal: std::rc::Rc<Wal>,
     /// The transaction number the next statement takes.
     next_txn: std::cell::Cell<u64>,
+    /// The transaction the statement in flight took, outside a batch.
+    ///
+    /// **Because `next_txn` is not the number of the statement that is
+    /// running.** [`ImportedDatabase::write`] reads `next_txn` and moves it on
+    /// in the same breath, so for the rest of that statement `next_txn` names
+    /// the *following* transaction - and anything the statement reaches that
+    /// asks `current_txn()` is told that number. `follow_vector_indexes` is
+    /// such a caller: it runs after the trees are no longer borrowed, so that
+    /// it can undo, and it reaches `change_module`, which builds its log with
+    /// `current_txn()`. The table's row was logged under the statement's
+    /// transaction and the index entry under the next one, which nothing ever
+    /// commits - so every insert into a table carrying a vector index lost its
+    /// index entry, and a `CREATE INDEX` over a full table lost the whole
+    /// backfill. Measured before the fix: five inserts through five statements
+    /// left `t_v_state` reading `rows 0`.
+    ///
+    /// `undo_to_floor` worked around the same hazard by taking the number as a
+    /// parameter; this holds it once so that every caller is right rather than
+    /// the ones somebody remembered.
+    ///
+    /// `None` inside a batch and between statements, where `next_txn` is the
+    /// correct answer.
+    statement_txn: std::cell::Cell<Option<u64>>,
     /// The statements already parsed, bound, planned and prepared, by SQL text.
     ///
     /// **Both arms must reuse what they prepared.** SQLite steps a VDBE program
@@ -1143,6 +1168,12 @@ impl TreeCatalog for ImportedDatabase {
         }
     }
 
+    // `docs/roadmap.md` item 15: read off the registration's own flags.
+    fn user_scalar_is_deterministic(&self, name: &[u8], argc: usize) -> bool {
+        self.user_function(name, argc)
+            .is_some_and(|function| function.flags.deterministic)
+    }
+
     fn user_aggregate(
         &self,
         name: &[u8],
@@ -1384,6 +1415,7 @@ impl ImportedDatabase {
             limits: Limits::default(),
             wal,
             next_txn: std::cell::Cell::new(1),
+            statement_txn: std::cell::Cell::new(None),
             last_rowid: std::cell::Cell::new(0),
             last_changes: std::cell::Cell::new(0),
             seed: std::cell::Cell::new(fresh_seed()),
@@ -1679,6 +1711,7 @@ impl ImportedDatabase {
             // Above every number the log still holds, so that this run cannot
             // call something by a name a crashed one already used.
             next_txn: std::cell::Cell::new(highest_txn.saturating_add(1)),
+            statement_txn: std::cell::Cell::new(None),
             last_rowid: std::cell::Cell::new(0),
             last_changes: std::cell::Cell::new(0),
             seed: std::cell::Cell::new(fresh_seed()),
@@ -2167,277 +2200,6 @@ impl ImportedDatabase {
             Cached::Update(..) => Ok(vec!["an update".to_string()]),
             Cached::Delete(..) => Ok(vec!["a delete".to_string()]),
         }
-    }
-
-    /// Applies a statement's row images to every index a module owns.
-    ///
-    /// **The other half of `Changes::written`.** The write path cannot reach a
-    /// module, so it reports what it stored and what it removed; this is where
-    /// those become the module's own inserts and deletes. Removals go first,
-    /// because an `UPDATE` reports both halves of the same key and the store
-    /// would otherwise hold the old row and refuse the new one.
-    ///
-    /// A row whose vector is NULL is not in the index at all, which is what
-    /// makes a partly-populated column work: the rows that have vectors are
-    /// searchable and the rows that do not are simply absent.
-    ///
-    /// @param changes - what the statement stored and removed
-    pub(crate) fn follow_vector_indexes(&mut self, changes: &Changes) -> DbResult<()> {
-        if changes.written.is_empty() && changes.removed.is_empty() {
-            return Ok(());
-        }
-        let indexes: Vec<VectorIndex> = self.vector_indexes.values().flatten().cloned().collect();
-        for index in indexes {
-            for row in &changes.removed {
-                let Some(OwnedDatum::Int(rowid)) = row.get(index.rowid) else {
-                    continue;
-                };
-                self.change_module(
-                    &index.name,
-                    &inillucent_sql::vtab::Change::Delete(inillucent_value::Value::Integer(*rowid)),
-                )?;
-            }
-            for row in &changes.written {
-                let Some(OwnedDatum::Int(rowid)) = row.get(index.rowid) else {
-                    continue;
-                };
-                let Some(vector) = row.get(index.column) else {
-                    continue;
-                };
-                let value = inillucent_exec::scalar::to_value(vector.borrow());
-                if matches!(value, inillucent_value::Value::Null) {
-                    continue;
-                }
-                self.change_module(
-                    &index.name,
-                    &inillucent_sql::vtab::Change::Insert {
-                        rowid: inillucent_value::Value::Integer(*rowid),
-                        // `body` then the hidden query columns: the store's
-                        // first declared column carries the source rowid as
-                        // text, so a hit can name the row it came from, and the
-                        // vector goes in the hidden `vector` column the module
-                        // reads embeddings out of.
-                        values: vec![
-                            inillucent_value::Value::owned_text(rowid.to_string().as_bytes())?,
-                            inillucent_value::Value::Null,
-                            inillucent_value::Value::Null,
-                            value,
-                            inillucent_value::Value::Null,
-                            inillucent_value::Value::Null,
-                        ],
-                    },
-                )?;
-            }
-        }
-        Ok(())
-    }
-
-    /// Asks an index a module owns for the rowids nearest a vector.
-    ///
-    /// **The store's rowid is the table's rowid**, which is what makes this an
-    /// answer rather than a lookup table: the index was written with the source
-    /// row's number as its own, so the candidates come back ready to probe the
-    /// table with.
-    ///
-    /// The query is the module's own vector-only shape - no query text, a
-    /// vector, and a depth - and it is put through the ordinary planner, so
-    /// there is one implementation of what asking this module means.
-    ///
-    /// @param index - the store's name
-    /// @param probe - the vector to measure against
-    /// @param depth - how many candidates to ask for
-    fn nearest_rowids(
-        &self,
-        index: &[u8],
-        probe: &inillucent_tree::datum::Datum<'_>,
-        depth: usize,
-    ) -> DbResult<Option<Vec<i64>>> {
-        let folded = index.to_ascii_lowercase();
-        let Some(connected) = self.virtual_tables.get(&folded) else {
-            return Ok(None);
-        };
-        let (inillucent_tree::datum::Datum::Blob(bytes)
-        | inillucent_tree::datum::Datum::Text(bytes)) = probe
-        else {
-            // A probe that is not bytes cannot be a vector, and an index asked
-            // for the nearest to a number has no answer rather than a wrong
-            // one.
-            return Ok(Some(Vec::new()));
-        };
-        Ok(Some(self.probe_module(connected, bytes, depth)?))
-    }
-
-    /// Puts the module's own vector-only query to one connected store.
-    ///
-    /// **Built here rather than compiled from text**, because this runs inside
-    /// a read: the executor is holding the catalog, and compiling a statement
-    /// would want the connection mutably. The constraints are exactly the three
-    /// the module documents - no query text, a vector, and a depth - offered
-    /// through `best_index` the way the planner offers them, so the module
-    /// chooses its own plan rather than being told one.
-    ///
-    /// @param connected - the store
-    /// @param probe - the vector's bytes
-    /// @param depth - how many candidates to ask for
-    fn probe_module(
-        &self,
-        connected: &vtab::Connected,
-        probe: &[u8],
-        depth: usize,
-    ) -> DbResult<Vec<i64>> {
-        use inillucent_sql::vtab::{ConstraintOp, ConstraintSpec, IndexQuery, OrderSpec};
-        let declaration = connected.table.declaration();
-        let column_of = |wanted: &[u8]| -> Option<i32> {
-            declaration
-                .columns
-                .iter()
-                .position(|held| held.name.eq_ignore_ascii_case(wanted))
-                .and_then(|at| i32::try_from(at).ok())
-        };
-        // The query column is the table's own name; the rest are named.
-        let (Some(query), Some(k), Some(vector), Some(rank)) = (
-            column_of(&connected.arguments.table),
-            column_of(b"k"),
-            column_of(b"vector"),
-            column_of(b"rank"),
-        ) else {
-            return Err(refusal("the index's store is not a search table"));
-        };
-        let specs = vec![
-            ConstraintSpec {
-                column: query,
-                op: ConstraintOp::Match,
-                usable: true,
-            },
-            ConstraintSpec {
-                column: vector,
-                op: ConstraintOp::Eq,
-                usable: true,
-            },
-            ConstraintSpec {
-                column: k,
-                op: ConstraintOp::Eq,
-                usable: true,
-            },
-        ];
-        let values = [
-            inillucent_value::Value::owned_text(b"")?,
-            inillucent_value::Value::owned_blob(probe)?,
-            inillucent_value::Value::Integer(depth as i64),
-        ];
-        let mut query_plan = IndexQuery::new(
-            specs,
-            vec![OrderSpec {
-                column: rank,
-                descending: false,
-            }],
-        );
-        connected.table.best_index(&mut query_plan)?;
-        let mut arguments: Vec<inillucent_value::Value<'static>> = Vec::new();
-        for position in query_plan.argument_order() {
-            let Some(value) = values.get(position) else {
-                continue;
-            };
-            arguments.push(value.clone());
-        }
-        let plan = inillucent_ext::vtab::FilterPlan {
-            index_number: query_plan.index_number,
-            index_string: query_plan.index_string.clone(),
-            arguments,
-        };
-        let mut cursor = connected.table.open()?;
-        let store = vtab::ReadStore {
-            pool: self.database.pool(),
-            trees: &self.trees,
-        };
-        let mut nowhere = inillucent_ext::vtab::WithStore { store };
-        let mut context = inillucent_ext::vtab::Context {
-            host: &mut nowhere,
-            database: 0,
-            limits: &self.limits,
-            catalog: None,
-        };
-        cursor.filter(&mut context, &plan)?;
-        let mut found = Vec::with_capacity(depth);
-        while !cursor.eof() {
-            found.push(cursor.rowid()?);
-            cursor.next(&mut context)?;
-        }
-        Ok(found)
-    }
-
-    /// Rebuilds the map of indexes a module owns from the connected tables.
-    ///
-    /// Called wherever the catalog changes. The association is read back out of
-    /// the arguments the engine itself wrote when the index was created, which
-    /// is why this does not have to parse a module's argument grammar in
-    /// general: it only recognises the two arguments it put there.
-    pub(crate) fn refresh_vector_indexes(&mut self) {
-        let mut found: HashMap<u32, Vec<VectorIndex>> = HashMap::new();
-        for (name, connected) in &self.virtual_tables {
-            let Some(source) = argument_of(&connected.arguments.arguments, b"source") else {
-                continue;
-            };
-            let Some(column) = argument_of(&connected.arguments.arguments, b"source_column") else {
-                continue;
-            };
-            let folded = source.to_ascii_lowercase();
-            let Some(table) = self.tables.iter().find(|held| held.folded == folded) else {
-                continue;
-            };
-            let Some(layout) = self.layouts.get(&table.root) else {
-                continue;
-            };
-            let wanted = column.to_ascii_lowercase();
-            let Some(position) = table.columns.iter().position(|held| held.folded == wanted) else {
-                continue;
-            };
-            let (Some(slot), Some(rowid)) =
-                (layout.slots.get(position).copied().flatten(), layout.rowid)
-            else {
-                continue;
-            };
-            found.entry(table.root).or_default().push(VectorIndex {
-                name: name.clone(),
-                column: slot,
-                rowid,
-                declared: position as u16,
-            });
-        }
-        // **Published into the catalog as well, because the planner reads the
-        // catalog and not this map.** An index a module owns is an `IndexInfo`
-        // with `IndexOrigin::Module` on the table it indexes: none of the
-        // b-tree paths apply to it, and the one path that does looks for
-        // exactly that origin.
-        for table in &mut self.tables {
-            table
-                .indexes
-                .retain(|held| held.origin != inillucent_sql::catalog_view::IndexOrigin::Module);
-            let Some(indexes) = found.get(&table.root) else {
-                continue;
-            };
-            for index in indexes {
-                table.indexes.push(inillucent_sql::catalog_view::IndexInfo {
-                    folded: index.name.to_ascii_lowercase(),
-                    name: index.name.clone(),
-                    root: 0,
-                    unique: false,
-                    columns: vec![inillucent_sql::catalog_view::IndexColumnInfo {
-                        column: Some(index.declared),
-                        collation: b"binary".to_vec(),
-                        descending: false,
-                        declared_descending: false,
-                        expr_sql: None,
-                    }],
-                    partial_sql: None,
-                    origin: inillucent_sql::catalog_view::IndexOrigin::Module,
-                    conflict: None,
-                    prefix_rows: Vec::new(),
-                    analysed_rows: None,
-                });
-            }
-        }
-        self.vector_indexes = found;
     }
 
     /// Returns where the last `CREATE INDEX` spent its time.
@@ -5100,6 +4862,15 @@ impl ImportedDatabase {
             None => {
                 let txn = self.next_txn.get();
                 self.next_txn.set(txn.saturating_add(1));
+                // **What `current_txn()` answers for the rest of this
+                // statement.** `next_txn` has just moved past this number, so
+                // anything the statement reaches that asks for "the current
+                // transaction" - a module write out of
+                // `follow_vector_indexes`, most of all - would otherwise be
+                // told the next one and log into a transaction nothing
+                // commits. Cleared on every exit below, including the failure
+                // one.
+                self.statement_txn.set(Some(txn));
                 (txn, true)
             }
         };
@@ -5183,6 +4954,7 @@ impl ImportedDatabase {
                 covering: &self.covering,
                 indexed: &self.vector_indexes,
                 counted: std::cell::Cell::new((0, 0, None)),
+                registry: &self.registry,
             };
             // **Not `?`.** A failed statement has writes of its own to put
             // back, and the borrow of the trees has to end before anything can.
@@ -5233,8 +5005,33 @@ impl ImportedDatabase {
         // maintains is part of the write, so a statement that could not
         // maintain it is a statement that did not happen. Reached with the
         // trees no longer borrowed, which is what lets it undo.
-        if let Err(error) = self.follow_vector_indexes(&changes) {
-            return Err(self.abandon(error, mark, autocommit, wrote, txn));
+        // **And flushed, in the same transaction.** A module holds a delta log
+        // and folds it into a published generation on `sync`; nothing called
+        // `sync` on this path, so a table with a vector index on it accumulated
+        // delta entries for ever and never published a generation. The index
+        // answered correctly - the read path replays the log over the
+        // generation - and it answered by replaying every entry, which made
+        // having the index **slower than not having one**: 2.34 s against
+        // 0.66 s for the same top-5 over the 2,661 passages of
+        // `examples/rag-agent`. A fold is bounded by what this transaction
+        // wrote and returns at once when the log is short, so an ordinary small
+        // write pays a `sync` that does nothing.
+        match self.follow_vector_indexes(&changes) {
+            Err(error) => return Err(self.abandon(error, mark, autocommit, wrote, txn)),
+            // **Only outside a batch**, which is the same guard the
+            // `VirtualUpdate` and `VirtualDelete` arms take. `sync_modules`
+            // ends with `commit` on every connected module, and telling a
+            // module its transaction is over while the batch is still open
+            // would throw away what the rest of the batch is still adding to.
+            // Inside a batch, `commit_batch` syncs them once at the end, which
+            // is also cheaper: a thousand-row transaction folds once.
+            Ok(true) if autocommit => {
+                if let Err(error) = self.sync_modules() {
+                    return Err(self.abandon(error, mark, autocommit, wrote, txn));
+                }
+            }
+            Ok(true) => {}
+            Ok(false) => {}
         }
         if autocommit {
             // **Nothing else can abandon what an autocommit statement wrote**,
@@ -5250,10 +5047,17 @@ impl ImportedDatabase {
         // and the failure path count the same way and a trigger's rows land in
         // `total_changes()` where SQLite puts them.
         self.record_changes(counted.0, counted.1);
-        if autocommit {
+        let committed = if autocommit {
             let participants = std::mem::take(&mut self.touched);
-            self.commit_across(txn, participants)?;
-        }
+            self.commit_across(txn, participants)
+        } else {
+            Ok(())
+        };
+        // **Cleared whether the commit worked or not**, because what comes next
+        // is a different statement either way, and a number left behind here
+        // would be handed to it by `current_txn()`.
+        self.statement_txn.set(None);
+        committed?;
         Ok(Outcome {
             rows: changes.returned.clone(),
             names,
@@ -5323,6 +5127,10 @@ impl ImportedDatabase {
                 self.touched = 0;
             }
         }
+        // The statement is over, so its transaction number stops being the
+        // answer - cleared here rather than at the two call sites, so that
+        // every way out of `write` clears it.
+        self.statement_txn.set(None);
         undone.err().unwrap_or(error)
     }
 }
@@ -5796,6 +5604,8 @@ struct WriteView<'a> {
     /// Which index trees cover which table, so a query a trigger body runs
     /// inside the write reaches the same covering indexes a typed one does.
     covering: &'a HashMap<u32, Vec<u32>>,
+    /// What this connection has registered - `docs/roadmap.md` item 13.
+    registry: &'a inillucent_ext::registry::Registry,
 }
 
 impl WriteView<'_> {
@@ -5919,6 +5729,22 @@ impl TreeCatalog for WriteView<'_> {
             "a trigger body reads {}, which is a virtual table",
             String::from_utf8_lossy(&table.name)
         )))
+    }
+
+    // `docs/roadmap.md` item 13.
+    fn user_scalar(&self, name: &[u8], argc: usize) -> Option<inillucent_exec::expr::ScalarBody> {
+        match self.registry.function(name, argc)?.body.clone() {
+            inillucent_ext::registry::UserBody::Scalar(body) => {
+                Some(inillucent_exec::expr::ScalarBody(body))
+            }
+            inillucent_ext::registry::UserBody::Aggregate(_) => None,
+        }
+    }
+
+    fn user_scalar_is_deterministic(&self, name: &[u8], argc: usize) -> bool {
+        self.registry
+            .function(name, argc)
+            .is_some_and(|function| function.flags.deterministic)
     }
 }
 

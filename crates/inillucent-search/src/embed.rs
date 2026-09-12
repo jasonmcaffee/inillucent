@@ -122,12 +122,30 @@ fn embed(arguments: &[Value<'static>]) -> DbResult<Value<'static>> {
 
 /// Adds `embed` to a registry.
 ///
+/// **Registered as deterministic, which is what makes a semantic search take
+/// a second rather than a minute.** The same text through the same weights
+/// gives the same vector, so a call whose argument does not vary within one
+/// statement may be evaluated once for the statement instead of once for every
+/// row. Without this flag the planner has to assume the model might answer
+/// differently each time, and
+/// `ORDER BY vector_distance_cos(v, embed('search_query: ' || ?1)) LIMIT 5`
+/// over the 2,661 passages of `examples/rag-agent` measured **105.7 seconds**
+/// against 1.48 for the same question written as a one-row subquery - 2,661
+/// embeddings of one sentence, and 2,660 of them thrown away.
+///
+/// It stays `direct_only`: a function that loads a 275 MB model has no
+/// business being called out of a `CHECK` constraint or an index expression,
+/// and being deterministic says nothing about being cheap.
+///
 /// @param registry - what a connection reaches functions through
 pub fn register(registry: &mut inillucent_ext::registry::Registry) {
     registry.register_function(inillucent_ext::registry::UserFunction {
         name: "embed".to_string(),
         arity: 1,
-        flags: inillucent_ext::registry::FunctionFlags::default(),
+        flags: inillucent_ext::registry::FunctionFlags {
+            deterministic: true,
+            ..inillucent_ext::registry::FunctionFlags::default()
+        },
         body: inillucent_ext::registry::UserBody::Scalar(Arc::new(embed)),
     });
 }

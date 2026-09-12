@@ -448,10 +448,7 @@ fn phrase_rows(
         return Ok(Vec::new());
     };
     let mut rows = Vec::new();
-    for page in term_pages(term, context, shadows, buffer)? {
-        let Some(bytes) = super::read_doclist(context, shadows, buffer, page)? else {
-            continue;
-        };
+    for bytes in term_doclists(term, context, shadows, buffer)? {
         super::doclist_rows(&bytes, phrase.column, columns, &mut rows);
     }
     rows.sort_unstable();
@@ -761,32 +758,32 @@ fn meet(left: &Hits, right: &Hits) -> Hits {
     out
 }
 
-/// Returns the doclist entries one term matches, prefix included.
-/// Returns the `%_data` rows one term's doclists live in.
+/// Returns the doclists one term matches, prefix included.
 ///
-/// One row for an ordinary term; the whole prefix run for `word*`.
+/// One doclist for an ordinary term; the whole prefix run for `word*`.
 ///
 /// @param term - the term
 /// @param context - the host
 /// @param shadows - the table's shadow tables
 /// @param buffer - the doclists this transaction has staged
-fn term_pages(
+fn term_doclists(
     term: &Term,
     context: &mut Context<'_>,
     shadows: &ShadowTables,
     buffer: &super::Buffer,
-) -> DbResult<Vec<i64>> {
-    let mut pages = Vec::new();
+) -> DbResult<Vec<Vec<u8>>> {
+    let mut doclists = Vec::new();
     if term.prefix {
-        // **The staged dictionary rows go out first.** A term this transaction
-        // created is held in the buffer and written in term order at the flush,
-        // so a scan that ran before it would not see it - and a prefix search
-        // inside the transaction that wrote the term would miss it. The point
-        // lookup below needs no flush, because the buffer answers it.
+        // **The staged rows go out first.** A term this transaction created is
+        // held in the buffer and written in term order at the flush, so a scan
+        // that ran before it would not see it - and a prefix search inside the
+        // transaction that wrote the term would miss it. The point lookup
+        // below needs no flush, because the buffer answers it.
         super::flush_doclists(context, shadows, buffer)?;
         // A prefix reads every term the dictionary holds that starts with it.
         // The dictionary is in term order, so the run is contiguous - which is
         // what makes a prefix search cheaper than a scan of every term.
+        let mut rows: Vec<Vec<Value<'static>>> = Vec::new();
         shadows.scan_keyed(context, b"idx", 2, |values| {
             let Some(candidate) = values.get(1).and_then(Value::as_blob) else {
                 return Ok(true);
@@ -798,17 +795,18 @@ fn term_pages(
             if !candidate.starts_with(&term.token) {
                 return Ok(false);
             }
-            if let Some(page) = values.get(2).and_then(Value::as_integer) {
-                pages.push(page);
-            }
+            rows.push(values.to_vec());
             Ok(true)
         })?;
-    } else if let Some(page) =
-        super::term_row(context, shadows, buffer, &term.token, false)?.map(|held| held.page)
-    {
-        pages.push(page);
+        for row in rows {
+            if let Some(bytes) = super::resolve_doclist(context, shadows, &row)? {
+                doclists.push(bytes);
+            }
+        }
+    } else if let Some(bytes) = super::read_doclist(context, shadows, buffer, &term.token)? {
+        doclists.push(bytes);
     }
-    Ok(pages)
+    Ok(doclists)
 }
 
 fn term_entries(
@@ -817,29 +815,23 @@ fn term_entries(
     shadows: &ShadowTables,
     buffer: &super::Buffer,
 ) -> DbResult<Vec<DocEntry>> {
-    let pages = term_pages(term, context, shadows, buffer)?;
+    let doclists = term_doclists(term, context, shadows, buffer)?;
 
     // **One doclist is already the answer.** A term that is not a prefix has
-    // exactly one `%_data` row, and a doclist holds each rowid once in
-    // ascending order - so the merge below has nothing to merge, and running it
-    // anyway searched a growing vector once per entry. That is quadratic in the
+    // exactly one row, and a doclist holds each rowid once in ascending order
+    // - so the merge below has nothing to merge, and running it anyway
+    // searched a growing vector once per entry. That is quadratic in the
     // documents a term appears in: a term in five hundred of them cost a
     // hundred and twenty-five thousand comparisons per query, and `evaluate`
     // was seventy per cent of `SELECT count(*) ... MATCH`.
-    if let Some(only) = pages.first().filter(|_| pages.len() == 1) {
-        let Some(bytes) = super::read_doclist(context, shadows, buffer, *only)? else {
-            return Ok(Vec::new());
-        };
-        return Ok(decode_doclist(&bytes));
+    if let Some(only) = doclists.first().filter(|_| doclists.len() == 1) {
+        return Ok(decode_doclist(only));
     }
     // A prefix reads several, and they can name the same row: merged by rowid
     // rather than searched for it.
     let mut entries: Vec<DocEntry> = Vec::new();
-    for page in pages {
-        let Some(bytes) = super::read_doclist(context, shadows, buffer, page)? else {
-            continue;
-        };
-        entries.extend(decode_doclist(&bytes));
+    for bytes in &doclists {
+        entries.extend(decode_doclist(bytes));
     }
     entries.sort_by_key(|entry| entry.rowid);
     let mut merged: Vec<DocEntry> = Vec::with_capacity(entries.len());

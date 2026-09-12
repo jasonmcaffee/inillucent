@@ -1200,12 +1200,23 @@ impl ImportedDatabase {
 
     /// Returns the transaction a schema change joins.
     ///
-    /// Inside a batch it is the batch's; outside one it is a fresh number that
-    /// is committed by [`ImportedDatabase::seal`] at the end of the statement.
+    /// Inside a batch it is the batch's; outside one it is the number the
+    /// statement in flight already took, and a fresh one when no statement is
+    /// in flight - which is then committed by [`ImportedDatabase::seal`] at the
+    /// end of the statement.
+    ///
+    /// **The middle case is the one that was missing.**
+    /// [`ImportedDatabase::write`] reads `next_txn` and moves it on at once, so
+    /// asking `next_txn` from inside a running statement names the transaction
+    /// *after* the one about to commit. Everything logged under that number is
+    /// written and never committed. See `statement_txn` for what that cost.
     pub(super) fn current_txn(&self) -> u64 {
         match self.batch.get() {
             Some(held) => held,
-            None => self.next_txn.get(),
+            None => self
+                .statement_txn
+                .get()
+                .unwrap_or_else(|| self.next_txn.get()),
         }
     }
 
@@ -1676,157 +1687,6 @@ impl ImportedDatabase {
             catalog,
             sealed.elapsed().as_nanos(),
         ));
-        Ok(Outcome::empty())
-    }
-
-    /// Builds an index a module owns, and backfills it from the table.
-    ///
-    /// One statement of sugar for three things that already work: a search
-    /// store, the `source=` marker that makes the association durable, and a
-    /// pass over the rows that are already there. Everything after this is
-    /// ordinary - a write reports its images and `follow_vector_indexes`
-    /// applies them.
-    ///
-    /// The store's declared column is `body`, and it holds the source row's
-    /// **rowid as text** so a hit can name the row it came from. That is what
-    /// makes the index answerable without a second map: the store's own rowid
-    /// is the source rowid too, so a delete needs no lookup at all.
-    ///
-    /// @param name - the index's name, which is the store's name
-    /// @param table - the table being indexed
-    /// @param columns - the key columns, of which there must be exactly one
-    /// @param exists - whether an index of this name is already there
-    /// @param if_not_exists - whether the statement said `IF NOT EXISTS`
-    fn create_vector_index(
-        &mut self,
-        module: &[u8],
-        name: &[u8],
-        table: &[u8],
-        columns: &[inillucent_sql::directive::IndexKeyColumn],
-        settings: &[(Vec<u8>, Vec<u8>)],
-        exists: bool,
-        if_not_exists: bool,
-    ) -> DbResult<Outcome> {
-        if exists {
-            if if_not_exists {
-                return Ok(Outcome::empty());
-            }
-            return Err(refusal(format!(
-                "index {} already exists",
-                String::from_utf8_lossy(name)
-            )));
-        }
-        let [key] = columns else {
-            return Err(
-                refusal("an index USING inillucent_hnsw takes exactly one column")
-                    .with_unsupported("a multi-column vector index"),
-            );
-        };
-        let folded = table.to_ascii_lowercase();
-        let owner = self
-            .tables
-            .iter()
-            .find(|held| held.folded == folded)
-            .cloned()
-            .ok_or_else(|| refusal(format!("no such table: {}", String::from_utf8_lossy(table))))?;
-        // A module-backed index takes a column, not an expression: the store
-        // is declared over a table column's vectors and there is nothing for it
-        // to compute one from.
-        let key_column = key.column.ok_or_else(|| {
-            refusal("an index USING inillucent_hnsw takes a column, not an expression")
-        })?;
-        let column = owner
-            .columns
-            .get(usize::from(key_column))
-            .ok_or_else(|| refusal("the indexed column is not in the table"))?;
-        // **The width has to be declared.** A store is created with a fixed
-        // number of dimensions and every vector it is given is checked against
-        // it, so an index over a column that never said how wide its vectors
-        // are would have to guess from the first row - and be wrong for the
-        // rest of them.
-        let dims = column.vector_dimensions().ok_or_else(|| {
-            refusal(format!(
-                "{}.{} is not declared VECTOR(N), so an index cannot know how wide its vectors are",
-                String::from_utf8_lossy(table),
-                String::from_utf8_lossy(&column.name)
-            ))
-        })?;
-        // The storage parameters go through as the store's own options, which
-        // is what they are: `WITH (m = 32)` and `USING inillucent_search(...,
-        // m=32)` reach the same graph, so the index form is a spelling of the
-        // table form rather than a second path into it.
-        let mut declared = String::new();
-        for (option, value) in settings {
-            declared.push_str(&format!(
-                ", {}={}",
-                String::from_utf8_lossy(option),
-                String::from_utf8_lossy(value)
-            ));
-        }
-        // **The structure the index named is the module the store uses.** An
-        // `ivfflat` is an inverted file and needs no lexical half, so it is its
-        // own module with its own three shadow tables; `inillucent_hnsw` is the
-        // graph, which is `inillucent_search` with a vector width and no text.
-        // Both answer the engine's vector probe the same way, which is the only
-        // thing above this line knows about either.
-        let store = if module == b"ivfflat" {
-            format!(
-                "CREATE VIRTUAL TABLE {} USING ivfflat(dims={}, source={}, source_column={}{declared})",
-                String::from_utf8_lossy(name),
-                dims,
-                String::from_utf8_lossy(&owner.name),
-                String::from_utf8_lossy(&column.name)
-            )
-        } else {
-            format!(
-                "CREATE VIRTUAL TABLE {} USING inillucent_search(body, dims={}, source={}, source_column={}{declared})",
-                String::from_utf8_lossy(name),
-                dims,
-                String::from_utf8_lossy(&owner.name),
-                String::from_utf8_lossy(&column.name)
-            )
-        };
-        self.execute_any(&store, &inillucent_exec::physical::Params::new())?;
-        // The association is only visible once the store is connected, and the
-        // backfill below has to be seen by it.
-        self.refresh_vector_indexes();
-        // **Read as rows and written as module changes, not as an
-        // `INSERT ... SELECT`.** A module's insert takes values, so the engine
-        // refuses an `INSERT ... SELECT` into a virtual table - and the rows
-        // that are already in the table are exactly the case an index has to
-        // cover, or a `CREATE INDEX` on a full table would build an empty one.
-        let query = format!(
-            "SELECT rowid, {} FROM {} WHERE {} IS NOT NULL",
-            String::from_utf8_lossy(&column.name),
-            String::from_utf8_lossy(&owner.name),
-            String::from_utf8_lossy(&column.name)
-        );
-        let existing = self
-            .execute_any(&query, &inillucent_exec::physical::Params::new())?
-            .rows;
-        let changes = inillucent_exec::dml::Changes {
-            written: existing
-                .into_iter()
-                .map(|row| {
-                    vec![
-                        row.first().cloned().unwrap_or(OwnedDatum::Null),
-                        row.get(1).cloned().unwrap_or(OwnedDatum::Null),
-                    ]
-                })
-                .collect(),
-            ..Default::default()
-        };
-        // The rowid is column 0 and the vector column 1 of what was just read,
-        // which is not the table's layout - so the index is told where they are
-        // for this one call rather than being asked to agree with the layout.
-        let held = self.vector_indexes.clone();
-        self.vector_indexes = std::collections::HashMap::from([(
-            owner.root,
-            vec![super::VectorIndex::at(name.to_ascii_lowercase(), 1, 0)],
-        )]);
-        let outcome = self.follow_vector_indexes(&changes);
-        self.vector_indexes = held;
-        outcome?;
         Ok(Outcome::empty())
     }
 

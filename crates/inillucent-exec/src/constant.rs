@@ -149,11 +149,13 @@ fn constant_call(expr: &Expr) -> bool {
 ///
 /// The batch is one row wide and holds no columns. **A column reference would
 /// not fail against it - it would read back NULL**, which is why the only
-/// expression this is ever handed is one [`constant_call`] has already said
-/// holds no column reference at all.
+/// expression this is ever handed is one the caller has already checked reads
+/// no column at all - [`constant_call`] for a seek key or a range bound,
+/// [`translate`](crate::physical) for a deterministic registered function's
+/// call over constant arguments (`docs/roadmap.md` item 15).
 ///
 /// @param expr - the translated expression
-fn evaluated_constant(expr: &Expr) -> DbResult<OwnedDatum> {
+pub(crate) fn evaluated_constant(expr: &Expr) -> DbResult<OwnedDatum> {
     let evaluator = compile(expr, &[])?;
     let batch = Batch::new(1, Vec::new());
     Ok(evaluator.value(&batch, 0)?.into_owned())

@@ -33,6 +33,29 @@ pub enum IndexOrigin {
     Module,
 }
 
+/// The distance a `Module`-origin vector index was declared to minimise.
+///
+/// **Only a vector index has one of these, and only a real one.** An ordinary
+/// b-tree orders by a collation, not a distance, so every `IndexInfo` that is
+/// not `IndexOrigin::Module` carries `None`. A `Module` index carries `None`
+/// too unless its own module is one the planner has verified actually honours
+/// the setting: `inillucent-engine/src/vectors.rs` only ever reports `Some`
+/// for `inillucent_search` (which backs `USING inillucent_hnsw`), because that
+/// is the one module whose store was changed to read the graph under this
+/// metric. An `ivfflat` index that was declared `WITH (metric = 'l2')` still
+/// reads back as `None` here, deliberately: `ivfflat`'s own argument parser
+/// silently accepts and ignores a key it does not recognise, so trusting the
+/// text would let the planner believe an index orders by Euclidean distance
+/// when the structure behind it still computes cosine - the exact "wrong
+/// answer that looks like a working index" this field exists to prevent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IndexMetric {
+    /// One minus the cosine similarity of two unit vectors.
+    Cosine,
+    /// Euclidean distance.
+    L2,
+}
+
 /// One column of a table or view.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ColumnInfo {
@@ -146,6 +169,9 @@ pub struct IndexInfo {
     ///
     /// `None` until the schema has been analysed.
     pub analysed_rows: Option<i64>,
+    /// The distance a vector index minimises, when it is one the planner may
+    /// trust to answer for it. See [`IndexMetric`].
+    pub metric: Option<IndexMetric>,
 }
 
 /// What kind of schema object a name resolves to.

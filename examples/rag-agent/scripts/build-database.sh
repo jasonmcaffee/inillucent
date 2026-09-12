@@ -102,19 +102,17 @@ DETACH DATABASE staging;
 "
 
 echo "== indexing"
-# **There is no HNSW index here, on purpose.** `CREATE INDEX ... USING
-# inillucent_hnsw (v)` is what `docs/vector-search.md` says to build, and on this
-# engine it makes the search return nothing at all. The store keeps what it is
-# given only until the file is reopened: an index built over a table that already
-# holds rows reports those rows in the session that built it and holds none the
-# next time the database is opened, and an insert loses its last row the same
-# way. An empty vector index does not fail - it answers zero rows - so the index
-# has to be left off until that is fixed. `docs/roadmap.md` item 14.
+# **There is no HNSW index here, on purpose - and the purpose changed.** It used
+# to be that `CREATE INDEX ... USING inillucent_hnsw (v)` made the search return
+# nothing at all: the store kept what it was given only until the file was
+# reopened, and an empty vector index answers zero rows rather than failing. That
+# was fixed in task-1911, and `scripts/verify-indexed.sh` asks this corpus's own
+# ten questions through an index to keep it fixed.
 #
-# Nothing is lost at this size. 2,661 passages is an exhaustive cosine over 8 MB
-# of vectors, which is milliseconds, and `docs/vector-search.md` already says to
-# build the index when it is slow rather than before. What matters far more here
-# is the shape of the query - see README.md, "Why the query looks like that".
+# The index is still left off because nothing here needs it. 2,661 passages is an
+# exhaustive cosine over 8 MB of vectors, which is milliseconds, and
+# `docs/vector-search.md` says to build the index when the search is slow rather
+# than before it is.
 
 # The full-text table is loaded from a file rather than copied across from
 # `passage`, because `INSERT INTO <virtual table> ... SELECT` is refused with the

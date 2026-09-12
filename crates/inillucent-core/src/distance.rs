@@ -64,6 +64,63 @@ pub fn truncate_normalized(v: &[f32], dims: usize) -> Vec<f32> {
     out
 }
 
+/// Squared Euclidean distance.
+///
+/// No square root. A top-k ordered by distance is the same top-k whether or
+/// not the epsilon is applied - `sqrt` is monotone increasing over the
+/// non-negative reals a squared distance always is - so the root is one
+/// operation this build does not pay for on every comparison a graph walk
+/// makes. `vector_distance_l2` still takes it, once, on the handful of rows a
+/// query actually projects; the index never does, because the index never
+/// returns a distance, only an order.
+/// @param a - one vector
+/// @param b - the other, the same width
+pub fn squared_euclidean(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
+    a.iter().zip(b.iter()).map(|(x, y)| { let d = x - y; d * d }).sum()
+}
+
+/// Which distance a vector structure minimises.
+///
+/// **Cosine and L2 want opposite things done to a vector before it is
+/// stored.** Cosine is one minus the dot product of two *unit* vectors, so
+/// every stored vector is normalized once at insert and the comparison is a
+/// dot product for the rest of the structure's life. L2 measures the raw
+/// distance between two points, and normalizing either one first would move
+/// it to a point at a fixed distance from the origin - throwing away the
+/// magnitude L2 exists to compare. So a structure has to know, at insert time
+/// and not only at query time, which of the two it was declared to minimise;
+/// that is why this is threaded through as a field on `VectorSet` and
+/// `IndexConfig` rather than decided only where a query is answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Metric {
+    /// One minus the cosine similarity of two unit vectors.
+    #[default]
+    Cosine,
+    /// Euclidean distance, compared as its square (see [`squared_euclidean`]).
+    L2,
+}
+
+impl Metric {
+    /// Returns the distance between two vectors under this metric.
+    /// @param a - one vector
+    /// @param b - the other, the same width
+    pub fn distance(self, a: &[f32], b: &[f32]) -> f32 {
+        match self {
+            Metric::Cosine => cosine_distance(a, b),
+            Metric::L2 => squared_euclidean(a, b),
+        }
+    }
+
+    /// Whether a vector must be normalized before this metric can compare it.
+    ///
+    /// Cosine needs it; L2 is what breaks if a vector gets it, because the
+    /// magnitude L2 measures is exactly what normalizing discards.
+    pub fn normalizes(self) -> bool {
+        matches!(self, Metric::Cosine)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,5 +170,65 @@ mod tests {
             assert_eq!(t.len(), dims);
             assert!((dot(&t, &t) - 1.0).abs() < 1e-5, "dims={dims}");
         }
+    }
+
+    #[test]
+    fn squared_euclidean_matches_the_naive_sum_of_squares() {
+        for n in [1usize, 3, 4, 7, 768] {
+            let a: Vec<f32> = (0..n).map(|i| (i as f32 * 0.37).sin()).collect();
+            let b: Vec<f32> = (0..n).map(|i| (i as f32 * 0.11).cos()).collect();
+            let naive: f32 = a.iter().zip(&b).map(|(x, y)| (x - y) * (x - y)).sum();
+            let got = squared_euclidean(&a, &b);
+            assert!((naive - got).abs() < 1e-4, "n={n} naive={naive} got={got}");
+        }
+    }
+
+    /// The whole argument for skipping the square root: it cannot change which
+    /// of two candidates is nearer, only the number that says so.
+    #[test]
+    fn squared_euclidean_orders_the_same_as_true_euclidean() {
+        let query = [1.0f32, 0.0, 0.0, 0.0];
+        let near = [0.9f32, 0.1, 0.0, 0.0];
+        let far = [2.0f32, 0.0, 0.0, 0.0];
+        let squared_near = squared_euclidean(&near, &query);
+        let squared_far = squared_euclidean(&far, &query);
+        let true_near = squared_near.sqrt();
+        let true_far = squared_far.sqrt();
+        assert!(squared_near < squared_far);
+        assert!(true_near < true_far);
+    }
+
+    #[test]
+    fn cosine_normalizes_and_l2_does_not() {
+        assert!(Metric::Cosine.normalizes());
+        assert!(!Metric::L2.normalizes());
+        assert_eq!(Metric::default(), Metric::Cosine);
+    }
+
+    /// The disagreement the whole ticket is about: a vector that is perfectly
+    /// aligned with the query but far from it in space is nearest by cosine and
+    /// farthest by L2, over the same two candidates.
+    #[test]
+    fn cosine_and_l2_can_disagree_about_which_candidate_is_nearer() {
+        let query = [1.0f32, 0.0, 0.0, 0.0];
+        // Perfectly aligned with the query, but twice as long.
+        let aligned_but_far = [2.0f32, 0.0, 0.0, 0.0];
+        // Slightly off-axis, but close to the query in raw position.
+        let close_but_off_axis = [0.9f32, 0.1, 0.0, 0.0];
+
+        let mut aligned_unit = aligned_but_far;
+        normalize(&mut aligned_unit);
+        let mut off_axis_unit = close_but_off_axis;
+        normalize(&mut off_axis_unit);
+        assert!(
+            Metric::Cosine.distance(&aligned_unit, &query)
+                < Metric::Cosine.distance(&off_axis_unit, &query),
+            "cosine should prefer the aligned vector"
+        );
+        assert!(
+            Metric::L2.distance(&aligned_but_far, &query)
+                > Metric::L2.distance(&close_but_off_axis, &query),
+            "L2 should prefer the vector that is actually close"
+        );
     }
 }

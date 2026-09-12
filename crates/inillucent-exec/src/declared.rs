@@ -38,7 +38,7 @@ use inillucent_value::encoding::TextEncoding;
 
 use crate::dml::RowSpace;
 use crate::expr::Eval;
-use crate::physical::{Params, SourceLayout};
+use crate::physical::{Params, SourceLayout, TreeCatalog};
 
 /// The storage class a `STRICT` column's declared type admits.
 ///
@@ -271,6 +271,7 @@ impl WriteDeclarations {
     /// @param index_exprs - the statement's bound index expressions
     /// @param space - the statement's row space
     /// @param params - the bound parameters
+    /// @param catalog - where a registered function's body is looked up
     pub fn compile(
         table: &TableInfo,
         layout: &SourceLayout,
@@ -279,6 +280,7 @@ impl WriteDeclarations {
         index_exprs: &[BoundIndexExprs],
         space: &RowSpace,
         params: &Params,
+        catalog: &dyn TreeCatalog,
     ) -> DbResult<WriteDeclarations> {
         let mut affinities = Vec::new();
         let mut typed = Vec::new();
@@ -311,19 +313,19 @@ impl WriteDeclarations {
                     .name
                     .clone()
                     .unwrap_or_else(|| source_text_of(table, check)),
-                expr: space.compile(&check.expr, params)?,
+                expr: space.compile(&check.expr, params, catalog)?,
             });
         }
         let mut indexed = Vec::with_capacity(index_exprs.len());
         for bound in index_exprs {
             let predicate = match bound.predicate.as_ref() {
-                Some(expr) => Some(space.compile(expr, params)?),
+                Some(expr) => Some(space.compile(expr, params, catalog)?),
                 None => None,
             };
             let mut keys = Vec::with_capacity(bound.keys.len());
             for key in &bound.keys {
                 keys.push(match key {
-                    Some(expr) => Some(space.compile(expr, params)?),
+                    Some(expr) => Some(space.compile(expr, params, catalog)?),
                     None => None,
                 });
             }
@@ -345,7 +347,7 @@ impl WriteDeclarations {
             };
             standins.push(CompiledDefault {
                 slot,
-                expr: space.compile(&default.expr, params)?,
+                expr: space.compile(&default.expr, params, catalog)?,
             });
         }
         Ok(WriteDeclarations {

@@ -7,6 +7,7 @@
 //! and a collation has to change what an `ORDER BY` returns rather than only
 //! what a comparison answers.
 
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 
 use inillucent_compat::facade::Database;
@@ -132,17 +133,26 @@ fn a_registered_scalar_reaches_order_by_and_where() {
     assert_eq!(single(&connection, "SELECT sum(weight) FROM m"), Some(-60));
 }
 
-/// A registered scalar in an INSERT's `VALUES` is refused by name rather than
-/// answered wrongly.
+/// A registered scalar reaches the write path: an INSERT's `VALUES` row, an
+/// `UPDATE`'s assignment, and an INSERT's `RETURNING` clause can all call one.
 ///
-/// The write path builds its row space from a layout rather than from a
-/// catalog, so there is no body to look up, and it says so with the
-/// `unsupported` status rather than treating the function as absent. That is a
-/// gap rather than a design - `docs/roadmap.md` records it - and this test is
-/// here so that closing it is a deliberate change to a named expectation rather
-/// than something that quietly starts working.
+/// **This was refused, by name, until `docs/roadmap.md` item 13 was closed.**
+/// The physical pass resolves a registered function's body through the
+/// catalog, and the write path's `RowSpace` used to carry none at all - not
+/// because it cannot hold one, but because a `RowSpace` is threaded through
+/// about a dozen signatures and a borrowed field would put a lifetime on every
+/// one of them. The fix is a catalog **parameter** on `RowSpace::compile` and
+/// on the handful of callers that reach it, every one of which already holds a
+/// `WriteTarget` and therefore `WriteTarget::catalog()` - the same view a
+/// trigger body's own queries already used.
+///
+/// Each shape is checked against the same call made in a projection, which
+/// already worked before this fix -
+/// `a_registered_scalar_reaches_order_by_and_where` is that test - so a write
+/// path that stored something arbitrary instead of the function's real answer
+/// would be caught here rather than passing on a value nobody checked.
 #[test]
-fn a_registered_scalar_in_a_values_row_refuses_by_name() {
+fn a_registered_scalar_reaches_the_write_path() {
     let connection = connect();
     connection
         .create_scalar_function(
@@ -156,16 +166,171 @@ fn a_registered_scalar_in_a_values_row_refuses_by_name() {
         )
         .expect("registers");
     connection
-        .execute("CREATE TABLE n (id INTEGER PRIMARY KEY, weight INTEGER)")
+        .execute("CREATE TABLE note (id INTEGER PRIMARY KEY, body INTEGER, v INTEGER)")
         .expect("creates");
 
-    let refused = connection
-        .execute("INSERT INTO n (id, weight) VALUES (1, negate(10))")
-        .expect_err("the write path has no catalog to resolve the body through");
-    let said = format!("{refused:?}");
-    assert!(
-        said.contains("negate"),
-        "the refusal names the function: {said}"
+    // `INSERT INTO note (...) VALUES (..., negate(?1))`.
+    connection
+        .execute("INSERT INTO note (id, body, v) VALUES (1, 10, negate(10))")
+        .expect("a VALUES row may call a registered scalar");
+    assert_eq!(
+        single(&connection, "SELECT v FROM note WHERE id = 1"),
+        single(&connection, "SELECT negate(10)"),
+        "the stored value is the same call made in a projection, not something arbitrary"
+    );
+
+    // `UPDATE note SET v = negate(body)`.
+    connection
+        .execute("UPDATE note SET v = negate(body) WHERE id = 1")
+        .expect("an UPDATE assignment may call a registered scalar");
+    assert_eq!(
+        single(&connection, "SELECT v FROM note WHERE id = 1"),
+        single(&connection, "SELECT negate(10)"),
+        "negate(body) in the assignment read the row's own body, which is still 10"
+    );
+
+    // `INSERT INTO note (...) VALUES (...) RETURNING negate(body)`.
+    let returned = connection
+        .query("INSERT INTO note (id, body) VALUES (2, 5) RETURNING negate(body)")
+        .expect("a RETURNING clause may call a registered scalar");
+    let returned_value = returned
+        .first()
+        .and_then(|row| row.first())
+        .and_then(Value::as_integer);
+    assert_eq!(
+        returned_value,
+        single(&connection, "SELECT negate(5)"),
+        "RETURNING answers the same call a projection would"
+    );
+}
+
+/// A deterministic registered scalar over arguments that read no column is
+/// called once - not once per row - and one that reads a column still runs
+/// once for every row. `docs/roadmap.md` item 15: `embed('search_query: ' ||
+/// ?1)` in an `ORDER BY` used to call the embedding model once for every one
+/// of 2,661 rows of `examples/rag-agent`, 64 seconds of a 65-second query,
+/// every call answering the same embedding - because nothing distinguished a
+/// call whose arguments cannot vary by row from one that reads the row being
+/// scanned.
+///
+/// A wall-clock reading is a measurement of the machine as much as of the
+/// code - `tests/inillucent-testing-tdd.md` §1.7 - so this counts calls
+/// instead of timing them: a registered function that stamps a shared counter
+/// every time its body actually runs, read back after each shape.
+#[test]
+fn a_deterministic_scalar_is_called_once_unless_it_reads_a_column() {
+    let connection = connect();
+    connection
+        .execute_batch(
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, val INTEGER);
+             INSERT INTO t (id, val) VALUES (1, 10), (2, 20), (3, 30), (4, 40);",
+        )
+        .expect("fills");
+    let calls = Arc::new(AtomicI64::new(0));
+    let counting = Arc::clone(&calls);
+    connection
+        .create_scalar_function(
+            "counted",
+            1,
+            FunctionFlags {
+                deterministic: true,
+                ..FunctionFlags::external()
+            },
+            Arc::new(move |_arguments: &[Value<'static>]| {
+                counting.fetch_add(1, Ordering::SeqCst);
+                Ok(Value::Integer(1))
+            }),
+        )
+        .expect("registers");
+
+    // All-literal arguments: a constant regardless of which execution asked,
+    // so `translate` folds it once and the projection never calls it again.
+    calls.store(0, Ordering::SeqCst);
+    connection.query("SELECT counted(1) FROM t").expect("runs");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "a literal argument is folded once, not once per one of the table's 4 rows"
+    );
+
+    // The same fold in the shape the roadmap measured: an ORDER BY key.
+    calls.store(0, Ordering::SeqCst);
+    connection
+        .query("SELECT id FROM t ORDER BY counted(1) LIMIT 4")
+        .expect("runs");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "an ORDER BY key over a literal argument is folded once, not once per row of the scan"
+    );
+
+    // A bound parameter: a constant for this execution, folded at execution
+    // setup rather than run for every row - but not folded forever, which the
+    // literal case above is.
+    calls.store(0, Ordering::SeqCst);
+    let mut statement = connection
+        .prepare("SELECT counted(?1) FROM t")
+        .expect("prepares");
+    statement.bind_integer(1, 7).expect("binds");
+    while statement.step().expect("steps") {}
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "a bound parameter is folded once for this execution, not once per row"
+    );
+
+    // A column reference: genuinely different per row, so it must run once
+    // per row - the one shape this may never fold.
+    calls.store(0, Ordering::SeqCst);
+    connection
+        .query("SELECT counted(val) FROM t")
+        .expect("runs");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        4,
+        "a column argument differs per row and has to be evaluated once for each of the table's 4 rows"
+    );
+}
+
+/// A registered scalar that has not promised `FunctionFlags::deterministic`
+/// is never folded, even when every one of its arguments is a literal.
+///
+/// The default a caller gets from `FunctionFlags::external()` is
+/// `deterministic: false` - the safe assumption about a function nobody here
+/// wrote - and folding one anyway would call something like `random()` once
+/// for a whole scan instead of once per row. This is the same counting
+/// scalar as `a_deterministic_scalar_is_called_once_unless_it_reads_a_column`,
+/// with the one flag left off.
+#[test]
+fn a_non_deterministic_scalar_is_never_folded() {
+    let connection = connect();
+    connection
+        .execute_batch(
+            "CREATE TABLE t (id INTEGER PRIMARY KEY);
+             INSERT INTO t (id) VALUES (1), (2), (3);",
+        )
+        .expect("fills");
+    let calls = Arc::new(AtomicI64::new(0));
+    let counting = Arc::clone(&calls);
+    connection
+        .create_scalar_function(
+            "not_deterministic",
+            1,
+            FunctionFlags::external(),
+            Arc::new(move |_arguments: &[Value<'static>]| {
+                counting.fetch_add(1, Ordering::SeqCst);
+                Ok(Value::Integer(1))
+            }),
+        )
+        .expect("registers");
+
+    connection
+        .query("SELECT not_deterministic(1) FROM t")
+        .expect("runs");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        3,
+        "with no deterministic promise, even a literal argument runs once per row rather than being folded"
     );
 }
 
@@ -364,29 +529,33 @@ fn a_registered_scalar_is_the_probe_of_a_vector_index() {
     );
 }
 
-/// A vector index does not keep the rows it was given, once the file is reopened.
+/// A vector index keeps the rows it was given, across a reopen.
 ///
-/// **The wrong answer here is zero rows, and nothing raises.** `CREATE INDEX ...
-/// USING inillucent_hnsw` is what `docs/vector-search.md` tells a reader to
-/// build; `create_vector_index` reads the rows already in the table back and
-/// applies them; and the store reports, in that same session, that it holds
-/// them. Open the file again and it holds none. The planner then turns the
-/// documented semantic search into a probe of an empty index, and an empty
-/// probe answers zero rows rather than failing - so a search that worked before
-/// the index existed silently stops working after.
+/// **This asserted the opposite until task-1911**, because until task-1911 a
+/// `CREATE INDEX ... USING inillucent_hnsw` over a full table built an index
+/// that held every row in the session that built it and none the next time the
+/// file was opened - and an empty vector index answers zero rows rather than
+/// failing, so the documented semantic search silently stopped working. There
+/// were two faults under it, both about a write that is never committed:
+///
+/// 1. `create_vector_index` returned without the `seal()` every other directive
+///    ends with, so the backfill was logged and no commit record followed it.
+/// 2. `ImportedDatabase::write` reads `next_txn` and moves it on at once, so
+///    `current_txn()` answered the *next* number for the rest of the statement -
+///    and `follow_vector_indexes`, which runs after the trees are released,
+///    logged every index entry into a transaction nothing commits.
+///
+/// The second one is why "an insert loses its last row" was the shape this was
+/// first seen in: inside a batch each statement's lost entry is rescued by the
+/// following statement claiming that number, so only the last one stays lost.
+/// Outside a batch **every** insert lost its entry, which is what
+/// `every_insert_into_an_indexed_table_reaches_the_index` covers.
 ///
 /// The reopen is the whole test. The first pass of it asserted inside the
 /// session that created the index, saw the rows the backfill had just written,
-/// and concluded the backfill worked. `docs/roadmap.md` item 14 carries the
-/// command-line reproduction, and the same shape at twenty rows, where an
-/// insert keeps nineteen of them.
-///
-/// This asserts the wrong behaviour, the way
-/// `a_registered_scalar_in_a_values_row_refuses_by_name` does, so that fixing it
-/// is a deliberate change to a named expectation rather than something that
-/// quietly starts working.
+/// and concluded the backfill worked.
 #[test]
-fn a_vector_index_does_not_survive_a_reopen() {
+fn a_vector_index_survives_a_reopen() {
     let path = scratch();
     {
         let database = Database::open(&path).expect("opens");
@@ -416,16 +585,188 @@ fn a_vector_index_does_not_survive_a_reopen() {
         assert_eq!(
             held_rows(&connection),
             "3",
-            "the backfill does run, and says so, in the session that ran it"
+            "the backfill runs, and says so, in the session that ran it"
         );
+    }
+
+    let database = Database::open(&path).expect("reopens");
+    let connection = database.connect().expect("connects");
+    connection
+        .create_scalar_function("toy_embed", 1, FunctionFlags::external(), toy_embedder())
+        .expect("registers");
+    assert_eq!(
+        held_rows(&connection),
+        "3",
+        "the backfilled rows survive the reopen"
+    );
+    // **And the search answers them**, which is what a reader actually does.
+    // The counter surviving while the probe returned nothing would be the same
+    // wrong answer wearing a different number.
+    let after = connection
+        .query("SELECT id FROM p ORDER BY vector_distance_cos(v, toy_embed('alpha')) LIMIT 3")
+        .expect("searches through the index");
+    assert_eq!(
+        after.len(),
+        3,
+        "the search through the index answers the rows the index holds"
+    );
+    assert_eq!(
+        after
+            .first()
+            .and_then(|row| row.first())
+            .and_then(Value::as_integer),
+        Some(1),
+        "the row embedded from the same word is still the nearest one"
+    );
+}
+
+/// Every insert into an indexed table reaches the index, not all but the last.
+///
+/// **Each insert is its own statement and its own transaction**, which is the
+/// case the reproduction in `docs/roadmap.md` item 14 never ran: it used one
+/// batch, where each statement's lost index entry happens to be rescued by the
+/// next statement claiming the transaction number it was logged under. That made
+/// a fault which loses **every** entry look like one that loses the last. Five
+/// inserts through five statements left the store reading `rows 0` before
+/// task-1911.
+///
+/// The index is built first and empty here, so nothing a backfill does can hide
+/// a write path that does not maintain it.
+#[test]
+fn every_insert_into_an_indexed_table_reaches_the_index() {
+    let path = scratch();
+    {
+        let database = Database::open(&path).expect("opens");
+        let connection = database.connect().expect("connects");
+        connection
+            .create_scalar_function("toy_embed", 1, FunctionFlags::external(), toy_embedder())
+            .expect("registers");
+        connection
+            .execute("CREATE TABLE p (id INTEGER PRIMARY KEY, v VECTOR(4))")
+            .expect("creates");
+        connection
+            .execute("CREATE INDEX p_v ON p USING inillucent_hnsw (v)")
+            .expect("creates the index over an empty table");
+        for (id, word) in [(1, "alpha"), (2, "zeta"), (3, "mu"), (4, "nu"), (5, "xi")] {
+            connection
+                .execute(&format!(
+                    "INSERT INTO p (id, v) SELECT {id}, toy_embed('{word}')"
+                ))
+                .expect("inserts");
+        }
+        assert_eq!(held_rows(&connection), "5", "all five reach the store");
     }
 
     let database = Database::open(&path).expect("reopens");
     let connection = database.connect().expect("connects");
     assert_eq!(
         held_rows(&connection),
-        "0",
-        "roadmap item 14: the backfilled rows do not survive the reopen. If this now reports          3 the defect is fixed - delete this test, and take the warning out of          examples/rag-agent and out of the roadmap"
+        "5",
+        "all five survive the reopen - not four, which is what losing only the last would leave"
+    );
+}
+
+/// A backfilled index takes the inserts that come after it.
+///
+/// `docs/roadmap.md` item 14 recorded that "a backfilled index does not recover,
+/// either: later inserts into that table do not reach it, and it stays at zero
+/// for good". That was the same fault seen from the other side - the backfill
+/// was lost and so was every insert after it - rather than a third one, and this
+/// asserts the pair works together: the rows that were there when the index was
+/// built and the rows that arrived afterwards are all in it after a reopen.
+#[test]
+fn a_backfilled_index_takes_later_inserts() {
+    let path = scratch();
+    {
+        let database = Database::open(&path).expect("opens");
+        let connection = database.connect().expect("connects");
+        connection
+            .create_scalar_function("toy_embed", 1, FunctionFlags::external(), toy_embedder())
+            .expect("registers");
+        connection
+            .execute("CREATE TABLE p (id INTEGER PRIMARY KEY, v VECTOR(4))")
+            .expect("creates");
+        for (id, word) in [(1, "alpha"), (2, "zeta")] {
+            connection
+                .execute(&format!(
+                    "INSERT INTO p (id, v) SELECT {id}, toy_embed('{word}')"
+                ))
+                .expect("inserts");
+        }
+        connection
+            .execute("CREATE INDEX p_v ON p USING inillucent_hnsw (v)")
+            .expect("creates the index over two rows");
+        for (id, word) in [(3, "mu"), (4, "nu")] {
+            connection
+                .execute(&format!(
+                    "INSERT INTO p (id, v) SELECT {id}, toy_embed('{word}')"
+                ))
+                .expect("inserts after the backfill");
+        }
+    }
+
+    let database = Database::open(&path).expect("reopens");
+    let connection = database.connect().expect("connects");
+    connection
+        .create_scalar_function("toy_embed", 1, FunctionFlags::external(), toy_embedder())
+        .expect("registers");
+    assert_eq!(
+        held_rows(&connection),
+        "4",
+        "the two backfilled rows and the two that came after are all in the index"
+    );
+    let found = connection
+        .query("SELECT id FROM p ORDER BY vector_distance_cos(v, toy_embed('nu')) LIMIT 1")
+        .expect("searches");
+    assert_eq!(
+        found
+            .first()
+            .and_then(|row| row.first())
+            .and_then(Value::as_integer),
+        Some(4),
+        "a row inserted after the backfill is findable through the index"
+    );
+}
+
+/// A delete takes its row out of the index, across a reopen.
+///
+/// The other half of what `follow_vector_indexes` does, and it went the same way
+/// for the same reason. A removal that never commits leaves a row the table no
+/// longer holds answerable by the index, which is a wrong answer rather than a
+/// missing one.
+#[test]
+fn a_delete_leaves_the_index_without_the_row() {
+    let path = scratch();
+    {
+        let database = Database::open(&path).expect("opens");
+        let connection = database.connect().expect("connects");
+        connection
+            .create_scalar_function("toy_embed", 1, FunctionFlags::external(), toy_embedder())
+            .expect("registers");
+        connection
+            .execute("CREATE TABLE p (id INTEGER PRIMARY KEY, v VECTOR(4))")
+            .expect("creates");
+        connection
+            .execute("CREATE INDEX p_v ON p USING inillucent_hnsw (v)")
+            .expect("creates the index");
+        for (id, word) in [(1, "alpha"), (2, "zeta"), (3, "mu")] {
+            connection
+                .execute(&format!(
+                    "INSERT INTO p (id, v) SELECT {id}, toy_embed('{word}')"
+                ))
+                .expect("inserts");
+        }
+        connection
+            .execute("DELETE FROM p WHERE id = 2")
+            .expect("deletes");
+    }
+
+    let database = Database::open(&path).expect("reopens");
+    let connection = database.connect().expect("connects");
+    assert_eq!(
+        held_rows(&connection),
+        "2",
+        "the deleted row is out of the index after the reopen, not back in it"
     );
 }
 

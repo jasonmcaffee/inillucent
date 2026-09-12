@@ -155,6 +155,37 @@ impl ShadowStore for PagerShadowStore<'_> {
         }
     }
 
+    /// Runs a body over every row whose rowid is at least `from`.
+    ///
+    /// **The cursor's own seek, not a scan the caller filters.** `seek_rowid`
+    /// with [`SeekBias::AtOrAfter`] is the same descent `read_row` already
+    /// makes for a single rowid; asked for `from` it lands on the first row
+    /// that qualifies and `next` walks the rest, so nothing below `from` is
+    /// read off the page at all.
+    fn scan_from(
+        &mut self,
+        root: u32,
+        from: i64,
+        body: &mut dyn FnMut(i64, &[Value<'static>]) -> DbResult<bool>,
+    ) -> DbResult<()> {
+        let mut cursor = BTreeCursor::table(page_of(root)?);
+        if !cursor.seek_rowid(self.pager, from, SeekBias::AtOrAfter)? {
+            return Ok(());
+        }
+        loop {
+            let rowid = cursor.rowid()?;
+            let payload = cursor.payload(self.pager, &self.limits)?;
+            let record = record::RecordRef::parse(&payload, TextEncoding::Utf8)?;
+            let values = row_values(rowid, &record)?;
+            if !body(rowid, &values)? {
+                return Ok(());
+            }
+            if !cursor.next(self.pager)? {
+                return Ok(());
+            }
+        }
+    }
+
     /// Reads one row of a keyed shadow table, or nothing when there is not one.
     ///
     /// A `WITHOUT ROWID` table's b-tree holds the whole row as its key, ordered

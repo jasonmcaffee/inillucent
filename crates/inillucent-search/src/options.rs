@@ -87,10 +87,23 @@ impl Mode {
 }
 
 /// Which distance the vector branch minimises.
+///
+/// **The index, not the functions.** `vector_distance_cos` and
+/// `vector_distance_l2` both answer for any pair of vectors regardless of
+/// this setting - the distance functions were never the limit. What this
+/// declares is which one the graph underneath is built to minimise: the HNSW
+/// graph is a structure over one distance, and a query asking for the other
+/// one has to fall back to comparing every row, which is exactly what
+/// `crates/inillucent-sql/src/plan.rs::vector_path` refuses to paper over.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Metric {
     /// One minus the cosine similarity of two unit vectors.
     Cosine,
+    /// Euclidean distance. Unlike cosine, this needs the stored vectors kept
+    /// at their original magnitude - see `inillucent_core::distance::Metric`,
+    /// which this maps onto so the store built over a `metric = 'l2'` table
+    /// actually keeps that promise.
+    L2,
 }
 
 impl Metric {
@@ -98,6 +111,7 @@ impl Metric {
     pub fn name(self) -> &'static str {
         match self {
             Metric::Cosine => "cosine",
+            Metric::L2 => "l2",
         }
     }
 
@@ -105,8 +119,9 @@ impl Metric {
     pub fn parse(text: &str) -> DbResult<Metric> {
         match text.trim().to_ascii_lowercase().as_str() {
             "cosine" => Ok(Metric::Cosine),
+            "l2" => Ok(Metric::L2),
             other => Err(failure(format!(
-                "inillucent_search: the only distance this build implements is cosine, not {other}"
+                "inillucent_search: the only distances this build implements are cosine and l2, not {other}"
             ))),
         }
     }
@@ -487,6 +502,33 @@ mod tests {
         assert!(parse(&[b"body".to_vec(), b"metric = 'euclidean'".to_vec()]).is_err());
     }
 
+    /// `l2` is spelled, parses, and round trips through the same accessors
+    /// `cosine` does - the structure this ticket adds to, not a special case
+    /// beside it.
+    #[test]
+    fn l2_is_a_real_metric_now() {
+        let parsed = parse(&[b"body".to_vec(), b"metric = 'l2'".to_vec()]).expect("parsed");
+        assert_eq!(parsed.metric, Metric::L2);
+        assert_eq!(Metric::L2.name(), "l2");
+        assert_eq!(Metric::parse("L2").expect("case insensitive"), Metric::L2);
+        assert_eq!(
+            parsed
+                .config_rows()
+                .iter()
+                .find(|(key, _)| key == "metric")
+                .map(|(_, value)| value.as_str()),
+            Some("l2")
+        );
+    }
+
+    /// `distance` is the alias `metric` has always accepted, and it takes `l2`
+    /// exactly the way it takes `cosine`.
+    #[test]
+    fn l2_is_accepted_through_the_distance_alias_too() {
+        let parsed = parse(&[b"body".to_vec(), b"distance = 'l2'".to_vec()]).expect("parsed");
+        assert_eq!(parsed.metric, Metric::L2);
+    }
+
     /// A table with no columns has nothing to index.
     #[test]
     fn a_table_needs_a_column() {
@@ -507,6 +549,43 @@ mod tests {
         assert_eq!(read.columns.len(), 2);
         assert_eq!(read.dims, 16);
         assert_eq!(read.mode, Mode::Approximate);
+    }
+
+    /// A table whose `%_config` was written before this ticket has no `metric`
+    /// row at all - not an empty one, an absent one, the same way a table
+    /// written before `compact` existed has no `compact` row. It has to keep
+    /// reading as cosine, which is the only metric that table could ever have
+    /// been built with.
+    ///
+    /// This is deliberately not the same claim as `an_index_declares_cosine_by_default`
+    /// below: that one is about a `CREATE` that never named a metric, and this
+    /// one is about `%_config` rows a real pre-existing table would have, which
+    /// is the scenario a stored index actually presents on reopen.
+    #[test]
+    fn a_table_with_no_stored_metric_row_reads_as_cosine() {
+        let fallback = parse(&[b"body".to_vec()]).expect("parsed");
+        let stored = vec![
+            ("format".to_string(), "1".to_string()),
+            ("columns".to_string(), "body".to_string()),
+            ("dims".to_string(), "8".to_string()),
+            ("mode".to_string(), "exact".to_string()),
+            // No "metric" row at all.
+        ];
+        let read = from_config(&stored, &fallback).expect("read");
+        assert_eq!(read.metric, Metric::Cosine);
+    }
+
+    /// The same claim, but for a `CREATE` that never named a metric at all -
+    /// the declaration-time default, which `from_config` above falls back to
+    /// when `%_config` itself has nothing to say.
+    #[test]
+    fn an_index_declares_cosine_by_default() {
+        let declared = parse(&[b"body".to_vec()]).expect("parsed");
+        assert_eq!(
+            declared.metric,
+            Metric::Cosine,
+            "cosine remains the default"
+        );
     }
 
     /// A table written by another format version is refused rather than read.

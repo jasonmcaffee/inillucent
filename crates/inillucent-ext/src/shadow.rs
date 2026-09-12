@@ -146,6 +146,25 @@ impl ShadowTables {
         let root = self.root_id(suffix)?;
         store_of(context)?.scan(root, &mut body)
     }
+
+    /// Runs a body over every row of one shadow table whose rowid is at
+    /// least `from`, in rowid order.
+    ///
+    /// A rowid table's rows are already in key order, so a caller holding a
+    /// watermark - "everything above sequence N" is the shape every caller of
+    /// this has - seeks to it once rather than reading and discarding
+    /// everything below it on every call.
+    /// @param from - the smallest rowid to visit
+    pub fn scan_from(
+        &self,
+        context: &mut Context<'_>,
+        suffix: &[u8],
+        from: i64,
+        mut body: impl FnMut(i64, &[Value<'static>]) -> DbResult<bool>,
+    ) -> DbResult<()> {
+        let root = self.root_id(suffix)?;
+        store_of(context)?.scan_from(root, from, &mut body)
+    }
 }
 
 impl ShadowTables {

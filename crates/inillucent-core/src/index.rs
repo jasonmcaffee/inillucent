@@ -3,6 +3,7 @@
 //! stack exposes.
 
 use crate::bm25::{Bm25Index, LexicalHit, LexicalParams};
+use crate::distance::Metric;
 use crate::filter::{CompiledFilter, Filter};
 use crate::flat::{self, Neighbour};
 use crate::hnsw::{Hnsw, HnswParams};
@@ -17,6 +18,11 @@ use crate::vectors::VectorSet;
 #[derive(Debug, Clone, Copy)]
 pub struct IndexConfig {
     pub dims: usize,
+    /// The distance the vector branch minimises. Decided once, at
+    /// construction: it decides whether `add`/`append` normalize a vector on
+    /// the way in, so a config that changed metric after vectors were already
+    /// stored would leave old and new rows compared inconsistently.
+    pub metric: Metric,
     pub hnsw: HnswParams,
     /// Hold the full precision vectors on the heap rather than reading them from
     /// the index file as they are scored.
@@ -86,6 +92,7 @@ impl Default for IndexConfig {
     fn default() -> Self {
         IndexConfig {
             dims: 768,
+            metric: Metric::Cosine,
             hnsw: HnswParams::default(),
             // Off. See the field for the argument; the short version is that the
             // vectors are the largest thing an index holds and the operating
@@ -226,7 +233,7 @@ impl Index {
     pub fn new(config: IndexConfig) -> Self {
         Index {
             store: Store::default(),
-            vectors: VectorSet::new(config.dims),
+            vectors: VectorSet::with_metric(config.dims, config.metric),
             quantized: None,
             graph: None,
             lexical: None,
@@ -418,6 +425,20 @@ impl Index {
                 "index is inconsistent: {} vectors for {} chunks",
                 vectors.len(),
                 store.n_chunks()
+            );
+        }
+        // The same kind of inconsistency as the chunk count above, and the
+        // same answer: refuse rather than search a graph that was built over
+        // vectors stored for one metric as though it answered for another.
+        // `persist::read_index`/`load_generation` never produce this - they
+        // build `vectors` from `config.metric` themselves - so reaching this
+        // means a caller assembled the parts by hand and got two of them to
+        // disagree.
+        if vectors.metric() != config.metric {
+            anyhow::bail!(
+                "index is inconsistent: the vectors are stored for {:?}, the config declares {:?}",
+                vectors.metric(),
+                config.metric
             );
         }
         let tokenizer = Tokenizer::default();
@@ -672,7 +693,8 @@ impl Index {
         CompiledFilter::compile(filter, &self.store)
     }
 
-    /// Exact top k by cosine distance. The reference the rest is graded against.
+    /// Exact top k under this index's declared metric. The reference the rest
+    /// is graded against.
     pub fn exhaustive_search(
         &self,
         query: &[f32],

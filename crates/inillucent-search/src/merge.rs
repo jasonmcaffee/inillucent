@@ -246,8 +246,59 @@ pub fn configuration(options: &Options) -> IndexConfig {
     if let Some(ef) = options.ef_search {
         config.hnsw.ef_search = ef;
     }
-    let _ = Metric::Cosine;
+    // **The one line this whole ticket is about.** Everything above decides
+    // how the graph is shaped; this decides what it is a graph *of*. Cosine
+    // needs every stored vector normalized to unit length; L2 needs the
+    // opposite, the raw magnitude kept - so the metric has to reach
+    // `inillucent_core::vectors::VectorSet::push` before the first row is
+    // ever inserted, not only the search call at the end. `IndexConfig::metric`
+    // is the field that carries it there.
+    config.metric = core_metric(options.metric);
     config
+}
+
+/// Maps the table's own metric spelling onto the one the retrieval engine
+/// stores and builds its graph under.
+///
+/// Two enums rather than one: `inillucent-core` is a lower layer than this
+/// crate and may not depend on it (`docs/invariants/layering.toml`), so it
+/// cannot share `options::Metric` directly - the same reason `SavedFusion`
+/// exists in `inillucent_core::persist` instead of serializing `Fusion` by
+/// derive.
+/// @param metric - the table's own declaration
+fn core_metric(metric: Metric) -> inillucent_core::distance::Metric {
+    match metric {
+        Metric::Cosine => inillucent_core::distance::Metric::Cosine,
+        Metric::L2 => inillucent_core::distance::Metric::L2,
+    }
+}
+
+/// Refuses a generation whose graph was built under a different metric from
+/// the one the table now declares.
+///
+/// **A generation is bytes on disk; a declaration is `%_config`.** The two
+/// are written together and read together on every ordinary path, so they
+/// cannot disagree by themselves - but nothing stops a `%_gen` row from one
+/// table's history sitting under a declaration that no longer matches it
+/// (the shadow tables are ordinary rows, and `store.rs`'s own invariant is
+/// that they are exactly that). Answering with a graph built for a different
+/// distance than the one just declared is a wrong order that looks like a
+/// working index; refusing it, naming both metrics, is what
+/// `inillucent_core::persist`'s own version check does for a format that
+/// changed shape, and this is the same rule for a generation that changed
+/// meaning instead.
+/// @param index - the generation just read from disk
+/// @param options - the table's current declaration
+pub fn check_generation_metric(index: &Index, options: &Options) -> DbResult<()> {
+    let stored = index.config().metric;
+    let declared = core_metric(options.metric);
+    if stored != declared {
+        return Err(failure(format!(
+            "inillucent_search: this generation was built under metric {stored:?}, \
+             the table now declares {declared:?} - rebuild the index"
+        )));
+    }
+    Ok(())
 }
 
 /// Builds a chunk from one stored row.
@@ -409,6 +460,7 @@ pub fn fold_generation(
     };
     let mut index = inillucent_core::persist::read_index(&mut bytes.as_slice())
         .map_err(|error| failure(format!("inillucent_search: unreadable generation: {error}")))?;
+    check_generation_metric(&index, options)?;
     let inserted = apply(&mut index, context, store, options, pending)?;
     Ok((index, inserted))
 }
@@ -450,9 +502,12 @@ fn refresh(
     }
     let mut index = match store.read_generation(context, generation)? {
         Some(bytes) => {
-            inillucent_core::persist::read_index(&mut bytes.as_slice()).map_err(|error| {
-                failure(format!("inillucent_search: unreadable generation: {error}"))
-            })?
+            let index =
+                inillucent_core::persist::read_index(&mut bytes.as_slice()).map_err(|error| {
+                    failure(format!("inillucent_search: unreadable generation: {error}"))
+                })?;
+            check_generation_metric(&index, options)?;
+            index
         }
         None => {
             let mut fresh = Index::new(configuration(options));
@@ -602,6 +657,60 @@ mod tests {
     fn a_lexical_table_has_one_dimension() {
         let config = configuration(&declaration(&["body"]));
         assert_eq!(config.dims, 1);
+    }
+
+    /// A table with no `metric` argument builds the graph as cosine, which is
+    /// the only metric a table with nothing declared could ever have meant.
+    #[test]
+    fn configuration_defaults_to_cosine() {
+        let config = configuration(&declaration(&["body", "dims = 8"]));
+        assert_eq!(config.metric, inillucent_core::distance::Metric::Cosine);
+    }
+
+    /// `metric = 'l2'` reaches `IndexConfig`, which is the field
+    /// `VectorSet::push` reads to decide whether to normalize - the one line
+    /// this whole feature turns on.
+    #[test]
+    fn configuration_carries_a_declared_l2_metric() {
+        let config = configuration(&declaration(&["body", "dims = 8", "metric = l2"]));
+        assert_eq!(config.metric, inillucent_core::distance::Metric::L2);
+    }
+
+    /// A generation built under the metric the table still declares is
+    /// accepted.
+    #[test]
+    fn a_generation_matching_the_declared_metric_is_accepted() {
+        let l2 = declaration(&["body", "dims = 4", "metric = l2"]);
+        let mut index = Index::new(configuration(&l2));
+        index.commit();
+        assert!(check_generation_metric(&index, &l2).is_ok());
+    }
+
+    /// A generation built under one metric, opened by a table that now
+    /// declares the other, is refused rather than silently searched as if it
+    /// agreed - and the message names both, so a person reading it knows
+    /// which one is wrong and what the fix is (rebuild).
+    #[test]
+    fn a_mismatched_generation_is_refused_naming_both_metrics() {
+        let declared_l2 = declaration(&["body", "dims = 4", "metric = l2"]);
+        // A generation actually built under cosine - as if an older
+        // declaration built it, or a generation from a different table's
+        // history ended up under this one's row.
+        let cosine_config = configuration(&declaration(&["body", "dims = 4"]));
+        let mut built_under_cosine = Index::new(cosine_config);
+        built_under_cosine.commit();
+
+        let error = check_generation_metric(&built_under_cosine, &declared_l2)
+            .expect_err("a metric mismatch must be refused");
+        let message = format!("{error:?}");
+        assert!(
+            message.contains("Cosine"),
+            "should name the stored metric: {message}"
+        );
+        assert!(
+            message.contains("L2"),
+            "should name the declared metric: {message}"
+        );
     }
 
     /// A chunk's text begins with its heading, which is what the ranking

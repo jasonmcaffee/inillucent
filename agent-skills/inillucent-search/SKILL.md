@@ -25,14 +25,16 @@ Wikipedia articles, 2,661 passages, a 768 dimension vector on each. Install the 
 ```sh
 inillucent setup-embeddings all
 inillucent --db examples/rag-agent/greek-philosophy.rdb query \
-  "SELECT p.title, p.body FROM passage p, (SELECT embed('search_query: ' || ?1) AS q) AS probe
-   ORDER BY vector_distance_cos(p.v, probe.q) LIMIT 5" \
+  "SELECT title, body FROM passage
+   ORDER BY vector_distance_cos(v, embed('search_query: ' || ?1)) LIMIT 5" \
   --params '["who was Seneca"]'
 ```
 
-**The one-row subquery is not decoration.** Nothing folds a constant call to a registered function
-yet, so `embed(...)` written directly inside the `ORDER BY` runs once per row: on that corpus, 65
-seconds against 0.9 for the same five passages. `docs/roadmap.md` item 15.
+**`embed` runs once for the statement, not once per row**, because it is registered deterministic and
+its argument does not vary within one execution. Before task-1911 nothing read that flag and the same
+query took 105 seconds on that corpus instead of one and a half. A function you register yourself
+gets the same treatment only if you set `FunctionFlags::deterministic` — the default for anything
+registered from outside is `false`, which is the safe assumption about code this engine did not write.
 
 Its `AGENTS.md` is the page to copy when you build one of these for somebody else.
 
@@ -61,11 +63,10 @@ reaching for it:
   ever compared against is wrong.
 - **Nothing has to be exported after the install.** The engine finds the runtime and the weights
   where the command put them. `ORT_DYLIB_PATH` and `INILLUCENT_ONNX_DIR` still override.
-- **Write it through `INSERT ... SELECT`, not `INSERT ... VALUES`.** A registered function in a
-  `VALUES` row, an `UPDATE ... SET` or a `RETURNING` clause is refused with the `unsupported`
-  status and exit code 3: the write path builds its row space from a layout rather than from a
-  catalog, so there is no function body to look up. `INSERT INTO t (...) SELECT ..., embed(?1)`
-  goes through the read path and works. `docs/roadmap.md` records the gap.
+- **A registered function reaches the write path.** `INSERT ... VALUES`, `UPDATE ... SET` and
+  `RETURNING` all take one, so `INSERT INTO note (body, v) VALUES (?1, embed(?1))` writes the vector
+  the function returns. Until task-1911 those three were refused with the `unsupported` status and
+  `INSERT ... SELECT` was the only shape that worked.
 - **Loading the model costs 650 to 800 ms and an embedding costs 12 to 36 ms**, so when it is in
   memory matters. `--residency resident` keeps it, `on-demand` drops it after every call, and the
   default `idle:5m` keeps it through a burst of questions and lets it go afterwards. A process that
@@ -93,7 +94,8 @@ SELECT id, source FROM embedding ORDER BY vector_distance_cos(v, ?1) LIMIT 10;
   before the commit.
 - With no index the same query is an exhaustive scan and **is still correct**. Build the index when
   it is slow, not before.
-- Ordering on the index is cosine-only today. `WITH (metric = …)` is where a second metric goes;
+- Ordering on the index is cosine unless the index says `WITH (metric = 'l2')`, and a query whose
+  distance function does not match the index's metric plans as a scan rather than a probe;
   `USING ivfflat` is a second structure beside the graph.
 
 From the command line, which writes the query for you:

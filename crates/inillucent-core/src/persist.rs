@@ -175,6 +175,21 @@ struct SavedConfig {
     /// index that wrote the file would also do today.
     #[serde(default)]
     resident_vectors: bool,
+    /// Which distance the vectors were stored to answer - `""` or `"cosine"`
+    /// for cosine, `"l2"` for L2.
+    ///
+    /// **Defaulted on read, to the only metric this build ever wrote before
+    /// this field existed.** Every generation on disk before this ticket was
+    /// built under cosine, because cosine was the only metric there was, so
+    /// an absent value here is not an unknown - it is the answer, the same
+    /// way an absent `resident_vectors` above it means the file backing that
+    /// predates the setting. Bumping `FORMAT_VERSION` over this would refuse
+    /// every one of those generations outright, which is the opposite of
+    /// "the old one reads as cosine"; `#[serde(default)]` is what this file
+    /// already uses for exactly this kind of addition, and reading the old
+    /// generations is the reason to keep using it here too.
+    #[serde(default)]
+    metric: String,
 }
 
 /// `Fusion` in a form that survives a round trip through JSON.
@@ -276,6 +291,10 @@ impl From<&IndexConfig> for SavedConfig {
     fn from(cfg: &IndexConfig) -> Self {
         SavedConfig {
             dims: cfg.dims,
+            metric: match cfg.metric {
+                crate::distance::Metric::Cosine => "cosine".to_string(),
+                crate::distance::Metric::L2 => "l2".to_string(),
+            },
             quantized: cfg.quantized,
             oversample: cfg.oversample,
             candidates: cfg.candidates,
@@ -329,6 +348,21 @@ impl SavedConfig {
     fn to_config(&self) -> Result<IndexConfig> {
         Ok(IndexConfig {
             dims: self.dims,
+            metric: match self.metric.trim() {
+                // Empty is a generation saved before this field existed, and
+                // this build never wrote anything but cosine until now - so
+                // it is read as cosine rather than refused. See the field's
+                // own comment for why that is a read default and not a
+                // format-version bump.
+                "" | "cosine" => crate::distance::Metric::Cosine,
+                "l2" => crate::distance::Metric::L2,
+                // A name from a build newer than this one, or a corrupted
+                // record: refused rather than defaulted, the same rule
+                // `SavedFusion::to_fusion` applies to an unknown method - an
+                // index that answers differently from the one that was saved
+                // is worse than one that will not open.
+                other => anyhow::bail!("the saved index names an unknown metric {other}"),
+            },
             quantized: self.quantized,
             oversample: self.oversample,
             candidates: self.candidates,
@@ -584,6 +618,10 @@ fn load_generation(dir: &Path, resident_vectors: Option<bool>) -> Result<Index> 
         check_header(&mut r, KIND_CONFIG)?;
         serde_json::from_reader(r).context("reading the config")?
     };
+    // Read once, ahead of the vectors: the metric it names decides whether
+    // those bytes are normalized or raw, which `VectorSet` has to be told at
+    // construction rather than guess from the floats themselves.
+    let config = saved.to_config()?;
     let store: Store = {
         let mut r = BufReader::with_capacity(1 << 20, File::open(path(dir, "store.bin"))?);
         check_header(&mut r, KIND_STORE)?;
@@ -605,11 +643,11 @@ fn load_generation(dir: &Path, resident_vectors: Option<bool>) -> Result<Index> 
         r.read_exact(&mut buf4)?;
         let n = u32::from_le_bytes(buf4) as usize;
         if resident_vectors.unwrap_or(saved.resident_vectors) {
-            VectorSet::from_raw(dims, crate::binio::read_pod_vec::<f32>(&mut r, dims * n)?)
+            VectorSet::from_raw(dims, config.metric, crate::binio::read_pod_vec::<f32>(&mut r, dims * n)?)
         } else {
             // The header is eight magic bytes, one kind byte, then the two counts.
             let offset = VECTOR_HEADER_BYTES;
-            VectorSet::from_file(dims, n, File::open(&vector_path)?, offset)
+            VectorSet::from_file(dims, config.metric, n, File::open(&vector_path)?, offset)
         }
     };
     let params = saved.hnsw_params();
@@ -624,7 +662,7 @@ fn load_generation(dir: &Path, resident_vectors: Option<bool>) -> Result<Index> 
         Bm25Index::read_from(&mut r).context("reading the lexical index")?
     };
 
-    Index::from_parts(saved.to_config()?, store, vectors, graph, Some(lexical))
+    Index::from_parts(config, store, vectors, graph, Some(lexical))
 }
 
 /// The tag that opens an index written as one byte stream.
@@ -679,6 +717,9 @@ pub fn read_index(r: &mut impl Read) -> Result<Index> {
     check_header(r, KIND_STREAM)?;
     let saved: SavedConfig =
         serde_json::from_slice(&read_section(r)?).context("reading the config")?;
+    // Read before the vectors, for the same reason `load_generation` does:
+    // the metric decides whether these bytes are normalized or raw.
+    let config = saved.to_config()?;
     let store = Store::read_from(&mut read_section(r)?.as_slice()).context("reading the store")?;
     let vectors = {
         let bytes = read_section(r)?;
@@ -690,6 +731,7 @@ pub fn read_index(r: &mut impl Read) -> Result<Index> {
         let count = u32::from_le_bytes(buf4) as usize;
         VectorSet::from_raw(
             dims,
+            config.metric,
             crate::binio::read_pod_vec::<f32>(&mut cursor, dims * count)?,
         )
     };
@@ -697,7 +739,7 @@ pub fn read_index(r: &mut impl Read) -> Result<Index> {
     let graph = Hnsw::read_graph(&mut read_section(r)?.as_slice(), params)?;
     let lexical = Bm25Index::read_from(&mut read_section(r)?.as_slice())
         .context("reading the lexical index")?;
-    Index::from_parts(saved.to_config()?, store, vectors, graph, Some(lexical))
+    Index::from_parts(config, store, vectors, graph, Some(lexical))
 }
 
 /// Writes one length-prefixed section.
@@ -762,6 +804,33 @@ mod tests {
                 normalize(&mut v);
                 v
             })
+            .collect();
+        index.add(chunks, &vectors);
+        index.commit();
+        index
+    }
+
+    /// The same fixture, built under L2 rather than cosine, with raw
+    /// (unnormalized) vectors - normalizing them would defeat the point of a
+    /// test that exists to prove L2 keeps their magnitude.
+    fn small_l2_index() -> Index {
+        let mut index = Index::new(IndexConfig {
+            dims: 16,
+            metric: crate::distance::Metric::L2,
+            ..Default::default()
+        });
+        let chunks: Vec<ChunkInput> = (0..40)
+            .map(|i| ChunkInput {
+                source: "confluence".into(),
+                external_doc_id: format!("d{i}"),
+                content: format!("chunk {i}"),
+                title: format!("title {i}"),
+                url: format!("https://x/{i}"),
+                ..Default::default()
+            })
+            .collect();
+        let vectors: Vec<Vec<f32>> = (0..40)
+            .map(|i| (0..16).map(|d| ((i * 16 + d) as f32 * 0.07).sin() * 3.0).collect())
             .collect();
         index.add(chunks, &vectors);
         index.commit();
@@ -1226,5 +1295,124 @@ mod tests {
         let config = fs::read(dir.join(generation.trim()).join("config.bin")).unwrap();
         assert_eq!(&config[..8], MAGIC);
         fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Rewrites a generation's `config.bin` JSON body in place, keeping the
+    /// same header. What a byte-for-byte editor of the file would produce,
+    /// which is the only way to manufacture a generation this build never
+    /// actually wrote - the same technique `an_index_written_under_the_old_magic_still_opens`
+    /// uses on the header rather than the body.
+    /// @param dir - the generation directory
+    /// @param edit - transforms the parsed JSON object
+    fn rewrite_config_json(dir: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
+        let config_path = path(dir, "config.bin");
+        let bytes = fs::read(&config_path).unwrap();
+        let header_len = 8 + 4 + 1;
+        let (header, body) = bytes.split_at(header_len);
+        let mut value: serde_json::Value = serde_json::from_slice(body).unwrap();
+        edit(&mut value);
+        let mut rewritten = header.to_vec();
+        serde_json::to_writer(&mut rewritten, &value).unwrap();
+        fs::write(&config_path, rewritten).unwrap();
+    }
+
+    /// A generation saved before this ticket has no `metric` key in its
+    /// `config.bin` at all - stripping the key, rather than setting it to
+    /// `"cosine"`, is what actually reproduces that file rather than a
+    /// same-effect stand-in for it. It has to keep answering as a cosine
+    /// index, not fail to open.
+    #[test]
+    fn a_generation_with_no_stored_metric_reads_as_cosine() {
+        let dir = temp_dir("no-metric-key");
+        let original = small_index();
+        save(&original, &dir).unwrap();
+        let generation = generation_dir(&dir, read_current(&dir).unwrap());
+
+        rewrite_config_json(&generation, |value| {
+            if let Some(object) = value.as_object_mut() {
+                let removed = object.remove("metric");
+                assert!(removed.is_some(), "the fixture must have written a metric to remove");
+            }
+        });
+
+        let loaded = load(&dir).unwrap();
+        assert_eq!(loaded.config().metric, crate::distance::Metric::Cosine);
+        // And it still answers a real query, not just an equal config.
+        let query = original.vectors().copy_of(11);
+        let filter = loaded.compile(&Filter::default());
+        assert!(!loaded.vector_search(&query, &filter, 5, Some(64)).is_empty());
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A metric this build does not have is refused, the same rule
+    /// `SavedFusion::to_fusion` applies to an unknown fusion method.
+    #[test]
+    fn a_generation_naming_an_unknown_metric_is_refused() {
+        let dir = temp_dir("unknown-metric");
+        let original = small_index();
+        save(&original, &dir).unwrap();
+        let generation = generation_dir(&dir, read_current(&dir).unwrap());
+
+        rewrite_config_json(&generation, |value| {
+            value["metric"] = serde_json::Value::String("manhattan".to_string());
+        });
+
+        let error = match load(&dir) {
+            Ok(_) => panic!("an unknown metric name must not be silently read"),
+            Err(error) => error,
+        };
+        assert!(
+            format!("{error:#}").contains("manhattan"),
+            "the refusal should name the unrecognised metric: {error:#}"
+        );
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// An L2 index round trips: the metric survives, the vectors keep their
+    /// raw magnitude rather than being normalized on the way back in, and the
+    /// graph answers the same nearest neighbour before and after reloading.
+    #[test]
+    fn an_l2_index_survives_the_round_trip_unnormalized() {
+        let dir = temp_dir("l2-roundtrip");
+        let original = small_l2_index();
+        save(&original, &dir).unwrap();
+        let loaded = load(&dir).unwrap();
+
+        assert_eq!(loaded.config().metric, crate::distance::Metric::L2);
+        for id in [0u32, 7, 39] {
+            assert_eq!(
+                loaded.vectors().copy_of(id),
+                original.vectors().copy_of(id),
+                "an L2 vector must not be normalized by a save/load round trip"
+            );
+        }
+
+        let query = original.vectors().copy_of(3);
+        let f_orig = original.compile(&Filter::default());
+        let f_load = loaded.compile(&Filter::default());
+        let a: Vec<u32> = original
+            .vector_search(&query, &f_orig, 5, Some(64))
+            .iter()
+            .map(|n| n.chunk)
+            .collect();
+        let b: Vec<u32> = loaded
+            .vector_search(&query, &f_load, 5, Some(64))
+            .iter()
+            .map(|n| n.chunk)
+            .collect();
+        assert_eq!(a, b, "the L2 graph did not survive the round trip");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The byte-stream form (`write_index`/`read_index`, what a shadow table
+    /// row holds) carries the metric the same way the directory form does.
+    #[test]
+    fn the_byte_stream_form_carries_l2_through_the_round_trip() {
+        let original = small_l2_index();
+        let mut bytes = Vec::new();
+        write_index(&original, &mut bytes).unwrap();
+        let loaded = read_index(&mut bytes.as_slice()).unwrap();
+        assert_eq!(loaded.config().metric, crate::distance::Metric::L2);
+        assert_eq!(loaded.vectors().copy_of(5), original.vectors().copy_of(5));
     }
 }

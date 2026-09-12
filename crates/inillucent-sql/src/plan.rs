@@ -232,8 +232,7 @@ pub enum AccessPath {
     /// rows are chosen by the index rather than filtered out of a walk, so the
     /// path carries the probe and the depth rather than a range: the module is
     /// asked for `k` candidates and the plan's own `ORDER BY` then rescores
-    /// them exactly, which is what keeps the answer the answer an exhaustive
-    /// cosine gives.
+    /// them exactly, over an `ORDER BY` function matching the index's metric.
     VectorProbe {
         /// The table's root page, whose rows the candidates name.
         root: u32,
@@ -1454,7 +1453,9 @@ fn order_cost(select: &BoundSelect, terms: &[BoundExpr], order: &[usize], levers
 /// - no `OFFSET`, no `GROUP BY`, no aggregate and no `DISTINCT`, each of which
 ///   reads rows the top k does not contain;
 /// - and a probe that reads no column, because a per-row probe is a different
-///   query - the index answers one question, not one per row.
+///   query - the index answers one question, not one per row;
+/// - and the `ORDER BY` function names the distance the index minimises
+///   (`IndexInfo::metric`), or it falls back to scan-and-sort instead.
 ///
 /// A `WHERE` clause is *allowed*: the residual is tested over the candidates,
 /// which is what SQLite does with a partial index and what pgvector's own
@@ -1494,12 +1495,15 @@ fn vector_path(
     };
     let depth = usize::try_from(*depth).ok().filter(|held| *held > 0)?;
     let BoundExpr::Function {
-        func: crate::function::ScalarFunc::VectorDistanceCos,
-        arguments,
-        ..
+        func, arguments, ..
     } = &term.expr
     else {
         return None;
+    };
+    let wanted = match func {
+        crate::function::ScalarFunc::VectorDistanceCos => crate::catalog_view::IndexMetric::Cosine,
+        crate::function::ScalarFunc::VectorDistanceL2 => crate::catalog_view::IndexMetric::L2,
+        _ => return None,
     };
     let [BoundExpr::Column {
         source: held,
@@ -1514,6 +1518,7 @@ fn vector_path(
     }
     let index = source.table.indexes.iter().find(|held| {
         held.origin == crate::catalog_view::IndexOrigin::Module
+            && held.metric == Some(wanted)
             && held
                 .columns
                 .first()
