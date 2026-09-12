@@ -17,6 +17,25 @@ Three surfaces, and picking the right one is most of the work:
 | keyword search over text | an **FTS5** table, with `bm25()` |
 | both at once over one corpus, fused and scored | an **`inillucent_search`** virtual table |
 
+## A corpus to try it on, with nothing to build
+
+`examples/rag-agent/` is a database of Greek philosophy that is already embedded and committed: 80
+Wikipedia articles, 2,661 passages, a 768 dimension vector on each. Install the model and search it:
+
+```sh
+inillucent setup-embeddings all
+inillucent --db examples/rag-agent/greek-philosophy.rdb query \
+  "SELECT p.title, p.body FROM passage p, (SELECT embed('search_query: ' || ?1) AS q) AS probe
+   ORDER BY vector_distance_cos(p.v, probe.q) LIMIT 5" \
+  --params '["who was Seneca"]'
+```
+
+**The one-row subquery is not decoration.** Nothing folds a constant call to a registered function
+yet, so `embed(...)` written directly inside the `ORDER BY` runs once per row: on that corpus, 65
+seconds against 0.9 for the same five passages. `docs/roadmap.md` item 15.
+
+Its `AGENTS.md` is the page to copy when you build one of these for somebody else.
+
 ## Where the vectors come from
 
 You can supply them, and most callers do. inillucent can also produce them, in this process, with no
@@ -34,10 +53,12 @@ SELECT id FROM note ORDER BY vector_distance_cos(v, embed('flight details')) LIM
 `embed(TEXT)` returns the 3,072 bytes a `VECTOR(768)` column holds. Three things to know before
 reaching for it:
 
-- **It is behind `--features embed` and off by default.** A build that does not have it refuses by
-  name and tells you the command that installs the model, rather than returning a NULL or a vector of
-  zeroes. A vector whose provenance is unknown is worse than no vector: it goes into an index, and
-  every neighbour it is ever compared against is wrong.
+- **The released binaries carry it from 0.1.2**, and a build from a checkout needs
+  `--features inillucent-cli/embed` because the feature is off by default. A build without it says
+  `no such function: embed`; a build with it but no model installed refuses by name and tells you the
+  command that installs one, rather than returning a NULL or a vector of zeroes. A vector whose
+  provenance is unknown is worse than no vector: it goes into an index, and every neighbour it is
+  ever compared against is wrong.
 - **Nothing has to be exported after the install.** The engine finds the runtime and the weights
   where the command put them. `ORT_DYLIB_PATH` and `INILLUCENT_ONNX_DIR` still override.
 - **Write it through `INSERT ... SELECT`, not `INSERT ... VALUES`.** A registered function in a

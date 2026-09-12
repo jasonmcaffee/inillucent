@@ -518,14 +518,39 @@ pub fn import(context: &mut Context, arguments: &Arguments) -> Result<Outcome, F
         " \"{}\" \"{table_name}\"",
         confined.to_string_lossy()
     ));
-    let before = context.shell().connection().total_changes();
+    // Counted two ways, because neither alone is right. `total_changes` is what
+    // an ordinary table's insert moves and it is exact. A **virtual** table's
+    // insert does not move it at all, so a 2,661 row load into an FTS5 table
+    // reported `imported 0 rows` while every one of those rows was in fact
+    // there - a number that says the opposite of what happened. The row count
+    // of the target covers that case, and is the fallback rather than the
+    // primary because a table with a trigger on it can change more rows than it
+    // gained.
+    let before_changes = context.shell().connection().total_changes();
+    let before_rows = row_count(context, &table_name);
     let mut produced = dot(context, "import", &line)?;
-    let after = context.shell().connection().total_changes();
-    produced.changes = after - before;
+    let after_changes = context.shell().connection().total_changes();
+    produced.changes = after_changes - before_changes;
+    if produced.changes == 0 {
+        produced.changes = row_count(context, &table_name).saturating_sub(before_rows);
+    }
     if produced.text.is_empty() {
         produced.text = format!("imported {} rows into {table_name}", produced.changes);
     }
     Ok(produced)
+}
+
+/// Returns how many rows a table holds, or zero when it holds none or is absent.
+///
+/// @param context - the open database
+/// @param table - the table to count
+fn row_count(context: &mut Context, table: &str) -> i64 {
+    let sql = format!("SELECT count(*) FROM \"{}\"", table.replace('"', "\"\""));
+    context
+        .shell()
+        .scalar(&sql)
+        .and_then(|text| text.parse::<i64>().ok())
+        .unwrap_or(0)
 }
 
 /// `export`: writes rows out in a chosen format.

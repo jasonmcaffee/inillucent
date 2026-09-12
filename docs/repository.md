@@ -68,6 +68,7 @@ says what its deletion is waiting on.
 | `tools/` | the pinned reference build, the feature probe, and the gate fixture builder |
 | `packaging/` | how a release is cut, and what a signed installer would take on each platform |
 | `agent-skills/` | one task shaped page per job, for an AI agent |
+| `examples/` | a worked example per thing that is hard to evaluate from a document. `examples/rag-agent/` is a Greek philosophy database, already embedded and committed, that an agent can search in its first minute — it is the one place a `.rdb` and a corpus are tracked, and the `.gitignore` rules say why |
 | `fuzz/` | eight libFuzzer targets over the codecs, built and run on their own |
 | `docs/invariants/layering.toml` | the dependency contract, enforced by a test |
 

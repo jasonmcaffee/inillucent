@@ -516,6 +516,16 @@ fn no_module_grows_past_the_size_it_is_recorded_at() {
     /// left where it is rather than followed down to 8,070 - a ceiling two lines
     /// above the file is what sent somebody here in the first place, and this
     /// test's own slack rule allows 200.
+    /// task-1907 is the second one, and it is the extraction this test's own
+    /// message named. `physical.rs` needed a catalog on the fold that produces a
+    /// vector index's probe vector - without one, adding an
+    /// `inillucent_hnsw` index to a column made the documented semantic search
+    /// refuse - and the doc comment explaining why is longer than the change.
+    /// `literal_value`, `constant_value`, `fold` and the evaluation behind them
+    /// are one idea, *what is constant and what is it worth*, and they moved to
+    /// `crates/inillucent-exec/src/constant.rs`. 6,742 back to 6,563. `physical`
+    /// re-exports `literal_value`, so the twelve call sites in
+    /// `inillucent-engine` that name it by path did not move.
     const CEILINGS: [(&str, usize); 14] = [
         ("crates/inillucent-engine/src/lib.rs", 8_130),
         ("crates/inillucent-exec/src/physical.rs", 6_691),

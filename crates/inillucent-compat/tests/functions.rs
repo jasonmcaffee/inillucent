@@ -291,3 +291,161 @@ fn a_removed_function_is_unknown_again() {
     let refused = connection.query("SELECT gone()");
     assert!(refused.is_err(), "the name should be unknown again");
 }
+
+/// Returns a registration that turns a word into a four-component unit vector.
+///
+/// It stands in for `embed(TEXT)` in a test that must not depend on 522 MB of
+/// weights being installed: the same shape - text in, a `VECTOR(N)` blob out -
+/// through the same registration path.
+///
+/// The vector points at `[a, 1-a, 0, 0]` where `a` is the first byte of the
+/// text divided by 255, so two different words give two different directions
+/// and the same word always gives the same one.
+fn toy_embedder(
+) -> Arc<dyn Fn(&[Value<'static>]) -> inillucent_base::DbResult<Value<'static>> + Send + Sync> {
+    Arc::new(|arguments: &[Value<'static>]| {
+        let seed = match arguments.first() {
+            Some(Value::Text(text)) => f32::from(text.raw().first().copied().unwrap_or(0)) / 255.0,
+            _ => 0.0,
+        };
+        let mut bytes = Vec::with_capacity(16);
+        for component in [seed, 1.0 - seed, 0.0, 0.0] {
+            bytes.extend_from_slice(&component.to_bits().to_le_bytes());
+        }
+        Value::owned_blob(&bytes)
+    })
+}
+
+/// A registered scalar can be the probe vector of a vector index.
+///
+/// **This was refused until task-1907, and the refusal appeared when the index
+/// did.** `ORDER BY vector_distance_cos(v, embed('a question')) LIMIT k` over a
+/// plain column works - `a_registered_scalar_reaches_order_by_and_where` is
+/// that case. Put an `inillucent_hnsw` index on the column and the planner
+/// turns the same query into a probe of that index, whose probe vector is
+/// folded through a space that carried no catalog, so the function's body could
+/// not be looked up and the whole statement came back `unsupported`. Creating
+/// the index broke the query the index exists for, which is why this test
+/// builds one.
+#[test]
+fn a_registered_scalar_is_the_probe_of_a_vector_index() {
+    let connection = connect();
+    connection
+        .create_scalar_function("toy_embed", 1, FunctionFlags::external(), toy_embedder())
+        .expect("registers");
+    // The index is created before the rows on purpose: an index built over rows
+    // that are already there is empty, which is `docs/roadmap.md` item 14 and
+    // is pinned by the test below.
+    connection
+        .execute_batch(
+            "CREATE TABLE p (id INTEGER PRIMARY KEY, word TEXT, v VECTOR(4));
+             CREATE INDEX p_v ON p USING inillucent_hnsw (v);",
+        )
+        .expect("creates");
+    for (id, word) in [(1, "alpha"), (2, "zeta"), (3, "mu"), (4, "spare")] {
+        connection
+            .execute(&format!(
+                "INSERT INTO p (id, word, v) SELECT {id}, '{word}', toy_embed('{word}')"
+            ))
+            .expect("inserts");
+    }
+
+    let rows = connection
+        .query("SELECT id FROM p ORDER BY vector_distance_cos(v, toy_embed('alpha')) LIMIT 1")
+        .expect("a registered function resolves in an index probe");
+    let nearest: Vec<i64> = rows
+        .iter()
+        .filter_map(|row| row.first().and_then(Value::as_integer))
+        .collect();
+    assert_eq!(
+        nearest,
+        vec![1],
+        "the row embedded from the same word is the nearest one"
+    );
+}
+
+/// A vector index does not keep the rows it was given, once the file is reopened.
+///
+/// **The wrong answer here is zero rows, and nothing raises.** `CREATE INDEX ...
+/// USING inillucent_hnsw` is what `docs/vector-search.md` tells a reader to
+/// build; `create_vector_index` reads the rows already in the table back and
+/// applies them; and the store reports, in that same session, that it holds
+/// them. Open the file again and it holds none. The planner then turns the
+/// documented semantic search into a probe of an empty index, and an empty
+/// probe answers zero rows rather than failing - so a search that worked before
+/// the index existed silently stops working after.
+///
+/// The reopen is the whole test. The first pass of it asserted inside the
+/// session that created the index, saw the rows the backfill had just written,
+/// and concluded the backfill worked. `docs/roadmap.md` item 14 carries the
+/// command-line reproduction, and the same shape at twenty rows, where an
+/// insert keeps nineteen of them.
+///
+/// This asserts the wrong behaviour, the way
+/// `a_registered_scalar_in_a_values_row_refuses_by_name` does, so that fixing it
+/// is a deliberate change to a named expectation rather than something that
+/// quietly starts working.
+#[test]
+fn a_vector_index_does_not_survive_a_reopen() {
+    let path = scratch();
+    {
+        let database = Database::open(&path).expect("opens");
+        let connection = database.connect().expect("connects");
+        connection
+            .create_scalar_function("toy_embed", 1, FunctionFlags::external(), toy_embedder())
+            .expect("registers");
+        connection
+            .execute("CREATE TABLE p (id INTEGER PRIMARY KEY, v VECTOR(4))")
+            .expect("creates");
+        for (id, word) in [(1, "alpha"), (2, "zeta"), (3, "mu")] {
+            connection
+                .execute(&format!(
+                    "INSERT INTO p (id, v) SELECT {id}, toy_embed('{word}')"
+                ))
+                .expect("inserts");
+        }
+
+        let before = connection
+            .query("SELECT id FROM p ORDER BY vector_distance_cos(v, toy_embed('alpha')) LIMIT 3")
+            .expect("runs without an index");
+        assert_eq!(before.len(), 3, "an exhaustive scan answers every row");
+
+        connection
+            .execute("CREATE INDEX p_v ON p USING inillucent_hnsw (v)")
+            .expect("creates the index");
+        assert_eq!(
+            held_rows(&connection),
+            "3",
+            "the backfill does run, and says so, in the session that ran it"
+        );
+    }
+
+    let database = Database::open(&path).expect("reopens");
+    let connection = database.connect().expect("connects");
+    assert_eq!(
+        held_rows(&connection),
+        "0",
+        "roadmap item 14: the backfilled rows do not survive the reopen. If this now reports          3 the defect is fixed - delete this test, and take the warning out of          examples/rag-agent and out of the roadmap"
+    );
+}
+
+/// Returns what a vector index's own counters say it holds, rendered as text.
+///
+/// Rendered rather than read as one type: a check that asked for text and got
+/// something else reported an empty string, which compared unequal to every
+/// expectation and said nothing at all about the index.
+///
+/// @param connection - a connection to the database holding `p_v`
+fn held_rows(connection: &inillucent_compat::facade::Connection) -> String {
+    connection
+        .query("SELECT v FROM p_v_state WHERE k = 'rows'")
+        .expect("the store keeps its own counters")
+        .first()
+        .and_then(|row| row.first())
+        .map(|value| match value {
+            Value::Text(text) => String::from_utf8_lossy(text.raw()).into_owned(),
+            Value::Integer(number) => number.to_string(),
+            other => format!("{other:?}"),
+        })
+        .unwrap_or_else(|| "no counter at all".to_string())
+}

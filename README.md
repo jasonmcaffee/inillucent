@@ -104,6 +104,26 @@ Four programs come out of an install or a build:
 [Getting started](docs/getting-started.md) covers all four, the exit codes, and the JSON a binding
 sees.
 
+## A first search
+
+[**`examples/rag-agent/`**](examples/rag-agent/README.md) is a database of Greek philosophy that is
+already built and already embedded — 80 Wikipedia articles, 2,661 passages, a 768 dimension vector on
+every one of them, an HNSW graph and a BM25 index, committed. Install the embedding model, point a
+coding agent at that directory, and ask it a question:
+
+```sh
+inillucent setup-embeddings all          # ONNX Runtime and the weights, about 620 MB, once
+
+inillucent --db examples/rag-agent/greek-philosophy.rdb query \
+  "SELECT p.title, p.body
+   FROM passage p, (SELECT embed('search_query: ' || ?1) AS q) AS probe
+   ORDER BY vector_distance_cos(p.v, probe.q) LIMIT 5" \
+  --params '["who was Seneca"]'
+```
+
+No corpus to download, nothing to index, no embedding server. It is the shortest answer to "show me
+this doing retrieval".
+
 ## Client libraries
 
 An application calls the engine in its own process through the C ABI. **The eight client libraries
