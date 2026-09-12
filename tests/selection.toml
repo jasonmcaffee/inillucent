@@ -1156,6 +1156,18 @@ name = "command_parity"
 tier = "tooling"
 covers = ["inillucent-cli"]
 
+# `inillucent import`, run as the verb rather than as the dot command under it.
+# It is its own target because the defect it guards lived in the gap between the
+# two: `.import`'s only coverage was a script that passed no options, the verb
+# always passes one, and so the verb failed on every file while the suite
+# underneath it stayed green.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "cli_import"
+tier = "tooling"
+covers = ["inillucent-cli"]
+
 # The install command, driven as a program, with nothing downloaded. It is here
 # rather than as a unit test because the defect it guards - a bare invocation
 # fetching 620 MB - is about what the process does, and a function that returns

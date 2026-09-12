@@ -22,6 +22,12 @@ inillucent --db notes.rdb query "SELECT length(embed('hello'))"
 About 620 MB the first time and nothing on a later run. Run it with no component at all and it
 reports what is installed and downloads nothing, which is what stops the fetch being a surprise.
 
+**The binary has to carry the `embed` feature for that query to answer**, and the released ones do
+from 0.1.2. Every release up to 0.1.1 did not, which made `setup-embeddings` a command that
+downloaded 620 MB the program that downloaded it could not use: the query above answered `no such
+function: embed`. From a checkout the flag is
+`cargo build --release -p inillucent-cli --features inillucent-cli/embed`.
+
 | | |
 |---|---|
 | `inillucent setup-embeddings all` | the runtime and the weights |

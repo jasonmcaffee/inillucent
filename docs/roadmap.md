@@ -175,6 +175,92 @@ deliberate change to a named expectation rather than something that quietly star
 Until then, `INSERT ... SELECT` is the documented shape for writing a computed vector, and it is what
 `docs/embeddings.md` and the search skill show.
 
+## 14. A vector index answers zero rows instead of the rows it holds
+
+**This one returns a wrong answer rather than refusing, which is the class this engine is built not
+to have.** `CREATE INDEX ... USING inillucent_hnsw (v)` is what
+[vector search](vector-search.md) tells a reader to build, and building it makes the search that
+worked a moment earlier return nothing. Nothing fails and nothing is logged: the planner turns the
+query into a probe of the index, the index holds no rows, and zero candidates is a legal answer.
+
+There are two faults under it. Both were found while building `examples/rag-agent`, and both
+reproduce in ten lines.
+
+**The rows do not survive the file being reopened.** An index created over a table that already
+holds rows should cover them, and `create_vector_index` in
+`crates/inillucent-engine/src/ddl.rs` does read them back with a `SELECT rowid, <column>` and apply
+them as module changes. **In the session that ran it, the store says it holds them.** Open the file
+again and it holds none:
+
+```sh
+inillucent --db t.rdb batch "
+CREATE TABLE t (id INTEGER PRIMARY KEY, v VECTOR(4));
+INSERT INTO t (id,v) VALUES (1, x'0000803F000000000000000000000000');
+INSERT INTO t (id,v) VALUES (2, x'000000000000803F0000000000000000');
+INSERT INTO t (id,v) VALUES (3, x'00000000000000000000803F00000000');"
+
+# two rows, correctly
+inillucent --db t.rdb query "SELECT id FROM t ORDER BY vector_distance_cos(v, x'0000803F000000000000000000000000') LIMIT 2"
+
+inillucent --db t.rdb exec "CREATE INDEX t_v ON t USING inillucent_hnsw (v)"
+
+# no rows at all
+inillucent --db t.rdb query "SELECT id FROM t ORDER BY vector_distance_cos(v, x'0000803F000000000000000000000000') LIMIT 2"
+inillucent --db t.rdb query "SELECT * FROM t_v_state"   # rows 0, covered 0
+```
+
+**And an insert loses its last row the same way.** Create the index first and the write path does
+maintain it — almost. Twenty rows inserted, twenty reported in the session that inserted them,
+**nineteen** after the reopen: `t_v_state` says `rows 19`, `t_v_content` holds 19, and a search with
+`LIMIT 25` returns ids 1 to 19. So it is not two faults. It is one — the store's newest writes are
+not persisted — wearing two faces, because a backfill happens inside a single statement and all of
+it is newest, while a run of inserts loses only the last.
+
+A backfilled index does not recover, either: later inserts into that table do not reach it, and it
+stays at zero for good.
+
+`crates/inillucent-compat/tests/functions.rs` holds it as
+`a_vector_index_does_not_survive_a_reopen`, asserting both halves — three rows in the session that
+built the index, none after reopening — so closing this is a deliberate change to a named
+expectation. **The reopen is the whole test**: the first version of it asserted inside the building
+session, saw the rows the backfill had just written, and concluded the backfill worked.
+
+Until this is fixed, a corpus small enough for an exhaustive scan should not have the index built
+over it at all — which is what [vector search](vector-search.md) already advises for a different
+reason, and what `examples/rag-agent` does. A corpus too large for that has no answer here yet.
+
+## 15. `embed(TEXT)` is called once per row when it is a constant
+
+`ORDER BY vector_distance_cos(v, embed('search_query: ' || ?1)) LIMIT 5` calls the model once for
+**every row of the table**, because nothing folds a constant call to a registered function. Measured
+on `examples/rag-agent`, 2,661 passages: **65 seconds**, of which 64 are 2,661 embeddings of the same
+sentence. The same question through a one-row subquery, which evaluates it once, takes **0.9
+seconds**.
+
+```sql
+-- 65 s: one embedding per row
+SELECT title FROM passage ORDER BY vector_distance_cos(v, embed('search_query: ' || ?1)) LIMIT 5;
+
+-- 0.9 s: one embedding
+SELECT p.title FROM passage p, (SELECT embed('search_query: ' || ?1) AS q) AS probe
+ORDER BY vector_distance_cos(p.v, probe.q) LIMIT 5;
+```
+
+`FunctionFlags::deterministic` already exists and already says what it is for — "the function returns
+the same answer for the same arguments within one statement, so the planner may call it once" — and
+nothing reads it. `embed` is registered without it.
+
+The fix is not simply to fold the call in `translate`: a compiled chain is reused across re-binds, so
+folding an argument that is a bound parameter would make the chain correct only for the values it was
+built against, which is the trap `BoundExpr::Parameter` already carries a comment about. A call whose
+arguments are all literals can be folded there; one that reads a parameter has to be evaluated where
+the parameters are, once per execution rather than once per row.
+
+The probe of a vector index is the one place this already happens, because the probe vector is folded
+to build the probe — see `literal_value_in` in `crates/inillucent-exec/src/physical.rs`, which was
+given a catalog in task-1907 so that the fold can resolve `embed` at all. Before that, adding an HNSW
+index to a column made the documented semantic search refuse outright with `unsupported`.
+
 ## The failing tests
 
 Seventeen, all accounted for, and every one of them failed before the last two rounds of work as

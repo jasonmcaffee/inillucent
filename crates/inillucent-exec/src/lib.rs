@@ -43,6 +43,7 @@
 pub mod aggregate;
 pub mod autoindex;
 pub mod batch;
+pub mod constant;
 pub mod correlate;
 pub mod declared;
 pub mod dml;

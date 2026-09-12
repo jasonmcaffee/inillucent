@@ -277,7 +277,16 @@ Write-Host "inillucent $Version for $Target"
 
 if (-not $SkipBuild) {
     Write-Host 'building (release, locked)...'
+    # `--features inillucent-cli/embed` is what makes `embed(TEXT)` answer in a
+    # shipped binary. Without it `inillucent setup-embeddings all` downloads 620
+    # MB of ONNX Runtime and weights that the program which downloaded them
+    # cannot use, and `docs/embeddings.md`'s own first example answers
+    # `no such function: embed`. That was true of every release up to 0.1.1.
+    # It costs 3.2 MB of binary - 9.7 against 6.5 - and nothing at run time:
+    # `ort` links `load-dynamic`, so a machine with no runtime installed still
+    # runs every command that does not embed.
     & cargo build --manifest-path (Join-Path $root 'Cargo.toml') --release --locked `
+        --features inillucent-cli/embed `
         -p inillucent-cli -p inillucent-migrate -p inillucent-driver-capi
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed with $LASTEXITCODE" }
 }
