@@ -545,9 +545,18 @@ fn the_mcp_server_refuses_a_path_outside_the_root() {
         .to_string_lossy()
         .replace('\\', "/");
 
+    // **The handshake, in full.** task-1909 made the server demand
+    // `protocolVersion` on `initialize` and refuse every other method until
+    // `notifications/initialized` has followed it. A test that sends the old
+    // two-line shape gets `initialization must complete` back, which contains
+    // neither "confined" nor "outside" - so it reported that the server had
+    // read a database outside its root when the server had not read one at
+    // all. A confinement check that fails for the wrong reason is the same
+    // defect as one that passes for the wrong reason.
     let request = format!(
-        "{}\n{}\n",
-        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}"#,
+        "{}\n{}\n{}\n",
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"confinement"}}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
         format_args!(
             "{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{{\"name\":\"inillucent_query\",\"arguments\":{{\"db\":\"{named}\",\"sql\":\"SELECT 1\"}}}}}}"
         )
