@@ -105,7 +105,35 @@ impl Server {
             .spawn()
             .ok()?;
         let answers = BufReader::new(child.stdout.take()?);
-        Some(Server { child, answers })
+        let mut server = Server { child, answers };
+        server.shake_hands();
+        Some(server)
+    }
+
+    /// Completes the MCP handshake, which every other method waits for.
+    ///
+    /// **Not optional, and not a formality.** task-1909 made the server demand
+    /// `protocolVersion` on `initialize` and refuse every other method until a
+    /// `notifications/initialized` has followed it. Without this, every case
+    /// below read `MCP initialization must complete before this method is used`
+    /// and asserted against that string - so a suite about row ceilings was
+    /// reporting that the ceilings were missing when it had never asked about
+    /// them. A test that cannot reach the thing it is testing fails for the
+    /// wrong reason, which the testing standard rates as bad as passing for one.
+    fn shake_hands(&mut self) {
+        let _ = self.ask(concat!(
+            r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":"#,
+            r#"{"protocolVersion":"2025-06-18","capabilities":{},"#,
+            r#""clientInfo":{"name":"budgets"}}}"#
+        ));
+        // A notification, so there is no answer to read.
+        if let Some(stdin) = self.child.stdin.as_mut() {
+            let _ = writeln!(
+                stdin,
+                r#"{{"jsonrpc":"2.0","method":"notifications/initialized"}}"#
+            );
+            let _ = stdin.flush();
+        }
     }
 
     /// Sends one request and returns the line that came back.
