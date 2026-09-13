@@ -1189,6 +1189,20 @@ name = "cli_import"
 tier = "tooling"
 covers = ["inillucent-cli"]
 
+# What `inillucent batch` promises about all-or-nothing, driven through the
+# shipped binary. It is an end-to-end row rather than an engine one because the
+# promise is the command's: `Connection::execute_batch` is a loop of
+# `execute_any` and always was, and `verbs::batch` is what wraps a transaction
+# round it. Reading the result back through a second invocation is the point -
+# a check inside the same process would agree with whatever that process
+# believed rather than with what reached the file.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "cli_batch"
+tier = "e2e"
+covers = ["inillucent-cli"]
+
 # The install command, driven as a program, with nothing downloaded. It is here
 # rather than as a unit test because the defect it guards - a bare invocation
 # fetching 620 MB - is about what the process does, and a function that returns

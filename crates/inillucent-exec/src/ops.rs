@@ -964,10 +964,18 @@ impl Sink for StreamAggregate {
                 let Some(accumulator) = self.accumulators.get_mut(index) else {
                     continue;
                 };
-                match &spec.argument {
-                    None => accumulator.push(&Datum::Null),
-                    Some(argument) => accumulator.push(&argument.value(batch, nth)?.get()),
-                }
+                // **Through `feed`, which is where `FILTER` is applied
+                // (task-1932).** This loop used to push the argument straight
+                // into the accumulator, so an aggregate's `FILTER (WHERE ...)`
+                // was ignored outright by this path - `SELECT team, count(*)
+                // FILTER (WHERE score > 0) FROM a GROUP BY team` counted every
+                // row of every group. The dense integer-key path above already
+                // went through `fold_run`, which checks it, so the same
+                // statement answered correctly over an integer group key and
+                // wrongly over a text one, which is why nothing caught it.
+                // `feed` also carries the whole-row and inner-`ORDER BY` cases
+                // this loop had no idea about.
+                spec.feed(accumulator, batch, nth)?;
             }
         }
         Ok(Flow::Continue)

@@ -82,6 +82,13 @@ fn request_tls(stream: &mut Stream, url: &ConnectionUrl) -> DbResult<()> {
 /// How many rows one `FETCH` asks for.
 const FETCH_ROWS: usize = 10_000;
 
+/// The most columns a message may claim.
+///
+/// PostgreSQL's own hard limit on a table, so a `RowDescription` or a `DataRow`
+/// above it is a message this client should name rather than start building a
+/// vector for.
+const MAX_COLUMNS: usize = 1_600;
+
 /// The cursor a table scan runs through.
 const CURSOR: &str = "inillucent_migrate_cursor";
 
@@ -843,6 +850,18 @@ fn decode_bytea(bytes: &[u8]) -> Vec<u8> {
 /// @param body - the message body
 fn decode_row_description(body: &[u8]) -> DbResult<Vec<Field>> {
     let count = be_u16(body, 0)? as usize;
+    // **Not the same hazard MySQL's count is, and bounded anyway.** This count
+    // is a `u16`, so the worst `Vec::with_capacity` it can ask for is 65,535
+    // entries - large, harmless, and nothing like the `u64::MAX` a MySQL
+    // length-encoded count can claim. It is bounded here because PostgreSQL's
+    // own maximum is 1,600 columns, so a count above it is a message this
+    // client should name rather than start building a vector for (task-1932,
+    // H5's audit of the sibling decoders).
+    if count > MAX_COLUMNS {
+        return Err(protocol(format!(
+            "RowDescription claims {count} columns, past the {MAX_COLUMNS} a PostgreSQL table can have"
+        )));
+    }
     let mut fields = Vec::with_capacity(count);
     let mut at = 2usize;
     for _ in 0..count {
@@ -868,6 +887,11 @@ fn decode_row_description(body: &[u8]) -> DbResult<Vec<Field>> {
 /// @param body - the message body
 fn decode_data_row(body: &[u8]) -> DbResult<Vec<Option<Vec<u8>>>> {
     let count = be_u16(body, 0)? as usize;
+    if count > MAX_COLUMNS {
+        return Err(protocol(format!(
+            "a DataRow claims {count} values, past the {MAX_COLUMNS} columns a PostgreSQL table can have"
+        )));
+    }
     let mut row = Vec::with_capacity(count);
     let mut at = 2usize;
     for _ in 0..count {

@@ -134,6 +134,120 @@ fn adversarial_depth_is_refused_rather_than_crashing() {
     }
 }
 
+/// H8 (task-1920): a flat chain is charged against `ExprDepth`, which was
+/// declared and enforced nowhere.
+///
+/// **Why a flat chain and not a nest.** `adversarial_depth_is_refused_rather_than_crashing`
+/// above lowers `ParserDepth` and nests parentheses, which charges the
+/// parser's own recursion. `a1 = 1 AND a2 = 2 AND ...` charges nothing at all:
+/// the Pratt loop enters and leaves `parse_expr_bp` once per term, so the
+/// recursion counter never accumulates, while the tree grows one level per
+/// term because `AND` is left-associative. `compat/limits.toml` declares
+/// `ExprDepth` with a default of 1000 - SQLite's - and nothing read it.
+///
+/// A tree that deep is not a parser problem on its own. It is a problem for
+/// the binder, the planner and the executor, each of which walks it
+/// recursively, and the `SqlLength` default of 1 GiB leaves room for a chain
+/// tens of millions of terms long.
+///
+/// The last case is the one that says the limit is charged as the tree grows
+/// rather than after it is built: at the default `ExprDepth` of 1000 a chain
+/// of 200,000 terms is refused, and it is refused quickly.
+#[test]
+fn a_flat_chain_is_charged_against_the_expression_depth_limit() {
+    let mut limits = Limits::default();
+    limits.set(Limit::ExprDepth, 100);
+    let chain: String = (0..200)
+        .map(|nth| format!("a{nth} = {nth}"))
+        .collect::<Vec<String>>()
+        .join(" AND ");
+    let sql = format!("SELECT 1 WHERE {chain}");
+    let failure = match parser::parse_next_statement(sql.as_bytes(), 0, &limits) {
+        Err(failure) => failure,
+        Ok(_) => panic!("a 200-term chain must be refused at an ExprDepth of 100"),
+    };
+    assert!(
+        failure.message().contains("depth"),
+        "the refusal must name the depth: {}",
+        failure.message()
+    );
+
+    // A chain inside the limit still parses, which is the half a limit that
+    // refused everything would break.
+    let short: String = (0..50)
+        .map(|nth| format!("a{nth} = {nth}"))
+        .collect::<Vec<String>>()
+        .join(" AND ");
+    parser::parse_next_statement(format!("SELECT 1 WHERE {short}").as_bytes(), 0, &limits)
+        .expect("a 50-term chain is inside a limit of 100");
+
+    // And at the shipped default, a chain SQLite refuses is refused here too.
+    let long: String = (0..200_000)
+        .map(|nth| format!("a{nth} = {nth}"))
+        .collect::<Vec<String>>()
+        .join(" AND ");
+    let started = std::time::Instant::now();
+    let refused = parser::parse_next_statement(
+        format!("SELECT 1 WHERE {long}").as_bytes(),
+        0,
+        &Limits::default(),
+    );
+    assert!(
+        refused.is_err(),
+        "a 200,000-term chain must be refused at the default ExprDepth of 1000"
+    );
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "the refusal took {:?}, which means the limit is charged after the tree \
+         is built rather than as it grows",
+        started.elapsed()
+    );
+}
+
+/// H8 (task-1920): interning N distinct identifiers costs N, not N squared.
+///
+/// **What it used to cost.** `Ast::intern` walked every name interned so far
+/// and compared three fields against each, so a statement naming N distinct
+/// identifiers cost N-squared comparisons. Under the 1 GiB `SqlLength` default
+/// a statement can name hundreds of thousands of them.
+///
+/// **A wall-clock bound is a weak assertion and a ratio is not.** Timing one
+/// run says nothing on a busy machine; doubling the input and asserting the
+/// work does not quadruple says exactly what "quadratic" means. The bound is
+/// deliberately loose - four times the smaller run, where the defect would give
+/// sixteen - so that this fails on the algorithm rather than on the scheduler.
+#[test]
+fn interning_distinct_identifiers_is_not_quadratic() {
+    let names = |count: usize| -> String {
+        let list: Vec<String> = (0..count).map(|nth| format!("c{nth}")).collect();
+        format!("SELECT {} FROM t", list.join(", "))
+    };
+    // The result-set column limit defaults to 2,000 and this is not a test
+    // about that limit, so it is raised to its own hard maximum of 32,767 -
+    // which is what bounds the two sizes below. The identifier-count limit
+    // `charge_expr_depth` applies is derived from it and moves with it.
+    let mut limits = Limits::default();
+    limits.set(Limit::Column, 32_767);
+    let time = |sql: &str| -> std::time::Duration {
+        let started = std::time::Instant::now();
+        parser::parse_next_statement(sql.as_bytes(), 0, &limits).expect("it parses");
+        started.elapsed()
+    };
+    // Warm the allocator and the branch predictors so the first run is not the
+    // one that pays for them.
+    let _ = time(&names(2_000));
+    let small = time(&names(8_000));
+    let large = time(&names(16_000));
+    assert!(
+        large
+            < small
+                .saturating_mul(3)
+                .max(std::time::Duration::from_millis(50)),
+        "doubling the identifiers took {large:?} against {small:?} for half as \
+         many, which is the quadratic scan rather than the map"
+    );
+}
+
 /// A statement longer than the SQL-length limit is refused before it is lexed.
 #[test]
 fn an_overlong_statement_is_refused() {

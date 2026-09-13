@@ -281,6 +281,52 @@ impl<'a> Parser<'a> {
         self.depth = self.depth.saturating_sub(1);
     }
 
+    /// Charges the expression tree's own depth against `Limit::ExprDepth`.
+    ///
+    /// **`ExprDepth` was declared in `compat/limits.toml` and enforced nowhere
+    /// (task-1932, H8).** `enter`/`leave` above charge `ParserDepth`, which
+    /// counts recursion, and that is a different measurement: a flat chain
+    /// `a1 = 1 AND a2 = 2 AND ...` enters and leaves `parse_expr_bp` once per
+    /// term, so the recursion counter never accumulates, while the tree grows
+    /// one level per term with nothing counting it. Under the 1 GiB
+    /// `SqlLength` default that is a tree tens of millions of levels deep,
+    /// accepted here and then walked recursively by the binder, the planner and
+    /// the executor - each of which overflows the stack somewhere nobody
+    /// measured. SQLite refuses at depth 1000.
+    ///
+    /// It is charged here rather than inside `Ast::add_expr` because
+    /// `add_expr` is infallible and called from about a hundred places; this is
+    /// one call in the Pratt loop, which every expression node passes through,
+    /// so a chain is refused after the term that crossed the limit rather than
+    /// after the whole statement is built.
+    fn charge_expr_depth(&mut self) -> Result<(), ParseError> {
+        if i64::from(self.ast.max_expr_depth()) > self.limits.get(Limit::ExprDepth) {
+            let span = Span::at(self.cursor());
+            return Err(ParseError::new(
+                ParseErrorKind::LimitExceeded("expression tree depth"),
+                span,
+            ));
+        }
+        // **The identifier count, charged at the same place and for the same
+        // reason.** `Ast::intern` is a hash lookup as of task-1932 and no
+        // longer quadratic, but a statement can still name arbitrarily many
+        // distinct identifiers under the `SqlLength` default, and every one of
+        // them is a `Name` holding two copies of its text. `Limit::Column` is
+        // the closest declared bound and this is deliberately generous against
+        // it - a name is a column, a table, an alias, a function or a
+        // collation, so one honest statement interns several times as many
+        // names as any one table has columns.
+        let names = i64::try_from(self.ast.name_count()).unwrap_or(i64::MAX);
+        if names > self.limits.get(Limit::Column).saturating_mul(64) {
+            let span = Span::at(self.cursor());
+            return Err(ParseError::new(
+                ParseErrorKind::LimitExceeded("distinct identifiers"),
+                span,
+            ));
+        }
+        Ok(())
+    }
+
     /// Returns whether a token may be read as a name here.
     ///
     /// A quoted word is always a name. A bare word is a name unless it is a

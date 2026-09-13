@@ -13,6 +13,8 @@
 //! that make `é` and `e` the same word. `unicode61` is the default, as it is
 //! there.
 
+use inillucent_base::DbResult;
+
 /// Which tokenizer an index uses.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Tokenizer {
@@ -46,11 +48,23 @@ pub enum Tokenizer {
 impl Tokenizer {
     /// Returns the tokenizer a specification names.
     ///
-    /// An unrecognised name is read as `unicode61`, which is what the pinned
-    /// release falls back to for its own built-ins and is the safe direction:
-    /// a schema naming a tokenizer this build has not got still opens, and its
-    /// rows are still found by the words they contain.
-    pub fn named(specification: &[Vec<u8>]) -> Tokenizer {
+    /// **A name this build has not got is refused, and used to be read as
+    /// `unicode61` (task-1932, M5).** The old comment called that "the safe
+    /// direction: a schema naming a tokenizer this build has not got still
+    /// opens, and its rows are still found by the words they contain". It is
+    /// not the safe direction, because the tokenizer is what a query *means*.
+    /// `tokenize='trigram'` in SQLite makes `MATCH` a substring search, and
+    /// substituting `unicode61` made it whole-word search - so
+    /// `CREATE VIRTUAL TABLE t USING fts5(body, tokenize='trigram')` succeeded
+    /// and then answered a different question from the one it was asked, with
+    /// no error anywhere. A refusal is a caller's problem to solve; a silently
+    /// different search is a wrong answer nobody looks for.
+    ///
+    /// `trigram` itself is a feature to build rather than a name to add here.
+    /// What this does is stop pretending it exists.
+    ///
+    /// @param specification - the `tokenize=` words, the name first
+    pub fn named(specification: &[Vec<u8>]) -> DbResult<Tokenizer> {
         let name = specification
             .first()
             .map(|part| String::from_utf8_lossy(part).to_ascii_lowercase())
@@ -59,10 +73,22 @@ impl Tokenizer {
             // Whatever follows `porter` is the tokenizer it wraps, and nothing
             // following it means the default one.
             let inner = specification.get(1..).unwrap_or(&[]);
-            return Tokenizer::Porter(Box::new(Tokenizer::named(inner)));
+            return Ok(Tokenizer::Porter(Box::new(Tokenizer::named(inner)?)));
         }
         if name == "ascii" {
-            return Tokenizer::Ascii;
+            return Ok(Tokenizer::Ascii);
+        }
+        // An empty name is the default, which is `unicode61`; anything else has
+        // to be a name this build implements.
+        if !name.is_empty() && name != "unicode61" {
+            let said = format!("the fts5 tokenizer {name}");
+            return Err(inillucent_base::error::misuse(format!(
+                "the new engine's physical pass does not handle {said} yet"
+            ))
+            .with_message(format!(
+                "the new engine's physical pass does not handle {said} yet"
+            ))
+            .with_unsupported(said));
         }
         let mut remove_diacritics = true;
         let mut extra_tokens = Vec::new();
@@ -81,11 +107,11 @@ impl Tokenizer {
                 _ => {}
             }
         }
-        Tokenizer::Unicode61 {
+        Ok(Tokenizer::Unicode61 {
             remove_diacritics,
             extra_tokens,
             separators,
-        }
+        })
     }
 
     /// Returns the tokens of one piece of text with where each one came from.
@@ -369,7 +395,7 @@ mod tests {
     /// The default splits on anything that is not a letter or a number.
     #[test]
     fn the_default_splits_on_punctuation() {
-        let tokenizer = Tokenizer::named(&[]);
+        let tokenizer = Tokenizer::named(&[]).expect("a known tokenizer");
         assert_eq!(
             tokens(&tokenizer, "The quick, brown fox!"),
             ["the", "quick", "brown", "fox"]
@@ -380,7 +406,7 @@ mod tests {
     /// `ascii` treats everything outside `A-Za-z0-9` as a separator.
     #[test]
     fn ascii_keeps_to_ascii() {
-        let tokenizer = Tokenizer::named(&[b"ascii".to_vec()]);
+        let tokenizer = Tokenizer::named(&[b"ascii".to_vec()]).expect("a known tokenizer");
         assert_eq!(
             tokens(&tokenizer, "Caf\u{e9} au lait"),
             ["caf", "au", "lait"]
@@ -390,13 +416,14 @@ mod tests {
     /// The default removes diacritics, so an accented word is the plain one.
     #[test]
     fn diacritics_are_removed_by_default() {
-        let tokenizer = Tokenizer::named(&[]);
+        let tokenizer = Tokenizer::named(&[]).expect("a known tokenizer");
         assert_eq!(tokens(&tokenizer, "Caf\u{e9}"), ["cafe"]);
         let kept = Tokenizer::named(&[
             b"unicode61".to_vec(),
             b"remove_diacritics".to_vec(),
             b"0".to_vec(),
-        ]);
+        ])
+        .expect("a known tokenizer");
         assert_eq!(tokens(&kept, "Caf\u{e9}"), ["caf\u{e9}"]);
     }
 
@@ -404,10 +431,12 @@ mod tests {
     #[test]
     fn the_character_lists_are_honoured() {
         let joined =
-            Tokenizer::named(&[b"unicode61".to_vec(), b"tokenchars".to_vec(), b"-".to_vec()]);
+            Tokenizer::named(&[b"unicode61".to_vec(), b"tokenchars".to_vec(), b"-".to_vec()])
+                .expect("a known tokenizer");
         assert_eq!(tokens(&joined, "well-known"), ["well-known"]);
         let split =
-            Tokenizer::named(&[b"unicode61".to_vec(), b"separators".to_vec(), b"x".to_vec()]);
+            Tokenizer::named(&[b"unicode61".to_vec(), b"separators".to_vec(), b"x".to_vec()])
+                .expect("a known tokenizer");
         assert_eq!(tokens(&split, "axb"), ["a", "b"]);
     }
 
@@ -438,8 +467,50 @@ mod tests {
     fn an_empty_specification_is_the_default() {
         assert_eq!(parse_specification(""), vec![b"unicode61".to_vec()]);
         assert!(matches!(
-            Tokenizer::named(&parse_specification("")),
+            Tokenizer::named(&parse_specification("")).expect("a known tokenizer"),
             Tokenizer::Unicode61 { .. }
         ));
+    }
+
+    /// M5 (task-1920): a tokenizer name this build has not got is refused,
+    /// and `trigram` is the one that matters.
+    ///
+    /// **A substituted tokenizer is a wrong answer, not a graceful
+    /// fallback.** `named` read any unrecognised name as `unicode61` on the
+    /// reasoning that "a schema naming a tokenizer this build has not got
+    /// still opens, and its rows are still found by the words they contain".
+    /// But the tokenizer decides what `MATCH` *means*: `tokenize='trigram'`
+    /// makes it a substring search in SQLite, and substituting `unicode61`
+    /// made it whole-word search. The table was created, the query ran, and
+    /// it answered a different question with no error anywhere.
+    #[test]
+    fn a_tokenizer_this_build_has_not_got_is_refused() {
+        for name in ["trigram", "icu", "porter2", "nonsense"] {
+            let refused = Tokenizer::named(&[name.as_bytes().to_vec()])
+                .err()
+                .unwrap_or_else(|| panic!("{name} must be refused, not substituted"));
+            assert_eq!(
+                refused.unsupported(),
+                Some(format!("the fts5 tokenizer {name}").as_str()),
+                "the refusal must name the tokenizer it refused"
+            );
+        }
+        // The names this build does have, and the wrapper, still work - which
+        // is the half a refusal that turned everything away would break.
+        for specification in [
+            vec![],
+            vec![b"unicode61".to_vec()],
+            vec![b"ascii".to_vec()],
+            vec![b"porter".to_vec()],
+            vec![b"porter".to_vec(), b"ascii".to_vec()],
+        ] {
+            assert!(
+                Tokenizer::named(&specification).is_ok(),
+                "{specification:?} is a tokenizer this build has"
+            );
+        }
+        // And an unknown name inside `porter` is refused too, rather than
+        // being wrapped and silently substituted.
+        assert!(Tokenizer::named(&[b"porter".to_vec(), b"trigram".to_vec()]).is_err());
     }
 }

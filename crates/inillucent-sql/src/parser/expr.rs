@@ -31,13 +31,22 @@ impl Parser<'_> {
     }
 
     /// The Pratt loop: one prefix, then as many suffixes as bind tightly enough.
+    ///
+    /// **`charge_expr_depth` is here and not in `Ast::add_expr` (task-1932,
+    /// H8).** Every expression node in a statement is built either by
+    /// `parse_prefix` or by `parse_suffix`, and both go through this loop, so
+    /// one call per iteration charges the tree's depth as it grows - a flat
+    /// `a1 = 1 AND a2 = 2 AND ...` chain is refused at the term that crossed
+    /// the limit rather than after the whole statement has been built.
     fn parse_expr_loop(&mut self, minimum: Power) -> Result<ExprId, ParseError> {
         let mut left = self.parse_prefix()?;
+        self.charge_expr_depth()?;
         loop {
             let Some(next) = self.parse_suffix(left, minimum)? else {
                 return Ok(left);
             };
             left = next;
+            self.charge_expr_depth()?;
         }
     }
 

@@ -115,6 +115,12 @@ reason = "The product was renamed from its working name to inillucent. Every cha
 sha256 = "eba4b8ecea88ebb6f04d3b601a41e608e497c4e2a7b5d0b2a1accc9b2427cfac"
 
 [[amendment]]
+path = "crates/inillucent-core/src/binio.rs"
+ticket = "task-1932"
+reason = "H4: every reader sized its buffer from a length read out of the file and allocated it before read_exact found out whether the bytes were there, which aborts the process through handle_alloc_error rather than returning an error. read_records grows the buffer as the bytes arrive."
+sha256 = "6c314a0aab48a0955055f8ab752087ea1f1f57cdcdff32c9eeadb1d8aa9ec2f4"
+
+[[amendment]]
 path = "crates/inillucent-core/src/bm25.rs"
 ticket = "task-1911"
 reason = "Roadmap item 10 phase 2: a size tiered merge checkpoints across several commits, and a checkpoint needs to record exactly what one fold changed rather than re-derive it later. bm25.rs gains Bm25Index::start_recording/drain_recording and LexicalDelta so a checkpoint's added postings and positions can be replayed without re-tokenising. hnsw.rs gains the graph side of the same recording (drained adjacency lists and apply_touched). index.rs adds the seam persist.rs's new segment delta format (KIND_SEGMENT_DELTA) replays through: start_recording, drain_graph_recording, drain_lexical_recording, append_store_and_vectors, apply_graph_recording, apply_lexical_recording. persist.rs adds the segment delta chain itself: a checkpoint's bytes are a pointer to whatever it continues plus only the rows that checkpoint folded, so writing the newest link never touches an earlier one, while the store and vectors replay as cheap operations and the graph and lexical index replay as recorded content rather than re-running the fold. crates/inillucent-compat/tests/segment_delta_chain.rs is the test added for it. No existing file format changes shape: KIND_STREAM is untouched."
@@ -170,9 +176,9 @@ sha256 = "c37a0472de14fd72bb3c352626b7d898fa3f459849b2014725c3dae80dca289b"
 
 [[amendment]]
 path = "crates/inillucent-core/src/persist.rs"
-ticket = "task-1911"
-reason = "Roadmap item 10 phase 2: a size tiered merge checkpoints across several commits, and a checkpoint needs to record exactly what one fold changed rather than re-derive it later. bm25.rs gains Bm25Index::start_recording/drain_recording and LexicalDelta so a checkpoint's added postings and positions can be replayed without re-tokenising. hnsw.rs gains the graph side of the same recording (drained adjacency lists and apply_touched). index.rs adds the seam persist.rs's new segment delta format (KIND_SEGMENT_DELTA) replays through: start_recording, drain_graph_recording, drain_lexical_recording, append_store_and_vectors, apply_graph_recording, apply_lexical_recording. persist.rs adds the segment delta chain itself: a checkpoint's bytes are a pointer to whatever it continues plus only the rows that checkpoint folded, so writing the newest link never touches an earlier one, while the store and vectors replay as cheap operations and the graph and lexical index replay as recorded content rather than re-running the fold. crates/inillucent-compat/tests/segment_delta_chain.rs is the test added for it. No existing file format changes shape: KIND_STREAM is untouched."
-sha256 = "1d3cf55be11f473cbd5623951d5dbb7c25b29520a1a2724cdd799682bfe5335b"
+ticket = "task-1932"
+reason = "H4: read_section allocated up to a terabyte from a length read out of the file, and the vectors section multiplied two u32s from the file without checking for overflow. Both now read through binio::read_records, and the ceiling comes down from 1 TiB to 64 GiB."
+sha256 = "4d818a49e595244d2cef72440ebaa4266c159a056861d3b8821085f3f2879c64"
 
 [[amendment]]
 path = "crates/inillucent-core/src/quantize.rs"

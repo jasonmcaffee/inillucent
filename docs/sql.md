@@ -1,23 +1,23 @@
 # SQL support
 
-inillucent speaks SQLite's SQL dialect on its own storage. This page says which SQL runs, which
-cases out of 416 do not produce SQLite's exact bytes, and which constructs are refused.
+inillucent speaks SQLite's SQL dialect on its own storage. This page says which SQL runs and which
+cases out of 416 do not produce SQLite's exact bytes.
 
-**Twelve cases are refused outright, and every one of them is a window function.** Of the other
-thirteen that are not byte for byte, seven answer differently and six are vector search features
-SQLite has no equivalent for. None of those thirteen is silent - each answers, and each reports
-something a caller can read. [Feature comparison](feature-comparison.md) is the same material in
-full, table by table.
+**Nothing is refused.** Thirteen cases are not byte for byte: seven answer differently, and six are
+vector search features SQLite has no equivalent for. None of the thirteen is silent. Each answers,
+and each reports something a caller can read. [Feature comparison](feature-comparison.md) is the same
+material in full, table by table.
 
 ## How this was measured
 
 416 SQL scripts were run through `inillucent-shell` and through a pinned `sqlite3` 3.53.4, each over
 its own fresh database, and every byte of both output streams was compared.
 
-- **391 of 416 produce SQLite's exact bytes** - 94.0% of the total, and 95.4% of the 410 cases that
+- **403 of 416 produce SQLite's exact bytes** - 96.9% of the total, and 98.3% of the 410 cases that
   have a SQLite answer to compare against.
-- **12 are refused here that SQLite answers, and every one of the twelve is a window function.**
-  0 are accepted here that SQLite rejects.
+- **0 are refused here that SQLite answers**, and 0 are accepted here that SQLite rejects. Window
+  functions were the last twelve cases to close: all eleven window-only functions, every frame unit,
+  every bound and every `EXCLUDE` clause now match the pinned SQLite exactly.
 - **7 answer differently, and 6 are vector search features SQLite has no equivalent for**, so there
   is no SQLite output for them to match.
 
@@ -100,16 +100,7 @@ any eponymous module a caller registers.
 Every extension's shadow tables are ordinary trees in the same file, so they commit and roll back
 with the transaction that wrote them.
 
-## The twenty-five cases that are not byte for byte
-
-### Twelve are refused: every window function
-
-`OVER (...)`, `PARTITION BY`, the `ROWS`, `RANGE` and `GROUPS` frame clauses, and the eleven functions
-that need them: `row_number`, `rank`, `dense_rank`, `percent_rank`, `cume_dist`, `ntile`, `lag`,
-`lead`, `first_value`, `last_value`, `nth_value`. The engine's physical pass does not yet handle a
-window function reaching the pipeline builder, so every statement using one is refused rather than
-run. `sql.select.window` and `functions.window` are both `status = "missing"` in
-`compat/sqlite-3.53.4.toml`.
+## The thirteen cases that are not byte for byte
 
 ### Six are vector search, which SQLite does not have
 
@@ -158,7 +149,7 @@ program, including every program that never opens a second connection.
 
 **`.recover`** differs on one line of nineteen, and it is the line that names the page size.
 
-Adopting SQLite's values in the first two would take the byte for byte number from 391 to 394, at a
+Adopting SQLite's values in the first two would take the byte for byte number from 403 to 406, at a
 measured cost to the performance bars.
 
 ### One is the two pinned reference artifacts disagreeing with each other
@@ -171,12 +162,13 @@ disagrees.
 
 ## What is refused, by name
 
-A refusal is visible and an application can work around it. These say what they are, and each returns
-exit code `3` rather than `1`, so a caller can tell "not built" from "your SQL is wrong".
+**No SQL statement is refused.** What remains on this list is a shell command, five function names,
+two modules and three properties of the engine. Each says what it is, and a construct that is not
+built returns exit code `3` rather than `1`, so a caller can tell "not built" from "your SQL is
+wrong".
 
 | construct | why |
 |---|---|
-| every window function: `OVER (...)`, `PARTITION BY`, the frame clauses, and the eleven functions that need them | the engine's physical pass does not yet handle a window function reaching the pipeline builder |
 | `.expert` and `.session` | the two of `sqlite3`'s 65 dot commands this shell has not got |
 | `fts5(...)`, `fts5_locale()`, `fts5_get_locale()`, `fts5_insttoken()` | four function names that hand out C pointers or belong to FTS5's locale machinery. A stub would be a wrong answer rather than a missing one |
 | `fts3_tokenizer()` | the same, and absent from the pinned SQLite library too, so it is a difference against the shell rather than against the library an application links |

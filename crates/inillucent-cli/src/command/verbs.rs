@@ -270,14 +270,57 @@ pub fn exec(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Fai
 }
 
 /// `batch`: runs several statements as one transaction.
+///
+/// **It is a transaction as of task-1932, and until then it was not.** The
+/// command's own description says "either all of them take effect or none of
+/// them do, which is what you want when creating a schema or loading related
+/// rows", and the MCP tool `inillucent_batch` inherits that description - but
+/// nothing opened a transaction. `execute_batch` is a loop of `execute_any`
+/// with nothing around it, so each statement committed as it succeeded, and
+/// `inillucent batch "INSERT ...; INSERT ...; GARBAGE"` reported failure with
+/// two rows committed. That is the exact case the description names as the
+/// reason to use it.
+///
+/// A script run inside a transaction the caller already opened joins it and
+/// does not commit: closing somebody else's transaction because a command
+/// inside it finished would be a worse surprise than the one being fixed, and
+/// the outcome's `detail` says which of the two happened. An explicit `BEGIN`
+/// inside the script is left to the engine, which refuses it with "cannot
+/// start a transaction within a transaction".
 pub fn batch(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
     let sql = arguments.required_text("sql")?.to_string();
     context.refuse_if_it_writes(&sql)?;
+    let joined = !context.shell().connection().autocommit();
     let before = context.shell().connection().total_changes();
-    context
-        .shell()
-        .execute(&sql)
-        .map_err(|message| Failed::said(Status::Syntax, message))?;
+    if !joined {
+        context
+            .shell()
+            .execute("BEGIN")
+            .map_err(|message| Failed::said(Status::Syntax, message))?;
+    }
+    let ran = context.shell().execute(&sql);
+    if let Err(message) = ran {
+        if !joined {
+            // **The rollback's own failure is not reported over the
+            // statement's.** The script's error is what the caller asked
+            // about; a rollback that could not run is reported beside it
+            // rather than instead of it, because a caller who reads only
+            // "cannot rollback" learns nothing about what went wrong.
+            if let Err(second) = context.shell().execute("ROLLBACK") {
+                return Err(Failed::said(
+                    Status::Syntax,
+                    format!("{message} (and the rollback failed: {second})"),
+                ));
+            }
+        }
+        return Err(Failed::said(Status::Syntax, message));
+    }
+    if !joined {
+        context
+            .shell()
+            .execute("COMMIT")
+            .map_err(|message| Failed::said(Status::Syntax, message))?;
+    }
     let after = context.shell().connection().total_changes();
     let changes = after - before;
     let mut produced = Outcome::said(
@@ -288,6 +331,17 @@ pub fn batch(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Fa
         ),
     );
     produced.changes = changes;
+    produced.extra.push((
+        "transaction".to_string(),
+        Json::Text(
+            if joined {
+                "joined the open transaction; not committed"
+            } else {
+                "committed"
+            }
+            .to_string(),
+        ),
+    ));
     Ok(produced)
 }
 

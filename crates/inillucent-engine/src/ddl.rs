@@ -177,12 +177,55 @@ impl ImportedDatabase {
         // application watching it must be able to rule out. Read back by
         // `PRAGMA schema_version`; a directive that failed does not move it.
         let changes_schema = schema_change(&directive);
+        // **Statement atomicity for DDL, which only DML had (task-1932, H3).**
+        // A directive is several writes - `alter_table` rewrites every catalog
+        // row that names the table, rebuilds the connection's schema, then
+        // rebuilds the tree - and nothing put the earlier ones back when a
+        // later one failed. There was no rollback wrapper here, unlike
+        // `write`'s `abandon`, and `record`/`rewrite`/`forget` recorded no
+        // before-image at all outside an explicit transaction, so there was
+        // nothing to put back with. `next_txn` had not moved either, because
+        // `seal` was never reached, so the half-written catalog rows were
+        // committed by whatever the next successful statement committed:
+        // `ALTER TABLE t ADD COLUMN b INTEGER DEFAULT (no_such_function())`
+        // errored and left `PRAGMA table_info(t)` listing a column the tree had
+        // no slot for, on disk, across a reopen.
+        //
+        // The mark and the floor are exactly `write`'s, at exactly its cost -
+        // one integer read off a `Vec`'s length - and the reload is what puts
+        // the connection's derived schema back in step with the catalog tree
+        // the undo has just restored.
+        let autocommit = self.batch.get().is_none();
+        let mark = self.undo.borrow().len();
+        let txn = self.current_txn();
         let outcome = self.run_directive(*directive, sql);
         self.ddl_schema = previous;
-        if changes_schema && outcome.is_ok() {
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let undone = self.undo_to_floor(mark, true, txn);
+                if autocommit {
+                    self.undo.borrow_mut().clear();
+                }
+                // **The undo's own failure is the one worth reporting.** A
+                // "no such function" describing a database that is now in a
+                // state nobody intended is worse than saying so, which is the
+                // argument `abandon` already makes for DML.
+                return Err(undone.err().unwrap_or(error));
+            }
+        };
+        if autocommit {
+            // **Nothing else can abandon what a committed directive wrote.**
+            // `seal` has already gone through `commit_across` by here, so the
+            // before-images stop being useful - and leaving them would put a
+            // committed `CREATE TABLE` inside the reach of the next explicit
+            // `ROLLBACK`, which undoes to floor zero.
+            self.undo.borrow_mut().clear();
+        }
+        if changes_schema {
             self.database.bump_schema_cookie();
         }
-        outcome
+        Ok(outcome)
     }
 
     /// Runs one bound directive against the schema `execute_ddl` selected.
@@ -786,13 +829,23 @@ impl ImportedDatabase {
         entry.tree_id = self.local_of(at, root);
         let catalog_handle = self.catalog_handle_of(at);
         {
-            let (_, txn, open, wal, uncommitted) = self.catalog_write()?;
+            let (_, txn, _open, wal, uncommitted) = self.catalog_write()?;
             let mut log = WalLog {
                 wal,
                 txn,
                 schema: at,
                 wrote: false,
-                undo: open.then_some(&self.undo),
+                // **A before-image whether or not a transaction is open
+                // (task-1932, H3).** This was `open.then_some(&self.undo)`, so
+                // outside an explicit transaction a catalog write recorded
+                // nothing to put back - and `execute_ddl`, which now takes an
+                // undo floor the way `write` does, would have had an empty
+                // buffer to undo from. A directive is several catalog writes
+                // and a failure in a later one has to unwrite the earlier ones.
+                // `build_tree_rows` is deliberately still gated: a bulk build's
+                // before-images are one record per row of the table, and a
+                // freshly built tree has no earlier state to restore to.
+                undo: Some(&self.undo),
                 uncommitted,
             };
             let tree = self
@@ -1011,13 +1064,15 @@ impl ImportedDatabase {
     /// @param entry - what it should now say
     fn rewrite(&mut self, rowid: i64, entry: SchemaEntry) -> DbResult<()> {
         {
-            let (at, txn, open, wal, uncommitted) = self.catalog_write()?;
+            let (at, txn, _open, wal, uncommitted) = self.catalog_write()?;
             let mut log = WalLog {
                 wal,
                 txn,
                 schema: at,
                 wrote: false,
-                undo: open.then_some(&self.undo),
+                // See `record` above: the before-image is kept whether or not
+                // an explicit transaction is open (task-1932, H3).
+                undo: Some(&self.undo),
                 uncommitted,
             };
             let catalog_handle = self.catalog_handle_of(at);
@@ -1050,13 +1105,15 @@ impl ImportedDatabase {
     /// @param rowid - the row's key
     fn forget(&mut self, rowid: i64) -> DbResult<()> {
         {
-            let (at, txn, open, wal, uncommitted) = self.catalog_write()?;
+            let (at, txn, _open, wal, uncommitted) = self.catalog_write()?;
             let mut log = WalLog {
                 wal,
                 txn,
                 schema: at,
                 wrote: false,
-                undo: open.then_some(&self.undo),
+                // See `record` above: the before-image is kept whether or not
+                // an explicit transaction is open (task-1932, H3).
+                undo: Some(&self.undo),
                 uncommitted,
             };
             let catalog_handle = self.catalog_handle_of(at);
@@ -2447,6 +2504,29 @@ impl ImportedDatabase {
                 if let Some(cell) = from.get_mut(*slot) {
                     *cell = Fill::From(*source);
                 }
+                continue;
+            }
+            // **Nothing to fill, so nothing to evaluate (task-1932, H3).**
+            // This ran whether or not the table had a row, and
+            // `constant_default` evaluates the default by running
+            // `SELECT <the default text>` through the ordinary execute path -
+            // so `ALTER TABLE t ADD COLUMN b INTEGER DEFAULT
+            // (no_such_function())` on an empty table failed here, three
+            // writes after the catalog already said the column was there, and
+            // `PRAGMA table_info(t)` then listed a column the tree had no slot
+            // for.
+            //
+            // An empty table is the only way to reach it:
+            // `AddedColumnRisk::refusal` refuses a default that is not a
+            // literal, and `alter_table` applies that refusal only when
+            // `table_has_a_row`. So on a populated table the statement never
+            // gets here, and on an empty one there is no row to give a value
+            // to. SQLite behaves the same way - it accepts the `ALTER`,
+            // records `DEFAULT (no_such_function())` in the schema text, and
+            // reports `unknown function` at the first `INSERT` that needs the
+            // value - so skipping the evaluation is what matches the reference
+            // rather than merely what avoids the failure.
+            if old_rows.is_empty() {
                 continue;
             }
             let Some(default) = info

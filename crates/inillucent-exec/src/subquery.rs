@@ -272,6 +272,11 @@ fn expressions(select: &BoundSelect) -> Vec<&BoundExpr> {
     out.extend(select.values.iter().flatten());
     for aggregate in &select.aggregates {
         out.extend(aggregate.arguments.iter());
+        // The `FILTER` and the inner `ORDER BY` hold expressions too, and an
+        // uncorrelated subquery in one of them has to be folded like any other
+        // (task-1932, M6).
+        out.extend(aggregate.filter.iter());
+        out.extend(aggregate.order_by.iter().map(|term| &term.expr));
     }
     for window in &select.windows {
         out.extend(window.arguments.iter());

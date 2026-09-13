@@ -378,7 +378,7 @@ fn connect_with(
             ShadowTables::of(arguments, &[b"data", b"idx", suffix, b"docsize", b"config"])?;
         Ok(Box::new(Fts5Table {
             dialect,
-            tokenizer: Tokenizer::named(&options.tokenizer),
+            tokenizer: Tokenizer::named(&options.tokenizer)?,
             content: suffix.to_vec(),
             external: options.content.clone(),
             options,

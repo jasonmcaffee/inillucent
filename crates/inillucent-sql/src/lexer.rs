@@ -67,7 +67,7 @@ impl Span {
 /// SQLite treats the four forms differently once semantics begin: a
 /// double-quoted word falls back to a string literal when it resolves to no
 /// name and the connection permits it, and the other three never do.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum QuoteForm {
     /// `plain`, with no quoting at all.
     Bare,

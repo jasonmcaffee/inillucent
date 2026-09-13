@@ -9,6 +9,8 @@
 //! `%_config` are compared, because an application reads those.
 
 use inillucent_compat::differential::{compare, Step};
+use inillucent_compat::facade::Database;
+use inillucent_compat::oracle::{Driver, Op};
 
 /// Where this suite's scratch databases live.
 const AREA: &str = "fts5";
@@ -302,4 +304,107 @@ fn the_settings_are_written_to_the_config_table() {
             Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'quick'"),
         ],
     );
+}
+
+/// M5 (task-1920): a tokenizer this build has not got is refused by name.
+///
+/// **A substituted tokenizer is a wrong answer.** `Tokenizer::named` read any
+/// name it did not recognise as `unicode61`, on the reasoning that a schema
+/// naming a tokenizer this build has not got should still open. But the
+/// tokenizer decides what `MATCH` means: `tokenize='trigram'` makes it a
+/// substring search in SQLite, and `unicode61` makes it a whole-word search.
+/// So `CREATE VIRTUAL TABLE t USING fts5(body, tokenize='trigram')` succeeded,
+/// `SELECT ... WHERE t MATCH 'ell'` ran, and it answered a different question
+/// from the one it was asked with no error anywhere.
+///
+/// **This case is deliberately not a `compare` step.** SQLite answers these
+/// statements and this engine refuses them, which `compare` would report as a
+/// failure - correctly, because it is a difference. It is a *recorded*
+/// difference: exit code 3, `unsupported`, and the `FTS5 tokenizer options`
+/// row of `docs/feature-comparison.md` says which names are implemented.
+/// Building `trigram` is a separate piece of work; what this asserts is that
+/// asking for it says so.
+///
+/// Both sides are exercised: the reference's own answer is taken first, so
+/// what is recorded as the difference is measured rather than assumed.
+#[test]
+fn a_tokenizer_this_build_has_not_got_is_refused_rather_than_substituted() {
+    let Some(program) = inillucent_compat::differential::sqlite_oracle() else {
+        eprintln!("the pinned SQLite oracle is not built; skipping");
+        return;
+    };
+    // What SQLite does with the same statements.
+    let reference = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fts5-trigram.db");
+    let _ = std::fs::remove_file(&reference);
+    let mut driver = Driver::start("sqlite", &program).expect("the oracle starts");
+    driver.send(&Op::Hello).expect("the oracle greets");
+    driver
+        .send(&Op::Open(reference.display().to_string()))
+        .expect("the oracle opens");
+    for statement in [
+        "CREATE VIRTUAL TABLE t USING fts5(body, tokenize='trigram')",
+        "INSERT INTO t VALUES ('hello world')",
+    ] {
+        let observation = driver
+            .send(&Op::Exec(statement.to_string()))
+            .expect("the oracle answers");
+        assert!(
+            observation.ok,
+            "SQLite refused {statement}: {}",
+            observation.message
+        );
+    }
+    let substring = driver
+        .send(&Op::Query(
+            "SELECT rowid FROM t WHERE t MATCH 'ell'".to_string(),
+        ))
+        .expect("the oracle answers");
+    assert!(substring.ok);
+    assert_eq!(
+        substring.rows.len(),
+        1,
+        "trigram makes MATCH a substring search in SQLite, which is the whole \
+         difference substituting unicode61 hid"
+    );
+
+    // What this engine does: refuse, by name, at `CREATE VIRTUAL TABLE`.
+    let path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fts5-trigram.rdb");
+    for suffix in ["", "-wal", "-journal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+    let database = Database::open(&path).expect("the database opens");
+    let connection = database.connect().expect("the connection opens");
+    for name in ["trigram", "icu", "porter2"] {
+        let refused = connection
+            .execute(&format!(
+                "CREATE VIRTUAL TABLE t_{name} USING fts5(body, tokenize='{name}')"
+            ))
+            .expect_err("a tokenizer this build has not got must be refused");
+        assert_eq!(
+            refused.unsupported(),
+            Some(format!("the fts5 tokenizer {name}").as_str()),
+            "the refusal must name the tokenizer: {refused:?}"
+        );
+        assert!(
+            connection
+                .query(&format!("SELECT rowid FROM t_{name}"))
+                .is_err(),
+            "the refused CREATE must leave no table behind"
+        );
+    }
+    // The names this build does have still work, so the refusal is about the
+    // name rather than about the clause.
+    for (suffix, specification) in [
+        ("default", ""),
+        ("unicode", ", tokenize='unicode61'"),
+        ("ascii", ", tokenize='ascii'"),
+        ("porter", ", tokenize='porter'"),
+        ("porter_ascii", ", tokenize=\"porter ascii\""),
+    ] {
+        connection
+            .execute(&format!(
+                "CREATE VIRTUAL TABLE ok_{suffix} USING fts5(body{specification})"
+            ))
+            .unwrap_or_else(|error| panic!("{suffix}: {error:?}"));
+    }
 }

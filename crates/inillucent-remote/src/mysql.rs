@@ -63,6 +63,22 @@ const COM_QUERY: u8 = 0x03;
 /// `COM_QUIT`.
 const COM_QUIT: u8 = 0x01;
 
+/// The most columns a result set may claim.
+///
+/// **MySQL's own hard limit, used here as a bound on a number the server
+/// chooses (task-1932, H5).** `stream_query` read a length-encoded column count
+/// out of the first packet of a result set and ran `Vec::with_capacity` on it,
+/// and `lenenc_read` decodes up to `u64::MAX` - so a twelve-byte packet claiming
+/// `u64::MAX` columns asked for an allocation that panics with capacity overflow
+/// or exhausts memory, before the first row. The 256 MiB message cap in
+/// `stream.rs` bounds the packet, not a number inside it.
+///
+/// A migration talks to a server somebody else runs, possibly through a proxy,
+/// so the count is untrusted in exactly the way a database page is. Refusing
+/// above MySQL's own limit costs a real server nothing and turns a hostile one
+/// into a named `protocol` error.
+const MAX_COLUMNS: u64 = 4096;
+
 /// One column of a result set, as `ColumnDefinition41` describes it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Field {
@@ -402,10 +418,7 @@ impl MysqlSource {
             }
             _ => {}
         }
-        let mut at = 0usize;
-        let columns = lenenc_read(&first, &mut at)
-            .ok_or_else(|| protocol("the result set did not begin with a column count"))?
-            as usize;
+        let columns = column_count(&first)?;
 
         let mut fields = Vec::with_capacity(columns);
         for _ in 0..columns {
@@ -797,6 +810,15 @@ fn decode_column(body: &[u8]) -> DbResult<Field> {
 /// @param body - the packet's payload
 /// @param columns - how many values it must hold
 fn decode_row(body: &[u8], columns: usize) -> DbResult<Vec<Option<Vec<u8>>>> {
+    // **Checked here as well as at the call site.** `stream_query` bounds the
+    // count it decodes, and this is a separate entry point that a later caller
+    // could reach with a number from somewhere else; a bound that only one of
+    // two doors carries is a bound somebody walks past (task-1932, H5).
+    if columns as u64 > MAX_COLUMNS {
+        return Err(protocol(format!(
+            "a row claims {columns} values, past the {MAX_COLUMNS} columns a MySQL server can have"
+        )));
+    }
     let mut at = 0usize;
     let mut row = Vec::with_capacity(columns);
     for _ in 0..columns {
@@ -879,6 +901,25 @@ fn lenenc_read(body: &[u8], at: &mut usize) -> Option<u64> {
     Some(value)
 }
 
+/// Returns how many columns a result set's first packet claims.
+///
+/// Separate from `stream_query` so the bound can be asserted without a live
+/// server: the packet an attacker sends is twelve bytes, and a test that needed
+/// a socket to show that would not be written.
+///
+/// @param first - the first packet of a result set
+fn column_count(first: &[u8]) -> DbResult<usize> {
+    let mut at = 0usize;
+    let claimed = lenenc_read(first, &mut at)
+        .ok_or_else(|| protocol("the result set did not begin with a column count"))?;
+    if claimed > MAX_COLUMNS {
+        return Err(protocol(format!(
+            "the result set claims {claimed} columns, past the {MAX_COLUMNS} a MySQL server can have"
+        )));
+    }
+    Ok(claimed as usize)
+}
+
 /// Reads a length-encoded string, advancing past it.
 ///
 /// @param body - the packet
@@ -944,6 +985,56 @@ pub fn is_binary(field: &Field) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// H5 (task-1920): a column count the server chose is bounded before it
+    /// sizes anything.
+    ///
+    /// **What it used to do.** `stream_query` decoded the length-encoded column
+    /// count out of a result set's first packet and ran
+    /// `Vec::with_capacity(columns)` on it. `lenenc_read` decodes up to
+    /// `u64::MAX`, and the 256 MiB message cap in `stream.rs` bounds the packet
+    /// rather than a number inside it - so a twelve-byte packet claiming
+    /// `u64::MAX` columns panicked with capacity overflow or asked for an
+    /// allocation that exhausted memory, before the first row of a migration.
+    ///
+    /// A migration talks to a server somebody else runs, possibly through a
+    /// proxy, so this is a number an attacker chooses. The packets below are
+    /// each exactly what such a server would send: one byte for a small count,
+    /// `0xfc` and two, `0xfd` and three, `0xfe` and eight.
+    #[test]
+    fn a_column_count_above_the_servers_own_limit_is_refused() {
+        // `0xfd` introduces a three-byte little-endian count.
+        let mut ten_million = vec![0xfdu8];
+        ten_million.extend_from_slice(&10_000_000u32.to_le_bytes()[..3]);
+        let refused = column_count(&ten_million).expect_err("ten million columns is refused");
+        assert!(
+            refused.detail().unwrap_or_default().contains("10000000"),
+            "the refusal must name the count it refused: {refused:?}"
+        );
+
+        // `0xfe` introduces an eight-byte one, which is where `u64::MAX` lives.
+        let mut enormous = vec![0xfeu8];
+        enormous.extend_from_slice(&u64::MAX.to_le_bytes());
+        assert!(column_count(&enormous).is_err());
+
+        // `0xfc` introduces two bytes, so 65,535 is the most a two-byte count
+        // can claim - still past MySQL's own 4,096.
+        let mut sixty_five_thousand = vec![0xfcu8];
+        sixty_five_thousand.extend_from_slice(&u16::MAX.to_le_bytes());
+        assert!(column_count(&sixty_five_thousand).is_err());
+
+        // An ordinary result set is unaffected, which is the half a bound that
+        // simply refused everything would break.
+        assert_eq!(column_count(&[3u8]).expect("three columns"), 3);
+        let mut four_thousand = vec![0xfcu8];
+        four_thousand.extend_from_slice(&4_000u16.to_le_bytes());
+        assert_eq!(column_count(&four_thousand).expect("four thousand"), 4_000);
+
+        // And the row decoder carries the same bound, because it is a second
+        // door into the same allocation.
+        assert!(decode_row(&[], 10_000_000).is_err());
+        assert!(decode_row(&[], 0).is_ok());
+    }
 
     /// The `mysql_native_password` response, against the worked example every
     /// implementation of this protocol is checked with: the algorithm is
