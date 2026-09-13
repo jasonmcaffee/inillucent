@@ -1,7 +1,7 @@
 # inillucent documentation
 
 The documentation in this repository. There is also a documentation book at
-[inillucent.com/docs](https://inillucent.com/docs), written as a tutorial in 23 chapters — start
+[inillucent.com/docs](https://inillucent.com/docs), written as a tutorial in 24 chapters — start
 there if you are learning the engine rather than looking something up.
 
 Every page here is written to be read on its own. Nothing is left implicit because an earlier page
@@ -37,8 +37,10 @@ said it.
 
 `inillucent-scorecard.md` in the repository root is the score card a grading run writes, with every
 interval, every p-value and every diagnostic. It stays at the root because
-`inillucent-bench grade` writes it there and a checked in digest records its contents.
-[Retrieval quality](retrieval-quality.md) is the page that reads it for you.
+`inillucent-bench grade` writes it there and a checked in digest records its contents. It holds the
+run of **2026-09-01**. [Retrieval quality](retrieval-quality.md) publishes the later run of
+**2026-09-08**, and [names the seven rows that differ](retrieval-quality.md#which-run-a-number-comes-from);
+every verdict is the same in both.
 
 ## Working on it
 

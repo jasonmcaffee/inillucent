@@ -26,7 +26,7 @@ and an embedding model served over a socket. inillucent replaces all three with 
 **Somebody who already uses SQLite and wants it faster.** The SQL is the same: 391 of 416 probed
 cases produce SQLite's exact bytes, 12 are refused (every one a window function), 7 answer
 differently, and 6 are vector search features SQLite has no equivalent for. What changes is the
-storage underneath, and the measurement is 326% faster at 100,000 rows.
+storage underneath, and the measurement is 330% faster at 100,000 rows.
 
 ## Where it stands
 
@@ -34,16 +34,16 @@ Everything here is measured, and each row links to the page carrying the run.
 
 | | | |
 |---|---|---|
-| **326% faster than SQLite 3.53.4** | 4.26x weighted over ten workload families at 100,000 rows, four consecutive 30-round runs, every answer hashed and compared before its timing counts | [Performance](performance.md) |
-| **67% less processor time** | 422 ms against 1,266 for the same plan, one child process each | [Performance](performance.md) |
-| **15% more memory** | 42.6 MiB against 37.2, on the same 128 MiB budget. The one measurement SQLite wins | [Performance](performance.md#memory) |
+| **330% faster than SQLite 3.53.4** | 4.30x weighted over ten workload families at 100,000 rows, four consecutive 30-round runs, every answer hashed and compared before its timing counts | [Performance](performance.md) |
+| **70% less processor time** | 390 ms against 1,320 for the same plan, one child process each | [Performance](performance.md) |
+| **14% more memory** | 42.40 MiB against 37.20, on the same 128 MiB budget. The one measurement SQLite wins | [Performance](performance.md#memory) |
 | **A file within 4% of SQLite's** | 1.036x on the same imported data | [Performance](performance.md#disk) |
 | **391 of 416 SQL cases byte for byte, 12 refused** | every case run through both shells over a fresh database and compared byte by byte; all twelve refusals are window functions | [SQL support](sql.md) |
 | **Better than pgvector on 15 of 17 graded comparisons, worse on none** | both engines reading byte identical vectors | [Retrieval quality](retrieval-quality.md) |
 | **175% faster unfiltered and 6,262% faster filtered** than pgvector | median in the calling process, against the correctly configured baseline | [Retrieval quality](retrieval-quality.md#latency) |
 
 Six of the thirty timed workloads are slower than SQLite, and **no family is under the floor the
-performance contract sets** — `transaction` was, on four consecutive runs, and is now 241% faster.
+performance contract sets** — `transaction` was, on four consecutive runs, and is now 152% faster.
 [The workloads that are slower](performance.md#the-workloads-that-are-slower) names each one and what
 it costs.
 
@@ -89,10 +89,15 @@ index fits in memory everything PostgreSQL does to survive a power cut is overhe
 - **This engine's own file format.** SQLite files are imported once with
   [`inillucent migrate`](migrating.md), not opened in place.
 - **No replication, no backups beyond a verified file copy, no wire protocol.** It is a library.
-- **Adding content to a retrieval index rebuilds the graph**, on one thread: about nine and a half
-  minutes over 598,560 passages.
-- **Four workloads slower than SQLite**, listed on the performance page.
-- **No macOS archive yet.** Build it with `cargo install inillucent-cli`.
+- **Publishing a retrieval generation costs the whole corpus.** Adding content no longer rebuilds
+  the graph — a commit folds each new row into the published generation, one graph insert per row
+  written. What is still proportional to the corpus is writing the generation out, because a
+  generation is one serialised index. [Roadmap item 10](roadmap.md#10-a-generation-is-one-blob-so-publishing-one-still-costs-the-whole-corpus)
+  has the measurements and the setting that pins write latency.
+- **Six of the thirty workloads are slower than SQLite**, listed on
+  [the performance page](performance.md#the-workloads-that-are-slower).
+- **No macOS archive yet.** Build it from a checkout with `cargo build --release -p inillucent-cli`;
+  `cargo install` needs a crates.io release, and there is not one yet.
 
 ## In production
 

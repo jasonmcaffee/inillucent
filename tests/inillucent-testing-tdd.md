@@ -5,7 +5,7 @@ only the part a change can break, and what all of it costs.**
 
 Written on 2026-09-08, with the target/test counts and §6's timings refreshed on
 2026-09-13 after task-1911. Every number below was measured on the machine
-described in [Timings](#timings), by the tools this document describes, and the
+described in [Timings](#6-timings), by the tools this document describes, and the
 commands that produce them are given so they can be taken again.
 
 ---

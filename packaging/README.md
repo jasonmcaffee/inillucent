@@ -98,27 +98,30 @@ pwsh packaging/linux/package-linux.ps1      # the .deb and the .rpm, signed
 
 ```sh
 # --- on the MacBook -----------------------------------------------------
-./packaging/macos/release-macos.sh --version 0.1.0 --upload
+./packaging/macos/release-macos.sh --version 0.1.2 --upload
 ```
+
+`0.1.2` throughout this section is the version being cut. The published release is **0.1.1**, and
+**0.1.0 was withdrawn** — `PUBLISHING.md` says why — so neither number is a version to pass here.
 
 ```powershell
 # --- back on the Windows box --------------------------------------------
-pwsh packaging/fetch-macos-artifacts.ps1 -Version 0.1.0   # collect and verify what the Mac made
+pwsh packaging/fetch-macos-artifacts.ps1 -Version 0.1.2   # collect and verify what the Mac made
 pwsh packaging/sign-sums.ps1                              # minisign over SHA256SUMS
-bash tools/release-verify-linux.sh --version 0.1.0        # from WSL
-pwsh packaging/publish-site.ps1 -Version 0.1.0 -Stage     # on the site, not yet linked
+bash tools/release-verify-linux.sh --version 0.1.2        # from WSL
+pwsh packaging/publish-site.ps1 -Version 0.1.2 -Stage     # on the site, not yet linked
 ```
 
 Then, on any Mac, against the bytes the site is now serving:
 
 ```sh
-curl -fsSL https://inillucent.com/downloads/verify-macos.sh | sh -s -- --version 0.1.0
+curl -fsSL https://inillucent.com/downloads/verify-macos.sh | sh -s -- --version 0.1.2
 ```
 
 and only once that passes:
 
 ```powershell
-pwsh packaging/publish-site.ps1 -Version 0.1.0 -Link
+pwsh packaging/publish-site.ps1 -Version 0.1.2 -Link
 ```
 
 The order is the point. A download link that points at an artifact nobody has

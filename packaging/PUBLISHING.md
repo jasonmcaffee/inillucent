@@ -39,12 +39,12 @@ nothing to say so. The 0.1.0 archives are removed from the site and answer 404.
 |---|---|---|
 | **inillucent.com, Windows** | **live** - `irm .../install.ps1 \| iex` installs and runs | nothing |
 | **inillucent.com, Linux** | **live** - `curl -fsSL .../install.sh \| sh` installs and runs | nothing |
-| **inillucent.com, macOS** | work remains - no archive | a Mac: `packaging/release.sh --target aarch64-apple-darwin`, then `lipo` |
+| **inillucent.com, macOS** | work remains - no archive | a Mac: `packaging/macos/release-macos.sh --version <v> --upload`, which builds both architectures, `lipo`s them, signs, notarises and uploads |
 | **GitHub release** | **done** - `v0.1.1` with both archives, `SHA256SUMS` and `provenance.json` | nothing |
 | **Go** | **published** - tag `packages/go/v0.1.2` | nothing, except that a private repository limits who can install it |
 | **npm** | **token is the only step** - three tarballs packed, installed and run | **the signup page answers 403 to every client** - see below |
 | **PyPI** | **token is the only step** - wheel installed into a clean venv and run | an account; the form carries an hCaptcha and uploads need 2FA |
-| **crates.io** | **token is the only step** - `--workspace --dry-run` clean for all 30 crates | a token, **and the decision to make the source public** |
+| **crates.io** | **token is the only step** - `--workspace --dry-run` clean for all 29 crates | a token, **and the decision to make the source public** |
 | **Packagist** | **token is the only step** - `composer install` works end to end | a Packagist account (GitHub OAuth), and a public repository |
 | **Homebrew** | **work remains after the token** - and there is no token | the macOS archive, which does not exist; then the tap repository |
 
@@ -172,16 +172,16 @@ pwsh packaging/linux/package-linux.ps1
 
 ```sh
 # the MacBook: build, sign, notarise, verify, hand over
-./packaging/macos/release-macos.sh --version 0.1.0 --upload
+./packaging/macos/release-macos.sh --version 0.1.2 --upload
 ```
 
 ```powershell
 # the Windows box again: collect, sign the checksums, publish
-pwsh packaging/fetch-macos-artifacts.ps1 -Version 0.1.0
+pwsh packaging/fetch-macos-artifacts.ps1 -Version 0.1.2
 pwsh packaging/sign-sums.ps1
-pwsh packaging/publish-site.ps1 -Version 0.1.0 -Stage
+pwsh packaging/publish-site.ps1 -Version 0.1.2 -Stage
 #   ... verify on the Mac, then:
-pwsh packaging/publish-site.ps1 -Version 0.1.0 -Link
+pwsh packaging/publish-site.ps1 -Version 0.1.2 -Link
 ```
 
 **The distribution point is inillucent.com.** A GitHub release cannot be one
@@ -419,16 +419,18 @@ database, writes to it, reads it back and asks the MCP server for its tool list.
 ## Go - published
 
 ```sh
-git tag packages/go/v0.1.1 && git push brl packages/go/v0.1.1
+git tag packages/go/v0.1.2 && git push brl packages/go/v0.1.2
 ```
 
-That is the whole publish. Go has no registry and no account: `go install` reads
+That is the whole publish. Three tags are pushed: `packages/go/v0.1.0`,
+`packages/go/v0.1.1` and `packages/go/v0.1.2`, and `@latest` resolves to the last
+of them. Go has no registry and no account: `go install` reads
 the repository directly, and a tag is the release. The tag carries the
 `packages/go/` prefix because the module is in a subdirectory, which is Go's own
 rule for a nested module.
 
 ```sh
-go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent-install@v0.1.1
+go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent-install@v0.1.2
 inillucent-install
 ```
 

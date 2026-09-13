@@ -108,8 +108,10 @@ sees.
 
 [**`examples/rag-agent/`**](examples/rag-agent/README.md) is a database of Greek philosophy that is
 already built and already embedded — 80 Wikipedia articles, 2,661 passages, a 768 dimension vector on
-every one of them, an HNSW graph and a BM25 index, committed. Install the embedding model, point a
-coding agent at that directory, and ask it a question:
+every one of them, and a BM25 index, committed. There is no vector index on that table on purpose:
+2,661 passages is an exhaustive cosine over 8 MB of vectors, and that example's readme says when to
+build one. Install the embedding model, point a coding agent at that directory, and ask it a
+question:
 
 ```sh
 inillucent setup-embeddings all          # ONNX Runtime and the weights, about 620 MB, once
@@ -122,6 +124,15 @@ inillucent --db examples/rag-agent/greek-philosophy.rdb query \
 
 No corpus to download, nothing to index, no embedding server. It is the shortest answer to "show me
 this doing retrieval".
+
+**`embed(TEXT)` needs a binary built with the embedding feature, and the published 0.1.1 archives are
+not.** Run the query above against one and it answers `no such function: embed`, with the 620 MB
+already downloaded. `packaging/release-all.ps1` passes `--features inillucent-cli/embed`, so the next
+release carries it; until that release is cut, build the command line from a checkout:
+
+```sh
+cargo build --release -p inillucent-cli --features inillucent-cli/embed
+```
 
 ## Client libraries
 
@@ -178,7 +189,7 @@ engine. [The driver](drivers/README.md) is the C ABI underneath, for anybody wri
 
 **SQLite's SQL, on its own storage.** Joins, common table expressions including recursive ones,
 triggers, foreign keys with all five referential actions, `ATTACH`, partial and expression indexes,
-`RETURNING`, `ON CONFLICT DO UPDATE`, 212 built in function names, 67 pragmas. 416 cases were run
+`RETURNING`, `ON CONFLICT DO UPDATE`, 190 built in function names, 67 pragmas. 416 cases were run
 through this engine and through a pinned `sqlite3` 3.53.4 over a fresh database each, and every byte
 of both streams compared: **391 produce SQLite's exact bytes, 12 are refused and 7 answer
 differently**. Every one of the twelve refusals is a window function — `OVER (...)`, `PARTITION BY`,
@@ -209,7 +220,8 @@ about one question in a hundred. → [Retrieval quality](docs/retrieval-quality.
 
 **The embedding model inside your process.** One command installs it on Windows, macOS or Linux —
 `inillucent setup-embeddings all` fetches ONNX Runtime and `nomic-embed-text-v1.5`, checks every byte
-against a pinned digest, and leaves `embed(TEXT)` answering with nothing exported by hand. Full
+against a pinned digest, and leaves `embed(TEXT)` answering with nothing exported by hand, in a
+binary built with the embedding feature. Full
 precision, on the processor or across several GPUs. No embedding server, no socket, no second thing
 to keep alive — and three profiles for when the weights are in memory, because loading them costs
 800 ms and an embedding costs 12 ms. → [Embeddings](docs/embeddings.md)
@@ -252,7 +264,7 @@ To serve a database to an agent over MCP:
 }
 ```
 
-The 27 MCP tools are generated from the same command table the command line reads, so the two cannot
+The 28 MCP tools are generated from the same command table the command line reads, so the two cannot
 drift apart. `--readonly` refuses every statement that changes something, decided by the binder
 rather than by reading the text. `--root DIR` refuses every path that *resolves* outside one
 directory — junctions and symbolic links followed, and enforced in the VFS, so `ATTACH DATABASE`,
@@ -309,19 +321,22 @@ each cost and how each was fixed:
   stood at 3.78x, `normal` took it to 3.03x. Threads inside one process are not supported.
 - **The file format is this engine's own.** SQLite files are imported, not opened. A SQLite
   application moves its data across once with `inillucent migrate`.
-- **Six of the thirty workloads are slower than SQLite**: building an FTS5 index (178% slower),
-  compiling `SELECT 1` on every call (98% slower), a 2,000 row insert batch (72% slower), a join over
-  an index range (15% slower), the same shape as a plain range scan (14% slower) and `json_extract`
-  (5% slower). [Performance](docs/performance.md#the-workloads-that-are-slower) says what each one
+- **Six of the thirty workloads are slower than SQLite**: building an FTS5 index (69% slower),
+  compiling `SELECT 1` on every call (100% slower), a 2,000 row insert batch (43% slower), a join over
+  an index range (11% slower), the same shape as a plain range scan (8% slower) and `json_extract`
+  (4% slower). [Performance](docs/performance.md#the-workloads-that-are-slower) says what each one
   costs and what is being done about it. 2,000 updates in one transaction used to lead this list at
   669% slower; it is now 270% *faster*.
 - **On Linux the same binary measured 53% faster** where Windows measured 279% at the time. That
   difference was traced to what SQLite pays the operating system on each platform rather than to
   anything this engine does differently there, and the finding is in
   [Performance](docs/performance.md#linux). The Linux arm has not been re-measured since the Windows
-  headline reached 326%.
-- **Adding content to a retrieval index rebuilds the graph**, on one thread: 132.6 s over 185,078
-  passages, and about nine and a half minutes over 598,560.
+  headline reached 330%.
+- **Publishing a retrieval generation costs the whole corpus.** Adding content folds each new row
+  into the published generation rather than rebuilding the graph, but a generation is one serialised
+  index, so writing a new one reads and writes all of it however few rows changed. A build from
+  scratch, which is what `INSERT INTO t(t) VALUES('compact')` asks for, is 132.6 s over 185,078
+  passages on one thread.
 - **There is no macOS archive yet**, because each platform's archive is built on that platform.
 
 ## Building it

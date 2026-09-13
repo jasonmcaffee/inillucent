@@ -73,7 +73,7 @@ flowchart LR
 
 Both arrangements use the same embedding model, so nothing about the meaning of the embeddings differs. What differs is where the work happens, and how a filter is applied. Section 7 covers the filter, which is the difference that changes results rather than only latency.
 
-## 4. The shape of the whole thing
+## 4. How the parts fit together
 
 A search runs through five stages.
 
@@ -340,7 +340,7 @@ all on filtered recall.
 
 **[Retrieval quality](retrieval-quality.md) carries the corrected run**, against the settings in that
 table, and it is the page to read for any comparison against pgvector. This page keeps the earlier
-figures because they are what the explanations above were written against, and the shape of every
+figures because they are what the explanations above were written against, and the form of every
 finding is unchanged. inillucent's own measurements — latency, memory, disk, the quantisation ladder,
 the `ef_search` sweep and the correctness gates — do not depend on the baseline at all.
 

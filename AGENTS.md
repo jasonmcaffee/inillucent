@@ -107,7 +107,7 @@ cargo build -p inillucent-compat --bin inillucent-testrun --features testrun
 target/debug/inillucent-testrun --tier smoke      # ~1 s, mid-edit
 target/debug/inillucent-testrun --changed         # what your edits can break
 target/debug/inillucent-testrun --changed --list  # ...without running it
-target/debug/inillucent-testrun                   # everything, ~155 s
+target/debug/inillucent-testrun                   # everything, ~300 s
 target/debug/inillucent-testrun --strict          # fail on a missing prerequisite
 ```
 

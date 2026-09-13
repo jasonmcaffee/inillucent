@@ -12,7 +12,7 @@ intended.
 
 ---
 
-## 1. The shape of it
+## 1. How the parts fit together
 
 ```mermaid
 flowchart TB
@@ -35,7 +35,7 @@ depend on which, and `cargo test -p inillucent-compat --test policy` walks the w
 and fails on an edge that is not declared. That is what makes the picture above a fact rather than a
 drawing.
 
-Two arrows are worth reading twice, because the obvious arrangement is the wrong one:
+Two arrows go the other way from the obvious arrangement:
 
 - **The log does not depend on the pool.** A record would then be able to carry a `PageId`, and an
   edge from the log to the crate that owns pages says the opposite of what the write-ahead rule
