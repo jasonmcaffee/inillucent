@@ -38,7 +38,9 @@ struct Ran {
 ///
 /// @param name - the case, which names the directory
 fn area(name: &str) -> PathBuf {
-    let path = workspace_root().join("_agent_output/cli-arguments").join(name);
+    let path = workspace_root()
+        .join("_agent_output/cli-arguments")
+        .join(name);
     let _ = std::fs::remove_dir_all(&path);
     let _ = std::fs::create_dir_all(&path);
     path
@@ -204,7 +206,11 @@ fn the_separator_still_opens_a_dashed_file_name() {
     let Some(program) = binary("inillucent-shell") else {
         return;
     };
-    let ran = run(&program, "dashed-file-name", &["--", "-ledger.rdb", "SELECT 1"]);
+    let ran = run(
+        &program,
+        "dashed-file-name",
+        &["--", "-ledger.rdb", "SELECT 1"],
+    );
     assert_eq!(ran.code, Some(0), "printed: {}", ran.printed);
     assert!(
         ran.left_behind.iter().any(|name| name == "-ledger.rdb"),
@@ -219,7 +225,11 @@ fn a_refused_option_still_says_why() {
     let Some(program) = binary("inillucent-shell") else {
         return;
     };
-    let ran = run(&program, "refused-option", &["-mmap", "268435456", "app.rdb"]);
+    let ran = run(
+        &program,
+        "refused-option",
+        &["-mmap", "268435456", "app.rdb"],
+    );
     assert_eq!(ran.code, Some(1), "printed: {}", ran.printed);
     assert!(
         ran.printed.contains("-mmap is not supported"),
