@@ -4,7 +4,7 @@ Install inillucent, make a database, run SQL against it, and understand what the
 when something goes wrong.
 
 If you would rather learn by working through examples, the tutorial at
-[inillucent.com/docs](https://inillucent.com/docs) covers the same ground in 23 chapters with the
+[inillucent.com/docs](https://inillucent.com/docs) covers the same ground in 24 chapters with the
 expected output printed beside every command.
 
 ## Install
@@ -43,8 +43,9 @@ The other five package managers are not published yet. This is what each will be
 Each of them installs the same four programs, and each downloader checks the release's published
 SHA-256 before unpacking the archive.
 
-There is no macOS archive yet, because every platform's archive is built on that platform. On macOS,
-use `cargo install inillucent-cli`.
+There is no macOS archive yet, because every platform's archive is built on that platform, and
+`cargo install` needs a crates.io release there is not one of. On macOS, build from a checkout:
+`cargo build --release -p inillucent-cli`.
 
 `packaging/README.md` is how a release is cut. `packaging/windows/README.md` and
 `packaging/macos/README.md` record what a signed installer would take on each platform and what it
@@ -54,9 +55,9 @@ would cost.
 
 | program | what it is |
 |---|---|
-| `inillucent` | the command line: 29 verbs — `query`, `exec`, `describe`, `import`, `export`, `search`, `explain`, `backup`, `migrate` and the rest |
-| `inillucent-shell` | an interactive shell shaped like `sqlite3`, with 63 of its 65 dot commands and all 48 of its command line options |
-| `inillucent-mcp` | 27 of the same commands served to an AI agent over MCP |
+| `inillucent` | the command line: 30 verbs — `query`, `exec`, `describe`, `import`, `export`, `search`, `explain`, `backup`, `migrate`, `setup-embeddings` and the rest |
+| `inillucent-shell` | an interactive shell shaped like `sqlite3`, with 63 of its 65 dot commands. It knows all 48 of `sqlite3`'s command line options: 30 it acts on, and 18 it refuses by name because this engine has no equivalent |
+| `inillucent-mcp` | 28 of the same commands served to an AI agent over MCP |
 | `inillucent-migrate` | builds a database from a SQLite file, a running PostgreSQL or MySQL server, or a legacy retrieval index |
 
 ## A first database
@@ -77,8 +78,9 @@ Or interactively:
 inillucent-shell app.rdb
 ```
 
-The shell answers `.tables`, `.schema`, `.mode`, `.import`, `.dump`, `.expert` aside, and 62 more of
-`sqlite3`'s dot commands. [SQL support](sql.md) lists the two it does not answer and why.
+The shell answers 63 of `sqlite3`'s 65 dot commands, `.tables`, `.schema`, `.mode`, `.import` and
+`.dump` among them. The two it does not answer are `.expert` and `.session`; [SQL support](sql.md)
+says why.
 
 ## Bind parameters, do not paste values
 

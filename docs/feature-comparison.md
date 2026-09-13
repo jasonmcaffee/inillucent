@@ -779,7 +779,7 @@ path serves `generate_series(1, t.a)` and any other table-valued function given 
 `inillucent_sql::function::every_function` is what `pragma_function_list` reports. Against the pinned
 **library** - the amalgamation, not the shell - there is no function SQLite answers that this engine
 does not. `current_date`, `current_time` and `current_timestamp` used to be the exception: they
-worked as keywords but were not named in the register, which is the shape of under-reporting that
+worked as keywords but were not named in the register, which is the kind of under-reporting that
 review 6 went after. They are named now. `load_extension` *is* registered and refuses in the platform's own
 words, because this build has no dynamic loader and a function that quietly answered NULL would be a
 function an application believed had worked.
@@ -1099,7 +1099,7 @@ Every one, with what it measures. Nothing here is refused and nothing here is si
 and each reports something a caller can read.
 
 **Two are one decision, measured.** Both of the experiments in this section were run when the
-weighted headline stood at 3.83x rather than today's 4.26x, and neither has been re-run since. What
+weighted headline stood at 3.83x rather than today's 4.30x, and neither has been re-run since. What
 each measures is the *difference* between two settings, which is why it is still quoted.
 
 1. **`PRAGMA page_size` is 32768** where the reference is 4096. Measured both ways on the medium
@@ -1260,7 +1260,7 @@ the configured one returns the rows and pays for them.
 | `source = slack`, p50 | **0.6631 ms** | 42.182 ms | **6,262% faster** | 1.398 ms | **111% faster** |
 | `source = slack`, p95 | **1.292 ms** | 101.038 ms | **7,720% faster** | 1.969 ms | **52% faster** |
 
-The filtered row is the shape of the whole comparison: pgvector's cost of *being correct under a
+The filtered row stands for the whole comparison: pgvector's cost of *being correct under a
 filter* is to repeat the scan, and it is two orders of magnitude. inillucent's probe widens itself
 instead - ask the graph for *k*, run the residual predicate, and if fewer than *k* survive ask for
 four times as many - which needs no setting, and is why the filtered query here takes **less** time
@@ -1406,7 +1406,11 @@ file rather than a buffer, and it has not moved since.
 [Where the memory goes](#where-the-memory-goes) has the per-workload attribution and the measured
 reason the last 5.4 MiB is not going to come from another buffer either.
 
-The four runs:
+**The four runs below are the gate run that preceded the one above**, and they are kept because they
+are the last run whose four arms were recorded one by one. Its median headline is 4.26x where the
+current one is 4.30x, and its `transaction` family reads 3.41x where the current one reads 2.52x —
+task-1911 made the rollback journal do the sync a rollback journal is for, and autocommit pays that
+sync once a statement now.
 
 | | run 1 | run 2 | run 3 | run 4 | median |
 |---|---|---|---|---|---|
@@ -1440,7 +1444,9 @@ directories holding 60 GB had built up in `%TEMP%`, one per gate run ever taken.
 
 ### Elapsed time by family
 
-Median of the four runs. **Bar** is what `compat/perf/contract.toml` asks of the family; **weight** is
+Median of the four runs in the table above, which is the run that preceded the current one.
+[Performance](performance.md#by-family) carries the current figures per family, with each family's
+own 95% lower bound. **Bar** is what `compat/perf/contract.toml` asks of the family; **weight** is
 what the contract gives it in the headline.
 
 | family | weight | measured | the difference | the bar asks | verdict | lower bounds |
@@ -1905,7 +1911,7 @@ target/release/inillucent-fullgate <dir>/m.db --scale medium --rounds 12 --page-
 target/release/inillucent-childcost target/release/inillucent-allocarm <dir>/m.db --rounds 8 --scale medium
 target/release/inillucent-childcost target/release/inillucent-allocarm <dir>/m.db --rounds 8 --scale medium --system
 
-# the read-path memory: two shells, 200,000 rows each. The cache_size ladder is the same
+# the memory a read costs: two shells, 200,000 rows each. The cache_size ladder is the same
 # script with a leading `PRAGMA cache_size = -N;`, through inillucent-childcost
 target/release/inillucent-shellrss
 

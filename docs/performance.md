@@ -52,7 +52,8 @@ it, expressed as the family's own ratio.
 **No family is below the 1.00x floor on any of the four runs**, which is the release condition.
 
 **`read.join` sits on its bar rather than over it**, and the four runs' lower bounds were 2.97x,
-3.00x, 3.00x and 2.99x. A number that straddles a threshold is not a number that has met it, so it
+3.00x, 3.00x and 2.99x. A bound that lands on the threshold on two runs and under it on two has not
+cleared it, so it
 stays in [the roadmap](roadmap.md#2-four-per-family-bars-are-missed) with the other three.
 
 **`transaction` fell from 3.41x, and the reason is `txn.autocommit`.** The other two workloads in
@@ -62,8 +63,8 @@ do the sync a rollback journal is for. Autocommit checkpoints once per statement
 sync once per statement, and SQLite at `synchronous = FULL` pays the same one. The old number was
 faster than SQLite by skipping work SQLite does; four separate ways a crash could then lose a
 database are in [the roadmap](roadmap.md#what-task-1911-closed), and that is what the 2.36x bought.
-`transaction` was below it on all four before task-1890 and is now 3.41x; what that took, and the
-defect in the measurement it uncovered, is the section after next.
+`transaction` was under the contract's floor on all four runs before task-1890, which took it to
+3.41x; what that took, and the defect in the measurement it uncovered, is the section after next.
 
 ## The workloads that are slower
 
@@ -249,7 +250,7 @@ retires to **0.0 MB** at a checkpoint, where it used to hold 94.6 MB across two 
 
 **The same binary measured 53% faster on Linux, where Windows measured 279% at the time.** That
 difference was settled by experiment rather than argued about, and the finding is that it is not a
-Linux problem. The Linux arm has not been re-measured since; the Windows headline has moved to 326%
+Linux problem. The Linux arm has not been re-measured since; the Windows headline has moved to 330%
 in the meantime, so treat the pair as the finding it was rather than as a comparison with the number
 at the top of this page.
 

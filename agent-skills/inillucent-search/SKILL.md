@@ -55,8 +55,9 @@ SELECT id FROM note ORDER BY vector_distance_cos(v, embed('flight details')) LIM
 `embed(TEXT)` returns the 3,072 bytes a `VECTOR(768)` column holds. Three things to know before
 reaching for it:
 
-- **The released binaries carry it from 0.1.2**, and a build from a checkout needs
-  `--features inillucent-cli/embed` because the feature is off by default. A build without it says
+- **The published 0.1.1 archives do not carry it**, and a build from a checkout needs
+  `--features inillucent-cli/embed` because the feature is off by default. The next release will
+  carry it: `packaging/release-all.ps1` passes that flag. A build without it says
   `no such function: embed`; a build with it but no model installed refuses by name and tells you the
   command that installs one, rather than returning a NULL or a vector of zeroes. A vector whose
   provenance is unknown is worse than no vector: it goes into an index, and every neighbour it is

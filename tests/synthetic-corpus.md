@@ -323,7 +323,7 @@ The unit tests are separate and take under a minute:
 cargo test --release
 ```
 
-That is 255 tests across the two crates. They should all pass with no warnings.
+That is 442 tests in the two retrieval crates, `inillucent-core` and `inillucent-bench`: 282 and 160. They should all pass with no warnings.
 
 ## Reading the score card
 
@@ -331,7 +331,7 @@ The card opens with a verdict over the **primary** measurements only. Each famil
 
 Each primary comparison is decided against the better of the two pgvector configurations by a 95% paired bootstrap interval and a paired randomization test over the per-query scores, against a practical threshold declared before the run: 0.01 on the ranking measures, five per cent on latency. The verdict is *better* when the interval clears both zero and the threshold, *equivalent* when the whole interval sits inside it, *worse* in the other direction, and *inconclusive* when the run cannot tell. Anything worse is listed explicitly with its numbers, and a run that cannot separate two engines says so rather than rounding up.
 
-Beneath the headline, every primary comparison is printed with its delta, its interval, its p-value, the number of queries behind it and how many of those queries the two engines answered differently. A comparison resting on three queries is worth reading with suspicion however small its p-value, and that column is there so it can be.
+Beneath the headline, every primary comparison is printed with its delta, its interval, its p-value, the number of queries behind it and how many of those queries the two engines answered differently. A comparison resting on three queries deserves suspicion however small its p-value, and that column is there so it can be.
 
 The provenance table names the run directory. `runs/<id>/per-query.jsonl` holds one line per engine per query — the ranking, each hit’s relevance grade, the component scores, the latency and the metrics that query contributed — so a miss can be looked at rather than guessed at, and a comparison can be recomputed or re-judged without paying for the run again.
 

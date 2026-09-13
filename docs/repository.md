@@ -56,7 +56,7 @@ not differ, so there is no wrapper.
 The old engine was the one that reached SQLite file format parity: 264 of 271 capabilities passed,
 with seven optional ones missing. It was measured between 30% and 95% slower than SQLite across the
 families, which is why the current engine was written, and it has now been deleted -
-[Roadmap](roadmap.md#7-deleting-the-old-engine) records what its four crates were and what still
+[Roadmap](roadmap.md#7-the-old-engine-is-deleted) records what its four crates were and what still
 reads a SQLite file in their place.
 
 ## The other directories
@@ -83,7 +83,7 @@ cargo build -p inillucent-compat --bin inillucent-testrun --features testrun
 target/debug/inillucent-testrun --tier smoke      # about 1 s, for mid edit
 target/debug/inillucent-testrun --changed         # what your edits can break
 target/debug/inillucent-testrun --changed --list  # ...without running it
-target/debug/inillucent-testrun                   # everything, about 155 s
+target/debug/inillucent-testrun                   # everything, about 300 s
 target/debug/inillucent-testrun --strict          # fail on a missing prerequisite
 ```
 
@@ -95,12 +95,16 @@ mistaken for a green run.
 If you do use `cargo test --workspace`, pass `--no-fail-fast`. Without it the run stops at the first
 failing binary, and has reported about a quarter of the suite.
 
-Seventeen tests fail today and every one is accounted for:
-[the failing tests](roadmap.md#the-failing-tests).
+**No test fails today.** `inillucent-testrun --strict` on a quiet box reports 149 targets, 2,646
+tests, 0 failed and 0 undetermined in 301 seconds. It still prints `not ok`, because `live_postgres`
+and `live_mysql` evidenced nothing and neither server is configured on this machine — which is the
+condition `--strict` exists to report. This page used to say seventeen tests failed; task-1869 had
+already removed the cause and nobody re-ran it, which is recorded in
+[the roadmap](roadmap.md#what-task-1911-closed).
 
 ## What the tests cover
 
-2,508 tests across 140 test targets in the workspace, in these classes:
+2,646 tests across 149 test targets in the workspace, in these classes:
 
 - **A differential harness** that runs the same SQL through the pinned SQLite 3.53.4 and compares
   transcripts. 208 of those cases are `semantics.rs`, and 416 are the wider feature probe.
@@ -123,7 +127,7 @@ Seventeen tests fail today and every one is accounted for:
   simulator — so "the simulator behaves like a disk" is a checked claim rather than a hope.
 - **100% branch coverage** held on the page pool's interior, latch, meta, extent, free map and swip
   modules, and on the tree's key codec.
-- **23 of the 29 crates deny `unwrap`, `expect`, `panic` and slice indexing**, and 22 forbid
+- **26 of the 29 crates deny `unwrap`, `expect`, `panic` and slice indexing**, and 22 forbid
   `unsafe`, on every path that reads SQL text, database pages, log frames, network bytes or file
   system results.
 

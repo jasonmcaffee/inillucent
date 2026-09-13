@@ -22,11 +22,15 @@ inillucent --db notes.rdb query "SELECT length(embed('hello'))"
 About 620 MB the first time and nothing on a later run. Run it with no component at all and it
 reports what is installed and downloads nothing, which is what stops the fetch being a surprise.
 
-**The binary has to carry the `embed` feature for that query to answer**, and the released ones do
-from 0.1.2. Every release up to 0.1.1 did not, which made `setup-embeddings` a command that
-downloaded 620 MB the program that downloaded it could not use: the query above answered `no such
-function: embed`. From a checkout the flag is
-`cargo build --release -p inillucent-cli --features inillucent-cli/embed`.
+**The binary has to carry the `embed` feature for that query to answer, and the published 0.1.1
+archives do not.** Run the query above against one and it answers `no such function: embed`, which
+makes `setup-embeddings` a command that downloads 620 MB the program that downloaded it cannot use.
+`packaging/release-all.ps1` passes `--features inillucent-cli/embed`, so the next release carries it;
+until that release is cut, build the command line from a checkout:
+
+```sh
+cargo build --release -p inillucent-cli --features inillucent-cli/embed
+```
 
 | | |
 |---|---|
@@ -39,7 +43,7 @@ function: embed`. From a checkout the flag is
 | `--dir <path>` | somewhere other than the per-user directory |
 
 It is one row in the command table every front end is generated from, so it is also an MCP tool
-called `inillucent_setup-embeddings`, with the same parameters and the same description.
+called `inillucent_setup_embeddings`, with the same parameters and the same description.
 
 ### Where it goes
 

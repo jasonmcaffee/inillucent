@@ -5,7 +5,7 @@ description: Serve an inillucent database to an AI agent over MCP, with --readon
 
 # Giving an agent a database, over MCP
 
-`inillucent-mcp` serves 27 of the CLI's commands as MCP tools over standard input and output. They
+`inillucent-mcp` serves 28 of the CLI's commands as MCP tools over standard input and output. They
 are **generated from the same command table the CLI reads**, so the two cannot drift — a test
 (`command_parity.rs`) fails the build if they do — and a tool's description is the same sentence
 `inillucent help <command>` prints.

@@ -25,8 +25,30 @@ its own fresh database, and every byte of both output streams was compared.
 construct that changes its answer in either direction fails a build rather than waiting for somebody
 to audit it. The probe harness is `tools/feature-probe/`.
 
-Counted against SQLite's own enumerations rather than against a case list: **212 function names of
-218**, **67 pragmas of 67**, **63 dot commands of 65**, **5 collations of 5**.
+Counted against SQLite's own enumerations rather than against a case list: **172 of the 177 function
+names the pinned SQLite library answers**, **67 pragmas of 67**, **63 dot commands of 65**, **5
+collations of 5**. [The function register](#the-function-register) says where 177 comes from and names
+the five.
+
+### The function register
+
+`PRAGMA function_list` in SQLite's own shell reports **218** names, and 41 of those are extensions the
+shell itself defines rather than functions the library answers: `readfile`, `writefile`, `sha3`,
+`zipfile`, `ieee754`, the `decimal` family, the `shell_*` helpers and the rest. They are not part of
+SQLite, so they are not a gap here. That leaves **177 library names**.
+
+inillucent answers **172** of the 177. The five it does not are `fts3_tokenizer`, `fts5`,
+`fts5_get_locale`, `fts5_insttoken` and `fts5_locale`: the first two hand out a C pointer to a
+tokenizer and to the FTS5 API, and the other three are FTS5's locale machinery, which this build does
+not carry.
+
+Its own register holds **190** names: those 172, plus 18 vector functions SQLite has no equivalent
+for. `inillucent functions` prints 213 rows because it prints one row per name and argument count.
+
+```sh
+inillucent functions --output json --limit 0
+node tools/feature-probe/registers.js    # both registers, compared name by name
+```
 
 ## What runs
 
@@ -52,7 +74,7 @@ compile to triggers, so one mechanism serves `PRAGMA foreign_keys`,
 `DEFERRABLE INITIALLY DEFERRED`, `ON DELETE CASCADE`, `SET NULL`, `SET DEFAULT` and `RESTRICT`.
 
 **Values.** Type affinity applied on write. `CAST`. `COLLATE` with `BINARY`, `NOCASE` and `RTRIM`.
-`LIKE` and `GLOB`. 212 built in function names, including 28 JSON functions, 29 maths functions and
+`LIKE` and `GLOB`. 190 built in function names, including 30 JSON functions, 29 maths functions and
 7 date and time functions. User defined scalar functions, aggregates and collations.
 
 **Transactions.** `BEGIN`, `COMMIT`, `ROLLBACK`, `SAVEPOINT`, `RELEASE` and `ROLLBACK TO`. `ATTACH`
@@ -70,7 +92,7 @@ any eponymous module a caller registers.
 
 | extension | state |
 |---|---|
-| **JSON** | over a binary form, with all 28 function names |
+| **JSON** | over a binary form, with all 30 function names, `json_*` and `jsonb_*` alike |
 | **FTS5** | including `bm25()` and `fts5vocab` |
 | **R-Tree** | the module and its queries |
 | **`inillucent_search`** | this engine's own hybrid vector and keyword index — see [Vector search](vector-search.md) |
@@ -117,7 +139,7 @@ That is a fabrication rather than compatibility, so none of the three will ever 
 
 ### Three are decisions this engine made, and each was measured
 
-Both experiments below were run when the weighted headline stood at 3.83x rather than today's 4.26x, and neither has been re-run since. What they measure is the *difference* between the two settings, which is why they are still quoted.
+Both experiments below were run when the weighted headline stood at 3.83x rather than today's 4.30x, and neither has been re-run since. What they measure is the *difference* between the two settings, which is why they are still quoted.
 
 **`PRAGMA page_size` reports 32768** where SQLite reports 4096. Both were measured on the same gate:
 32768 gave 3.83x weighted with the `schema` family at 1.15x; 4096 with a matched cache budget gave

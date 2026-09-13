@@ -89,11 +89,14 @@ match connection.query(statement, &[], 0) {
 }
 ```
 
-**No SQL statement answers `Unsupported` today.** The 416-case differential probe refuses nothing
-SQLite answers, and `VACUUM` — which this example used to name — rebuilds the file. Write the arm
-anyway: it is four lines, and the alternative is rewriting every call site the first time a construct
-arrives that does return it. `cancel` reports partial support because cancellation is observed between
-executor units of work rather than at every instruction.
+**Window functions answer `Unsupported`, and nothing else does.** `OVER (...)`, `PARTITION BY`, the
+`ROWS`, `RANGE` and `GROUPS` frame clauses and the eleven functions that need them are the twelve
+cases the 416-case differential probe records as refused; over the command line the same condition is
+exit code 3. `VACUUM`, which this example used to name, rebuilds the file and does not return it.
+Write the arm: any statement carrying a window function reaches it today. `cancel` and `readonly_open`
+report partial support — cancellation is observed between executor units of work rather than at every
+instruction, and read-only is enforced by this driver above the engine rather than by the file
+handle.
 
 Rust does **not** go through the C ABI. DuckDB routes even its own first-party
 Rust binding through its C API because its core is C++ and the ABI is the

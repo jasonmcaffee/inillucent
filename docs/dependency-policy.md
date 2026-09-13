@@ -172,7 +172,7 @@ compression method beyond stored and deflated, no tar extension past the GNU lon
 of those is refused by name if it appears, so an archive this cannot read is a message rather than a
 wrong file.
 
-Two properties are worth stating because they are what a downloader gets wrong:
+Two properties matter here, because they are what a downloader gets wrong:
 
 - **A file that fails its digest is not left on disk.** The download is written to a `.part` beside
   the destination and renamed only once the digest matches, so an interrupted run leaves something a

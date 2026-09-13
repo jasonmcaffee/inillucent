@@ -12,6 +12,11 @@ The corpus is 185,078 chunks assembled from public data by this repository:
 [Synthetic corpus](../tests/synthetic-corpus.md) builds it, and every number here can be reproduced
 by anyone with this repository, an internet connection and a few hours.
 
+**Every figure on this page is the grading run of 2026-09-08.** The score card checked in at the
+repository root, `inillucent-scorecard.md`, is the run of **2026-09-01**, and the two do not agree
+row for row — [Which run a number comes from](#which-run-a-number-comes-from) names every row that
+moved. Read the card for the method, the intervals and the p-values, which did not change.
+
 ## Ranking
 
 Against the **better** of the two pgvector configurations on every row, never the misconfigured one.
@@ -51,9 +56,9 @@ extension's defaults it returned fewer than the 50 rows the predicate admits on 
 for every one of the six sources**. Correctly configured it still fell short on github (12 queries of
 25), jira (9 of 25) and miro (1 of 25).
 
-An engine that returns fewer rows than the filter allows is not a faster engine, it is an incomplete
-one. Completeness is graded as a gate rather than scored as relevance, because returning thirty rows
-where fifty exist is a defect however good the thirty are.
+An engine that returns fewer rows than the filter allows has answered incompletely rather than
+quickly. Completeness is therefore graded as a gate rather than scored as relevance, because
+returning thirty rows where fifty exist is a defect however good the thirty are.
 
 ## Abstention
 
@@ -68,6 +73,28 @@ of either.
 [Vector search](vector-search.md#confidence-is-a-separate-number-from-score) explains how the
 confidence is computed and why it had to stop being the same number as the score.
 
+## Which run a number comes from
+
+Two grading runs exist. This page is the later one; the checked in score card is the earlier one and
+has not been regenerated since, so a reader comparing the two finds seven rows that differ.
+
+| row | this page, 2026-09-08 | the score card, 2026-09-01 |
+|---|---|---|
+| Lexical, rare identifiers, MRR | 0.5467 against 0.1568 | 0.5442 against 0.1363 |
+| Lexical, natural language headings, MRR | 0.7246 against 0.6346 | 0.7221 against 0.5896 |
+| Hybrid, document identity, nDCG@10 | 0.9773 against 0.8101 | 0.9756 against 0.8148 |
+| Hybrid, natural language headings, nDCG@10 | 0.7540 against 0.6498 | 0.7477 against 0.6271 |
+| Passage evidence, graded nDCG@10 | 0.7745 against 0.6898 | 0.7045 against 0.6027 |
+| Passage evidence, one transposed character | 0.7616 against 0.4460 | 0.6794 against 0.3969 |
+| Abstention, confident answer rate | 0.0125 against 1.000 | 0.0050 against 1.000 |
+
+Every verdict is the same in both: 15 better, 1 equivalent, 1 inconclusive, 0 worse, and every
+correctness gate passing. What moved is the size of the margin, not the direction of any row.
+
+The 2026-09-08 run's own output file did not survive, which is why the card was not replaced with it.
+Rebuilding the corpus and re-embedding it is about ten hours before a single query runs, so the two
+are reconciled by running the grading again rather than by editing either number.
+
 ## Latency
 
 Median over the same queries, measured inside the calling process. Both pgvector columns are given
@@ -81,7 +108,7 @@ the configured one returns the rows and pays for them.
 | `source = slack`, p50 | **0.6631 ms** | 42.182 ms | **6,262% faster** | 1.398 ms | **111% faster** |
 | `source = slack`, p95 | **1.292 ms** | 101.038 ms | **7,720% faster** | 1.969 ms | **52% faster** |
 
-The filtered row is the shape of the whole comparison. pgvector's cost of being *correct* under a
+The filtered row stands for the whole comparison. pgvector's cost of being *correct* under a
 filter is to repeat the scan, and that is two orders of magnitude. inillucent's probe widens itself
 instead: ask the graph for *k*, run the residual predicate, and if fewer than *k* rows survive, ask
 for four times as many. It needs no setting, and it is why the filtered query here takes **less** time

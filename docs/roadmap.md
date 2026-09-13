@@ -17,7 +17,9 @@ Rust binary in this workspace costs before the engine exists**, and one `CREATE 
 
 Each on four consecutive runs. These are targets rather than requirements, and every one of these
 families is still faster than SQLite. `transaction` was under the contract's **floor** on all four
-runs and is no longer on this list at all: task-1890 took it to 241% faster.
+runs and is no longer on this list at all: task-1890 took it to 241% faster, and it reads 152% faster
+today because the rollback journal now does the sync a rollback journal is for.
+[Performance](performance.md#by-family) has that change and what it bought.
 
 | family | measured | the bar asks |
 |---|---|---|
@@ -67,7 +69,7 @@ of per-round differences reported beside a count of how many rounds each arm won
 | a point join | 20,204 ns | 11,564 ns | 41% | 38 of 40 |
 
 The absolute times are large because several agents were compiling on the box; the ratios and the
-round counts are what survive that, which is the whole point of pairing.
+round counts are what survive that, which is what pairing is for.
 
 **The 200-row range scan does not move**, and the sequential arms' 11-14% was noise: 17 of 40 rounds
 went the other way. So this item does not close `range.lookaside` or `join.range`, and
@@ -123,7 +125,7 @@ a size classed free list in place of the system allocator the two platforms run 
 speed, 38.97 ms against 38.20, and it is SQLite's own arm that moves across platforms rather than
 this engine's. [Linux](performance.md#linux) has the measurement. Neither the allocator change that
 took Windows from 3.24x to 3.86x nor anything since has been measured on Linux, so the Linux figure
-is older than the 326% Windows headline rather than a comparison with it.
+is older than the 330% Windows headline rather than a comparison with it.
 
 Re-measuring wants a Linux machine that is not also running the Windows arm. Both inside one box —
 WSL beside Windows — would measure the contention rather than the platform. task-1911 watched that
@@ -434,7 +436,7 @@ reader who remembers the old numbers can find what happened to them.
   pays for one sync.
 
   **The journal had no checksums, so recovery wrote torn bytes over a good database.** This is the
-  one worth reading twice. At the failing cut point the database file was *perfect* — page 3 stored
+  one to read twice. At the failing cut point the database file was *perfect* — page 3 stored
   the checksum `b59f5196` and computed `b59f5196` — and the corruption the test reported was
   manufactured by recovery itself, out of a journal whose seventeen sectors the crash model had left
   Torn, Garbage and Dropped. Nothing in the file format could tell a replay that a pre-image was not
