@@ -448,7 +448,10 @@ const checks = [
   assertWritten('JSON function names', functions?.json, /all (\d+) function names/i),
   assertWritten('driver capabilities', caps?.total, /(\d+) capabilities reported/i),
   assertWritten('probe cases', probed?.total, /(\d+)[ -]case (?:differential )?(?:probe|compatibility probe)/i),
-  assertWritten('probe cases the same', probed?.same, /(\d+) of 416 (?:produce|SQL cases)/i),
+  // `docs/feature-comparison.md` wrote it as "391 of 416 probed cases produce", which the narrower
+  // pattern walked straight past while every other page was corrected. A fact this check can miss in
+  // one phrasing is a fact it does not check.
+  assertWritten('probe cases the same', probed?.same, /(\d+) of (?:the )?416 (?:probed cases )?(?:produce|agree|SQL cases)/i, /read |dip to |gave \*\*|count read /),
   assertWritten('workspace members', lints?.members, /(\d+) crates (?:forbid|deny)/i),
   assertWritten('crates forbidding unsafe', lints?.forbidsUnsafe, /(?:(\d+) of (?:the )?29 crates forbid|and (\d+) forbid[\s\n]+`unsafe`)/i),
   assertWritten('crates denying the four lints', lints?.deniesFour, /(\d+) of the 29 crates deny/i),

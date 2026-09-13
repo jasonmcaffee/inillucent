@@ -98,14 +98,13 @@ works because somebody implemented it is the thing the probe exists to replace.
 
 ## Why it is not 100%
 
-**Twenty-five of the 416 cases are not byte-equal to SQLite. Twelve are refused outright, and every
-one of the twelve is a window function.** The other thirteen all answer - none of them is silent -
+**Thirteen of the 416 cases are not byte-equal to SQLite, and none of them is refused.** All
+thirteen answer - none of them is silent -
 split between vector search features SQLite has no equivalent for and three kinds of measured or
 structural difference. Zero cases are accepted here that SQLite rejects.
 
 | how many | what they are | can it ever be closed? |
 |---|---|---|
-| **12** | **refused outright: every window function.** `OVER (...)`, `PARTITION BY`, the `ROWS`, `RANGE` and `GROUPS` frame clauses, and the eleven functions that need them: `row_number`, `rank`, `dense_rank`, `percent_rank`, `cume_dist`, `ntile`, `lag`, `lead`, `first_value`, `last_value`, `nth_value`. The engine's physical pass does not yet handle a window function reaching the pipeline builder. `sql.select.window` and `functions.window` are both `status = "missing"` in `compat/sqlite-3.53.4.toml` | **Yes, once window functions are implemented.** Not scheduled |
 | **6** | **vector-search features SQLite does not have** - the `vec0` table, the distance functions and the operator spellings. There is no SQLite output for them to be byte-equal to, so they cannot count as agreement however well they work. All six work | **No, by construction.** They are extras, not gaps |
 | **3** | **two decisions this engine made and measured**: `PRAGMA page_size` is 32768 where the reference says 4096, `PRAGMA locking_mode` is `exclusive`, and `.recover` differs on the one line of nineteen that names the page size. Adopting the reference's values was measured, not assumed: 4096 puts the `schema` family at **0.94x**, under the contract's 1.00x floor, and `normal` locking puts the headline at **3.03x** against a 3.00x bar | **Yes - at a measured cost to the performance bars.** The pragma reports what the file is, which is its job |
 | **1** | **the two pinned SQLite artifacts disagreeing with each other.** `.limit` reports `trigger_depth 1000`; the downloaded `sqlite3.exe` says 100 because it was built with `SQLITE_MAX_TRIGGER_DEPTH=100`, and the locally built oracle says 1000. Twelve of its thirteen lines agree | **No.** Whichever value is printed, one of the two references disagrees with it |
@@ -129,8 +128,9 @@ the message. The cause was one of review 6's own fixes: moving `bind::refused` f
 `near "ORDER": syntax error` is the shape that caller wants. It builds an `Unexpected` directly now,
 the re-run reproduced **403 / 7 / 6 with no wording difference**, and both shapes are cases in
 `crates/inillucent-compat/tests/semantics.rs` so they cannot drift back. That **403** was measured
-through `inillucent-shell` while it still ran the engine task-1911 retired; re-run against the engine
-that ships, the count is **391 / 12 / 7 / 6**, as above.
+through `inillucent-shell` while it still ran a retired engine; against the engine that ships it read
+**391 / 12 / 7 / 6** until the window path was reconnected, and it reads **403 / 0 / 7 / 6** now, as
+above.
 
 Detail for every one of the seven that differ: [The seven rows that are not the same](#the-seven-rows-that-are-not-the-same).
 
@@ -154,7 +154,7 @@ and this engine wins two of those three.
 | | SQLite 3.53.4 | inillucent | the difference |
 |---|---|---|---|
 | **SQL features probed** | 416 | 416 | - |
-| features that agree byte for byte, answers and error text alike | the reference | 391 | **94.0% of the surface** - and [here is exactly why it is not 100%](#why-it-is-not-100): 12 of the other 25 are window functions this engine refuses, 6 are vector features SQLite does not have, and the remaining 7 answer differently. None of the 25 is silent |
+| features that agree byte for byte, answers and error text alike | the reference | 403 | **96.9% of the surface** - and [here is exactly why it is not 100%](#why-it-is-not-100): 12 of the other 25 are window functions this engine refuses, 6 are vector features SQLite does not have, and the remaining 7 answer differently. None of the 25 is silent |
 | features SQLite answers and inillucent **refuses** | - | **12** | **every one is a window function** |
 | features inillucent accepts that SQLite rejects | - | **0** | **none** |
 | features both answer **differently** | - | 7 | **1.7%**, none of them silent |
@@ -201,7 +201,7 @@ pages and arena.
 
 | | | at review 5 |
 |---|---|---|
-| **416 probed features** | **391 agree with SQLite byte for byte** - [why not 416](#why-it-is-not-100) | 403 |
+| **416 probed features** | **403 agree with SQLite byte for byte** - [why not 416](#why-it-is-not-100) | 403 |
 | features SQLite answers and inillucent refuses | **12, all window functions** | 0 |
 | features both answer, **differently** | **7** - and none of them is silent | 7 |
 | features inillucent accepts that SQLite rejects | **0** | 0 |
@@ -219,14 +219,15 @@ engines still refused, so nothing that checks only whether a statement fails cou
 cause was one of review 6's own fixes applied one caller too widely. Corrected, review 7 reproduced
 403 case for case, and both shapes are now cases in `semantics.rs`, so the next drift fails a build
 instead of a document. **That 403 was measured through `inillucent-shell` while it still ran the
-engine task-1911 has since retired.** Re-run against the engine that ships, the count is 391 agree,
-12 refused and 7 differ - [why it is not 100%](#why-it-is-not-100) has the full breakdown.
+a retired engine.** Against the engine that ships the count read 391 agree, 12 refused and 7 differ
+until the window path was reconnected, and it reads 403 agree, 0 refused and 7 differ now -
+[why it is not 100%](#why-it-is-not-100) has the full breakdown.
 
 **The five goals, measured:**
 
 | goal | state |
 |---|---|
-| Same SQL as SQLite | **Mostly - window functions are the exception.** Every window function is refused outright: `sql.select.window` and `functions.window` are both `status = "missing"` in `compat/sqlite-3.53.4.toml`. Everything else agrees byte for byte, or answers with a measured, explained difference in `pragma`, `explain` and `shell`. See [SQL support](sql.md). |
+| Same SQL as SQLite | **Yes.** Nothing the probe runs is refused, window functions included: `sql.select.window` and `functions.window` are both `pass` in `compat/sqlite-3.53.4.toml`. Everything agrees byte for byte, or answers with a measured, explained difference in `pragma`, `explain` and `shell`. See [SQL support](sql.md). |
 | Same observable semantics | **Nothing SQLite answers is refused silently, and the one silent difference is closed.** `pragma_function_list` and `pragma_module_list` answered fewer rows than SQLite's while the functionality behind the difference worked, so a caller that introspected the register was told less than the truth with no error. It was found by [auditing the list against SQLite's own enumerations](#is-the-feature-list-itself-complete) rather than by the 416 cases, and review 6 closed it and turned the audit into `crates/inillucent-compat/tests/registers.rs`, which compares all four registers on every build. Every one of the seven rows that answers differently reports something a caller can read and act on: a page size and a locking mode this engine chose and can measure the cost of choosing otherwise, a build option the two pinned reference artifacts disagree about, or a number that describes SQLite's own C structures - a VDBE program, `sizeof(sqlite3_file)`, a lookaside allocator's counters - which no engine that is not SQLite can print. The twelve window function refusals are visible too: each returns exit code `3`, not `1`, so a caller can tell "not built" from "your SQL is wrong". |
 | The PRAGMA surface an application uses | **59 of the 67 pragmas SQLite lists answer; the other 8 answer nothing in SQLite either.** None is silent here, and none is refused here. |
 | Embedding search like pgvector | **The ranking is better and the SQL surface matches**, operator spellings included. Re-graded in full for this review. See [Vector search](#vector-search-against-postgresql--pgvector). |
