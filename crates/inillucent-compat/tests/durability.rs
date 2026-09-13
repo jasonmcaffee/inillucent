@@ -38,7 +38,7 @@ use inillucent_sim::media::MediaModel;
 use inillucent_sim::sim_vfs::{CrashSnapshot, SimConfig, SimVfs};
 use inillucent_tree::datum::OwnedDatum;
 use inillucent_vfs::path::DbPath;
-use inillucent_vfs::Vfs;
+use inillucent_vfs::{AccessMode, Vfs};
 
 /// The page size these tests build at, and the frames the pool holds.
 ///
@@ -1147,6 +1147,71 @@ fn a_checkpoint_during_a_later_open_transaction_keeps_the_earlier_commit() {
     );
 }
 
+/// The highest segment number this file's tests ever create, generously - a
+/// bound for [`segments_present`] to check rather than a claim about how many
+/// any one run actually makes.
+const HIGHEST_PLAUSIBLE_SEGMENT: u64 = 40;
+
+/// Returns which segment numbers up to [`HIGHEST_PLAUSIBLE_SEGMENT`] exist
+/// right now.
+///
+/// **Has to run before the crash, not after.** `SimVfs::access` refuses once
+/// `SimVfs::crash` has marked the machine powered off, so a caller that wants
+/// to know what existed at the moment of the crash has to ask before making
+/// it, then hand the answer to [`force_unsynced_deletes_final`] afterward -
+/// asking after crashing silently reports every segment absent regardless of
+/// the truth, which was measured directly: it turned this file's own fix into
+/// one that failed even with every one of its own defects fixed, because it
+/// erased segments the recovered database genuinely still needed.
+///
+/// @param vfs - the still-live filesystem
+fn segments_present(vfs: &SimVfs) -> std::collections::HashSet<u64> {
+    (1..=HIGHEST_PLAUSIBLE_SEGMENT)
+        .filter(|&sequence| {
+            let segment_path = inillucent_wal::writer::segment_path("app.db", None, sequence);
+            vfs.access(&segment_path, AccessMode::Exists)
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
+/// Forces every WAL segment absent from `present_before_the_crash` to stay
+/// absent in the crash's own snapshot.
+///
+/// **Controls the crash simulator's restoration coin flip rather than
+/// sampling it.** `Wal::retire_segments_below` deletes a segment without
+/// syncing the directory entry (`Vfs::delete(path, sync_dir: false)`), so
+/// `SimVfs::crash` resolves each such pending, unsynced delete independently -
+/// a coin flip seeded from the run's own seed
+/// (`crash_rng: Rng::new(seed ^ 0xc0ff_ee00)`). A test that crashes right
+/// after a retirement and asserts on the outcome is, without this, asserting
+/// on a coin flip: the specific seed it happens to run under decides whether
+/// the segment a defect needs gone is actually gone in the snapshot handed to
+/// recovery. That is exactly the gap that let
+/// `a_page_untouched_through_several_checkpoints_never_asks_recovery_for_a_retired_segment`
+/// pass with `retained_lsn` removed from `Pool::note_dirty_from` during Codex
+/// Sol's review of this ticket - sweeping many seeds was tried first and
+/// rejected, because a test that needs luck across a sweep still needs luck.
+///
+/// This forces the strictest, most conservative outcome every real crash
+/// already has to survive: an unsynced directory entry is never assumed
+/// durable.
+///
+/// @param present_before_the_crash - [`segments_present`]'s answer, read
+///   before the crash
+/// @param snapshot - the crash snapshot to correct in place
+fn force_unsynced_deletes_final(
+    present_before_the_crash: &std::collections::HashSet<u64>,
+    snapshot: &mut CrashSnapshot,
+) {
+    for sequence in 1..=HIGHEST_PLAUSIBLE_SEGMENT {
+        if !present_before_the_crash.contains(&sequence) {
+            let segment_path = inillucent_wal::writer::segment_path("app.db", None, sequence);
+            snapshot.files.remove(segment_path.as_path());
+        }
+    }
+}
+
 /// A page untouched through several checkpoints must not ask recovery to
 /// start below a segment those checkpoints already retired.
 ///
@@ -1164,12 +1229,15 @@ fn a_checkpoint_during_a_later_open_transaction_keeps_the_earlier_commit() {
 /// moment it dirties again and a *different*, later transaction forces a
 /// checkpoint to hold it back, `oldest_dirty_lsn` would report that stale
 /// stamp verbatim and ask recovery to start at a segment that no longer
-/// exists - a strictly worse failure than the sibling test's, since here even
-/// `Wal::sequence_containing` cannot locate a genuinely deleted segment.
+/// exists.
 ///
-/// No fault injection is needed, for the same reason as the sibling test:
-/// the defect is in what an uninterrupted, successfully finished checkpoint
-/// records.
+/// See [`force_unsynced_deletes_final`] for why the crash snapshot is
+/// corrected before it is read: without that, this assertion depends on the
+/// crash simulator's own coin flip for whether the retired segment stays
+/// gone, and a single seed is not something to build a regression test on.
+///
+/// No fault injection is needed beyond the crash itself: the defect is in
+/// what an uninterrupted, successfully finished checkpoint records.
 #[test]
 fn a_page_untouched_through_several_checkpoints_never_asks_recovery_for_a_retired_segment() {
     let journal = Journal::NO_ROLLBACK_JOURNAL;
@@ -1202,14 +1270,15 @@ fn a_page_untouched_through_several_checkpoints_never_asks_recovery_for_a_retire
         exec(&mut engine, "PRAGMA user_version = 100").expect("the checkpoint runs");
         rows
     };
-    let snapshot = vfs.crash();
+    let present_before_the_crash = segments_present(&vfs);
+    let mut snapshot = vfs.crash();
+    force_unsynced_deletes_final(&present_before_the_crash, &mut snapshot);
     let recovery = recovered(journal, &snapshot, 70_801);
     assert_eq!(
         recovery,
         Recovery::Rows(expected),
-        "the row 4 insert, committed before table t's page was dirtied again, \
-         did not survive a checkpoint that had to hold that page back - the \
-         recovery point pointed at a segment several unrelated checkpoints \
-         had already retired"
+        "the row 4 insert, committed before table t's page was dirtied again, did not \
+         survive a checkpoint that had to hold that page back - the recovery point \
+         pointed at a segment several unrelated checkpoints had already retired"
     );
 }

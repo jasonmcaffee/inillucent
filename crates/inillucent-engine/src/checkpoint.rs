@@ -166,8 +166,12 @@ impl ImportedDatabase {
         // next open's `read_chain` to start reading a segment that does not
         // contain it, silently skipping every record between the true
         // segment and the new one. See `Wal::sequence_containing`'s own doc
-        // comment for the reproduction this was caught by.
-        let recovery_sequence = self.wal.sequence_containing(recovery_from);
+        // comment for the reproduction this was caught by, and for why it
+        // refuses outright rather than guess when no present segment holds
+        // `recovery_from` - the `?` here is that refusal reaching this
+        // checkpoint: better a failed checkpoint than one that persists a
+        // recovery point `read_chain` cannot actually honor.
+        let recovery_sequence = self.wal.sequence_containing(recovery_from)?;
         self.database
             .set_log_position(recovery_from, 0, recovery_sequence);
         // **Before the segments below it are retired.** From this instant, any
@@ -252,8 +256,8 @@ impl ImportedDatabase {
                 .min(oldest_dirty);
             // See `checkpoint`'s own comment: paired with the segment that
             // actually holds `recovery_from`, not whichever one `roll_segment`
-            // just opened.
-            let recovery_sequence = held.wal.sequence_containing(recovery_from);
+            // just opened, and refused rather than guessed if none does.
+            let recovery_sequence = held.wal.sequence_containing(recovery_from)?;
             held.database
                 .set_log_position(recovery_from, 0, recovery_sequence);
             // Same reason as `checkpoint`'s own call: floors this file's own
