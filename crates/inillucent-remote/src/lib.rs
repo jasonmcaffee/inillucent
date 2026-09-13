@@ -46,6 +46,11 @@
 //! | [`mysql`] | the MySQL and MariaDB client protocol |
 //! | [`source`] | what a source database looks like from here, and the type map |
 //! | [`migrate`] | inventory, stage, copy, verify by count and digest, publish by rename |
+//!
+//! Invariant: **a migration either publishes a database that matches the
+//! source or publishes nothing.** Every table is copied, digested and compared
+//! before anything is renamed into place, so a copy that lost rows is a failure
+//! rather than a smaller database nobody notices.
 
 // **`deny` rather than `forbid`, for one module.** `tls::windows` and
 // `tls::unix` reach SChannel and OpenSSL, which is an FFI call and nothing

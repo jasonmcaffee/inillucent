@@ -66,7 +66,9 @@ fn reading<'a>(shell: &mut Shell, arguments: &[&'a str]) -> Option<Reading<'a>> 
 
     let mut index = 0;
     while index < arguments.len() {
-        let word = arguments[index];
+        let Some(word) = arguments.get(index).copied() else {
+            break;
+        };
         index += 1;
         // An option that takes a value consumes the next word here, so that
         // word can never be mistaken for the file name further down.

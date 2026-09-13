@@ -647,7 +647,13 @@ impl SearchTable {
             if folded_any && !crisis && *budget == 0 {
                 break;
             }
-            let input = state.inputs[state.folded].clone();
+            // The loop's own condition proves the index is in range; `get`
+            // says it in the form the compiler keeps true (task-1932, H9 -
+            // reported once `inillucent-ext` was made to deny the four lints,
+            // because clippy then walked this crate too).
+            let Some(input) = state.inputs.get(state.folded).cloned() else {
+                break;
+            };
             let segment = merge::load_segment(context, &self.store, &self.options, input.id)?;
             let (_inserted, recorded) =
                 merge::fold_segment_recording(&mut accumulator, &segment, &input.tombstoned)?;

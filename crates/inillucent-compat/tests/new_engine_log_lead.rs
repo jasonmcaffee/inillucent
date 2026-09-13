@@ -65,7 +65,9 @@ fn fixture(tag: &str) -> Option<PathBuf> {
 #[test]
 fn an_index_build_bigger_than_the_pool_completes() {
     let Some(path) = fixture("index-build") else {
-        eprintln!("the medium fixture is not built; run build-fixtures first");
+        inillucent_compat::differential::skipping(
+            "the medium fixture is not built; run `tools/build-gate-fixtures.sh _agent_output/fixtures`",
+        );
         return;
     };
     let mut database = ImportedDatabase::import_with(path, 32_768, FRAMES)
@@ -107,7 +109,9 @@ fn an_index_build_bigger_than_the_pool_completes() {
 #[test]
 fn an_index_build_survives_a_reopen() {
     let Some(path) = fixture("index-reopen") else {
-        eprintln!("the medium fixture is not built; run build-fixtures first");
+        inillucent_compat::differential::skipping(
+            "the medium fixture is not built; run `tools/build-gate-fixtures.sh _agent_output/fixtures`",
+        );
         return;
     };
     let mut database = ImportedDatabase::import_with(path, 32_768, FRAMES)

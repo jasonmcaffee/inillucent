@@ -169,7 +169,7 @@ fn the_catalog_reads_a_real_schema() {
             "CREATE VIEW v AS SELECT a FROM t",
         ],
     ) else {
-        eprintln!("the pinned SQLite oracle is not built; skipping");
+        inillucent_compat::differential::skipping("the pinned SQLite oracle is not built");
         return;
     };
     let database = open(&path);
@@ -258,7 +258,7 @@ fn an_automatic_index_gets_its_declared_key_order() {
         "autoindex.db",
         &["CREATE TABLE t (a TEXT UNIQUE, b TEXT, UNIQUE (b, a))"],
     ) else {
-        eprintln!("the pinned SQLite oracle is not built; skipping");
+        inillucent_compat::differential::skipping("the pinned SQLite oracle is not built");
         return;
     };
     let database = open(&path);
@@ -313,7 +313,7 @@ fn a_schema_change_recompiles_a_prepared_statement() {
             "INSERT INTO t VALUES (1, 'one')",
         ],
     ) else {
-        eprintln!("the pinned SQLite oracle is not built; skipping");
+        inillucent_compat::differential::skipping("the pinned SQLite oracle is not built");
         return;
     };
     let database = open(&path);
@@ -375,7 +375,7 @@ fn a_dropped_table_is_reported_rather_than_read() {
             "INSERT INTO t VALUES (1)",
         ],
     ) else {
-        eprintln!("the pinned SQLite oracle is not built; skipping");
+        inillucent_compat::differential::skipping("the pinned SQLite oracle is not built");
         return;
     };
     let database = open(&path);
@@ -412,7 +412,7 @@ fn an_unchanged_schema_does_not_recompile() {
             "INSERT INTO t VALUES (1)",
         ],
     ) else {
-        eprintln!("the pinned SQLite oracle is not built; skipping");
+        inillucent_compat::differential::skipping("the pinned SQLite oracle is not built");
         return;
     };
     let database = open(&path);
@@ -456,7 +456,7 @@ fn an_unparseable_schema_row_names_its_object_and_the_reason() {
             "PRAGMA writable_schema = OFF",
         ],
     ) else {
-        eprintln!("the pinned SQLite oracle is not built; skipping");
+        inillucent_compat::differential::skipping("the pinned SQLite oracle is not built");
         return;
     };
     let failure = match Database::import(&path) {

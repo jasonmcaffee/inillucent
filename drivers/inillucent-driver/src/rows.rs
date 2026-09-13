@@ -24,6 +24,11 @@
 //! costs what the whole result costs, because that is what the engine
 //! underneath does. A caller that cannot afford it puts a `LIMIT` in its own SQL,
 //! where the planner can act on it.
+//!
+//! Invariant: **one value describes every kind of statement, and the fields a
+//! statement did not fill are empty rather than absent.** A consumer draws one
+//! thing whether it ran a `SELECT`, a write or an `INSERT ... RETURNING`, so
+//! there is no shape to branch on before reading an answer.
 
 use std::time::Duration;
 

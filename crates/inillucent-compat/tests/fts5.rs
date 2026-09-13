@@ -330,7 +330,7 @@ fn the_settings_are_written_to_the_config_table() {
 #[test]
 fn a_tokenizer_this_build_has_not_got_is_refused_rather_than_substituted() {
     let Some(program) = inillucent_compat::differential::sqlite_oracle() else {
-        eprintln!("the pinned SQLite oracle is not built; skipping");
+        inillucent_compat::differential::skipping("the pinned SQLite oracle is not built");
         return;
     };
     // What SQLite does with the same statements.

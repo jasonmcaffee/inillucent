@@ -92,39 +92,42 @@ pub fn home() -> PathBuf {
 /// usually a container, and a container that can still install into the working
 /// directory is more useful than one that refuses.
 fn platform_home() -> Option<PathBuf> {
+    // **One binding per platform rather than one `return` per platform.** Only
+    // one of the three is compiled, so each was the function's whole body and
+    // each ended with a `return` that clippy reads as needless - correctly, in
+    // the sense that a block ending in `return` says with a keyword what a tail
+    // expression says by position. The bindings say the same thing and leave
+    // the value where the compiler can see it (task-1932, H9).
     #[cfg(windows)]
-    {
-        if let Some(local) = non_empty_var("LOCALAPPDATA") {
-            return Some(PathBuf::from(local).join("inillucent"));
-        }
-        return non_empty_var("USERPROFILE").map(|p| {
-            PathBuf::from(p)
-                .join("AppData")
-                .join("Local")
-                .join("inillucent")
+    let found = non_empty_var("LOCALAPPDATA")
+        .map(|local| PathBuf::from(local).join("inillucent"))
+        .or_else(|| {
+            non_empty_var("USERPROFILE").map(|p| {
+                PathBuf::from(p)
+                    .join("AppData")
+                    .join("Local")
+                    .join("inillucent")
+            })
         });
-    }
     #[cfg(target_os = "macos")]
-    {
-        return non_empty_var("HOME").map(|p| {
-            PathBuf::from(p)
-                .join("Library")
-                .join("Application Support")
-                .join("inillucent")
-        });
-    }
+    let found = non_empty_var("HOME").map(|p| {
+        PathBuf::from(p)
+            .join("Library")
+            .join("Application Support")
+            .join("inillucent")
+    });
     #[cfg(not(any(windows, target_os = "macos")))]
-    {
-        if let Some(data) = non_empty_var("XDG_DATA_HOME") {
-            return Some(PathBuf::from(data).join("inillucent"));
-        }
-        return non_empty_var("HOME").map(|p| {
-            PathBuf::from(p)
-                .join(".local")
-                .join("share")
-                .join("inillucent")
+    let found = non_empty_var("XDG_DATA_HOME")
+        .map(|data| PathBuf::from(data).join("inillucent"))
+        .or_else(|| {
+            non_empty_var("HOME").map(|p| {
+                PathBuf::from(p)
+                    .join(".local")
+                    .join("share")
+                    .join("inillucent")
+            })
         });
-    }
+    found
 }
 
 /// Where ONNX Runtime installs go, one directory per version.

@@ -368,7 +368,6 @@ fn with_inillucent<T>(
             .map_err(|error| format!("{pragma}: {}", error.message()))?;
     }
     let result = body(&connection)?;
-    drop(connection);
     // Checkpointed on every call, not only the pristine build: it is cheap
     // next to a workload round, it runs after every timed sample is already
     // collected so it cannot skew a measurement, and a working copy that gets

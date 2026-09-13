@@ -12,6 +12,11 @@
 //! driver choosing a float's formatting on the application's behalf, and the
 //! application parsing it back if it wanted the number. So the five arrive as
 //! five, which is also what `rusqlite` gives the same consumer today.
+//!
+//! Invariant: **a value keeps the type the engine gave it, all the way to the
+//! caller.** Rendering it as text and parsing it back is where a storage class
+//! is lost, and the loss is silent: an integer that arrives as a string still
+//! prints correctly and no longer compares correctly.
 
 use inillucent_engine::Value as EngineValue;
 

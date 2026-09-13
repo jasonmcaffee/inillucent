@@ -185,6 +185,11 @@ fn acquire(manual: bool) -> DbResult<SecHandle> {
         true => SCH_CRED_MANUAL_CRED_VALIDATION,
         false => SCH_CRED_AUTO_CRED_VALIDATION,
     };
+    // SAFETY: `SCHANNEL_CRED` is a plain C structure of integers, unions and raw
+    // pointers with no `Drop`, no reference and no niche, so every byte
+    // pattern is a valid value of it. All zeroes is what the Win32 headers
+    // themselves initialise one to before filling in `cbSize`, which is the
+    // next statement.
     let mut description: SCHANNEL_CRED = unsafe { std::mem::zeroed() };
     description.dwVersion = SCHANNEL_CRED_VERSION;
     description.dwFlags = SCH_USE_STRONG_CRYPTO | SCH_CRED_NO_DEFAULT_CREDS | validation;
@@ -443,6 +448,11 @@ fn finish(
     requested: u32,
 ) -> DbResult<Session> {
     let _ = requested;
+    // SAFETY: `SecPkgContext_StreamSizes` is a plain C structure of integers, unions and raw
+    // pointers with no `Drop`, no reference and no niche, so every byte
+    // pattern is a valid value of it. All zeroes is what the Win32 headers
+    // themselves initialise one to before filling in `cbSize`, which is the
+    // next statement.
     let mut sizes: SecPkgContext_StreamSizes = unsafe { std::mem::zeroed() };
     // SAFETY: the context is established, and `sizes` is a live local of the
     // type this attribute writes.
@@ -576,6 +586,11 @@ fn verify_against(certificate: *mut CERT_CONTEXT, host: &str, root: &[u8]) -> Db
     // which is exactly what naming an authority means - and it is stricter than
     // the machine store, not weaker: nothing else is trusted for this
     // connection.
+    // SAFETY: `CERT_CHAIN_ENGINE_CONFIG` is a plain C structure of integers, unions and raw
+    // pointers with no `Drop`, no reference and no niche, so every byte
+    // pattern is a valid value of it. All zeroes is what the Win32 headers
+    // themselves initialise one to before filling in `cbSize`, which is the
+    // next statement.
     let mut configuration: CERT_CHAIN_ENGINE_CONFIG = unsafe { std::mem::zeroed() };
     configuration.cbSize = size_of::<CERT_CHAIN_ENGINE_CONFIG>() as u32;
     configuration.hExclusiveRoot = store;
@@ -627,15 +642,30 @@ fn verify_against(certificate: *mut CERT_CONTEXT, host: &str, root: &[u8]) -> Db
 
     let mut name: Vec<u16> = host.encode_utf16().collect();
     name.push(0);
+    // SAFETY: `HTTPSPolicyCallbackData` is a plain C structure of integers, unions and raw
+    // pointers with no `Drop`, no reference and no niche, so every byte
+    // pattern is a valid value of it. All zeroes is what the Win32 headers
+    // themselves initialise one to before filling in `cbSize`, which is the
+    // next statement.
     let mut https: HTTPSPolicyCallbackData = unsafe { std::mem::zeroed() };
     // The first field is a union of two names for the same `u32`, which is
     // what the header does; either arm writes the same bytes.
     https.Anonymous.cbStruct = size_of::<HTTPSPolicyCallbackData>() as u32;
     https.dwAuthType = AUTHTYPE_SERVER;
     https.pwszServerName = name.as_mut_ptr();
+    // SAFETY: `CERT_CHAIN_POLICY_PARA` is a plain C structure of integers, unions and raw
+    // pointers with no `Drop`, no reference and no niche, so every byte
+    // pattern is a valid value of it. All zeroes is what the Win32 headers
+    // themselves initialise one to before filling in `cbSize`, which is the
+    // next statement.
     let mut policy: CERT_CHAIN_POLICY_PARA = unsafe { std::mem::zeroed() };
     policy.cbSize = size_of::<CERT_CHAIN_POLICY_PARA>() as u32;
     policy.pvExtraPolicyPara = (&mut https as *mut HTTPSPolicyCallbackData).cast();
+    // SAFETY: `CERT_CHAIN_POLICY_STATUS` is a plain C structure of integers, unions and raw
+    // pointers with no `Drop`, no reference and no niche, so every byte
+    // pattern is a valid value of it. All zeroes is what the Win32 headers
+    // themselves initialise one to before filling in `cbSize`, which is the
+    // next statement.
     let mut result: CERT_CHAIN_POLICY_STATUS = unsafe { std::mem::zeroed() };
     result.cbSize = size_of::<CERT_CHAIN_POLICY_STATUS>() as u32;
     // SAFETY: the chain is live, and both structures are correctly sized

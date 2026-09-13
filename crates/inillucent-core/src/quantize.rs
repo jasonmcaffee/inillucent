@@ -10,9 +10,15 @@
 //! One scale per vector, symmetric. The vectors are already L2 normalized so no
 //! component exceeds 1, and a per vector scale of `max(|component|) / 127` uses
 //! the full int8 range without clipping.
+//!
+//! Invariant: **a quantized pass narrows the candidate set and never decides
+//! the answer.** The int8 codes are a filter over which full vectors are worth
+//! reading; the ranking that is returned is always computed from the f32
+//! vectors, so the quantization costs speed and not correctness.
 
 use crate::vectors::{Scorer, VectorSet};
 
+/// One int8 code per component per vector, with a per-vector scale.
 pub struct QuantizedSet {
     dims: usize,
     codes: Vec<i8>,
@@ -20,6 +26,9 @@ pub struct QuantizedSet {
 }
 
 impl QuantizedSet {
+    /// Quantizes a whole vector set.
+    ///
+    /// @param vectors - the full-precision set
     pub fn from_vectors(vectors: &VectorSet) -> QuantizedSet {
         let mut set = QuantizedSet {
             dims: vectors.dims(),
@@ -56,39 +65,56 @@ impl QuantizedSet {
             if read == 0 {
                 break;
             }
-            for nth in 0..read {
-                let v = &buffer[nth * dims..(nth + 1) * dims];
+            // `chunks_exact` rather than a pair of indexes: the buffer was
+            // sized `block * dims`, so the windows are exactly the vectors
+            // (task-1932, H9).
+            for (nth, v) in buffer.chunks_exact(dims).take(read).enumerate() {
                 let peak = v.iter().fold(0f32, |acc, x| acc.max(x.abs()));
                 let scale = if peak > 0.0 { peak / 127.0 } else { 1.0 };
-                self.scales[id + nth] = scale;
-                let base = (id + nth) * dims;
+                let at = id.saturating_add(nth);
+                if let Some(slot) = self.scales.get_mut(at) {
+                    *slot = scale;
+                }
+                let base = at.saturating_mul(dims);
                 for (d, x) in v.iter().enumerate() {
                     // round, then clamp, so a value exactly at the peak lands on 127
                     // rather than overflowing to -128.
                     let q = (x / scale).round().clamp(-127.0, 127.0);
-                    self.codes[base + d] = q as i8;
+                    if let Some(slot) = self.codes.get_mut(base.saturating_add(d)) {
+                        *slot = q as i8;
+                    }
                 }
             }
             id += read;
         }
     }
 
+    /// Returns how many vectors are quantized.
     pub fn len(&self) -> usize {
         self.scales.len()
     }
 
+    /// Reports whether nothing is quantized.
     pub fn is_empty(&self) -> bool {
         self.scales.is_empty()
     }
 
+    /// Returns how much memory the codes and scales occupy, which is what the
+    /// score card reports against the full-precision set.
     pub fn bytes(&self) -> usize {
         self.codes.len() + self.scales.len() * 4
     }
 
+    /// Returns one vector's codes, empty for an identifier this set does not
+    /// hold.
+    ///
+    /// @param id - the chunk identifier
     #[inline]
     fn code(&self, id: u32) -> &[i8] {
-        let s = id as usize * self.dims;
-        &self.codes[s..s + self.dims]
+        let s = (id as usize).saturating_mul(self.dims);
+        self.codes
+            .get(s..s.saturating_add(self.dims))
+            .unwrap_or(&[])
     }
 
     /// Approximate similarity between a stored vector and a full precision query.
@@ -98,27 +124,44 @@ impl QuantizedSet {
     #[inline]
     pub fn similarity(&self, id: u32, query: &[f32]) -> f32 {
         let code = self.code(id);
-        let scale = self.scales[id as usize];
+        let Some(scale) = self.scales.get(id as usize).copied() else {
+            return 0.0;
+        };
         let mut s0 = 0f32;
         let mut s1 = 0f32;
         let mut s2 = 0f32;
         let mut s3 = 0f32;
-        let chunks = self.dims / 4;
-        for i in 0..chunks {
-            let j = i * 4;
-            s0 += code[j] as f32 * query[j];
-            s1 += code[j + 1] as f32 * query[j + 1];
-            s2 += code[j + 2] as f32 * query[j + 2];
-            s3 += code[j + 3] as f32 * query[j + 3];
+        // The same four accumulator chains `distance::dot` uses, and the same
+        // reason for `chunks_exact`: a fixed-width window has no bound to check,
+        // which is what lets the compiler emit SIMD (task-1932, H9).
+        for (c, q) in code.chunks_exact(4).zip(query.chunks_exact(4)) {
+            let [c0, c1, c2, c3] = *<&[i8; 4]>::try_from(c).unwrap_or(&[0; 4]);
+            let [q0, q1, q2, q3] = *<&[f32; 4]>::try_from(q).unwrap_or(&[0.0; 4]);
+            s0 += f32::from(c0) * q0;
+            s1 += f32::from(c1) * q1;
+            s2 += f32::from(c2) * q2;
+            s3 += f32::from(c3) * q3;
         }
         let mut acc = (s0 + s1) + (s2 + s3);
-        for j in (chunks * 4)..self.dims {
-            acc += code[j] as f32 * query[j];
+        for (c, q) in code
+            .chunks_exact(4)
+            .remainder()
+            .iter()
+            .zip(query.chunks_exact(4).remainder())
+        {
+            acc += f32::from(*c) * q;
         }
         acc * scale
     }
 
     #[inline]
+    /// Returns the approximate distance between one code and a query.
+    ///
+    /// Approximate is the whole point: this narrows the candidate set, and the
+    /// ranking that is returned is always recomputed from the full vectors.
+    ///
+    /// @param id - the chunk identifier
+    /// @param query - the query vector
     pub fn distance(&self, id: u32, query: &[f32]) -> f32 {
         1.0 - self.similarity(id, query)
     }
@@ -210,7 +253,10 @@ mod tests {
 
         let want: std::collections::HashSet<u32> = exact[..10].iter().copied().collect();
         let overlap = approx[..10].iter().filter(|c| want.contains(c)).count();
-        assert!(overlap >= 9, "only {overlap} of the top 10 survived quantization");
+        assert!(
+            overlap >= 9,
+            "only {overlap} of the top 10 survived quantization"
+        );
     }
 
     #[test]

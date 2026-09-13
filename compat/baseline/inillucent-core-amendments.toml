@@ -62,9 +62,9 @@ sha256 = "842d244348c2676dea0a9e35468f621fdd4b57d7998a2cf072bc86825d846bf3"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/models.rs"
-ticket = "embedding model head to head grading"
-reason = "The grading harness was generalised from one embedding model to a head-to-head between several, matching the success criteria the design document set for that comparison. A model is now a manifest (id, width, Matryoshka widths, four prefixes, pooling, token bound, backend, output, tokenizer and weights digests) instead of a set of constants; a cache carries a header naming the corpus digest, the model, the manifest digest and the truncation it performed; grade-embedding compares two or more caches and refuses before it starts unless they agree on corpus, chunk count and query seeds; and the embedder gained CLS and last-token pooling, graph-driven inputs, and a llama.cpp backend for the one model with no ONNX export. ModelManifest::nomic_v1_5() reproduces every constant it replaced: the fresh baseline cache agrees with the August run at cosine 1.000000 minimum over 5000 chunks, and grade's card is unchanged on every measurement row."
-sha256 = "0248ed0dc494e9a815edcf5aa19166add598639b62640830bfcc1a3138925a32"
+ticket = "task-1932"
+reason = "H10: the five skip messages end with the one marker inillucent-testrun matches, so a run without the arms installed is visible to --strict."
+sha256 = "d4ec67f955639ec22f396010da40b0647ec92a55b5846db7aad28f6ea0210f22"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/queryset.rs"
@@ -117,80 +117,92 @@ sha256 = "eba4b8ecea88ebb6f04d3b601a41e608e497c4e2a7b5d0b2a1accc9b2427cfac"
 [[amendment]]
 path = "crates/inillucent-core/src/binio.rs"
 ticket = "task-1932"
-reason = "H4: every reader sized its buffer from a length read out of the file and allocated it before read_exact found out whether the bytes were there, which aborts the process through handle_alloc_error rather than returning an error. read_records grows the buffer as the bytes arrive."
-sha256 = "6c314a0aab48a0955055f8ab752087ea1f1f57cdcdff32c9eeadb1d8aa9ec2f4"
+reason = "H9: inillucent-core joins GOVERNED. The four panic lints and deny(missing_docs) are now on the crate, every module states its invariant, 167 doc comments were written and every indexing, slicing, unwrap and expect site the lints report is rewritten."
+sha256 = "7ba311eed102be8d6abb5afaeb1f8ebda37ddf493fed90f3822433d84a5c52c0"
 
 [[amendment]]
 path = "crates/inillucent-core/src/bm25.rs"
-ticket = "task-1911"
-reason = "Roadmap item 10 phase 2: a size tiered merge checkpoints across several commits, and a checkpoint needs to record exactly what one fold changed rather than re-derive it later. bm25.rs gains Bm25Index::start_recording/drain_recording and LexicalDelta so a checkpoint's added postings and positions can be replayed without re-tokenising. hnsw.rs gains the graph side of the same recording (drained adjacency lists and apply_touched). index.rs adds the seam persist.rs's new segment delta format (KIND_SEGMENT_DELTA) replays through: start_recording, drain_graph_recording, drain_lexical_recording, append_store_and_vectors, apply_graph_recording, apply_lexical_recording. persist.rs adds the segment delta chain itself: a checkpoint's bytes are a pointer to whatever it continues plus only the rows that checkpoint folded, so writing the newest link never touches an earlier one, while the store and vectors replay as cheap operations and the graph and lexical index replay as recorded content rather than re-running the fold. crates/inillucent-compat/tests/segment_delta_chain.rs is the test added for it. No existing file format changes shape: KIND_STREAM is untouched."
-sha256 = "e62ae829cb230651d13a6c318472b61ed60b8ffbf6234881f5c9b882d56d8bdb"
+ticket = "task-1932"
+reason = "H9: inillucent-core joins GOVERNED. The four panic lints and deny(missing_docs) are now on the crate, every module states its invariant, 167 doc comments were written and every indexing, slicing, unwrap and expect site the lints report is rewritten."
+sha256 = "73979a6f4daf14e69162b8ffb1d73f286d6ea53c5e8d2f32ab9c0a3dbdf567dd"
 
 [[amendment]]
 path = "crates/inillucent-core/src/distance.rs"
-ticket = "task-1911"
-reason = "A second distance, L2, was added to the vector index alongside cosine. Cosine remains the default: Metric::default() is Cosine, IndexConfig::default() sets metric: Metric::Cosine, and a generation saved before this field existed has no metric key in its config.bin at all, which SavedConfig::metric reads as cosine rather than refusing (a_generation_with_no_stored_metric_reads_as_cosine proves it, and an_index_declares_cosine_by_default proves the same for a table that never named a metric). No FORMAT_VERSION bump: bumping it would refuse every existing generation outright, the opposite of reading the old one as cosine. VectorSet now carries its metric and normalizes at push only for cosine, since L2 needs the raw magnitude a normalized vector would have thrown away. flat.rs::streaming_search had a real bug this surfaced: it computed 1.0 - dot(stored, query) unconditionally, which is cosine distance whatever metric the set was actually built under, so an L2 set read through the filed, unfiltered scan path was silently scored as cosine. It now calls vectors.distance_of(stored, query), which reads the set's own metric the way every other path already did; a_filed_l2_set_streams_through_the_l2_metric_not_cosine pins it."
-sha256 = "21690ac3916cb680f690ec8496ea9c4ae0b04c75339c4b926f63dc957180ef7d"
+ticket = "task-1932"
+reason = "H9: inillucent-core joins GOVERNED. The four panic lints and deny(missing_docs) are now on the crate, every module states its invariant, 167 doc comments were written and every indexing, slicing, unwrap and expect site the lints report is rewritten."
+sha256 = "8419ddb6b738d8b4a0bfe61fa757ca4ff715d4e2cf26a431138df0b5fc4996a5"
+
+[[amendment]]
+path = "crates/inillucent-core/src/embed.rs"
+ticket = "task-1932"
+reason = "H9: inillucent-core joins GOVERNED. The four panic lints and deny(missing_docs) are now on the crate, every module states its invariant, 167 doc comments were written and every indexing, slicing, unwrap and expect site the lints report is rewritten."
+sha256 = "3f8c9918845848bba6c58be46c3b9c47a97f72ad4847bdfb707c1091cae10ccb"
 
 [[amendment]]
 path = "crates/inillucent-core/src/embed_onnx.rs"
-ticket = "task-1900"
-reason = "graph optimization level as an option, and the installed runtime handed to ort::init_from so no variable has to be exported"
-sha256 = "df2e6457fb96a18a2bd84827c7bf45965590e8539f5f7c1a54505cefe400acf3"
+ticket = "task-1932"
+reason = "H9: inillucent-core joins GOVERNED - the four panic lints, deny(missing_docs), a stated invariant, and every indexing site rewritten."
+sha256 = "926aac0e7a3b05f21106de0fd197e7bf974f01afeea70489ca989650a2584268"
+
+[[amendment]]
+path = "crates/inillucent-core/src/filter.rs"
+ticket = "task-1932"
+reason = "H9: inillucent-core joins GOVERNED. The four panic lints and deny(missing_docs) are now on the crate, every module states its invariant, 167 doc comments were written and every indexing, slicing, unwrap and expect site the lints report is rewritten."
+sha256 = "ebc03fa6021757518f75a054a2da2f7e2d3eed573de5cd34900f768c65b65d54"
 
 [[amendment]]
 path = "crates/inillucent-core/src/flat.rs"
-ticket = "task-1911"
-reason = "A second distance, L2, was added to the vector index alongside cosine. Cosine remains the default: Metric::default() is Cosine, IndexConfig::default() sets metric: Metric::Cosine, and a generation saved before this field existed has no metric key in its config.bin at all, which SavedConfig::metric reads as cosine rather than refusing (a_generation_with_no_stored_metric_reads_as_cosine proves it, and an_index_declares_cosine_by_default proves the same for a table that never named a metric). No FORMAT_VERSION bump: bumping it would refuse every existing generation outright, the opposite of reading the old one as cosine. VectorSet now carries its metric and normalizes at push only for cosine, since L2 needs the raw magnitude a normalized vector would have thrown away. flat.rs::streaming_search had a real bug this surfaced: it computed 1.0 - dot(stored, query) unconditionally, which is cosine distance whatever metric the set was actually built under, so an L2 set read through the filed, unfiltered scan path was silently scored as cosine. It now calls vectors.distance_of(stored, query), which reads the set's own metric the way every other path already did; a_filed_l2_set_streams_through_the_l2_metric_not_cosine pins it."
-sha256 = "c4792393d0125e39981850b77196cb6085726b3ac871ec29097b8af27814ab1e"
+ticket = "task-1932"
+reason = "H9: inillucent-core joins GOVERNED. The four panic lints and deny(missing_docs) are now on the crate, every module states its invariant, 167 doc comments were written and every indexing, slicing, unwrap and expect site the lints report is rewritten."
+sha256 = "d810fc3c331f916f171ce7edd7f3f7989156cdb31f819203b740b892f3343a1c"
 
 [[amendment]]
 path = "crates/inillucent-core/src/hnsw.rs"
-ticket = "task-1911"
-reason = "Roadmap item 10 phase 2: a size tiered merge checkpoints across several commits, and a checkpoint needs to record exactly what one fold changed rather than re-derive it later. bm25.rs gains Bm25Index::start_recording/drain_recording and LexicalDelta so a checkpoint's added postings and positions can be replayed without re-tokenising. hnsw.rs gains the graph side of the same recording (drained adjacency lists and apply_touched). index.rs adds the seam persist.rs's new segment delta format (KIND_SEGMENT_DELTA) replays through: start_recording, drain_graph_recording, drain_lexical_recording, append_store_and_vectors, apply_graph_recording, apply_lexical_recording. persist.rs adds the segment delta chain itself: a checkpoint's bytes are a pointer to whatever it continues plus only the rows that checkpoint folded, so writing the newest link never touches an earlier one, while the store and vectors replay as cheap operations and the graph and lexical index replay as recorded content rather than re-running the fold. crates/inillucent-compat/tests/segment_delta_chain.rs is the test added for it. No existing file format changes shape: KIND_STREAM is untouched."
-sha256 = "7f9fa8c37649f5903e849e84bd8b8b7e08260634e1465044d6a787e56fd078a0"
+ticket = "task-1932"
+reason = "H9: inillucent-core joins GOVERNED. The four panic lints and deny(missing_docs) are now on the crate, every module states its invariant, 167 doc comments were written and every indexing, slicing, unwrap and expect site the lints report is rewritten."
+sha256 = "a4d99646ff64db703b75d41c8cbc1402c5ffd1d49bbeb4bfb0997af8d72c2161"
 
 [[amendment]]
 path = "crates/inillucent-core/src/index.rs"
-ticket = "task-1911"
-reason = "Roadmap item 10 phase 2: a size tiered merge checkpoints across several commits, and a checkpoint needs to record exactly what one fold changed rather than re-derive it later. bm25.rs gains Bm25Index::start_recording/drain_recording and LexicalDelta so a checkpoint's added postings and positions can be replayed without re-tokenising. hnsw.rs gains the graph side of the same recording (drained adjacency lists and apply_touched). index.rs adds the seam persist.rs's new segment delta format (KIND_SEGMENT_DELTA) replays through: start_recording, drain_graph_recording, drain_lexical_recording, append_store_and_vectors, apply_graph_recording, apply_lexical_recording. persist.rs adds the segment delta chain itself: a checkpoint's bytes are a pointer to whatever it continues plus only the rows that checkpoint folded, so writing the newest link never touches an earlier one, while the store and vectors replay as cheap operations and the graph and lexical index replay as recorded content rather than re-running the fold. crates/inillucent-compat/tests/segment_delta_chain.rs is the test added for it. No existing file format changes shape: KIND_STREAM is untouched."
-sha256 = "6ae6663b3366fabc2147737c960292d4ff6c69f3ec574e50e159cb48faf9c5a1"
+ticket = "task-1932"
+reason = "H9: inillucent-core joins GOVERNED. The four panic lints and deny(missing_docs) are now on the crate, every module states its invariant, 167 doc comments were written and every indexing, slicing, unwrap and expect site the lints report is rewritten."
+sha256 = "614568b7fd682911a0a71a50a99fc0bf62855416fc6265e271301c7daa03ff10"
 
 [[amendment]]
 path = "crates/inillucent-core/src/install.rs"
-ticket = "task-1900"
-reason = "new: one definition of where the installer puts the ONNX runtime and the weights, read by both the setup command and the engine"
-sha256 = "67143bb1b55c9dc0ae1ae6fef9dcc8e8106e8f1a9810b3b5347a193cab8806e7"
+ticket = "task-1932"
+reason = "H9: inillucent-core joins GOVERNED. The four panic lints and deny(missing_docs) are now on the crate, every module states its invariant, 167 doc comments were written and every indexing, slicing, unwrap and expect site the lints report is rewritten."
+sha256 = "bca2361cd7836628ccad19bf953f0dd0ea68035697d11e8295f6aaeeea15a5d9"
 
 [[amendment]]
 path = "crates/inillucent-core/src/lib.rs"
-ticket = "task-1900"
-reason = "declares the two new modules"
-sha256 = "9bfa4a57827eeea253e226ababa9c821ce63188f0b60748c9b8d7a6491156db6"
+ticket = "task-1932"
+reason = "H9: inillucent-core joins GOVERNED. The four panic lints and deny(missing_docs) are now on the crate, every module states its invariant, 167 doc comments were written and every indexing, slicing, unwrap and expect site the lints report is rewritten."
+sha256 = "684d92dc2622ba9bd7c5032c224a3848c81d5d1531846ab355560c9de4e4896d"
 
 [[amendment]]
 path = "crates/inillucent-core/src/model.rs"
-ticket = "task-1900"
-reason = "ModelManifest::read and write, so a manifest is read one way rather than three"
-sha256 = "c37a0472de14fd72bb3c352626b7d898fa3f459849b2014725c3dae80dca289b"
+ticket = "task-1932"
+reason = "H9: inillucent-core joins GOVERNED. The four panic lints and deny(missing_docs) are now on the crate, every module states its invariant, 167 doc comments were written and every indexing, slicing, unwrap and expect site the lints report is rewritten."
+sha256 = "194dc2057506af2b35c24b0a846baad8ae6848c42f4761268e1eeb51e3c9bd02"
 
 [[amendment]]
 path = "crates/inillucent-core/src/persist.rs"
 ticket = "task-1932"
-reason = "H4: read_section allocated up to a terabyte from a length read out of the file, and the vectors section multiplied two u32s from the file without checking for overflow. Both now read through binio::read_records, and the ceiling comes down from 1 TiB to 64 GiB."
-sha256 = "4d818a49e595244d2cef72440ebaa4266c159a056861d3b8821085f3f2879c64"
+reason = "H4 and H9: read_section reads in bounded steps rather than allocating from a length in the file, and the module states its invariant."
+sha256 = "d5e083f0201f99c0cea97eefa8c600d43eb34c8092f0c554be7dc3e151d6f67d"
 
 [[amendment]]
 path = "crates/inillucent-core/src/quantize.rs"
-ticket = "vector access through the file"
-reason = "Quantisation reads its input through the vector set's accessor, so it works on a filed set as well as a resident one."
-sha256 = "28f4bda2e54cc9a3acd710a9fce2ba9799f4197b7a1fdf8b2025aa6b012bf154"
+ticket = "task-1932"
+reason = "H9: inillucent-core joins GOVERNED. The four panic lints and deny(missing_docs) are now on the crate, every module states its invariant, 167 doc comments were written and every indexing, slicing, unwrap and expect site the lints report is rewritten."
+sha256 = "517f350546cefd93b6bb6990af0a7ee1cd1e8a488ac6caac5369a8ae7379ae04"
 
 [[amendment]]
 path = "crates/inillucent-core/src/rank.rs"
-ticket = "strict lint remediation"
-reason = "M8: targeted clippy fixes under the workspace lint table, re-applied after an accidental format pass was reverted"
-sha256 = "51d5e74fa721f236ec30f3ef6beb768c9667c118a195195a782c5e883518a129"
+ticket = "task-1932"
+reason = "H9: inillucent-core joins GOVERNED. The four panic lints and deny(missing_docs) are now on the crate, every module states its invariant, 167 doc comments were written and every indexing, slicing, unwrap and expect site the lints report is rewritten."
+sha256 = "b38cdc74333611b5ad6d08630b5a9d6421ba0278366b5d464f1612eee72e8bbf"
 
 [[amendment]]
 path = "crates/inillucent-core/src/residency.rs"
@@ -199,10 +211,22 @@ reason = "new: resident, on-demand and idle profiles for when the 522 MB model i
 sha256 = "81026d0f20007ef65eb5c690e89098b95a0b978ebade7999ab95a2c8ccbc957c"
 
 [[amendment]]
+path = "crates/inillucent-core/src/store.rs"
+ticket = "task-1932"
+reason = "H9: inillucent-core joins GOVERNED. The four panic lints and deny(missing_docs) are now on the crate, every module states its invariant, 167 doc comments were written and every indexing, slicing, unwrap and expect site the lints report is rewritten."
+sha256 = "ce6c9509c733b83ca3cec323033732a7b9788cb1b650fcfd082f8c847c64d807"
+
+[[amendment]]
+path = "crates/inillucent-core/src/tokenize.rs"
+ticket = "task-1932"
+reason = "H9: inillucent-core joins GOVERNED. The four panic lints and deny(missing_docs) are now on the crate, every module states its invariant, 167 doc comments were written and every indexing, slicing, unwrap and expect site the lints report is rewritten."
+sha256 = "f99b751ad938c3e0a8309fd8084bdc32016ee8303ff178b2fc5de99987477be6"
+
+[[amendment]]
 path = "crates/inillucent-core/src/vectors.rs"
-ticket = "task-1911"
-reason = "A second distance, L2, was added to the vector index alongside cosine. Cosine remains the default: Metric::default() is Cosine, IndexConfig::default() sets metric: Metric::Cosine, and a generation saved before this field existed has no metric key in its config.bin at all, which SavedConfig::metric reads as cosine rather than refusing (a_generation_with_no_stored_metric_reads_as_cosine proves it, and an_index_declares_cosine_by_default proves the same for a table that never named a metric). No FORMAT_VERSION bump: bumping it would refuse every existing generation outright, the opposite of reading the old one as cosine. VectorSet now carries its metric and normalizes at push only for cosine, since L2 needs the raw magnitude a normalized vector would have thrown away. flat.rs::streaming_search had a real bug this surfaced: it computed 1.0 - dot(stored, query) unconditionally, which is cosine distance whatever metric the set was actually built under, so an L2 set read through the filed, unfiltered scan path was silently scored as cosine. It now calls vectors.distance_of(stored, query), which reads the set's own metric the way every other path already did; a_filed_l2_set_streams_through_the_l2_metric_not_cosine pins it."
-sha256 = "eb4540b34c928902dc7b3ea5adb75973cd35181b1b62334fe6d71af79b423a05"
+ticket = "task-1932"
+reason = "H9: inillucent-core joins GOVERNED. The four panic lints and deny(missing_docs) are now on the crate, every module states its invariant, 167 doc comments were written and every indexing, slicing, unwrap and expect site the lints report is rewritten."
+sha256 = "6784023d2abb05e4d0a5ddf644c92aaf0656a03f937b82fdbb058f52bd30da8f"
 
 [[amendment]]
 path = "inillucent-scorecard.json"

@@ -5,17 +5,37 @@
 //! embedded once and the same bytes go to the cache and to the database. If each
 //! engine embedded independently, a score difference could come from the embedder,
 //! and the harness would be measuring the embedding model instead of the index.
+//!
+//! Invariant: **the engine never embeds anything itself.** It takes vectors,
+//! which is what lets a comparison hand both engines the identical bytes: a
+//! score difference then comes from retrieval and cannot come from the
+//! embedder.
 
 use crate::distance::truncate_normalized;
 
+/// The full width `nomic-embed-text-v1.5` outputs.
 pub const NOMIC_DIMS: usize = 768;
 /// Widths the Matryoshka training makes usable. A prefix of the embedding is
 /// itself an embedding, once renormalized.
 pub const MATRYOSHKA_WIDTHS: &[usize] = &[64, 128, 256, 512, 768];
 
+/// Whatever turns text into vectors.
+///
+/// A document and a query are embedded by different calls because the model is
+/// trained with a different prefix for each, and using one for the other
+/// measurably degrades retrieval.
 pub trait Embedder {
+    /// Embeds a batch of documents.
+    ///
+    /// @param texts - the documents, already chunked
     fn embed_documents(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>>;
+
+    /// Embeds one query.
+    ///
+    /// @param text - the query
     fn embed_query(&self, text: &str) -> anyhow::Result<Vec<f32>>;
+
+    /// Returns how wide the vectors this embedder produces are.
     fn dimensions(&self) -> usize;
 }
 
@@ -25,6 +45,9 @@ pub fn document_prefix(text: &str) -> String {
     format!("search_document: {text}")
 }
 
+/// Returns a query with the prefix the model is trained to see on one.
+///
+/// @param text - the query
 pub fn query_prefix(text: &str) -> String {
     format!("search_query: {text}")
 }
@@ -36,6 +59,9 @@ pub struct PrecomputedEmbedder {
 }
 
 impl PrecomputedEmbedder {
+    /// Returns an embedder that narrows to one width.
+    ///
+    /// @param dims - the width, which must be one of [`MATRYOSHKA_WIDTHS`]
     pub fn new(dims: usize) -> Self {
         PrecomputedEmbedder { dims }
     }

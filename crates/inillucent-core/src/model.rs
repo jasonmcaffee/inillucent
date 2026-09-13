@@ -18,6 +18,12 @@
 //! Nothing here hashes anything. The digest fields are carried as data, computed
 //! by whoever has a hash function and a file to read, because this crate is a
 //! leaf with no dependencies to spend on one.
+//!
+//! Invariant: **a model's width, prefixes, pooling and truncation bound travel
+//! together as data.** They were constants and a string literal in three
+//! report files, which is fine for one model and exactly wrong for two: a
+//! constant that describes one of them describes the other incorrectly, and
+//! nothing says so.
 
 use serde::{Deserialize, Serialize};
 
@@ -30,9 +36,13 @@ use serde::{Deserialize, Serialize};
 /// caller.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Prefixes {
+    /// What a query is prefixed with.
     pub query: String,
+    /// What a document is prefixed with.
     pub document: String,
+    /// What text being clustered is prefixed with.
     pub clustering: String,
+    /// What text being classified is prefixed with.
     pub classification: String,
 }
 
@@ -132,7 +142,9 @@ pub struct ModelManifest {
     /// The widths the model was trained to be truncated to. A model with no
     /// Matryoshka training lists only its full width.
     pub mrl_widths: Vec<usize>,
+    /// The four task prefixes this model was trained with.
     pub prefixes: Prefixes,
+    /// How the token vectors become one vector.
     pub pooling: Pooling,
     /// Longest sequence handed to the model. Chunks above it are truncated, and
     /// the card prints how many were, so a model that quietly saw less text than
@@ -259,8 +271,12 @@ impl ModelManifest {
     /// The widths a Matryoshka lane should report, always ascending and always
     /// ending at the model's full width even when the manifest forgot to say so.
     pub fn widths(&self) -> Vec<usize> {
-        let mut widths: Vec<usize> =
-            self.mrl_widths.iter().copied().filter(|w| *w > 0 && *w <= self.dims).collect();
+        let mut widths: Vec<usize> = self
+            .mrl_widths
+            .iter()
+            .copied()
+            .filter(|w| *w > 0 && *w <= self.dims)
+            .collect();
         if !widths.contains(&self.dims) {
             widths.push(self.dims);
         }
@@ -287,7 +303,14 @@ impl ModelManifest {
             };
             field(&self.id);
             field(&self.dims.to_string());
-            field(&self.mrl_widths.iter().map(|w| w.to_string()).collect::<Vec<_>>().join(","));
+            field(
+                &self
+                    .mrl_widths
+                    .iter()
+                    .map(|w| w.to_string())
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
             field(&self.prefixes.query);
             field(&self.prefixes.document);
             field(&self.prefixes.clustering);

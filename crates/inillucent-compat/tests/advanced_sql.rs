@@ -161,7 +161,7 @@ fn grade(tag: &str, statements: &[&str]) {
     let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("advanced-sql");
     let _ = std::fs::create_dir_all(&directory);
     let Some((mut driver, database)) = build(&directory, tag) else {
-        eprintln!("the pinned SQLite oracle is not built; skipping");
+        inillucent_compat::differential::skipping("the pinned SQLite oracle is not built");
         return;
     };
     let handle = Database::import_with_busy_timeout(&database, std::time::Duration::from_secs(5))

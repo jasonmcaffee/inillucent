@@ -298,7 +298,7 @@ fn unspecified(sql: &str, ours: &[String], theirs: &[String]) -> Option<String> 
 #[test]
 fn the_generated_corpus_has_no_unexplained_differences() {
     let Some(program) = oracle_path() else {
-        eprintln!("the pinned SQLite oracle is not built; skipping");
+        inillucent_compat::differential::skipping("the pinned SQLite oracle is not built");
         return;
     };
     let fixture = corpus_copy();

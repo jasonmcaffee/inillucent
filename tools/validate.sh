@@ -51,13 +51,17 @@ stage() {
 versions() { rustc --version && cargo --version; }
 stage toolchain 'the pinned compiler is the one in use' versions
 
-# **`inillucent-core` and `inillucent-bench` are not formatted, and that is not
-# an oversight to correct here.** Neither is in `policy.rs`'s governed list, both
-# have been unformatted since before the rearchitecture (636 diffs at the commit
-# task-1894 started from), and every file of them is pinned by SHA3-256 in
-# `compat/baseline/inillucent-core-baseline.json`. Formatting them would move 35
-# pinned files for a reason unconnected to anything being changed. The lint stage
-# below still covers them.
+# **`inillucent-bench` is not formatted, and that is not an oversight to correct
+# here.** It is not in `policy.rs`'s governed list and has been unformatted since
+# before the rearchitecture (636 diffs at the commit task-1894 started from). The
+# lint stage below still covers it.
+#
+# **`inillucent-core` came off this list in task-1932 (H9).** It is governed now,
+# so `policy.rs`'s `the_governed_crates_are_formatted` checks it and leaving it
+# out here would be a check that disagrees with the one that gates a merge. Its
+# files are pinned by SHA3-256 in
+# `compat/baseline/inillucent-core-baseline.json` and every one of them is a
+# declared amendment on that ticket.
 formatting() {
     local packages=()
     local member
@@ -70,7 +74,7 @@ formatting() {
     for member in $(sed -n 's@^ *"\(crates/[a-z-]*\|drivers/[a-z-]*\)",@\1@p' "$root/Cargo.toml"); do
         name="${member##*/}"
         case "$name" in
-            inillucent-core|inillucent-bench) continue ;;
+            inillucent-bench) continue ;;
         esac
         packages+=(-p "$name")
     done
@@ -85,6 +89,19 @@ stage build 'every target compiles from the lock file as it stands' \
 
 stage lint 'the strict lint set, which the pinned compiler fixes' \
     cargo clippy --manifest-path "$root/Cargo.toml" --workspace --all-targets --all-features --locked -- -D warnings
+
+# Built before anything grades against it (task-1932, H10). Sixty-nine
+# differential tests across ten files compare this engine with SQLite 3.53.4 and
+# each of them skips when the oracle is absent; --strict at the end of this
+# script counts those skips and fails. So on a machine without the oracle this
+# script was either failing every run or --strict was not what gated a merge,
+# and nothing in the repository could say which, because nothing in it built the
+# oracle. This stage does, and the run's log now carries the evidence.
+#
+# Idempotent and cheap on a second run: every artifact is checked against the
+# SHA3-256 sum SQLite publishes and re-downloaded only when it is absent.
+stage oracle 'the sixty-nine differential suites have nothing to compare against without it' \
+    sh "$root/tools/sqlite-reference.sh"
 
 stage contracts 'dependencies, layering, the command table and the test map' \
     cargo test --manifest-path "$root/Cargo.toml" -p inillucent-compat \

@@ -16,6 +16,11 @@
 //!
 //! A row with no probe is exempt and has to say why in its note, which
 //! `capability.rs`'s own unit test enforces.
+//!
+//! Invariant: **every capability this driver claims is checked in both
+//! directions.** A claimed capability that fails and a denied one that now
+//! works each turn the build red, which is what makes the table worth trusting
+//! in a way a hand-written feature list is not.
 
 use std::path::PathBuf;
 

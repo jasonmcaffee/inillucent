@@ -378,7 +378,7 @@ mod arms {
     fn every_arm_embeds_the_same_text_identically_twice() {
         let models = installed();
         if models.is_empty() {
-            eprintln!("no arms installed");
+            eprintln!("no arms installed; skipping");
             return;
         }
         for model in &models {
@@ -402,7 +402,7 @@ mod arms {
     fn batching_does_not_change_any_arms_result() {
         let models = installed();
         if models.is_empty() {
-            eprintln!("no arms installed");
+            eprintln!("no arms installed; skipping");
             return;
         }
         for model in &models {
@@ -428,7 +428,7 @@ mod arms {
     fn no_arm_lets_a_long_text_leak_into_a_short_one_in_the_same_batch() {
         let models = installed();
         if models.is_empty() {
-            eprintln!("no arms installed");
+            eprintln!("no arms installed; skipping");
             return;
         }
         for model in &models {
@@ -454,7 +454,7 @@ mod arms {
     fn every_arm_applies_exactly_the_prefixes_its_manifest_declares() {
         let models = installed();
         if models.is_empty() {
-            eprintln!("no arms installed");
+            eprintln!("no arms installed; skipping");
             return;
         }
         let text = "offer eligibility rules";
@@ -488,7 +488,7 @@ mod arms {
     fn every_arms_token_count_is_the_texts_own() {
         let models = installed();
         if models.is_empty() {
-            eprintln!("no arms installed");
+            eprintln!("no arms installed; skipping");
             return;
         }
         for model in &models {

@@ -175,11 +175,11 @@ impl Server {
 #[test]
 fn a_negative_limit_is_refused_rather_than_meaning_everything() {
     let Some(database) = database("negative.rdb", 50) else {
-        eprintln!("budgets: the command line did not build; case skipped");
+        inillucent_compat::differential::skipping("budgets: the command line did not build");
         return;
     };
     let Some(mut server) = Server::start(&database) else {
-        eprintln!("budgets: the MCP server did not start; case skipped");
+        inillucent_compat::differential::skipping("budgets: the MCP server did not start");
         return;
     };
     let answered = server.call("query", "{\"sql\":\"SELECT * FROM t\",\"limit\":-1}");
@@ -198,11 +198,11 @@ fn a_negative_limit_is_refused_rather_than_meaning_everything() {
 #[test]
 fn a_row_ceiling_refuses_a_request_past_it() {
     let Some(database) = database("ceiling.rdb", 20) else {
-        eprintln!("budgets: the command line did not build; case skipped");
+        inillucent_compat::differential::skipping("budgets: the command line did not build");
         return;
     };
     let Some(mut server) = Server::start(&database) else {
-        eprintln!("budgets: the MCP server did not start; case skipped");
+        inillucent_compat::differential::skipping("budgets: the MCP server did not start");
         return;
     };
     let refused = server.call("query", "{\"sql\":\"SELECT * FROM t\",\"limit\":99999999}");
@@ -227,11 +227,11 @@ fn a_row_ceiling_refuses_a_request_past_it() {
 #[test]
 fn asking_for_every_row_is_refused_on_a_served_surface() {
     let Some(database) = database("everything.rdb", 20) else {
-        eprintln!("budgets: the command line did not build; case skipped");
+        inillucent_compat::differential::skipping("budgets: the command line did not build");
         return;
     };
     let Some(mut server) = Server::start(&database) else {
-        eprintln!("budgets: the MCP server did not start; case skipped");
+        inillucent_compat::differential::skipping("budgets: the MCP server did not start");
         return;
     };
     let refused = server.call("query", "{\"sql\":\"SELECT * FROM t\",\"limit\":0}");
@@ -250,7 +250,7 @@ fn asking_for_every_row_is_refused_on_a_served_surface() {
 #[test]
 fn the_command_line_has_no_row_ceiling() {
     let Some(program) = binary("inillucent") else {
-        eprintln!("budgets: the command line did not build; case skipped");
+        inillucent_compat::differential::skipping("budgets: the command line did not build");
         return;
     };
     let Some(database) = database("unbounded.rdb", 20) else {
@@ -278,11 +278,11 @@ fn the_command_line_has_no_row_ceiling() {
 #[test]
 fn an_over_long_request_is_refused_rather_than_buffered() {
     let Some(database) = database("longline.rdb", 5) else {
-        eprintln!("budgets: the command line did not build; case skipped");
+        inillucent_compat::differential::skipping("budgets: the command line did not build");
         return;
     };
     let Some(mut server) = Server::start(&database) else {
-        eprintln!("budgets: the MCP server did not start; case skipped");
+        inillucent_compat::differential::skipping("budgets: the MCP server did not start");
         return;
     };
     // Two megabytes of one line, which is past the one-megabyte ceiling and
@@ -307,11 +307,11 @@ fn an_over_long_request_is_refused_rather_than_buffered() {
 #[test]
 fn the_tool_schema_says_there_is_a_ceiling() {
     let Some(database) = database("schema.rdb", 1) else {
-        eprintln!("budgets: the command line did not build; case skipped");
+        inillucent_compat::differential::skipping("budgets: the command line did not build");
         return;
     };
     let Some(mut server) = Server::start(&database) else {
-        eprintln!("budgets: the MCP server did not start; case skipped");
+        inillucent_compat::differential::skipping("budgets: the MCP server did not start");
         return;
     };
     let listed =

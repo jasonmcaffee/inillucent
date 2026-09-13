@@ -13,7 +13,7 @@
 //! because the promise is the command's and not the engine's: `execute_batch`
 //! is still a loop, and it is `verbs::batch` that wraps a transaction round it.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use inillucent_compat::workspace_root;
@@ -64,7 +64,7 @@ type Ran = (i32, String, String);
 /// @param program - the binary
 /// @param database - the file
 /// @param arguments - everything after `--db <file>`
-fn run(program: &PathBuf, database: &PathBuf, arguments: &[&str]) -> Ran {
+fn run(program: &Path, database: &Path, arguments: &[&str]) -> Ran {
     let named = database.to_string_lossy().into_owned();
     let output = Command::new(program)
         .args(["--db", &named])
@@ -120,7 +120,7 @@ fn only_value(stdout: &str) -> String {
 #[test]
 fn a_batch_whose_script_fails_commits_nothing() {
     let Some(program) = binary("inillucent") else {
-        eprintln!("the inillucent binary is not built; skipping");
+        inillucent_compat::differential::skipping("the inillucent binary is not built");
         return;
     };
     let database = scratch("failing-batch.rdb");
@@ -194,7 +194,7 @@ fn a_batch_whose_script_fails_commits_nothing() {
 #[test]
 fn a_batch_that_succeeds_commits_every_statement() {
     let Some(program) = binary("inillucent") else {
-        eprintln!("the inillucent binary is not built; skipping");
+        inillucent_compat::differential::skipping("the inillucent binary is not built");
         return;
     };
     let database = scratch("succeeding-batch.rdb");

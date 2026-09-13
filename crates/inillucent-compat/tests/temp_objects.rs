@@ -123,7 +123,7 @@ fn render(value: &Value<'_>) -> String {
 /// Runs one script against both engines and requires the same report.
 fn grade(name: &str, script: &str) {
     let Some(reference) = shell(&scratch(&format!("{name}-ref")), script) else {
-        eprintln!("the pinned shell is not present; skipping");
+        inillucent_compat::differential::skipping("the pinned shell is not present");
         return;
     };
     let candidate = run(&scratch(&format!("{name}-inillucent")), script);

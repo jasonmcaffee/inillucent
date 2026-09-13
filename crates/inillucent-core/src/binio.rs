@@ -6,6 +6,15 @@
 //! Escaping that as JSON and parsing it back is most of what a save and a load
 //! cost, for a structure that is already a flat byte array and a set of
 //! fixed-width integers.
+//!
+//! Invariant: **every read is bounded by what the source actually supplied,
+//! not by a length the source claimed.** These readers take a count out of the
+//! bytes they are decoding and that count is a number an attacker chooses: a
+//! `.rdb` segment is a page somebody else could have written. Sizing a buffer
+//! from it before the bytes are known to be there is not an error that can be
+//! returned - an allocation of a few gigabytes goes through
+//! `handle_alloc_error` and aborts the process - so the readers grow in fixed
+//! steps and fail with `UnexpectedEof` instead.
 
 use std::io::{Read, Write};
 
@@ -64,30 +73,51 @@ fn read_records<T: bytemuck::Pod + bytemuck::Zeroable>(
 /// dense from zero: a corpus would need four billion distinct authors to reach it.
 pub const NONE_ID: u32 = u32::MAX;
 
+/// Writes a `u32` as four little-endian bytes.
+///
+/// @param w - where the bytes go
+/// @param v - the value
 pub fn write_u32(w: &mut impl Write, v: u32) -> std::io::Result<()> {
     w.write_all(&v.to_le_bytes())
 }
 
+/// Writes a `u64` as eight little-endian bytes.
+///
+/// @param w - where the bytes go
+/// @param v - the value
 pub fn write_u64(w: &mut impl Write, v: u64) -> std::io::Result<()> {
     w.write_all(&v.to_le_bytes())
 }
 
+/// Writes an `i64` as eight little-endian bytes.
+///
+/// @param w - where the bytes go
+/// @param v - the value
 pub fn write_i64(w: &mut impl Write, v: i64) -> std::io::Result<()> {
     w.write_all(&v.to_le_bytes())
 }
 
+/// Reads a `u32` back, or fails if four bytes are not there.
+///
+/// @param r - the source
 pub fn read_u32(r: &mut impl Read) -> std::io::Result<u32> {
     let mut b = [0u8; 4];
     r.read_exact(&mut b)?;
     Ok(u32::from_le_bytes(b))
 }
 
+/// Reads a `u64` back, or fails if eight bytes are not there.
+///
+/// @param r - the source
 pub fn read_u64(r: &mut impl Read) -> std::io::Result<u64> {
     let mut b = [0u8; 8];
     r.read_exact(&mut b)?;
     Ok(u64::from_le_bytes(b))
 }
 
+/// Reads an `i64` back, or fails if eight bytes are not there.
+///
+/// @param r - the source
 pub fn read_i64(r: &mut impl Read) -> std::io::Result<i64> {
     let mut b = [0u8; 8];
     r.read_exact(&mut b)?;
@@ -100,6 +130,12 @@ pub fn write_str(w: &mut impl Write, s: &str) -> std::io::Result<()> {
     w.write_all(s.as_bytes())
 }
 
+/// Reads back a string written by [`write_str`].
+///
+/// The length is a number out of the source, so the bytes are read in steps
+/// rather than allocated from it - see [`read_records`].
+///
+/// @param r - the source
 pub fn read_str(r: &mut impl Read) -> std::io::Result<String> {
     let len = read_u32(r)? as usize;
     let bytes = read_records::<u8>(r, len)?;
@@ -138,6 +174,9 @@ pub fn write_text(w: &mut impl Write, text: &str) -> std::io::Result<()> {
     w.write_all(text.as_bytes())
 }
 
+/// Reads back a string written by [`write_text`], whose length is a `u64`.
+///
+/// @param r - the source
 pub fn read_text(r: &mut impl Read) -> std::io::Result<String> {
     let len = read_u64(r)? as usize;
     let bytes = read_records::<u8>(r, len)?;

@@ -489,7 +489,7 @@ fn attribute_log(
             bytes,
         })
         .collect();
-    by_tree.sort_by(|left, right| right.bytes.cmp(&left.bytes));
+    by_tree.sort_by_key(|row| std::cmp::Reverse(row.bytes));
 
     Ok(Attribution {
         by_kind,

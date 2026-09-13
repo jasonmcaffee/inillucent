@@ -73,15 +73,19 @@ Invoke-Stage -Name 'toolchain' -Because 'the pinned compiler is the one in use' 
     cargo --version
 }
 
-# **`inillucent-core` and `inillucent-bench` are not formatted, and that is not
-# an oversight to correct here.** Neither is in `policy.rs`'s governed list, both
-# have been unformatted since before the rearchitecture (636 diffs at the commit
-# task-1894 started from), and every file of them is pinned by SHA3-256 in
-# `compat/baseline/inillucent-core-baseline.json`. Formatting them would move 35
-# pinned files for a reason unconnected to anything being changed. The lint stage
-# below still covers them.
+# **`inillucent-bench` is not formatted, and that is not an oversight to correct
+# here.** It is not in `policy.rs`'s governed list and has been unformatted
+# since before the rearchitecture (636 diffs at the commit task-1894 started
+# from). The lint stage below still covers it.
+#
+# **`inillucent-core` came off this list in task-1932 (H9).** It is governed
+# now, so `policy.rs`'s `the_governed_crates_are_formatted` checks it and
+# leaving it out here would be a check that disagrees with the one that gates a
+# merge. Its files are pinned by SHA3-256 in
+# `compat/baseline/inillucent-core-baseline.json` and every one of them is a
+# declared amendment on that ticket.
 Invoke-Stage -Name 'format' -Because 'a governed crate that is unformatted fails policy.rs anyway' -Body {
-    $skip = @('inillucent-core', 'inillucent-bench')
+    $skip = @('inillucent-bench')
     # The workspace members, read from the manifest's own list so a new
     # crate is covered the day it is added.
     $members = Select-String -Path "$root/Cargo.toml" -Pattern '^\s*"(crates|drivers)/([a-z-]+)",' |
@@ -101,6 +105,22 @@ Invoke-Stage -Name 'lint' -Because 'the strict lint set, which the pinned compil
     cargo clippy --manifest-path "$root/Cargo.toml" --workspace --all-targets --all-features --locked -- -D warnings
 }
 
+# **Built before anything grades against it (task-1932, H10).** Sixty-nine
+# differential tests across ten files compare this engine with SQLite 3.53.4,
+# and each of them skips when the oracle is absent. `--strict` at the end of
+# this script counts those skips and fails - so on a machine without the oracle
+# this script was either failing every run, or `--strict` was not what gated a
+# merge. Nothing in the repository could say which, because nothing in the
+# repository built the oracle. This stage does, and the run's log now carries
+# the evidence that it did.
+#
+# The script is idempotent and cheap on a second run: every artifact is checked
+# against the SHA3-256 sum SQLite publishes and re-downloaded only when it is
+# absent or `-Force` is given.
+Invoke-Stage -Name 'oracle' -Because 'the sixty-nine differential suites have nothing to compare against without it' -Body {
+    & pwsh -NoProfile -File "$root/tools/sqlite-reference.ps1"
+}
+
 # The four contracts `AGENTS.md` names, plus the selection map. Each of them
 # fails a build rather than producing a review comment, which is the point of
 # having them.
@@ -108,8 +128,16 @@ Invoke-Stage -Name 'contracts' -Because 'dependencies, layering, the command tab
     cargo test --manifest-path "$root/Cargo.toml" -p inillucent-compat --test policy --test selection --test command_parity --test harness
 }
 
+# **The exit code is checked between the two statements (task-1932, H12).**
+# Without the guard, a failed build left the previous `inillucent-testrun` on
+# disk and the runner then passed smoke against a stale binary - a green stage
+# for a build that did not happen, which is the exact shape of "a test that
+# cannot fail" the testing standard forbids. `Invoke-Stage` reads
+# `$LASTEXITCODE` after the body, so only the *last* statement decided the
+# stage.
 Invoke-Stage -Name 'smoke' -Because 'a real file opened, written, reopened, read' -Body {
     cargo build --manifest-path "$root/Cargo.toml" -p inillucent-compat --bin inillucent-testrun --features testrun
+    if ($LASTEXITCODE -ne 0) { return }
     & "$root/target/debug/inillucent-testrun" --tier smoke
 }
 

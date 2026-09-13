@@ -160,7 +160,9 @@ fn a_link_below_the_root_does_not_reach_outside_it() {
     );
 
     if !link_directory(&root.join("escape"), &outside) {
-        eprintln!("confinement: this platform would not make a directory link; case skipped");
+        inillucent_compat::differential::skipping(
+            "confinement: this platform would not make a directory link",
+        );
         return;
     }
 
@@ -331,7 +333,9 @@ fn attaching_through_a_link_is_refused() {
     assert!(created.status.success());
 
     if !link_directory(&root.join("escape"), &outside) {
-        eprintln!("confinement: this platform would not make a directory link; case skipped");
+        inillucent_compat::differential::skipping(
+            "confinement: this platform would not make a directory link",
+        );
         return;
     }
     let refused = run(

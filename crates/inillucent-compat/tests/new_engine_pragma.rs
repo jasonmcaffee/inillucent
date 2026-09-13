@@ -97,7 +97,9 @@ fn ask(engine: &mut ImportedDatabase, sql: &str) -> Vec<Vec<String>> {
 
 /// Says the suite could not run, rather than passing quietly.
 fn no_oracle() {
-    eprintln!("the pinned SQLite oracle is not built; run tools/sqlite-reference.ps1");
+    inillucent_compat::differential::skipping(
+        "the pinned SQLite oracle is not built; run tools/sqlite-reference.{ps1,sh}",
+    );
 }
 
 #[test]

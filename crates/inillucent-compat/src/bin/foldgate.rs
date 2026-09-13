@@ -818,7 +818,6 @@ fn read_until(path: &Path, flag: &std::sync::atomic::AtomicBool) -> (Vec<f64>, u
             held = open(path).ok().and_then(|database| {
                 let connection = database.connect();
                 set_busy_timeout(&connection).ok()?;
-                drop(connection);
                 Some(database)
             });
         }

@@ -18,6 +18,11 @@
 //! `docs/invariants/layering.toml` is: *"checked, not documented: an
 //! architecture rule that is only written down is a rule that has already been
 //! broken somewhere."*
+//!
+//! Invariant: **the C ABI's published manifest and its implementation say the
+//! same thing.** A header that promises a symbol the library does not export,
+//! or a note that says `unsupported` about a function that works, is a contract
+//! a caller writes against and then finds untrue at run time.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};

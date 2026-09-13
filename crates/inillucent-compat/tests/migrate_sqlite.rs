@@ -197,7 +197,9 @@ fn quote_row(row: &[OwnedDatum]) -> String {
 #[test]
 fn every_task_1781_fixture_migrates_with_verified_counts_and_digests() {
     let Some(shell) = reference() else {
-        eprintln!("the pinned SQLite oracle is not built; run tools/sqlite-reference.{{ps1,sh}}");
+        inillucent_compat::differential::skipping(
+            "the pinned SQLite oracle is not built; run tools/sqlite-reference.{ps1,sh}",
+        );
         return;
     };
     let area = scratch("every-fixture");
@@ -544,7 +546,7 @@ fn a_failed_migration_leaves_evidence_and_no_destination() {
 #[test]
 fn a_database_with_triggers_views_fts5_and_a_sequence_migrates_and_answers() {
     let Some(shell) = reference() else {
-        eprintln!("the pinned SQLite shell is missing; skipping");
+        inillucent_compat::differential::skipping("the pinned SQLite shell is missing");
         return;
     };
     let area = scratch("rich");
@@ -581,7 +583,7 @@ INSERT INTO f(body) VALUES('the quick brown fox'),('jumps over');\n";
             child.wait_with_output()
         });
     let Ok(output) = built else {
-        eprintln!("the reference shell could not be run; skipping");
+        inillucent_compat::differential::skipping("the reference shell could not be run");
         return;
     };
     assert!(

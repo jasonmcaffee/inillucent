@@ -9,6 +9,12 @@
 //! comparison in the innermost loop. A substring author and a substring attribute
 //! value are both resolved against their dictionary at compile time, once per
 //! query, into the same dense id set every other predicate tests.
+//!
+//! Invariant: **a compiled filter answers the same question as the filter it
+//! was compiled from, and it knows how many chunks pass.** The count is not a
+//! convenience: it is what the vector index uses to choose between walking the
+//! graph and scanning the passing set, so a count that disagreed with the
+//! predicate would pick the wrong path and return the wrong neighbours.
 
 use crate::store::{Store, NO_TIMESTAMP};
 
@@ -21,8 +27,12 @@ use crate::store::{Store, NO_TIMESTAMP};
 /// into the same attribute set. Setting both requires a document to satisfy each.
 #[derive(Debug, Clone, Default)]
 pub struct AttributeFilter {
+    /// Which attribute set this constrains, such as `participant`.
     pub name: String,
+    /// Exact values, any one of which admits a document. Empty means no
+    /// constraint of this kind.
     pub any_of: Vec<String>,
+    /// A substring, matched without case against every value in the set.
     pub contains: Option<String>,
 }
 
@@ -54,9 +64,14 @@ impl AttributeFilter {
 /// stack field for field, including the two author forms.
 #[derive(Debug, Clone, Default)]
 pub struct Filter {
+    /// One source, by name.
     pub source: Option<String>,
+    /// Several sources, any one of which admits a document. Set beside
+    /// `source` it narrows further rather than widening.
     pub sources: Option<Vec<String>>,
+    /// The space or workspace a document belongs to.
     pub space_key: Option<String>,
+    /// An exact author identifier.
     pub author: Option<String>,
     /// Substring author, matched against display name and stable identifier
     /// alike. The exact `author` above is an equality; this is what a mail corpus
@@ -68,6 +83,7 @@ pub struct Filter {
     /// unconstrained. This is the rule the baseline implements in SQL as
     /// `NOT (source = ANY(named)) OR (source = a AND author_id = b) OR ...`.
     pub authors: Option<Vec<(String, String)>>,
+    /// Lower time bound, inclusive. A document with no timestamp is excluded.
     pub updated_after: Option<i64>,
     /// Upper time bound, inclusive. A document with no timestamp is excluded,
     /// matching `NULL <= x` being false rather than unknown-and-therefore-true.
@@ -78,10 +94,15 @@ pub struct Filter {
     pub flags: Vec<(String, bool)>,
     /// Constraints on named multi-valued attribute sets.
     pub attributes: Vec<AttributeFilter>,
+    /// Whether a document marked deleted still passes. False by default,
+    /// because a deletion that a search still returns is not a deletion.
     pub include_deleted: bool,
 }
 
 impl Filter {
+    /// A filter admitting one named source and nothing else.
+    ///
+    /// @param name - the source
     pub fn source(name: &str) -> Self {
         Filter {
             source: Some(name.to_string()),
@@ -104,6 +125,11 @@ impl Filter {
         self
     }
 
+    /// Reports whether this filter constrains anything at all.
+    ///
+    /// An empty filter is the one case the vector index can skip predicate
+    /// evaluation for entirely, which is why it is a question rather than a
+    /// walk of every field at each node.
     pub fn is_empty(&self) -> bool {
         self.source.is_none()
             && self.sources.is_none()
@@ -127,11 +153,18 @@ impl Filter {
 /// into a union.
 #[derive(Debug)]
 struct CompiledAttribute {
+    /// The attribute set's interned name id.
     name: u32,
     /// Each clause is an ascending id set, tested with a binary search.
     clauses: Vec<Vec<u32>>,
 }
 
+/// A filter resolved against one store's dictionaries.
+///
+/// Every string the caller wrote has become an interned id, so the predicate a
+/// traversal evaluates at each node is a comparison of integers. A value the
+/// store has never seen resolves to no id at all, which is how a filter that
+/// cannot match anything is known before the first node is visited.
 #[derive(Debug)]
 pub struct CompiledFilter {
     sources: Option<Vec<u32>>,
@@ -164,6 +197,15 @@ pub struct CompiledFilter {
 }
 
 impl CompiledFilter {
+    /// Resolves a caller's filter against one store's dictionaries.
+    ///
+    /// A value the store has never interned resolves to no id, and a clause
+    /// that can match no id makes the whole filter dead - which is answered by
+    /// `is_dead` before a single node is visited rather than by walking the
+    /// graph and finding nothing.
+    ///
+    /// @param filter - what the caller wrote
+    /// @param store - the corpus whose dictionaries the strings resolve against
     pub fn compile(filter: &Filter, store: &Store) -> CompiledFilter {
         let mut dead = false;
 
@@ -233,9 +275,7 @@ impl CompiledFilter {
                 .collect();
             let tuples: Vec<(u32, u32)> = pairs
                 .iter()
-                .filter_map(|(s, a)| {
-                    Some((store.sources.get(s)?, store.author_ids.get(a)?))
-                })
+                .filter_map(|(s, a)| Some((store.sources.get(s)?, store.author_ids.get(a)?)))
                 .collect();
             Some((named, tuples))
         });
@@ -285,8 +325,7 @@ impl CompiledFilter {
         // scorer and the unfiltered graph walk both skip `passes` entirely when
         // this is set. Before tombstoning existed nothing could reach that state,
         // so it was invisible.
-        let trivial =
-            filter.is_empty() && (filter.include_deleted || store.deleted_chunks == 0);
+        let trivial = filter.is_empty() && (filter.include_deleted || store.deleted_chunks == 0);
 
         let mut compiled = CompiledFilter {
             sources,
@@ -348,10 +387,16 @@ impl CompiledFilter {
         }
     }
 
+    /// Returns how many chunks pass this filter.
+    ///
+    /// The number the index uses to choose between walking the graph and
+    /// scanning the passing set exhaustively, so it is counted at compile time
+    /// rather than estimated.
     pub fn pass_count(&self) -> usize {
         self.pass_count
     }
 
+    /// Reports whether this filter can match nothing at all.
     pub fn is_dead(&self) -> bool {
         self.dead
     }
@@ -370,8 +415,13 @@ impl CompiledFilter {
         if self.dead {
             return false;
         }
-        let doc_id = store.chunks[chunk as usize].doc;
-        let doc = &store.documents[doc_id as usize];
+        // A chunk the store does not hold passes nothing (task-1932, H9).
+        let Some(doc_id) = store.doc_of(chunk) else {
+            return false;
+        };
+        let Some(doc) = store.documents.get(doc_id as usize) else {
+            return false;
+        };
 
         if doc.deleted && !self.include_deleted {
             return false;
@@ -421,8 +471,12 @@ impl CompiledFilter {
             }
         }
         if let Some((by_name, by_id)) = &self.author_contains {
-            let matches = doc.author.is_some_and(|a| by_name.binary_search(&a).is_ok())
-                || doc.author_id.is_some_and(|a| by_id.binary_search(&a).is_ok());
+            let matches = doc
+                .author
+                .is_some_and(|a| by_name.binary_search(&a).is_ok())
+                || doc
+                    .author_id
+                    .is_some_and(|a| by_id.binary_search(&a).is_ok());
             if !matches {
                 return false;
             }
@@ -551,7 +605,9 @@ mod tests {
 
     fn passing(f: &Filter, s: &Store) -> Vec<u32> {
         let c = CompiledFilter::compile(f, s);
-        (0..s.n_chunks() as u32).filter(|i| c.passes(*i, s)).collect()
+        (0..s.n_chunks() as u32)
+            .filter(|i| c.passes(*i, s))
+            .collect()
     }
 
     #[test]
@@ -665,11 +721,26 @@ mod tests {
             Filter::default(),
             Filter::source("confluence"),
             Filter::source("slack"),
-            Filter { sources: Some(vec!["slack".into(), "jira".into()]), ..Default::default() },
-            Filter { include_deleted: true, ..Default::default() },
-            Filter { updated_after: Some(3000), ..Default::default() },
-            Filter { author: Some("Ada".into()), ..Default::default() },
-            Filter { labels: Some(vec!["design".into()]), ..Default::default() },
+            Filter {
+                sources: Some(vec!["slack".into(), "jira".into()]),
+                ..Default::default()
+            },
+            Filter {
+                include_deleted: true,
+                ..Default::default()
+            },
+            Filter {
+                updated_after: Some(3000),
+                ..Default::default()
+            },
+            Filter {
+                author: Some("Ada".into()),
+                ..Default::default()
+            },
+            Filter {
+                labels: Some(vec!["design".into()]),
+                ..Default::default()
+            },
             Filter {
                 source: Some("confluence".into()),
                 labels: Some(vec!["ops".into()]),
@@ -678,7 +749,9 @@ mod tests {
         ];
         for f in shapes {
             let c = CompiledFilter::compile(&f, &s);
-            let scanned = (0..s.n_chunks() as u32).filter(|i| c.passes(*i, &s)).count();
+            let scanned = (0..s.n_chunks() as u32)
+                .filter(|i| c.passes(*i, &s))
+                .count();
             assert_eq!(c.pass_count(), scanned, "disagreement for {f:?}");
         }
     }
@@ -725,14 +798,38 @@ mod tests {
             deleted: false,
         };
         s.add_chunks(vec![
-            mk("m1", "Terri Shaw", "terri.shaw@example.org", Some(1000),
-               vec!["terri.shaw@example.org", "Terri Shaw", "jason@example.com"],
-               vec!["has_attachment"]),
-            mk("m2", "Jean Platt", "jean@example.net", Some(2000),
-               vec!["jean@example.net", "Jean Platt"], vec![]),
-            mk("m3", "Terri Shaw (Work)", "tshaw@work.example", Some(3000),
-               vec!["tshaw@work.example", "Terri Shaw (Work)"], vec!["has_attachment"]),
-            mk("m4", "Nobody", "nobody@example.com", None, vec!["nobody@example.com"], vec![]),
+            mk(
+                "m1",
+                "Terri Shaw",
+                "terri.shaw@example.org",
+                Some(1000),
+                vec!["terri.shaw@example.org", "Terri Shaw", "jason@example.com"],
+                vec!["has_attachment"],
+            ),
+            mk(
+                "m2",
+                "Jean Platt",
+                "jean@example.net",
+                Some(2000),
+                vec!["jean@example.net", "Jean Platt"],
+                vec![],
+            ),
+            mk(
+                "m3",
+                "Terri Shaw (Work)",
+                "tshaw@work.example",
+                Some(3000),
+                vec!["tshaw@work.example", "Terri Shaw (Work)"],
+                vec!["has_attachment"],
+            ),
+            mk(
+                "m4",
+                "Nobody",
+                "nobody@example.com",
+                None,
+                vec!["nobody@example.com"],
+                vec![],
+            ),
         ]);
         s
     }
@@ -740,7 +837,10 @@ mod tests {
     #[test]
     fn updated_before_is_inclusive_and_excludes_a_missing_timestamp() {
         let s = mail_store();
-        let f = Filter { updated_before: Some(2000), ..Default::default() };
+        let f = Filter {
+            updated_before: Some(2000),
+            ..Default::default()
+        };
         // m4 has no timestamp: NULL <= x is not true, so it must not pass.
         assert_eq!(passing(&f, &s), vec![0, 1]);
     }
@@ -759,8 +859,14 @@ mod tests {
     #[test]
     fn a_boolean_flag_selects_and_deselects_without_touching_labels() {
         let s = mail_store();
-        assert_eq!(passing(&Filter::default().with_flag("has_attachment", true), &s), vec![0, 2]);
-        assert_eq!(passing(&Filter::default().with_flag("has_attachment", false), &s), vec![1, 3]);
+        assert_eq!(
+            passing(&Filter::default().with_flag("has_attachment", true), &s),
+            vec![0, 2]
+        );
+        assert_eq!(
+            passing(&Filter::default().with_flag("has_attachment", false), &s),
+            vec![1, 3]
+        );
         // The flag is not a label, so it never appears in the label vocabulary a
         // filter drawer reads back.
         assert!(s.labels.is_empty());
@@ -787,24 +893,36 @@ mod tests {
     fn a_substring_author_matches_display_name_and_address_alike() {
         let s = mail_store();
         // "Terri Shaw" is the display name of m1 and a prefix of m3's.
-        let by_name = Filter { author_contains: Some("Terri Shaw".into()), ..Default::default() };
+        let by_name = Filter {
+            author_contains: Some("Terri Shaw".into()),
+            ..Default::default()
+        };
         assert_eq!(passing(&by_name, &s), vec![0, 2]);
         // The same filter written as part of an address reaches only that sender.
-        let by_address = Filter { author_contains: Some("tshaw@".into()), ..Default::default() };
+        let by_address = Filter {
+            author_contains: Some("tshaw@".into()),
+            ..Default::default()
+        };
         assert_eq!(passing(&by_address, &s), vec![2]);
     }
 
     #[test]
     fn a_substring_author_is_matched_without_case() {
         let s = mail_store();
-        let f = Filter { author_contains: Some("terri shaw".into()), ..Default::default() };
+        let f = Filter {
+            author_contains: Some("terri shaw".into()),
+            ..Default::default()
+        };
         assert_eq!(passing(&f, &s), vec![0, 2]);
     }
 
     #[test]
     fn a_substring_author_the_corpus_lacks_selects_nothing_rather_than_everything() {
         let s = mail_store();
-        let f = Filter { author_contains: Some("nobody by this name".into()), ..Default::default() };
+        let f = Filter {
+            author_contains: Some("nobody by this name".into()),
+            ..Default::default()
+        };
         let c = CompiledFilter::compile(&f, &s);
         assert!(c.is_dead());
         assert!(passing(&f, &s).is_empty());
@@ -815,8 +933,10 @@ mod tests {
         let s = mail_store();
         // jason is a recipient of m1 and its sender is somebody else, which is
         // exactly what an author filter cannot express.
-        let f = Filter::default()
-            .with_attribute(AttributeFilter::containing("participant", "jason@example.com"));
+        let f = Filter::default().with_attribute(AttributeFilter::containing(
+            "participant",
+            "jason@example.com",
+        ));
         assert_eq!(passing(&f, &s), vec![0]);
     }
 
@@ -841,8 +961,10 @@ mod tests {
     #[test]
     fn an_attribute_value_the_corpus_lacks_selects_nothing() {
         let s = mail_store();
-        let f = Filter::default()
-            .with_attribute(AttributeFilter::containing("participant", "stranger@nowhere"));
+        let f = Filter::default().with_attribute(AttributeFilter::containing(
+            "participant",
+            "stranger@nowhere",
+        ));
         let c = CompiledFilter::compile(&f, &s);
         assert!(c.is_dead());
         assert!(passing(&f, &s).is_empty());
@@ -887,19 +1009,37 @@ mod tests {
         let s = mail_store();
         let shapes = vec![
             Filter::default(),
-            Filter { updated_before: Some(2000), ..Default::default() },
-            Filter { updated_after: Some(1500), updated_before: Some(3000), ..Default::default() },
+            Filter {
+                updated_before: Some(2000),
+                ..Default::default()
+            },
+            Filter {
+                updated_after: Some(1500),
+                updated_before: Some(3000),
+                ..Default::default()
+            },
             Filter::default().with_flag("has_attachment", true),
             Filter::default().with_flag("has_attachment", false),
-            Filter { author_contains: Some("Terri".into()), ..Default::default() },
+            Filter {
+                author_contains: Some("Terri".into()),
+                ..Default::default()
+            },
             Filter::default().with_attribute(AttributeFilter::containing("participant", "Terri")),
-            Filter::default()
-                .with_attribute(AttributeFilter::any_of("participant", &["jean@example.net"])),
-            Filter { source: Some("email".into()), updated_before: Some(2000), ..Default::default() },
+            Filter::default().with_attribute(AttributeFilter::any_of(
+                "participant",
+                &["jean@example.net"],
+            )),
+            Filter {
+                source: Some("email".into()),
+                updated_before: Some(2000),
+                ..Default::default()
+            },
         ];
         for f in shapes {
             let c = CompiledFilter::compile(&f, &s);
-            let scanned = (0..s.n_chunks() as u32).filter(|i| c.passes(*i, &s)).count();
+            let scanned = (0..s.n_chunks() as u32)
+                .filter(|i| c.passes(*i, &s))
+                .count();
             assert_eq!(c.pass_count(), scanned, "disagreement for {f:?}");
         }
     }
@@ -921,7 +1061,10 @@ mod tests {
             "the soft delete check would have been skipped"
         );
         // Asking for the deleted rows as well genuinely constrains nothing again.
-        let all = Filter { include_deleted: true, ..Default::default() };
+        let all = Filter {
+            include_deleted: true,
+            ..Default::default()
+        };
         assert!(CompiledFilter::compile(&all, &s).is_trivial());
     }
 
@@ -935,16 +1078,25 @@ mod tests {
         // "e" appears in every address and display name in the fixture, which is
         // the shape that used to be slow and is the shape a binary search gets
         // wrong if the ids are not sorted.
-        let by_author = Filter { author_contains: Some("e".into()), ..Default::default() };
+        let by_author = Filter {
+            author_contains: Some("e".into()),
+            ..Default::default()
+        };
         assert_eq!(passing(&by_author, &s), vec![0, 1, 2, 3]);
 
-        let by_participant = Filter::default()
-            .with_attribute(AttributeFilter::containing("participant", "e"));
+        let by_participant =
+            Filter::default().with_attribute(AttributeFilter::containing("participant", "e"));
         assert_eq!(passing(&by_participant, &s), vec![0, 1, 2, 3]);
 
         // And a compiled set really is ascending, which is what the search assumes.
-        let ids = s.attribute_dictionary("participant").unwrap().find_containing("e");
-        assert!(ids.windows(2).all(|w| w[0] < w[1]), "not ascending: {ids:?}");
+        let ids = s
+            .attribute_dictionary("participant")
+            .unwrap()
+            .find_containing("e");
+        assert!(
+            ids.windows(2).all(|w| w[0] < w[1]),
+            "not ascending: {ids:?}"
+        );
         assert!(ids.len() > 1);
     }
 
@@ -954,7 +1106,11 @@ mod tests {
         // Written newest-first on purpose; the compiled clause has to sort it.
         let f = Filter::default().with_attribute(AttributeFilter::any_of(
             "participant",
-            &["tshaw@work.example", "jean@example.net", "terri.shaw@example.org"],
+            &[
+                "tshaw@work.example",
+                "jean@example.net",
+                "terri.shaw@example.org",
+            ],
         ));
         assert_eq!(passing(&f, &s), vec![0, 1, 2]);
     }

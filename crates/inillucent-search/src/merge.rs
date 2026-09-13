@@ -568,7 +568,7 @@ pub fn fold_segment_recording(
             SOURCE,
             &id.to_string(),
             vec![chunk.clone()],
-            &[vector.clone()],
+            std::slice::from_ref(&vector),
         );
         inserted = inserted.saturating_add(stats.chunks_added);
         recorded.puts.push((chunk, vector));

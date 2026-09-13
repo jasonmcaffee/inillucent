@@ -1697,7 +1697,7 @@ fn run(program: &PathBuf, area: &PathBuf, script: &str) -> String {
 #[test]
 fn every_probed_construct_answers_as_the_table_says() {
     let (Some(reference), Some(ours)) = (reference(), ours()) else {
-        eprintln!("a shell is missing; skipping");
+        inillucent_compat::differential::skipping("a shell is missing");
         return;
     };
     let area = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("semantics");

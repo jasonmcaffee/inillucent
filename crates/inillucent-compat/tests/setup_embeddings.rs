@@ -117,7 +117,7 @@ fn bytes_under(path: &PathBuf) -> u64 {
 fn a_bare_invocation_installs_nothing() {
     let root = area("bare");
     let Some((ok, stdout, _)) = run(&root, &[]) else {
-        eprintln!("skipping: the binary would not build");
+        inillucent_compat::differential::skipping("the binary would not build");
         return;
     };
     assert!(ok, "a bare invocation succeeds: {stdout}");
@@ -138,7 +138,7 @@ fn a_bare_invocation_installs_nothing() {
 fn status_on_an_empty_machine_says_what_is_missing() {
     let root = area("status");
     let Some((ok, stdout, _)) = run(&root, &["--status"]) else {
-        eprintln!("skipping: the binary would not build");
+        inillucent_compat::differential::skipping("the binary would not build");
         return;
     };
     assert!(ok, "status succeeds even with nothing installed: {stdout}");
@@ -157,7 +157,7 @@ fn status_on_an_empty_machine_says_what_is_missing() {
 fn status_reports_readiness_as_a_field() {
     let root = area("status-json");
     let Some((ok, stdout, _)) = run(&root, &["--status", "--output", "json"]) else {
-        eprintln!("skipping: the binary would not build");
+        inillucent_compat::differential::skipping("the binary would not build");
         return;
     };
     assert!(ok, "{stdout}");
@@ -172,7 +172,7 @@ fn status_reports_readiness_as_a_field() {
 fn an_unknown_component_is_refused_before_anything_is_fetched() {
     let root = area("component");
     let Some((ok, stdout, stderr)) = run(&root, &["everything"]) else {
-        eprintln!("skipping: the binary would not build");
+        inillucent_compat::differential::skipping("the binary would not build");
         return;
     };
     assert!(!ok, "an unknown component fails: {stdout}");
@@ -192,7 +192,7 @@ fn an_unknown_component_is_refused_before_anything_is_fetched() {
 fn an_unknown_residency_profile_is_refused_before_anything_is_fetched() {
     let root = area("residency");
     let Some((ok, stdout, stderr)) = run(&root, &["all", "--residency", "sometimes"]) else {
-        eprintln!("skipping: the binary would not build");
+        inillucent_compat::differential::skipping("the binary would not build");
         return;
     };
     assert!(!ok, "an unknown profile fails: {stdout}");
@@ -217,7 +217,7 @@ fn an_unknown_residency_profile_is_refused_before_anything_is_fetched() {
 fn setting_only_the_profile_records_it_and_downloads_nothing() {
     let root = area("profile-only");
     let Some((ok, stdout, _)) = run(&root, &["--residency", "resident"]) else {
-        eprintln!("skipping: the binary would not build");
+        inillucent_compat::differential::skipping("the binary would not build");
         return;
     };
     assert!(ok, "{stdout}");

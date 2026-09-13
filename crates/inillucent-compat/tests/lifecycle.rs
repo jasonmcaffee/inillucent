@@ -243,7 +243,6 @@ fn a_long_session_changes_no_byte() {
     ] {
         let _ = connection.query(sql).expect("it runs");
     }
-    drop(connection);
     let after = std::fs::read(&path).expect("the database reads");
     assert_eq!(before, after);
 }
@@ -295,7 +294,7 @@ fn sqlite_oracle() -> Option<PathBuf> {
 #[test]
 fn lifecycle_and_metadata_match_the_oracle() {
     let Some(program) = sqlite_oracle() else {
-        eprintln!("the pinned SQLite oracle is not built; skipping");
+        inillucent_compat::differential::skipping("the pinned SQLite oracle is not built");
         return;
     };
     let mut driver = Driver::start("sqlite", &program).expect("the oracle starts");

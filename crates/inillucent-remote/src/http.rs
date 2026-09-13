@@ -701,6 +701,28 @@ fn parse_content_range_total(value: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
+
+    /// Says why a case did not run, and fails the case when the run is strict.
+    ///
+    /// **The same helper `inillucent_compat::differential::skipping` is, written
+    /// here because the layering contract will not let a production crate depend
+    /// on the test harness (task-1932, H10).** Every skip message in the workspace
+    /// ends with `; skipping`, which is the one marker
+    /// `tests/inillucent-testing-tdd.md` §9 asks for and the one phrase
+    /// `inillucent-testrun`'s classifier matches. `INILLUCENT_STRICT`, which
+    /// `inillucent-testrun --strict` sets, turns the skip into a failure that names
+    /// the test - which matters most here, because this binary runs other tests,
+    /// so a skip of its own was invisible to `--strict` by both routes: a CI image
+    /// without Python's `ssl` module passed the TLS verification suite without
+    /// running any of it.
+    ///
+    /// @param reason - what is missing, without the marker
+    fn skipping(reason: &str) {
+        if std::env::var("INILLUCENT_STRICT").is_ok_and(|value| !value.is_empty()) {
+            panic!("{reason}; skipping - and this run is strict, so a skip is a failure");
+        }
+        eprintln!("{reason}; skipping");
+    }
     use super::*;
 
     /// A URL splits into the four things a request needs, with the port
@@ -827,7 +849,7 @@ mod tests {
     #[test]
     fn it_fetches_from_the_hosts_the_installer_uses() {
         if std::env::var("INILLUCENT_NETWORK_TESTS").is_err() {
-            eprintln!("skipping: set INILLUCENT_NETWORK_TESTS to run this");
+            skipping("set INILLUCENT_NETWORK_TESTS to run this");
             return;
         }
         let into = std::env::temp_dir().join("inillucent-http-network");

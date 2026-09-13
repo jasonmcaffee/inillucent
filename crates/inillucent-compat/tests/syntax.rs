@@ -386,7 +386,7 @@ fn oracle_syntax_verdict(driver: &mut Driver, sql: &str) -> Option<bool> {
 #[test]
 fn the_register_agrees_with_the_pinned_release() {
     let Some(mut driver) = start_oracle() else {
-        eprintln!("the pinned SQLite oracle is not built; skipping");
+        inillucent_compat::differential::skipping("the pinned SQLite oracle is not built");
         return;
     };
     let register = register();
@@ -537,7 +537,7 @@ fn a_join_keyword_is_still_not_a_bare_alias_or_a_type_name() {
 #[test]
 fn the_reserved_word_lists_agree_with_the_pinned_release() {
     let Some(mut driver) = start_oracle() else {
-        eprintln!("the pinned SQLite oracle is not built; skipping");
+        inillucent_compat::differential::skipping("the pinned SQLite oracle is not built");
         return;
     };
     let mut divergences = Vec::new();
@@ -628,7 +628,7 @@ fn generate(rng: &mut Rng) -> String {
 #[test]
 fn differential_parser_fuzzing_finds_no_divergence() {
     let Some(mut driver) = start_oracle() else {
-        eprintln!("the pinned SQLite oracle is not built; skipping");
+        inillucent_compat::differential::skipping("the pinned SQLite oracle is not built");
         return;
     };
     let mut rng = Rng(0x9e3779b97f4a7c15);

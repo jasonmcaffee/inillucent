@@ -26,6 +26,11 @@
 //! every time by design - so it is covered by a fake server further down that
 //! *computes* the exchange rather than replaying one, and by `live_postgres.rs`
 //! against a real `scram-sha-256` instance.
+//!
+//! Invariant: **the decoders are asserted against bytes, including bytes no
+//! honest server sends.** A wire format is exactly the bytes it is, so a
+//! hand-built packet is the only thing that can say what the client does with a
+//! malformed one - and that is the case an ordinary migration never reaches.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};

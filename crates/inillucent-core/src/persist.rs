@@ -18,6 +18,13 @@
 //!
 //! There is no daemon, no port and no background process. Opening an index is
 //! opening files.
+//!
+//! Invariant: **a file written by a different layout is refused rather than
+//! misread, and no length read out of one sizes a buffer before the bytes are
+//! known to be there.** Each section carries a version-stamped header, and each
+//! is read in bounded steps: these bytes come out of a database file somebody
+//! else could have written, and an allocation sized from a number in them is
+//! not an error that can be returned - it aborts the process.
 
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
@@ -892,8 +899,8 @@ const PART_LEXICAL: u8 = 4;
 /// earlier link a merge writes while it is still folding inputs has no seal
 /// at all, and [`parse_segment_delta`] reports that plainly rather than
 /// guessing: `ParsedDelta::sealed` is `None` for one, and a caller that
-/// requires a finished segment - a query, `finish_merge`, an integrity check
-/// - is the one that decides whether the absence of a seal is refused,
+/// requires a finished segment - a query, `finish_merge`, an integrity check -
+/// is the one that decides whether the absence of a seal is refused,
 /// exactly as `crates/inillucent-search`'s `load_segment` does for every
 /// caller except the merge itself resuming its own checkpoint.
 const PART_SEAL: u8 = 5;

@@ -43,6 +43,16 @@
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+// **These four were named in the `cfg_attr(test, allow(...))` block below and
+// denied nowhere (task-1932, H9).** `policy.rs` matched on the lint's *name*,
+// which is in that block, so this crate passed the check while allowing every
+// one of them - 71 `expect`s, two `unwrap`s, two `panic!`s and 22 direct index
+// expressions in `geopoly.rs`, in a crate that evaluates every scalar function
+// over values a caller chose.
+#![deny(clippy::indexing_slicing)]
+#![deny(clippy::unwrap_used)]
+#![deny(clippy::expect_used)]
+#![deny(clippy::panic)]
 #![cfg_attr(
     test,
     allow(

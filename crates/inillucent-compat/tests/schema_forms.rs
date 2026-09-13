@@ -1257,7 +1257,7 @@ fn vacuum_into_writes_a_copy_sqlite_reads() {
 #[test]
 fn an_alter_adding_a_column_to_an_empty_table_matches_the_oracle() {
     let Some(program) = oracle_path() else {
-        eprintln!("the pinned SQLite oracle is not built; skipping");
+        inillucent_compat::differential::skipping("the pinned SQLite oracle is not built");
         return;
     };
     // The reference's answers, taken first so that what is asserted below is

@@ -1168,6 +1168,18 @@ name = "inillucent-perfhistory"
 tier = "tooling"
 covers = ["inillucent-compat"]
 
+# Blocks crossing threads in the allocator, which is the one production crate in
+# the workspace allowed to write `unsafe`. Its module comment claimed a block
+# freed on a thread other than the one that allocated it "is safe", and until
+# task-1932 the crate had no `tests/` directory at all - so the claim was a
+# sentence rather than a fact.
+[[target]]
+package = "inillucent-alloc"
+kind = "test"
+name = "concurrency"
+tier = "e2e"
+covers = ["inillucent-alloc"]
+
 # The one command table against the two surfaces it generates. Also arrived with
 # the command surface without a row.
 [[target]]
@@ -1201,6 +1213,28 @@ package = "inillucent-compat"
 kind = "test"
 name = "cli_batch"
 tier = "e2e"
+covers = ["inillucent-cli"]
+
+# What each command line does before it opens anything. Arrived in task-1936
+# without a row, which `selection.rs` caught by name: a mistyped verb used to
+# exit 0 and leave a database file named after the typo, so the defect is a file
+# on disk and the test lists the directory to find it. Added here in task-1932,
+# which is where the red suite surfaced.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "cli_arguments"
+tier = "e2e"
+covers = ["inillucent-cli"]
+
+# The `inillucent` binary's own unit tests, which grew a `#[test]` in task-1936
+# and had no row either. A binary's tests are a target like any other, and a
+# target with no row is one the runner never starts.
+[[target]]
+package = "inillucent-cli"
+kind = "bin"
+name = "inillucent"
+tier = "tooling"
 covers = ["inillucent-cli"]
 
 # The install command, driven as a program, with nothing downloaded. It is here

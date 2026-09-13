@@ -51,6 +51,28 @@
 //! at worst moves a block between threads. The per-class cap bounds what that
 //! can cost.
 
+#![deny(missing_docs)]
+// **The one production crate in this workspace allowed to write `unsafe`, and
+// it was outside every check until task-1932 (H9).** It was not in `GOVERNED`
+// and not in `UNSAFE_CRATES`, which is not the same as being permitted: it
+// means nothing read it. A `GlobalAlloc` is an unsafe trait and this crate is
+// the boundary, so the four lints below are what say that the *rest* of it -
+// the size-class arithmetic, the caps, the thread-local lists - is ordinary
+// safe code held to the same standard as the engine.
+#![deny(clippy::indexing_slicing)]
+#![deny(clippy::unwrap_used)]
+#![deny(clippy::expect_used)]
+#![deny(clippy::panic)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::unwrap_used
+    )
+)]
+
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
