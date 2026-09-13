@@ -12,24 +12,24 @@ are what you need, and you should not have to read any Rust.
 
 ---
 
-## The one thing to read first
+## Two requirements
 
-**This engine is deliberately incomplete in places, and it refuses what it has
-not built rather than answering it wrongly.** That is the whole shape of the
-driver, and it has two consequences you have to design for rather than discover:
+This engine is incomplete in places. It refuses what it has not built, and it
+says so with a status of its own. Two things follow, and a binding has to be
+designed for both.
 
-1. **There is a status of its own for "not implemented"** — `unsupported`,
-   `INILLUCENT_UNSUPPORTED` — and it is *not* the status a mistyped statement
-   gets. An application needs to be able to say "this engine cannot do that yet"
-   rather than "check your spelling", and it can only do that if the driver
-   tells it. A binding that folds this into its general error type has thrown
-   the design away; see [Writing a binding](#writing-a-binding), rule 4.
-2. **There is a capability table you can ask before you compose a statement.**
+1. **Handle `unsupported`.** `unsupported` and `INILLUCENT_UNSUPPORTED` are the
+   status for "this engine has not built that". It is a different status from
+   the one a mistyped statement gets, so an application can tell a construct
+   that does not exist yet from a construct it got wrong. A binding that folds
+   this into its general error type cannot tell them apart. See
+   [Writing a binding](#writing-a-binding), rule 4.
+2. **Read the capability table before composing SQL.**
    `inillucent_capability()` enumerates what the engine does, with a sentence
-   about each. Every row is checked against the running engine by a test — in
-   **both** directions, so a claim of support that fails and a claim of absence
-   that now works each turn it red. That second half is what makes it worth
-   trusting; see [The capability table](#the-capability-table).
+   about each. A test checks every row against the running engine in both
+   directions: a claim of support that fails turns the build red, and so does a
+   claim of absence that now works. See
+   [The capability table](#the-capability-table).
 
 The engine reports `cancel` as partial support. A running statement stops at a
 scan leaf or result batch, while an indivisible operator finishes before it can
@@ -94,18 +94,17 @@ match connection.query(statement, &[], 0) {
 cases the 416-case differential probe records as refused; over the command line the same condition is
 exit code 3. `VACUUM`, which this example used to name, rebuilds the file and does not return it.
 Write the arm: any statement carrying a window function reaches it today. `cancel` and `readonly_open`
-report partial support — cancellation is observed between executor units of work rather than at every
-instruction, and read-only is enforced by this driver above the engine rather than by the file
-handle.
+report partial support. Cancellation is observed between executor units of work, not at every
+instruction. Read-only is enforced by this driver above the engine, not by the file handle.
 
 Rust does **not** go through the C ABI. DuckDB routes even its own first-party
 Rust binding through its C API because its core is C++ and the ABI is the
 narrowest thing it can be stable across; ours is a Rust core whose first
 consumer is Rust, so doing the same would add a pointer round trip and a
 `catch_unwind` per call, lose the type system across the seam, and put a Rust
-caller's errors through a C integer and back — all of it to reach Rust.
+caller's errors through a C integer and back, all of it to reach Rust.
 
-### Six things worth knowing
+### Six behaviours to design around
 
 - **Values are typed, not text.** `Null | Integer | Real | Text | Blob`. A
   driver that rendered everything as text would be choosing a float's formatting
@@ -116,7 +115,7 @@ caller's errors through a C integer and back — all of it to reach Rust.
   the count was taken rather than estimated. `limit` caps the rows handed back;
   `total` and `more` describe what was produced. That is what lets a grid say
   `1–200 of 4,317` and mean it. The cost is that a query over a large table
-  costs what the whole result costs — put a `LIMIT` in your own SQL when you
+  costs what the whole result costs. Put a `LIMIT` in your own SQL when you
   cannot afford that, where the planner can act on it.
 - **A batch is one transaction, and the check happens before the commit.**
   `Connection::transaction(work, check)` takes the predicate as an argument on
@@ -125,9 +124,9 @@ caller's errors through a C integer and back — all of it to reach Rust.
 - **One file is one buffer pool**, and the engine is single threaded. A
   `Database` is neither `Send` nor `Sync`.
 - **Read-only is enforced by the driver, not by the file.** A statement that
-  does not bind to a query is refused — the binder's classification, not a scan
-  of the text — but the file is still open for writing. The capability table
-  says `partial` and says why.
+  does not bind to a query is refused. That is the binder's classification, not
+  a scan of the text. The file is still open for writing, so the capability
+  table says `partial` and says why.
 
 ---
 
@@ -169,8 +168,8 @@ recursive CTEs, foreign keys, triggers, `ATTACH`, temporary tables, `STRICT` and
 a message naming the row to update, rather than leaving an application quietly
 refusing to offer something that works.
 
-**A row's probe is not optional.** Two rows once carried `Probe::Nothing` —
-"the driver has no call for registering a function" — and the engine grew
+**A row's probe is not optional.** Two rows once carried `Probe::Nothing`, on
+the grounds that the driver had no call for registering a function. The engine grew
 `create_scalar_function` underneath them, so they rotted invisibly, exactly the
 way a JDBC list rots. They now register a doubling function and a
 case-insensitive collation and then **call them from SQL**, because a registry
@@ -196,7 +195,7 @@ python drivers/bindings/python/run_conformance.py
 ```
 
 When they disagree, one of the bindings is wrong. When they agree, the
-specification is followable — which is a claim about this README, and the only
+specification is followable. That is a claim about this README, and the only
 way to test it is to have somebody follow it in a second language.
 
 The file's own `about` section documents its shape. In short: a case has
@@ -207,7 +206,7 @@ the file itself.
 
 **Add a case whenever you fix something.** The `returning_gives_rows_and_a_count`
 case exists because writing it found that `INSERT … RETURNING a, b` produced its
-rows with an empty column list — two columns of values and no headings for them.
+rows with an empty column list: two columns of values and no headings for them.
 
 ---
 
@@ -224,7 +223,7 @@ The shape is the same in every language.
    twice.
 3. **After every call that takes an `inillucent_error **`, check the status
    first.** On non-zero, build your exception from `inillucent_error_status`,
-   `_message`, `_feature` and `_offset` — then call `inillucent_error_free` **in
+   `_message`, `_feature` and `_offset`. Then call `inillucent_error_free` **in
    a `finally`**, because an exception constructed from the error must not leak
    it.
 4. **Map `INILLUCENT_UNSUPPORTED` to its own exception type**, not to the
@@ -245,8 +244,8 @@ The shape is the same in every language.
 3. Every pointer you **pass in** is copied before the call returns. You may free
    your buffer on the next line.
 
-Text is **not** NUL-terminated — a text value may contain a NUL byte, and
-pretending otherwise would truncate it silently — so byte accessors take a
+Text is **not** NUL-terminated. A text value may contain a NUL byte, and
+pretending otherwise would truncate it silently, so byte accessors take a
 length out-parameter.
 
 ### Lifetimes in a garbage-collected language
@@ -255,8 +254,8 @@ A connection is only valid while its database is, and non-deterministic
 finalisation will otherwise free them in the wrong order. Hold a strong
 reference from child to parent: the connection object keeps the database alive,
 the statement keeps the connection. A result keeps nothing, because it is
-materialised and self-contained — which is deliberate, since it is the handle
-most likely to outlive its statement in a `for row in query(...)` idiom.
+materialised and self-contained. That is deliberate: it is the handle most
+likely to outlive its statement in a `for row in query(...)` idiom.
 
 `inillucent_close` refuses with `INILLUCENT_INVALID_STATE` while any connection
 is open rather than leaving them dangling, so getting this wrong is an error
@@ -273,14 +272,14 @@ does not pretend there is. Two databases on two files are independent.
 
 A **session** is what `temp.`, `ATTACH` and the connection pragmas are scoped
 to. `inillucent_connect` opens one and the handle keeps it, so every call on
-that handle is the same session however the call is implemented underneath —
-which matters, because underneath it is a connection per call: the Rust
+that handle is the same session however the call is implemented underneath.
+That matters, because underneath it is a connection per call: the Rust
 `Connection` borrows its `Database`, and a C handle cannot hold a borrow.
 
-That is worth knowing if you are writing a binding that does *not* go through
+This matters to a binding that does *not* go through
 the C ABI. `inillucent_driver::Connection<'d>` borrows the `Database`, so a
-long-lived object cannot hold both — it is a self-referential struct and Rust
-will not have it. A caller in that position holds the `Database` and connects
+long-lived object cannot hold both. It would be a self-referential struct, and
+Rust will not have it. A caller in that position holds the `Database` and connects
 per call, and must carry the session across:
 
 ```rust
@@ -296,12 +295,12 @@ the one case that sets `"connection": "per_call"`.
 
 ### Known-good starting points
 
-- **Python** — `ctypes`, standard library only. `bindings/python/inillucent.py`
+- **Python**: `ctypes`, standard library only. `bindings/python/inillucent.py`
   is the reference implementation and is written to be read.
-- **Node** — `koffi`, or N-API if a compiled addon is acceptable.
-- **Go** — `cgo`, or `purego` to avoid it.
-- **Java** — the Foreign Function & Memory API on 22+; JNI below that.
-- **C#** — `DllImport` with `SafeHandle` subclasses, which give you the
+- **Node**: `koffi`, or N-API if a compiled addon is acceptable.
+- **Go**: `cgo`, or `purego` to avoid it.
+- **Java**: the Foreign Function & Memory API on 22+, and JNI below that.
+- **C#**: `DllImport` with `SafeHandle` subclasses, which give you the
   lifetime rule above for free.
 
 ---
@@ -310,14 +309,14 @@ the one case that sets `"connection": "per_call"`.
 
 `abi.toml` gives every symbol a stability and a `since`, and
 `inillucent-driver-capi/tests/abi.rs` checks that the header, the manifest and
-the implementation all name the same set — and that the header's numeric
-constants are the driver's own enum values, because **the numbers are the ABI**
+the implementation all name the same set. It also checks that the header's
+numeric constants are the driver's own enum values, because **the numbers are the ABI**
 and a variant renumbered on the Rust side without the header changing would make
 every binding in every language silently misread every error, with both sides
 still compiling.
 
-- **stable** — the signature will not change and the symbol will not be removed.
-- **provisional** — it exists and may change in a minor version. Today that is
+- **stable**: the signature will not change and the symbol will not be removed.
+- **provisional**: it exists and may change in a minor version. Today that is
   `inillucent_cancel` alone. It requests cancellation of a running statement,
   which reports `INTERRUPTED` once the executor reaches a cancellation point.
 
@@ -334,8 +333,8 @@ cargo build --manifest-path <repo>/Cargo.toml -p inillucent-driver-capi
 
 produces, in `target/<profile>/`:
 
-- `inillucent_driver_capi.dll` / `.so` / `.dylib` — what a binding loads;
-- `inillucent_driver_capi.lib` / `libinillucent_driver_capi.a` — for a C or C++
+- `inillucent_driver_capi.dll` / `.so` / `.dylib`, which is what a binding loads;
+- `inillucent_driver_capi.lib` / `libinillucent_driver_capi.a`, for a C or C++
   program that would rather link it.
 
 The header has no dependencies beyond `stdint.h` and `stddef.h`.

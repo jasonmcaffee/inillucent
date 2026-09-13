@@ -17,7 +17,7 @@ Measured at 100,000 rows on Windows, over the ten workload families the performa
 | **elapsed time**, weighted over the ten families | the reference | 4.30x the speed | **330% faster** |
 | **elapsed time**, the 95% lower bound the gate grades on | | 4.06x | **306% faster**, against a bar asking 200% |
 | **processor time**, one round of the whole plan | 1,320 ms | 390 ms | **70% less processor** |
-| **peak resident memory**, one round of the whole plan | 37.20 MiB | 42.40 MiB | **14% more** — the one loss |
+| **peak resident memory**, one round of the whole plan | 37.20 MiB | 42.40 MiB | **14% more**, the one loss |
 | **the database file**, the same imported fixture | the reference | 1.036x | within 4% |
 
 Every workload's answer is hashed and compared with SQLite's before its timing is allowed to count.
@@ -38,23 +38,22 @@ it, expressed as the family's own ratio.
 
 | family | weight | what it measures | measured | 95% lower bound | bar |
 |---|---|---|---|---|---|
-| `read.point` | 16% | one row by rowid, by integer key, and through a secondary index | **2,877% faster** (29.77x) | 26.77x | 2.00x — met |
-| `large.values` | 4% | text and blobs across the boundary where a value stops fitting in a leaf | **1,167% faster** (12.67x) | 8.81x | 1.50x — met |
-| `read.analytical` | 10% | scans, aggregates, `GROUP BY`, `DISTINCT`, sorts | **567% faster** (6.67x) | 5.45x | 5.00x — met |
-| `read.range` | 12% | selective ranges, forward and reverse, covering and not | **402% faster** (5.02x) | 4.00x | 3.00x — met |
-| `read.join` | 8% | two table and four table joins | **332% faster** (4.32x) | 3.00x | 3.00x — sits exactly on the bar |
-| `transaction` | 10% | autocommit, small batches, large batches, savepoints | **152% faster** (2.52x) | 1.99x | no slower than SQLite — met |
-| `write` | 20% | insert, update, delete, upsert, with and without indexes | **108% faster** (2.08x) | 1.62x | 1.50x — met |
-| `open.prepare` | 8% | parse, bind, step one row, reset | **56% faster** (1.56x) | 1.17x | 5.00x — bar missed |
-| `extension` | 8% | JSON, FTS5, R-Tree | **52% faster** (1.52x) | 1.36x | 1.50x — bar missed on the lower bound |
-| `schema` | 4% | `CREATE INDEX` and its backfill | **40% faster** (1.40x) | 1.16x | 3.00x — bar missed |
+| `read.point` | 16% | one row by rowid, by integer key, and through a secondary index | **2,877% faster** (29.77x) | 26.77x | 2.00x, met |
+| `large.values` | 4% | text and blobs across the boundary where a value stops fitting in a leaf | **1,167% faster** (12.67x) | 8.81x | 1.50x, met |
+| `read.analytical` | 10% | scans, aggregates, `GROUP BY`, `DISTINCT`, sorts | **567% faster** (6.67x) | 5.45x | 5.00x, met |
+| `read.range` | 12% | selective ranges, forward and reverse, covering and not | **402% faster** (5.02x) | 4.00x | 3.00x, met |
+| `read.join` | 8% | two table and four table joins | **332% faster** (4.32x) | 3.00x | 3.00x, and two of four runs came in under it |
+| `transaction` | 10% | autocommit, small batches, large batches, savepoints | **152% faster** (2.52x) | 1.99x | no slower than SQLite, met |
+| `write` | 20% | insert, update, delete, upsert, with and without indexes | **108% faster** (2.08x) | 1.62x | 1.50x, met |
+| `open.prepare` | 8% | parse, bind, step one row, reset | **56% faster** (1.56x) | 1.17x | 5.00x, missed |
+| `extension` | 8% | JSON, FTS5, R-Tree | **52% faster** (1.52x) | 1.36x | 1.50x, missed on the lower bound |
+| `schema` | 4% | `CREATE INDEX` and its backfill | **40% faster** (1.40x) | 1.16x | 3.00x, missed |
 
 **No family is below the 1.00x floor on any of the four runs**, which is the release condition.
 
-**`read.join` sits on its bar rather than over it**, and the four runs' lower bounds were 2.97x,
-3.00x, 3.00x and 2.99x. A bound that lands on the threshold on two runs and under it on two has not
-cleared it, so it
-stays in [the roadmap](roadmap.md#2-four-per-family-bars-are-missed) with the other three.
+**`read.join` has not cleared its bar.** The four lower bounds were 2.97x, 3.00x, 3.00x and 2.99x.
+Two runs missed the 3.00x requirement, so `read.join` stays in
+[the roadmap](roadmap.md#2-four-per-family-bars-are-missed) with the other three.
 
 **`transaction` fell from 3.41x, and the reason is `txn.autocommit`.** The other two workloads in
 that family did not move: `txn.batched` reads 3.79x and `txn.large` 4.05x. `txn.autocommit` is now
@@ -86,7 +85,7 @@ the `transaction` floor, and it is now **3.70x**, where the median round takes 2
 SQLite's 9.65. Two things got it there and only one of them is the engine.
 
 **How a ratio on this page is taken.** A family's or a workload's ratio is the gate's own paired-round
-figure — it pairs the two arms round by round and reports the middle of the thirty — and the number
+figure, which pairs the two arms round by round and reports the middle of the thirty. The number
 printed here is the median of the two middle runs of four. An absolute time printed beside it is the
 median of the same four runs' own medians. The two are different summaries of one set of rounds, so
 dividing the printed times gives a number close to the printed ratio rather than exactly it: 2.66 and
@@ -95,8 +94,8 @@ and the one quoted.
 
 ### What a statement costs before it reaches a tree
 
-The whole tree write was ablated out of the in-place update path — the statement found its row,
-decided what to write, and returned without writing — and `txn.large` measured **1.54 microseconds
+The whole tree write was ablated out of the in-place update path, so the statement found its row,
+decided what to write, and returned without writing. `txn.large` then measured **1.54 microseconds
 against 1.53**. None of its gap was in leaves, delta areas or compactions. It was in what a statement
 costs to set itself up:
 
@@ -111,7 +110,7 @@ costs to set itself up:
 What made the middle row possible is that **a parameter is now read when the expression is
 evaluated** rather than folded into it when it is built. `translate` answered `?2` with an
 `Expr::Literal` holding whatever was bound at the time, so nothing compiled could outlive one
-execution's values — which is why `Statement::rebindable` existed to refuse a re-run. An
+execution's values, which is why `Statement::rebindable` existed to refuse a re-run. An
 `Expr::Parameter` reads a cell the statement refreshes instead, and it costs a repeated literal
 nothing it did not already cost: a text literal clones per evaluation either way.
 
@@ -120,12 +119,12 @@ nothing it did not already cost: a text literal clones per evaluation either way
 `fullgate` runs a round's workloads in order against one database, and `txn.batched` and `txn.large`
 are the same statement over the same scattered rowids with the same `row {iteration} lorem ipsum ...`
 text and the same repeat. So by the time `txn.large` ran, **every row it touched already held the
-bytes it was about to write** — 2,000 updates that changed nothing, under a description saying
+bytes it was about to write**: 2,000 updates that changed nothing, under a description saying
 "2,000 `UPDATE`s in one transaction".
 
 That was hiding a real defect rather than only mis-measuring. `only_change` answered `None` both when
-*nothing* differed and when *several* columns did, so the caller took the most expensive path it has —
-a tombstone, a delta insert, and a compaction every `DELTA_LIMIT` writes — for the cheapest case
+*nothing* differed and when *several* columns did, so the caller took the most expensive path it has
+for the cheapest case: a tombstone, a delta insert, and a compaction every `DELTA_LIMIT` writes
 there is. Running the same `UPDATE` twice over the same rows:
 
 | pass | ns each | allocations | inserted | in place |
@@ -139,7 +138,7 @@ still counts the row, both trigger times still fire, `RETURNING` still returns, 
 already skipped an entry that had not moved.
 
 And because making that case cheap would otherwise have turned `txn.large` into a workload that
-measures an operation doing no work — a test that cannot fail — **the workload was corrected too**.
+measures an operation doing no work, which is a test that cannot fail, **the workload was corrected too**.
 `txn.batched` and `txn.large` now reset `side_table.note` first, outside the timed region on both
 arms, where `sqlite_bench.c` already runs a workload's setup. `txn.large` reads **0.09x** on the old
 workload with the old engine, **0.59x** on the old workload with this one, and **3.63x** once the
@@ -149,8 +148,8 @@ it has to perform the same 2,000 updates.
 ### What an `UPDATE` that changes a value's length used to cost
 
 Until task-1890 a heap slot could only be written over by a value of **exactly** the same length, so
-`txn.large` — which replaces an eight byte `note 1234` with a forty-two byte
-`row 1234 lorem ipsum ...` — took none of the in-place path at all. Every statement became a
+`txn.large` replaces an eight byte `note 1234` with a forty-two byte
+`row 1234 lorem ipsum ...`, so it took none of the in-place path at all. Every statement became a
 tombstone plus an insert into the leaf's delta area, and every thirty-second one a compaction over
 every live row of the leaf.
 
@@ -163,7 +162,7 @@ the state the original write saw, and the relocation is a function of that page 
 
 ## Memory
 
-**42.40 MiB against SQLite's 37.20 — 14% more.** The contract asks for 5% less, so this bar is
+**42.40 MiB against SQLite's 37.20, which is 14% more.** The contract asks for 5% less, so this bar is
 missed, and it is the only headline that is a loss.
 
 It has been worked twice. It was **102% more** two rounds of work ago and **43% more** one round ago.
@@ -189,7 +188,7 @@ Where the remaining 5.4 MiB is:
 | | inillucent | SQLite | what it is |
 |---|---|---|---|
 | the cached database | 16.56 MiB | about 16 MiB | the `.rdb` is 1.036x the `.db`. Under 0.6 MiB left here |
-| the process floor | 8.49 MiB | about 4.2 MiB | **4.1 MiB of it is what any Rust binary in this workspace costs before the engine exists** — a trivial 110 KB one measures the same. About 2.2 MiB is this engine's own code and statics |
+| the process floor | 8.49 MiB | about 4.2 MiB | **4.1 MiB of it is what any Rust binary in this workspace costs before the engine exists**, because a trivial 110 KB one measures the same. About 2.2 MiB is this engine's own code and statics |
 | `schema.index`'s rise | 12.50 MiB | about 15.9 MiB | the pages the new index occupies plus the sort's arena. This one is **smaller** than SQLite's |
 
 So most of what is left is the operating system's, which neither engine escapes, and one
@@ -222,7 +221,7 @@ The imported fixture, both engines given the same data:
 
 | | inillucent | SQLite |
 |---|---|---|
-| the medium fixture | 17,432,576 B | **1.036x** — within 4% |
+| the medium fixture | 17,432,576 B | **1.036x**, within 4% |
 
 An integer column is now as wide as its own values rather than always eight bytes: the builder picks
 the narrowest of 1, 2, 4 and 8 bytes that holds every value in a leaf, and writes the choice into a
@@ -255,12 +254,12 @@ in the meantime, so treat the pair as the finding it was rather than as a compar
 at the top of this page.
 
 With a size classed free list in place of the system allocator, a `SELECT 1` compile goes from
-46.95 ms to 38.97 ms on Windows (17% faster) and from 39.91 ms to 38.20 ms on Linux (4% faster) —
+46.95 ms to 38.97 ms on Windows (17% faster) and from 39.91 ms to 38.20 ms on Linux (4% faster),
 and **the two platforms then run the same speed**, 38.97 against 38.20. On the Windows compile the C
 runtime's heap is 59% of the time.
 
 SQLite does per statement work with the operating system that Windows charges heavily for and Linux
-barely does. So SQLite's arm — the denominator of every ratio on this page — moves across platforms
+barely does. SQLite's arm is the denominator of every ratio on this page, and it moves across platforms
 while this engine's does not. The absolute work is the same on both, and lowering it is what the
 missed bars need. Neither the allocator change that took Windows from 3.24x to 3.86x nor anything
 since has been measured on Linux.
@@ -273,11 +272,11 @@ since has been measured on Linux.
   because a bigger table spreads what a statement costs to set itself up over more of a page.
   `extension` moves the other way: 1.58x at 5,000 rows and 1.51x at 600,000, against 1.30x at 100,000.
   Both of those clear the 1.50x bar's central value, but the gate grades a family on its 95% lower
-  bound, and that is 1.33x at both ends — so `extension` reads MISSED at all three scales. The reason
+  bound, and that is 1.33x at both ends, so `extension` reads MISSED at all three scales. The reason
   it is better at the ends than in the middle is the same one: FTS5's build is four ordinary row
   writes per document, and a row write is where the per-statement cost lands.
 - **One machine.** Windows 11 on x64. The disk matters more than it looks: part way through a four
-  run sequence, `txn.batched` — 200 commits and 200 `fsync`s — goes from 309 ms to 895 ms **on
+  run sequence, `txn.batched` is 200 commits and 200 `fsync`s, and it goes from 309 ms to 895 ms **on
   SQLite's own arm**, on the same fixture with the same binary, because the volume stops keeping up
   with the couple of gigabytes a sequence writes. That row is published beside every run so a reader
   can tell a slow volume from a slow engine. Twelve runs across three sequences were taken and the
@@ -294,7 +293,7 @@ cargo build --release
 pwsh tools/sqlite-reference.ps1      # Windows
 bash tools/sqlite-reference.sh       # Linux
 
-# The fixtures are not checked in — they are 17 MB, 94 MB and 600 MB — and each
+# The fixtures are not checked in, because they are 17 MB, 94 MB and 600 MB. Each
 # gate run needs its own copy: the schema.index workload leaves an index behind
 # on the SQLite arm, so a second run against the same file stops on
 # `index main_label already exists`.
