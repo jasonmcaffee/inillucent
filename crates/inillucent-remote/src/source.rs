@@ -11,6 +11,11 @@
 //! IEEE double is still a number, still eight bytes, and no check anywhere will
 //! notice. Its digits, carried as text, are exactly what `psql` prints and
 //! cannot lose anything they had.
+//!
+//! Invariant: **every source type maps to exactly one inillucent type, and the
+//! map is written down rather than inferred.** This is the part of the crate
+//! most able to be quietly wrong - a column that arrives as the wrong class
+//! reads back as a working migration - so the table is asserted type by type.
 
 use inillucent_tree::datum::OwnedDatum;
 

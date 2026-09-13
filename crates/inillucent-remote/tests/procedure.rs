@@ -9,6 +9,11 @@
 //! that cannot make them happen is not testing them.
 //!
 //! So the source here is a struct. It can lie.
+//!
+//! Invariant: **the migration procedure is asserted as a sequence, not as an
+//! outcome.** Copy, digest, compare, publish - a test that only checked the
+//! final database would pass for an implementation that published first and
+//! verified afterwards, which is the ordering that loses data.
 
 use std::path::{Path, PathBuf};
 

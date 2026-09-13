@@ -880,10 +880,11 @@ fn execute(ordered: Vec<Built>, options: &Options) -> Vec<Outcome> {
         let sender = sender.clone();
         let threads = options.test_threads.to_string();
         let filter = options.filter.clone();
+        let strict = options.strict;
         let _ = std::thread::Builder::new()
             .name(built.target.label())
             .spawn(move || {
-                let outcome = run_one(&built, &threads, filter.as_deref());
+                let outcome = run_one(&built, &threads, filter.as_deref(), strict);
                 let _ = sender.send(outcome);
             });
         true
@@ -919,7 +920,8 @@ fn execute(ordered: Vec<Built>, options: &Options) -> Vec<Outcome> {
 /// @param built - the executable and where to run it
 /// @param threads - what to pass as `--test-threads`
 /// @param filter - a name filter, when one was asked for
-fn run_one(built: &Built, threads: &str, filter: Option<&str>) -> Outcome {
+/// @param strict - whether a suite that skips should panic rather than pass
+fn run_one(built: &Built, threads: &str, filter: Option<&str>, strict: bool) -> Outcome {
     let mut command = Command::new(&built.executable);
     command
         .current_dir(&built.directory)
@@ -928,6 +930,16 @@ fn run_one(built: &Built, threads: &str, filter: Option<&str>) -> Outcome {
         // fall back to whatever `cargo` is on PATH, which on a machine with
         // several toolchains is not necessarily this one.
         .env("CARGO", cargo())
+        // **What `--strict` means, handed to the suite itself.** The
+        // classifier below reads a suite's captured output and decides whether
+        // it skipped, which works and is the backstop; this is the same
+        // decision made one layer earlier, where the *test* is still on the
+        // stack. A suite that skips under `--strict` panics with the name of
+        // the test and the name of the thing that is missing, rather than
+        // passing and being classified afterwards by binary. `INILLUCENT_STRICT`
+        // is unset for an ordinary run, so a developer without the oracle still
+        // gets a green suite that says what it skipped (task-1932, H10).
+        .env("INILLUCENT_STRICT", if strict { "1" } else { "" })
         // **`--show-output`, or `--strict` cannot see a skip at all.**
         // libtest swallows the output of a test that *passes*, and
         // a suite whose prerequisite is absent passes - that is the whole shape
@@ -1032,7 +1044,7 @@ fn settle_undetermined(
         let Some(built) = executables.get(&target) else {
             continue;
         };
-        let mut again = run_one(built, &threads, options.filter.as_deref());
+        let mut again = run_one(built, &threads, options.filter.as_deref(), options.strict);
         again.retry_of = Some(format!(
             "{} on the first attempt ({status})",
             reason.reason()
@@ -1052,6 +1064,51 @@ fn settle_undetermined(
     settled
 }
 
+/// Returns how many tests a transcript says failed.
+///
+/// Read out of libtest's own summary line rather than counted from the failure
+/// list, because the list is printed twice - once as it happens and once in the
+/// summary - and counting it would double every number.
+///
+/// @param output - everything the suite printed
+fn failed_count(output: &str) -> usize {
+    output
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("test result: "))
+        .filter_map(|rest| rest.split(';').nth(1))
+        .filter_map(|part| part.trim().strip_suffix(" failed"))
+        .filter_map(|count| count.parse::<usize>().ok())
+        .sum()
+}
+
+/// Returns what a strict run's skip panics said was missing, de-duplicated.
+///
+/// The suite's own sentence, which is better evidence than a `requires` row: it
+/// names the thing this machine has not got rather than the category the map
+/// put the target in.
+///
+/// @param output - everything the suite printed
+fn strict_skip_reasons(output: &str) -> Vec<String> {
+    let mut said: Vec<String> = Vec::new();
+    for line in output.lines() {
+        let Some(at) = line.find("; skipping") else {
+            continue;
+        };
+        if !line.contains(inillucent_compat::differential::STRICT_SKIP) {
+            continue;
+        }
+        // The panic prints `<file>:<line>:<column>:` ahead of the message on
+        // the line libtest captures, and the reason is what is between that and
+        // the marker.
+        let head = line.get(..at).unwrap_or_default();
+        let reason = head.rsplit(": ").next().unwrap_or(head).trim().to_string();
+        if !reason.is_empty() && !said.contains(&reason) {
+            said.push(reason);
+        }
+    }
+    said
+}
+
 /// Returns the selected suites whose prerequisites were not there.
 ///
 /// The harness says so itself: every one of these suites prints a line naming
@@ -1067,17 +1124,40 @@ fn missing_prerequisites<'run>(
 ) -> Vec<(&'run Outcome, Vec<String>)> {
     let mut hollow = Vec::new();
     for outcome in outcomes {
-        // Only a target that passed can be hollow. One that failed, or that the
-        // runner could not read, did not "evidence nothing" - it evidenced a
-        // problem, and calling it a missing prerequisite as well would put a
-        // second wrong label on the same event.
-        if !outcome.verdict.is_green() {
+        // **A target that failed is hollow only when every one of its failures
+        // is a strict skip (task-1932, H10).** The rule used to be that only a
+        // passing target could be hollow, which was right while a skip was a
+        // `return` - it evidenced a problem, and a second label would have been
+        // wrong. `--strict` now makes a skip panic, so the same suite fails
+        // instead, and calling that a failure is the wrong label the other way
+        // round: it did not evidence a problem, it evidenced nothing. The
+        // sentinel `differential::skipping` panics with is what separates the
+        // two, and a target with even one failure that does not carry it stays a
+        // failure.
+        let strictly_skipped = inillucent_compat::differential::every_failure_is_a_strict_skip(
+            &outcome.output,
+            failed_count(&outcome.output),
+        );
+        if !outcome.verdict.is_green() && !strictly_skipped {
             continue;
         }
         let Some(row) = map.row(&outcome.target) else {
             continue;
         };
-        if row.requires.is_empty() {
+        // **A suite that said what it was missing does not need a `requires`
+        // row to be believed (task-1932, H10).** The rule was that a target
+        // with no declared prerequisite could not be hollow, which was safe
+        // while a skip was a silent `return`: there was nothing to read. Under
+        // `--strict` the suite panics with the reason, and dropping it here
+        // because `selection.toml` happens not to declare one would put the
+        // skip back where it started - invisible, with the run reporting that
+        // every test passed while two of them did not run.
+        //
+        // `confinement` is the case that showed it: it needs a platform that
+        // can make a directory link, which its row does not say and which a
+        // Windows session without developer mode cannot do.
+        let strict_reasons = strict_skip_reasons(&outcome.output);
+        if row.requires.is_empty() && strict_reasons.is_empty() {
             continue;
         }
         // A suite that ran no tests at all, or that said out loud that its
@@ -1096,19 +1176,23 @@ fn missing_prerequisites<'run>(
         // oracle, thirty-odd differential suites skipped every case and the run
         // reported `ok`.
         //
-        // `; skipping` is the one that carries it, because it is the phrase the
-        // standard asks for and the suffix every existing message already ends
-        // with. The others stay so that a message written to the old list is
-        // still recognised.
+        // **One phrase as of task-1932, and every site was moved onto it.**
+        // The other five substrings are gone rather than kept "in case", which
+        // is what let two phrasings exist that matched none of them: a list of
+        // near-misses is a list nobody checks against, and
+        // `policy::every_skip_site_carries_the_one_marker` now greps every
+        // `eprintln!` that precedes an early return and names any that does not
+        // end with the marker. A message written to the old list fails that
+        // check rather than being quietly half-recognised here.
         let silent = outcome.ran == 0;
-        let announced = outcome.output.contains("; skipping")
-            || outcome.output.contains("has not been built")
-            || outcome.output.contains("is not built")
-            || outcome.output.contains("is not available")
-            || outcome.output.contains("is missing")
-            || outcome.output.contains("no reference");
+        let announced = inillucent_compat::differential::announces_a_skip(&outcome.output);
         if silent || announced {
-            hollow.push((outcome, row.requires.clone()));
+            let said = if row.requires.is_empty() {
+                strict_reasons
+            } else {
+                row.requires.clone()
+            };
+            hollow.push((outcome, said));
         }
     }
     hollow
@@ -1121,9 +1205,22 @@ fn missing_prerequisites<'run>(
 /// @param map - the selection map
 /// @param strict - whether a missing prerequisite is a failure
 fn report(outcomes: &[Outcome], wall: Duration, map: &Map, strict: bool) {
+    // **A suite whose every failure is a strict skip is not a failure
+    // (task-1932, H10).** It is listed under "evidenced nothing" below, with
+    // what it was missing, because that is what it did: `--strict` turns a skip
+    // into a failed *test* so the case is named rather than the binary, and
+    // reporting the binary as FAILED afterwards would say a defect was found
+    // when none was. The exit status is unchanged - a strict run still exits 1
+    // for it - which is the whole point of `--strict`.
     let failures: Vec<&Outcome> = outcomes
         .iter()
         .filter(|outcome| matches!(outcome.verdict, Verdict::Failed))
+        .filter(|outcome| {
+            !inillucent_compat::differential::every_failure_is_a_strict_skip(
+                &outcome.output,
+                failed_count(&outcome.output),
+            )
+        })
         .collect();
     let unread: Vec<&Outcome> = outcomes
         .iter()
@@ -1192,11 +1289,18 @@ fn report(outcomes: &[Outcome], wall: Duration, map: &Map, strict: bool) {
             }
         );
         for (outcome, requires) in &hollow {
-            println!(
-                "  {:<44} needs {}",
-                outcome.target.label(),
-                requires.join(", ")
-            );
+            // **"needs" only in front of a `requires` row.** Those are names of
+            // things - `postgres`, `oracle`, `shell` - and read as a need. A
+            // reason the suite printed is a whole sentence about this machine,
+            // and putting "needs" in front of one produces "needs this platform
+            // would not make a directory link" (task-1932, H10).
+            let said = requires.join(", ");
+            let lead = if said.split_whitespace().count() > 3 {
+                ""
+            } else {
+                "needs "
+            };
+            println!("  {:<44} {lead}{}", outcome.target.label(), said);
         }
     }
 

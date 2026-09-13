@@ -306,7 +306,6 @@ fn fresh_owned(scratch: &Path, name: &str, synchronous: Synchronous) -> Result<D
             synchronous.name()
         ),
     )?;
-    drop(connection);
     Ok(database)
 }
 

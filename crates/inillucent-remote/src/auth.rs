@@ -12,6 +12,12 @@
 //! tests, because a hash that is subtly wrong does not produce a wrong answer -
 //! it produces "password authentication failed", which reads as the operator's
 //! mistake.
+//!
+//! Invariant: **these are other people's wire formats, reproduced exactly, and
+//! no secret is kept a moment longer than the handshake needs it.** A hash that
+//! is nearly right is a login that fails with no explanation either end can
+//! act on, so each algorithm is written out the way its specification states it
+//! and checked against that specification's own worked example.
 
 use inillucent_base::hash::{sha256, Sha256};
 

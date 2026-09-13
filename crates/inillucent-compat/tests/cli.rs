@@ -85,7 +85,7 @@ fn waiting_on(gap: &str) {
 /// Runs one script through both shells and requires the same output.
 fn check(name: &str, script: &str) {
     let (Some(reference), Some(ours)) = (reference(), ours()) else {
-        eprintln!("a shell is missing; skipping");
+        inillucent_compat::differential::skipping("a shell is missing");
         return;
     };
     let expected = run(&reference, &format!("{name}-sqlite"), script);
@@ -113,7 +113,7 @@ fn check(name: &str, script: &str) {
 /// Runs one script through both shells, comparing with whitespace collapsed.
 fn check_words(name: &str, script: &str) {
     let (Some(reference), Some(ours)) = (reference(), ours()) else {
-        eprintln!("a shell is missing; skipping");
+        inillucent_compat::differential::skipping("a shell is missing");
         return;
     };
     let expected = collapse(&run(&reference, &format!("{name}-sqlite"), script));
@@ -222,7 +222,7 @@ fn a_dump_matches() {
 #[test]
 fn a_dump_round_trips() {
     let Some(ours) = ours() else {
-        eprintln!("the shell is missing; skipping");
+        inillucent_compat::differential::skipping("the shell is missing");
         return;
     };
     let dumped = run(&ours, "roundtrip-out", &format!("{SETUP}.dump\n"));

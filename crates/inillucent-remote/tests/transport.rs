@@ -36,6 +36,28 @@ use std::process::{Child, Command, Stdio};
 
 use inillucent_remote::{ConnectionUrl, PostgresSource, Transport};
 
+/// Says why a case did not run, and fails the case when the run is strict.
+///
+/// **The same helper `inillucent_compat::differential::skipping` is, written
+/// here because the layering contract will not let a production crate depend
+/// on the test harness (task-1932, H10).** Every skip message in the workspace
+/// ends with `; skipping`, which is the one marker
+/// `tests/inillucent-testing-tdd.md` §9 asks for and the one phrase
+/// `inillucent-testrun`'s classifier matches. `INILLUCENT_STRICT`, which
+/// `inillucent-testrun --strict` sets, turns the skip into a failure that names
+/// the test - which matters most here, because this binary runs other tests,
+/// so a skip of its own was invisible to `--strict` by both routes: a CI image
+/// without Python's `ssl` module passed the TLS verification suite without
+/// running any of it.
+///
+/// @param reason - what is missing, without the marker
+fn skipping(reason: &str) {
+    if std::env::var("INILLUCENT_STRICT").is_ok_and(|value| !value.is_empty()) {
+        panic!("{reason}; skipping - and this run is strict, so a skip is a failure");
+    }
+    eprintln!("{reason}; skipping");
+}
+
 /// Where the generated certificates and the server's log go.
 fn area() -> PathBuf {
     let path = workspace_root().join("_agent_output/tls");
@@ -248,15 +270,15 @@ fn url(port: u16, parameters: &str) -> ConnectionUrl {
 #[test]
 fn a_server_that_refuses_tls_gets_no_credentials() {
     let Some(python) = python() else {
-        eprintln!("transport: no python with an ssl module; case skipped");
+        skipping("transport: no python with an ssl module");
         return;
     };
     let Some((_, certificate, key)) = certificates("127.0.0.1", "refuse") else {
-        eprintln!("transport: no openssl to generate certificates; case skipped");
+        skipping("transport: no openssl to generate certificates");
         return;
     };
     let Some(mut server) = Server::start(&python, "refuse", &certificate, &key) else {
-        eprintln!("transport: the fake server did not start; case skipped");
+        skipping("transport: the fake server did not start");
         return;
     };
     let failure =
@@ -285,15 +307,15 @@ fn a_server_that_refuses_tls_gets_no_credentials() {
 #[test]
 fn an_untrusted_certificate_is_refused() {
     let Some(python) = python() else {
-        eprintln!("transport: no python with an ssl module; case skipped");
+        skipping("transport: no python with an ssl module");
         return;
     };
     let Some((_, certificate, key)) = certificates("127.0.0.1", "untrusted") else {
-        eprintln!("transport: no openssl to generate certificates; case skipped");
+        skipping("transport: no openssl to generate certificates");
         return;
     };
     let Some(mut server) = Server::start(&python, "accept", &certificate, &key) else {
-        eprintln!("transport: the fake server did not start; case skipped");
+        skipping("transport: the fake server did not start");
         return;
     };
     // No `sslrootcert`, so the chain is built against the machine's own store -
@@ -324,15 +346,15 @@ fn an_untrusted_certificate_is_refused() {
 #[test]
 fn a_certificate_for_another_name_is_refused() {
     let Some(python) = python() else {
-        eprintln!("transport: no python with an ssl module; case skipped");
+        skipping("transport: no python with an ssl module");
         return;
     };
     let Some((authority, certificate, key)) = certificates("wrong.example", "mismatch") else {
-        eprintln!("transport: no openssl to generate certificates; case skipped");
+        skipping("transport: no openssl to generate certificates");
         return;
     };
     let Some(mut server) = Server::start(&python, "accept", &certificate, &key) else {
-        eprintln!("transport: the fake server did not start; case skipped");
+        skipping("transport: the fake server did not start");
         return;
     };
     let parameters = format!(
@@ -371,15 +393,15 @@ fn a_certificate_for_another_name_is_refused() {
 #[test]
 fn a_certificate_that_verifies_is_accepted() {
     let Some(python) = python() else {
-        eprintln!("transport: no python with an ssl module; case skipped");
+        skipping("transport: no python with an ssl module");
         return;
     };
     let Some((authority, certificate, key)) = certificates("127.0.0.1", "accepted") else {
-        eprintln!("transport: no openssl to generate certificates; case skipped");
+        skipping("transport: no openssl to generate certificates");
         return;
     };
     let Some(mut server) = Server::start(&python, "accept", &certificate, &key) else {
-        eprintln!("transport: the fake server did not start; case skipped");
+        skipping("transport: the fake server did not start");
         return;
     };
     let parameters = format!(

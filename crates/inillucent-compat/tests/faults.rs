@@ -372,7 +372,6 @@ fn a_savepoint_outside_a_transaction_commits_on_release() {
     );
     run(&connection, "INSERT INTO t VALUES(4, 'four', 40)").expect("inserts");
     run(&connection, "RELEASE top").expect("releases, which commits");
-    drop(connection);
 
     let connection = database.connect();
     assert_eq!(rows(&connection).len(), 4, "the release committed");

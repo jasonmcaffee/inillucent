@@ -364,7 +364,13 @@ fn keyset_branches(
         {
             return None;
         }
-        by_depth[depth - 1] = Some(IndexSeekBranch {
+        // `depth` is one-based and `by_depth` was sized from the same walk, so
+        // the slot is always there; a `get_mut` says that rather than asserting
+        // it, and the crate denies `indexing_slicing` (task-1932, H9 - this was
+        // reported the moment `inillucent-scalar` was made to deny the same
+        // four lints, because clippy then walked the whole dependency chain).
+        let slot = by_depth.get_mut(depth.saturating_sub(1))?;
+        *slot = Some(IndexSeekBranch {
             equalities,
             low: Some(RangeBound {
                 kind: BoundKind::Greater,

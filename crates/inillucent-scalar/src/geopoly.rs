@@ -126,16 +126,24 @@ impl Polygon {
         if endian != 0 && endian != 1 {
             return None;
         }
-        let count =
-            (usize::from(bytes[1]) << 16) | (usize::from(bytes[2]) << 8) | usize::from(bytes[3]);
+        // **A blob out of a database file, so every read of it is a read of
+        // bytes somebody else could have written (task-1932, H9).** The length
+        // check below makes each index below in range, but "the check above
+        // makes this safe" is a claim a later edit can falsify silently, and
+        // this crate now denies `indexing_slicing`. `get` says the same thing
+        // in a form the compiler keeps true.
+        let count = (usize::from(*bytes.get(1)?) << 16)
+            | (usize::from(*bytes.get(2)?) << 8)
+            | usize::from(*bytes.get(3)?);
         if count.saturating_mul(8).saturating_add(4) != bytes.len() {
             return None;
         }
         let mut vertices = Vec::with_capacity(count);
         for index in 0..count {
-            let at = 4 + index * 8;
-            let x = coordinate(&bytes[at..at + 4], endian)?;
-            let y = coordinate(&bytes[at + 4..at + 8], endian)?;
+            let at = 4usize.saturating_add(index.saturating_mul(8));
+            let pair = bytes.get(at..at.saturating_add(8))?;
+            let x = coordinate(pair.get(..4)?, endian)?;
+            let y = coordinate(pair.get(4..)?, endian)?;
             vertices.push((x, y));
         }
         Some(Polygon { vertices })
@@ -188,12 +196,20 @@ impl Polygon {
         if scan.skip_space().is_some() {
             return None;
         }
-        if flat[0] != flat[count * 2 - 2] || flat[1] != flat[count * 2 - 1] {
+        // The ring has to close: the last pair repeats the first.
+        let last = count.saturating_mul(2).saturating_sub(2);
+        if flat.first() != flat.get(last) || flat.get(1) != flat.get(last.saturating_add(1)) {
             return None;
         }
-        let vertices = (0..count - 1)
-            .map(|at| (flat[at * 2], flat[at * 2 + 1]))
+        // The closing pair is dropped, which is what `count - 1` said.
+        let vertices: Vec<(f32, f32)> = flat
+            .chunks_exact(2)
+            .take(count.saturating_sub(1))
+            .filter_map(|pair| Some((*pair.first()?, *pair.get(1)?)))
             .collect();
+        if vertices.len() != count.saturating_sub(1) {
+            return None;
+        }
         Some(Polygon { vertices })
     }
 
@@ -276,14 +292,19 @@ impl Polygon {
             return 0.0;
         }
         let mut total = 0.0f64;
-        for at in 0..count - 1 {
-            let (x0, y0) = self.vertices[at];
-            let (x1, y1) = self.vertices[at + 1];
-            total += (f64::from(x0) - f64::from(x1)) * (f64::from(y0) + f64::from(y1)) * 0.5;
+        // `windows(2)` is the pairing the loop spelled out, and it cannot run
+        // off the end (task-1932, H9).
+        for pair in self.vertices.windows(2) {
+            let (Some((x0, y0)), Some((x1, y1))) = (pair.first(), pair.get(1)) else {
+                continue;
+            };
+            total += (f64::from(*x0) - f64::from(*x1)) * (f64::from(*y0) + f64::from(*y1)) * 0.5;
         }
-        let (xn, yn) = self.vertices[count - 1];
-        let (x0, y0) = self.vertices[0];
-        total += (f64::from(xn) - f64::from(x0)) * (f64::from(yn) + f64::from(y0)) * 0.5;
+        // The closing edge, back from the last vertex to the first.
+        let (Some((xn, yn)), Some((x0, y0))) = (self.vertices.last(), self.vertices.first()) else {
+            return total;
+        };
+        total += (f64::from(*xn) - f64::from(*x0)) * (f64::from(*yn) + f64::from(*y0)) * 0.5;
         total
     }
 
@@ -294,7 +315,9 @@ impl Polygon {
     pub fn counter_clockwise(&self) -> Polygon {
         let mut vertices = self.vertices.clone();
         if self.area() < 0.0 && vertices.len() > 2 {
-            vertices[1..].reverse();
+            if let Some(rest) = vertices.get_mut(1..) {
+                rest.reverse();
+            }
         }
         Polygon { vertices }
     }
@@ -352,9 +375,13 @@ impl Polygon {
         let mut crossings = 0i64;
         let mut last = 0i64;
         let mut at = 0usize;
-        while at + 1 < count {
-            let (x1, y1) = self.vertices[at];
-            let (x2, y2) = self.vertices[at + 1];
+        while at.saturating_add(1) < count {
+            let (Some((x1, y1)), Some((x2, y2))) = (
+                self.vertices.get(at).copied(),
+                self.vertices.get(at.saturating_add(1)).copied(),
+            ) else {
+                break;
+            };
             last = beneath(
                 x,
                 y,
@@ -370,8 +397,12 @@ impl Polygon {
             at += 1;
         }
         if last != 2 {
-            let (x1, y1) = self.vertices[at.min(count - 1)];
-            let (x2, y2) = self.vertices[0];
+            let (Some((x1, y1)), Some((x2, y2))) = (
+                self.vertices.get(at.min(count.saturating_sub(1))).copied(),
+                self.vertices.first().copied(),
+            ) else {
+                return 0;
+            };
             last = beneath(
                 x,
                 y,
@@ -465,23 +496,31 @@ pub fn overlap(first: &Polygon, second: &Polygon) -> i64 {
     // order they were made. It decides the order two segments enter the active
     // list in, and that decides which gaps the sweep counts.
     let mut order: Vec<usize> = (0..events.len()).collect();
+    // **`get` rather than an index, and the missing case keeps the order it
+    // had (task-1932, H9).** `order` is `0..events.len()`, so neither lookup can
+    // miss; a comparator that indexed would say the same thing in a form a
+    // later edit could falsify without a compiler noticing.
     order.sort_by(|left, right| {
-        events[*left]
-            .x
-            .partial_cmp(&events[*right].x)
+        let (Some(one), Some(two)) = (events.get(*left), events.get(*right)) else {
+            return std::cmp::Ordering::Equal;
+        };
+        one.x
+            .partial_cmp(&two.x)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(right.cmp(left))
     });
 
     let mut active: Vec<usize> = Vec::new();
-    let mut sweep = match order.first() {
-        Some(first) if events[*first].x == 0.0 => -1.0,
+    let mut sweep = match order.first().and_then(|first| events.get(*first)) {
+        Some(first) if first.x == 0.0 => -1.0,
         _ => 0.0,
     };
     let mut inside = [false; 4];
     let mut needs_sort = false;
     for position in order {
-        let event = events[position];
+        let Some(event) = events.get(position).copied() else {
+            continue;
+        };
         if event.x != sweep {
             sweep = event.x;
             if needs_sort {
@@ -491,30 +530,39 @@ pub fn overlap(first: &Polygon, second: &Polygon) -> i64 {
             let mut mask = 0usize;
             let mut previous: Option<usize> = None;
             for index in &active {
-                if let Some(before) = previous {
-                    if segments[before].y != segments[*index].y {
-                        inside[mask] = true;
+                let Some(current) = segments.get(*index) else {
+                    continue;
+                };
+                if let Some(before) = previous.and_then(|at: usize| segments.get(at)) {
+                    if before.y != current.y {
+                        if let Some(slot) = inside.get_mut(mask) {
+                            *slot = true;
+                        }
                     }
                 }
-                mask ^= usize::from(segments[*index].side);
+                mask ^= usize::from(current.side);
                 previous = Some(*index);
             }
             let mut mask = 0usize;
             let mut previous: Option<usize> = None;
             for index in &active {
                 let at = *index;
-                segments[at].y = segments[at].slope * sweep + segments[at].intercept;
-                if let Some(before) = previous {
-                    if segments[before].y > segments[at].y
-                        && segments[before].side != segments[at].side
-                    {
+                let Some(current) = segments.get_mut(at) else {
+                    continue;
+                };
+                current.y = current.slope * sweep + current.intercept;
+                let (current_y, current_side) = (current.y, current.side);
+                if let Some(before) = previous.and_then(|at: usize| segments.get(at)) {
+                    if before.y > current_y && before.side != current_side {
                         return 1;
                     }
-                    if segments[before].y != segments[at].y {
-                        inside[mask] = true;
+                    if before.y != current_y {
+                        if let Some(slot) = inside.get_mut(mask) {
+                            *slot = true;
+                        }
                     }
                 }
-                mask ^= usize::from(segments[at].side);
+                mask ^= usize::from(current_side);
                 previous = Some(at);
             }
         }
@@ -523,12 +571,14 @@ pub fn overlap(first: &Polygon, second: &Polygon) -> i64 {
                 active.remove(at);
             }
         } else {
-            segments[event.segment].y = f64::from(segments[event.segment].start_y);
+            if let Some(segment) = segments.get_mut(event.segment) {
+                segment.y = f64::from(segment.start_y);
+            }
             active.insert(0, event.segment);
             needs_sort = true;
         }
     }
-    if !inside[3] {
+    if !inside.get(3).copied().unwrap_or(false) {
         return 0;
     }
     match (inside[1], inside[2]) {
@@ -576,14 +626,18 @@ fn add_segments(segments: &mut Vec<Segment>, events: &mut Vec<Event>, polygon: &
     if count == 0 {
         return;
     }
-    for at in 0..count - 1 {
-        let (x0, y0) = polygon.vertices[at];
-        let (x1, y1) = polygon.vertices[at + 1];
-        add_one_segment(segments, events, x0, y0, x1, y1, side);
+    for pair in polygon.vertices.windows(2) {
+        let (Some((x0, y0)), Some((x1, y1))) = (pair.first(), pair.get(1)) else {
+            continue;
+        };
+        add_one_segment(segments, events, *x0, *y0, *x1, *y1, side);
     }
-    let (x0, y0) = polygon.vertices[count - 1];
-    let (x1, y1) = polygon.vertices[0];
-    add_one_segment(segments, events, x0, y0, x1, y1, side);
+    // The closing edge, back from the last vertex to the first.
+    let (Some((x0, y0)), Some((x1, y1))) = (polygon.vertices.last(), polygon.vertices.first())
+    else {
+        return;
+    };
+    add_one_segment(segments, events, *x0, *y0, *x1, *y1, side);
 }
 
 /// Adds one edge, left endpoint first, ignoring the vertical ones.
@@ -647,8 +701,9 @@ fn add_one_segment(
 /// @param segments - every edge
 fn sort_active(active: &mut [usize], segments: &[Segment]) {
     active.sort_by(|left, right| {
-        let one = &segments[*left];
-        let two = &segments[*right];
+        let (Some(one), Some(two)) = (segments.get(*left), segments.get(*right)) else {
+            return std::cmp::Ordering::Equal;
+        };
         one.y
             .partial_cmp(&two.y)
             .unwrap_or(std::cmp::Ordering::Equal)
@@ -833,7 +888,10 @@ impl Scan<'_> {
         if at == start || !text.get(at - 1).is_some_and(u8::is_ascii_digit) {
             return None;
         }
-        let parsed = std::str::from_utf8(&text[start..at]).ok()?.parse().ok()?;
+        let parsed = std::str::from_utf8(text.get(start..at)?)
+            .ok()?
+            .parse()
+            .ok()?;
         self.at = at;
         Some(parsed)
     }

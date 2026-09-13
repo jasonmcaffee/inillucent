@@ -123,7 +123,7 @@ fn grade(name: &str, script: &str) {
     let reference_dir = scratch(&format!("{name}-ref"));
     let reference_main = reference_dir.join("main.db");
     let Some(reference) = shell(&reference_main, &resolved(script, &reference_dir)) else {
-        eprintln!("the pinned shell is not present; skipping");
+        inillucent_compat::differential::skipping("the pinned shell is not present");
         return;
     };
     let candidate_dir = scratch(&format!("{name}-inillucent"));

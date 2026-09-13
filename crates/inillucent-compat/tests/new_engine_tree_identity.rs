@@ -130,7 +130,7 @@ fn every_identifier_is_present_and_distinct() {
 fn an_imported_database_keeps_its_identifiers() {
     let fixture = workspace_root().join("compat/fixtures/basic-p4096-utf8.db");
     if !fixture.is_file() {
-        eprintln!("the fixture corpus is not checked in; skipping");
+        inillucent_compat::differential::skipping("the fixture corpus is not checked in");
         return;
     }
     let path = scratch("imported");

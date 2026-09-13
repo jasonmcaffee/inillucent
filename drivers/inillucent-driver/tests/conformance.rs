@@ -20,6 +20,10 @@
 //! else. A reader that silently accepted what it did not understand would make
 //! a malformed suite look like a passing one, which is the failure mode a test
 //! harness must not have.
+//!
+//! Invariant: **the driver answers what the engine answers.** It is the one
+//! surface every language binding reaches the engine through, so a difference
+//! between the two is a difference every binding inherits.
 
 use std::path::PathBuf;
 

@@ -1192,11 +1192,16 @@ fn rtree_depth(value: Option<&Value<'static>>) -> Value<'static> {
     let Some(Value::Blob(blob)) = value else {
         return Value::Null;
     };
+    // A blob a caller chose, so the read is bounded by `get` rather than by
+    // the length check above (task-1932, H9).
     let bytes = blob.raw();
-    if bytes.len() < 2 {
+    let Some(pair) = bytes
+        .get(..2)
+        .and_then(|head| <[u8; 2]>::try_from(head).ok())
+    else {
         return Value::Null;
-    }
-    Value::Integer(i64::from(u16::from_be_bytes([bytes[0], bytes[1]])))
+    };
+    Value::Integer(i64::from(u16::from_be_bytes(pair)))
 }
 
 /// Returns an R-Tree node rendered as a readable list.
@@ -1215,13 +1220,20 @@ fn rtree_node(arguments: &[Value<'static>]) -> Value<'static> {
     let Some(Value::Blob(blob)) = arguments.get(1) else {
         return Value::Null;
     };
+    // An R-Tree node blob a caller chose, so every read of it goes through
+    // `get` (task-1932, H9). The length checks stay - they are what makes a
+    // short blob NULL rather than a partial rendering - and the reads no longer
+    // depend on them being right.
     let bytes = blob.raw();
-    if bytes.len() < 4 {
+    let Some(count) = bytes
+        .get(2..4)
+        .and_then(|head| <[u8; 2]>::try_from(head).ok())
+    else {
         return Value::Null;
-    }
-    let cells = usize::from(u16::from_be_bytes([bytes[2], bytes[3]]));
-    let width = 8 + dimensions * 2 * 4;
-    if bytes.len() < 4 + cells * width {
+    };
+    let cells = usize::from(u16::from_be_bytes(count));
+    let width = 8usize.saturating_add(dimensions.saturating_mul(8));
+    if bytes.len() < 4usize.saturating_add(cells.saturating_mul(width)) {
         return Value::Null;
     }
     let mut out = String::new();
@@ -1229,14 +1241,22 @@ fn rtree_node(arguments: &[Value<'static>]) -> Value<'static> {
         if cell > 0 {
             out.push(' ');
         }
-        let at = 4 + cell * width;
-        let mut key = [0u8; 8];
-        key.copy_from_slice(&bytes[at..at + 8]);
+        let at = 4usize.saturating_add(cell.saturating_mul(width));
+        let Some(key) = bytes
+            .get(at..at.saturating_add(8))
+            .and_then(|head| <[u8; 8]>::try_from(head).ok())
+        else {
+            return Value::Null;
+        };
         out.push_str(&format!("{{{}", i64::from_be_bytes(key)));
-        for value in 0..dimensions * 2 {
-            let from = at + 8 + value * 4;
-            let mut word = [0u8; 4];
-            word.copy_from_slice(&bytes[from..from + 4]);
+        for value in 0..dimensions.saturating_mul(2) {
+            let from = at.saturating_add(8).saturating_add(value.saturating_mul(4));
+            let Some(word) = bytes
+                .get(from..from.saturating_add(4))
+                .and_then(|head| <[u8; 4]>::try_from(head).ok())
+            else {
+                return Value::Null;
+            };
             out.push(' ');
             out.push_str(&crate::printf::general(f64::from(f32::from_be_bytes(word))));
         }
@@ -1473,7 +1493,9 @@ fn binary_quantize(value: Option<&Value<'static>>) -> Value<'static> {
     let mut bytes = vec![0u8; vector.len().div_ceil(8)];
     for (at, component) in vector.iter().enumerate() {
         if *component > 0.0 {
-            bytes[at / 8] |= 0x80 >> (at % 8);
+            if let Some(slot) = bytes.get_mut(at / 8) {
+                *slot |= 0x80u8 >> (at % 8);
+            }
         }
     }
     Value::owned_blob(&bytes).unwrap_or(Value::Null)
@@ -1502,10 +1524,10 @@ fn subvector(arguments: &[Value<'static>]) -> Value<'static> {
     }
     let from = (start - 1) as usize;
     let to = from.saturating_add(count as usize);
-    if to > vector.len() {
+    let Some(slice) = vector.get(from..to) else {
         return Value::Null;
-    }
-    vector_value(&vector[from..to])
+    };
+    vector_value(slice)
 }
 
 /// Applies an operation to two vectors component by component.

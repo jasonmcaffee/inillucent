@@ -19,6 +19,11 @@
 //! A set being **built** is always resident, because a build has just produced
 //! the vectors and has nowhere else to put them. The file backing is what a
 //! *load* produces.
+//!
+//! Invariant: **a chunk identifier addresses the same vector however the set
+//! is backed.** The memory backing and the file backing are two ways to reach
+//! one layout, chosen by size rather than by meaning, and a caller cannot tell
+//! them apart from the answers.
 
 use std::fs::File;
 use std::io;
@@ -37,6 +42,11 @@ const BLOCK_VECTORS: usize = 2_730;
 /// same traversal code runs either way and the quantized pass is a real pass
 /// rather than a relabelled one.
 pub trait Scorer {
+    /// Returns how far one stored vector is from a query, under whatever
+    /// measure this scorer implements.
+    ///
+    /// @param id - the chunk identifier
+    /// @param query - the query vector
     fn distance(&self, id: u32, query: &[f32]) -> f32;
 }
 
@@ -60,9 +70,15 @@ enum Backing {
     /// at which point they are written into the file and the next load has them
     /// filed like the rest. The heap holds what has arrived since the last save,
     /// not the corpus.
-    Filed { file: File, offset: u64, count: usize, tail: Vec<f32> },
+    Filed {
+        file: File,
+        offset: u64,
+        count: usize,
+        tail: Vec<f32>,
+    },
 }
 
+/// N `f32` per chunk, addressed by chunk identifier.
 #[derive(Default)]
 pub struct VectorSet {
     dims: usize,
@@ -101,9 +117,15 @@ fn read_exact_at(file: &File, offset: u64, output: &mut [u8]) -> io::Result<()> 
         let mut at = offset;
         let mut written = 0usize;
         while written < output.len() {
-            let read = file.seek_read(&mut output[written..], at)?;
+            let Some(rest) = output.get_mut(written..) else {
+                break;
+            };
+            let read = file.seek_read(rest, at)?;
             if read == 0 {
-                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "the vector file ended early"));
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "the vector file ended early",
+                ));
             }
             written += read;
             at += read as u64;
@@ -119,7 +141,13 @@ fn read_exact_at(file: &File, offset: u64, output: &mut [u8]) -> io::Result<()> 
 /// @param dims - how wide a vector is
 /// @param first - the ordinal to start at
 /// @param output - a buffer of exactly `count * dims` floats
-fn read_vectors(file: &File, offset: u64, dims: usize, first: u32, output: &mut [f32]) -> io::Result<()> {
+fn read_vectors(
+    file: &File,
+    offset: u64,
+    dims: usize,
+    first: u32,
+    output: &mut [f32],
+) -> io::Result<()> {
     let at = offset + u64::from(first) * (dims as u64) * 4;
     read_exact_at(file, at, bytemuck::cast_slice_mut(output))
 }
@@ -131,7 +159,11 @@ impl VectorSet {
     /// when the width is not the only thing being decided.
     /// @param dims - how wide a vector is
     pub fn new(dims: usize) -> Self {
-        VectorSet { dims, metric: Metric::Cosine, backing: Backing::Resident(Vec::new()) }
+        VectorSet {
+            dims,
+            metric: Metric::Cosine,
+            backing: Backing::Resident(Vec::new()),
+        }
     }
 
     /// A set that stores its vectors to answer the given metric: normalized
@@ -140,7 +172,11 @@ impl VectorSet {
     /// @param dims - how wide a vector is
     /// @param metric - which distance this set's vectors will be compared by
     pub fn with_metric(dims: usize, metric: Metric) -> Self {
-        VectorSet { dims, metric, backing: Backing::Resident(Vec::new()) }
+        VectorSet {
+            dims,
+            metric,
+            backing: Backing::Resident(Vec::new()),
+        }
     }
 
     /// Wraps a file of vectors already stored in the form this metric needs -
@@ -156,7 +192,16 @@ impl VectorSet {
     /// @param file - the file, open for reading
     /// @param offset - the byte offset of the first vector
     pub fn from_file(dims: usize, metric: Metric, count: usize, file: File, offset: u64) -> Self {
-        VectorSet { dims, metric, backing: Backing::Filed { file, offset, count, tail: Vec::new() } }
+        VectorSet {
+            dims,
+            metric,
+            backing: Backing::Filed {
+                file,
+                offset,
+                count,
+                tail: Vec::new(),
+            },
+        }
     }
 
     /// Which distance this set's vectors are stored to answer.
@@ -179,10 +224,12 @@ impl VectorSet {
         }
     }
 
+    /// Returns how wide each vector is.
     pub fn dims(&self) -> usize {
         self.dims
     }
 
+    /// Returns how many vectors the set holds.
     pub fn len(&self) -> usize {
         match &self.backing {
             Backing::Resident(data) => data.len().checked_div(self.dims).unwrap_or(0),
@@ -192,6 +239,7 @@ impl VectorSet {
         }
     }
 
+    /// Reports whether the set holds no vectors.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -215,7 +263,9 @@ impl VectorSet {
                 let start = data.len();
                 data.extend_from_slice(v);
                 if normalizes {
-                    normalize(&mut data[start..]);
+                    if let Some(added) = data.get_mut(start..) {
+                        normalize(added);
+                    }
                 }
                 id
             }
@@ -224,7 +274,9 @@ impl VectorSet {
                 let start = tail.len();
                 tail.extend_from_slice(v);
                 if normalizes {
-                    normalize(&mut tail[start..]);
+                    if let Some(added) = tail.get_mut(start..) {
+                        normalize(added);
+                    }
                 }
                 id
             }
@@ -243,13 +295,29 @@ impl VectorSet {
     pub fn with<R>(&self, id: u32, visit: impl FnOnce(&[f32]) -> R) -> R {
         match &self.backing {
             Backing::Resident(data) => {
-                let start = id as usize * self.dims;
-                visit(&data[start..start + self.dims])
+                // An identifier the set does not hold visits a zeroed vector
+                // rather than panicking; every distance from it is the same, so
+                // it never wins a ranking (task-1932, H9).
+                let start = (id as usize).saturating_mul(self.dims);
+                match data.get(start..start.saturating_add(self.dims)) {
+                    Some(vector) => visit(vector),
+                    None => visit(&vec![0f32; self.dims]),
+                }
             }
-            Backing::Filed { file, offset, count, tail } => {
+            Backing::Filed {
+                file,
+                offset,
+                count,
+                tail,
+            } => {
                 if (id as usize) >= *count {
-                    let start = (id as usize - *count) * self.dims;
-                    return visit(&tail[start..start + self.dims]);
+                    let start = (id as usize)
+                        .saturating_sub(*count)
+                        .saturating_mul(self.dims);
+                    return match tail.get(start..start.saturating_add(self.dims)) {
+                        Some(vector) => visit(vector),
+                        None => visit(&vec![0f32; self.dims]),
+                    };
                 }
                 let mut held = vec![0f32; self.dims];
                 match read_vectors(file, *offset, self.dims, id, &mut held) {
@@ -363,7 +431,10 @@ impl VectorSet {
                             "the vector file ended before the set did",
                         ));
                     }
-                    w.write_all(bytemuck::cast_slice(&block[..read * self.dims]))?;
+                    let written = block
+                        .get(..read.saturating_mul(self.dims))
+                        .unwrap_or(&block);
+                    w.write_all(bytemuck::cast_slice(written))?;
                     at += read;
                 }
                 w.write_all(bytemuck::cast_slice(tail))
@@ -381,22 +452,45 @@ impl VectorSet {
     /// @param data - the vectors, `dims` floats each
     pub fn from_raw(dims: usize, metric: Metric, data: Vec<f32>) -> Self {
         assert!(dims > 0, "a vector set needs a positive width");
-        assert_eq!(data.len() % dims, 0, "buffer length is not a multiple of the width");
-        VectorSet { dims, metric, backing: Backing::Resident(data) }
+        assert_eq!(
+            data.len() % dims,
+            0,
+            "buffer length is not a multiple of the width"
+        );
+        VectorSet {
+            dims,
+            metric,
+            backing: Backing::Resident(data),
+        }
     }
 
     /// Reads this set into memory, so a caller that asked for resident vectors gets them.
     ///
     /// @param path - the file to read, when this set is filed
     pub fn make_resident(&mut self) -> io::Result<()> {
-        let Backing::Filed { file, offset, count, tail } = &self.backing else {
+        let Backing::Filed {
+            file,
+            offset,
+            count,
+            tail,
+        } = &self.backing
+        else {
             return Ok(());
         };
-        let mut held = vec![0f32; count * self.dims + tail.len()];
+        let filed = count.saturating_mul(self.dims);
+        let mut held = vec![0f32; filed.saturating_add(tail.len())];
         if *count > 0 {
-            read_exact_at(file, *offset, bytemuck::cast_slice_mut(&mut held[..count * self.dims]))?;
+            let Some(head) = held.get_mut(..filed) else {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "the vector buffer is shorter than the file it holds",
+                ));
+            };
+            read_exact_at(file, *offset, bytemuck::cast_slice_mut(head))?;
         }
-        held[count * self.dims..].copy_from_slice(tail);
+        if let Some(rest) = held.get_mut(filed..) {
+            rest.copy_from_slice(tail);
+        }
         self.backing = Backing::Resident(held);
         Ok(())
     }
@@ -424,22 +518,44 @@ impl VectorSet {
         }
         match &self.backing {
             Backing::Resident(data) => {
-                let start = first as usize * self.dims;
-                let end = start + wanted * self.dims;
-                output[..wanted * self.dims].copy_from_slice(&data[start..end]);
+                let start = (first as usize).saturating_mul(self.dims);
+                let width = wanted.saturating_mul(self.dims);
+                let (Some(slot), Some(source)) = (
+                    output.get_mut(..width),
+                    data.get(start..start.saturating_add(width)),
+                ) else {
+                    return 0;
+                };
+                slot.copy_from_slice(source);
                 wanted
             }
-            Backing::Filed { file, offset, count, tail } => {
+            Backing::Filed {
+                file,
+                offset,
+                count,
+                tail,
+            } => {
                 // A block never straddles the file and the tail: it is cut at the
                 // boundary so each half is one contiguous copy.
                 if (first as usize) >= *count {
-                    let start = (first as usize - *count) * self.dims;
-                    let take = wanted.min((tail.len() - start) / self.dims);
-                    output[..take * self.dims].copy_from_slice(&tail[start..start + take * self.dims]);
+                    let start = (first as usize)
+                        .saturating_sub(*count)
+                        .saturating_mul(self.dims);
+                    let take = wanted.min(tail.len().saturating_sub(start) / self.dims);
+                    let width = take.saturating_mul(self.dims);
+                    let (Some(slot), Some(source)) = (
+                        output.get_mut(..width),
+                        tail.get(start..start.saturating_add(width)),
+                    ) else {
+                        return 0;
+                    };
+                    slot.copy_from_slice(source);
                     return take;
                 }
-                let take = wanted.min(*count - first as usize);
-                let slice = &mut output[..take * self.dims];
+                let take = wanted.min(count.saturating_sub(first as usize));
+                let Some(slice) = output.get_mut(..take.saturating_mul(self.dims)) else {
+                    return 0;
+                };
                 match read_vectors(file, *offset, self.dims, first, slice) {
                     Ok(()) => take,
                     Err(_) => {
@@ -492,16 +608,25 @@ mod tests {
         let count = 500usize;
         let mut resident = VectorSet::new(dims);
         for id in 0..count {
-            let held: Vec<f32> = (0..dims).map(|d| ((id * 31 + d * 7) % 97) as f32 - 48.0).collect();
+            let held: Vec<f32> = (0..dims)
+                .map(|d| ((id * 31 + d * 7) % 97) as f32 - 48.0)
+                .collect();
             resident.push(&held);
         }
 
-        let directory = std::env::temp_dir().join(format!("inillucent-filed-{}", std::process::id()));
+        let directory =
+            std::env::temp_dir().join(format!("inillucent-filed-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&directory);
         let path = directory.join("vectors.raw");
         let raw = resident.raw().expect("a resident set has a buffer");
         std::fs::write(&path, bytemuck::cast_slice(raw)).expect("the vectors are written");
-        let filed = VectorSet::from_file(dims, Metric::Cosine, count, File::open(&path).expect("it opens"), 0);
+        let filed = VectorSet::from_file(
+            dims,
+            Metric::Cosine,
+            count,
+            File::open(&path).expect("it opens"),
+            0,
+        );
 
         assert_eq!(filed.len(), resident.len());
         assert!(!filed.is_resident());
@@ -517,7 +642,10 @@ mod tests {
             );
             assert_eq!(filed.copy_of(id), resident.copy_of(id));
         }
-        assert_eq!(filed.distance_between(3, 400), resident.distance_between(3, 400));
+        assert_eq!(
+            filed.distance_between(3, 400),
+            resident.distance_between(3, 400)
+        );
 
         // A block read produces the same floats as the buffer it was written from.
         let mut block = vec![0f32; filed.block_len() * dims];
@@ -528,13 +656,24 @@ mod tests {
         // A block that starts past the middle is short and still correct.
         let read = filed.read_block(490, &mut block);
         assert_eq!(read, 10);
-        assert_eq!(&block[..10 * dims], &resident.raw().expect("resident")[490 * dims..]);
+        assert_eq!(
+            &block[..10 * dims],
+            &resident.raw().expect("resident")[490 * dims..]
+        );
 
-        let mut promoted =
-            VectorSet::from_file(dims, Metric::Cosine, count, File::open(&path).expect("it opens"), 0);
+        let mut promoted = VectorSet::from_file(
+            dims,
+            Metric::Cosine,
+            count,
+            File::open(&path).expect("it opens"),
+            0,
+        );
         promoted.make_resident().expect("it reads");
         assert!(promoted.is_resident());
-        assert_eq!(promoted.raw().expect("resident"), resident.raw().expect("resident"));
+        assert_eq!(
+            promoted.raw().expect("resident"),
+            resident.raw().expect("resident")
+        );
 
         let _ = std::fs::remove_file(&path);
     }
@@ -551,7 +690,11 @@ mod tests {
     fn an_l2_set_does_not_normalize_on_push() {
         let mut vs = VectorSet::with_metric(4, Metric::L2);
         vs.push(&[2.0, 0.0, 0.0, 0.0]);
-        assert_eq!(vs.copy_of(0), vec![2.0, 0.0, 0.0, 0.0], "L2 must not normalize a stored vector");
+        assert_eq!(
+            vs.copy_of(0),
+            vec![2.0, 0.0, 0.0, 0.0],
+            "L2 must not normalize a stored vector"
+        );
     }
 
     /// The same two candidates order oppositely under the two metrics - the
@@ -587,6 +730,9 @@ mod tests {
         let mut vs = VectorSet::with_metric(4, Metric::L2);
         vs.push(&[1.0, 2.0, 3.0, 4.0]);
         let query = [0.5f32, 0.5, 0.5, 0.5];
-        assert_eq!(vs.distance(0, &query), vs.distance_of(&vs.copy_of(0), &query));
+        assert_eq!(
+            vs.distance(0, &query),
+            vs.distance_of(&vs.copy_of(0), &query)
+        );
     }
 }

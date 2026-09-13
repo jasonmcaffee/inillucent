@@ -37,6 +37,12 @@
 //! `mysql` client themselves - and it lives in the live-server acceptance tests
 //! rather than in this function, because the tool must not require a PostgreSQL
 //! installation in order to migrate away from one.
+//!
+//! Invariant: **the copy is proved to match before it is published, and the
+//! publish is a rename.** A digest is taken of what the server sent and of what
+//! was written, and they are compared; only then does the finished file take
+//! the name. A reader therefore sees the old database or the new one and never
+//! a half-copied one.
 
 use std::fmt;
 use std::path::{Path, PathBuf};

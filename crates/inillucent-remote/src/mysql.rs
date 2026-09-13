@@ -14,6 +14,11 @@
 //! exchange, and this client has neither. Pretending otherwise would surface as
 //! "the server rejected my password", which is a wrong diagnosis of a correct
 //! password, so the refusal names the two ways out instead.
+//!
+//! Invariant: **every number this client reads out of a packet is bounded
+//! before it sizes anything.** A server can be hostile, buggy, or reached
+//! through a proxy, so a length-encoded count is a number an attacker chooses:
+//! the 256 MiB message cap bounds the packet and not the numbers inside it.
 
 use std::collections::BTreeMap;
 use std::time::Duration;

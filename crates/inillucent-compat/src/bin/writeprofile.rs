@@ -77,7 +77,6 @@ fn build(path: &std::path::Path, indexes: bool) -> Result<Database, String> {
     connection
         .execute_batch(&script)
         .map_err(|error| error.message().to_string())?;
-    drop(connection);
     Ok(database)
 }
 

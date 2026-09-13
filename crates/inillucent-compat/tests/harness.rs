@@ -353,7 +353,9 @@ fn the_reference_artifacts_match_their_pinned_checksums() {
         .expect("the reference parses");
     let directory = root.join(".sqlite-ref/3.53.4");
     if !directory.is_dir() {
-        eprintln!("the reference is not downloaded; run tools/sqlite-reference.{{ps1,sh}}");
+        inillucent_compat::differential::skipping(
+            "the reference is not downloaded; run tools/sqlite-reference.{ps1,sh}",
+        );
         return;
     }
     let mut checked = 0;
@@ -390,7 +392,9 @@ fn the_reference_artifacts_match_their_pinned_checksums() {
 fn the_retrieval_baseline_is_unchanged() {
     let baseline = workspace_root().join("compat/baseline/inillucent-core-baseline.json");
     if !baseline.is_file() {
-        eprintln!("no baseline captured yet; run `inillucent-baseline capture`");
+        inillucent_compat::differential::skipping(
+            "no baseline captured yet; run `inillucent-baseline capture`",
+        );
         return;
     }
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_inillucent-baseline"))

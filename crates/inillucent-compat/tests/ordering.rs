@@ -238,7 +238,7 @@ fn ordered_statements_match_the_oracle() {
     let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("ordering");
     let _ = std::fs::create_dir_all(&directory);
     let Some((mut driver, database)) = build(&directory, "rows") else {
-        eprintln!("the pinned SQLite oracle is not built; skipping");
+        inillucent_compat::differential::skipping("the pinned SQLite oracle is not built");
         return;
     };
     let handle = Database::import_with_busy_timeout(&database, std::time::Duration::from_secs(5))
@@ -301,7 +301,7 @@ fn the_sort_is_skipped_exactly_where_the_walk_answers_the_order() {
     let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("ordering");
     let _ = std::fs::create_dir_all(&directory);
     let Some((_driver, database)) = build(&directory, "plans") else {
-        eprintln!("the pinned SQLite oracle is not built; skipping");
+        inillucent_compat::differential::skipping("the pinned SQLite oracle is not built");
         return;
     };
     let handle = Database::import_with_busy_timeout(&database, std::time::Duration::from_secs(5))

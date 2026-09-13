@@ -11,6 +11,11 @@
 //! longer. `k1` saturates frequency. And because `idf` weights rare terms far
 //! above common ones, scoring any term rather than requiring all of them does not
 //! flood the results.
+//!
+//! Invariant: **a term is normalized the same way when it is indexed and when
+//! it is searched for.** A document indexed under one rule and queried under
+//! another finds nothing, and nothing about the failure says why - so both
+//! sides call `crate::tokenize` and neither has a rule of its own.
 
 use std::collections::HashMap;
 
@@ -19,7 +24,12 @@ use crate::filter::CompiledFilter;
 use crate::store::Store;
 use crate::tokenize::Tokenizer;
 
+/// BM25's term-frequency saturation constant. Above it, repeating a term in a
+/// chunk stops adding much.
 pub const K1: f32 = 1.2;
+
+/// BM25's length-normalization constant, from 0 (ignore length) to 1
+/// (normalize fully).
 pub const B: f32 = 0.75;
 
 /// How many dictionary terms one prefix query term may expand to. Prefix
@@ -35,19 +45,26 @@ const RESCORE_DEPTH_FACTOR: usize = 6;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+/// One term's appearance in one chunk.
 pub struct Posting {
+    /// Which chunk.
     pub chunk: u32,
     /// Where this posting's token positions start in the index's flat position
     /// array. `term_frequency` is how many of them there are. Flat rather than a
     /// `Vec` per posting because there are 11.7 million postings on this corpus and
     /// eleven million tiny allocations cost more in headers than in positions.
     pub positions_at: u32,
+    /// How many times the term appears in the chunk, which is also how many
+    /// positions `positions_at` addresses.
     pub term_frequency: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+/// One chunk the lexical search returned.
 pub struct LexicalHit {
+    /// The chunk identifier.
     pub chunk: u32,
+    /// Its BM25 score.
     pub score: f32,
     /// Share of the query's inverse document frequency mass this chunk holds, in
     /// `[0, 1]`. Carried out of the index rather than recomputed because fusion
@@ -109,6 +126,7 @@ impl Default for LexicalParams {
     }
 }
 
+/// The inverted index: every stemmed term, the chunks holding it, and where.
 #[derive(Default)]
 pub struct Bm25Index {
     /// Stemmed term to its postings, sorted by chunk identifier.
@@ -225,13 +243,29 @@ impl Bm25Index {
 
         for chunk in range {
             let terms = tokenizer.terms(store.content(chunk));
-            self.chunk_lengths[chunk as usize] = terms.len() as u32;
-            self.chunk_heading_lengths[chunk as usize] =
-                heading_token_count(store, tokenizer, chunk);
+            // Both arrays were grown to cover the range above, so a chunk they
+            // do not cover is a chunk this build has no room for; skipping it
+            // is what an index would have panicked over (task-1932, H9).
+            let length = terms.len() as u32;
+            let heading_length = heading_token_count(store, tokenizer, chunk);
+            let (Some(length_slot), Some(heading_slot)) = (
+                self.chunk_lengths.get_mut(chunk as usize).map(|slot| {
+                    *slot = length;
+                    length
+                }),
+                self.chunk_heading_lengths
+                    .get_mut(chunk as usize)
+                    .map(|slot| {
+                        *slot = heading_length;
+                        heading_length
+                    }),
+            ) else {
+                continue;
+            };
             self.total_length += terms.len() as u64;
             if let Some(recording) = self.recording.as_mut() {
-                recording.chunk_lengths.push(self.chunk_lengths[chunk as usize]);
-                recording.chunk_heading_lengths.push(self.chunk_heading_lengths[chunk as usize]);
+                recording.chunk_lengths.push(length_slot);
+                recording.chunk_heading_lengths.push(heading_slot);
             }
 
             // Positions as well as counts. Term frequency says a chunk mentions two
@@ -315,7 +349,8 @@ impl Bm25Index {
     pub fn apply_lexical_delta(&mut self, delta: &LexicalDelta) {
         if self.chunk_lengths.len() < delta.range.end as usize {
             self.chunk_lengths.resize(delta.range.end as usize, 0);
-            self.chunk_heading_lengths.resize(delta.range.end as usize, 0);
+            self.chunk_heading_lengths
+                .resize(delta.range.end as usize, 0);
         }
         for (offset, length) in delta.chunk_lengths.iter().enumerate() {
             let Some(chunk) = delta.range.start.checked_add(offset as u32) else {
@@ -373,20 +408,29 @@ impl Bm25Index {
             return added;
         }
         let mut merged = Vec::with_capacity(self.sorted_terms.len() + added);
-        let mut existing = std::mem::take(&mut self.sorted_terms).into_iter().peekable();
+        let mut existing = std::mem::take(&mut self.sorted_terms)
+            .into_iter()
+            .peekable();
         let mut fresh = new_terms.into_iter().peekable();
+        // **`next()` after `peek()` cannot be `None`, and the `unwrap`s said so
+        // four times (task-1932, H9).** Matching on the value `next` returns
+        // says the same thing with no way to be wrong, and the arms are the
+        // same merge.
         loop {
-            match (existing.peek(), fresh.peek()) {
-                (Some(a), Some(b)) => {
-                    if a <= b {
-                        merged.push(existing.next().unwrap());
-                    } else {
-                        merged.push(fresh.next().unwrap());
-                    }
-                }
-                (Some(_), None) => merged.push(existing.next().unwrap()),
-                (None, Some(_)) => merged.push(fresh.next().unwrap()),
+            let take_existing = match (existing.peek(), fresh.peek()) {
+                (Some(a), Some(b)) => a <= b,
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
                 (None, None) => break,
+            };
+            let taken = if take_existing {
+                existing.next()
+            } else {
+                fresh.next()
+            };
+            match taken {
+                Some(term) => merged.push(term),
+                None => break,
             }
         }
         self.sorted_terms = merged;
@@ -450,10 +494,12 @@ impl Bm25Index {
         })
     }
 
+    /// Returns how many distinct stemmed terms the index holds.
     pub fn n_terms(&self) -> usize {
         self.postings.len()
     }
 
+    /// Returns how many term-in-chunk appearances the index holds.
     pub fn n_postings(&self) -> usize {
         self.postings.values().map(|p| p.len()).sum()
     }
@@ -485,7 +531,9 @@ impl Bm25Index {
     /// Terms in the dictionary that begin with `prefix`, capped.
     fn expand_prefix(&self, prefix: &str) -> Vec<&str> {
         let start = self.sorted_terms.partition_point(|t| t.as_str() < prefix);
-        self.sorted_terms[start..]
+        self.sorted_terms
+            .get(start..)
+            .unwrap_or(&[])
             .iter()
             .take_while(|t| t.starts_with(prefix))
             .take(MAX_PREFIX_EXPANSIONS)
@@ -631,7 +679,11 @@ impl Bm25Index {
                         continue;
                     }
                     let tf = p.term_frequency as f32;
-                    let len = self.chunk_lengths[p.chunk as usize] as f32;
+                    let len = self
+                        .chunk_lengths
+                        .get(p.chunk as usize)
+                        .copied()
+                        .unwrap_or(0) as f32;
                     let norm = if mean_len > 0.0 { len / mean_len } else { 1.0 };
                     let mut contribution =
                         idf * (tf * (K1 + 1.0)) / (tf + K1 * (1.0 - B + B * norm));
@@ -657,9 +709,22 @@ impl Bm25Index {
             .into_iter()
             .map(|(chunk, (score, mass, matched))| {
                 tiers.insert(chunk, matched);
-                let share = if total_mass > 0.0 { (mass / total_mass).clamp(0.0, 1.0) } else { 1.0 };
-                let scaled = if coverage <= 0.0 { score } else { score * share.powf(coverage) };
-                LexicalHit { chunk, score: scaled, coverage: share, matched_terms: matched }
+                let share = if total_mass > 0.0 {
+                    (mass / total_mass).clamp(0.0, 1.0)
+                } else {
+                    1.0
+                };
+                let scaled = if coverage <= 0.0 {
+                    score
+                } else {
+                    score * share.powf(coverage)
+                };
+                LexicalHit {
+                    chunk,
+                    score: scaled,
+                    coverage: share,
+                    matched_terms: matched,
+                }
             })
             .collect();
 
@@ -672,7 +737,11 @@ impl Bm25Index {
                 std::cmp::Ordering::Equal
             };
             by_tier
-                .then_with(|| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
+                .then_with(|| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
                 .then(a.chunk.cmp(&b.chunk))
         };
         hits.sort_by(&order);
@@ -682,8 +751,10 @@ impl Bm25Index {
         // order the score map happened to produce would rescore an arbitrary subset.
         if (proximity > 0.0 || phrase > 0.0) && query_terms.len() > 1 {
             let depth = rescore_depth_factor.max(1);
-            let reach = (k * depth).min(hits.len());
-            self.rescore_by_position(&mut hits[..reach], &query_terms, proximity, phrase);
+            let reach = k.saturating_mul(depth).min(hits.len());
+            if let Some(head) = hits.get_mut(..reach) {
+                self.rescore_by_position(head, &query_terms, proximity, phrase);
+            }
             hits.sort_by(&order);
         }
         hits.truncate(k);
@@ -706,8 +777,11 @@ impl Bm25Index {
             return 0.0;
         }
         let start = posting.positions_at as usize;
-        let end = start + posting.term_frequency as usize;
-        let inside = self.positions[start..end]
+        let end = start.saturating_add(posting.term_frequency as usize);
+        let inside = self
+            .positions
+            .get(start..end)
+            .unwrap_or(&[])
             .iter()
             .filter(|at| **at < heading_length)
             .count();
@@ -822,9 +896,10 @@ impl Bm25Index {
     fn positions_of(&self, term: &str, chunk: u32) -> Option<&[u32]> {
         let postings = self.postings.get(term)?;
         let at = postings.binary_search_by_key(&chunk, |p| p.chunk).ok()?;
-        let p = postings[at];
+        let p = postings.get(at)?;
         let start = p.positions_at as usize;
-        Some(&self.positions[start..start + p.term_frequency as usize])
+        self.positions
+            .get(start..start.saturating_add(p.term_frequency as usize))
     }
 }
 
@@ -848,10 +923,21 @@ fn longest_ordered_run(ordered: &[(usize, &[u32])]) -> usize {
     }
     let mut best = 1usize;
     let mut run = 1usize;
-    // The position the previous term of the current run was matched at.
-    let mut previous = ordered[0].1[0];
+    // The position the previous term of the current run was matched at. A term
+    // with no positions is not a matched term, so the caller never supplies one
+    // - and answering `ordered.len()` for the shape that cannot be walked is
+    // the same answer the length check above gives (task-1932, H9).
+    let Some(&(_, first_positions)) = ordered.first() else {
+        return ordered.len();
+    };
+    let Some(&start) = first_positions.first() else {
+        return ordered.len();
+    };
+    let mut previous = start;
     for window in ordered.windows(2) {
-        let (_, next_positions) = window[1];
+        let Some((_, next_positions)) = window.get(1) else {
+            continue;
+        };
         match next_positions.iter().copied().find(|p| *p > previous) {
             Some(p) => {
                 run += 1;
@@ -859,7 +945,10 @@ fn longest_ordered_run(ordered: &[(usize, &[u32])]) -> usize {
             }
             None => {
                 run = 1;
-                previous = next_positions[0];
+                let Some(&restart) = next_positions.first() else {
+                    continue;
+                };
+                previous = restart;
             }
         }
         best = best.max(run);
@@ -886,16 +975,24 @@ fn smallest_window(lists: &[&[u32]]) -> Option<u32> {
         let mut low = u32::MAX;
         let mut high = 0u32;
         for (i, list) in lists.iter().enumerate() {
-            let v = list[cursors[i]];
+            // Every cursor starts at zero and is advanced only while it is
+            // inside its list, so this is always there; `get` says so in the
+            // form the compiler keeps (task-1932, H9).
+            let Some(v) = cursors.get(i).and_then(|at| list.get(*at)).copied() else {
+                return Some(best);
+            };
             if v < low {
                 low = v;
                 lowest = i;
             }
             high = high.max(v);
         }
-        best = best.min(high - low + 1);
-        cursors[lowest] += 1;
-        if cursors[lowest] >= lists[lowest].len() {
+        best = best.min(high.saturating_sub(low).saturating_add(1));
+        let (Some(cursor), Some(list)) = (cursors.get_mut(lowest), lists.get(lowest)) else {
+            return Some(best);
+        };
+        *cursor = cursor.saturating_add(1);
+        if *cursor >= list.len() {
             return Some(best);
         }
     }
@@ -971,10 +1068,23 @@ mod tests {
         let tok = Tokenizer::default();
         let idx = Bm25Index::build(store, &tok);
         let f = CompiledFilter::compile(&Filter::default(), store);
-        idx.search(query, store, &f, &tok, k, LexicalParams { prefix: false, coverage: 0.0, proximity: 0.0, tier: false, ..Default::default() })
-            .into_iter()
-            .map(|h| h.chunk)
-            .collect()
+        idx.search(
+            query,
+            store,
+            &f,
+            &tok,
+            k,
+            LexicalParams {
+                prefix: false,
+                coverage: 0.0,
+                proximity: 0.0,
+                tier: false,
+                ..Default::default()
+            },
+        )
+        .into_iter()
+        .map(|h| h.chunk)
+        .collect()
     }
 
     #[test]
@@ -1007,23 +1117,45 @@ mod tests {
             ("confluence", "offer"),
         ]);
         let hits = run(&s, "offer", 2);
-        assert_eq!(hits[0], 1, "the short chunk should win on length normalization");
+        assert_eq!(
+            hits[0], 1,
+            "the short chunk should win on length normalization"
+        );
     }
 
     #[test]
     fn term_frequency_saturates() {
         // Ten occurrences must not score ten times one occurrence.
         let s = store_of(&[
-            ("confluence", "offer offer offer offer offer offer offer offer offer offer"),
+            (
+                "confluence",
+                "offer offer offer offer offer offer offer offer offer offer",
+            ),
             ("confluence", "offer"),
         ]);
         let tok = Tokenizer::default();
         let idx = Bm25Index::build(&s, &tok);
         let f = CompiledFilter::compile(&Filter::default(), &s);
-        let hits = idx.search("offer", &s, &f, &tok, 2, LexicalParams { prefix: false, coverage: 0.0, proximity: 0.0, tier: false, ..Default::default() });
+        let hits = idx.search(
+            "offer",
+            &s,
+            &f,
+            &tok,
+            2,
+            LexicalParams {
+                prefix: false,
+                coverage: 0.0,
+                proximity: 0.0,
+                tier: false,
+                ..Default::default()
+            },
+        );
         let many = hits.iter().find(|h| h.chunk == 0).unwrap().score;
         let one = hits.iter().find(|h| h.chunk == 1).unwrap().score;
-        assert!(many < one * 10.0, "frequency did not saturate: {many} vs {one}");
+        assert!(
+            many < one * 10.0,
+            "frequency did not saturate: {many} vs {one}"
+        );
     }
 
     #[test]
@@ -1044,7 +1176,10 @@ mod tests {
 
     #[test]
     fn stemming_lets_a_query_match_an_inflected_form() {
-        let s = store_of(&[("confluence", "the offering was redeemed by eligible members")]);
+        let s = store_of(&[(
+            "confluence",
+            "the offering was redeemed by eligible members",
+        )]);
         assert_eq!(run(&s, "offer redeem eligibility", 5), vec![0]);
     }
 
@@ -1057,7 +1192,20 @@ mod tests {
         let tok = Tokenizer::default();
         let idx = Bm25Index::build(&s, &tok);
         let f = CompiledFilter::compile(&Filter::source("slack"), &s);
-        let hits = idx.search("offer eligibility", &s, &f, &tok, 5, LexicalParams { prefix: false, coverage: 0.0, proximity: 0.0, tier: false, ..Default::default() });
+        let hits = idx.search(
+            "offer eligibility",
+            &s,
+            &f,
+            &tok,
+            5,
+            LexicalParams {
+                prefix: false,
+                coverage: 0.0,
+                proximity: 0.0,
+                tier: false,
+                ..Default::default()
+            },
+        );
         assert_eq!(hits.iter().map(|h| h.chunk).collect::<Vec<_>>(), vec![1]);
     }
 
@@ -1074,25 +1222,46 @@ mod tests {
     fn a_heading_term_can_be_weighted_above_the_same_term_in_a_body() {
         let mut store = Store::default();
         store.add_chunks(vec![
-            headed("d1", "Terri Shaw tax return", "please find the attached document"),
-            headed("d2", "meeting notes", "we discussed the Terri Shaw tax return at length"),
+            headed(
+                "d1",
+                "Terri Shaw tax return",
+                "please find the attached document",
+            ),
+            headed(
+                "d2",
+                "meeting notes",
+                "we discussed the Terri Shaw tax return at length",
+            ),
         ]);
 
         let tokenizer = Tokenizer::default();
         let index = Bm25Index::build(&store, &tokenizer);
         let filter = CompiledFilter::compile(&Filter::default(), &store);
 
-        let unweighted = index.search("Terri Shaw", &store, &filter, &tokenizer, 10, LexicalParams::default());
+        let unweighted = index.search(
+            "Terri Shaw",
+            &store,
+            &filter,
+            &tokenizer,
+            10,
+            LexicalParams::default(),
+        );
         let weighted = index.search(
             "Terri Shaw",
             &store,
             &filter,
             &tokenizer,
             10,
-            LexicalParams { heading_boost: 3.0, ..Default::default() },
+            LexicalParams {
+                heading_boost: 3.0,
+                ..Default::default()
+            },
         );
         assert_eq!(weighted.len(), 2, "both chunks still match");
-        assert_eq!(weighted[0].chunk, 0, "the heading match should lead: {weighted:?}");
+        assert_eq!(
+            weighted[0].chunk, 0,
+            "the heading match should lead: {weighted:?}"
+        );
         let gap = |hits: &[LexicalHit]| {
             let a = hits.iter().find(|h| h.chunk == 0).unwrap().score;
             let b = hits.iter().find(|h| h.chunk == 1).unwrap().score;
@@ -1117,14 +1286,24 @@ mod tests {
         let tokenizer = Tokenizer::default();
         let index = Bm25Index::build(&store, &tokenizer);
         let filter = CompiledFilter::compile(&Filter::default(), &store);
-        let a = index.search("Terri Shaw", &store, &filter, &tokenizer, 10, LexicalParams::default());
+        let a = index.search(
+            "Terri Shaw",
+            &store,
+            &filter,
+            &tokenizer,
+            10,
+            LexicalParams::default(),
+        );
         let b = index.search(
             "Terri Shaw",
             &store,
             &filter,
             &tokenizer,
             10,
-            LexicalParams { heading_boost: 0.0, ..Default::default() },
+            LexicalParams {
+                heading_boost: 0.0,
+                ..Default::default()
+            },
         );
         assert_eq!(a[0].score.to_bits(), b[0].score.to_bits());
     }
@@ -1149,9 +1328,37 @@ mod tests {
         let f = CompiledFilter::compile(&Filter::default(), &s);
         // "elig" is the stem of eligibility, so an exact search already matches.
         // Use a genuine prefix of the stem to exercise expansion.
-        let hits = idx.search("eli", &s, &f, &tok, 5, LexicalParams { prefix: true, coverage: 0.0, proximity: 0.0, tier: false, ..Default::default() });
+        let hits = idx.search(
+            "eli",
+            &s,
+            &f,
+            &tok,
+            5,
+            LexicalParams {
+                prefix: true,
+                coverage: 0.0,
+                proximity: 0.0,
+                tier: false,
+                ..Default::default()
+            },
+        );
         assert_eq!(hits.len(), 1);
-        assert!(idx.search("eli", &s, &f, &tok, 5, LexicalParams { prefix: false, coverage: 0.0, proximity: 0.0, tier: false, ..Default::default() }).is_empty());
+        assert!(idx
+            .search(
+                "eli",
+                &s,
+                &f,
+                &tok,
+                5,
+                LexicalParams {
+                    prefix: false,
+                    coverage: 0.0,
+                    proximity: 0.0,
+                    tier: false,
+                    ..Default::default()
+                }
+            )
+            .is_empty());
     }
 
     #[test]
@@ -1164,7 +1371,20 @@ mod tests {
         let tok = Tokenizer::default();
         let idx = Bm25Index::build(&s, &tok);
         let f = CompiledFilter::compile(&Filter::default(), &s);
-        let hits = idx.search("offer eligibility", &s, &f, &tok, 3, LexicalParams { prefix: false, coverage: 0.0, proximity: 0.0, tier: false, ..Default::default() });
+        let hits = idx.search(
+            "offer eligibility",
+            &s,
+            &f,
+            &tok,
+            3,
+            LexicalParams {
+                prefix: false,
+                coverage: 0.0,
+                proximity: 0.0,
+                tier: false,
+                ..Default::default()
+            },
+        );
         for w in hits.windows(2) {
             assert!(w[0].score >= w[1].score);
         }
@@ -1172,7 +1392,10 @@ mod tests {
 
     #[test]
     fn index_statistics_are_reported() {
-        let s = store_of(&[("confluence", "offer eligibility rules"), ("slack", "offer")]);
+        let s = store_of(&[
+            ("confluence", "offer eligibility rules"),
+            ("slack", "offer"),
+        ]);
         let tok = Tokenizer::default();
         let idx = Bm25Index::build(&s, &tok);
         assert_eq!(idx.n_terms(), 3); // offer, elig, rule
@@ -1188,7 +1411,10 @@ mod tests {
     fn coverage_weighting_prefers_the_chunk_holding_more_of_the_query() {
         let s = store_of(&[
             // Holds one query word, many times over.
-            ("confluence", "release release release release release release release"),
+            (
+                "confluence",
+                "release release release release release release release",
+            ),
             // Holds all three, once each.
             ("confluence", "release process approval steps for the team"),
         ]);
@@ -1203,15 +1429,44 @@ mod tests {
             complete / partial
         };
 
-        let plain = idx.search(query, &s, &f, &tok, 5, LexicalParams { prefix: false, coverage: 0.0, proximity: 0.0, tier: false, ..Default::default() });
-        let weighted = idx.search(query, &s, &f, &tok, 5, LexicalParams { prefix: false, coverage: 2.0, proximity: 0.0, tier: false, ..Default::default() });
+        let plain = idx.search(
+            query,
+            &s,
+            &f,
+            &tok,
+            5,
+            LexicalParams {
+                prefix: false,
+                coverage: 0.0,
+                proximity: 0.0,
+                tier: false,
+                ..Default::default()
+            },
+        );
+        let weighted = idx.search(
+            query,
+            &s,
+            &f,
+            &tok,
+            5,
+            LexicalParams {
+                prefix: false,
+                coverage: 2.0,
+                proximity: 0.0,
+                tier: false,
+                ..Default::default()
+            },
+        );
         assert!(
             ratio(&weighted) > ratio(&plain),
             "coverage should raise the complete match relative to the partial one: {} then {}",
             ratio(&plain),
             ratio(&weighted)
         );
-        assert_eq!(weighted[0].chunk, 1, "with coverage the complete match should lead");
+        assert_eq!(
+            weighted[0].chunk, 1,
+            "with coverage the complete match should lead"
+        );
     }
 
     /// A single term query has no coverage information to use, so the exponent must
@@ -1220,13 +1475,42 @@ mod tests {
     fn coverage_weighting_leaves_a_single_term_query_alone() {
         let s = store_of(&[
             ("confluence", "eligibility eligibility rules"),
-            ("confluence", "one mention of eligibility inside a much longer chunk of prose"),
+            (
+                "confluence",
+                "one mention of eligibility inside a much longer chunk of prose",
+            ),
         ]);
         let tok = Tokenizer::default();
         let idx = Bm25Index::build(&s, &tok);
         let f = CompiledFilter::compile(&Filter::default(), &s);
-        let plain = idx.search("eligibility", &s, &f, &tok, 5, LexicalParams { prefix: false, coverage: 0.0, proximity: 0.0, tier: false, ..Default::default() });
-        let weighted = idx.search("eligibility", &s, &f, &tok, 5, LexicalParams { prefix: false, coverage: 3.0, proximity: 0.0, tier: false, ..Default::default() });
+        let plain = idx.search(
+            "eligibility",
+            &s,
+            &f,
+            &tok,
+            5,
+            LexicalParams {
+                prefix: false,
+                coverage: 0.0,
+                proximity: 0.0,
+                tier: false,
+                ..Default::default()
+            },
+        );
+        let weighted = idx.search(
+            "eligibility",
+            &s,
+            &f,
+            &tok,
+            5,
+            LexicalParams {
+                prefix: false,
+                coverage: 3.0,
+                proximity: 0.0,
+                tier: false,
+                ..Default::default()
+            },
+        );
         assert_eq!(
             plain.iter().map(|h| h.chunk).collect::<Vec<_>>(),
             weighted.iter().map(|h| h.chunk).collect::<Vec<_>>()
@@ -1240,12 +1524,28 @@ mod tests {
         let filler = "padding words that carry no query terms at all ".repeat(6);
         let together = format!("{filler} release process {filler}");
         let apart = format!("release {filler} something else entirely {filler} process");
-        let s = store_of(&[("confluence", together.as_str()), ("confluence", apart.as_str())]);
+        let s = store_of(&[
+            ("confluence", together.as_str()),
+            ("confluence", apart.as_str()),
+        ]);
         let tok = Tokenizer::default();
         let idx = Bm25Index::build(&s, &tok);
         let f = CompiledFilter::compile(&Filter::default(), &s);
 
-        let scored = idx.search("release process", &s, &f, &tok, 5, LexicalParams { prefix: false, coverage: 0.0, proximity: 1.0, tier: false, ..Default::default() });
+        let scored = idx.search(
+            "release process",
+            &s,
+            &f,
+            &tok,
+            5,
+            LexicalParams {
+                prefix: false,
+                coverage: 0.0,
+                proximity: 1.0,
+                tier: false,
+                ..Default::default()
+            },
+        );
         assert_eq!(scored[0].chunk, 0, "the adjacent pair should lead");
         assert!(scored[0].score > scored[1].score);
     }
@@ -1256,20 +1556,65 @@ mod tests {
     fn proximity_weight_zero_changes_nothing() {
         let s = store_of(&[
             ("confluence", "release process is described here in full"),
-            ("confluence", "release of the build, and separately a process"),
+            (
+                "confluence",
+                "release of the build, and separately a process",
+            ),
         ]);
         let tok = Tokenizer::default();
         let idx = Bm25Index::build(&s, &tok);
         let f = CompiledFilter::compile(&Filter::default(), &s);
-        let off = idx.search("release process", &s, &f, &tok, 5, LexicalParams { prefix: false, coverage: 0.0, proximity: 0.0, tier: false, ..Default::default() });
-        let on = idx.search("release process", &s, &f, &tok, 5, LexicalParams { prefix: false, coverage: 0.0, proximity: 1.0, tier: false, ..Default::default() });
+        let off = idx.search(
+            "release process",
+            &s,
+            &f,
+            &tok,
+            5,
+            LexicalParams {
+                prefix: false,
+                coverage: 0.0,
+                proximity: 0.0,
+                tier: false,
+                ..Default::default()
+            },
+        );
+        let on = idx.search(
+            "release process",
+            &s,
+            &f,
+            &tok,
+            5,
+            LexicalParams {
+                prefix: false,
+                coverage: 0.0,
+                proximity: 1.0,
+                tier: false,
+                ..Default::default()
+            },
+        );
         assert_eq!(off.len(), on.len());
         for (a, b) in off.iter().zip(&on) {
             if a.chunk == b.chunk {
                 continue;
             }
         }
-        assert_eq!(off, idx.search("release process", &s, &f, &tok, 5, LexicalParams { prefix: false, coverage: 0.0, proximity: 0.0, tier: false, ..Default::default() }));
+        assert_eq!(
+            off,
+            idx.search(
+                "release process",
+                &s,
+                &f,
+                &tok,
+                5,
+                LexicalParams {
+                    prefix: false,
+                    coverage: 0.0,
+                    proximity: 0.0,
+                    tier: false,
+                    ..Default::default()
+                }
+            )
+        );
     }
 
     /// The covering window is the whole of the proximity signal, so it is worth
@@ -1311,7 +1656,10 @@ mod tests {
     fn tiering_puts_every_term_above_a_higher_scoring_partial_match() {
         let s = store_of(&[
             // A strong score on two of the three terms, repeated hard.
-            ("confluence", "approval approval approval approval process process process"),
+            (
+                "confluence",
+                "approval approval approval approval process process process",
+            ),
             // All three, buried in a long chunk, so its BM25 score is much lower.
             (
                 "confluence",
@@ -1328,11 +1676,40 @@ mod tests {
         // Whether score alone would have ranked the complete match first depends on the
         // collection statistics, which is the whole reason tiering is an ordering rather
         // than a score adjustment: it does not have to out-argue term frequency.
-        let untiered = idx.search(query, &s, &f, &tok, 5, LexicalParams { prefix: false, coverage: 0.0, proximity: 0.0, tier: false, ..Default::default() });
+        let untiered = idx.search(
+            query,
+            &s,
+            &f,
+            &tok,
+            5,
+            LexicalParams {
+                prefix: false,
+                coverage: 0.0,
+                proximity: 0.0,
+                tier: false,
+                ..Default::default()
+            },
+        );
         assert_eq!(untiered.len(), 2);
 
-        let tiered = idx.search(query, &s, &f, &tok, 5, LexicalParams { prefix: false, coverage: 0.0, proximity: 0.0, tier: true, ..Default::default() });
-        assert_eq!(tiered[0].chunk, 1, "tiered, the chunk holding every term leads");
+        let tiered = idx.search(
+            query,
+            &s,
+            &f,
+            &tok,
+            5,
+            LexicalParams {
+                prefix: false,
+                coverage: 0.0,
+                proximity: 0.0,
+                tier: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            tiered[0].chunk, 1,
+            "tiered, the chunk holding every term leads"
+        );
         assert_eq!(tiered.len(), 2, "and the partial match is still returned");
     }
 
@@ -1347,7 +1724,20 @@ mod tests {
         let tok = Tokenizer::default();
         let idx = Bm25Index::build(&s, &tok);
         let f = CompiledFilter::compile(&Filter::default(), &s);
-        let hits = idx.search("release approval elsewhere", &s, &f, &tok, 5, LexicalParams { prefix: false, coverage: 0.0, proximity: 0.0, tier: true, ..Default::default() });
+        let hits = idx.search(
+            "release approval elsewhere",
+            &s,
+            &f,
+            &tok,
+            5,
+            LexicalParams {
+                prefix: false,
+                coverage: 0.0,
+                proximity: 0.0,
+                tier: true,
+                ..Default::default()
+            },
+        );
         assert_eq!(hits.len(), 2, "both partial matches are returned");
     }
 
@@ -1356,16 +1746,35 @@ mod tests {
     #[test]
     fn the_score_ceiling_bounds_every_score_the_search_produces() {
         let s = store_of(&[
-            ("confluence", "offer eligibility offer eligibility offer eligibility"),
-            ("confluence", "offer eligibility rules for members of the plan"),
-            ("confluence", "entirely unrelated text about invoices and billing"),
+            (
+                "confluence",
+                "offer eligibility offer eligibility offer eligibility",
+            ),
+            (
+                "confluence",
+                "offer eligibility rules for members of the plan",
+            ),
+            (
+                "confluence",
+                "entirely unrelated text about invoices and billing",
+            ),
         ]);
         let tok = Tokenizer::default();
         let idx = Bm25Index::build(&s, &tok);
         let f = CompiledFilter::compile(&Filter::default(), &s);
         let ceiling = idx.score_ceiling("offer eligibility", &tok, false);
-        assert!(ceiling > 0.0, "a query of known terms has a positive ceiling");
-        for hit in idx.search("offer eligibility", &s, &f, &tok, 10, LexicalParams::default()) {
+        assert!(
+            ceiling > 0.0,
+            "a query of known terms has a positive ceiling"
+        );
+        for hit in idx.search(
+            "offer eligibility",
+            &s,
+            &f,
+            &tok,
+            10,
+            LexicalParams::default(),
+        ) {
             assert!(
                 hit.score <= ceiling + 1e-4,
                 "score {} exceeded the ceiling {ceiling}",
@@ -1381,7 +1790,10 @@ mod tests {
         let s = store_of(&[("confluence", "offer eligibility rules")]);
         let tok = Tokenizer::default();
         let idx = Bm25Index::build(&s, &tok);
-        assert_eq!(idx.score_ceiling("tirzepatide semaglutide", &tok, false), 0.0);
+        assert_eq!(
+            idx.score_ceiling("tirzepatide semaglutide", &tok, false),
+            0.0
+        );
     }
 
     #[test]
@@ -1402,22 +1814,37 @@ mod tests {
     #[test]
     fn the_phrase_weight_separates_two_chunks_proximity_cannot() {
         let s = store_of(&[
-            ("confluence", "the offer eligibility criteria are listed below"),
-            ("confluence", "the eligibility offer criteria are listed below"),
+            (
+                "confluence",
+                "the offer eligibility criteria are listed below",
+            ),
+            (
+                "confluence",
+                "the eligibility offer criteria are listed below",
+            ),
         ]);
         let tok = Tokenizer::default();
         let idx = Bm25Index::build(&s, &tok);
         let f = CompiledFilter::compile(&Filter::default(), &s);
 
-        let width_only = LexicalParams { proximity: 1.0, phrase: 0.0, ..Default::default() };
+        let width_only = LexicalParams {
+            proximity: 1.0,
+            phrase: 0.0,
+            ..Default::default()
+        };
         let a = idx.search("offer eligibility", &s, &f, &tok, 10, width_only);
-        let ordered = |hits: &[LexicalHit], c: u32| hits.iter().find(|h| h.chunk == c).unwrap().score;
+        let ordered =
+            |hits: &[LexicalHit], c: u32| hits.iter().find(|h| h.chunk == c).unwrap().score;
         assert!(
             (ordered(&a, 0) - ordered(&a, 1)).abs() < 1e-4,
             "window width cannot tell the two apart"
         );
 
-        let with_phrase = LexicalParams { proximity: 1.0, phrase: 1.0, ..Default::default() };
+        let with_phrase = LexicalParams {
+            proximity: 1.0,
+            phrase: 1.0,
+            ..Default::default()
+        };
         let b = idx.search("offer eligibility", &s, &f, &tok, 10, with_phrase);
         assert!(
             ordered(&b, 0) > ordered(&b, 1),
@@ -1439,14 +1866,24 @@ mod tests {
         let tok = Tokenizer::default();
         let idx = Bm25Index::build(&s, &tok);
         let f = CompiledFilter::compile(&Filter::default(), &s);
-        let without = idx.search("offer eligibility", &s, &f, &tok, 10, LexicalParams::default());
+        let without = idx.search(
+            "offer eligibility",
+            &s,
+            &f,
+            &tok,
+            10,
+            LexicalParams::default(),
+        );
         let with_zero = idx.search(
             "offer eligibility",
             &s,
             &f,
             &tok,
             10,
-            LexicalParams { phrase: 0.0, ..Default::default() },
+            LexicalParams {
+                phrase: 0.0,
+                ..Default::default()
+            },
         );
         assert_eq!(without, with_zero);
     }
@@ -1460,7 +1897,14 @@ mod tests {
         let tok = Tokenizer::default();
         let idx = Bm25Index::build(&s, &tok);
         let f = CompiledFilter::compile(&Filter::default(), &s);
-        let hits = idx.search("offer eligibility", &s, &f, &tok, 10, LexicalParams::default());
+        let hits = idx.search(
+            "offer eligibility",
+            &s,
+            &f,
+            &tok,
+            10,
+            LexicalParams::default(),
+        );
         let both = hits.iter().find(|h| h.chunk == 0).unwrap();
         let one = hits.iter().find(|h| h.chunk == 1).unwrap();
         assert_eq!(both.matched_terms, 2);
@@ -1479,5 +1923,4 @@ mod tests {
         let partial: Vec<(usize, &[u32])> = vec![(0, &[1]), (1, &[4]), (2, &[2])];
         assert_eq!(longest_ordered_run(&partial), 2);
     }
-
 }

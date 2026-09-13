@@ -14,6 +14,14 @@
 //! [`ModelManifest`](crate::model::ModelManifest). `OnnxOptions::default()`
 //! still reproduces `nomic-embed-text-v1.5` exactly, so the baseline arm is
 //! unchanged by the generalisation and the existing score card is unmoved.
+//!
+//! Invariant: **the model is told what it was trained to be told, and what it
+//! could not see is counted.** The four task prefixes, the pooling and the
+//! truncation bound are properties of the export rather than conventions of the
+//! caller, and applying the wrong one is measurably worse in both directions.
+//! A text longer than the bound is embedded from a prefix of itself, and the
+//! count of those is kept - a model whose tokenizer is more verbose sees less
+//! of each chunk than its rivals and would otherwise look merely faster.
 
 use std::path::{Path, PathBuf};
 
@@ -52,7 +60,9 @@ impl Device {
             return Ok(Device::Cuda(0));
         }
         if let Some(rest) = text.strip_prefix("cuda:") {
-            let id: i32 = rest.parse().with_context(|| format!("{rest} is not a card ordinal"))?;
+            let id: i32 = rest
+                .parse()
+                .with_context(|| format!("{rest} is not a card ordinal"))?;
             return Ok(Device::Cuda(id));
         }
         anyhow::bail!("unknown device {text}, expected cpu, cuda or cuda:N")
@@ -139,6 +149,8 @@ impl Optimization {
     }
 }
 
+/// Everything about one exported model that the engine has to be told rather
+/// than able to read out of the graph.
 #[derive(Debug, Clone)]
 pub struct OnnxOptions {
     /// Width to keep. 768 is the full output; 512, 256, 128 and 64 are the
@@ -156,6 +168,7 @@ pub struct OnnxOptions {
     /// tokens against a 2048 context; the exported model accepts more, but
     /// staying at the same bound keeps behaviour comparable.
     pub max_tokens: usize,
+    /// How the token vectors become one vector.
     pub pooling: Pooling,
     /// The four task prefixes, from the model's manifest. Applying the wrong
     /// one, or applying one to a model trained without them, is measurably worse
@@ -168,6 +181,7 @@ pub struct OnnxOptions {
     pub token_type_ids: bool,
     /// Which output carries the answer, and under what name.
     pub output: Output,
+    /// The name that output carries in the graph.
     pub output_name: String,
     /// Texts per inference call.
     pub batch_size: usize,
@@ -251,11 +265,21 @@ impl OnnxOptions {
     /// @param manifest - the model being run
     /// @param batch_size - texts per inference call
     /// @param device - the processor to open the session on
-    pub fn for_model_on(manifest: &ModelManifest, batch_size: usize, device: Device) -> OnnxOptions {
-        OnnxOptions { batch_size, device, ..OnnxOptions::for_model(manifest) }
+    pub fn for_model_on(
+        manifest: &ModelManifest,
+        batch_size: usize,
+        device: Device,
+    ) -> OnnxOptions {
+        OnnxOptions {
+            batch_size,
+            device,
+            ..OnnxOptions::for_model(manifest)
+        }
     }
 }
 
+/// An embedder over an ONNX export, with the counters that say how much text
+/// the model actually saw.
 pub struct OnnxEmbedder {
     session: std::sync::Mutex<Session>,
     tokenizer: Tokenizer,
@@ -274,13 +298,17 @@ pub struct OnnxEmbedder {
 /// How much text a model actually saw, over the run so far.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TruncationFacts {
+    /// How many texts were handed to the model.
     pub texts: usize,
+    /// How many of them were longer than `max_tokens` and were therefore
+    /// embedded from a prefix of themselves.
     pub truncated: usize,
     /// Total tokens after truncation, which is what the model was charged for.
     pub tokens: usize,
 }
 
 impl TruncationFacts {
+    /// Returns the share of texts that were truncated, from 0 to 1.
     pub fn share(&self) -> f64 {
         if self.texts == 0 {
             0.0
@@ -289,6 +317,8 @@ impl TruncationFacts {
         }
     }
 
+    /// Returns the mean tokens per text after truncation, which is what the
+    /// model was charged for.
     pub fn tokens_per_text(&self) -> f64 {
         if self.texts == 0 {
             0.0
@@ -321,7 +351,11 @@ impl OnnxEmbedder {
         device: Device,
     ) -> Result<Self> {
         let file = manifest.model_file.clone();
-        Self::open_model(dir, &file, OnnxOptions::for_model_on(manifest, batch_size, device))
+        Self::open_model(
+            dir,
+            &file,
+            OnnxOptions::for_model_on(manifest, batch_size, device),
+        )
     }
 
     /// The output this arm reads, resolved against what the export actually
@@ -370,6 +404,11 @@ impl OnnxEmbedder {
         }
     }
 
+    /// Opens one exported model and its tokenizer.
+    ///
+    /// @param dir - the directory holding the export and `tokenizer.json`
+    /// @param model_file - which file in it is the graph
+    /// @param options - what the graph cannot say about itself
     pub fn open_model(
         dir: impl AsRef<Path>,
         model_file: &str,
@@ -393,9 +432,9 @@ impl OnnxEmbedder {
         if let Some(threads) = options.intra_threads {
             // ort's builder returns its error carrying the builder itself, which is
             // not a plain error type, so the message is rebuilt rather than wrapped.
-            builder = builder
-                .with_intra_threads(threads)
-                .map_err(|e| anyhow::anyhow!("setting the ONNX intra operator thread count: {e}"))?;
+            builder = builder.with_intra_threads(threads).map_err(|e| {
+                anyhow::anyhow!("setting the ONNX intra operator thread count: {e}")
+            })?;
         }
         if let Device::Cuda(device_id) = options.device {
             preload_cuda_dylibs();
@@ -415,7 +454,11 @@ impl OnnxEmbedder {
                     .with_memory_limit(options.device_memory_limit.unwrap_or(usize::MAX))
                     .build()
                     .error_on_failure()])
-                .map_err(|e| anyhow::anyhow!("registering the CUDA execution provider on card {device_id}: {e}"))?;
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "registering the CUDA execution provider on card {device_id}: {e}"
+                    )
+                })?;
         }
         let session = builder
             .commit_from_file(&model_path)
@@ -435,6 +478,7 @@ impl OnnxEmbedder {
         })
     }
 
+    /// Returns the options this embedder was opened with.
     pub fn options(&self) -> &OnnxOptions {
         &self.options
     }
@@ -462,14 +506,22 @@ impl OnnxEmbedder {
 
         {
             use std::sync::atomic::Ordering::Relaxed;
-            let cut = encodings.iter().filter(|e| e.get_ids().len() > self.options.max_tokens).count();
+            let cut = encodings
+                .iter()
+                .filter(|e| e.get_ids().len() > self.options.max_tokens)
+                .count();
             self.seen.fetch_add(texts.len(), Relaxed);
             self.truncated.fetch_add(cut, Relaxed);
-            self.tokens.fetch_add(lengths.iter().sum::<usize>(), Relaxed);
+            self.tokens
+                .fetch_add(lengths.iter().sum::<usize>(), Relaxed);
         }
 
         let mut out: Vec<Vec<f32>> = vec![Vec::new(); texts.len()];
-        for batch in plan_batches(&lengths, self.options.batch_size, self.options.max_batch_cells) {
+        for batch in plan_batches(
+            &lengths,
+            self.options.batch_size,
+            self.options.max_batch_cells,
+        ) {
             self.run_group(&batch, &encodings, &mut out)?;
         }
         Ok(out)
@@ -486,9 +538,15 @@ impl OnnxEmbedder {
         encodings: &[tokenizers::Encoding],
         out: &mut [Vec<f32>],
     ) -> Result<()> {
-        let picked: Vec<&tokenizers::Encoding> = batch.iter().map(|&i| &encodings[i]).collect();
+        // `batch` holds indices into `encodings` that `plan_batches` produced
+        // from `encodings.len()`, so each is in range; `filter_map` says that to
+        // the compiler instead (task-1932, H9).
+        let picked: Vec<&tokenizers::Encoding> =
+            batch.iter().filter_map(|&i| encodings.get(i)).collect();
         for (&i, v) in batch.iter().zip(self.run_encodings(&picked)?) {
-            out[i] = v;
+            if let Some(slot) = out.get_mut(i) {
+                *slot = v;
+            }
         }
         Ok(())
     }
@@ -529,10 +587,15 @@ impl OnnxEmbedder {
         let types = vec![0i64; batch * width];
 
         for (row, encoding) in encodings.iter().enumerate() {
-            let take = lengths[row];
+            let take = lengths.get(row).copied().unwrap_or(0);
             let encoded = encoding.get_attention_mask();
+            let source = encoding.get_ids();
             for col in 0..take {
-                ids[row * width + col] = encoding.get_ids()[col] as i64;
+                let at = row.saturating_mul(width).saturating_add(col);
+                let (Some(slot), Some(id)) = (ids.get_mut(at), source.get(col)) else {
+                    continue;
+                };
+                *slot = i64::from(*id);
                 // The encoding's own mask AND our truncation. The second half is
                 // what stops a truncated tail being marked present. The first is
                 // what stops a tokenizer that padded for itself - one of the eight
@@ -541,7 +604,9 @@ impl OnnxEmbedder {
                 // on load, and this is the belt to its braces: a mask built from
                 // a length alone cannot tell the two apart, and a wrong mask is a
                 // wrong vector that nothing downstream would notice.
-                mask[row * width + col] = i64::from(encoded.get(col).copied().unwrap_or(1) != 0);
+                if let Some(slot) = mask.get_mut(at) {
+                    *slot = i64::from(encoded.get(col).copied().unwrap_or(1) != 0);
+                }
             }
         }
 
@@ -576,7 +641,9 @@ impl OnnxEmbedder {
         })?;
 
         let name = self.output_name(&outputs)?;
-        let (shape, data) = outputs[name.as_str()]
+        let (shape, data) = outputs
+            .get(name.as_str())
+            .with_context(|| format!("{name} is not among the model's outputs"))?
             .try_extract_tensor::<f32>()
             .with_context(|| format!("reading {name}"))?;
         let hidden = *shape.last().context("output had no trailing dimension")? as usize;
@@ -588,7 +655,7 @@ impl OnnxEmbedder {
         // arms comparable at all.
         if self.options.output == Output::SentenceEmbedding {
             anyhow::ensure!(
-                shape.len() == 2 && shape[0] as usize == batch,
+                shape.len() == 2 && shape.first().copied().unwrap_or(0) as usize == batch,
                 "{name} has shape {shape:?}; a pooled output must be [batch, hidden]"
             );
             anyhow::ensure!(
@@ -598,7 +665,11 @@ impl OnnxEmbedder {
             );
             let mut result = Vec::with_capacity(batch);
             for row in 0..batch {
-                let mut pooled = data[row * hidden..(row + 1) * hidden].to_vec();
+                let start = row.saturating_mul(hidden);
+                let Some(slice) = data.get(start..start.saturating_add(hidden)) else {
+                    anyhow::bail!("{name} is shorter than its own shape says");
+                };
+                let mut pooled = slice.to_vec();
                 if self.options.layer_norm {
                     layer_norm(&mut pooled);
                 }
@@ -621,9 +692,22 @@ impl OnnxEmbedder {
 
         let mut result = Vec::with_capacity(batch);
         for row in 0..batch {
-            let token_at = |col: usize| {
-                let start = (row * width + col) * hidden;
-                &data[start..start + hidden]
+            // An empty slice for a position the tensor does not hold, which
+            // contributes nothing to a mean and gives a zero vector for a `Cls`
+            // or `LastToken` pick - the same outcome an index would have
+            // reached by ending the process (task-1932, H9).
+            let token_at = |col: usize| -> &[f32] {
+                let start = row
+                    .saturating_mul(width)
+                    .saturating_add(col)
+                    .saturating_mul(hidden);
+                data.get(start..start.saturating_add(hidden)).unwrap_or(&[])
+            };
+            let masked = |col: usize| -> bool {
+                mask.get(row.saturating_mul(width).saturating_add(col))
+                    .copied()
+                    .unwrap_or(0)
+                    == 0
             };
             let mut pooled = match self.options.pooling {
                 // Every unmasked position, averaged. Padding contributes nothing
@@ -632,7 +716,7 @@ impl OnnxEmbedder {
                     let mut acc = vec![0f32; hidden];
                     let mut counted = 0f32;
                     for col in 0..width {
-                        if mask[row * width + col] == 0 {
+                        if masked(col) {
                             continue;
                         }
                         for (a, v) in acc.iter_mut().zip(token_at(col)) {
@@ -653,7 +737,7 @@ impl OnnxEmbedder {
                 // elsewhere, and this batcher pads on the right, which is what
                 // makes the scan from the end correct.
                 Pooling::LastToken => {
-                    let last = (0..width).rev().find(|&col| mask[row * width + col] != 0);
+                    let last = (0..width).rev().find(|&col| !masked(col));
                     token_at(last.unwrap_or(0)).to_vec()
                 }
             };
@@ -717,8 +801,6 @@ pub fn count_truncation(
     Ok(facts)
 }
 
-
-
 /// Take the padding and the truncation out of a tokenizer's own configuration.
 ///
 /// A `tokenizer.json` may carry both, and one of the eight models compared here
@@ -777,10 +859,18 @@ fn build_inputs<'a>(
     ids: Vec<i64>,
     mask: &[i64],
     types: Vec<i64>,
-) -> Result<Vec<(std::borrow::Cow<'a, str>, ort::session::SessionInputValue<'a>)>> {
+) -> Result<
+    Vec<(
+        std::borrow::Cow<'a, str>,
+        ort::session::SessionInputValue<'a>,
+    )>,
+> {
     let mut ids = Some(ids);
     let mut types = Some(types);
-    let mut out: Vec<(std::borrow::Cow<'a, str>, ort::session::SessionInputValue<'a>)> = Vec::new();
+    let mut out: Vec<(
+        std::borrow::Cow<'a, str>,
+        ort::session::SessionInputValue<'a>,
+    )> = Vec::new();
     for input in session.inputs() {
         let name = input.name().to_string();
         let value: Value = match name.as_str() {
@@ -805,11 +895,8 @@ fn build_inputs<'a>(
                 }
                 Value::from_array(([batch, width], positions))?.into()
             }
-            other if other.starts_with("past_key_values.") => {
-                empty_cache_tensor(input, batch).with_context(|| {
-                    format!("building the empty past-key-value tensor {other}")
-                })?
-            }
+            other if other.starts_with("past_key_values.") => empty_cache_tensor(input, batch)
+                .with_context(|| format!("building the empty past-key-value tensor {other}"))?,
             other => anyhow::bail!(
                 "the export declares an input this embedder does not know how to fill: {other}. \
                  Re-export it for feature extraction, or teach build_inputs what it means - \
@@ -821,7 +908,11 @@ fn build_inputs<'a>(
     anyhow::ensure!(
         ids.is_none(),
         "the export declares no input_ids; its inputs are {:?}",
-        session.inputs().iter().map(|i| i.name()).collect::<Vec<_>>()
+        session
+            .inputs()
+            .iter()
+            .map(|i| i.name())
+            .collect::<Vec<_>>()
     );
     Ok(out)
 }
@@ -850,7 +941,7 @@ fn empty_cache_tensor(input: &ort::value::Outlet, batch: usize) -> Result<Value>
     // Both are declared dynamic (-1); the other two are the model's own numbers.
     let mut resolved = [0usize; 4];
     for (i, d) in dims.iter().enumerate() {
-        resolved[i] = match i {
+        let value = match i {
             0 => batch,
             2 => 0,
             _ => {
@@ -863,6 +954,11 @@ fn empty_cache_tensor(input: &ort::value::Outlet, batch: usize) -> Result<Value>
                 *d as usize
             }
         };
+        // The `dims.len() == 4` check above makes this in range; `get_mut` is
+        // how that is said to the compiler (task-1932, H9).
+        if let Some(slot) = resolved.get_mut(i) {
+            *slot = value;
+        }
     }
     Ok(Value::from_array((resolved, Vec::<f32>::new()))?.into())
 }
@@ -884,20 +980,22 @@ fn empty_cache_tensor(input: &ort::value::Outlet, batch: usize) -> Result<Value>
 /// @param max_cells - ceiling on `texts in the batch x longest, squared`
 fn plan_batches(lengths: &[usize], batch_size: usize, max_cells: usize) -> Vec<Vec<usize>> {
     let mut order: Vec<usize> = (0..lengths.len()).collect();
-    order.sort_by_key(|&i| lengths[i]);
+    order.sort_by_key(|&i| lengths.get(i).copied().unwrap_or(0));
 
     let mut batches: Vec<Vec<usize>> = Vec::new();
     let mut batch: Vec<usize> = Vec::with_capacity(batch_size.max(1));
     let mut widest = 0usize;
     for &i in &order {
-        let width = widest.max(lengths[i]);
-        let cells = (batch.len() + 1).saturating_mul(width).saturating_mul(width);
+        let width = widest.max(lengths.get(i).copied().unwrap_or(0));
+        let cells = (batch.len() + 1)
+            .saturating_mul(width)
+            .saturating_mul(width);
         let full = batch.len() >= batch_size.max(1) || (!batch.is_empty() && cells > max_cells);
         if full {
             batches.push(std::mem::take(&mut batch));
             widest = 0;
         }
-        widest = widest.max(lengths[i]);
+        widest = widest.max(lengths.get(i).copied().unwrap_or(0));
         batch.push(i);
     }
     if !batch.is_empty() {
@@ -955,7 +1053,9 @@ fn preload_cuda_dylibs() {
     static ONCE: OnceLock<()> = OnceLock::new();
     ONCE.get_or_init(|| {
         let cuda = std::env::var("INILLUCENT_CUDA_BIN").ok().map(PathBuf::from);
-        let cudnn = std::env::var("INILLUCENT_CUDNN_BIN").ok().map(PathBuf::from);
+        let cudnn = std::env::var("INILLUCENT_CUDNN_BIN")
+            .ok()
+            .map(PathBuf::from);
         if cuda.is_none() && cudnn.is_none() {
             return;
         }
@@ -1007,19 +1107,25 @@ mod tests {
     use crate::distance::dot;
 
     fn model_dir() -> Option<PathBuf> {
-        let dir = std::env::var("INILLUCENT_ONNX_DIR").ok().map(PathBuf::from).or_else(|| {
-            for root in ["J:/inillucent-embeddings/models", "~/.cache/inillucent-models"] {
-                let root = match root.strip_prefix("~/") {
-                    Some(rest) => PathBuf::from(std::env::var("HOME").ok()?).join(rest),
-                    None => PathBuf::from(root),
-                };
-                let dir = root.join("nomic-embed-text-v1.5");
-                if dir.join("model.onnx").exists() {
-                    return Some(dir);
+        let dir = std::env::var("INILLUCENT_ONNX_DIR")
+            .ok()
+            .map(PathBuf::from)
+            .or_else(|| {
+                for root in [
+                    "J:/inillucent-embeddings/models",
+                    "~/.cache/inillucent-models",
+                ] {
+                    let root = match root.strip_prefix("~/") {
+                        Some(rest) => PathBuf::from(std::env::var("HOME").ok()?).join(rest),
+                        None => PathBuf::from(root),
+                    };
+                    let dir = root.join("nomic-embed-text-v1.5");
+                    if dir.join("model.onnx").exists() {
+                        return Some(dir);
+                    }
                 }
-            }
-            None
-        })?;
+                None
+            })?;
         if dir.join("model.onnx").exists() && dir.join("tokenizer.json").exists() {
             Some(dir)
         } else {
@@ -1034,13 +1140,13 @@ mod tests {
         ($opts:expr) => {
             match model_dir() {
                 None => {
-                    eprintln!("skipping: no ONNX weights found");
+                    eprintln!("no ONNX weights found; skipping");
                     return;
                 }
                 Some(dir) => match OnnxEmbedder::open(&dir, $opts) {
                     Ok(e) => e,
                     Err(err) => {
-                        eprintln!("skipping: could not load the model ({err:#})");
+                        eprintln!("could not load the model ({err:#}); skipping");
                         return;
                     }
                 },
@@ -1051,14 +1157,23 @@ mod tests {
     #[test]
     fn produces_one_unit_vector_of_the_configured_width_per_text() {
         for dims in [768usize, 512, 256, 128, 64] {
-            let e = embedder_or_skip!(OnnxOptions { dims, ..Default::default() });
+            let e = embedder_or_skip!(OnnxOptions {
+                dims,
+                ..Default::default()
+            });
             let v = e
-                .embed_documents(&["offer eligibility rules".to_string(), "unrelated".to_string()])
+                .embed_documents(&[
+                    "offer eligibility rules".to_string(),
+                    "unrelated".to_string(),
+                ])
                 .unwrap();
             assert_eq!(v.len(), 2);
             for x in &v {
                 assert_eq!(x.len(), dims);
-                assert!((dot(x, x) - 1.0).abs() < 1e-4, "width {dims} not unit length");
+                assert!(
+                    (dot(x, x) - 1.0).abs() < 1e-4,
+                    "width {dims} not unit length"
+                );
             }
         }
     }
@@ -1074,7 +1189,9 @@ mod tests {
     #[test]
     fn related_text_scores_higher_than_unrelated_text() {
         let e = embedder_or_skip!(OnnxOptions::default());
-        let q = e.embed_query("how are offers made eligible for a member").unwrap();
+        let q = e
+            .embed_query("how are offers made eligible for a member")
+            .unwrap();
         let docs = e
             .embed_documents(&[
                 "Offer eligibility is evaluated against the member's profile.".to_string(),
@@ -1093,7 +1210,10 @@ mod tests {
     /// silently shift the vectors a document was indexed with.
     #[test]
     fn batching_does_not_change_the_result() {
-        let e = embedder_or_skip!(OnnxOptions { batch_size: 2, ..Default::default() });
+        let e = embedder_or_skip!(OnnxOptions {
+            batch_size: 2,
+            ..Default::default()
+        });
         let texts: Vec<String> = (0..5)
             .map(|i| format!("chunk number {i} about offer eligibility and redemption"))
             .collect();
@@ -1118,7 +1238,10 @@ mod tests {
         let together = e.embed_documents(&[short.clone(), long]).unwrap();
         let alone = e.embed_documents(&[short]).unwrap();
         let agreement = dot(&together[0], &alone[0]);
-        assert!(agreement > 0.9999, "padding leaked into the result: cosine {agreement}");
+        assert!(
+            agreement > 0.9999,
+            "padding leaked into the result: cosine {agreement}"
+        );
     }
 
     #[test]
@@ -1148,8 +1271,16 @@ mod tests {
     #[test]
     fn layer_norm_is_immaterial_after_l2_normalisation() {
         for dims in [768usize, 512, 256, 128, 64] {
-            let plain = embedder_or_skip!(OnnxOptions { dims, layer_norm: false, ..Default::default() });
-            let normed = embedder_or_skip!(OnnxOptions { dims, layer_norm: true, ..Default::default() });
+            let plain = embedder_or_skip!(OnnxOptions {
+                dims,
+                layer_norm: false,
+                ..Default::default()
+            });
+            let normed = embedder_or_skip!(OnnxOptions {
+                dims,
+                layer_norm: true,
+                ..Default::default()
+            });
             let a = plain.embed_query("offer eligibility").unwrap();
             let b = normed.embed_query("offer eligibility").unwrap();
             let agreement = dot(&a, &b);
@@ -1199,7 +1330,10 @@ mod tests {
             ..baseline.clone()
         }));
         let text = "offer eligibility rules";
-        let agreement = dot(&prefixed.embed_query(text).unwrap(), &bare.embed_query(text).unwrap());
+        let agreement = dot(
+            &prefixed.embed_query(text).unwrap(),
+            &bare.embed_query(text).unwrap(),
+        );
         assert!(agreement < 0.999, "cosine {agreement}");
     }
 
@@ -1210,29 +1344,47 @@ mod tests {
     /// counted". This is the fixture that says the counter works.
     #[test]
     fn a_text_past_the_token_bound_is_counted_as_truncated() {
-        let manifest = ModelManifest { max_tokens: 128, ..ModelManifest::nomic_v1_5() };
+        let manifest = ModelManifest {
+            max_tokens: 128,
+            ..ModelManifest::nomic_v1_5()
+        };
         let e = embedder_or_skip!(OnnxOptions::for_model(&manifest));
         // Distinct words, so the tokenizer cannot collapse them: about 3,000
         // tokens against a 128 bound.
-        let long: String =
-            (0..3000).map(|i| format!("token{i} ")).collect::<Vec<_>>().concat();
+        let long: String = (0..3000)
+            .map(|i| format!("token{i} "))
+            .collect::<Vec<_>>()
+            .concat();
         e.embed_documents(&["short".to_string(), long]).unwrap();
         let facts = e.truncation();
         assert_eq!(facts.texts, 2);
-        assert_eq!(facts.truncated, 1, "the long text was not counted as truncated");
+        assert_eq!(
+            facts.truncated, 1,
+            "the long text was not counted as truncated"
+        );
         assert!((facts.share() - 0.5).abs() < 1e-9);
         // Tokens are counted after truncation, which is what the model was
         // charged for: 128 for the long one plus a handful for the short one.
-        assert!(facts.tokens > 128 && facts.tokens < 160, "{} tokens", facts.tokens);
+        assert!(
+            facts.tokens > 128 && facts.tokens < 160,
+            "{} tokens",
+            facts.tokens
+        );
     }
 
     /// A truncated text is embedded from its prefix rather than dropped, and the
     /// vector is still a unit vector of the right width.
     #[test]
     fn a_truncated_text_is_still_embedded() {
-        let manifest = ModelManifest { max_tokens: 64, ..ModelManifest::nomic_v1_5() };
+        let manifest = ModelManifest {
+            max_tokens: 64,
+            ..ModelManifest::nomic_v1_5()
+        };
         let e = embedder_or_skip!(OnnxOptions::for_model(&manifest));
-        let long: String = (0..2000).map(|i| format!("token{i} ")).collect::<Vec<_>>().concat();
+        let long: String = (0..2000)
+            .map(|i| format!("token{i} "))
+            .collect::<Vec<_>>()
+            .concat();
         let v = e.embed_documents(&[long]).unwrap();
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].len(), 768);
@@ -1259,8 +1411,16 @@ mod tests {
         let m = mean.embed_documents(&[text.to_string()]).unwrap().remove(0);
         let c = cls.embed_documents(&[text.to_string()]).unwrap().remove(0);
         let l = last.embed_documents(&[text.to_string()]).unwrap().remove(0);
-        assert!(dot(&m, &c) < 0.999, "mean and cls agreed to {}", dot(&m, &c));
-        assert!(dot(&c, &l) < 0.999, "cls and last-token agreed to {}", dot(&c, &l));
+        assert!(
+            dot(&m, &c) < 0.999,
+            "mean and cls agreed to {}",
+            dot(&m, &c)
+        );
+        assert!(
+            dot(&c, &l) < 0.999,
+            "cls and last-token agreed to {}",
+            dot(&c, &l)
+        );
         for v in [&m, &c, &l] {
             assert!((dot(v, v) - 1.0).abs() < 1e-4);
         }
@@ -1280,7 +1440,10 @@ mod tests {
         let together = e.embed_documents(&[short.clone(), long]).unwrap();
         let alone = e.embed_documents(&[short]).unwrap();
         let agreement = dot(&together[0], &alone[0]);
-        assert!(agreement > 0.9999, "padding leaked into the last token: cosine {agreement}");
+        assert!(
+            agreement > 0.9999,
+            "padding leaked into the last token: cosine {agreement}"
+        );
     }
 
     /// A tokenizer that pads or truncates for itself is disarmed on load.
@@ -1294,13 +1457,13 @@ mod tests {
     #[test]
     fn a_tokenizer_that_pads_and_truncates_for_itself_is_disarmed() {
         let Some(dir) = model_dir() else {
-            eprintln!("skipping: no ONNX weights found");
+            eprintln!("no ONNX weights found; skipping");
             return;
         };
         let mut armed = match Tokenizer::from_file(dir.join("tokenizer.json")) {
             Ok(t) => t,
             Err(e) => {
-                eprintln!("skipping: {e}");
+                eprintln!("{e}; skipping");
                 return;
             }
         };
@@ -1335,9 +1498,13 @@ mod tests {
     /// configuration it happened to ship with.
     #[test]
     fn the_embedder_reports_the_texts_own_token_count_not_a_padded_one() {
-        let manifest = ModelManifest { max_tokens: 4096, ..ModelManifest::nomic_v1_5() };
+        let manifest = ModelManifest {
+            max_tokens: 4096,
+            ..ModelManifest::nomic_v1_5()
+        };
         let e = embedder_or_skip!(OnnxOptions::for_model(&manifest));
-        e.embed_documents(&["one two three four five six".to_string()]).unwrap();
+        e.embed_documents(&["one two three four five six".to_string()])
+            .unwrap();
         let facts = e.truncation();
         assert_eq!(facts.texts, 1);
         assert_eq!(facts.truncated, 0);
@@ -1369,7 +1536,10 @@ mod tests {
         // Long sequences: the cell budget binds long before the count does.
         let lengths = vec![1900usize; 64];
         let batches = plan_batches(&lengths, 64, 24_000_000);
-        assert!(batches.len() > 1, "64 sequences of 1900 tokens must not be one batch");
+        assert!(
+            batches.len() > 1,
+            "64 sequences of 1900 tokens must not be one batch"
+        );
         for b in &batches {
             let width = b.iter().map(|&i| lengths[i]).max().unwrap();
             assert!(b.len() * width * width <= 24_000_000 || b.len() == 1);
@@ -1410,7 +1580,10 @@ mod tests {
         let batches = plan_batches(&lengths, 3, usize::MAX);
         for b in &batches {
             let widths: Vec<usize> = b.iter().map(|&i| lengths[i]).collect();
-            assert!(widths.iter().all(|w| *w == widths[0]), "mixed lengths in one batch: {widths:?}");
+            assert!(
+                widths.iter().all(|w| *w == widths[0]),
+                "mixed lengths in one batch: {widths:?}"
+            );
         }
     }
 

@@ -10,6 +10,12 @@
 //! - **A short read is an error, never a shorter message.** A stream that ends
 //!   mid-row has to fail loudly: the alternative is a migration that publishes
 //!   a table it only read half of.
+//!
+//! Invariant: **every length is checked before it is allocated, and every read
+//! is bounded.** Both protocols put a length on the wire ahead of the bytes it
+//! describes, which makes it a number the peer chooses; this file is the one
+//! place that number turns into a buffer, so it is the one place the bound has
+//! to hold.
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};

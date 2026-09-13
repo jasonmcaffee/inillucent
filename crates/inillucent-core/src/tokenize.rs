@@ -7,6 +7,11 @@
 //! offers offering redeemed redeeming')` yields `'elig':1,2 'offer':3,4
 //! 'redeem':5,6`. `rust-stemmers` implements the same Snowball algorithm, so the
 //! two agree term for term.
+//!
+//! Invariant: **the same text produces the same terms on the way in and on the
+//! way out.** This is the one function the index and the query both call,
+//! because a corpus stemmed one way and a query stemmed another is a search
+//! that silently finds nothing.
 
 use rust_stemmers::{Algorithm, Stemmer};
 
@@ -14,20 +19,136 @@ use rust_stemmers::{Algorithm, Stemmer};
 /// Reproduced rather than referenced because term parity with the baseline is the
 /// point, and a different stopword list would shift every score.
 pub const ENGLISH_STOPWORDS: &[&str] = &[
-    "i", "me", "my", "myself", "we", "our", "ours", "ourselves", "you", "your", "yours",
-    "yourself", "yourselves", "he", "him", "his", "himself", "she", "her", "hers", "herself",
-    "it", "its", "itself", "they", "them", "their", "theirs", "themselves", "what", "which",
-    "who", "whom", "this", "that", "these", "those", "am", "is", "are", "was", "were", "be",
-    "been", "being", "have", "has", "had", "having", "do", "does", "did", "doing", "a", "an",
-    "the", "and", "but", "if", "or", "because", "as", "until", "while", "of", "at", "by",
-    "for", "with", "about", "against", "between", "into", "through", "during", "before",
-    "after", "above", "below", "to", "from", "up", "down", "in", "out", "on", "off", "over",
-    "under", "again", "further", "then", "once", "here", "there", "when", "where", "why",
-    "how", "all", "any", "both", "each", "few", "more", "most", "other", "some", "such",
-    "no", "nor", "not", "only", "own", "same", "so", "than", "too", "very", "s", "t", "can",
-    "will", "just", "don", "should", "now",
+    "i",
+    "me",
+    "my",
+    "myself",
+    "we",
+    "our",
+    "ours",
+    "ourselves",
+    "you",
+    "your",
+    "yours",
+    "yourself",
+    "yourselves",
+    "he",
+    "him",
+    "his",
+    "himself",
+    "she",
+    "her",
+    "hers",
+    "herself",
+    "it",
+    "its",
+    "itself",
+    "they",
+    "them",
+    "their",
+    "theirs",
+    "themselves",
+    "what",
+    "which",
+    "who",
+    "whom",
+    "this",
+    "that",
+    "these",
+    "those",
+    "am",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "been",
+    "being",
+    "have",
+    "has",
+    "had",
+    "having",
+    "do",
+    "does",
+    "did",
+    "doing",
+    "a",
+    "an",
+    "the",
+    "and",
+    "but",
+    "if",
+    "or",
+    "because",
+    "as",
+    "until",
+    "while",
+    "of",
+    "at",
+    "by",
+    "for",
+    "with",
+    "about",
+    "against",
+    "between",
+    "into",
+    "through",
+    "during",
+    "before",
+    "after",
+    "above",
+    "below",
+    "to",
+    "from",
+    "up",
+    "down",
+    "in",
+    "out",
+    "on",
+    "off",
+    "over",
+    "under",
+    "again",
+    "further",
+    "then",
+    "once",
+    "here",
+    "there",
+    "when",
+    "where",
+    "why",
+    "how",
+    "all",
+    "any",
+    "both",
+    "each",
+    "few",
+    "more",
+    "most",
+    "other",
+    "some",
+    "such",
+    "no",
+    "nor",
+    "not",
+    "only",
+    "own",
+    "same",
+    "so",
+    "than",
+    "too",
+    "very",
+    "s",
+    "t",
+    "can",
+    "will",
+    "just",
+    "don",
+    "should",
+    "now",
 ];
 
+/// The one normalizer both indexing and searching call.
 pub struct Tokenizer {
     stemmer: Stemmer,
     stopwords: std::collections::HashSet<&'static str>,
@@ -221,7 +342,10 @@ mod tests {
     #[test]
     fn lowercases_before_stemming() {
         let t = Tokenizer::default();
-        assert_eq!(t.terms("OFFERS Offers offers"), vec!["offer", "offer", "offer"]);
+        assert_eq!(
+            t.terms("OFFERS Offers offers"),
+            vec!["offer", "offer", "offer"]
+        );
     }
 
     #[test]
@@ -250,7 +374,9 @@ mod tests {
         let t = Tokenizer::default();
         assert!(t.terms("author_id").contains(&"author_id".to_string()));
         assert!(t.terms("v1.5.2").contains(&"v1.5.2".to_string()));
-        assert!(t.terms("src/search/vector").contains(&"src/search/vector".to_string()));
+        assert!(t
+            .terms("src/search/vector")
+            .contains(&"src/search/vector".to_string()));
     }
 
     #[test]
@@ -295,7 +421,10 @@ mod tests {
         // quietly matched every message mentioning gmail. The address itself is
         // now a term, and it is not put through the stemmer.
         let terms = t.terms("jasonlmcaffee@gmail.com");
-        assert!(terms.contains(&"jasonlmcaffee@gmail.com".to_string()), "got {terms:?}");
+        assert!(
+            terms.contains(&"jasonlmcaffee@gmail.com".to_string()),
+            "got {terms:?}"
+        );
         assert!(
             !terms.contains(&"jasonlmcaffe@gmail.com".to_string()),
             "the address itself was stemmed: {terms:?}"
@@ -332,7 +461,11 @@ mod tests {
     #[test]
     fn surrounding_punctuation_does_not_change_the_address() {
         let t = Tokenizer::default();
-        for form in ["<jason@example.com>", "jason@example.com,", "(jason@example.com)"] {
+        for form in [
+            "<jason@example.com>",
+            "jason@example.com,",
+            "(jason@example.com)",
+        ] {
             assert!(
                 t.terms(form).contains(&"jason@example.com".to_string()),
                 "{form} did not produce the address"
@@ -346,8 +479,19 @@ mod tests {
         // the general compound rule may still keep some of these whole; what
         // matters is that none of them is treated as an address and exempted from
         // stemming.
-        for word in ["@mentions", "cost@10", "a@b", "x@y.1", "two@@ats.com", "user@localhost"] {
-            assert_eq!(email_address(word), None, "{word} was mistaken for an address");
+        for word in [
+            "@mentions",
+            "cost@10",
+            "a@b",
+            "x@y.1",
+            "two@@ats.com",
+            "user@localhost",
+        ] {
+            assert_eq!(
+                email_address(word),
+                None,
+                "{word} was mistaken for an address"
+            );
         }
     }
 
@@ -360,7 +504,10 @@ mod tests {
         let document = t.terms("From: jasonlmcaffee@gmail.com");
         let query = t.query_terms("jasonlmcaffee");
         assert_eq!(query.len(), 1);
-        assert!(document.contains(&query[0]), "{document:?} does not hold {query:?}");
+        assert!(
+            document.contains(&query[0]),
+            "{document:?} does not hold {query:?}"
+        );
     }
 
     #[test]

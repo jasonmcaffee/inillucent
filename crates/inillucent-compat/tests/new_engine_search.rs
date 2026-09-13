@@ -135,7 +135,7 @@ fn new_engine(tag: &str) -> Option<ImportedDatabase> {
 #[test]
 fn the_search_module_answers_the_corpus_it_was_given() {
     let Some(mut engine) = new_engine("answers") else {
-        eprintln!("the empty fixture is not checked in; skipping");
+        inillucent_compat::differential::skipping("the empty fixture is not checked in");
         return;
     };
 
@@ -232,7 +232,7 @@ fn the_search_module_answers_the_corpus_it_was_given() {
 #[test]
 fn the_shadow_tables_are_ordinary_trees() {
     let Some(mut engine) = new_engine("shadows") else {
-        eprintln!("the empty fixture is not checked in; skipping");
+        inillucent_compat::differential::skipping("the empty fixture is not checked in");
         return;
     };
     for statement in seed_statements() {

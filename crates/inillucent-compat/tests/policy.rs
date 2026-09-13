@@ -15,7 +15,22 @@ use std::process::Command;
 use inillucent_compat::workspace_root;
 
 /// The crates the policy applies to.
-const GOVERNED: [&str; 20] = [
+///
+/// **Six crates were added in task-1932 (H9), and they were the ones where the
+/// rules matter most.** The list held twenty and omitted, among others: the one
+/// crate in the workspace allowed to write `unsafe`
+/// (`inillucent-alloc`); the crate that parses bytes off a network socket and
+/// holds 72 `unsafe` occurrences in its TLS files (`inillucent-remote`, whose
+/// own module comment claimed `policy.rs` checked its `SAFETY` notes - it did
+/// not, because the crate was not here); and the crate that decodes the
+/// retrieval index straight off the database file, with no lint attributes at
+/// all (`inillucent-core`). The two driver crates are the surface every
+/// language binding reaches the engine through.
+///
+/// The argument for each is the one already written below for the engine
+/// crates: a crate that is exempt is a crate that is exempt, and the exemption
+/// is invisible from inside it.
+const GOVERNED: [&str; 26] = [
     "inillucent-base",
     "inillucent-vfs",
     "inillucent-sim",
@@ -46,6 +61,14 @@ const GOVERNED: [&str; 20] = [
     "inillucent",
     "inillucent-cli",
     "inillucent-compat",
+    // The six task-1932 added. See the doc comment above for why each one
+    // matters more than the twenty that were already here, not less.
+    "inillucent-alloc",
+    "inillucent-core",
+    "inillucent-remote",
+    "inillucent-migrate",
+    "inillucent-driver",
+    "inillucent-driver-capi",
 ];
 
 /// The crates whose whole point is an unsafe boundary.
@@ -78,7 +101,29 @@ const UNSAFE_CRATES: [&str; 1] = ["inillucent-driver-capi"];
 /// about what the engine is made of, and a baseline tool that never ships is
 /// not part of it - but a file with `unsafe` in it should still have to say
 /// why, in writing, in a list somebody reads.
-const UNSAFE_ALLOWED: [&str; 9] = [
+const UNSAFE_ALLOWED: [&str; 13] = [
+    // The allocator's own concurrency suite, added in task-1932 (H9). It
+    // allocates on one thread and frees on another through `GlobalAlloc`, which
+    // is an unsafe trait - the boundary is what the suite exists to cross, and
+    // every call carries its own SAFETY note saying which thread owns the block
+    // at that point.
+    "crates/inillucent-alloc/tests/concurrency.rs",
+    // **The allocator and the two TLS files, admitted in task-1932 (H9).**
+    // None of them was here because none of their crates was in `GOVERNED`, so
+    // `unsafe` in them was not permitted - it was unexamined, which is a
+    // different thing and the worse one. `inillucent-remote`'s own module
+    // comment said `policy.rs` checked its `SAFETY` notes; it did not, because
+    // the crate was not governed.
+    //
+    // `inillucent-alloc` is a `GlobalAlloc`, which is an unsafe trait: it is
+    // the one production crate in the workspace allowed to write the word, and
+    // its whole surface is the boundary. The two TLS files are the operating
+    // system's certificate stores - Windows's SChannel and the platform trust
+    // roots on Unix - reached through FFI, which is the same ground
+    // `inillucent-vfs`'s two files stand on.
+    "crates/inillucent-alloc/src/lib.rs",
+    "crates/inillucent-remote/src/tls/unix.rs",
+    "crates/inillucent-remote/src/tls/windows.rs",
     "crates/inillucent-vfs/src/os/windows.rs",
     "crates/inillucent-vfs/src/os/unix.rs",
     "crates/inillucent-compat/src/bin/sqlperf.rs",
@@ -153,7 +198,7 @@ fn unsafe_code_is_confined_and_justified() {
         if UNSAFE_CRATES.contains(&crate_name) {
             continue;
         }
-        for file in rust_files(&root.join("crates").join(crate_name)) {
+        for file in rust_files(&crate_directory(&root, crate_name)) {
             let name = relative(&root, &file);
             // This file names the word in every check it makes.
             if name.ends_with("tests/policy.rs") {
@@ -169,13 +214,38 @@ fn unsafe_code_is_confined_and_justified() {
                 if line.trim_start().starts_with("//") || line.contains("unsafe_code") {
                     continue;
                 }
+                // **A function-pointer *type* is not an unsafe operation, and
+                // requiring a safety argument on one asks for a sentence that
+                // cannot be written (task-1932, H9).** `inillucent-remote`'s
+                // TLS files resolve OpenSSL and SChannel at run time, so their
+                // entry points are struct fields typed
+                // `unsafe extern "C" fn(...)` - nineteen of them in
+                // `tls/unix.rs` alone. The field declares what the pointer is;
+                // the *call* through it is the unsafe operation, and each of
+                // those does carry a note. A definition is told apart from a
+                // type by having a name between `fn` and its arguments.
+                if line.contains("unsafe extern \"C\" fn(") {
+                    continue;
+                }
                 if !UNSAFE_ALLOWED.contains(&name.as_str()) {
                     offenders.push(format!("{name}:{}: {}", index + 1, line.trim()));
                     continue;
                 }
                 let start = index.saturating_sub(8);
                 let preceding = lines.get(start..index).unwrap_or(&[]);
-                if preceding.iter().any(|line| line.contains("SAFETY:")) {
+                // **`# Safety` counts, and it is the right form for a
+                // declaration (task-1932, H9).** An unsafe *operation* carries
+                // a `SAFETY:` comment saying why this call is sound; an unsafe
+                // *function* carries a `# Safety` doc section saying what its
+                // caller must guarantee. They are different sentences with
+                // different subjects, and rustc's own
+                // `clippy::missing_safety_doc` asks for the second. A check
+                // that accepted only the first would push a declaration into
+                // writing the wrong one.
+                if preceding
+                    .iter()
+                    .any(|line| line.contains("SAFETY:") || line.contains("# Safety"))
+                {
                     justified += 1;
                 } else {
                     offenders.push(format!("{name}:{}: no SAFETY comment", index + 1));
@@ -251,13 +321,24 @@ fn every_exported_c_function_documents_itself() {
 
 /// Every governed crate must deny undocumented public items, so a public
 /// function without a doc comment is a build error rather than a review note.
+///
+/// **The match is on the whole attribute, and it used to be on the lint's name
+/// (task-1932, H9).** `text.contains("clippy::unwrap_used")` is true of a crate
+/// that *denies* the lint and equally true of one that *allows* it - and
+/// `inillucent-scalar` had a `#![cfg_attr(test, allow(clippy::expect_used,
+/// clippy::indexing_slicing, clippy::panic, clippy::unwrap_used))]` block and
+/// no `deny` for any of the four. It named all four lint paths, so it passed
+/// this test while denying none of them, with 71 `expect`s and 22 direct index
+/// expressions in `geopoly.rs`. A check that a crate can satisfy by allowing
+/// the thing it is supposed to deny is the shape
+/// `tests/inillucent-testing-tdd.md` rule 1.5 is about.
 #[test]
 fn every_governed_crate_denies_undocumented_items() {
     let root = workspace_root();
     for crate_name in GOVERNED {
         // A binary crate's root is `main.rs`; the rule is about the root, not
         // about which kind of crate it is.
-        let directory = root.join("crates").join(crate_name).join("src");
+        let directory = crate_directory(&root, crate_name).join("src");
         let lib = if directory.join("lib.rs").is_file() {
             directory.join("lib.rs")
         } else {
@@ -274,9 +355,30 @@ fn every_governed_crate_denies_undocumented_items() {
             "clippy::expect_used",
             "clippy::panic",
         ] {
-            assert!(text.contains(lint), "{crate_name} does not deny {lint}");
+            assert!(
+                text.contains(&format!("#![deny({lint})]")),
+                "{crate_name} does not carry `#![deny({lint})]`. Naming the lint in a                  `cfg_attr(test, allow(...))` block is not denying it."
+            );
         }
     }
+}
+
+/// Returns where a crate's manifest lives.
+///
+/// **Two directories, because the driver crates are in `drivers/`.** Every
+/// governed crate was under `crates/` until task-1932 added
+/// `inillucent-driver` and `inillucent-driver-capi`, and a check that looked
+/// only in `crates/` would have reported them as having no crate root rather
+/// than as being ungoverned.
+///
+/// @param root - the workspace root
+/// @param crate_name - the crate's directory name
+fn crate_directory(root: &std::path::Path, crate_name: &str) -> std::path::PathBuf {
+    let under_crates = root.join("crates").join(crate_name);
+    if under_crates.is_dir() {
+        return under_crates;
+    }
+    root.join("drivers").join(crate_name)
 }
 
 /// Every module must open with a comment, and the first paragraph must state
@@ -287,7 +389,7 @@ fn every_module_states_its_invariant() {
     let root = workspace_root();
     let mut offenders = Vec::new();
     for crate_name in GOVERNED {
-        for file in rust_files(&root.join("crates").join(crate_name)) {
+        for file in rust_files(&crate_directory(&root, crate_name)) {
             let name = relative(&root, &file);
             let text = std::fs::read_to_string(&file).expect("the source reads");
             if !text.starts_with("//!") {
@@ -447,7 +549,7 @@ fn no_new_crate_reaches_into_the_retired_engine() {
         if ALLOWED.contains(crate_name) || *crate_name == "inillucent-compat" {
             continue;
         }
-        let manifest = root.join("crates").join(crate_name).join("Cargo.toml");
+        let manifest = crate_directory(&root, crate_name).join("Cargo.toml");
         let Ok(text) = std::fs::read_to_string(&manifest) else {
             continue;
         };
@@ -762,7 +864,11 @@ fn no_module_grows_past_the_size_it_is_recorded_at() {
     /// into `crates/inillucent-engine/src/recovery.rs`, which is a coherent
     /// unit - opening one file and replaying its log into it - rather than a
     /// slice taken to make a number fit. Nothing in them changed in the move.
-    // **Two rows went up in task-1932 and one came down.** `ddl.rs` takes
+    // **Three rows went up in task-1932 and one came down.** `lib.rs` and
+    // `ddl.rs` take the three `#![deny]` lines each was missing and the
+    // paragraph saying why nothing had noticed - `policy.rs` matched on the
+    // lint's name, which is in the `cfg_attr(test, allow(...))` block, so a
+    // crate could satisfy the check while allowing all four. `ddl.rs` takes
     // H3's undo floor, which is the paragraph explaining why a directive is
     // several writes and why nothing put the earlier ones back; `plan.rs`
     // takes M6's walk of an aggregate's `FILTER` and inner `ORDER BY`. Both
@@ -786,7 +892,7 @@ fn no_module_grows_past_the_size_it_is_recorded_at() {
     // for exactly this reason - removing them here is answering that failure
     // before it happens rather than after.
     const CEILINGS: [(&str, usize); 10] = [
-        ("crates/inillucent-engine/src/lib.rs", 7_863),
+        ("crates/inillucent-engine/src/lib.rs", 7_875),
         ("crates/inillucent-exec/src/physical.rs", 6_663),
         ("crates/inillucent-sql/src/bind.rs", 5_315),
         ("crates/inillucent-tree/src/leaf.rs", 5_175),
@@ -831,4 +937,111 @@ fn no_module_grows_past_the_size_it_is_recorded_at() {
          The ceiling follows the work rather than the other way round.",
         shrunk.join("\n")
     );
+}
+
+/// H10 (task-1920): every skip site ends its message with the one marker.
+///
+/// **A skip nobody can see is a suite that reports green having asserted
+/// nothing, which is exactly what `--strict` exists to make visible.** Before
+/// this there were three phrasings and `testrun`'s classifier held a list of
+/// six substrings trying to catch them. Two of the three matched none of the
+/// six: `crates/inillucent-remote/tests/transport.rs` printed `...; case
+/// skipped` and the ONNX suites printed `skipping: ...`. The TLS one mattered
+/// most, because that binary runs other tests too - so it was invisible to
+/// `--strict` by both routes at once, and a CI image without Python's `ssl`
+/// module passed the TLS verification suite without running any of it.
+///
+/// The rule this checks is the one `tests/inillucent-testing-tdd.md` §9 states:
+/// a message that precedes an early return ends with `; skipping`. It is a grep
+/// rather than a type because a skip is a `return`, and no type can be put on
+/// the absence of work.
+#[test]
+fn every_skip_site_carries_the_one_marker() {
+    let root = workspace_root();
+    let mut wrong: Vec<String> = Vec::new();
+    let mut found = 0usize;
+    for file in rust_sources(&root) {
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        for (at, line) in lines.iter().enumerate() {
+            let Some(message) = quoted_after(line, "eprintln!(") else {
+                continue;
+            };
+            // A skip is an announcement followed by an early return. Anything
+            // else an `eprintln!` says is progress or a warning, and neither is
+            // a claim that a suite ran.
+            let follows = lines
+                .get(at..at.saturating_add(4))
+                .unwrap_or_default()
+                .join("\n");
+            let returns = follows.contains("\n        return;")
+                || follows.contains("\n            return;")
+                || follows.contains("\n                return;")
+                || follows.contains("\n    return;")
+                || follows.contains("return Ok(());");
+            if !returns {
+                continue;
+            }
+            found = found.saturating_add(1);
+            if !message.contains("; skipping") {
+                wrong.push(format!(
+                    "{}:{}: {message}",
+                    file.strip_prefix(&root).unwrap_or(&file).display(),
+                    at.saturating_add(1)
+                ));
+            }
+        }
+    }
+    assert!(
+        found > 0,
+        "no skip site was found at all, which means this check is looking in \
+         the wrong place rather than that every suite runs"
+    );
+    assert!(
+        wrong.is_empty(),
+        "these skip messages do not end with `; skipping`, so `--strict` cannot \
+         see them:\n{}\n`inillucent-testrun` matches that one phrase, and \
+         `tests/inillucent-testing-tdd.md` §9 asks for it.",
+        wrong.join("\n")
+    );
+}
+
+/// Returns the text between the first pair of quotes after a marker.
+///
+/// @param line - the source line
+/// @param marker - what the string follows
+fn quoted_after(line: &str, marker: &str) -> Option<String> {
+    let at = line.find(marker)?;
+    let rest = line.get(at.saturating_add(marker.len())..)?;
+    let open = rest.find('"')?;
+    let body = rest.get(open.saturating_add(1)..)?;
+    let close = body.find('"')?;
+    Some(body.get(..close)?.to_string())
+}
+
+/// Returns every `.rs` file in the workspace's own sources.
+///
+/// @param root - the workspace root
+fn rust_sources(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut found = Vec::new();
+    let mut pending = vec![root.join("crates"), root.join("drivers")];
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.file_name().is_some_and(|name| name == "target") {
+                    continue;
+                }
+                pending.push(path);
+            } else if path.extension().is_some_and(|kind| kind == "rs") {
+                found.push(path);
+            }
+        }
+    }
+    found
 }

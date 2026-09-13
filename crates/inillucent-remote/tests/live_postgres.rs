@@ -21,6 +21,11 @@
 //!      -f crates/inillucent-remote/tests/fixtures/postgres.sql
 //! set INILLUCENT_TEST_POSTGRES_URL=postgres://postgres@127.0.0.1:5432/inillucent_migrate_test
 //! ```
+//!
+//! Invariant: **this suite says so when it did not run.** It needs a live
+//! PostgreSQL server, and a suite that reports success without one is a green
+//! that evidences nothing - which is what `inillucent-testrun --strict` exists
+//! to make visible.
 
 use std::path::PathBuf;
 

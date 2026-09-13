@@ -71,7 +71,9 @@ fn cases() -> Vec<TaggedValue> {
 #[test]
 fn the_oracle_round_trips_every_storage_class_against_sqlite() {
     let Some(program) = sqlite_oracle() else {
-        eprintln!("the pinned SQLite oracle is not built; run tools/sqlite-reference.{{ps1,sh}}");
+        inillucent_compat::differential::skipping(
+            "the pinned SQLite oracle is not built; run tools/sqlite-reference.{ps1,sh}",
+        );
         return;
     };
     let mut sqlite = Driver::start("sqlite", &program).expect("the sqlite oracle starts");
@@ -147,7 +149,9 @@ fn the_oracle_round_trips_every_storage_class_against_sqlite() {
 #[test]
 fn the_oracle_reports_the_same_error_as_sqlite() {
     let Some(program) = sqlite_oracle() else {
-        eprintln!("the pinned SQLite oracle is not built; run tools/sqlite-reference.{{ps1,sh}}");
+        inillucent_compat::differential::skipping(
+            "the pinned SQLite oracle is not built; run tools/sqlite-reference.{ps1,sh}",
+        );
         return;
     };
     let mut sqlite = Driver::start("sqlite", &program).expect("the sqlite oracle starts");
@@ -198,7 +202,9 @@ fn the_oracle_reports_the_same_error_as_sqlite() {
 #[test]
 fn the_oracle_reports_connection_state() {
     let Some(program) = sqlite_oracle() else {
-        eprintln!("the pinned SQLite oracle is not built; run tools/sqlite-reference.{{ps1,sh}}");
+        inillucent_compat::differential::skipping(
+            "the pinned SQLite oracle is not built; run tools/sqlite-reference.{ps1,sh}",
+        );
         return;
     };
     let mut sqlite = Driver::start("sqlite", &program).expect("the sqlite oracle starts");

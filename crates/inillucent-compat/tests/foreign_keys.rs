@@ -143,7 +143,7 @@ fn render(value: &Value<'_>) -> String {
 /// refusal, since prose is not a contract.
 fn grade(name: &str, script: &str) {
     let Some(reference) = shell(&scratch(&format!("{name}-ref")), script) else {
-        eprintln!("the pinned shell is not present; skipping");
+        inillucent_compat::differential::skipping("the pinned shell is not present");
         return;
     };
     let candidate = run(&connect(&scratch(&format!("{name}-inillucent"))), script);

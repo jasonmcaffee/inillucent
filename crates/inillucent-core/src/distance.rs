@@ -5,31 +5,48 @@
 //! single accumulator serializes the whole loop on the latency of floating point
 //! addition, because each add depends on the previous one. Four chains let the
 //! CPU keep several adds in flight and let LLVM emit SIMD.
+//!
+//! Invariant: **one metric decides both how a vector is stored and how two of
+//! them are compared.** A set normalized on the way in and compared with a
+//! measure that assumes raw magnitudes gives wrong neighbours quietly, so the
+//! `Metric` travels with the vectors rather than being chosen at the call
+//! site.
 
 /// Dot product of two equal length slices.
 pub fn dot(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
-    let n = a.len();
-    let chunks = n / 4;
-
     let mut s0 = 0.0f32;
     let mut s1 = 0.0f32;
     let mut s2 = 0.0f32;
     let mut s3 = 0.0f32;
 
-    for i in 0..chunks {
-        let j = i * 4;
-        // Bounds checks are hoisted by the slice reborrow below.
-        let (x, y) = (&a[j..j + 4], &b[j..j + 4]);
-        s0 += x[0] * y[0];
-        s1 += x[1] * y[1];
-        s2 += x[2] * y[2];
-        s3 += x[3] * y[3];
+    // **`chunks_exact` rather than an index, and it is the same four chains
+    // (task-1932, H9).** The comment that was here said "bounds checks are
+    // hoisted by the slice reborrow below", which is a claim about what LLVM
+    // does rather than anything the code guarantees - and this crate now denies
+    // `indexing_slicing`. `chunks_exact` states the same fact in a form the
+    // compiler has to honour: a fixed-width window with no bound to check at
+    // all, which is what lets it emit SIMD. `zip` also makes the two lengths
+    // agreeing something the loop enforces rather than something the caller is
+    // trusted for.
+    for (x, y) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+        let [x0, x1, x2, x3] = *<&[f32; 4]>::try_from(x).unwrap_or(&[0.0; 4]);
+        let [y0, y1, y2, y3] = *<&[f32; 4]>::try_from(y).unwrap_or(&[0.0; 4]);
+        s0 += x0 * y0;
+        s1 += x1 * y1;
+        s2 += x2 * y2;
+        s3 += x3 * y3;
     }
 
     let mut acc = (s0 + s1) + (s2 + s3);
-    for i in (chunks * 4)..n {
-        acc += a[i] * b[i];
+    // The components a multiple of four does not reach, at most three of them.
+    for (x, y) in a
+        .chunks_exact(4)
+        .remainder()
+        .iter()
+        .zip(b.chunks_exact(4).remainder())
+    {
+        acc += x * y;
     }
     acc
 }
@@ -59,7 +76,7 @@ pub fn normalize(v: &mut [f32]) {
 /// trained so a prefix of the embedding is itself a usable embedding, but the
 /// prefix is no longer unit length, so it has to be normalized again.
 pub fn truncate_normalized(v: &[f32], dims: usize) -> Vec<f32> {
-    let mut out = v[..dims.min(v.len())].to_vec();
+    let mut out = v.get(..dims.min(v.len())).unwrap_or(v).to_vec();
     normalize(&mut out);
     out
 }
@@ -77,7 +94,13 @@ pub fn truncate_normalized(v: &[f32], dims: usize) -> Vec<f32> {
 /// @param b - the other, the same width
 pub fn squared_euclidean(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
-    a.iter().zip(b.iter()).map(|(x, y)| { let d = x - y; d * d }).sum()
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| {
+            let d = x - y;
+            d * d
+        })
+        .sum()
 }
 
 /// Which distance a vector structure minimises.
@@ -133,10 +156,7 @@ mod tests {
             let b: Vec<f32> = (0..n).map(|i| (i as f32 * 0.11).cos()).collect();
             let naive: f32 = a.iter().zip(&b).map(|(x, y)| x * y).sum();
             let got = dot(&a, &b);
-            assert!(
-                (naive - got).abs() < 1e-4,
-                "n={n} naive={naive} got={got}"
-            );
+            assert!((naive - got).abs() < 1e-4, "n={n} naive={naive} got={got}");
         }
     }
 

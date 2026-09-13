@@ -142,15 +142,21 @@ pub fn read_header(blob: &[u8], at: usize) -> DbResult<ElementHeader> {
             usize::from(*blob.get(at + 1).ok_or_else(malformed)?),
         ),
         13 => {
-            let bytes = blob.get(at + 1..at + 3).ok_or_else(malformed)?;
-            (
-                3usize,
-                usize::from(u16::from_be_bytes([bytes[0], bytes[1]])),
-            )
+            // `try_from` on the slice rather than indexing it: `get` already
+            // proved the length, and this is the form that says so to the
+            // compiler as well as to a reader (task-1932, H9).
+            let bytes = blob
+                .get(at + 1..at + 3)
+                .and_then(|head| <[u8; 2]>::try_from(head).ok())
+                .ok_or_else(malformed)?;
+            (3usize, usize::from(u16::from_be_bytes(bytes)))
         }
         14 => {
-            let bytes = blob.get(at + 1..at + 5).ok_or_else(malformed)?;
-            let size = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+            let bytes = blob
+                .get(at + 1..at + 5)
+                .and_then(|head| <[u8; 4]>::try_from(head).ok())
+                .ok_or_else(malformed)?;
+            let size = u32::from_be_bytes(bytes);
             (5usize, size as usize)
         }
         15 => {

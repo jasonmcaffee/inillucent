@@ -18,7 +18,16 @@
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+// **Three of the four were missing and nothing said so (task-1932, H9).**
+// `policy.rs` matched on the lint's *name*, which appears in the
+// `cfg_attr(test, allow(...))` block below, so this crate satisfied the check
+// while denying only `indexing_slicing`. The corrected check - which matches
+// the whole `#![deny(...)]` attribute - found three crates in this position,
+// not the one the review reported.
 #![deny(clippy::indexing_slicing)]
+#![deny(clippy::unwrap_used)]
+#![deny(clippy::expect_used)]
+#![deny(clippy::panic)]
 #![cfg_attr(
     test,
     allow(

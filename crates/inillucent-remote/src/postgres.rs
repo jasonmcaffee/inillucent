@@ -19,6 +19,12 @@
 //!   the schema is as of one instant.
 //! - **A cursor rather than a whole result set.** `FETCH 10000` bounds this
 //!   process's memory to one batch no matter how large the table is.
+//!
+//! Invariant: **every number this client reads out of a message is bounded
+//! before it sizes anything, and the session's own formatting is set rather
+//! than inherited.** A value rendered under whatever zone and date style the
+//! server happened to default to is a value that can differ between two
+//! migrations of the same table.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
