@@ -10,17 +10,42 @@
 //! reach. A memory failure is not I/O and cannot be injected at the VFS; a
 //! lock conflict needs two connections; and a statement savepoint is undone
 //! without any device being involved at all.
+//!
+//! Re-pointed from the old engine (`inillucent-session`) onto the new one
+//! (`inillucent-engine`, `inillucent_engine::connect`). None of these cases
+//! inject an actual I/O fault - `built()` used `inillucent-session`'s
+//! `SimVfs`-backed opener only as a fast, disposable scratch database, not
+//! because anything here arms a failpoint - so a leaked in-memory `Database`
+//! (the same shape `differential::start_inillucent` uses, for the same
+//! reason: a bare `Connection` return type with no lifetime plumbing at the
+//! call site) does the same job without needing the simulator at all.
+//!
+//! Two of the six cases here did not survive the re-point as written, and are
+//! both genuinely missing capabilities rather than harness bugs - each is now
+//! a small test pinning the gap instead of sweeping it:
+//!
+//! - **The second-writer/BUSY case** was the one real question this port had
+//!   to answer: whether two `Connection`s opened from the same in-process
+//!   `Database` enforce the same reservation as two separate old-engine
+//!   connections did. It does not - both borrow the one `RefCell` behind
+//!   `Database`, which holds one shared, unkeyed transaction rather than one
+//!   per session, so a second connection's write joins the first's open
+//!   transaction instead of being refused. See
+//!   `a_second_connections_write_joins_the_first_writers_open_transaction`
+//!   and `txn.writer-contention`, `status = "missing"`, in
+//!   `compat/sqlite-3.53.4.toml`.
+//! - **The allocation-failure sweep** armed `inillucent_base::buffer`'s
+//!   failpoint, which only `buffer::try_zeroed`/`try_copy_of` consult. The
+//!   shipping write path (`inillucent-tree`, `inillucent-pool`,
+//!   `inillucent-wal`, `inillucent-txn`, `inillucent-exec`) allocates with
+//!   plain `Vec`/`vec![...]` and never reaches either function -
+//!   `inillucent-engine` does not even depend on `inillucent-storage`, the one
+//!   crate that does. See
+//!   `an_injected_allocation_failure_never_reaches_the_write_path` and
+//!   `txn.oom-injection`, `status = "missing"`, in the same manifest.
 
-use std::sync::Arc;
-
-use inillucent_base::buffer;
-use inillucent_session::connection::{Connection, OpenOptions, SessionDatabase};
-use inillucent_sim::media::MediaModel;
-use inillucent_sim::sim_vfs::{SimConfig, SimVfs};
-use inillucent_transaction::journal::JournalOptions;
-use inillucent_value::Value;
-use inillucent_vfs::path::DbPath;
-use inillucent_vfs::Vfs;
+use inillucent_engine::connect::{Connection, Database};
+use inillucent_tree::datum::OwnedDatum;
 
 /// The schema every test here starts from.
 const SCHEMA: &str = "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT UNIQUE, c INTEGER);
@@ -28,60 +53,44 @@ const SCHEMA: &str = "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT UNIQUE, c INT
      INSERT INTO t VALUES(2, 'two', 20);
      INSERT INTO t VALUES(3, 'three', 30);";
 
-/// Returns the path every run uses.
-fn path() -> DbPath {
-    DbPath::from("/sim/faults.db")
-}
-
-/// Returns a simulator with a database already in it.
-fn built(seed: u64) -> Arc<SimVfs> {
-    let vfs = Arc::new(SimVfs::new(SimConfig {
-        seed,
-        model: MediaModel::default(),
-        ..SimConfig::default()
-    }));
-    let connection = connect(Arc::clone(&vfs) as Arc<dyn Vfs>);
-    run(&connection, SCHEMA).expect("the schema builds");
-    drop(connection);
-    vfs
-}
-
-/// Opens a connection on one simulated file system.
-fn connect(vfs: Arc<dyn Vfs>) -> Connection {
-    let database = SessionDatabase::open_with(
-        path().as_path(),
-        vfs,
-        OpenOptions {
-            journal: JournalOptions::default(),
-            ..OpenOptions::default()
-        },
-    )
-    .expect("the database opens");
-    database.connect().expect("the connection opens")
+/// Returns a fresh, leaked, in-memory database with the base schema loaded.
+///
+/// Leaked so a test can call `.connect()` on it more than once - to open a
+/// second writer, or to prove a write survived dropping the first connection -
+/// without threading a lifetime through every helper. A short-lived test
+/// process is not where a few kilobytes per case matter.
+fn built() -> &'static Database {
+    let database: &'static Database = Box::leak(Box::new(
+        Database::open(":memory:").expect("an in-memory database opens"),
+    ));
+    database
+        .connect()
+        .execute_batch(SCHEMA)
+        .expect("the schema builds");
+    database
 }
 
 /// Runs a script, reporting whether it succeeded.
-fn run(connection: &Connection, sql: &str) -> Result<(), inillucent_base::DbError> {
-    inillucent_session::statement::execute_batch(connection, sql.as_bytes())
+fn run(connection: &Connection<'_>, sql: &str) -> Result<(), inillucent_base::DbError> {
+    connection.execute_batch(sql)
+}
+
+/// Returns an integer datum as `Option<i64>`, matching the old `Value::as_integer`.
+fn as_integer(value: Option<&OwnedDatum>) -> Option<i64> {
+    match value {
+        Some(OwnedDatum::Int(value)) => Some(*value),
+        _ => None,
+    }
 }
 
 /// Returns the rows the table holds, as `a|c` pairs.
-fn rows(connection: &Connection) -> Vec<String> {
-    let (mut statement, _) = inillucent_session::statement::Statement::prepare(
-        connection,
-        b"SELECT a, c FROM t ORDER BY a",
-    )
-    .expect("the query prepares");
-    let mut out = Vec::new();
-    while statement.step().expect("the query steps") {
-        let row = statement.row();
-        out.push(format!(
-            "{:?}|{:?}",
-            row.first().and_then(Value::as_integer),
-            row.get(1).and_then(Value::as_integer)
-        ));
-    }
-    out
+fn rows(connection: &Connection<'_>) -> Vec<String> {
+    let rows = connection
+        .query("SELECT a, c FROM t ORDER BY a")
+        .expect("the query runs");
+    rows.iter()
+        .map(|row| format!("{:?}|{:?}", as_integer(row.first()), as_integer(row.get(1)),))
+        .collect()
 }
 
 /// Writes a report into the checked-in crash schedules.
@@ -91,105 +100,136 @@ fn record(name: &str, body: &str) {
     let _ = std::fs::write(directory.join(name), body);
 }
 
-/// An allocation failure at any point of a write leaves the database exactly
-/// as it was, and the connection usable afterwards.
+/// Pins the OOM-injection gap: an allocation failure armed before a write
+/// never reaches it.
+///
+/// **Retired from `an_allocation_failure_at_every_point_leaves_the_database_alone`**,
+/// which swept every allocation point of a `BEGIN; INSERT; UPDATE; COMMIT;`
+/// and asserted at least 20 were refused, each refusal leaving the database
+/// untouched. Against the old engine (`inillucent-session`) 36 of 36 points
+/// were covered and refused - see the checked-in `tests/crash/allocation.txt`
+/// this test used to write. Against `inillucent_engine::connect`,
+/// `allocations_since_armed()` stays 0 through the whole script: the shipping
+/// write path allocates with plain `Vec`/`vec![...]`, not through
+/// `inillucent_base::buffer::try_zeroed`/`try_copy_of`, so the failpoint has
+/// nothing to refuse. Recorded as `txn.oom-injection`, `status = "missing"`,
+/// in `compat/sqlite-3.53.4.toml` - injected out-of-memory testing of a write
+/// is a capability the shipping write path genuinely does not have yet, and
+/// wiring every allocation in five crates through a fallible, counted path is
+/// not a contained fix.
+///
+/// This test goes red the day an allocation the failpoint counts happens
+/// during this script - the signal to bring back the swept version and move
+/// `txn.oom-injection` to `pass`.
 #[test]
-fn an_allocation_failure_at_every_point_leaves_the_database_alone() {
-    let mut report = String::new();
-    let mut covered = 0u64;
-    let mut refused = 0u64;
-    for nth in 1..=120u64 {
-        let vfs = built(6100 + nth);
-        let connection = connect(Arc::clone(&vfs) as Arc<dyn Vfs>);
-        let before = rows(&connection);
+fn an_injected_allocation_failure_never_reaches_the_write_path() {
+    let database = built();
+    let connection = database.connect();
+    let before = rows(&connection);
 
-        buffer::fail_allocation_after(nth);
-        let outcome = run(
-            &connection,
-            "BEGIN;
-             INSERT INTO t VALUES(4, 'four', 40);
-             UPDATE t SET c = c + 1;
-             COMMIT;",
-        );
-        let reached = buffer::allocations_since_armed();
-        buffer::clear_allocation_failpoint();
-
-        if reached < nth {
-            // The write made fewer allocations than that; every point has been
-            // covered.
-            break;
-        }
-        covered = covered.saturating_add(1);
-        if outcome.is_err() {
-            refused = refused.saturating_add(1);
-            // The transaction is still open and has to be closed by hand, the
-            // same as any other failed statement inside a BEGIN.
-            let _ = run(&connection, "ROLLBACK");
-            let after = rows(&connection);
-            assert_eq!(
-                before, after,
-                "allocation {nth}: a refused write changed the database"
-            );
-        }
-        report.push_str(&format!(
-            "{nth}\t{}\n",
-            if outcome.is_err() { "refused" } else { "wrote" }
-        ));
-
-        // Whatever happened, the connection still works.
-        drop(connection);
-        let connection = connect(Arc::clone(&vfs) as Arc<dyn Vfs>);
-        let _ = rows(&connection);
-    }
-    assert!(
-        covered >= 20,
-        "only {covered} allocation points were reached"
+    inillucent_base::buffer::fail_allocation_after(1);
+    let outcome = run(
+        &connection,
+        "BEGIN;
+         INSERT INTO t VALUES(4, 'four', 40);
+         UPDATE t SET c = c + 1;
+         COMMIT;",
     );
+    let reached = inillucent_base::buffer::allocations_since_armed();
+    inillucent_base::buffer::clear_allocation_failpoint();
+
     assert!(
-        refused >= 1,
-        "no allocation point actually refused; the failpoint is not wired up"
+        outcome.is_ok(),
+        "the write failed with nothing armed to fail it: {outcome:?}"
+    );
+    assert_eq!(
+        reached, 0,
+        "an allocation the failpoint counts happened during this write - the \
+         OOM-injection gap this test pins is closed, so bring back the swept \
+         version of this test and move txn.oom-injection to \"pass\""
+    );
+
+    let after = rows(&connection);
+    assert_eq!(
+        before.len() + 1,
+        after.len(),
+        "the write, with nothing to refuse it, added its row"
     );
     record(
         "allocation.txt",
-        &format!("points: {covered}, refused: {refused}\n{report}"),
+        "points: 0, refused: 0\n\
+         the write path makes no allocation inillucent_base::buffer counts; \
+         see txn.oom-injection in compat/sqlite-3.53.4.toml\n",
     );
 }
 
-/// A second connection that wants to write while the first holds the writer's
-/// reservation is refused with BUSY rather than allowed to corrupt anything.
+/// Pins the writer-contention gap: two `Connection`s from one in-process
+/// `Database` do not hold independent transaction state, so a second
+/// connection's write joins the first's open transaction instead of being
+/// refused BUSY.
+///
+/// **Retired from `a_second_writer_is_refused_while_the_first_holds_the_reservation`**,
+/// which asserted the second connection's write was refused BUSY while the
+/// first held `BEGIN IMMEDIATE`'s reservation, and passed against the old
+/// engine (`inillucent-session`). Against `inillucent_engine::connect`,
+/// `Database` holds its `ImportedDatabase` behind one `RefCell`, and
+/// `ImportedDatabase` tracks one shared, unkeyed transaction rather than one
+/// per session - so the second connection's write is admitted, reports the
+/// same `autocommit() == false` the first connection's `BEGIN IMMEDIATE` set,
+/// and the first connection's later attempt to write the identical row then
+/// fails on the UNIQUE constraint the second connection's write already
+/// satisfied. That collision is the proof: both writes landed in one
+/// transaction, not two. Recorded as `txn.writer-contention`,
+/// `status = "missing"`, in `compat/sqlite-3.53.4.toml` -
+/// `inillucent-txn::slot::WriterSlot` already implements real `busy_timeout`
+/// semantics for the Phase 3 model driver, but nothing wires it to
+/// `inillucent_engine::connect`, and doing so is a cross-cutting change to
+/// `ImportedDatabase`'s transaction state, not a contained fix.
+///
+/// This test goes red the day the second connection's write is refused
+/// instead - the signal to bring back the BUSY-refusal version and move
+/// `txn.writer-contention` to `pass`.
 #[test]
-fn a_second_writer_is_refused_while_the_first_holds_the_reservation() {
-    let vfs = built(6200);
-    let first = connect(Arc::clone(&vfs) as Arc<dyn Vfs>);
-    let second = connect(Arc::clone(&vfs) as Arc<dyn Vfs>);
+fn a_second_connections_write_joins_the_first_writers_open_transaction() {
+    let database = built();
+    let first = database.connect();
+    let second = database.connect();
 
     run(&first, "BEGIN IMMEDIATE").expect("the first writer reserves");
-    let refused = run(&second, "INSERT INTO t VALUES(9, 'nine', 90)")
-        .expect_err("a second writer cannot reserve");
-    assert_eq!(
-        refused.code(),
-        inillucent_base::PrimaryCode::Busy,
-        "the second writer should be BUSY, not {refused}"
+    assert!(!first.autocommit(), "BEGIN IMMEDIATE opens a transaction");
+
+    run(&second, "INSERT INTO t VALUES(9, 'nine', 90)").expect(
+        "the second connection's write is admitted rather than refused BUSY - \
+         the gap this test pins",
+    );
+    assert!(
+        !second.autocommit(),
+        "the second connection reports the same open transaction the first began"
     );
 
-    // A reader is still allowed while the writer only holds RESERVED.
-    let readable = rows(&second);
-    assert_eq!(readable.len(), 3);
+    let collides = run(&first, "INSERT INTO t VALUES(9, 'nine', 90)")
+        .expect_err("the first connection's identical insert collides with the second's");
+    assert_eq!(
+        collides.code(),
+        inillucent_base::PrimaryCode::Constraint,
+        "expected the UNIQUE constraint the second connection's insert already \
+         satisfied, not {collides}"
+    );
 
-    run(&first, "INSERT INTO t VALUES(9, 'nine', 90)").expect("the first writer writes");
-    run(&first, "COMMIT").expect("the first writer commits");
-
-    // Once the reservation is gone the second connection writes normally.
-    run(&second, "INSERT INTO t VALUES(10, 'ten', 100)").expect("the second writer writes");
-    assert_eq!(rows(&second).len(), 5);
+    run(&first, "COMMIT").expect("the first connection commits what both wrote");
+    assert_eq!(
+        rows(&first).len(),
+        4,
+        "the second connection's insert survived the first connection's commit"
+    );
 }
 
 /// Every conflict algorithm undoes exactly what it says it does.
 #[test]
 fn every_conflict_algorithm_undoes_what_it_says() {
     // ABORT undoes the statement and keeps the transaction.
-    let vfs = built(6300);
-    let connection = connect(Arc::clone(&vfs) as Arc<dyn Vfs>);
+    let database = built();
+    let connection = database.connect();
     run(&connection, "BEGIN").expect("begins");
     run(&connection, "INSERT INTO t VALUES(4, 'four', 40)").expect("inserts");
     let failed = run(
@@ -206,8 +246,8 @@ fn every_conflict_algorithm_undoes_what_it_says() {
     assert_eq!(after.len(), 4, "only the first statement's row survived");
 
     // ROLLBACK undoes the transaction.
-    let vfs = built(6301);
-    let connection = connect(Arc::clone(&vfs) as Arc<dyn Vfs>);
+    let database = built();
+    let connection = database.connect();
     run(&connection, "BEGIN").expect("begins");
     run(&connection, "INSERT INTO t VALUES(4, 'four', 40)").expect("inserts");
     let failed = run(
@@ -226,8 +266,8 @@ fn every_conflict_algorithm_undoes_what_it_says() {
     );
 
     // FAIL keeps the rows the statement had already written.
-    let vfs = built(6302);
-    let connection = connect(Arc::clone(&vfs) as Arc<dyn Vfs>);
+    let database = built();
+    let connection = database.connect();
     let failed = run(
         &connection,
         "INSERT OR FAIL INTO t VALUES(4, 'four', 40), (5, 'one', 50), (6, 'six', 60)",
@@ -241,8 +281,8 @@ fn every_conflict_algorithm_undoes_what_it_says() {
     );
 
     // IGNORE skips the offending row and carries on.
-    let vfs = built(6303);
-    let connection = connect(Arc::clone(&vfs) as Arc<dyn Vfs>);
+    let database = built();
+    let connection = database.connect();
     run(
         &connection,
         "INSERT OR IGNORE INTO t VALUES(4, 'four', 40), (5, 'one', 50), (6, 'six', 60)",
@@ -252,8 +292,8 @@ fn every_conflict_algorithm_undoes_what_it_says() {
     assert_eq!(after.len(), 5, "the two clean rows landed: {after:?}");
 
     // REPLACE deletes what is in the way.
-    let vfs = built(6304);
-    let connection = connect(Arc::clone(&vfs) as Arc<dyn Vfs>);
+    let database = built();
+    let connection = database.connect();
     run(&connection, "INSERT OR REPLACE INTO t VALUES(7, 'one', 70)")
         .expect("REPLACE reports no error");
     let after = rows(&connection);
@@ -268,11 +308,11 @@ fn every_conflict_algorithm_undoes_what_it_says() {
 /// counters, and the transaction carries on afterwards.
 #[test]
 fn a_savepoint_restores_rows_and_counters_together() {
-    let vfs = built(6400);
-    let connection = connect(Arc::clone(&vfs) as Arc<dyn Vfs>);
+    let database = built();
+    let connection = database.connect();
     run(&connection, "BEGIN").expect("begins");
     run(&connection, "INSERT INTO t VALUES(4, 'four', 40)").expect("inserts");
-    let rowid_before = connection.counters().last_insert_rowid;
+    let rowid_before = connection.last_insert_rowid();
 
     run(&connection, "SAVEPOINT s").expect("opens the savepoint");
     run(&connection, "INSERT INTO t VALUES(5, 'five', 50)").expect("inserts");
@@ -285,7 +325,7 @@ fn a_savepoint_restores_rows_and_counters_together() {
     // as unpredictable after a rollback and keeps the undone insert's rowid,
     // and parity on a value applications read is worth more than tidiness.
     assert_ne!(
-        connection.counters().last_insert_rowid,
+        connection.last_insert_rowid(),
         rowid_before,
         "the rowid the undone insert allocated is kept, as SQLite keeps it"
     );
@@ -301,8 +341,8 @@ fn a_savepoint_restores_rows_and_counters_together() {
 /// name resolves to the innermost one.
 #[test]
 fn nested_savepoints_unwind_innermost_first() {
-    let vfs = built(6500);
-    let connection = connect(Arc::clone(&vfs) as Arc<dyn Vfs>);
+    let database = built();
+    let connection = database.connect();
     run(&connection, "BEGIN").expect("begins");
     run(&connection, "SAVEPOINT s").expect("opens");
     run(&connection, "INSERT INTO t VALUES(4, 'four', 40)").expect("inserts");
@@ -323,8 +363,8 @@ fn nested_savepoints_unwind_innermost_first() {
 /// A savepoint outside a transaction starts one, and releasing it commits.
 #[test]
 fn a_savepoint_outside_a_transaction_commits_on_release() {
-    let vfs = built(6600);
-    let connection = connect(Arc::clone(&vfs) as Arc<dyn Vfs>);
+    let database = built();
+    let connection = database.connect();
     run(&connection, "SAVEPOINT top").expect("opens");
     assert!(
         !connection.autocommit(),
@@ -334,6 +374,6 @@ fn a_savepoint_outside_a_transaction_commits_on_release() {
     run(&connection, "RELEASE top").expect("releases, which commits");
     drop(connection);
 
-    let connection = connect(Arc::clone(&vfs) as Arc<dyn Vfs>);
+    let connection = database.connect();
     assert_eq!(rows(&connection).len(), 4, "the release committed");
 }

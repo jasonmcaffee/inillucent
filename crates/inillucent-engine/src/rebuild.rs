@@ -229,6 +229,77 @@ pub(crate) fn scratch_beside(target: &Path, stamp: u64) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// Swaps a rebuilt file into place over `path`, durably.
+///
+/// **A rename, not a copy.** `std::fs::copy` reads `scratch` and writes
+/// `path` a buffer at a time; a crash midway through leaves `path` holding
+/// some of the old file's bytes and some of the new one's, which is neither
+/// database. `std::fs::rename` within one directory is a single update to the
+/// directory entry - it names the old file, or it names the new one, and
+/// there is no byte offset in between for a crash to land on. Both Windows
+/// and Unix guarantee this when the rename replaces an existing destination
+/// on the same volume, which is exactly what `scratch_beside` arranges by
+/// naming the rebuilt file `path`'s own directory.
+///
+/// The rename itself is enough to survive a **crash of this process** -
+/// `scratch`'s bytes are already durable, by the checkpoint `rebuild_into`
+/// ran before this is ever called, and the directory update is one the file
+/// system either applies whole or not at all. What it is not enough for is a
+/// **power loss**: the directory entry's own new value is dirty page-cache
+/// state until it is flushed, same as any other write. Unix needs an
+/// explicit `fsync` of the containing directory to force that; Windows does
+/// not, because NTFS journals a rename's metadata itself - the same split
+/// `inillucent_vfs`'s own directory sync draws for a delete.
+///
+/// @param scratch - the rebuilt file, already checkpointed and therefore durable
+/// @param path - the database file it replaces
+pub(crate) fn commit_rebuild(scratch: &Path, path: &Path) -> DbResult<()> {
+    std::fs::rename(scratch, path).map_err(|error| {
+        inillucent_base::error::misuse(format!(
+            "cannot write the rebuilt database over {}: {error}",
+            path.display()
+        ))
+    })?;
+    sync_parent_directory(path)
+}
+
+/// Forces a rename's directory entry onto the disk, on the platform that
+/// needs to be told.
+///
+/// @param path - a path whose parent directory just gained a new entry for it
+#[cfg(unix)]
+fn sync_parent_directory(path: &Path) -> DbResult<()> {
+    let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    else {
+        return Ok(());
+    };
+    let directory = std::fs::File::open(parent).map_err(|error| {
+        inillucent_base::error::misuse(format!(
+            "cannot open {} to make the rebuilt database durable: {error}",
+            parent.display()
+        ))
+    })?;
+    directory.sync_all().map_err(|error| {
+        inillucent_base::error::misuse(format!(
+            "cannot sync {} to make the rebuilt database durable: {error}",
+            parent.display()
+        ))
+    })
+}
+
+/// A directory has nothing to flush on Windows: NTFS journals the metadata
+/// change a rename makes, rather than leaving it in a page a caller has to
+/// force out - the same fact `crates/inillucent-vfs/src/os/windows.rs`'s own
+/// `sync_directory` relies on for a delete.
+///
+/// @param path - a path whose parent directory just gained a new entry for it
+#[cfg(windows)]
+fn sync_parent_directory(_path: &Path) -> DbResult<()> {
+    Ok(())
+}
+
 /// Removes every write-ahead log segment beside a database file.
 ///
 /// A segment describes the *pages* of the database it was written for, so one
@@ -261,5 +332,533 @@ pub(crate) fn remove_log_segments(database: &Path) {
         if name.starts_with(&prefix) {
             let _ = std::fs::remove_file(entry.path());
         }
+    }
+}
+
+/// Returns what `last_insert_rowid()` should read once `VACUUM` has rebuilt
+/// `database`'s schema, given what the counter held before the rebuild.
+///
+/// Measured against the pinned reference: a schema with no view leaves the
+/// counter exactly where `preserved` already has it, but a view moves it.
+/// SQLite's own rebuild copies every table, index and trigger into the new
+/// schema with one bulk `INSERT ... SELECT`, which does not touch the
+/// counter, then recreates each view by running its own `CREATE VIEW` as an
+/// ordinary statement, which does. Every view therefore lands after
+/// everything else, so the last one recreated sets the counter to the
+/// schema's total row count - checked with the view at every position among
+/// four fixtures, and it was always the total rather than the view's own.
+///
+/// @param database - the schema `VACUUM` just rebuilt
+/// @param preserved - what the counter held before the rebuild
+pub(crate) fn last_rowid_after_vacuum(database: &ImportedDatabase, preserved: i64) -> i64 {
+    let entries = database.main_entries();
+    if entries.iter().any(|entry| entry.kind == ObjectKind::View) {
+        entries.len() as i64
+    } else {
+        preserved
+    }
+}
+
+/// Every pragma-set connection setting `VACUUM`'s reopen would otherwise
+/// default, captured so it can be put back.
+///
+/// **None of these are a fact about the file.** Two connections open on the
+/// same file may disagree about every one of them, which is exactly why
+/// `*self = ImportedDatabase::open(...)` - a fresh connection at every
+/// default - is the wrong answer for a statement that is supposed to leave
+/// the connection alone. SQLite's own `VACUUM` never faces this question: it
+/// rewrites the file without ever closing the connection, so there is
+/// nothing for it to put back.
+///
+/// `attached` and `temps` are carried separately, by [`AttachedSchemas`] -
+/// they are schemas rather than settings. `session`, `next_session` and the
+/// transaction-scoped fields (`batch`, `undo`, `marks`) are not carried at
+/// all: `vacuum_in_place` is only reachable outside a transaction in the
+/// first place (`Directive::Vacuum` refuses one before this ever runs), so
+/// the transaction-scoped fields are already at their empty defaults on every
+/// path that reaches this struct, and `session`/`next_session` restart at the
+/// same values - zero and one - that `ImportedDatabase::open` always gives
+/// them, which is what lets a restored `temp` schema's own recorded session
+/// still match. The random built-ins' seed is left to reseed too - it is
+/// per-connection state, not a setting a caller chose, and nothing asks a
+/// `VACUUM`d connection's random stream to continue where the last one left
+/// off.
+pub(crate) struct ConnectionSettings {
+    journal_mode: inillucent_pool::journal::JournalMode,
+    foreign_keys: bool,
+    defer_foreign_keys: bool,
+    locking_exclusive: bool,
+    defensive: bool,
+    secure_delete: u8,
+    auto_vacuum: u8,
+    automatic_index: bool,
+    ignore_check_constraints: bool,
+    case_sensitive_like: bool,
+    cache_size: Option<i64>,
+    analysis_limit: i64,
+    writable_schema: bool,
+    query_only: bool,
+    recursive_triggers: bool,
+    max_page_count: i64,
+    temp_store: i64,
+    busy_timeout_ms: u64,
+    collations: Vec<(String, inillucent_value::collation::Collation)>,
+    authorizer: Option<std::rc::Rc<dyn inillucent_sql::bind::Authorizer>>,
+    levers: inillucent_sql::plan::Levers,
+    /// Application-registered modules and scalar/aggregate functions -
+    /// `register_module`/`create_scalar_function`'s own state. Pure metadata,
+    /// not a handle into the file about to be replaced, so cloning it here and
+    /// putting it back is exactly as safe as `collations` above.
+    registry: inillucent_ext::registry::Registry,
+}
+
+impl ConnectionSettings {
+    /// Reads every setting off a connection, before its reopen defaults them.
+    ///
+    /// @param database - the connection `VACUUM` is about to reopen
+    pub(crate) fn capture(database: &ImportedDatabase) -> ConnectionSettings {
+        ConnectionSettings {
+            journal_mode: database.journal_mode,
+            foreign_keys: database.foreign_keys,
+            defer_foreign_keys: database.defer_foreign_keys,
+            locking_exclusive: database.locking_exclusive,
+            defensive: database.defensive,
+            secure_delete: database.secure_delete,
+            auto_vacuum: database.auto_vacuum,
+            automatic_index: database.automatic_index,
+            ignore_check_constraints: database.ignore_check_constraints,
+            case_sensitive_like: database.case_sensitive_like,
+            cache_size: database.cache_size,
+            analysis_limit: database.analysis_limit,
+            writable_schema: database.writable_schema,
+            query_only: database.query_only,
+            recursive_triggers: database.recursive_triggers,
+            max_page_count: database.max_page_count,
+            temp_store: database.temp_store,
+            busy_timeout_ms: database.busy_timeout_ms,
+            collations: database.collations.clone(),
+            authorizer: database.authorizer.clone(),
+            levers: database.levers,
+            registry: database.registry.clone(),
+        }
+    }
+
+    /// Writes every setting back onto a freshly reopened connection.
+    ///
+    /// `journal_mode` goes through [`ImportedDatabase::set_journal_mode`]
+    /// rather than a field write, deliberately: the WAL flag it carries is
+    /// also written into the file's own header, and a plain assignment here
+    /// would leave that header unset - a `VACUUM`d WAL database would then
+    /// reopen as `delete` for every later opener, not just this connection.
+    /// Every other field here is connection-local, so a direct write is
+    /// exactly what restoring it means.
+    ///
+    /// The registry just written may name a module or function the fresh
+    /// open's default registry did not have, so the eponymous list and the
+    /// catalog it feeds are rebuilt against it afterwards - the same two
+    /// calls `register_module` makes whenever it changes the registry.
+    ///
+    /// @param database - the freshly reopened connection
+    pub(crate) fn restore(self, database: &mut ImportedDatabase) -> DbResult<()> {
+        database.set_journal_mode(self.journal_mode)?;
+        database.foreign_keys = self.foreign_keys;
+        database.defer_foreign_keys = self.defer_foreign_keys;
+        database.locking_exclusive = self.locking_exclusive;
+        database.defensive = self.defensive;
+        database.secure_delete = self.secure_delete;
+        database.auto_vacuum = self.auto_vacuum;
+        database.automatic_index = self.automatic_index;
+        database.ignore_check_constraints = self.ignore_check_constraints;
+        database.case_sensitive_like = self.case_sensitive_like;
+        database.cache_size = self.cache_size;
+        database.analysis_limit = self.analysis_limit;
+        database.writable_schema = self.writable_schema;
+        database.query_only = self.query_only;
+        database.recursive_triggers = self.recursive_triggers;
+        database.max_page_count = self.max_page_count;
+        database.temp_store = self.temp_store;
+        database.busy_timeout_ms = self.busy_timeout_ms;
+        database.collations = self.collations;
+        database.authorizer = self.authorizer;
+        database.levers = self.levers;
+        database.registry = self.registry;
+        database.eponymous.clear();
+        database.refresh_catalog();
+        Ok(())
+    }
+}
+
+/// Every temporary table and every attached database, taken off a connection
+/// so `VACUUM`'s reopen cannot silently drop them.
+///
+/// **Carried across whole, not rebuilt.** `main` is the only file `VACUUM`
+/// touches: a temporary table's tree lives in its own `MemoryVfs` and an
+/// attachment's lives in its own file or its own `MemoryVfs`, and neither is
+/// opened, read or written by anything else in this module. So the fix is not
+/// to recreate them from a captured schema, the way `rebuild_into` does for
+/// `main` - it is to stop discarding them: taken out of the connection before
+/// `*self` is replaced and put back once the new one exists, they are
+/// exactly the schemas they were, because nothing about them ever changed.
+/// This is checked against the pinned SQLite shell, which keeps both a `TEMP`
+/// table's rows and an attached database - a real file or `:memory:` - across
+/// its own `VACUUM` of `main`.
+///
+/// `owner` and `next_handle` travel with them: they are what a tree root
+/// number resolves to a schema through, keyed by the same root numbers
+/// `attached`'s trees already carry, so restoring one without the other would
+/// leave every attached tree unreachable by name.
+pub(crate) struct AttachedSchemas {
+    temps: Vec<crate::Attached>,
+    attached: Vec<crate::Attached>,
+    owner: std::collections::HashMap<u32, usize>,
+    next_handle: u32,
+    /// Every built tree an attached or temporary schema owns.
+    ///
+    /// **`self.trees` is connection-wide, keyed by handle rather than by
+    /// schema, and `main`'s own trees are not among these** - `Attached`
+    /// itself holds no `PagedTree` at all, only the catalog row that names
+    /// one, so a handle here is unreachable without its matching entry moving
+    /// too. Filtered to handles at or past [`crate::FIRST_ATTACHED_HANDLE`],
+    /// which `main`'s own roots - imported page numbers below it and
+    /// DDL-created ones from `crate::FIRST_CREATED_ROOT` - never reach.
+    trees: std::collections::HashMap<u32, inillucent_tree::PagedTree>,
+    /// The matching `SourceLayout` for each tree above.
+    layouts: std::collections::HashMap<u32, std::rc::Rc<inillucent_exec::physical::SourceLayout>>,
+    /// The matching index roots for each table above that has one.
+    covering: std::collections::HashMap<u32, Vec<u32>>,
+}
+
+impl AttachedSchemas {
+    /// Takes every temporary table and every attached database off a
+    /// connection, leaving it as though neither had ever been used - which is
+    /// what the connection `*self = ImportedDatabase::open(...)` builds next
+    /// actually is.
+    ///
+    /// @param database - the connection about to be reopened
+    pub(crate) fn take(database: &mut ImportedDatabase) -> AttachedSchemas {
+        let is_attached = |root: &u32| *root >= crate::FIRST_ATTACHED_HANDLE;
+        let trees = std::mem::take(&mut database.trees)
+            .into_iter()
+            .filter(|(root, _)| is_attached(root))
+            .collect();
+        let layouts = std::mem::take(&mut database.layouts)
+            .into_iter()
+            .filter(|(root, _)| is_attached(root))
+            .collect();
+        let covering = std::mem::take(&mut database.covering)
+            .into_iter()
+            .filter(|(root, _)| is_attached(root))
+            .collect();
+        AttachedSchemas {
+            temps: std::mem::take(&mut database.temps),
+            attached: std::mem::take(&mut database.attached),
+            owner: std::mem::take(&mut database.owner),
+            next_handle: database.next_handle,
+            trees,
+            layouts,
+            covering,
+        }
+    }
+
+    /// Puts every temporary table and every attached database back onto a
+    /// freshly reopened connection, and rebuilds the tables that describe
+    /// them - the same step `ATTACH` itself takes after adding one, needed
+    /// here because the fresh connection derived `self.tables` from `main`
+    /// alone, before any of this existed to derive it from.
+    ///
+    /// @param database - the freshly reopened connection
+    pub(crate) fn restore(self, database: &mut ImportedDatabase) -> DbResult<()> {
+        database.temps = self.temps;
+        database.attached = self.attached;
+        database.owner = self.owner;
+        database.next_handle = self.next_handle;
+        database.trees.extend(self.trees);
+        database.layouts.extend(self.layouts);
+        database.covering.extend(self.covering);
+        database.rebuild_tables()
+    }
+}
+
+/// Reports whether any write-ahead log segment sits beside a database file.
+///
+/// The non-destructive twin of [`remove_log_segments`], for a test that needs
+/// to know the fixture it built actually has segments to be endangered by -
+/// asserting on a crash scenario that never had anything to lose would not be
+/// testing the thing it claims to.
+///
+/// @param database - the database file to check beside
+#[cfg(test)]
+fn has_log_segments(database: &Path) -> bool {
+    let Some(directory) = database.parent() else {
+        return false;
+    };
+    let Some(base) = database.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let prefix = format!("{base}-wal.");
+    let Ok(listing) = std::fs::read_dir(directory) else {
+        return false;
+    };
+    listing.flatten().any(|entry| {
+        entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(&prefix))
+    })
+}
+
+/// Crash-recovery cases specific to `VACUUM`'s own swap, over real files.
+///
+/// **Not driven through `SimVfs`.** `ImportedDatabase::create`/`open` (and so
+/// `rebuild_into`, which calls them) always build on `OsVfs`, regardless of
+/// the vfs the connection they are rebuilding was itself opened on - a
+/// pre-existing fact about this engine, not something this ticket changes -
+/// and the swap `commit_rebuild` performs is a raw `std::fs::rename` that
+/// bypasses the `Vfs` trait entirely, on the task's own instruction. Neither
+/// is reachable by `durability.rs`'s call-counting fault injection, which
+/// only ever sees calls made through a `Vfs`, so the cases below reproduce
+/// the two states a crash can leave `vacuum_in_place` in directly: they run
+/// its actual primitives (`rebuild_into`, `commit_rebuild`,
+/// `remove_log_segments`) up to a chosen point and stop, exactly as a killed
+/// process would, then reopen what is on disk the way a new process starting
+/// up would.
+#[cfg(test)]
+mod vacuum_crash {
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use crate::ImportedDatabase;
+
+    use super::{commit_rebuild, has_log_segments, remove_log_segments, scratch_beside};
+
+    const PAGE_SIZE: usize = 4_096;
+    const FRAMES: usize = 256;
+
+    /// Returns a path under the system temp directory nothing else is using.
+    ///
+    /// @param tag - which case this path belongs to, for a reader of the temp
+    ///   directory
+    fn temp_db_path(tag: &str) -> PathBuf {
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "inillucent-vacuum-crash-{}-{tag}-{unique}.rdb",
+            std::process::id()
+        ));
+        path
+    }
+
+    /// Builds a real database with something for `VACUUM` to reclaim - the
+    /// deleted row leaves a hole the rebuild has to compact away, which is
+    /// what makes the rebuilt file's bytes different from the original's
+    /// rather than a no-op copy of them.
+    ///
+    /// @param path - where to create it
+    fn seeded(path: &Path) -> ImportedDatabase {
+        let mut engine = ImportedDatabase::create(path.to_path_buf(), PAGE_SIZE, FRAMES)
+            .expect("the fixture database is created");
+        for sql in [
+            "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT)",
+            "INSERT INTO t VALUES(1, 'one'), (2, 'two'), (3, 'three'), (4, 'four')",
+            "DELETE FROM t WHERE a = 2",
+        ] {
+            engine
+                .execute_any(sql, &inillucent_exec::physical::Params::new())
+                .expect("the fixture script runs");
+        }
+        engine
+    }
+
+    /// Returns `t`'s rows, in a stable order.
+    ///
+    /// @param engine - the connection to read through
+    fn rows(engine: &ImportedDatabase) -> Vec<Vec<inillucent_tree::datum::OwnedDatum>> {
+        engine
+            .run("SELECT a, b FROM t ORDER BY a")
+            .expect("the fixture's own query runs")
+            .0
+    }
+
+    /// A crash between `rebuild_into` returning and the rename that follows
+    /// it leaves the original file exactly as it was.
+    ///
+    /// Nothing above the rename touches `path` or its log segments, so this
+    /// is true by construction rather than by anything worth measuring - it
+    /// is here as the other half of the pair with the case below, which is
+    /// the one this ticket's fix is actually about.
+    #[test]
+    fn a_crash_before_the_rename_recovers_the_original() {
+        let path = temp_db_path("before-rename");
+        let mut engine = seeded(&path);
+        let before = rows(&engine);
+
+        let scratch = scratch_beside(&path, 1);
+        let _ = std::fs::remove_file(&scratch);
+        engine
+            .rebuild_into(&scratch)
+            .expect("the rebuild checkpoints the scratch file durably");
+        // The crash: everything `vacuum_in_place` still had left to do -
+        // closing this handle, renaming `scratch` over `path`, removing
+        // `path`'s segments - never runs. `engine` is simply dropped, as a
+        // killed process's connection would be.
+        drop(engine);
+
+        let reopened = ImportedDatabase::open(path.clone(), PAGE_SIZE, FRAMES)
+            .expect("the untouched original still opens");
+        assert_eq!(
+            rows(&reopened),
+            before,
+            "a crash before the rename must leave the original database exactly as it was"
+        );
+        drop(reopened);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&scratch);
+        remove_log_segments(&path);
+        remove_log_segments(&scratch);
+    }
+
+    /// A crash after the rename lands, but before `path`'s pre-rebuild log
+    /// segments are removed, must still recover the rebuilt file - not the
+    /// pre-rebuild pages those stale segments describe, replayed back over
+    /// it.
+    ///
+    /// This is the window the fix opens that the old code did not have in
+    /// this shape: the old order removed the segments *before* the swap,
+    /// which closed this window by opening the one
+    /// `an_early_segment_removal_loses_the_original_to_an_interrupted_copy`
+    /// demonstrates instead. Proving both stay safe under their own ordering
+    /// is what justifies moving the removal rather than just picking a
+    /// different unsafe order.
+    #[test]
+    fn a_crash_after_the_rename_recovers_the_rebuilt_file() {
+        let path = temp_db_path("after-rename");
+        let mut engine = seeded(&path);
+        let before = rows(&engine);
+
+        let scratch = scratch_beside(&path, 2);
+        let _ = std::fs::remove_file(&scratch);
+        engine
+            .rebuild_into(&scratch)
+            .expect("the rebuild checkpoints the scratch file durably");
+        assert!(
+            has_log_segments(&path),
+            "the fixture must still carry its own log segments for this case to test anything"
+        );
+        // Closes the handle on `path`, as `vacuum_in_place` does before the
+        // rename - a rename cannot replace a file this process still has open
+        // for writing.
+        engine = ImportedDatabase::open(scratch.clone(), PAGE_SIZE, FRAMES)
+            .expect("the scratch reopens");
+        commit_rebuild(&scratch, &path).expect("the rename lands");
+        // The crash: `remove_log_segments(&path)`, the very next line in
+        // `vacuum_in_place`, never runs - `path`'s pre-rebuild segments are
+        // still sitting beside the rebuilt file.
+        drop(engine);
+
+        let reopened = ImportedDatabase::open(path.clone(), PAGE_SIZE, FRAMES)
+            .expect("the rebuilt file must still open despite the stale segments left beside it");
+        assert_eq!(
+            rows(&reopened),
+            before,
+            "a crash after the rename must recover the rebuilt file, not a replay of the segments \
+             that described the file it replaced"
+        );
+        drop(reopened);
+        let _ = std::fs::remove_file(&path);
+        remove_log_segments(&path);
+    }
+
+    /// The order `vacuum_in_place` used to run in - the original's log
+    /// segments removed *before* anything overwrites `path`, and a byte copy
+    /// rather than a rename - loses data when the copy is interrupted.
+    ///
+    /// Reproduced directly against this file's own primitives rather than by
+    /// reverting `vacuum_in_place`, so this keeps demonstrating the old
+    /// defect even after nothing in the source still runs in that order.
+    #[test]
+    fn an_early_segment_removal_loses_the_original_to_an_interrupted_copy() {
+        let path = temp_db_path("old-order");
+        let mut engine = seeded(&path);
+        let before = rows(&engine);
+
+        let scratch = scratch_beside(&path, 3);
+        let _ = std::fs::remove_file(&scratch);
+        engine
+            .rebuild_into(&scratch)
+            .expect("the rebuild checkpoints the scratch file durably");
+        engine = ImportedDatabase::open(scratch.clone(), PAGE_SIZE, FRAMES)
+            .expect("the scratch reopens");
+
+        // The defect: the original's segments are gone *before* `path` has
+        // been touched at all.
+        remove_log_segments(&path);
+        assert!(
+            !has_log_segments(&path),
+            "the segments this case removes early must actually have existed"
+        );
+
+        // The old mechanism: a byte copy, interrupted partway - exactly what
+        // `std::fs::copy` gave a crash the room to do, and a rename never
+        // does. Half of `scratch`'s bytes land in `path`; the write stops
+        // there, as a killed process's would.
+        let rebuilt_bytes = std::fs::read(&scratch).expect("the scratch file reads back");
+        let torn = &rebuilt_bytes[..rebuilt_bytes.len() / 2];
+        std::fs::write(&path, torn).expect("the torn write lands");
+        drop(engine);
+
+        // What the old order leaves behind: `path` holding half the rebuilt
+        // file's bytes, with its own recovery log already deleted. There is
+        // no longer a definition of "recovers correctly" available to it -
+        // either it is detected as unreadable, or it opens and answers
+        // something other than the rows it held a moment before. Both are
+        // the loss this ticket's fix removes; neither is "either the original
+        // or the rebuilt file, whole", which is what the comment above
+        // `vacuum_in_place` used to claim.
+        match ImportedDatabase::open(path.clone(), PAGE_SIZE, FRAMES) {
+            Err(_) => {}
+            Ok(reopened) => {
+                assert_ne!(
+                    rows(&reopened),
+                    before,
+                    "a torn write over a file whose own recovery log was already deleted read back \
+                     correctly by coincidence on this run - the old order still cannot be trusted \
+                     in general, but this run did not demonstrate why"
+                );
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&scratch);
+        remove_log_segments(&scratch);
+    }
+
+    /// `VACUUM` refuses a connection with an imposter table declared.
+    ///
+    /// Unlike a temporary table or an attachment, an imposter is bound into
+    /// `main`'s own trees by page - every index gets a fresh one when the
+    /// schema is replayed into the rebuilt file, so there is no tree left for
+    /// the declaration to still name afterward.
+    #[test]
+    fn a_declared_imposter_refuses_vacuum() {
+        let path = temp_db_path("imposter-refusal");
+        let mut engine = seeded(&path);
+        engine
+            .execute_any(
+                "CREATE INDEX t_b ON t(b)",
+                &inillucent_exec::physical::Params::new(),
+            )
+            .expect("the index the imposter reads is created");
+        engine
+            .imposter(Some(b"t_b"), b"imposter_t_b")
+            .expect("the imposter declares");
+
+        let refused = engine.execute_any("VACUUM", &inillucent_exec::physical::Params::new());
+        assert!(
+            refused.is_err(),
+            "VACUUM must refuse a connection with an imposter table declared"
+        );
+        drop(engine);
+        let _ = std::fs::remove_file(&path);
+        remove_log_segments(&path);
     }
 }

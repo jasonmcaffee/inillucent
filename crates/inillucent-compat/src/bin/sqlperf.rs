@@ -8,9 +8,14 @@
 //!
 //! Three counters are recorded next to the clock, and they matter more than the
 //! clock does: the number of heap allocations, the bytes those allocations
-//! asked for, and the number of bytecode instructions the machine executed.
-//! Wall time on a shared machine moves with what else is running; an allocation
-//! count and an instruction count do not.
+//! asked for, and the number of rows a query produces. Wall time on a shared
+//! machine moves with what else is running; an allocation count and a row
+//! count do not.
+//!
+//! **The row count replaces a bytecode-instruction count this file used to
+//! report.** The engine these baselines measure compiles to an operator tree
+//! rather than to bytecode, so there is no instruction to count any more; the
+//! row count is the closest engine-agnostic count of work a `SELECT` does.
 //!
 //! Usage: `cargo run --release -p inillucent-compat --bin inillucent-sqlperf`
 
@@ -23,7 +28,7 @@ use std::time::Instant;
 use inillucent_base::limits::Limits;
 use inillucent_compat::oracle::{Driver, Op};
 use inillucent_compat::{platform_name, workspace_root};
-use inillucent_legacy::Database;
+use inillucent_engine::connect::Database;
 use inillucent_sql::parser;
 
 /// How many allocations have been made since the process started.
@@ -82,7 +87,7 @@ struct Measurement {
     nanos_per_operation: f64,
     allocations_per_operation: f64,
     bytes_per_operation: f64,
-    instructions_per_operation: f64,
+    rows_per_operation: f64,
 }
 
 /// Runs the baselines and writes them.
@@ -192,7 +197,7 @@ fn measure(
         nanos_per_operation: elapsed / count,
         allocations_per_operation: allocations / count,
         bytes_per_operation: bytes / count,
-        instructions_per_operation: instructions as f64 / count,
+        rows_per_operation: instructions as f64 / count,
     }
 }
 
@@ -205,8 +210,12 @@ const REPRESENTATIVE: &str = "SELECT b.id, b.key, count(*) AS n FROM bench AS b 
 fn run(root: &Path) -> Result<usize, String> {
     let rows = 20_000usize;
     let path = build_database(root, rows)?;
-    let database = Database::open(&path).map_err(|failure| failure.to_string())?;
-    let connection = database.connect().map_err(|failure| failure.to_string())?;
+    // `build_database` writes a real SQLite file through the pinned oracle,
+    // deliberately - see its own doc comment - so it is read the only way the
+    // new engine reads SQLite's file format at all: imported into a `.rdb`
+    // rather than opened directly.
+    let database = Database::import(&path).map_err(|failure| failure.to_string())?;
+    let connection = database.connect();
     let limits = Limits::default();
     let mut measurements = Vec::new();
 
@@ -228,12 +237,19 @@ fn run(root: &Path) -> Result<usize, String> {
             .map(|statement| statement.ast.expr_count() as u64)
             .unwrap_or(0)
     }));
+    // The new engine's `Statement` has no `explain()` of its own to introspect
+    // a plan it already built - there is no per-statement bytecode listing to
+    // measure the length of, because there is no bytecode. `connection.explain`
+    // re-plans from SQL text, so calling it inside this loop would double the
+    // very prepare cost being timed rather than reporting it; the work counter
+    // here is therefore a plain success flag, like `prepare-cached` below
+    // already used.
     measurements.push(measure(
         "prepare",
         "representative",
         20_000,
         || match connection.prepare(REPRESENTATIVE) {
-            Ok(statement) => statement.explain().len() as u64,
+            Ok(_) => 1,
             Err(_) => 0,
         },
     ));
@@ -243,21 +259,21 @@ fn run(root: &Path) -> Result<usize, String> {
         .prepare(REPRESENTATIVE)
         .map_err(|failure| failure.to_string())?;
     measurements.push(measure("prepare-cached", "representative", 20_000, || {
-        let _ = cached.reset();
+        cached.reset();
         let _ = cached.bind_text(1, "k00000001");
         1
     }));
 
     // Opening a connection loads the catalog, which is the schema-load cost.
-    measurements.push(measure(
-        "schema-load",
-        "104-objects",
-        200,
-        || match database.connect() {
-            Ok(_) => 1,
-            Err(_) => 0,
-        },
-    ));
+    // The new engine's `connect()` cannot fail - it is a session number handed
+    // out against an already-open `Database`, never a fallible operation of its
+    // own - so this is now an unconditional count rather than an `Ok`/`Err`
+    // match; the timing and allocation counters around it still measure the
+    // real cost of opening a session.
+    measurements.push(measure("schema-load", "104-objects", 200, || {
+        let _connection = database.connect();
+        1
+    }));
 
     // The machine, on the shapes the phase delivers.
     for (workload, sql) in [
@@ -289,14 +305,22 @@ fn run(root: &Path) -> Result<usize, String> {
         let mut statement = connection
             .prepare(sql)
             .map_err(|failure| format!("{sql}: {failure}"))?;
+        // The work counter is rows produced, not a bytecode-instruction count:
+        // the new engine compiles to an operator tree, so there is no
+        // instruction to count. `distinct` produces one row per distinct value
+        // and always returns at least one, so `.max(1)` is only a guard against
+        // a statement that legitimately answers zero rows.
         measurements.push(measure(
             workload,
             format!("{rows}-rows"),
             operations,
             || {
-                let _ = statement.reset();
-                while statement.step().unwrap_or(false) {}
-                statement.steps()
+                statement.reset();
+                let mut rows = 0u64;
+                while statement.step().unwrap_or(false) {
+                    rows = rows.saturating_add(1);
+                }
+                rows.max(1)
             },
         ));
     }
@@ -316,14 +340,14 @@ fn write_report(root: &Path, measurements: &[Measurement]) -> Result<(), String>
         json.push_str(&format!(
             "    {{\"workload\": \"{}\", \"scale\": \"{}\", \"operations\": {}, \
              \"nanos_per_operation\": {:.1}, \"allocations_per_operation\": {:.1}, \
-             \"bytes_per_operation\": {:.1}, \"instructions_per_operation\": {:.1}}}{}\n",
+             \"bytes_per_operation\": {:.1}, \"rows_per_operation\": {:.1}}}{}\n",
             measurement.workload,
             measurement.scale,
             measurement.operations,
             measurement.nanos_per_operation,
             measurement.allocations_per_operation,
             measurement.bytes_per_operation,
-            measurement.instructions_per_operation,
+            measurement.rows_per_operation,
             if index.saturating_add(1) == measurements.len() {
                 ""
             } else {
@@ -342,12 +366,12 @@ fn write_report(root: &Path, measurements: &[Measurement]) -> Result<(), String>
          parser, the planner or the machine has something to change it against. They were taken\n\
          only after the semantic gates were green, because a fast wrong answer is not a\n\
          measurement.\n\n\
-         The allocation and instruction counts matter more than the clock. Wall time on a shared\n\
+         The allocation and row counts matter more than the clock. Wall time on a shared\n\
          machine moves with whatever else is running; the number of heap allocations a parse makes\n\
-         and the number of bytecode instructions a query executes do not, and they are what a\n\
+         and the number of rows a query produces do not, and they are what a\n\
          later change will actually have moved.\n\n",
     );
-    report.push_str("| Workload | Scale | Ops | ns/op | Allocs/op | Bytes/op | VM ops |\n");
+    report.push_str("| Workload | Scale | Ops | ns/op | Allocs/op | Bytes/op | rows/op |\n");
     report.push_str("|---|---|--:|--:|--:|--:|--:|\n");
     for measurement in measurements {
         report.push_str(&format!(
@@ -358,7 +382,7 @@ fn write_report(root: &Path, measurements: &[Measurement]) -> Result<(), String>
             measurement.nanos_per_operation,
             measurement.allocations_per_operation,
             measurement.bytes_per_operation,
-            measurement.instructions_per_operation
+            measurement.rows_per_operation
         ));
     }
 

@@ -17,6 +17,39 @@ use std::cmp::Ordering;
 use inillucent_base::error::corrupt;
 use inillucent_base::DbResult;
 
+/// A test-only count of how many times [`Datum::tagged_span`] ran.
+///
+/// **Compiled out of every non-test build**, so it costs nothing anywhere this
+/// crate ships. It exists because a per-column re-walk of a delta row is a
+/// defect a timing test cannot pin reliably - per `tests/inillucent-testing-tdd.md`
+/// §1.7, a duration on a shared box reads differently between runs while a
+/// count of decode steps does not. `crates/inillucent-tree/src/leaf.rs`'s
+/// `locate_stops_reading_a_delta_row_at_the_first_mismatched_column` is what
+/// reads it.
+#[cfg(test)]
+pub(crate) mod probe {
+    use std::cell::Cell;
+
+    thread_local! {
+        static TAGGED_SPAN_CALLS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    /// Zeroes this thread's `tagged_span` call count.
+    pub(crate) fn reset_tagged_span_calls() {
+        TAGGED_SPAN_CALLS.with(|calls| calls.set(0));
+    }
+
+    /// Returns this thread's `tagged_span` call count since the last reset.
+    pub(crate) fn tagged_span_calls() -> usize {
+        TAGGED_SPAN_CALLS.with(|calls| calls.get())
+    }
+
+    /// Records one call. Only [`super::Datum::tagged_span`] does this.
+    pub(crate) fn record_tagged_span_call() {
+        TAGGED_SPAN_CALLS.with(|calls| calls.set(calls.get().saturating_add(1)));
+    }
+}
+
 /// One value, borrowing whatever holds its payload.
 #[derive(Clone, Copy, Debug)]
 pub enum Datum<'p> {
@@ -221,6 +254,8 @@ impl<'p> Datum<'p> {
     ///
     /// @param bytes - the buffer to measure from
     pub fn tagged_span(bytes: &[u8]) -> DbResult<usize> {
+        #[cfg(test)]
+        probe::record_tagged_span_call();
         let (&kind, rest) = bytes
             .split_first()
             .ok_or_else(|| corrupt("tagged value has no tag byte"))?;

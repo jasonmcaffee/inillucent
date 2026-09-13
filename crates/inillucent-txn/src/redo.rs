@@ -799,6 +799,9 @@ impl<R: RowRedo> Redo for Applier<'_, R> {
             // is a compile error instead of a silent no-op.
             Body::Abort => {}
             Body::CatalogChange { .. } => self.stats.catalog_changed = true,
+            // Pure filler - see `inillucent_wal::record::Body::Pad` - so
+            // replaying one changes nothing.
+            Body::Pad { .. } => {}
         }
         Ok(())
     }

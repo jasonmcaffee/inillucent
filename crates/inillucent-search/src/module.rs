@@ -35,6 +35,7 @@
 //! `rank` is negated, so `ORDER BY rank` ascending is best-first. That is
 //! FTS5's convention and there is no reason to have two.
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use inillucent_base::DbResult;
@@ -47,7 +48,7 @@ use inillucent_ext::vtab::{
 
 use crate::merge::{self, Cache, Hit, Request};
 use crate::options::{self, Options, DEFAULT_K};
-use crate::store::{state, Delta, Op, Row, Store};
+use crate::store::{state, Delta, MergeState, Op, Row, SegmentMeta, Store};
 
 /// The plan number for a scan of every row.
 const PLAN_SCAN: i32 = 0;
@@ -272,8 +273,24 @@ impl SearchTable {
             "compact" => self.compact(context),
             "rebuild" => self.rebuild(context),
             "drop-old-generations" => {
-                let current = self.store.state(context, state::GENERATION)?;
-                self.store.drop_generations_below(context, current)?;
+                let live = merge::live_segments(context, &self.store)?;
+                let mut ids: Vec<i64> = live.iter().map(|segment| segment.id).collect();
+                // Every in-flight merge's checkpoint is a real segment that
+                // is not yet named by the manifest - dropping one here would
+                // strand its `state::MERGE` entry pointing at a `%_gen` id no
+                // longer there, and the next commit's resume would fail to
+                // load it. Since task-1911's segment delta format, that
+                // checkpoint can itself be a chain of small links each
+                // pointing at the one before it, so the whole chain has to
+                // be protected, not only the tip `MergeState` names.
+                for merge_state in self.store.read_merge_states(context)? {
+                    ids.extend(merge::chain_ids(
+                        context,
+                        &self.store,
+                        merge_state.accumulator,
+                    )?);
+                }
+                self.store.drop_generations_except(context, &ids)?;
                 Ok(())
             }
             "integrity-check" => match self.integrity(context)? {
@@ -286,35 +303,61 @@ impl SearchTable {
         }
     }
 
-    /// Folds the delta log into a new immutable generation, at commit.
+    /// Allocates a fresh, never before used `%_gen` key for a new segment.
     ///
-    /// **The graph is not rebuilt here.** The built generation
-    /// is loaded and each pending entry is inserted into it, so the graph work
-    /// this commit pays is one insert per delta entry rather than one insert
-    /// per row in the table. This path used to build the whole graph in one
-    /// pass, which made an ordinary `INSERT` pay nine and a half minutes on the
-    /// 598,560 chunk corpus this engine is deployed on - work an application
-    /// cannot schedule and cannot interrupt.
-    ///
-    /// The delta log's length is what the bound is stated in, and
-    /// [`Options::compact_threshold`] is what sets it: `compact = N` pins it at
-    /// `N` entries, so a table declared that way pays `N` graph inserts per
-    /// published generation however large it grows.
-    ///
-    /// The single-pass build is still the better graph and it is still
-    /// reachable; it is now only ever asked for, by the `compact` command or by
-    /// `rebuild`. [`Self::compact`] says what the difference costs.
-    ///
-    /// Every step is an ordinary write inside the caller's transaction: the new
-    /// generation's rows are appended, the state rows are moved to name it, and
-    /// the folded delta rows are removed. A crash at any point leaves the old
-    /// generation named by the old state rows and the delta log untouched -
-    /// which is the same index, reachable by exactly the same reads. The
-    /// previous generation's rows are left where they are; reclaiming them is
-    /// the separate `drop-old-generations` command, because a snapshot opened
-    /// before the swap is still reading them.
+    /// Separate from [`state::GENERATION`], which counts build events rather
+    /// than storage slots - see the constant's own doc comment for why a
+    /// merge must never touch that counter. A table with no
+    /// [`state::SEGMENT_ID`] row yet is one of two things: brand new, in
+    /// which case the first id this hands out is `1`, exactly as
+    /// `GENERATION` used to allocate it directly; or migrating up from a
+    /// single generation, in which case the highest number already sitting in
+    /// `%_gen` - which a table that never ran `drop-old-generations` can still
+    /// hold several of - has to be read back so the first new segment cannot
+    /// collide with one of them.
     /// @param context - the module's reach into the database
-    fn fold(&mut self, context: &mut Context<'_>) -> DbResult<()> {
+    fn next_segment_id(&mut self, context: &mut Context<'_>) -> DbResult<i64> {
+        let seeded = self.store.state(context, state::SEGMENT_ID)?;
+        let seed = if seeded == 0 {
+            let from_counter = self.store.state(context, state::GENERATION)?;
+            let from_table = self
+                .store
+                .generations(context)?
+                .into_iter()
+                .max()
+                .unwrap_or(0);
+            from_counter.max(from_table)
+        } else {
+            seeded
+        };
+        let next = seed.saturating_add(1);
+        self.store.set_state(context, state::SEGMENT_ID, next)?;
+        Ok(next)
+    }
+
+    /// Flushes the delta log into a brand new segment, at commit.
+    ///
+    /// **No existing segment is read or rewritten here.** The pending batch is
+    /// built into an index of its own - one insert per row the batch touches,
+    /// not one per row the table holds - and appended to the manifest as a new
+    /// level zero segment. This is the change task-1911 makes: before it, a
+    /// commit that crossed the threshold loaded the single published
+    /// generation and inserted the batch into it, which bounded the graph work
+    /// but not the bytes, because publishing meant re-serialising the whole
+    /// generation however few rows had changed
+    /// (`docs/relational-architecture.md#10-keeping-a-vector-index-current`).
+    /// A flush's bytes are the batch's own segment, so publishing here costs
+    /// the batch on both counts.
+    ///
+    /// Every write below is inside the caller's transaction: the segment's
+    /// bytes land before the manifest names it, so a crash between the two
+    /// leaves bytes nothing reads rather than a manifest entry pointing at
+    /// nothing - the same ordering the single generation this replaces always
+    /// kept. [`Self::merge_cascade`] runs immediately after, still inside this
+    /// commit, because a level that has just grown to its cap is exactly the
+    /// level this transaction is responsible for shrinking back down.
+    /// @param context - the module's reach into the database
+    fn flush(&mut self, context: &mut Context<'_>) -> DbResult<()> {
         let covered = self.store.state(context, state::COVERED)?;
         let pending = self.store.deltas_above(context, covered)?;
         if pending.is_empty() {
@@ -328,31 +371,419 @@ impl SearchTable {
             return Ok(());
         }
         let highest = highest_of(&pending, covered);
-        let generation = self.store.state(context, state::GENERATION)?;
-        let (index, inserted) =
-            merge::fold_generation(context, &self.store, &self.options, generation, &pending)?;
+        let (index, inserted, tombstoned) =
+            merge::build_segment_from_batch(context, &self.store, &self.options, &pending)?;
+        let id = self.next_segment_id(context)?;
+        let chunks = index.store().n_chunks() as i64;
+        let mut bytes = Vec::new();
+        inillucent_core::persist::write_index(&index, &mut bytes).map_err(|error| {
+            failure(format!(
+                "inillucent_search: cannot write a segment: {error}"
+            ))
+        })?;
+        self.store.write_generation(context, id, &bytes)?;
+        let mut segments = merge::live_segments(context, &self.store)?;
+        segments.push(SegmentMeta {
+            id,
+            level: 0,
+            covers_from: covered,
+            covers_to: highest,
+            chunks,
+            tombstoned,
+        });
+        self.store.write_segments(context, &segments)?;
+        let generation = self
+            .store
+            .state(context, state::GENERATION)?
+            .saturating_add(1);
+        self.store
+            .set_state(context, state::GENERATION, generation)?;
         let folds = self.store.state(context, state::FOLDS)?.saturating_add(1);
-        self.publish(context, &index, highest, inserted, folds)
+        self.store.set_state(context, state::FOLDS, folds)?;
+        self.store
+            .set_state(context, state::INSERTED, inserted as i64)?;
+        self.store.set_state(context, state::COVERED, highest)?;
+        self.store
+            .set_state(context, state::CHUNKS, total_chunks(&segments))?;
+        self.store.forget_deltas(context, highest)?;
+        self.store.set_state(context, state::BUILD, highest)?;
+        self.cache.forget();
+        self.merge_cascade(context)
     }
 
-    /// Builds a new generation in one pass over every row.
+    /// Advances segment merging by at most one commit's worth of work,
+    /// resuming every merge left checkpointed before starting any new one.
+    ///
+    /// **Why a level at all, rather than merging every live segment on every
+    /// flush.** A query folds every live segment together, so the count of
+    /// live segments is the count a query pays to reconstruct its answer from
+    /// scratch, and merging on every flush would hold that count at one -
+    /// which is exactly the whole-corpus rewrite this ticket removes,
+    /// happening again under a different name. Bucketing by level bounds the
+    /// live count instead of collapsing it: [`Options::segment_fanin`]
+    /// segments accumulate at level zero before they become one segment at
+    /// level one, that level accumulates the same number before becoming one
+    /// at level two, and so on - `automerge` in FTS5's own vocabulary, and the
+    /// same size tiered shape an LSM tree merges its own levels with.
+    ///
+    /// **Bounded by chunks, never by a clock.** A commit's own share of merge
+    /// work is [`Options::merge_budget_chunks`], shared across every level
+    /// that needs it and spent one input segment at a time by
+    /// [`Self::continue_merge`] - a segment folds for what its own
+    /// [`SegmentMeta::chunks`] already says it costs, so the budget never has
+    /// to load a segment just to find out what it is worth. A merge that
+    /// cannot finish inside its share checkpoints the accumulator it has
+    /// built so far under a fresh `%_gen` id, records how far it got in
+    /// [`state::MERGE`], and this function moves on to the next candidate -
+    /// the next commit that reaches here resumes that exact state rather than
+    /// starting the level over. The one thing that ignores the budget is a
+    /// level whose segment count has reached [`Options::crisis_at`]: it runs
+    /// to completion in this commit regardless, because a level that far
+    /// behind is already costing every query more than one expensive commit
+    /// costs once - see that method's own doc comment for the number.
+    ///
+    /// **More than one level can be merging at once, and this is not a
+    /// corner case - it is what made the tail worth fixing in the first
+    /// place.** An earlier version of this function tracked a single
+    /// in-flight merge and always resumed it before considering anything
+    /// else, which meant a large merge several levels up - the exact case the
+    /// budget exists to spread out - blocked every *lower* level's own merge
+    /// for as many commits as the big one took to finish. Fresh flushes kept
+    /// landing at level zero the whole time, so that level's own segment
+    /// count climbed toward its own crisis threshold while the bounded
+    /// mechanism sat idle for it, which is why the worst commit measured on
+    /// the 100,000 document arm of `write_latency` came down from 49 s to
+    /// about 16 s under that version and no further - it had cut the single
+    /// worst merge down but was still occasionally forced into an unbounded
+    /// crisis merge for a *different* level that starved in the meantime.
+    /// Advancing every checkpointed merge first, lowest level before higher,
+    /// closes that: level zero is never blocked on level two's progress.
+    ///
+    /// **Invisible to `GENERATION`, `FOLDS` and `INSERTED`.** Those three count
+    /// *build events an application asked for or that a write triggered
+    /// directly* - a flush, a `compact`, a `rebuild` - and a merge is none of
+    /// those; it is bookkeeping this table would eventually have needed
+    /// regardless of which batch triggered it. Folding a merge into those
+    /// counters would make `folds` depend on `segment_fanin`, which nothing
+    /// about a fold count should.
+    /// @param context - the module's reach into the database
+    fn merge_cascade(&mut self, context: &mut Context<'_>) -> DbResult<()> {
+        let mut budget = self.options.merge_budget_chunks();
+        let mut spent: u64 = 0;
+        let crisis_at = self.options.crisis_at();
+
+        // Phase one: advance every merge already checkpointed, lowest source
+        // level first, so a level that has been waiting longest is not
+        // starved by a bigger one still in progress above it. Segment counts
+        // are re-read each time through the loop rather than once up front,
+        // because an earlier iteration finishing can itself add a fresh
+        // segment to a level a later iteration is about to judge.
+        let mut in_flight = self.store.read_merge_states(context)?;
+        in_flight.sort_by_key(|state| state.source_level);
+        let mut kept: Vec<MergeState> = Vec::with_capacity(in_flight.len());
+        for mut state in in_flight {
+            let segments = merge::live_segments(context, &self.store)?;
+            let crisis = count_at(&segments, state.source_level) >= crisis_at;
+            if self.continue_merge(context, &mut state, &mut budget, &mut spent, crisis)? {
+                self.finish_merge(context, state)?;
+            } else {
+                kept.push(state);
+            }
+        }
+
+        // Phase two: start a new merge for any level whose *unclaimed*
+        // segments - the ones no merge kept from phase one already owns -
+        // have reached `segment_fanin`, lowest level first, until nothing
+        // more qualifies or there is nothing left to spend. A level a merge
+        // is already resuming can still start a second one once enough fresh
+        // segments have landed on it since that merge began; the two never
+        // fight over the same input because `begin_merge` only ever looks at
+        // what is not already claimed.
+        loop {
+            let claimed: BTreeSet<i64> = kept
+                .iter()
+                .flat_map(|state| state.inputs.iter().map(|segment| segment.id))
+                .collect();
+            let segments = merge::live_segments(context, &self.store)?;
+            let fanin = self.options.segment_fanin();
+            let mut levels: Vec<i32> = segments
+                .iter()
+                .filter(|segment| !claimed.contains(&segment.id))
+                .map(|segment| segment.level)
+                .collect();
+            levels.sort_unstable();
+            levels.dedup();
+            let Some(level) = levels.into_iter().find(|level| {
+                segments
+                    .iter()
+                    .filter(|segment| segment.level == *level && !claimed.contains(&segment.id))
+                    .count()
+                    >= fanin
+            }) else {
+                break;
+            };
+            let crisis = count_at(&segments, level) >= crisis_at;
+            if !crisis && budget == 0 {
+                break;
+            }
+            let mut state = self.begin_merge(context, level, &claimed)?;
+            if self.continue_merge(context, &mut state, &mut budget, &mut spent, crisis)? {
+                self.finish_merge(context, state)?;
+            } else {
+                kept.push(state);
+            }
+        }
+
+        // `state::MERGE_WORK` is what a test reads back to check the bound
+        // was respected without a clock - see its own doc comment.
+        self.store
+            .set_state(context, state::MERGE_WORK, spent as i64)?;
+        self.store.write_merge_states(context, &kept)
+    }
+
+    /// Starts a merge of one level's unclaimed segments, without folding any
+    /// of them yet.
+    ///
+    /// The oldest unclaimed input becomes the accumulator directly and free
+    /// of charge: `folded` starts at one and `accumulator` names that
+    /// input's own existing `%_gen` id rather than a fresh copy of it,
+    /// because that input's bytes already are exactly what a merge with
+    /// nothing folded into it yet would be. [`Self::continue_merge`] is what
+    /// does the paid work of folding the rest.
+    /// @param context - the module's reach into the database
+    /// @param level - the level to collapse
+    /// @param claimed - segment ids another in-flight merge already owns,
+    ///   left alone so two merges never fold the same input
+    fn begin_merge(
+        &mut self,
+        context: &mut Context<'_>,
+        level: i32,
+        claimed: &BTreeSet<i64>,
+    ) -> DbResult<MergeState> {
+        let segments = merge::live_segments(context, &self.store)?;
+        let mut inputs: Vec<SegmentMeta> = segments
+            .into_iter()
+            .filter(|segment| segment.level == level && !claimed.contains(&segment.id))
+            .collect();
+        inputs.sort_by_key(|segment| segment.covers_from);
+        let accumulator = inputs.first().map(|segment| segment.id).unwrap_or(0);
+        Ok(MergeState {
+            source_level: level,
+            target_level: level.saturating_add(1),
+            inputs,
+            folded: 1,
+            accumulator,
+        })
+    }
+
+    /// Folds as many of an in-flight merge's remaining inputs into its
+    /// accumulator as the budget allows, checkpointing the result under a
+    /// fresh `%_gen` id, and returns whether every input is now folded in.
+    ///
+    /// **At least one input folds even with no budget left** - the check is
+    /// only made after the first fold of this call - so a merge that keeps
+    /// getting resumed always moves forward rather than stalling on a commit
+    /// that had nothing left to spend, the same progress guarantee an LSM's
+    /// own bounded merge makes. A crisis merge never makes that check at all,
+    /// which is what lets it run to completion in one call without a second
+    /// code path: `crisis` simply disables the early exit.
+    ///
+    /// **The checkpoint this writes is bounded by what this call folded, not
+    /// by the accumulator's total size.** Before this (task-1911's own
+    /// follow-on), a checkpoint reloaded the accumulator into memory and then
+    /// re-serialised the *whole thing* with `persist::write_index`, however
+    /// little this call added to it - so a merge several levels up, whose
+    /// accumulator is already a large fraction of the corpus, paid that
+    /// whole size on every checkpoint regardless of how finely the fold
+    /// itself was budgeted. `merge::fold_segment_recording` instead records
+    /// exactly the chunks, vectors and tombstones this call folded, and
+    /// `persist::write_segment_delta` writes only those - plus a pointer to
+    /// the accumulator this checkpoint continues - as a new, small link in a
+    /// chain. Reading the accumulator back (`merge::load_segment_resumable`,
+    /// just below) still costs the chain's full accumulated size, the same
+    /// as reloading a single blob always did; what changed is that writing a
+    /// checkpoint no longer does.
+    ///
+    /// The chain grows by at most one link per call to this function, and a
+    /// merge calls it at most [`Options::segment_fanin`] times over its whole
+    /// life, so a segment's chain depth is bounded the same way the number of
+    /// checkpoints already was - see `write_segment_delta`'s own doc comment
+    /// for why the chain never needs flattening back into one blob.
+    /// @param context - the module's reach into the database
+    /// @param state - the merge being advanced, updated in place
+    /// @param budget - how many more chunks this commit may still fold,
+    ///   debited as they are spent (saturates at zero, so it only answers
+    ///   "is there any left", not "how much was spent")
+    /// @param spent - every chunk actually folded this commit, across every
+    ///   merge advanced, added up uncapped - what `state::MERGE_WORK` reports
+    /// @param crisis - whether this merge ignores the budget and runs to
+    ///   completion regardless
+    fn continue_merge(
+        &mut self,
+        context: &mut Context<'_>,
+        state: &mut MergeState,
+        budget: &mut u64,
+        spent: &mut u64,
+        crisis: bool,
+    ) -> DbResult<bool> {
+        if state.folded >= state.inputs.len() {
+            return Ok(true);
+        }
+        let previous = state.accumulator;
+        let mut accumulator =
+            merge::load_segment_resumable(context, &self.store, &self.options, previous)?;
+        // Recording turns this checkpoint's real fold - the one below, the
+        // only expensive part of any of this - into content this checkpoint
+        // can write out directly. Nothing here re-runs it: the graph and the
+        // lexical index are copied from what recording captured, never
+        // reinserted or re-tokenised on a later reload. See
+        // `inillucent_core::persist`'s segment delta section for why that
+        // distinction is the whole point.
+        let before_nodes = accumulator.graph_shape().1;
+        accumulator.start_recording();
+        let mut batches: Vec<inillucent_core::persist::DeltaBatch> = Vec::new();
+        let mut folded_any = false;
+        while state.folded < state.inputs.len() {
+            if folded_any && !crisis && *budget == 0 {
+                break;
+            }
+            let input = state.inputs[state.folded].clone();
+            let segment = merge::load_segment(context, &self.store, &self.options, input.id)?;
+            let (_inserted, recorded) =
+                merge::fold_segment_recording(&mut accumulator, &segment, &input.tombstoned)?;
+            batches.push(inillucent_core::persist::DeltaBatch {
+                puts: recorded.puts,
+                tombstoned: recorded.tombstoned,
+            });
+            let cost = input.chunks.max(0) as u64;
+            *budget = budget.saturating_sub(cost);
+            *spent = spent.saturating_add(cost);
+            state.folded = state.folded.saturating_add(1);
+            folded_any = true;
+        }
+        let done = state.folded >= state.inputs.len();
+        let (entry, _, layers_len) = accumulator.graph_shape();
+        let graph = inillucent_core::persist::GraphRecording {
+            entry,
+            layers_len,
+            node_top_tail: accumulator.graph_node_top_tail(before_nodes),
+            touched: accumulator.drain_graph_recording(),
+        };
+        let lexical = accumulator.drain_lexical_recording();
+        let seal = done.then(|| {
+            (
+                accumulator.store().n_chunks() as u64,
+                accumulator.store().n_documents() as u64,
+            )
+        });
+        let mut bytes = Vec::new();
+        inillucent_core::persist::write_segment_delta(
+            &mut bytes,
+            Some(previous),
+            &batches,
+            &graph,
+            lexical.as_ref(),
+            seal,
+        )
+        .map_err(|error| {
+            failure(format!(
+                "inillucent_search: cannot write a segment delta: {error}"
+            ))
+        })?;
+        let id = self.next_segment_id(context)?;
+        self.store.write_generation(context, id, &bytes)?;
+        state.accumulator = id;
+        Ok(done)
+    }
+
+    /// Publishes a finished merge's accumulator as the live segment at its
+    /// target level, in place of every input it replaced, and clears the
+    /// resumable state.
+    ///
+    /// Recomputes the tombstoned list here by reloading every original input
+    /// fresh ([`merge::touched_and_dead`]), rather than carrying one forward
+    /// from `continue_merge`: those inputs are untouched on disk until this
+    /// moment - only the manifest names what is live, and every original
+    /// input stays named there until this call runs - so the reload costs
+    /// exactly what re-reading a level's own segments once already costs, and
+    /// nothing is gained by threading a running set through every checkpoint
+    /// instead.
+    ///
+    /// **Read safety across the swap.** Everything up to and including
+    /// `write_segments` below runs inside the caller's transaction, so a
+    /// crash before it leaves every original input still named and the
+    /// finished accumulator an orphaned, unnamed segment nothing reads; a
+    /// crash after it leaves the new segment named and the originals simply
+    /// unreferenced, cleaned up later by `drop-old-generations`. A query
+    /// reading concurrently through [`merge::live_segments`] therefore always
+    /// sees one manifest or the other, in full, never a mixture that drops or
+    /// doubles a row.
+    /// @param context - the module's reach into the database
+    /// @param state - the finished merge
+    fn finish_merge(&mut self, context: &mut Context<'_>, state: MergeState) -> DbResult<()> {
+        let accumulator =
+            merge::load_segment(context, &self.store, &self.options, state.accumulator)?;
+        let mut originals = Vec::with_capacity(state.inputs.len());
+        for input in &state.inputs {
+            let loaded = merge::load_segment(context, &self.store, &self.options, input.id)?;
+            originals.push((input.clone(), loaded));
+        }
+        let tombstoned = merge::touched_and_dead(&accumulator, &originals);
+        let chunks = accumulator.store().n_chunks() as i64;
+        let covers_from = state
+            .inputs
+            .iter()
+            .map(|segment| segment.covers_from)
+            .min()
+            .unwrap_or(0);
+        let covers_to = state
+            .inputs
+            .iter()
+            .map(|segment| segment.covers_to)
+            .max()
+            .unwrap_or(0);
+        let merged_ids: Vec<i64> = state.inputs.iter().map(|segment| segment.id).collect();
+        let mut segments = merge::live_segments(context, &self.store)?;
+        segments.retain(|segment| !merged_ids.contains(&segment.id));
+        segments.push(SegmentMeta {
+            id: state.accumulator,
+            level: state.target_level,
+            covers_from,
+            covers_to,
+            chunks,
+            tombstoned,
+        });
+        self.store.write_segments(context, &segments)?;
+        self.store
+            .set_state(context, state::CHUNKS, total_chunks(&segments))?;
+        // `state::MERGE` itself is not touched here: `merge_cascade` is what
+        // owns the list of every in-flight merge, and this one's absence
+        // from it is simply this merge never being added back to `kept`.
+        self.cache.forget();
+        Ok(())
+    }
+
+    /// Builds a new segment in one pass over every row, discarding every
+    /// other live segment.
     ///
     /// **This is the batch rebuild workflow, and it is explicit.** It is what
     /// `INSERT INTO docs(docs) VALUES('compact')` runs, and it costs the whole
     /// corpus: every row is read, every chunk is inserted into a fresh graph,
-    /// and the tombstoned chunks that folding left behind are gone. Those chunks
-    /// going away is what an application is buying when it schedules this.
+    /// and the tombstoned chunks that folding and merging both leave behind
+    /// are gone. Those chunks going away is what an application is buying
+    /// when it schedules this, and it is the one operation that still
+    /// collapses the whole manifest to one segment - segmented generations
+    /// bound an ordinary write's cost, they do not change what a caller who
+    /// explicitly asks for the clean graph gets.
     ///
     /// It is a write like any other, so it lands in the caller's transaction
-    /// and is atomic with it: the new generation is either named by the state
-    /// rows or it is not, and a crash leaves the old one in place.
+    /// and is atomic with it: the new segment is either the whole manifest or
+    /// the old one still is, and a crash leaves the old one in place.
     ///
-    /// **An empty delta log is not a reason to refuse.** It was, until M8, and
-    /// that was harmless while every automatic compaction also built in one
-    /// pass - there was nothing left to clean. Now that a commit folds, a table
-    /// whose log has just been folded away is exactly the table whose graph has
-    /// the most tombstoned chunks in it, and refusing there would leave an
-    /// application no way to ask for the clean graph at all.
+    /// **An empty delta log is not a reason to refuse.** A table whose log has
+    /// just been flushed away is exactly the table whose graph has the most
+    /// tombstoned chunks in it, and refusing there would leave an application
+    /// no way to ask for the clean graph at all.
     /// @param context - the module's reach into the database
     fn compact(&mut self, context: &mut Context<'_>) -> DbResult<()> {
         let covered = self.store.state(context, state::COVERED)?;
@@ -360,12 +791,12 @@ impl SearchTable {
         let highest = highest_of(&pending, covered);
         let (index, rows) = merge::build_from_rows(context, &self.store, &self.options)?;
         self.store.set_state(context, state::ROWS, rows as i64)?;
-        self.publish(context, &index, highest, rows, 0)
+        self.publish_full(context, &index, highest, rows)
     }
 
     /// Rebuilds the whole index from the rows, discarding every generation.
     ///
-    /// The recovery path when a generation is unreadable, and the way an index
+    /// The recovery path when a segment is unreadable, and the way an index
     /// built by an older layout is brought forward. `%_content` is the
     /// authoritative copy of every row, so this needs nothing the database does
     /// not already hold.
@@ -373,28 +804,31 @@ impl SearchTable {
         let (index, rows) = merge::build_from_rows(context, &self.store, &self.options)?;
         let ordinal = self.store.state(context, state::ORDINAL)?;
         self.store.set_state(context, state::ROWS, rows as i64)?;
-        self.publish(context, &index, ordinal, rows, 0)
+        self.publish_full(context, &index, ordinal, rows)
     }
 
-    /// Writes one built index out as the next generation and names it.
+    /// Writes one built index out as the sole live segment, replacing the
+    /// whole manifest.
     ///
-    /// The one place a generation is published, so folding and building differ
-    /// in how they produce the index and in nothing else. The order matters:
-    /// the generation's rows are written before any state row names them, so a
-    /// crash between the two leaves rows nothing reads rather than a state row
-    /// pointing at a generation that is not there.
+    /// Used by `compact` and `rebuild`, and only by them - a flush appends a
+    /// segment and a merge replaces a level's worth, but neither ever throws
+    /// away a segment it was not itself built from, because a snapshot opened
+    /// before either ran may still be reading one. This is the one path that
+    /// deliberately does, because collapsing to a single clean segment is the
+    /// entire point of asking for it. The order matters: the segment's rows
+    /// are written before any state row names them, so a crash between the two
+    /// leaves rows nothing reads rather than a manifest pointing at a segment
+    /// that is not there.
     /// @param context - the module's reach into the database
     /// @param index - the index to publish
-    /// @param highest - the delta sequence this generation now covers
+    /// @param highest - the delta sequence this segment now covers
     /// @param inserted - how many chunks the build inserted into the graph
-    /// @param folds - how many folds this lineage has taken, zero for a build
-    fn publish(
+    fn publish_full(
         &mut self,
         context: &mut Context<'_>,
         index: &inillucent_core::index::Index,
         highest: i64,
         inserted: usize,
-        folds: i64,
     ) -> DbResult<()> {
         let mut bytes = Vec::new();
         inillucent_core::persist::write_index(index, &mut bytes).map_err(|error| {
@@ -402,24 +836,56 @@ impl SearchTable {
                 "inillucent_search: cannot write a generation: {error}"
             ))
         })?;
+        let id = self.next_segment_id(context)?;
+        self.store.write_generation(context, id, &bytes)?;
+        let chunks = index.store().n_chunks() as i64;
+        let segments = vec![SegmentMeta {
+            id,
+            level: 0,
+            covers_from: 0,
+            covers_to: highest,
+            chunks,
+            tombstoned: Vec::new(),
+        }];
+        self.store.write_segments(context, &segments)?;
         let generation = self
             .store
             .state(context, state::GENERATION)?
             .saturating_add(1);
-        self.store.write_generation(context, generation, &bytes)?;
         self.store
             .set_state(context, state::GENERATION, generation)?;
         self.store.set_state(context, state::COVERED, highest)?;
         self.store
             .set_state(context, state::INSERTED, inserted as i64)?;
-        self.store.set_state(context, state::FOLDS, folds)?;
-        self.store
-            .set_state(context, state::CHUNKS, index.store().n_chunks() as i64)?;
+        self.store.set_state(context, state::FOLDS, 0)?;
+        self.store.set_state(context, state::CHUNKS, chunks)?;
         self.store.forget_deltas(context, highest)?;
         self.store.set_state(context, state::BUILD, highest)?;
+        // Every merge in flight was only ever collapsing part of the
+        // manifest this call just replaced whole - its inputs may no longer
+        // exist by the time a later commit would have resumed it, so the
+        // resumable state has to go with them rather than be left dangling.
+        self.store.clear_merge_states(context)?;
         self.cache.forget();
         Ok(())
     }
+}
+
+/// Returns how many segments a manifest holds at one level.
+/// @param segments - the live manifest
+/// @param level - the level to count
+fn count_at(segments: &[SegmentMeta], level: i32) -> usize {
+    segments
+        .iter()
+        .filter(|segment| segment.level == level)
+        .count()
+}
+
+/// Returns the aggregate chunk count `state::CHUNKS` reports: the sum of
+/// every live segment's own count.
+/// @param segments - the live manifest
+fn total_chunks(segments: &[SegmentMeta]) -> i64 {
+    segments.iter().map(|segment| segment.chunks).sum()
 }
 
 /// Returns the highest sequence a batch of pending deltas carries.
@@ -563,22 +1029,23 @@ impl VirtualTable for SearchTable {
         self.reconcile(context)
     }
 
-    /// Folds the delta log in, when the transaction made it long enough.
+    /// Flushes the delta log into a new segment, when the transaction made it
+    /// long enough.
     ///
     /// This runs before the engine writes its commit marker, so the new
-    /// generation's rows and the rows that made it necessary land in one
+    /// segment's rows and the rows that made it necessary land in one
     /// transaction. Doing it here rather than inside the `INSERT` is what keeps
     /// the cost of a write bounded and predictable: a thousand-row transaction
-    /// folds once, not a thousand times.
+    /// flushes once, not a thousand times.
     ///
-    /// [`SearchTable::fold`] is what it calls, and it is bounded by the rows
+    /// [`SearchTable::flush`] is what it calls, and it is bounded by the rows
     /// this transaction wrote. The single-pass build over the whole corpus is
     /// never reached from here.
     fn sync(&mut self, context: &mut Context<'_>) -> DbResult<()> {
         if !self.touched {
             return Ok(());
         }
-        self.fold(context)
+        self.flush(context)
     }
 
     /// Ends the transaction.
@@ -631,19 +1098,37 @@ impl VirtualTable for SearchTable {
         Ok(())
     }
 
-    /// Checks that the rows, the log and the generation agree.
+    /// Checks that the rows, the log and every live segment agree.
     fn integrity(&mut self, context: &mut Context<'_>) -> DbResult<Option<String>> {
         let mut problems: Vec<String> = Vec::new();
-        let generation = self.store.state(context, state::GENERATION)?;
-        if generation > 0 {
-            match self.store.read_generation(context, generation)? {
-                None => problems.push(format!("generation {generation} is named but not stored")),
-                Some(bytes) => {
-                    if let Err(error) = inillucent_core::persist::read_index(&mut bytes.as_slice())
-                    {
-                        problems.push(format!("generation {generation} is unreadable: {error}"));
-                    }
-                }
+        for segment in merge::live_segments(context, &self.store)? {
+            // Goes through the strict reader rather than `persist::read_index`
+            // directly, because a live segment's own bytes may now be a
+            // segment delta chain (task-1911) - `read_index` only understands
+            // the older, monolithic stream, and would misreport every merged
+            // segment as unreadable rather than checking what it actually is.
+            if let Err(error) = merge::load_segment(context, &self.store, &self.options, segment.id)
+            {
+                problems.push(format!("segment {} is unreadable: {error}", segment.id));
+            }
+        }
+        for merge_state in self.store.read_merge_states(context)? {
+            if self
+                .store
+                .read_generation(context, merge_state.accumulator)?
+                .is_none()
+            {
+                problems.push(format!(
+                    "an in-flight merge's checkpoint {} is named but not stored",
+                    merge_state.accumulator
+                ));
+            }
+            if merge_state.folded > merge_state.inputs.len() {
+                problems.push(format!(
+                    "an in-flight merge claims {} inputs folded of only {}",
+                    merge_state.folded,
+                    merge_state.inputs.len()
+                ));
             }
         }
         let covered = self.store.state(context, state::COVERED)?;

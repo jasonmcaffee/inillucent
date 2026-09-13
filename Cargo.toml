@@ -22,11 +22,7 @@ members = [
     "crates/inillucent-catalog",
     "crates/inillucent-sql",
     "crates/inillucent-ext",
-    "crates/inillucent-vm",
-    "crates/inillucent-session",
     "crates/inillucent",
-    "crates/inillucent-legacy",
-    "crates/inillucent-capi",
     "crates/inillucent-cli",
     "crates/inillucent-search",
     "crates/inillucent-migrate",
@@ -117,10 +113,7 @@ inillucent-transaction = { path = "crates/inillucent-transaction", version = "0.
 inillucent-catalog = { path = "crates/inillucent-catalog", version = "0.1.0" }
 inillucent-sql = { path = "crates/inillucent-sql", version = "0.1.0" }
 inillucent-ext = { path = "crates/inillucent-ext", version = "0.1.0" }
-inillucent-vm = { path = "crates/inillucent-vm", version = "0.1.0" }
-inillucent-session = { path = "crates/inillucent-session", version = "0.1.0" }
 inillucent = { path = "crates/inillucent", version = "0.1.0" }
-inillucent-legacy = { path = "crates/inillucent-legacy", version = "0.1.0" }
 inillucent-core = { path = "crates/inillucent-core", version = "0.1.0" }
 inillucent-cli = { path = "crates/inillucent-cli", version = "0.1.0" }
 inillucent-search = { path = "crates/inillucent-search", version = "0.1.0" }

@@ -3269,18 +3269,23 @@ impl<'a> Binder<'a> {
 
     /// Returns the name an unaliased result column reports.
     ///
-    /// SQLite reports a bare column reference by its column name and every
-    /// other expression by the source text it was written as. The text is what
-    /// makes `SELECT a+1` report `a+1`.
+    /// A bare column reference is named after its declared name rather than
+    /// the query's text - `rowid`/`oid`/`_rowid_` resolve to the column they
+    /// alias and take its name too. Everything else keeps the source text.
     fn default_column_name(&self, id: ExprId, bound: &BoundExpr) -> Vec<u8> {
-        if let BoundExpr::Column { source, column, .. } = bound {
-            if let Some(name) = self
+        let name = match bound {
+            BoundExpr::Column { source, column, .. } => self
                 .sources
                 .get(*source)
-                .and_then(|source| source.table.column(*column))
-            {
-                return name.name.clone();
-            }
+                .and_then(|held| held.table.column(*column)),
+            BoundExpr::Rowid { source } => self
+                .sources
+                .get(*source)
+                .and_then(|held| held.table.column(held.table.rowid_alias?)),
+            _ => None,
+        };
+        if let Some(name) = name {
+            return name.name.clone();
         }
         if let Some(Expr::Column { column, .. }) = self.ast.expr(id) {
             return self.ast.text(*column).to_vec();

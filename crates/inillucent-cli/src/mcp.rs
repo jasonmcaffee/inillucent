@@ -40,9 +40,8 @@ use crate::json::{self, Json};
 
 /// The protocol version this server speaks.
 ///
-/// Echoed back to a client that asks for it, and sent as-is to one that asks
-/// for something else - which is what the specification says to do, because a
-/// client that understands a later revision still understands this one.
+/// Sent to every client, including one that asks for a revision this server does
+/// not support. MCP requires a server to select a revision it supports.
 pub const PROTOCOL: &str = "2025-06-18";
 
 /// The most bytes one request line may hold.
@@ -90,6 +89,24 @@ pub struct Settings {
     pub max_rows: usize,
     /// How long one call may run before it is stopped.
     pub max_time: std::time::Duration,
+}
+
+/// The initialization stage of one MCP stdio session.
+#[derive(Default)]
+enum Lifecycle {
+    /// The client has not sent its initialize request.
+    #[default]
+    AwaitingInitialize,
+    /// The server answered initialize and waits for notifications/initialized.
+    AwaitingInitializedNotification,
+    /// The client completed initialization and may use normal methods.
+    Ready,
+}
+
+/// State held for the lifetime of one MCP stdio session.
+#[derive(Default)]
+pub struct Session {
+    lifecycle: Lifecycle,
 }
 
 impl Default for Settings {
@@ -170,6 +187,12 @@ pub fn schema_of(command: &Command) -> Json {
                     )]),
                 ));
             }
+            if let Some(allowed) = command.allowed_values(param.name) {
+                member.push((
+                    "enum",
+                    Json::Array(allowed.iter().map(|value| json::text(*value)).collect()),
+                ));
+            }
             (param.name.to_string(), json::object(member))
         })
         .collect();
@@ -183,6 +206,7 @@ pub fn schema_of(command: &Command) -> Json {
         ("type", json::text("object")),
         ("properties", Json::Object(properties)),
         ("required", Json::Array(required)),
+        ("additionalProperties", Json::Bool(false)),
     ])
 }
 
@@ -209,6 +233,7 @@ pub fn serve(
     context.set_limits(
         inillucent_engine::base::budget::Limits::served().with_time(Some(settings.max_time)),
     );
+    let mut session = Session::default();
     let mut line = String::new();
     loop {
         line.clear();
@@ -238,23 +263,31 @@ pub fn serve(
         if line.trim().is_empty() {
             continue;
         }
-        if let Some(answer) = handle(&mut context, &line) {
-            let answer = match answer.len() > MAX_RESPONSE_BYTES {
-                false => answer,
-                true => error_response(
-                    Json::Null,
-                    -32603,
-                    &format!(
-                        "this answer would have been {} bytes, past the {MAX_RESPONSE_BYTES} a \
-                         reply may hold. Ask for fewer rows or fewer columns.",
-                        answer.len()
-                    ),
-                ),
-            };
+        if let Some(answer) = handle_with_session(&mut context, &mut session, &line) {
+            let answer = enforce_response_budget(answer);
             writeln!(output, "{answer}").map_err(|error| error.to_string())?;
             output.flush().map_err(|error| error.to_string())?;
         }
     }
+}
+
+/// Replaces an oversized response with a JSON RPC error for the same request.
+///
+/// @param answer - the completed response before it is written to the client
+fn enforce_response_budget(answer: String) -> String {
+    if answer.len() <= MAX_RESPONSE_BYTES {
+        return answer;
+    }
+    let id = response_id(&answer);
+    error_response(
+        id,
+        -32603,
+        &format!(
+            "this answer would have been {} bytes, past the {MAX_RESPONSE_BYTES} a \
+             reply may hold. Ask for fewer rows or fewer columns.",
+            answer.len()
+        ),
+    )
 }
 
 /// A request line that ran past [`MAX_REQUEST_BYTES`].
@@ -299,15 +332,37 @@ fn read_request(input: &mut impl BufRead, line: &mut String) -> Result<usize, To
 /// Answers one request, or returns nothing for a notification.
 ///
 /// @param context - the open database
+/// @param session - lifecycle state held for this client connection
 /// @param line - the request, as it arrived
-pub fn handle(context: &mut Context, line: &str) -> Option<String> {
+pub fn handle_with_session(
+    context: &mut Context,
+    session: &mut Session,
+    line: &str,
+) -> Option<String> {
     let request = match json::parse(line) {
         Ok(request) => request,
         // -32700 is JSON-RPC's parse error, and it is answered with a null id
         // because the id is exactly what could not be read.
         Err(why) => return Some(error_response(Json::Null, -32700, &why)),
     };
+    let Json::Object(_) = request else {
+        return Some(error_response(
+            Json::Null,
+            -32600,
+            "a request must be an object.",
+        ));
+    };
     let id = request.get("id").cloned().unwrap_or(Json::Null);
+    if !valid_request_id(&id) {
+        return Some(error_response(
+            Json::Null,
+            -32600,
+            "a request id must be a string, number, or null.",
+        ));
+    }
+    if request.get("jsonrpc").and_then(Json::text) != Some("2.0") {
+        return Some(error_response(id, -32600, "'jsonrpc' must be '2.0'."));
+    }
     let Some(method) = request.get("method").and_then(Json::text) else {
         return Some(error_response(id, -32600, "a request needs a 'method'."));
     };
@@ -315,8 +370,51 @@ pub fn handle(context: &mut Context, line: &str) -> Option<String> {
     // most common way a hand-written server breaks a strict client.
     let is_notification = request.get("id").is_none();
     let params = request.get("params").cloned().unwrap_or(Json::Null);
+    if request.get("params").is_some() && !matches!(params, Json::Object(_) | Json::Array(_)) {
+        return Some(error_response(
+            Json::Null,
+            -32600,
+            "request params must be an object or array.",
+        ));
+    }
+    if method == "initialize" {
+        if !matches!(session.lifecycle, Lifecycle::AwaitingInitialize) {
+            return Some(error_response(
+                id,
+                -32600,
+                "initialize was already completed.",
+            ));
+        }
+        let result = initialize(&params);
+        if result.is_ok() {
+            session.lifecycle = Lifecycle::AwaitingInitializedNotification;
+        }
+        return response_for(id, is_notification, result);
+    }
+    if method == "notifications/initialized" {
+        if matches!(
+            session.lifecycle,
+            Lifecycle::AwaitingInitializedNotification
+        ) {
+            session.lifecycle = Lifecycle::Ready;
+            return None;
+        }
+        return response_for(
+            id,
+            is_notification,
+            Err(Failed::misuse(
+                "notifications/initialized must follow initialize.",
+            )),
+        );
+    }
+    if !matches!(session.lifecycle, Lifecycle::Ready) {
+        return Some(error_response(
+            id,
+            -32002,
+            "MCP initialization must complete before this method is used.",
+        ));
+    }
     let result = match method {
-        "initialize" => Ok(initialize(&params)),
         "tools/list" => Ok(json::object(vec![("tools", Json::Array(tools()))])),
         "tools/call" => call(context, &params),
         "ping" => Ok(json::object(vec![])),
@@ -329,6 +427,36 @@ pub fn handle(context: &mut Context, line: &str) -> Option<String> {
             ))
         }
     };
+    response_for(id, is_notification, result)
+}
+
+/// Answers one request for callers that do not maintain a stdio session.
+///
+/// @param context - the open database
+/// @param line - the request, as it arrived
+pub fn handle(context: &mut Context, line: &str) -> Option<String> {
+    let mut session = Session {
+        lifecycle: Lifecycle::Ready,
+    };
+    handle_with_session(context, &mut session, line)
+}
+
+/// Returns whether a JSON-RPC request id has one of the permitted types.
+///
+/// @param id - the request id the client supplied or the null default
+fn valid_request_id(id: &Json) -> bool {
+    matches!(
+        id,
+        Json::Null | Json::Int(_) | Json::Real(_) | Json::Text(_)
+    )
+}
+
+/// Renders a method result unless the request was a notification.
+///
+/// @param id - the request id to include in a response
+/// @param is_notification - whether the request omitted its id member
+/// @param result - the method result or parameter refusal
+fn response_for(id: Json, is_notification: bool, result: Result<Json, Failed>) -> Option<String> {
     if is_notification {
         return None;
     }
@@ -346,13 +474,30 @@ pub fn handle(context: &mut Context, line: &str) -> Option<String> {
 /// Returns what a client is told when it connects.
 ///
 /// @param params - what the client sent, whose `protocolVersion` is echoed
-fn initialize(params: &Json) -> Json {
-    let asked = params
-        .get("protocolVersion")
-        .and_then(Json::text)
-        .unwrap_or(PROTOCOL);
-    json::object(vec![
-        ("protocolVersion", json::text(asked)),
+fn initialize(params: &Json) -> Result<Json, Failed> {
+    let Json::Object(_) = params else {
+        return Err(Failed::misuse("initialize params must be an object."));
+    };
+    for (name, required) in [
+        ("protocolVersion", true),
+        ("capabilities", true),
+        ("clientInfo", true),
+    ] {
+        if required && params.get(name).is_none() {
+            return Err(Failed::misuse(format!("initialize needs '{name}'.")));
+        }
+    }
+    if params.get("protocolVersion").and_then(Json::text).is_none() {
+        return Err(Failed::misuse("'protocolVersion' has to be text."));
+    }
+    if !matches!(params.get("capabilities"), Some(Json::Object(_))) {
+        return Err(Failed::misuse("'capabilities' has to be an object."));
+    }
+    if !matches!(params.get("clientInfo"), Some(Json::Object(_))) {
+        return Err(Failed::misuse("'clientInfo' has to be an object."));
+    }
+    Ok(json::object(vec![
+        ("protocolVersion", json::text(PROTOCOL)),
         (
             "capabilities",
             json::object(vec![(
@@ -378,7 +523,7 @@ fn initialize(params: &Json) -> Json {
                  mistake in your SQL, and rewording it will not help.",
             ),
         ),
-    ])
+    ]))
 }
 
 /// Runs one tool call.
@@ -400,7 +545,10 @@ fn call(context: &mut Context, params: &Json) -> Result<Json, Failed> {
             command.cli_only.unwrap_or_default()
         )));
     }
-    let arguments = Arguments::from_json(&params.get("arguments").cloned().unwrap_or(Json::Null));
+    let arguments = Arguments::from_json(
+        command,
+        &params.get("arguments").cloned().unwrap_or(Json::Null),
+    )?;
     let wants_json = arguments.text("output") == Some("json");
     match command::run(command, context, &arguments) {
         Ok(produced) => {
@@ -422,6 +570,16 @@ fn call(context: &mut Context, params: &Json) -> Result<Json, Failed> {
             Ok(content(&body, true))
         }
     }
+}
+
+/// Extracts the JSON RPC id from a completed response.
+///
+/// @param response - the response that may need replacing because it is too large
+fn response_id(response: &str) -> Json {
+    json::parse(response)
+        .ok()
+        .and_then(|value| value.get("id").cloned())
+        .unwrap_or(Json::Null)
 }
 
 /// Wraps text as an MCP tool result.
@@ -508,17 +666,88 @@ mod tests {
         }
     }
 
-    /// Initialize echoes the version the client asked for.
+    /// Initialize selects the revision the server supports.
     #[test]
-    fn initialize_echoes_the_clients_version() {
-        let answer = handle(
+    fn initialize_selects_the_supported_version() {
+        let mut session = Session::default();
+        let answer = handle_with_session(
             &mut context(),
+            &mut session,
             "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\
-             \"params\":{\"protocolVersion\":\"2024-11-05\"}}",
+             \"params\":{\"protocolVersion\":\"2099-01-01\",\"capabilities\":{},\
+             \"clientInfo\":{\"name\":\"test\"}}}",
         )
         .unwrap_or_default();
-        assert!(answer.contains("\"protocolVersion\":\"2024-11-05\""));
+        assert!(answer.contains(&format!("\"protocolVersion\":\"{PROTOCOL}\"")));
         assert!(answer.contains("\"name\":\"inillucent\""));
+    }
+
+    /// Invalid JSON RPC envelopes and initialize payloads return protocol errors.
+    #[test]
+    fn invalid_requests_and_initialize_payloads_are_refused() {
+        for request in [
+            "{\"id\":41,\"method\":\"ping\"}",
+            "{\"jsonrpc\":\"1.0\",\"id\":42,\"method\":\"ping\"}",
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}",
+        ] {
+            let answer = handle(&mut context(), request).unwrap_or_default();
+            assert!(answer.contains("\"error\""), "{answer}");
+        }
+    }
+
+    /// JSON-RPC rejects scalar params and non scalar request ids with a null id.
+    #[test]
+    fn invalid_json_rpc_member_types_are_refused() {
+        for request in [
+            "{\"jsonrpc\":\"2.0\",\"id\":31,\"method\":\"ping\",\"params\":\"bad\"}",
+            "{\"jsonrpc\":\"2.0\",\"id\":true,\"method\":\"ping\"}",
+            "{\"jsonrpc\":\"2.0\",\"id\":{},\"method\":\"ping\"}",
+        ] {
+            let answer = handle(&mut context(), request).unwrap_or_default();
+            assert!(answer.contains("\"code\":-32600"), "{answer}");
+            assert!(answer.contains("\"id\":null"), "{answer}");
+        }
+    }
+
+    /// Normal methods wait for initialize and notifications/initialized.
+    #[test]
+    fn initialization_must_complete_before_normal_methods() {
+        let mut held = context();
+        let mut session = Session::default();
+        let before = handle_with_session(
+            &mut held,
+            &mut session,
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}",
+        )
+        .unwrap_or_default();
+        assert!(before.contains("\"code\":-32002"), "{before}");
+        let initialized = handle_with_session(
+            &mut held,
+            &mut session,
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"test\"}}}",
+        )
+        .unwrap_or_default();
+        assert!(initialized.contains("\"result\""), "{initialized}");
+        let waiting = handle_with_session(
+            &mut held,
+            &mut session,
+            "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/list\"}",
+        )
+        .unwrap_or_default();
+        assert!(waiting.contains("\"code\":-32002"), "{waiting}");
+        assert!(handle_with_session(
+            &mut held,
+            &mut session,
+            "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}",
+        )
+        .is_none());
+        let listed = handle_with_session(
+            &mut held,
+            &mut session,
+            "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/list\"}",
+        )
+        .unwrap_or_default();
+        assert!(listed.contains("\"result\""), "{listed}");
     }
 
     /// A notification is not answered.
@@ -615,7 +844,44 @@ mod tests {
                 "{} declares the wrong required set",
                 command.name
             );
+            assert_eq!(schema.get("additionalProperties"), Some(&Json::Bool(false)));
         }
+    }
+
+    /// Tool arguments reject unknown names, wrong types, and disallowed text values.
+    #[test]
+    fn tool_arguments_are_checked_against_the_command_schema() {
+        for arguments in [
+            "{\"sql\":\"SELECT 1\",\"limit\":\"one\"}",
+            "{\"sql\":\"SELECT 1\",\"limti\":1}",
+            "{\"sql\":\"SELECT 1\",\"output\":\"yaml\"}",
+        ] {
+            let answer = handle(
+                &mut context(),
+                &format!("{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{{\"name\":\"inillucent_query\",\"arguments\":{arguments}}}}}"),
+            )
+            .unwrap_or_default();
+            assert!(answer.contains("\"code\":-32602"), "{answer}");
+        }
+        let query_schema = schema_of(command::find("query").unwrap_or(&command::COMMANDS[0]));
+        let output = query_schema
+            .get("properties")
+            .and_then(|value| value.get("output"))
+            .unwrap_or(&Json::Null)
+            .write();
+        assert!(output.contains("\"enum\":[\"text\",\"json\"]"), "{output}");
+    }
+
+    /// An oversized replacement response keeps the original JSON RPC id.
+    #[test]
+    fn response_budget_errors_keep_the_request_id() {
+        let response = format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":77,\"result\":\"{}\"}}",
+            "x".repeat(MAX_RESPONSE_BYTES)
+        );
+        let replacement = enforce_response_budget(response);
+        assert!(replacement.contains("\"id\":77"), "{replacement}");
+        assert!(replacement.contains("\"code\":-32603"), "{replacement}");
     }
 
     /// A read-only server refuses a write and says why.

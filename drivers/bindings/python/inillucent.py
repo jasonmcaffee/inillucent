@@ -646,9 +646,11 @@ class Connection:
     def cancel(self) -> None:
         """Ask a running statement to stop.
 
-        Always raises :class:`Unsupported`, and ``supports("cancel")`` says so
-        before you draw a Stop button: the engine runs a statement whole rather
-        than a row at a time, so there is no point at which it could notice.
+        ``supports("cancel")`` reports ``SUPPORT_PARTIAL`` because the request
+        is read at each scan leaf and result batch. Long scans, large results,
+        and slow joins stop with ``INTERRUPTED``. One indivisible operator must
+        finish before it can observe the request, so callers should not promise
+        an immediate stop.
         """
         error = c_void_p()
         status = _LIB.inillucent_cancel(self._handle, ctypes.byref(error))

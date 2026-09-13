@@ -181,6 +181,9 @@ impl Failpoints {
             .sites_reached
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
+        if std::env::var_os("INILLUCENT_TRACE_SITES").is_some() {
+            eprintln!("TRACE site#{index} {site:?}");
+        }
         let armed = self.fail_nth.load(Ordering::Relaxed);
         if armed != 0 && armed == index {
             return Some(*guard(&self.nth_failure));

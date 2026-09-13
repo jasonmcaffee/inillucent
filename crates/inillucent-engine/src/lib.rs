@@ -78,6 +78,7 @@
 
 pub mod analyze;
 pub mod attach;
+mod checkpoint;
 pub mod connect;
 pub mod ddl;
 mod entries;
@@ -88,12 +89,18 @@ pub mod multi;
 mod plans;
 pub mod pragma;
 mod rebuild;
+mod recovery;
+use recovery::{open_file, OpenedFile};
+/// Session-scoped `total_changes()` accounting.
+mod session_changes;
 /// The engine's half of a vector index a module owns.
 mod vectors;
 pub mod vtab;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+use plans::CachedQuery;
 
 use inillucent_base::error::{refusal, Unwind};
 use inillucent_base::limits::Limits;
@@ -310,6 +317,19 @@ pub struct ImportedDatabase {
     touched: u16,
     /// Named savepoints, and where each one sits in `undo`.
     marks: Vec<(Vec<u8>, usize)>,
+    /// Whether the open transaction was started by `SAVEPOINT` rather than by
+    /// `BEGIN`.
+    ///
+    /// **What tells `release` whether to commit.** SQLite's rule for
+    /// `RELEASE` is not "commit whenever the last savepoint goes away" - a
+    /// `SAVEPOINT s` inside an explicit `BEGIN` also empties `marks` when `s`
+    /// is released, and that must stay open for the `COMMIT` that follows.
+    /// It is "commit when the transaction the savepoint stack itself opened
+    /// has no savepoints left in it": `SAVEPOINT` outside a transaction opens
+    /// one - see `Directive::Savepoint` - and this is set there, at the
+    /// instant it does, and cleared wherever the transaction ends
+    /// (`commit_batch`, `rollback`).
+    implicit_transaction: std::cell::Cell<bool>,
     /// The rowid the last `INSERT` assigned, for `last_insert_rowid`.
     ///
     /// **Deliberately not restored by a rollback.** SQLite documents the value
@@ -324,6 +344,11 @@ pub struct ImportedDatabase {
     /// Never decremented: a `ROLLBACK` does not put it back, which was measured
     /// against the pinned shell rather than assumed.
     changed_ever: std::cell::Cell<i64>,
+    /// What `changed_ever` read when each connection's session was opened, so
+    /// `total_changes()` answers for this session alone rather than for every
+    /// session this database has ever handed out. See
+    /// [`session_changes::SessionChanges`].
+    session_change_baseline: session_changes::SessionChanges,
     /// How many rows the most recent write changed, for `changes()`.
     ///
     /// The statement's own rows only - a trigger body's are not in it. A
@@ -890,9 +915,18 @@ impl ImportedDatabase {
     }
 
     /// Returns a number for a connection that has just been opened.
+    ///
+    /// **Records `changed_ever`'s value at this instant as the new session's
+    /// baseline**, which is what lets `total_changes()` answer only for rows
+    /// this connection changed - see `session_change_baseline`. A caller that
+    /// wants the *same* connection back across several calls uses
+    /// `Connection::session` and `Database::connect_as` instead, which never
+    /// reaches here and so never resets the baseline it already has.
     pub fn open_session(&self) -> u64 {
         let session = self.next_session.get();
         self.next_session.set(session.saturating_add(1));
+        self.session_change_baseline
+            .record_open(session, self.changed_ever.get());
         session
     }
 
@@ -977,6 +1011,23 @@ impl ImportedDatabase {
             return Some(std::rc::Rc::clone(&self.wal));
         }
         self.schema_at(at).map(|held| std::rc::Rc::clone(&held.wal))
+    }
+
+    /// Returns the handle a [`WalLog`] arms one schema's no-steal watermark
+    /// through.
+    ///
+    /// Falls back to `main`'s own pool for a schema that has gone - a rollback
+    /// racing a `DETACH`, say - so a write never panics over bookkeeping that
+    /// exists only to make a checkpoint honest.
+    ///
+    /// @param at - the schema, as the binder numbers them
+    pub(crate) fn uncommitted_handle_of(
+        &self,
+        at: usize,
+    ) -> std::sync::Arc<std::sync::atomic::AtomicU64> {
+        self.schema_file(at)
+            .map(|database| database.pool().uncommitted_handle())
+            .unwrap_or_else(|| self.database.pool().uncommitted_handle())
     }
 
     /// Returns one schema's catalog rows.
@@ -1420,6 +1471,7 @@ impl ImportedDatabase {
             last_changes: std::cell::Cell::new(0),
             seed: std::cell::Cell::new(fresh_seed()),
             changed_ever: std::cell::Cell::new(0),
+            session_change_baseline: session_changes::SessionChanges::default(),
             statements: std::cell::RefCell::new(HashMap::new()),
             compiles: std::cell::Cell::new(0),
             batch: std::cell::Cell::new(None),
@@ -1427,6 +1479,7 @@ impl ImportedDatabase {
             touched: 0,
             decided_over: std::cell::Cell::new(0),
             marks: Vec::new(),
+            implicit_transaction: std::cell::Cell::new(false),
             entries: carried
                 .entries
                 .into_iter()
@@ -1523,11 +1576,11 @@ impl ImportedDatabase {
         };
         self.journal_mode = mode;
         let held: std::sync::Arc<dyn inillucent_vfs::Vfs> = std::sync::Arc::clone(&self.vfs);
-        let journal = mode.is_rollback().then(|| {
+        let journal = journal_for(mode).map(|protection| {
             inillucent_pool::journal::Journal::new(
                 held,
                 &DbPath::new(self.path.to_string_lossy().as_ref()),
-                mode,
+                protection,
                 self.page_size,
             )
         });
@@ -1716,6 +1769,7 @@ impl ImportedDatabase {
             last_changes: std::cell::Cell::new(0),
             seed: std::cell::Cell::new(fresh_seed()),
             changed_ever: std::cell::Cell::new(0),
+            session_change_baseline: session_changes::SessionChanges::default(),
             statements: std::cell::RefCell::new(HashMap::new()),
             compiles: std::cell::Cell::new(0),
             batch: std::cell::Cell::new(None),
@@ -1723,6 +1777,7 @@ impl ImportedDatabase {
             touched: 0,
             decided_over: std::cell::Cell::new(0),
             marks: Vec::new(),
+            implicit_transaction: std::cell::Cell::new(false),
             entries,
             tables: Vec::new(),
             schema_info,
@@ -2165,7 +2220,7 @@ impl ImportedDatabase {
     pub(crate) fn statement_shape(&self, sql: &str) -> (i64, bool) {
         let columns = match self.compiled(sql) {
             Ok(cached) => match &*cached {
-                Cached::Select(plan, _) => plan.select.columns.len() as i64,
+                Cached::Select(plan, _, _) => plan.select.columns.len() as i64,
                 _ => 0,
             },
             Err(_) => 0,
@@ -2189,7 +2244,7 @@ impl ImportedDatabase {
     pub fn describe_cached(&self, sql: &str) -> DbResult<Vec<String>> {
         match &*self.compiled(sql)? {
             Cached::Nothing => Ok(vec!["nothing".to_string()]),
-            Cached::Select(_, prepared) => Ok(prepared.describe()),
+            Cached::Select(_, prepared, _) => Ok(prepared.describe()),
             Cached::Ddl(_) => Ok(vec!["a directive".to_string()]),
             Cached::QueryPlan(_) => Ok(vec!["a query plan".to_string()]),
             Cached::Program(_) => Ok(vec!["a program listing".to_string()]),
@@ -2283,9 +2338,18 @@ impl ImportedDatabase {
         self.last_rowid.get()
     }
 
-    /// Returns how many rows every statement so far has changed.
+    /// Returns how many rows every statement on **this connection** has
+    /// changed.
+    ///
+    /// `changed_ever` is one counter shared by every connection this database
+    /// has ever handed out, so the answer is the counter's value minus what it
+    /// already read when `self.session` was opened - see
+    /// `session_change_baseline`. `self.session` is always the caller's own:
+    /// every entry point reaches this through `use_session`, which sets it
+    /// first.
     pub fn total_changes(&self) -> i64 {
-        self.changed_ever.get()
+        self.session_change_baseline
+            .total_changes(self.session.get(), self.changed_ever.get())
     }
 
     /// Returns how many rows the most recent write changed.
@@ -2326,7 +2390,7 @@ impl ImportedDatabase {
     pub fn scalar_context(&self) -> inillucent_exec::scalar::Context {
         inillucent_exec::scalar::Context {
             changes: self.last_changes.get(),
-            total_changes: self.changed_ever.get(),
+            total_changes: self.total_changes(),
             last_insert_rowid: self.last_rowid.get(),
             seed: self.next_seed(),
             // So the `like(a, b)` function spelling follows the same pragma the
@@ -2452,6 +2516,7 @@ impl ImportedDatabase {
                 // The restore is not itself undoable: it *is* the undo, and
                 // recording it would grow the buffer being drained.
                 undo: None,
+                uncommitted: self.uncommitted_handle_of(at),
             };
             // **The catalog tree answers to two numbers.** Its `tree_id` is
             // `SCHEMA_TREE_ID`, which is what the log records carry, and it
@@ -2757,6 +2822,15 @@ impl ImportedDatabase {
         let undone = self.undo_to(None);
         self.marks.clear();
         self.batch.set(None);
+        self.implicit_transaction.set(false);
+        // Rolled back, so no-steal has nothing left to hold back on any
+        // schema this transaction touched - read before `touched` is cleared
+        // below, which is the only record of which schemas those were.
+        for at in schemas_in(self.touched) {
+            if let Some(database) = self.schema_file(at) {
+                database.pool().set_uncommitted_lsn(u64::MAX);
+            }
+        }
         // Nothing to decide: an abandoned transaction has no commit for a
         // super-journal to be about, and the records it left are never replayed
         // because no `Commit` follows them.
@@ -2867,6 +2941,7 @@ impl ImportedDatabase {
         // would hold every row a long transaction touched.
         self.undo.borrow_mut().clear();
         self.marks.clear();
+        self.implicit_transaction.set(false);
         let Some(txn) = self.batch.take() else {
             self.touched = 0;
             return Ok(());
@@ -2947,6 +3022,9 @@ impl ImportedDatabase {
             wal.commit(txn, txn)?;
             if let Some(database) = self.schema_file(at) {
                 database.pool().set_durable_lsn(wal.write_ahead_point());
+                // Committed, so no-steal has nothing left to hold back on
+                // this schema until its next transaction's first record.
+                database.pool().set_uncommitted_lsn(u64::MAX);
             }
             wrote_any = true;
         }
@@ -2966,46 +3044,6 @@ impl ImportedDatabase {
     /// super-journal.
     pub fn decided_over(&self) -> usize {
         self.decided_over.get()
-    }
-
-    /// Returns what the write path has done to every tree, added up.
-    ///
-    /// The counters, not the clock. For a write the counters are the story: a
-    /// page compacted is a whole page image in the log, and a tree that
-    /// compacts once per statement is doing work no timing will explain on its
-    /// own.
-    /// Folds every attached database's log into its own file.
-    ///
-    /// A checkpoint is per file, because a log is per file. `checkpoint` does
-    /// `main`; this does the rest, so that a connection closed after one is not
-    /// leaving an attached database's committed rows in a log the next open of
-    /// *that file alone* would still have to replay.
-    fn checkpoint_attached(&mut self) -> DbResult<()> {
-        for nth in 0..self.attached.len() {
-            let Some(held) = self.attached.get_mut(nth) else {
-                continue;
-            };
-            if held.path.is_none() {
-                // A database with no file has nothing to fold a log into.
-                continue;
-            }
-            held.wal.sync()?;
-            held.wal.roll_segment()?;
-            let durable = held.wal.write_ahead_point();
-            held.database.pool().set_durable_lsn(durable);
-            let sequence = held.wal.sequence();
-            held.database.set_log_position(durable, 0, sequence);
-            held.database.checkpoint()?;
-            held.wal.note_checkpoint(durable, 0)?;
-            // The segments below the checkpoint describe changes the file now
-            // holds, so keeping them is keeping a second copy of the database
-            // for ever. See `Database::checkpoint` for the measurement.
-            held.wal.retire_segments_below(durable)?;
-            held.database
-                .pool()
-                .set_durable_lsn(held.wal.write_ahead_point());
-        }
-        Ok(())
     }
 
     /// Returns what the write path has done to every tree, added up.
@@ -3136,12 +3174,33 @@ impl ImportedDatabase {
 
     /// Rebuilds this database over itself, reclaiming everything nothing uses.
     ///
-    /// The rebuild is written beside the database and then moved over it, so a
-    /// crash at any point leaves either the original or the rebuilt file whole
-    /// and never a half-written one. The connection reopens onto the new file
-    /// afterwards, because every tree handle it holds names a root that has
-    /// moved.
+    /// **Written beside the database and renamed over it, not copied**: see
+    /// `crate::rebuild::commit_rebuild` for why a rename is what a crash
+    /// cannot catch halfway and a byte copy is. The connection reopens onto
+    /// the new file afterwards, because every tree handle it holds names a
+    /// root that has moved. This is real `std::fs`, not `self.vfs` - see
+    /// `docs/relational-architecture.md` §6 for what that means for a
+    /// connection not on an `OsVfs`, and why this is crash-tested against
+    /// real files rather than through a simulated one.
+    ///
+    /// **Every temporary table and every attached database is carried across
+    /// too**, by `crate::rebuild::AttachedSchemas` (see its doc) - `main` is
+    /// the only file this rewrites, so both are simply moved onto the
+    /// reopened connection unchanged. Refused instead for a declared imposter
+    /// table, which is bound into `main`'s own trees by page - every index
+    /// below gets a fresh one, so there is nothing to move it onto.
+    ///
+    /// **`changes()`, `total_changes()` and `last_insert_rowid()` are
+    /// preserved - except when the rebuilt schema holds a view**, which moves
+    /// the last one; see `crate::rebuild::last_rowid_after_vacuum`. Every
+    /// other connection setting is captured before the first reopen and put
+    /// back after the second, by `crate::rebuild::ConnectionSettings`.
     pub(crate) fn vacuum_in_place(&mut self) -> DbResult<()> {
+        if !self.imposters.is_empty() {
+            return Err(refusal(
+                "cannot VACUUM a connection with an imposter table declared - every index gets a fresh tree below",
+            ));
+        }
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|since| since.as_nanos() as u64)
@@ -3152,29 +3211,57 @@ impl ImportedDatabase {
         let path = self.path.clone();
         let page_size = self.page_size;
         let frames = self.frames;
-        // **The old file is closed before it is replaced, not after.** Every
-        // handle this connection holds names a root in the file that is about
-        // to go, and a pool still holding frames of a file whose bytes have
-        // changed underneath it is a pool that will answer from the database
-        // that used to be there. Assigning through `self` is what closes it:
-        // the old value is dropped as the old value of the assignment, which is
-        // the only moment in this function when neither file is open by us.
+        // **`changes()`/`total_changes()`/`last_insert_rowid()` are the
+        // connection's own history, not a fact about the file `VACUUM` is
+        // rewriting, and SQLite's own `VACUUM` leaves them alone.** Assigning
+        // through `self` below replaces the whole `ImportedDatabase` with a
+        // freshly opened one, whose `last_changes`/`changed_ever`/
+        // `last_rowid`/`session_change_baseline` all start at zero - so the
+        // differential suite's `vacuum_matches_sqlite` read `changes()` as 0
+        // and `last_insert_rowid()` as 0 straight after a `VACUUM` that
+        // changed nothing itself and inserted no row, where the reference
+        // still answered whatever the last real write left there. Saved here
+        // and restored once, after the second and final swap - nothing runs a
+        // statement on `self` between the two, so there is nothing to restore
+        // in between.
+        let last_changes = self.last_changes.get();
+        let changed_ever = self.changed_ever.get();
+        let last_rowid = self.last_rowid.get();
+        let session_change_baseline = std::mem::take(&mut self.session_change_baseline);
+        let settings = crate::rebuild::ConnectionSettings::capture(self);
+        let schemas = crate::rebuild::AttachedSchemas::take(self);
+        // **The old file is closed before it is replaced, not after** -
+        // assigning through `self` drops the old value first, which is the
+        // only moment in this function when neither file is open by us. A
+        // pool still holding frames of a file whose bytes changed underneath
+        // it would answer from the database that used to be there.
         *self = ImportedDatabase::open(scratch.clone(), page_size, frames)?;
-        // **And its log segments go with it.** They describe the pages of the
-        // database that was there; left beside the file they would be replayed
-        // over the rebuilt one on the next open, which is the rebuild undone by
-        // recovery. The checkpoint at the head of `rebuild_into` already folded
-        // everything they hold into the file that is about to be overwritten.
+        // **The one crash-sensitive moment.** Up to here neither `path` nor
+        // its log segments have been touched, so a crash recovers the
+        // original the ordinary way. `commit_rebuild` is a single rename, and
+        // once it returns `path` holds the rebuilt bytes durably.
+        crate::rebuild::commit_rebuild(&scratch, &path)?;
+        // Only now, with the rename durable, do `path`'s pre-rebuild segments
+        // stop describing anything true - left beside the new file they would
+        // be replayed over it on the next open, undoing the rebuild. Removing
+        // them earlier, before the rename could be proven to land, was this
+        // function's defect: a crash between the removal and the copy left
+        // the original unrecoverable, its log already gone.
         crate::rebuild::remove_log_segments(&path);
-        std::fs::copy(&scratch, &path).map_err(|error| {
-            inillucent_base::error::misuse(format!(
-                "cannot write the rebuilt database over {}: {error}",
-                path.display()
-            ))
-        })?;
         *self = ImportedDatabase::open(path, page_size, frames)?;
+        self.last_changes.set(last_changes);
+        self.changed_ever.set(changed_ever);
+        self.last_rowid
+            .set(crate::rebuild::last_rowid_after_vacuum(self, last_rowid));
+        self.session_change_baseline = session_change_baseline;
+        // Before the settings: `ConnectionSettings::restore`'s
+        // `refresh_catalog` needs the tables `rebuild_tables` derives here
+        // already in place to describe them.
+        schemas.restore(self)?;
+        settings.restore(self)?;
+        // The scratch name is spent - `commit_rebuild` renamed the file away -
+        // so this is only the log segments it picked up along the way.
         crate::rebuild::remove_log_segments(&scratch);
-        let _ = std::fs::remove_file(&scratch);
         Ok(())
     }
 
@@ -3414,64 +3501,6 @@ impl ImportedDatabase {
         self.wal.set_synchronous(policy);
     }
 
-    /// Writes every dirty page and advances the log's recovery point.
-    ///
-    /// The log is synced *first*, so that every page about to be written is one
-    /// the log has already described durably. The other order is the durability
-    /// mutant the Phase 3 gate exists to kill.
-    pub fn checkpoint(&mut self) -> DbResult<()> {
-        // **The catalog's statistics are made honest first, and inside the
-        // transaction the checkpoint is about to make durable.** A tree's shape
-        // changes on every split and every insert, and rewriting a catalog row
-        // that often would put a catalog write on the write path. A checkpoint
-        // is the moment it is cheap: the file is being flushed anyway, and what
-        // the next open reads is the shape as of the last checkpoint - which is
-        // exactly what the next open needs, because everything after it is in
-        // the log for recovery to replay.
-        self.refresh_statistics()?;
-        self.wal.sync()?;
-        // **The segment boundary is moved to the checkpoint point first.**
-        // A segment is only retirable once every record in it is below the
-        // checkpoint LSN, and the segment being appended to never is - the
-        // checkpoint record itself lands in it. Rolling here is what turns
-        // "everything except the current segment" into "everything", and it is
-        // the difference between a log that shrinks and one that keeps one
-        // segment's worth of a finished build for ever.
-        self.wal.roll_segment()?;
-        let durable = self.wal.write_ahead_point();
-        self.database.pool().set_durable_lsn(durable);
-        let sequence = self.wal.sequence();
-        self.database.set_log_position(durable, 0, sequence);
-        self.database.checkpoint()?;
-        self.wal.note_checkpoint(durable, 0)?;
-        // **And then the segments the checkpoint has made redundant go.**
-        //
-        // `retire_segments_below` was written, documented as "called after a
-        // checkpoint", and covered by six cases in `inillucent-wal`'s recovery
-        // tests - and called from exactly one place, `inillucent-txn`'s engine,
-        // which is not the engine that ships. The consequence was measured: the
-        // same 200,000 rows are 18.4 MB in SQLite and 179.1 MB here, 27.6 MB of
-        // data file and 151.5 MB of log segments that survive a checkpoint, a
-        // clean close, a reopen and a second checkpoint.
-        //
-        // It is safe to do here rather than only at close because the function
-        // deletes a segment only when every record in it is below the
-        // checkpoint LSN *and* the next segment starts at or below it, so a
-        // segment holding anything recovery would still need is left alone -
-        // and a segment it cannot unlink is left alone and reported `Ok`,
-        // because failing a checkpoint over a file that would not delete would
-        // turn a tidy-up into an outage.
-        self.wal.retire_segments_below(durable)?;
-        self.database
-            .pool()
-            .set_durable_lsn(self.wal.write_ahead_point());
-        // Every attached database too, because a log is per file and a
-        // connection closed after a checkpoint should leave databases rather
-        // than databases and logs nobody will open again.
-        self.checkpoint_attached()?;
-        Ok(())
-    }
-
     /// Closes the file and opens it again, from the catalog alone.
     ///
     /// **The test that makes the persisted statistics load-bearing.** Every tree
@@ -3690,11 +3719,18 @@ impl ImportedDatabase {
             | Cached::VirtualInsert(_)
             | Cached::Select(..)
             | Cached::Insert(_, None, _) => Vec::new(),
-            Cached::Insert(_, Some((plan, prepared)), _) => {
-                physical::run_any_prepared(plan, self, prepared, params)?.0
+            // This harness measures a fresh build on purpose - see the doc
+            // comment - so it keeps calling `run_any_prepared` directly
+            // rather than `query`'s slot, exactly as it did before Stage 3.
+            Cached::Insert(_, Some(query), _) => {
+                physical::run_any_prepared(&query.plan, self, &query.prepared, params)?.0
             }
-            Cached::Update(_, plan, prepared, _, _) | Cached::Delete(_, plan, prepared) => {
-                self.keys_of(plan, prepared, params)?
+            Cached::Update(_, query, _, _) | Cached::Delete(_, query) => {
+                if let Some(key) = physical::rowid_seek_key(&query.plan, params)? {
+                    vec![vec![key]]
+                } else {
+                    physical::run_any_prepared(&query.plan, self, &query.prepared, params)?.0
+                }
             }
         };
         let find = found.elapsed().as_nanos();
@@ -3714,7 +3750,7 @@ impl ImportedDatabase {
             Cached::VirtualInsert(statement) => {
                 self.insert_into_module(statement, params)?;
             }
-            Cached::Select(plan, prepared) => {
+            Cached::Select(plan, prepared, _) => {
                 physical::run_any_prepared(plan, self, prepared, params)?;
             }
             Cached::Insert(statement, ..) => {
@@ -3722,7 +3758,7 @@ impl ImportedDatabase {
                     dml::insert(statement, target, params, &rows)
                 })?;
             }
-            Cached::Update(statement, _, _, _, setup) => {
+            Cached::Update(statement, _, _, setup) => {
                 self.write(params, Vec::new(), |target, params| {
                     dml::update_cached(statement, target, params, &rows, setup)
                 })?;
@@ -4046,21 +4082,40 @@ impl ImportedDatabase {
         self.statements.borrow_mut().clear();
     }
 
-    /// Turns off one or more planner optimizations for this connection.
+    /// Sets exactly which planner optimizations are off for this connection.
+    ///
+    /// **An absolute mask, not an accumulating one** - this mirrors SQLite's own
+    /// `SQLITE_TESTCTRL_OPTIMIZATIONS`, which assigns the disabled set rather
+    /// than folding a new one into whatever was there. A caller measuring a
+    /// lever moves back and forth between two masks on the same connection -
+    /// `disable_optimizations(SOME_LEVER)` and then `disable_optimizations(0)`
+    /// to return to "everything on" - and an OR-based mask cannot answer that
+    /// second call: once any lever had ever been disabled, `mask = 0` folded in
+    /// nothing new and left it disabled, so a connection could turn levers off
+    /// but never back on. Three of the optimisation-arm tests in
+    /// `crates/inillucent-compat/tests/levers.rs` reuse one connection across a
+    /// `for` loop of statements for exactly this reason, and every statement
+    /// after the first ran its "with" arm under the previous statement's
+    /// "without" arm's mask - so the two arms silently compared the same plan
+    /// against itself from the second statement onward. `plan_cache.rs`'s
+    /// `a_lever_change_is_cached_separately` already asserts the corrected
+    /// contract: a `disable_optimizations(0)` after a lever was disabled has to
+    /// land back on the plan compiled before it, not stay on the disabled one.
     ///
     /// **Every compiled statement goes with it.** A plan built under a lever is
     /// that lever's answer, and re-running it after the lever changed would
     /// measure the old choice while reporting the new one - which is the whole
     /// thing a lever exists to compare.
     ///
-    /// @param mask - the levers to switch off
+    /// @param mask - exactly the levers that should be off; every other lever
+    ///   this build has is on, whatever was disabled before this call
     pub fn disable_optimizations(&mut self, mask: u32) {
         // **The cache is keyed by the levers rather than cleared by them.** A
         // plan built under a lever is that lever's answer, so the same SQL under
         // two settings is two entries; clearing would make the second arm's
         // first execution pay a compile the first arm's did not, and that
         // difference is the size of the thing such a measurement looks for.
-        self.levers = Levers::without(self.levers.disabled() | mask);
+        self.levers = Levers::without(mask);
     }
 
     /// Returns which planner optimizations this connection has on.
@@ -4207,15 +4262,43 @@ impl ImportedDatabase {
         // one file by name and `OsVfs` is stateless - the same reasoning that
         // lets `create` and `open` each make their own.
         let held: std::sync::Arc<dyn inillucent_vfs::Vfs> = std::sync::Arc::clone(&self.vfs);
-        let journal = mode.is_rollback().then(|| {
+        let journal = journal_for(mode).map(|protection| {
             inillucent_pool::journal::Journal::new(
                 held,
                 &DbPath::new(self.path.to_string_lossy().as_ref()),
-                mode,
+                protection,
                 self.page_size,
             )
         });
         self.database.pool().set_journal(journal);
+        // **`PRAGMA journal_mode` names the connection, not one file of it.**
+        // `checkpoint_attached` writes an attached file's pages in place
+        // exactly as `main`'s checkpoint does, so an attachment left on its
+        // old journal here would keep the interrupted-checkpoint defect open
+        // for every database this connection holds but the one the pragma
+        // named. Each attachment gets its own `Journal`, over its own path and
+        // its own file's page size, because an attached file can have been
+        // created at a page size that differs from this connection's.
+        for held in self.attached.iter_mut() {
+            let Some(path) = held.path.as_ref() else {
+                // `:memory:` has no file to checkpoint into, so nothing here
+                // needs protecting.
+                continue;
+            };
+            let attached_path = DbPath::new(path.to_string_lossy().as_ref());
+            let attached_vfs: std::sync::Arc<dyn inillucent_vfs::Vfs> =
+                std::sync::Arc::clone(&held.vfs);
+            let page_size = held.database.page_size();
+            let attached_journal = journal_for(mode).map(|protection| {
+                inillucent_pool::journal::Journal::new(
+                    attached_vfs,
+                    &attached_path,
+                    protection,
+                    page_size,
+                )
+            });
+            held.database.pool().set_journal(attached_journal);
+        }
         Ok(())
     }
 
@@ -4294,25 +4377,25 @@ impl ImportedDatabase {
 
     /// Returns the keys a write will change.
     ///
-    /// A `WHERE` that is a rowid equality is answered from the plan itself -
-    /// see `physical::rowid_seek_key` - and everything else runs the query. The
-    /// row may not exist, and that is not this function's problem: the write
-    /// path reads each key before it changes anything and skips the ones that
-    /// are not there.
+    /// A rowid-equality `WHERE` is answered from the plan itself - see
+    /// `physical::rowid_seek_key` - without asking `query`'s slot at all; that
+    /// shape is already a single lookup, so Stage 3's saving is on the range
+    /// and index shapes instead. Everything else runs through
+    /// [`ImportedDatabase::run_cached_query`], the slot-try/build-once/reuse
+    /// mechanism `execute_select_cached` gives a `SELECT`.
     ///
-    /// @param plan - the keys query
-    /// @param prepared - its structural choice
+    /// **Runs under `&self` and returns before `self.write` takes `&mut
+    /// self`.** `query.slot.try_borrow_mut()` is taken and dropped inside
+    /// `run_cached_query`, entirely before this returns, so nothing about it
+    /// is still borrowed when the write that follows needs `&mut self`.
+    ///
+    /// @param query - the keys query and its compiled-chain cache
     /// @param params - the bound parameters
-    fn keys_of(
-        &self,
-        plan: &PhysicalPlan,
-        prepared: &physical::Prepared,
-        params: &Params,
-    ) -> DbResult<Vec<Vec<OwnedDatum>>> {
-        if let Some(key) = physical::rowid_seek_key(plan, params)? {
+    fn keys_of(&self, query: &CachedQuery, params: &Params) -> DbResult<Vec<Vec<OwnedDatum>>> {
+        if let Some(key) = physical::rowid_seek_key(&query.plan, params)? {
             return Ok(vec![vec![key]]);
         }
-        Ok(physical::run_any_prepared(plan, self, prepared, params)?.0)
+        self.run_cached_query(&query.plan, &query.prepared, &query.slot, params)
     }
 
     /// Runs one already-compiled statement.
@@ -4396,18 +4479,13 @@ impl ImportedDatabase {
             Cached::QueryPlan(lines) => Ok(query_plan_rows(lines)),
             Cached::Program(rows) => Ok(program_rows(rows)),
             Cached::VirtualInsert(statement) => self.insert_into_module(statement, params),
-            Cached::Select(plan, prepared) => {
-                let (rows, shape) = physical::run_any_prepared(plan, self, prepared, params)?;
-                Ok(Outcome {
-                    rows,
-                    names: names_of(&shape),
-                    changes: Changes::default(),
-                })
+            Cached::Select(plan, prepared, slot) => {
+                self.execute_select_cached(plan, prepared, slot, params)
             }
             Cached::Insert(statement, source, values_hold_subquery) => {
                 let rows = match source {
-                    Some((plan, prepared)) => {
-                        physical::run_any_prepared(plan, self, prepared, params)?.0
+                    Some(query) => {
+                        self.run_cached_query(&query.plan, &query.prepared, &query.slot, params)?
                     }
                     None => Vec::new(),
                 };
@@ -4430,8 +4508,8 @@ impl ImportedDatabase {
                     |target, params| dml::insert(statement, target, params, &rows),
                 )
             }
-            Cached::Update(statement, plan, prepared, assignments_hold_subquery, setup) => {
-                let keys = self.keys_of(plan, prepared, params)?;
+            Cached::Update(statement, query, assignments_hold_subquery, setup) => {
+                let keys = self.keys_of(query, params)?;
                 // The same for an `UPDATE`'s assignments: the plan above finds
                 // the rows, and the values written into them are evaluated by
                 // the write path from expressions the plan never carried.
@@ -4453,13 +4531,19 @@ impl ImportedDatabase {
                     |target, params| dml::update_cached(statement, target, params, &keys, setup),
                 )
             }
-            Cached::VirtualUpdate(statement, plan, prepared) => {
-                let keys = physical::run_any_prepared(plan, self, prepared, params)?.0;
+            Cached::VirtualUpdate(statement, query) => {
+                let keys =
+                    self.run_cached_query(&query.plan, &query.prepared, &query.slot, params)?;
                 let changed = self.update_module(statement, &keys, params)?;
                 if self.batch.get().is_none() {
                     self.sync_modules()?;
                     self.seal()?;
                 }
+                // See the matching comment in `vtab::insert_into_module`: a
+                // module's own write has to reach `changes()`/`total_changes()`
+                // the same way an ordinary one does, and this path never
+                // touched either counter.
+                self.record_changes(changed as i64, changed as i64);
                 Ok(Outcome {
                     rows: Vec::new(),
                     names: Vec::new(),
@@ -4469,8 +4553,9 @@ impl ImportedDatabase {
                     },
                 })
             }
-            Cached::VirtualDelete(statement, plan, prepared) => {
-                let keys = physical::run_any_prepared(plan, self, prepared, params)?.0;
+            Cached::VirtualDelete(statement, query) => {
+                let keys =
+                    self.run_cached_query(&query.plan, &query.prepared, &query.slot, params)?;
                 let mut changed = 0usize;
                 for key in &keys {
                     let Some(rowid) = key.first() else { continue };
@@ -4486,6 +4571,8 @@ impl ImportedDatabase {
                     self.sync_modules()?;
                     self.seal()?;
                 }
+                // See the matching comment in `vtab::insert_into_module`.
+                self.record_changes(changed as i64, changed as i64);
                 Ok(Outcome {
                     rows: Vec::new(),
                     names: Vec::new(),
@@ -4495,8 +4582,8 @@ impl ImportedDatabase {
                     },
                 })
             }
-            Cached::Delete(statement, plan, prepared) => {
-                let keys = self.keys_of(plan, prepared, params)?;
+            Cached::Delete(statement, query) => {
+                let keys = self.keys_of(query, params)?;
                 // A `RETURNING` clause is a result-column list the write path
                 // evaluates directly, so the plan-shaped fold never sees its
                 // subqueries. `DELETE ... RETURNING id, (SELECT count(*) FROM
@@ -4634,7 +4721,11 @@ impl ImportedDatabase {
             BoundStatement::Select(select) => {
                 let plan = plan_select_with(*select, self.levers);
                 let prepared = physical::prepare_any(&plan, self)?;
-                Ok(Cached::Select(Box::new(plan), Box::new(prepared)))
+                Ok(Cached::Select(
+                    Box::new(plan),
+                    Box::new(prepared),
+                    std::cell::RefCell::new(physical::Slot::default()),
+                ))
             }
             BoundStatement::Insert(statement)
                 if statement.table.kind == inillucent_sql::catalog_view::TableKind::Virtual =>
@@ -4650,7 +4741,7 @@ impl ImportedDatabase {
                     inillucent_sql::dml::BoundInsertSource::Select(select) => {
                         let plan = plan_select_with((**select).clone(), self.levers);
                         let prepared = physical::prepare_any(&plan, self)?;
-                        Some((Box::new(plan), Box::new(prepared)))
+                        Some(CachedQuery::new(plan, prepared))
                     }
                     inillucent_sql::dml::BoundInsertSource::Values(_) => None,
                 };
@@ -4683,8 +4774,7 @@ impl ImportedDatabase {
                 let prepared = physical::prepare_any(&plan, self)?;
                 Ok(Cached::VirtualUpdate(
                     statement,
-                    Box::new(plan),
-                    Box::new(prepared),
+                    CachedQuery::new(plan, prepared),
                 ))
             }
             BoundStatement::Update(statement) => {
@@ -4694,8 +4784,7 @@ impl ImportedDatabase {
                 });
                 Ok(Cached::Update(
                     statement,
-                    Box::new(plan),
-                    Box::new(prepared),
+                    CachedQuery::new(plan, prepared),
                     assignments_hold_subquery,
                     dml::UpdateCache::default(),
                 ))
@@ -4714,8 +4803,7 @@ impl ImportedDatabase {
                 let prepared = physical::prepare_any(&plan, self)?;
                 Ok(Cached::VirtualDelete(
                     statement,
-                    Box::new(plan),
-                    Box::new(prepared),
+                    CachedQuery::new(plan, prepared),
                 ))
             }
             BoundStatement::Delete(statement) if statement.view_rows.is_some() => {
@@ -4725,11 +4813,7 @@ impl ImportedDatabase {
                     .ok_or_else(|| refusal("a view delete with no query"))?;
                 let plan = plan_select_with((**rows).clone(), self.levers);
                 let prepared = physical::prepare_any(&plan, self)?;
-                Ok(Cached::Delete(
-                    statement,
-                    Box::new(plan),
-                    Box::new(prepared),
-                ))
+                Ok(Cached::Delete(statement, CachedQuery::new(plan, prepared)))
             }
             BoundStatement::Delete(statement) => {
                 let (plan, prepared) = self.keys_plan(
@@ -4739,11 +4823,7 @@ impl ImportedDatabase {
                     statement.limit.as_ref(),
                     statement.offset.as_ref(),
                 )?;
-                Ok(Cached::Delete(
-                    statement,
-                    Box::new(plan),
-                    Box::new(prepared),
-                ))
+                Ok(Cached::Delete(statement, CachedQuery::new(plan, prepared)))
             }
             // A directive is *not* cached as a compiled thing: it changes the
             // catalog the next statement will be bound against, and the whole
@@ -4782,7 +4862,30 @@ impl ImportedDatabase {
             .get(&table.root)
             .ok_or_else(|| refusal("no layout imported for the table being written"))?;
         let select = dml::keys_query(table, source, filter, limit, offset, layout)?;
-        let plan = plan_select_with(select, self.levers);
+        let mut plan = plan_select_with(select, self.levers);
+        // **The one place `Levers::INDEXED_WRITE` has to be applied by hand.**
+        // `plan_select_with` is the ordinary read planner, shared with every
+        // `SELECT`, so nothing in it ever consulted this lever -
+        // `inillucent_sql::plan::write_path_with` does, but nothing calls it
+        // any more since the rearchitecture moved a write's row-finding onto
+        // this bound `SELECT`. Forcing the sole source to a table scan below
+        // is `write_path_with`'s own answer for "the lever is off".
+        if !self.levers.has(Levers::INDEXED_WRITE) {
+            for planned in &mut plan.sources {
+                planned.path = inillucent_sql::plan::AccessPath::TableScan { root: table.root };
+            }
+            // **A `TableScan` consumes no predicate.** The residual above was
+            // distributed against the path just discarded, so a predicate
+            // that path answered by seeking - `key BETWEEN 10 AND 40` against
+            // an index on `key` - is missing from it, and the forced scan
+            // then filtered on nothing: `levers.rs`'s
+            // `..._changes_the_plan_and_not_the_outcome` measured its "off"
+            // arm deleting every row instead of twenty. The whole filter,
+            // unconsumed, is what a table scan needs tested instead.
+            if let Some(residual) = plan.residuals.first_mut() {
+                *residual = filter.cloned();
+            }
+        }
         let prepared = physical::prepare_any(&plan, self)?;
         Ok((plan, prepared))
     }
@@ -4901,6 +5004,7 @@ impl ImportedDatabase {
             schema: MAIN,
             wrote: false,
             undo,
+            uncommitted: self.database.pool().uncommitted_handle(),
         };
         let logs = if self.attached.is_empty() && self.temps.is_empty() {
             Logs::One(main_log)
@@ -4920,6 +5024,7 @@ impl ImportedDatabase {
                     schema: TEMP,
                     wrote: false,
                     undo,
+                    uncommitted: temp.database.pool().uncommitted_handle(),
                 },
                 None => WalLog {
                     wal: std::rc::Rc::clone(&self.wal),
@@ -4927,6 +5032,7 @@ impl ImportedDatabase {
                     schema: MAIN,
                     wrote: false,
                     undo,
+                    uncommitted: self.database.pool().uncommitted_handle(),
                 },
             });
             for (nth, attached) in self.attached.iter().enumerate() {
@@ -4936,6 +5042,7 @@ impl ImportedDatabase {
                     schema: FIRST_ATTACHED.saturating_add(nth),
                     wrote: false,
                     undo,
+                    uncommitted: attached.database.pool().uncommitted_handle(),
                 });
             }
             Logs::Many(held)
@@ -5124,6 +5231,15 @@ impl ImportedDatabase {
                 // a participant. The restores are logged like any other write
                 // and no `Commit` follows them, so a recovery replays neither
                 // the statement nor its undo.
+                //
+                // And no-steal has nothing left to hold back either: in
+                // autocommit this statement was the whole transaction, so
+                // `wrote` is every schema it armed a watermark on.
+                for at in schemas_in(wrote) {
+                    if let Some(database) = self.schema_file(at) {
+                        database.pool().set_uncommitted_lsn(u64::MAX);
+                    }
+                }
                 self.touched = 0;
             }
         }
@@ -5177,7 +5293,7 @@ fn returning_names(returning: &[inillucent_sql::bind::BoundResultColumn]) -> Vec
 }
 
 /// Returns the names a plan's result columns report.
-fn names_of(shape: &physical::Shape) -> Vec<String> {
+pub(crate) fn names_of(shape: &physical::Shape) -> Vec<String> {
     shape
         .names
         .iter()
@@ -5383,24 +5499,26 @@ enum Cached {
     /// rowid it answers with: the plan asks which rowids match and the module
     /// is told about each. That is what SQLite does, and the reason `xUpdate`
     /// takes a rowid rather than a predicate.
-    VirtualDelete(
-        Box<inillucent_sql::dml::BoundDelete>,
-        Box<PhysicalPlan>,
-        Box<physical::Prepared>,
-    ),
+    VirtualDelete(Box<inillucent_sql::dml::BoundDelete>, CachedQuery),
     /// An update of a virtual table, with the query that finds its rowids.
     ///
     /// The same shape as [`Cached::VirtualDelete`] and for the same reason: a
     /// module owns its storage, so the only handle on one of its rows is the
     /// rowid it answers with.
-    VirtualUpdate(
-        Box<inillucent_sql::dml::BoundUpdate>,
+    VirtualUpdate(Box<inillucent_sql::dml::BoundUpdate>, CachedQuery),
+    /// A query, with a slot for a compiled chain reused across executions.
+    ///
+    /// The slot is a `RefCell` beside the plan, the same reason
+    /// `dml::UpdateCache` sits inside `Cached::Update`: `cached` here is a
+    /// shared `&Rc<Cached>`, and interior mutability is what lets one
+    /// execution build the chain and a later one, through the same `Rc`,
+    /// find it already there.
+    Select(
         Box<PhysicalPlan>,
         Box<physical::Prepared>,
+        std::cell::RefCell<physical::Slot>,
     ),
-    /// A query.
-    Select(Box<PhysicalPlan>, Box<physical::Prepared>),
-    /// An insert, with the plan for its `SELECT` source when it has one.
+    /// An insert, with the query for its `SELECT` source when it has one.
     ///
     /// The flag says whether a `VALUES` list holds a subquery. It is decided
     /// once, here, because the alternative is walking the value expressions on
@@ -5409,29 +5527,24 @@ enum Cached {
     /// read path at about 0.07 us per execution.
     Insert(
         Box<inillucent_sql::dml::BoundInsert>,
-        Option<(Box<PhysicalPlan>, Box<physical::Prepared>)>,
+        Option<CachedQuery>,
         bool,
     ),
-    /// An update, with the plan that finds the rows it changes.
+    /// An update, with the query that finds the rows it changes.
     ///
     /// The flag says whether an assignment holds a subquery, for the reason
     /// above.
     Update(
         Box<inillucent_sql::dml::BoundUpdate>,
-        Box<PhysicalPlan>,
-        Box<physical::Prepared>,
+        CachedQuery,
         bool,
         /// Everything the statement builds before it looks at a row, kept
         /// between executions. See `dml::UpdateSetup`: it was more than half of
         /// what `txn.large` cost, and none of it depends on the row.
         dml::UpdateCache,
     ),
-    /// A delete, with the plan that finds the rows it removes.
-    Delete(
-        Box<inillucent_sql::dml::BoundDelete>,
-        Box<PhysicalPlan>,
-        Box<physical::Prepared>,
-    ),
+    /// A delete, with the query that finds the rows it removes.
+    Delete(Box<inillucent_sql::dml::BoundDelete>, CachedQuery),
 }
 
 /// What running one statement produced.
@@ -5470,12 +5583,28 @@ fn refused(error: inillucent_sql::diagnostic::ParseError) -> inillucent_base::er
     // and `readgate::why` had each worked around it separately, which is what a
     // defect looks like when it has been met twice and fixed neither time.
     //
+    // **The primary code comes from `error.code()`, not from `refusal`'s own
+    // `SQLITE_MISUSE`.** `ParseError::code` already answers this correctly -
+    // `PrimaryCode::Error` for an ordinary compile-time refusal, `TooBig` for
+    // the one limit SQLite reports as a parse error - because a parse or bind
+    // refusal is `SQLITE_ERROR` in SQLite, not `SQLITE_MISUSE`: `SELECT
+    // nosuchcolumn FROM a`, `PRIMARY KEY missing on table x`, `ambiguous
+    // column name: v`, `AUTOINCREMENT is only allowed on an INTEGER PRIMARY
+    // KEY` and `RAISE() may only be used within a trigger-program` are every
+    // one of them code 1 at the reference, measured through
+    // `dml_differential.rs`. Routing them all through `refusal` here answered
+    // 21 for every one of them - right message, wrong code - which is
+    // invisible to a suite that only compares rows and text, and exactly what
+    // `dml_differential`'s own primary-code assertions exist to catch.
+    //
     // A parse or bind refusal is caller-safe by construction: it names tables,
     // columns and constructs, which are the caller's own words, and never a
     // path, a bound value or page bytes. The detail is left in place so that
     // everything reading it - the shell, the gate, the surface inventory -
     // sees exactly what it saw before.
-    let mut built = refusal(error.message()).with_message(error.message());
+    let mut built = inillucent_base::error::DbError::primary(error.code())
+        .with_message(error.message())
+        .with_detail(error.message());
     // **And the position, which used to be dropped here.** A refusal carries the
     // span of the token it is about, and the shell draws the reference's two
     // lines of caret art from it - so losing it here turned every parse failure
@@ -5786,12 +5915,29 @@ struct WalLog<'a> {
     /// rather than owned here because it has to outlive the log: the log lives
     /// for one statement and the transaction for many.
     undo: Option<&'a std::cell::RefCell<Vec<Before>>>,
+    /// This schema's own no-steal watermark - `u64::MAX` until something is
+    /// open, or the open transaction's first record.
+    ///
+    /// Shared with the schema's `Pool`, which is the only other reader:
+    /// arming it here is the one place that knows which record was first, and
+    /// `Pool::writeback` is the one place that must not write a page stamped
+    /// at or above it. See `Pool::holds_uncommitted`.
+    uncommitted: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl TreeLog for WalLog<'_> {
     fn log(&mut self, body: Body<'_>) -> DbResult<u64> {
         self.wrote = true;
-        self.wal.append(self.txn, body)
+        let lsn = self.wal.append(self.txn, body)?;
+        // Armed once, on the first record since the last commit or rollback -
+        // never rearmed while it is already set, so a later record in the
+        // same transaction (an ordinary write, or an undo's own restore)
+        // cannot move the watermark past the point recovery must not pass.
+        if self.uncommitted.load(std::sync::atomic::Ordering::SeqCst) == u64::MAX {
+            self.uncommitted
+                .store(lsn, std::sync::atomic::Ordering::SeqCst);
+        }
+        Ok(lsn)
     }
 
     fn wants_undo(&self) -> bool {
@@ -6121,6 +6267,19 @@ struct LearningRows {
     rows: TreeRows,
     /// The catalog as it now stands: at most one entry per object.
     seen: Vec<SchemaEntry>,
+    /// Whether a record naming a tree this pass has no shape for is skipped
+    /// rather than refused.
+    ///
+    /// Set only for the repair pass `open_file` runs when the checkpointed
+    /// catalog itself could not be read - see the module-level note above
+    /// `open_file` on the catalog/redo circularity. That pass cannot yet know
+    /// the shape of a tree whose `CREATE TABLE` predates the redo window, so a
+    /// record naming one is not damage, it is a shape this pass was never
+    /// going to have; refusing it would fail an open a second, catalog-aware
+    /// pass is about to repair. What this pass exists to fix - the schema
+    /// tree's own pages - has no such gap: `TreeRows::new` always knows
+    /// `schema_layout()`, tolerant or not.
+    tolerant: bool,
 }
 
 impl LearningRows {
@@ -6128,6 +6287,24 @@ impl LearningRows {
     ///
     /// @param checkpointed - the catalog as at the last checkpoint
     fn new(checkpointed: &[SchemaEntry]) -> LearningRows {
+        LearningRows::new_with_tolerance(checkpointed, false)
+    }
+
+    /// Returns an applier for the repair pass, told nothing but the schema
+    /// tree's own fixed shape and asked to skip what it cannot yet decode.
+    ///
+    /// @param checkpointed - the catalog as at the last checkpoint, empty when
+    ///   even that could not be read
+    fn new_tolerant(checkpointed: &[SchemaEntry]) -> LearningRows {
+        LearningRows::new_with_tolerance(checkpointed, true)
+    }
+
+    /// Shared constructor for [`LearningRows::new`] and
+    /// [`LearningRows::new_tolerant`].
+    ///
+    /// @param checkpointed - the catalog as at the last checkpoint
+    /// @param tolerant - whether an unknown tree is skipped rather than refused
+    fn new_with_tolerance(checkpointed: &[SchemaEntry], tolerant: bool) -> LearningRows {
         let mut learning = LearningRows {
             rows: TreeRows::new().with_tree(
                 inillucent_catalog::paged::SCHEMA_TREE_ID,
@@ -6135,6 +6312,7 @@ impl LearningRows {
                 1,
             ),
             seen: checkpointed.to_vec(),
+            tolerant,
         };
         learning.derive_every_shape();
         learning
@@ -6225,7 +6403,8 @@ impl RowRedo for LearningRows {
         if tree == inillucent_catalog::paged::SCHEMA_TREE_ID {
             self.learn(row);
         }
-        self.rows.insert_row(database, tree, page, row, lsn)
+        let result = self.rows.insert_row(database, tree, page, row, lsn);
+        self.tolerate_unknown_tree(tree, result)
     }
 
     fn delete_row(
@@ -6236,7 +6415,8 @@ impl RowRedo for LearningRows {
         key: &[u8],
         lsn: u64,
     ) -> DbResult<()> {
-        self.rows.delete_row(database, tree, page, key, lsn)
+        let result = self.rows.delete_row(database, tree, page, key, lsn);
+        self.tolerate_unknown_tree(tree, result)
     }
 
     fn update_in_place(
@@ -6249,8 +6429,10 @@ impl RowRedo for LearningRows {
         value: &[u8],
         lsn: u64,
     ) -> DbResult<()> {
-        self.rows
-            .update_in_place(database, tree, page, key, column, value, lsn)
+        let result = self
+            .rows
+            .update_in_place(database, tree, page, key, column, value, lsn);
+        self.tolerate_unknown_tree(tree, result)
     }
 
     fn compact_leaf(
@@ -6261,7 +6443,38 @@ impl RowRedo for LearningRows {
         lsn: u64,
         from_lsn: u64,
     ) -> DbResult<()> {
-        self.rows.compact_leaf(database, tree, page, lsn, from_lsn)
+        let result = self.rows.compact_leaf(database, tree, page, lsn, from_lsn);
+        self.tolerate_unknown_tree(tree, result)
+    }
+}
+
+impl LearningRows {
+    /// Turns "this pass was never told the shape of that tree" into success,
+    /// on the repair pass only and only for that one refusal.
+    ///
+    /// **Never for the schema tree.** Its shape is fixed
+    /// (`with_tree(SCHEMA_TREE_ID, schema_layout(), 1)` in every constructor),
+    /// so a refusal naming it is never this gap - it is a genuinely damaged
+    /// catalog row, and has to be refused the way it always was. And never for
+    /// any other failure a row's own redo can raise - a bad key, a page that is
+    /// not a leaf - which name a real defect this pass must not hide.
+    ///
+    /// @param tree - the tree the record named
+    /// @param result - what the delegated redo answered
+    fn tolerate_unknown_tree(&self, tree: u64, result: DbResult<()>) -> DbResult<()> {
+        if !self.tolerant || tree == inillucent_catalog::paged::SCHEMA_TREE_ID {
+            return result;
+        }
+        match result {
+            Err(error)
+                if error.detail().is_some_and(|detail| {
+                    detail.ends_with("which this recovery was not told the shape of")
+                }) =>
+            {
+                Ok(())
+            }
+            other => other,
+        }
     }
 }
 
@@ -7592,7 +7805,7 @@ fn load_schema(
     }
     let mut tables: Vec<TableInfo> = infos.into_values().map(|(_, info)| info).collect();
     tables.sort_by(|one, two| one.folded.cmp(&two.folded));
-    attach_statistics(database.pool(), &trees, &mut tables);
+    analyze::attach_statistics(database.pool(), &trees, &mut tables);
     Ok(LoadedSchema {
         trees,
         layouts,
@@ -7610,284 +7823,41 @@ fn load_schema(
     })
 }
 
-/// Reads `sqlite_stat1` onto the tables it describes.
+/// Returns the journal a connection in `mode` needs to protect a checkpoint.
 ///
-/// **The half of `ANALYZE` that was missing.** This engine wrote the table and
-/// never read it: `IndexInfo::prefix_rows` and `TableInfo::analysed_rows` are
-/// what the planner costs a join with, and nothing on this path had ever set
-/// them - so a file the reference had `ANALYZE`d arrived here with its
-/// measurements sitting in a table nobody opened, and the join was planned by
-/// the guesses the measurements exist to replace. `inillucent-catalog`'s own
-/// loader does this for a SQLite file; this is the same rule over a PAX tree.
+/// **A write-ahead log does not remove the need for a rollback journal here,
+/// and that is a consequence of the log being logical.** A checkpoint writes
+/// pages into the data file in place. Once a page's content is below the
+/// recorded checkpoint point, the log no longer describes it: the records that
+/// built it have been made redundant and their segments retired. So a page the
+/// checkpoint half wrote before a power loss is content nothing can rebuild -
+/// not the log, which has moved past it, and not the page itself, which is
+/// torn. SQLite is not exposed to this because its log holds whole page images
+/// and a checkpoint is a copy, so an interrupted one is simply redone.
 ///
-/// A missing, empty or unreadable statistics table is not an error - statistics
-/// are a hint, and a planner that refused to run without them would turn
-/// `ANALYZE` into a dependency.
+/// `crates/inillucent-compat/tests/wal_crash.rs`'s checkpoint campaign found
+/// it: a crash inside `PRAGMA wal_checkpoint` left pages 2 and 3 written and
+/// unsynced, the meta record correctly still naming the *previous* checkpoint,
+/// and recovery unable to read a page it could not rebuild either -
+/// `page 3 checksum fe9063aa is not the computed f53956bb`.
 ///
-/// @param pool - the buffer pool the trees live in
-/// @param trees - every tree this schema holds, by handle
-/// @param tables - the binder's tables, patched in place
-fn attach_statistics(pool: &Pool, trees: &HashMap<u32, PagedTree>, tables: &mut [TableInfo]) {
-    let folded = inillucent_catalog::analyze::STAT1
-        .as_bytes()
-        .to_ascii_lowercase();
-    let Some(root) = tables
-        .iter()
-        .find(|held| held.folded == folded)
-        .map(|held| held.root)
-    else {
-        return;
-    };
-    let Some(tree) = trees.get(&root) else {
-        return;
-    };
-    let rows = statistics_rows(pool, tree);
-    apply_statistics(tables, &rows);
-}
-
-/// Reads the three-column rows out of a `sqlite_stat1` tree.
+/// So a connection in `wal` takes a `delete` journal, which holds the
+/// pre-images for the duration of a checkpoint and removes the file when the
+/// checkpoint's meta record is durable. The cost is the one the default mode
+/// already pays; what it buys is that an interrupted checkpoint is undoable in
+/// every mode rather than in three of the five.
 ///
-/// Separate from attaching them so a caller holding `&mut self` can read under
-/// an immutable borrow, drop it, and then patch its tables.
+/// `off` is the one mode that gets nothing, because that is what it asks for.
 ///
-/// @param pool - the buffer pool the tree lives in
-/// @param tree - the statistics tree
-fn statistics_rows(pool: &Pool, tree: &PagedTree) -> Vec<(Vec<u8>, Option<Vec<u8>>, Vec<u8>)> {
-    let mut rows: Vec<(Vec<u8>, Option<Vec<u8>>, Vec<u8>)> = Vec::new();
-    let _ = tree.visit_leaves(pool, &mut |leaf| {
-        for row in leaf.live()? {
-            // The row is the rowid and then the three columns SQLite's own
-            // `sqlite_stat1` carries: the table, the index, the measurement.
-            let Some(Datum::Text(table)) = row.get(1) else {
-                continue;
-            };
-            let index = match row.get(2) {
-                Some(Datum::Text(name)) => Some(name.to_vec()),
-                _ => None,
-            };
-            let Some(Datum::Text(stat)) = row.get(3) else {
-                continue;
-            };
-            rows.push((table.to_vec(), index, stat.to_vec()));
+/// @param mode - what `PRAGMA journal_mode` reports
+fn journal_for(
+    mode: inillucent_pool::journal::JournalMode,
+) -> Option<inillucent_pool::journal::JournalMode> {
+    match mode {
+        inillucent_pool::journal::JournalMode::Off => None,
+        inillucent_pool::journal::JournalMode::Wal => {
+            Some(inillucent_pool::journal::JournalMode::Delete)
         }
-        Ok(true)
-    });
-    rows
-}
-
-/// Clears every table's measurements and applies the ones just read.
-///
-/// @param tables - the binder's tables, patched in place
-/// @param rows - the `sqlite_stat1` rows
-fn apply_statistics(tables: &mut [TableInfo], rows: &[(Vec<u8>, Option<Vec<u8>>, Vec<u8>)]) {
-    // A stale reading is worse than none, so what is there now replaces
-    // whatever a previous load left behind rather than adding to it.
-    for table in tables.iter_mut() {
-        table.analysed_rows = None;
-        for index in &mut table.indexes {
-            index.prefix_rows = Vec::new();
-        }
+        other => Some(other),
     }
-    for (table, index, stat) in rows {
-        inillucent_catalog::load::apply_statistic(tables, table, index.as_deref(), stat);
-    }
-}
-
-/// One database file, opened, recovered, and ready to be read.
-struct OpenedFile {
-    /// The pool, the meta page and the free map.
-    database: Database,
-    /// The log, positioned where recovery ended.
-    wal: std::rc::Rc<Wal>,
-    /// The catalog tree, attached from the meta page's root.
-    catalog_tree: PagedTree,
-    /// The highest transaction number any record recovery scanned carried.
-    ///
-    /// **A reopened database must not reuse a number the log still holds**, and
-    /// this is what the engine's counter is started above. Recovery decides
-    /// which records to replay by transaction number, so a number used twice in
-    /// one log makes two different transactions into one - a run that wrote as
-    /// transaction 3 and crashed leaves records the *next* run resurrects the
-    /// moment its own transaction 3 commits, permanently.
-    ///
-    /// `inillucent-wal` has reported this since it was written and nothing read
-    /// it; the cross-file commit is what made it load-bearing, because a marker
-    /// naming transaction 7 in a file whose next run also calls something
-    /// transaction 7 would suppress a commit that had nothing to do with it.
-    highest_txn: u64,
-}
-
-/// Returns where the log resumes, raising it above every stamp the file carries.
-///
-/// **A page's LSN has to be a position in the stream currently beside the file,
-/// and after a recovery whose chain was short of what the pages reflect it is
-/// not.** Recovery applies a record to a page only when the page's
-/// stamp is below the record's, so a page stamped by a stream that no longer
-/// exists silently swallows every later write to it - the record is skipped,
-/// the file stays structurally intact, and nothing anywhere says a committed row
-/// was lost. It is how Nikaya's mail database ended up with page 3 stamped
-/// 21,939,058,496 beside a log ending at 21,075,008,440, after 24 segments were
-/// moved aside to recover it.
-///
-/// So the log resumes at `max(recovered.next_lsn, high_water + 1)`. In every
-/// healthy file the first term already wins and this changes nothing: the
-/// write-ahead rule puts every stamp below the log's durable end, and the
-/// durable end is at or below where recovery stopped. It fires only on a file
-/// whose log is short of what its pages carry.
-///
-/// Two things follow from an LSN being a **byte offset inside a segment**:
-///
-/// 1. The jump takes the *next* sequence. The write offset of a record is
-///    `header + (lsn - segment.first_lsn)`, so resuming 864 million positions
-///    into the segment recovery stopped in would ask for an 864 MB file.
-/// 2. The meta page is checkpointed before a record is written at the new
-///    position. That leaves a gap between the old segment's last byte and the
-///    new one's first, and `read_chain` stops a chain at a gap - correctly,
-///    since a gap is otherwise a lost segment - so the next recovery has to
-///    start *inside* the new segment rather than walk up to it. The claim the
-///    checkpoint makes is true at that moment: the replay's pages have just been
-///    flushed, and there are no records between the chain's end and the new
-///    position.
-///
-/// @param database - the recovered file, whose pool carries the high water
-/// @param outcome - what recovery found
-fn resume_above_every_stamp(
-    database: &mut Database,
-    outcome: &inillucent_wal::Recovered,
-) -> DbResult<(u64, u64)> {
-    let next_lsn = outcome.next_lsn.max(FIRST_LSN);
-    let sequence = outcome.sequence.max(1);
-    // Read off the pool rather than off the meta record. `Database::open` seeds
-    // it with what the meta page carried and `Pool::writeback` has raised it for
-    // every page this recovery has already evicted, so it is the higher of the
-    // two and never the lower.
-    let high_water = database.pool().high_water_lsn();
-    if high_water < next_lsn {
-        return Ok((next_lsn, sequence));
-    }
-    let resumed = high_water.saturating_add(1);
-    let rolled = sequence.saturating_add(1);
-    database.set_log_position(resumed, outcome.latest_cts, rolled);
-    database.checkpoint()?;
-    Ok((resumed, rolled))
-}
-
-/// Opens one database file, replays its log into it, and opens that log.
-///
-/// **The one recovery path, for the file a connection is opened on and for
-/// every file it attaches.** An `ATTACH`ed database is an ordinary database of
-/// this engine - it may have been written by a process that crashed, and a
-/// second recovery path would be a second set of rules about what a torn tail
-/// means. There is one, and both callers take it.
-///
-/// @param vfs - the file system the file and its log live on
-/// @param db_path - the database file
-/// @param frames - how many frames the buffer pool holds
-/// @param doubtful - transactions whose `Commit` record is not the decision
-fn open_file(
-    vfs: &std::sync::Arc<dyn inillucent_vfs::Vfs>,
-    db_path: &DbPath,
-    frames: usize,
-    doubtful: &std::collections::BTreeSet<u64>,
-) -> DbResult<OpenedFile> {
-    let database = Database::open(vfs.as_ref(), db_path, frames.max(64))?;
-
-    // **Recovery.** The log is replayed into the file before anything is read
-    // out of it, which is what makes this an open rather than a reader of
-    // whatever the last checkpoint happened to leave behind.
-    //
-    // It could not be done before a tree's identifier was stored in the
-    // catalog. `TreeRows` is keyed by that identifier, every logical row record
-    // carries it, and until then the writer's numbering and a reader's were
-    // different - so a replay would have put rows into the wrong tree, which is
-    // a wrong answer rather than a refusal.
-    //
-    // From the file's own checkpoint, not from the start of the log:
-    // `RecoveryStart::fresh` scans from `FIRST_LSN` and would replay everything
-    // the last checkpoint already applied.
-    //
-    // `doubtful` is how a cross-file commit reaches this. A transaction that
-    // wrote two databases votes in each file's log and is *decided* by a
-    // super-journal outside both, so a `Commit` record for one of those
-    // transactions is a vote rather than the decision - see
-    // `super_journal_doubt`.
-    let meta = database.meta();
-    let start = if meta.checkpoint_lsn == 0 {
-        inillucent_wal::RecoveryStart {
-            doubtful: doubtful.clone(),
-            ..inillucent_wal::RecoveryStart::fresh(database.uuid())
-        }
-    } else {
-        inillucent_wal::RecoveryStart {
-            uuid: database.uuid(),
-            checkpoint_lsn: meta.checkpoint_lsn,
-            sequence: meta.wal_sequence,
-            cts_watermark: meta.cts_watermark,
-            doubtful: doubtful.clone(),
-        }
-    };
-    let mut database = database;
-    // The shapes come from the catalog as it stood at the last checkpoint, plus
-    // the catalog tree itself, whose own rows are what a `CREATE TABLE` writes.
-    // A record naming a tree that is in none of them - a table created *after*
-    // the checkpoint, whose rows were then written - makes `TreeRows` refuse,
-    // which fails this open with a named error rather than replaying into a
-    // tree that is not the one meant.
-    let checkpointed = {
-        let before = attach_catalog(database.pool(), database.catalog_root())?;
-        read_catalog(database.pool(), &before)?
-    };
-    let (outcome, free_map) = {
-        let mut applier =
-            inillucent_txn::redo::Applier::new(&mut database, LearningRows::new(&checkpointed));
-        let outcome = inillucent_wal::recover(vfs.as_ref(), db_path, start, &mut applier)?;
-        (outcome, applier.free_map_changes().to_vec())
-    };
-    // The free map is rebuilt after the scan rather than inside it: the map and
-    // every page write are both behind `&mut Database`, and one record cannot
-    // hold two mutable borrows of the same object.
-    //
-    // **In log order.** Claiming every allocation and then
-    // releasing every free gave the frees the last word, so a page freed and
-    // allocated again inside the replayed range came back free while it was
-    // live, and the next allocation handed it to a second owner. See
-    // `Applier::free_map_changes`.
-    for change in &free_map {
-        match change.allocated {
-            true => database.claim(change.page)?,
-            false => database.release(change.page, 1)?,
-        }
-    }
-    inillucent_wal::truncate_after(vfs.as_ref(), db_path, &outcome)?;
-
-    // **The log resumes where recovery ended, not at the beginning.** Opening it
-    // at `FIRST_LSN` with sequence 1 starts a second stream over the same
-    // segments: the session writes records the *next* open cannot find, because
-    // the meta page's checkpoint points into the first stream. A test caught it
-    // as a table created after an open vanishing on the one after that -
-    // `no such table: second` from a file that had just been told to make it.
-    //
-    // **And above every stamp the file carries.** See
-    // `resume_above_every_stamp`.
-    let (next_lsn, sequence) = resume_above_every_stamp(&mut database, &outcome)?;
-    let wal = std::rc::Rc::new(Wal::open(
-        std::sync::Arc::clone(vfs),
-        db_path,
-        database.uuid(),
-        next_lsn,
-        sequence,
-        WalOptions::default(),
-    )?);
-    database.pool().set_durable_lsn(wal.write_ahead_point());
-    let_the_pool_ask_the_log(database.pool(), &wal);
-
-    // The catalog is read again, because recovery may have changed it: a
-    // `CREATE TABLE` after the checkpoint is a row in this very tree.
-    let catalog_tree = attach_catalog(database.pool(), database.catalog_root())?;
-    Ok(OpenedFile {
-        database,
-        wal,
-        catalog_tree,
-        highest_txn: outcome.highest_txn,
-    })
 }

@@ -45,6 +45,7 @@ use std::sync::{Arc, Mutex};
 
 use inillucent_base::error::misuse;
 use inillucent_base::DbResult;
+use inillucent_pool::page::{self, header};
 use inillucent_pool::{Database, Options, Pool};
 use inillucent_vfs::{DbPath, Vfs};
 use inillucent_wal::record::Body;
@@ -236,6 +237,82 @@ fn resume_above_every_stamp(database: &mut Database, outcome: &Recovered) -> DbR
     database.set_log_position(resumed, outcome.latest_cts, rolled);
     database.checkpoint()?;
     Ok((resumed, rolled))
+}
+
+/// Logs and installs the free map's own pages, ahead of a checkpoint that
+/// would otherwise rewrite them with nothing behind the write.
+///
+/// **The defect this closes:** `Database::checkpoint` rewrites every free-map
+/// page on every checkpoint, because `FreeMap` keeps no per-page dirty bit -
+/// see `Database::free_map_pages`. Done through `Pool::install` alone, that
+/// rewrite carries no LSN stamp and no log record, so once an earlier
+/// checkpoint's own record for a page's last real change has retired, a crash
+/// partway through a later, otherwise-redundant rewrite leaves a torn page
+/// with nothing for redo to repair it from - `load_free_map` then fails its
+/// checksum on the next open, unconditionally, rather than reading either the
+/// state before this checkpoint or the state after it.
+///
+/// **The fix reuses the convention `AllocPage` and `FreePage` already use.**
+/// Both are logged under transaction `0` because a free-map bit "belongs to
+/// no transaction and is always part of the prefix" - `should_replay` says so
+/// in so many words - and this does the same for the page's own bytes: one
+/// `Body::WritePage` record per free-map page, txn `0`, so recovery replays
+/// it unconditionally rather than needing a matching `Commit`. The image is
+/// then stamped with that record's own LSN before it is installed, exactly as
+/// `Applier::put_image` stamps one on replay, so the same two guards that
+/// protect every other page protect this one too: `refuse_if_ahead_of_the_log`
+/// will not let the page reach disk before its record does, and a torn copy
+/// of it is repaired by the very same `put_image` on the next recovery.
+///
+/// **The invariant this buys back:** after a crash at any point during a
+/// checkpoint, a reopen's free map is either exactly what it held before this
+/// checkpoint began, or exactly what it holds once this checkpoint's own
+/// `WritePage` records are all replayed - never a torn mixture of the two,
+/// because every byte that changes is behind a record before it is written
+/// and the page-LSN rule makes a record's replay a no-op once its bytes are
+/// already durable.
+///
+/// **The caller still owns the durability order.** This only appends records
+/// and installs the stamped pages; it does not sync the log. A caller that
+/// goes on to flush these pages - `Engine::checkpoint` and
+/// `ImportedDatabase::checkpoint` both do - syncs the log once more first, so
+/// every record this function wrote is durable before `refuse_if_ahead_of_the_log`
+/// is asked to let the page it stamped go to disk.
+///
+/// **A page byte-identical to what is already durable is left alone.**
+/// `Database::free_map_pages`'s own comment already names the defect as a
+/// *redundant* rewrite - one that changes nothing and still costs a record
+/// and a physical write, on every single checkpoint, forever. Comparing
+/// against the pool's own resident copy before touching either the log or
+/// the file is not a cached flag that can go stale: it reads the same
+/// current state `Pool::install` would otherwise overwrite, every time, so a
+/// page this skips is a page nothing below here has any way to disagree
+/// about. `recovering_checkpointing_and_recovering_again_is_the_same_database`
+/// is the test that measures it - a checkpoint that changes nothing leaves
+/// nothing new for the next reopen to scan.
+///
+/// @param database - the file whose free map is about to be checkpointed
+/// @param wal - the log to record each page's rewrite in
+pub fn log_free_map_pages(database: &mut Database, wal: &Wal) -> DbResult<()> {
+    for (page_id, mut image) in database.free_map_pages() {
+        let unchanged = database
+            .pool()
+            .fetch(page_id)
+            .is_ok_and(|guard| guard.bytes() == image.as_slice());
+        if unchanged {
+            continue;
+        }
+        let lsn = wal.append(
+            0,
+            Body::WritePage {
+                page: page_id.0,
+                image: &image,
+            },
+        )?;
+        page::write_u64(&mut image, header::LSN, lsn)?;
+        database.install(page_id, &image)?;
+    }
+    Ok(())
 }
 
 impl Engine {
@@ -588,11 +665,33 @@ impl Engine {
             // that committed long ago: `oldest_open_lsn` alone would step over
             // it, and the model campaign reported the row it lost.
             database.pool().flush()?;
+            // Measured here, before the free map's own pages are touched
+            // below: that page is about to be dirtied and is flushed inside
+            // `checkpoint_after_free_map` regardless, never held back by
+            // no-steal, so it must not pull `recovery_from` down as though it
+            // could be.
             let dirty = database.pool().oldest_dirty_lsn();
+            // The free map's own pages, logged and stamped before they are
+            // rewritten - see `log_free_map_pages` - and done *before*
+            // `set_log_position` below reads the durable point. Read
+            // earlier, `durable` would sit under this checkpoint's own new
+            // free-map record, so the meta record would claim recovery need
+            // not start below a point that is, in fact, below an unreplayed
+            // record - the next reopen would scan it again every time, which
+            // is what `recovering_checkpointing_and_recovering_again_is_the_same_database`
+            // measures.
+            log_free_map_pages(database, &self.wal)?;
+            self.wal.sync()?;
+            let durable = self.wal.write_ahead_point();
+            database.pool().set_durable_lsn(durable);
             let recovery_from = durable.min(self.oldest_open_lsn.get()).min(dirty);
             database.set_log_position(recovery_from, watermark, sequence);
-            database.checkpoint()
+            database.checkpoint_after_free_map()
         })?;
+        // Refreshed rather than reused: `log_free_map_pages` appended records
+        // of its own, so the log's durable end has moved past the `durable`
+        // read at the top of this function.
+        let durable = self.wal.write_ahead_point();
         let recovery_from = durable
             .min(self.oldest_open_lsn.get())
             .min(self.with_pool(|pool| pool.oldest_dirty_lsn()));

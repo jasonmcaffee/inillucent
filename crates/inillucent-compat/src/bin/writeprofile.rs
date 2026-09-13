@@ -1,12 +1,21 @@
 //! Where a write actually spends its time, in counters rather than guesses.
 //!
-//! Invariant: this reports what the pager did, not what anybody thinks it did.
-//! The scorecard says a single-row `UPDATE` inside an open transaction costs
-//! five hundred microseconds here and thirty in the reference, and a ratio that
-//! large is a structural problem rather than a constant factor - so the first
-//! question is not "which line is slow" but "how much work is being done".
-//! Pages read, pages written, page images copied and rows visited answer that
-//! without a profiler, and they are the numbers an optimisation has to move.
+//! Invariant: this reports what the pool did, not what anybody thinks it did.
+//! The scorecard can report a structural difference between this engine and
+//! the reference on a single-row `UPDATE` inside an open transaction, and a
+//! large ratio is a structural problem rather than a constant factor - so the
+//! first question is not "which line is slow" but "how much work is being
+//! done". Pages read, cache hits and pages written answer that without a
+//! profiler, and they are the numbers an optimisation has to move.
+//!
+//! **"Page images copied" and "pages allocated" are gone from this report.**
+//! They read `inillucent_legacy::Connection::pager_counters()`, which does not
+//! exist on the new engine: `Database::cache_stats()` reports `hits`, `misses`,
+//! `rewarms`, `cooled`, `evicted`, `reads` and `writes` - a cache's-eye view of
+//! the pool rather than the old pager's own image-copy and allocation
+//! counters - and nothing in `inillucent-pool` counts a before-image copy or a
+//! fresh page allocation the way the old one did. `reads`, `hits` and `writes`
+//! below are the three that carried over.
 //!
 //! Usage: `cargo run --release -p inillucent-compat --bin inillucent-writeprofile`
 
@@ -15,7 +24,8 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use inillucent_compat::workspace_root;
-use inillucent_legacy::{Database, Value};
+use inillucent_engine::connect::Database;
+use inillucent_tree::datum::OwnedDatum;
 
 /// How many rows the probe table holds.
 const ROWS: i64 = 5_000;
@@ -49,9 +59,7 @@ fn scratch(name: &str) -> PathBuf {
 /// Builds the probe table.
 fn build(path: &std::path::Path, indexes: bool) -> Result<Database, String> {
     let database = Database::open(path).map_err(|error| error.message().to_string())?;
-    let connection = database
-        .connect()
-        .map_err(|error| error.message().to_string())?;
+    let connection = database.connect();
     let mut script = String::from(
         "PRAGMA page_size=4096; PRAGMA journal_mode=delete; PRAGMA synchronous=full;
          CREATE TABLE digits(n INTEGER PRIMARY KEY);
@@ -77,10 +85,8 @@ fn build(path: &std::path::Path, indexes: bool) -> Result<Database, String> {
 fn case(name: &str, indexes: bool, sql: &str, binds: usize) -> Result<(), String> {
     let path = scratch(name);
     let database = build(&path, indexes)?;
-    let connection = database
-        .connect()
-        .map_err(|error| error.message().to_string())?;
-    let before = connection.pager_counters();
+    let connection = database.connect();
+    let before = database.cache_stats();
     let mut statement = connection
         .prepare(sql)
         .map_err(|error| format!("{sql}: {}", error.message()))?;
@@ -102,25 +108,20 @@ fn case(name: &str, indexes: bool, sql: &str, binds: usize) -> Result<(), String
             .step()
             .map_err(|error| format!("{sql}: {}", error.message()))?
         {}
-        statement
-            .reset()
-            .map_err(|error| error.message().to_string())?;
+        statement.reset();
     }
     let elapsed = started.elapsed();
     drop(statement);
     connection
         .execute_batch("COMMIT")
         .map_err(|error| error.message().to_string())?;
-    let after = connection.pager_counters();
+    let after = database.cache_stats();
     let per = elapsed.as_secs_f64() * 1e6 / OPERATIONS as f64;
     println!(
-        "{name:<28} {per:>9.1} us/op  reads {:>7}  hits {:>8}  writes {:>6}  images {:>7}  \
-         alloc {:>5}",
-        after.page_reads - before.page_reads,
-        after.cache_hits - before.cache_hits,
-        after.page_writes - before.page_writes,
-        after.page_images - before.page_images,
-        after.pages_allocated - before.pages_allocated
+        "{name:<28} {per:>9.1} us/op  reads {:>7}  hits {:>8}  writes {:>6}",
+        after.reads - before.reads,
+        after.hits - before.hits,
+        after.writes - before.writes,
     );
     Ok(())
 }
@@ -129,10 +130,8 @@ fn case(name: &str, indexes: bool, sql: &str, binds: usize) -> Result<(), String
 fn read_case(name: &str, indexes: bool, sql: &str) -> Result<(), String> {
     let path = scratch(name);
     let database = build(&path, indexes)?;
-    let connection = database
-        .connect()
-        .map_err(|error| error.message().to_string())?;
-    let before = connection.pager_counters();
+    let connection = database.connect();
+    let before = database.cache_stats();
     let mut statement = connection
         .prepare(sql)
         .map_err(|error| format!("{sql}: {}", error.message()))?;
@@ -149,21 +148,19 @@ fn read_case(name: &str, indexes: bool, sql: &str) -> Result<(), String> {
         {
             rows += 1;
             let _ = statement.row().first().map(|value| match value {
-                Value::Integer(number) => *number,
+                OwnedDatum::Int(number) => *number,
                 _ => 0,
             });
         }
-        statement
-            .reset()
-            .map_err(|error| error.message().to_string())?;
+        statement.reset();
     }
     let elapsed = started.elapsed();
-    let after = connection.pager_counters();
+    let after = database.cache_stats();
     let per = elapsed.as_secs_f64() * 1e6 / OPERATIONS as f64;
     println!(
         "{name:<28} {per:>9.1} us/op  reads {:>7}  hits {:>8}  rows {:>6}",
-        after.page_reads - before.page_reads,
-        after.cache_hits - before.cache_hits,
+        after.reads - before.reads,
+        after.hits - before.hits,
         rows
     );
     Ok(())

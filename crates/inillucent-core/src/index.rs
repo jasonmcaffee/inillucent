@@ -490,6 +490,124 @@ impl Index {
         &self.vectors
     }
 
+    // -- checkpoint recording and replay --------------------------------
+    //
+    // A merge that checkpoints its own progress across several commits
+    // (`inillucent_search::module::SearchTable::continue_merge`) needs to
+    // record exactly what one checkpoint's fold changed - not re-derive it
+    // by re-running the fold again later, which for the graph and the
+    // lexical index would cost what building them cost in the first place,
+    // on every single chain resolution. These methods are the seam that
+    // lets `inillucent_core::persist`'s segment delta format capture that
+    // real work once and replay its *result* cheaply afterwards; nothing
+    // else in this crate reaches for them.
+
+    /// Starts recording exactly what a subsequent `append`/`replace_document`
+    /// changes in the graph and the lexical index, so it can be replayed
+    /// later without recomputing it. The store and the vectors need no such
+    /// recording: appending to them is already a pure function of the rows
+    /// given, cheap to repeat, which `append_store_and_vectors` below reaches
+    /// for directly on replay.
+    pub fn start_recording(&mut self) {
+        if let Some(graph) = self.graph.as_mut() {
+            graph.start_recording();
+        }
+        if let Some(lexical) = self.lexical.as_mut() {
+            lexical.start_recording();
+        }
+    }
+
+    /// Returns and clears every adjacency list the graph has changed since
+    /// recording started or since the last drain.
+    pub fn drain_graph_recording(&mut self) -> Vec<(u8, u32, Vec<u32>)> {
+        self.graph.as_mut().map(Hnsw::drain_recording).unwrap_or_default()
+    }
+
+    /// Returns and clears what the lexical index has added since recording
+    /// started or since the last drain, or `None` if nothing was indexed.
+    pub fn drain_lexical_recording(&mut self) -> Option<crate::bm25::LexicalDelta> {
+        self.lexical.as_mut().and_then(Bm25Index::drain_recording)
+    }
+
+    /// The graph's current entry point, node count and level count, for a
+    /// caller building a checkpoint that names how far the graph it is
+    /// recording has grown.
+    pub fn graph_shape(&self) -> (Option<u32>, usize, usize) {
+        match &self.graph {
+            Some(graph) => (graph.entry_point(), graph.node_count(), graph.n_layers()),
+            None => (None, 0, 0),
+        }
+    }
+
+    /// The graph's per-node top layer from `from` onward, for a caller
+    /// checkpointing only the nodes added since it last did.
+    /// @param from - the first node ordinal to include
+    pub fn graph_node_top_tail(&self, from: usize) -> Vec<u8> {
+        self.graph.as_ref().map(|g| g.node_top_tail(from).to_vec()).unwrap_or_default()
+    }
+
+    /// Appends chunks and vectors to the store and the vector set alone,
+    /// leaving the graph, the lexical index and the quantized codes
+    /// untouched - the store-only half of `append`, for a caller that will
+    /// supply the other three from their own recorded content instead of
+    /// recomputing them from these rows a second time.
+    ///
+    /// Returns the chunk ordinals this call assigned, which line up with
+    /// `embeddings` in order.
+    /// @param chunks - the new chunks
+    /// @param embeddings - their vectors, in the same order
+    pub fn append_store_and_vectors(
+        &mut self,
+        chunks: Vec<ChunkInput>,
+        embeddings: &[Vec<f32>],
+    ) -> std::ops::Range<u32> {
+        let first = self.store.n_chunks() as u32;
+        self.store.add_chunks(chunks);
+        for e in embeddings {
+            self.vectors.push(e);
+        }
+        first..(self.store.n_chunks() as u32)
+    }
+
+    /// Applies a graph checkpoint's recorded content directly - growing the
+    /// graph to the recorded shape and overwriting exactly the adjacency
+    /// lists that were recorded - instead of running `insert`/`insert_batch`
+    /// again over the rows that produced it.
+    ///
+    /// Builds a graph from scratch if this index was never committed with
+    /// one, which only happens when replaying a checkpoint with no base of
+    /// its own.
+    /// @param entry - the recorded entry point
+    /// @param layers_len - how many levels the graph must have afterwards
+    /// @param node_top_tail - the recorded top layer for every node added
+    ///   since the checkpoint this one continues
+    /// @param touched - every adjacency list the checkpoint changed
+    pub fn apply_graph_recording(
+        &mut self,
+        entry: Option<u32>,
+        layers_len: usize,
+        node_top_tail: &[u8],
+        touched: &[(u8, u32, Vec<u32>)],
+    ) {
+        let graph = self.graph.get_or_insert_with(|| Hnsw::new(self.config.hnsw));
+        graph.ensure_layers(layers_len);
+        for top in node_top_tail {
+            graph.push_node_top(*top);
+        }
+        for (layer, node, neighbours) in touched {
+            graph.apply_touched(*layer, *node, neighbours.clone());
+        }
+        graph.set_entry(entry);
+    }
+
+    /// Applies a lexical checkpoint's recorded content directly, without
+    /// re-tokenising the chunks that produced it.
+    /// @param delta - what one checkpoint's own fold added to the lexical index
+    pub fn apply_lexical_recording(&mut self, delta: &crate::bm25::LexicalDelta) {
+        let lexical = self.lexical.get_or_insert_with(Bm25Index::default);
+        lexical.apply_lexical_delta(delta);
+    }
+
     /// Add chunks together with their vectors. The two slices must correspond
     /// element for element, which is the one to one chunk to vector mapping the
     /// baseline also maintains.

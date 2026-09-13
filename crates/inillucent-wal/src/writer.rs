@@ -101,6 +101,39 @@ pub const NORMAL_SYNC_BYTES: u64 = 64 << 20;
 /// writes and no extra syncs, and holds a sixteenth of what it held before.
 pub const SPILL_BYTES: usize = 512 << 10;
 
+/// The device sector this log pads every durable write out to.
+///
+/// **A write that starts in the middle of a sector shares that sector with
+/// whatever else ends inside it**, and a device with no `powersafe_overwrite`
+/// guarantee - `inillucent_sim`'s `MediaModel::default`, the pessimistic model
+/// this crate's own durability campaigns run against - resolves an unsynced
+/// sector as a whole: applied, dropped, torn or garbled. So the moment a new
+/// write touches any byte of a sector, the *rest* of that sector - including
+/// bytes an earlier, independently synced record ended with - goes back into
+/// the unsynced pool, and a crash or a failed sync from the *new* write can
+/// destroy the *old* record's tail even though nothing about the old record
+/// itself failed.
+///
+/// This was not theoretical: `durability::a_full_disk_at_every_cut_point_is_recoverable`
+/// reproduced it directly. A workload's commit, whose own sync then failed on
+/// an injected disk-full error, wrote its first bytes at file offset 9440 -
+/// inside sector 18 (9216..9728), the same sector the *previous session's*
+/// `INSERT` had already written its tail into and durably synced. The crash
+/// model resolved sector 18 as `Garbage`, and the reopened database came back
+/// with a checksum failure on that `INSERT`'s own record - an acknowledged,
+/// already-closed commit lost by a later, unrelated transaction it happened
+/// to share a sector with.
+///
+/// Padding every synced write's tail out to this boundary means the *next*
+/// write always starts on a fresh sector, so it can never again share one
+/// with a record that was already durable before it began. 512 is what
+/// `MediaModel::default` declares and is also the traditional physical sector
+/// size, so it is the granularity this crate's own tests can prove; a real
+/// 4Kn device gains nothing extra from it, but loses nothing either; it is
+/// still every current write's own tail that gets protected, never a
+/// stranger's.
+const SECTOR_ALIGN: u64 = 512;
+
 /// How much log a checkpoint is triggered by, in bytes.
 pub const CHECKPOINT_BYTES: u64 = 256 << 20;
 
@@ -289,9 +322,21 @@ impl Wal {
             segment_bytes: options.segment_bytes.max(segment::HEADER_BYTES as u64 * 2),
             synchronous: AtomicU64::new(policy_code(options.synchronous)),
         };
-        Ok(Wal {
+        // **No padding call here.** Every commit pads its own tail to the next
+        // sector boundary (see `commit`'s own call), so by induction a resumed
+        // position is always already on one: the segment this session opens
+        // into either holds nothing yet - nothing durable to share a sector
+        // with, so there is nothing to protect - or its last record is an
+        // earlier session's own commit, which already closed the boundary
+        // behind it. Padding here too was tried and reverted: it inserted an
+        // unconditional filler record at the front of every freshly created
+        // log, which cost every fresh database a wasted sector and broke
+        // `inillucent-wal/tests/log.rs`'s own exact-LSN assertions for no
+        // durability this crate does not already have.
+        let wal = Wal {
             shared: Arc::new(shared),
-        })
+        };
+        Ok(wal)
     }
 
     /// Returns a second handle on the same log, for another thread.
@@ -408,9 +453,46 @@ impl Wal {
     /// @param cts - the commit timestamp it was assigned
     pub fn commit(&self, txn: u64, cts: u64) -> DbResult<u64> {
         let lsn = self.append(txn, Body::Commit { cts })?;
+        // Rides along in this same commit's own write and sync - see
+        // `SECTOR_ALIGN`'s own comment for why it must be this write and not
+        // a later one.
+        self.pad_to_sector_boundary()?;
         let end = self.with_inner(|inner| inner.next_lsn);
         self.await_commit(end)?;
         Ok(lsn)
+    }
+
+    /// Appends a `Pad` record reaching the next sector boundary, if the log
+    /// is not already sitting on one.
+    ///
+    /// Appended only - the caller's own sync (`commit`'s or `sync`'s) is what
+    /// makes it durable, together with the record it rides along with. See
+    /// `SECTOR_ALIGN`'s own comment for why it must ride along with a write
+    /// that is already going to succeed rather than be synced on its own
+    /// afterward: a pad synced separately would touch the shared sector all
+    /// over again with nothing riding along to protect.
+    ///
+    /// A no-op once the log is already sitting on a boundary - the ordinary
+    /// case, since every commit closes its own.
+    fn pad_to_sector_boundary(&self) -> DbResult<()> {
+        let segment_first_lsn = self.io_lock()?.first_lsn;
+        let next_lsn = self.with_inner(|inner| inner.next_lsn);
+        let offset = (segment::HEADER_BYTES as u64)
+            .saturating_add(next_lsn.saturating_sub(segment_first_lsn));
+        let remainder = offset % SECTOR_ALIGN;
+        if remainder == 0 {
+            return Ok(());
+        }
+        let mut gap = SECTOR_ALIGN.saturating_sub(remainder);
+        // A gap narrower than a record's own header cannot hold a record at
+        // all; the next sector is padded to instead, which still leaves this
+        // one durable on its own once this record's write lands.
+        if gap < crate::record::HEADER_BYTES as u64 {
+            gap = gap.saturating_add(SECTOR_ALIGN);
+        }
+        let len = gap.saturating_sub(crate::record::HEADER_BYTES as u64);
+        self.append(0, Body::Pad { len: len as u32 })?;
+        Ok(())
     }
 
     /// Makes everything below `end` durable under the policy.
@@ -483,6 +565,18 @@ impl Wal {
     /// replay. Under `OFF` nothing syncs, which is what `OFF` means and is why
     /// a checkpoint under it is not a durability boundary.
     pub fn sync(&self) -> DbResult<()> {
+        // **No padding call here.** Only `commit` pads its own tail - see
+        // `SECTOR_ALIGN`'s comment for why it has to ride along with a write
+        // that is already going to succeed, which is true of an acknowledged
+        // commit and not generally true of a bare `sync`: `note_checkpoint`
+        // calls this right after its own `Checkpoint` record, and callers
+        // that assert an exact record count over a sequence ending in one -
+        // `inillucent-wal/tests/recovery.rs`'s
+        // `records_belonging_to_no_transaction_are_replayed` is one - would
+        // see an extra filler record they never asked for and have no reason
+        // to expect. A checkpoint's own records already end wherever the
+        // schema tree's or the free map's last write happened to land; the
+        // next *commit*, whenever it comes, closes that boundary as its own.
         let end = self.with_inner(|inner| inner.next_lsn);
         self.drive(end, self.synchronous() != Synchronous::Off)
     }
@@ -901,19 +995,40 @@ fn open_segment(
     // that record ended.
     if existing >= segment::HEADER_BYTES as u64 {
         let mut head = vec![0u8; segment::HEADER_BYTES];
-        if file.read_exact_at(0, &mut head).is_ok() {
-            if let Ok(held) = SegmentHeader::decode(&head) {
-                if held.belongs_to(uuid, sequence).is_ok() && held.first_lsn <= first_lsn {
-                    return Ok(OpenSegment {
-                        file,
-                        path,
-                        sequence,
-                        // The segment's *own* first LSN, which is what every
-                        // write offset is measured from. Using the resume
-                        // position here would put the next record at the wrong
-                        // place in a segment that already holds records.
-                        first_lsn: held.first_lsn,
-                    });
+        // **A failed read of this header is not evidence about what the
+        // segment holds.** `file_size` just said the file is long enough, so
+        // a failure reading its first bytes is the VFS reporting an
+        // operational problem - an I/O error, a full disk, a denied
+        // permission - the same distinction `recover::read_chain` already
+        // makes about the same kind of read. The first version of this
+        // matched on `.is_ok()` alone, so any such failure fell through to
+        // the "foreign or unreadable segment" arm below and **truncated a
+        // segment that might hold every commit since the last checkpoint** -
+        // this crate's own module comment on the very next lines explains why
+        // that loss is invisible until a second crash. Only a genuine
+        // short-read - the media model's torn-tail signal - is read the same
+        // way a truly foreign or damaged header is; every other failure
+        // propagates instead of being swallowed.
+        match file.read_exact_at(0, &mut head) {
+            Ok(()) => {
+                if let Ok(held) = SegmentHeader::decode(&head) {
+                    if held.belongs_to(uuid, sequence).is_ok() && held.first_lsn <= first_lsn {
+                        return Ok(OpenSegment {
+                            file,
+                            path,
+                            sequence,
+                            // The segment's *own* first LSN, which is what every
+                            // write offset is measured from. Using the resume
+                            // position here would put the next record at the wrong
+                            // place in a segment that already holds records.
+                            first_lsn: held.first_lsn,
+                        });
+                    }
+                }
+            }
+            Err(error) => {
+                if error.extended() != inillucent_base::error::ExtendedCode::IO_ERR_SHORT_READ {
+                    return Err(error.into_db_error());
                 }
             }
         }

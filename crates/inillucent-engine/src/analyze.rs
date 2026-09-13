@@ -16,12 +16,16 @@
 //! **up**, because rounding down claims a prefix is more selective than it is
 //! and that is the direction that picks a bad plan.
 
+use std::collections::HashMap;
+
 use inillucent_base::error::refusal;
 use inillucent_base::DbResult;
 use inillucent_catalog::analyze::STAT1_SQL;
 use inillucent_catalog::paged::ObjectKind;
+use inillucent_pool::Pool;
 use inillucent_sql::catalog_view::{IndexInfo, TableInfo};
 use inillucent_tree::datum::{Datum, OwnedDatum};
+use inillucent_tree::PagedTree;
 
 use super::{ImportedDatabase, Outcome, WalLog};
 
@@ -257,6 +261,7 @@ impl ImportedDatabase {
             schema: at,
             wrote: false,
             undo: None,
+            uncommitted: self.uncommitted_handle_of(at),
         };
         let tree = self
             .trees
@@ -309,6 +314,7 @@ impl ImportedDatabase {
             schema: at,
             wrote: false,
             undo: None,
+            uncommitted: self.uncommitted_handle_of(at),
         };
         let tree = self
             .trees
@@ -387,16 +393,16 @@ impl ImportedDatabase {
         else {
             // No statistics table: clear whatever a previous one left, so a
             // `DROP TABLE sqlite_stat1` stops changing plans.
-            super::apply_statistics(&mut self.tables, &[]);
+            apply_statistics(&mut self.tables, &[]);
             return;
         };
         // Read under an immutable borrow, then patch: the rows come back owned,
         // which is what lets both happen in one method.
         let rows = match (self.trees.get(&root), self.pool_of(root)) {
-            (Some(tree), Ok(pool)) => super::statistics_rows(pool, tree),
+            (Some(tree), Ok(pool)) => statistics_rows(pool, tree),
             _ => Vec::new(),
         };
-        super::apply_statistics(&mut self.tables, &rows);
+        apply_statistics(&mut self.tables, &rows);
     }
 
     /// Reports whether the schema has a `sqlite_stat1` row.
@@ -404,5 +410,98 @@ impl ImportedDatabase {
         self.entries
             .iter()
             .any(|held| held.entry.kind == ObjectKind::Table && held.entry.name == STAT1)
+    }
+}
+
+/// Reads `sqlite_stat1` onto the tables it describes.
+///
+/// **The half of `ANALYZE` that was missing.** This engine wrote the table and
+/// never read it: `IndexInfo::prefix_rows` and `TableInfo::analysed_rows` are
+/// what the planner costs a join with, and nothing on this path had ever set
+/// them - so a file the reference had `ANALYZE`d arrived here with its
+/// measurements sitting in a table nobody opened, and the join was planned by
+/// the guesses the measurements exist to replace. `inillucent-catalog`'s own
+/// loader does this for a SQLite file; this is the same rule over a PAX tree.
+///
+/// A missing, empty or unreadable statistics table is not an error - statistics
+/// are a hint, and a planner that refused to run without them would turn
+/// `ANALYZE` into a dependency.
+///
+/// @param pool - the buffer pool the trees live in
+/// @param trees - every tree this schema holds, by handle
+/// @param tables - the binder's tables, patched in place
+pub(crate) fn attach_statistics(
+    pool: &Pool,
+    trees: &HashMap<u32, PagedTree>,
+    tables: &mut [TableInfo],
+) {
+    let folded = inillucent_catalog::analyze::STAT1
+        .as_bytes()
+        .to_ascii_lowercase();
+    let Some(root) = tables
+        .iter()
+        .find(|held| held.folded == folded)
+        .map(|held| held.root)
+    else {
+        return;
+    };
+    let Some(tree) = trees.get(&root) else {
+        return;
+    };
+    let rows = statistics_rows(pool, tree);
+    apply_statistics(tables, &rows);
+}
+
+/// Reads the three-column rows out of a `sqlite_stat1` tree.
+///
+/// Separate from attaching them so a caller holding `&mut self` can read under
+/// an immutable borrow, drop it, and then patch its tables.
+///
+/// @param pool - the buffer pool the tree lives in
+/// @param tree - the statistics tree
+pub(crate) fn statistics_rows(
+    pool: &Pool,
+    tree: &PagedTree,
+) -> Vec<(Vec<u8>, Option<Vec<u8>>, Vec<u8>)> {
+    let mut rows: Vec<(Vec<u8>, Option<Vec<u8>>, Vec<u8>)> = Vec::new();
+    let _ = tree.visit_leaves(pool, &mut |leaf| {
+        for row in leaf.live()? {
+            // The row is the rowid and then the three columns SQLite's own
+            // `sqlite_stat1` carries: the table, the index, the measurement.
+            let Some(Datum::Text(table)) = row.get(1) else {
+                continue;
+            };
+            let index = match row.get(2) {
+                Some(Datum::Text(name)) => Some(name.to_vec()),
+                _ => None,
+            };
+            let Some(Datum::Text(stat)) = row.get(3) else {
+                continue;
+            };
+            rows.push((table.to_vec(), index, stat.to_vec()));
+        }
+        Ok(true)
+    });
+    rows
+}
+
+/// Clears every table's measurements and applies the ones just read.
+///
+/// @param tables - the binder's tables, patched in place
+/// @param rows - the `sqlite_stat1` rows
+pub(crate) fn apply_statistics(
+    tables: &mut [TableInfo],
+    rows: &[(Vec<u8>, Option<Vec<u8>>, Vec<u8>)],
+) {
+    // A stale reading is worse than none, so what is there now replaces
+    // whatever a previous load left behind rather than adding to it.
+    for table in tables.iter_mut() {
+        table.analysed_rows = None;
+        for index in &mut table.indexes {
+            index.prefix_rows = Vec::new();
+        }
+    }
+    for (table, index, stat) in rows {
+        inillucent_catalog::load::apply_statistic(tables, table, index.as_deref(), stat);
     }
 }

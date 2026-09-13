@@ -1,5 +1,5 @@
-# 32 cuts: 23 old, 9 new, 0 reported
-cut	state	reported
+# 63 cuts: 21 old, 42 new, 0 damaged and detected
+cut	state	committed
 1	old	false
 2	old	false
 3	old	false
@@ -21,8 +21,8 @@ cut	state	reported
 19	old	false
 20	old	false
 21	old	false
-22	old	false
-23	old	false
+22	new	false
+23	new	false
 24	new	false
 25	new	false
 26	new	false
@@ -32,3 +32,34 @@ cut	state	reported
 30	new	false
 31	new	false
 32	new	false
+33	new	false
+34	new	false
+35	new	false
+36	new	false
+37	new	false
+38	new	false
+39	new	false
+40	new	false
+41	new	false
+42	new	false
+43	new	false
+44	new	false
+45	new	false
+46	new	false
+47	new	false
+48	new	false
+49	new	false
+50	new	false
+51	new	false
+52	new	false
+53	new	false
+54	new	false
+55	new	false
+56	new	false
+57	new	false
+58	new	true
+59	new	true
+60	new	true
+61	new	true
+62	new	true
+63	new	true

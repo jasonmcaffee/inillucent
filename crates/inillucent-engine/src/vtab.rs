@@ -29,7 +29,7 @@
 
 use std::collections::HashMap;
 
-use inillucent_base::error::refusal;
+use inillucent_base::error::{refusal, statement_refusal};
 use inillucent_base::DbResult;
 use inillucent_catalog::paged::{ObjectKind, SchemaEntry};
 use inillucent_ext::vtab::{Context, Host, VirtualTable};
@@ -324,6 +324,68 @@ fn walk_from(
     }
 }
 
+/// Walks a keyed shadow table's rows in key order, starting at a given key.
+///
+/// **A seek to `from`, not a scan of the whole tree** - the keyed twin of
+/// [`walk_from`], for a key of more than one column. FTS5's `%_idx` is keyed
+/// `(segid, term)`, so a caller that wants one live segment's terms starting
+/// at a prefix descends once to `(segid, prefix)` and walks right, instead of
+/// reading every row of every segment - and every tombstone, which this same
+/// key space also holds at a negative segid - to find the ones that match.
+///
+/// @param pool - the buffer pool
+/// @param tree - the shadow table
+/// @param from - the key to start at
+/// @param body - what to do with each row, stopping when it says so
+fn walk_keyed_from(
+    pool: &Pool,
+    tree: &PagedTree,
+    from: &[Value<'static>],
+    body: &mut dyn FnMut(&[Value<'static>]) -> DbResult<bool>,
+) -> DbResult<()> {
+    let owned = as_row(from);
+    let probe: Vec<Datum<'_>> = owned.iter().map(OwnedDatum::borrow).collect();
+    let low = tree.encode_key(&probe);
+    let mut stop = false;
+    let mut failure: Option<inillucent_base::DbError> = None;
+    tree.visit_range(pool, &low, &mut |leaf| {
+        for row in leaf.live()? {
+            let owned_row: Vec<OwnedDatum> = row.iter().map(OwnedDatum::from_datum).collect();
+            let values = match as_values(&owned_row) {
+                Ok(values) => values,
+                Err(error) => {
+                    failure = Some(error);
+                    return Ok(false);
+                }
+            };
+            // The leaf `visit_range` lands on is the one that *could* hold
+            // `from` - it may still open below it, the same reason
+            // `walk_from` re-checks every rowid rather than trusting the
+            // descent alone.
+            if inillucent_sql::vtab::key_sorts_below(&values, from) {
+                continue;
+            }
+            match body(&values) {
+                Ok(true) => {}
+                Ok(false) => {
+                    stop = true;
+                    return Ok(false);
+                }
+                Err(error) => {
+                    failure = Some(error);
+                    return Ok(false);
+                }
+            }
+        }
+        Ok(true)
+    })?;
+    let _ = stop;
+    match failure {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
+}
+
 /// Returns the largest rowid a shadow table holds.
 ///
 /// @param pool - the buffer pool
@@ -444,6 +506,19 @@ impl ShadowStore for ReadStore<'_> {
             return Ok(());
         };
         walk(self.pool, tree, body)
+    }
+
+    fn scan_keyed_from(
+        &mut self,
+        root: u32,
+        _key_columns: usize,
+        from: &[Value<'static>],
+        body: &mut dyn FnMut(&[Value<'static>]) -> DbResult<bool>,
+    ) -> DbResult<()> {
+        let Some(tree) = self.trees.get(&root) else {
+            return Ok(());
+        };
+        walk_keyed_from(self.pool, tree, from, body)
     }
 }
 
@@ -581,6 +656,19 @@ impl ShadowStore for WriteStore<'_> {
         };
         walk(self.database.pool(), tree, body)
     }
+
+    fn scan_keyed_from(
+        &mut self,
+        root: u32,
+        _key_columns: usize,
+        from: &[Value<'static>],
+        body: &mut dyn FnMut(&[Value<'static>]) -> DbResult<bool>,
+    ) -> DbResult<()> {
+        let Some(tree) = self.trees.get(&root) else {
+            return Ok(());
+        };
+        walk_keyed_from(self.database.pool(), tree, from, body)
+    }
 }
 
 impl ImportedDatabase {
@@ -618,14 +706,25 @@ impl ImportedDatabase {
                 String::from_utf8_lossy(name)
             )));
         }
+        // **`SQLITE_ERROR` (primary code 1), not `SQLITE_MISUSE` (21).** SQLite
+        // answers "no such module: x" - and, for a module it has but will not
+        // let `CREATE VIRTUAL TABLE` construct, the very same message and code
+        // rather than a distinct one, which is why `an_eponymous_only_module_
+        // cannot_be_created` grades this by code and not by wording: a
+        // clearer message here is worth keeping, the number behind it is not
+        // this engine's to invent. `refusal` answers `Misuse` unconditionally,
+        // which is right for an API contract violation and wrong for "the
+        // statement named something that is not there" - the same class of
+        // mistake `refused()`'s own doc comment already found and fixed for
+        // parser and binder refusals.
         let found = self.registry.module(module).ok_or_else(|| {
-            refusal(format!(
+            statement_refusal(format!(
                 "no such module: {}",
                 String::from_utf8_lossy(module)
             ))
         })?;
         if !found.constructible() {
-            return Err(refusal(format!(
+            return Err(statement_refusal(format!(
                 "{} may not be used with CREATE VIRTUAL TABLE",
                 String::from_utf8_lossy(module)
             )));
@@ -709,6 +808,7 @@ impl ImportedDatabase {
                 // wrong: no commit record was written, so recovery ignored
                 // the pages. Only the live connection was.
                 undo: Some(&self.undo),
+                uncommitted: self.uncommitted_handle_of(at),
             };
             let store = WriteStore {
                 database: super::file_of(
@@ -954,6 +1054,22 @@ impl ImportedDatabase {
             catalog: Some(&self.catalog),
         };
         let width = connected.table.declaration().columns.len();
+        // **A rowid constraint the module did not promise still needs the
+        // rowid in the row, so the recheck below has something to test.** A
+        // negative `constraint.spec.column` names the rowid, which is never
+        // one of the module's declared columns - `WHERE rowid > 2` on an FTS5
+        // table, or `docs.rowid` in a join's `ON`, both offer one. Forcing the
+        // rowid into the row here is what lets the recheck loop below test it
+        // at `width`, the slot it is appended at, instead of refusing outright
+        // because "a produced row does not carry it".
+        let rowid_recheck_needed = offer.iter().enumerate().any(|(position, constraint)| {
+            let promised = query
+                .usage
+                .get(position)
+                .map(|usage| usage.omit)
+                .unwrap_or(false);
+            !promised && constraint.spec.column < 0
+        });
         // **Only the columns something reads.** `needed` is what the bound
         // statement reads of this term - the same answer a covering index is
         // chosen by - plus the columns the recheck below tests, which were
@@ -1012,18 +1128,28 @@ impl ImportedDatabase {
             if promised {
                 continue;
             }
-            // A negative column is the rowid, which a produced row does not
-            // carry: the module's declared columns are all a row holds. Such a
-            // constraint has to have been the module's to apply.
-            let Ok(column) = usize::try_from(constraint.spec.column) else {
-                return Err(refusal(
-                    "the module did not apply a rowid constraint and the engine cannot",
-                ));
+            // A negative column is the rowid. It is not one of the module's
+            // declared columns, so it is not in `row` at its own position -
+            // `rowid_recheck_needed` above forced it into `row` at `width`
+            // instead, appended the same way `needed.rowid` does for a `SELECT`
+            // that reads it, and `Collation::Binary` is what a rowid - always
+            // an integer - compares under.
+            let column = match usize::try_from(constraint.spec.column) {
+                Ok(column) => column,
+                Err(_) => {
+                    rechecks.push((
+                        width,
+                        constraint.spec.op,
+                        recheck_value(constraint, position, supplied, params)?,
+                        inillucent_value::collation::Collation::Binary,
+                    ));
+                    continue;
+                }
             };
             rechecks.push((
                 column,
                 constraint.spec.op,
-                inillucent_exec::physical::literal_value(&constraint.value, params)?,
+                recheck_value(constraint, position, supplied, params)?,
                 connected.table.collation(column),
             ));
         }
@@ -1048,10 +1174,11 @@ impl ImportedDatabase {
             }
             // Appended after the declared columns, which is where
             // `plan_stages` puts the rowid slot for a materialised virtual
-            // scan. Asked of the cursor only when the query reads it, so a
-            // module whose rowid is expensive is not asked for one nobody
-            // wanted.
-            if needed.rowid {
+            // scan. Asked of the cursor when the query reads it, or when an
+            // unpromised rowid constraint needs it to recheck against - see
+            // `rowid_recheck_needed` - so a module whose rowid is expensive is
+            // not asked for one nobody wanted otherwise.
+            if needed.rowid || rowid_recheck_needed {
                 row.push(OwnedDatum::Int(cursor.rowid()?));
             }
             // The module's auxiliary functions, in the order `plan_stages`
@@ -1128,6 +1255,40 @@ fn hidden_columns(table: &inillucent_sql::catalog_view::TableInfo) -> Vec<i32> {
         .filter(|(_, column)| column.hidden)
         .filter_map(|(at, _)| i32::try_from(at).ok())
         .collect()
+}
+
+/// Returns the value one recheck tests a produced row against.
+///
+/// **A lateral join already evaluated a correlated constraint, and this is
+/// where its answer is read back rather than recomputed.** `docs.rowid = t.id`
+/// offers `t.id` as a constraint on the module the same way a literal argument
+/// does, and when the module does not promise `omit` for it, the recheck loop
+/// used to fold it with `literal_value` regardless - which is the fold
+/// `literal_value`'s own doc comment refuses: an expression that reads a
+/// column has no value outside the row it was read from. `supplied` is that
+/// row's values, one per offered constraint and in the same order `offer`
+/// itself is in - see `inillucent_exec::lateral::LateralModule`, which is the
+/// one thing that ever fills it - so a position it covers already has an
+/// answer and does not need one folded. An ordinary scan supplies nothing, and
+/// every constraint's value is a genuine statement-wide constant then, which
+/// is exactly what `literal_value` answers.
+///
+/// @param constraint - the offered constraint being rechecked
+/// @param position - its position in `offer`, which is also its position in
+///   `supplied`
+/// @param supplied - the lateral join's per-row values, empty for an ordinary
+///   scan
+/// @param params - the values bound to `?1`, `?2`, ...
+fn recheck_value(
+    constraint: &inillucent_sql::plan::VirtualConstraint,
+    position: usize,
+    supplied: &[OwnedDatum],
+    params: &inillucent_exec::physical::Params,
+) -> DbResult<OwnedDatum> {
+    match supplied.get(position) {
+        Some(value) => Ok(value.clone()),
+        None => inillucent_exec::physical::literal_value(&constraint.value, params),
+    }
 }
 
 /// Reports whether a produced row satisfies the constraints the module left.
@@ -1494,6 +1655,7 @@ impl ImportedDatabase {
                 // wrong: no commit record was written, so recovery ignored
                 // the pages. Only the live connection was.
                 undo: Some(&self.undo),
+                uncommitted: self.uncommitted_handle_of(at),
             };
             let store = WriteStore {
                 database: super::file_of(
@@ -1704,13 +1866,33 @@ impl ImportedDatabase {
                 // `Null` asks it for.
                 (None, Some(inillucent_sql::dml::ColumnSource::Generated(_)) | None) => Value::Null,
             };
-            self.change_module(
+            // **Tried gating this on `change_module`'s `Option<i64>` return -
+            // `Some` for an ordinary content row, `None` for a command, on the
+            // theory that a command never counts as a change.** That broke
+            // three passing cases: SQLite's own `changes()` reports 1 for a
+            // *recognised* command (`'pgsz'`, `'rebuild'`,
+            // `'integrity-check'`) and only 0 for one SQLite itself refuses -
+            // `crates\inillucent-compat\tests\fts5.rs`'s
+            // `an_unknown_command_is_refused`. Both engines answer `ok:
+            // false` there, so the count is right and the count is what has
+            // to answer 0: this loop errors out through the `?` below before
+            // `changed` moves, past the `record_changes` call after it, and
+            // `changes()` then read whatever the *previous* statement had
+            // left - measured at 1, from the schema's last successful
+            // single-row insert, where the reference answers 0 for a
+            // statement that changed nothing. Recording here, on the way out,
+            // is what makes a refused command's `changes()` its own instead
+            // of an earlier statement's leftover.
+            if let Err(error) = self.change_module(
                 &statement.table.name,
                 &Change::Insert {
                     rowid,
                     values: cells,
                 },
-            )?;
+            ) {
+                self.record_changes(changed as i64, changed as i64);
+                return Err(error);
+            }
             changed = changed.saturating_add(1);
         }
         // Outside a transaction the statement is its own, so the module flushes
@@ -1719,6 +1901,15 @@ impl ImportedDatabase {
             self.sync_modules()?;
             self.seal()?;
         }
+        // **A module's insert changed rows exactly as much as an ordinary
+        // one.** `changes()`/`total_changes()` read `last_changes`/
+        // `changed_ever`, and nothing on this path used to touch either -
+        // `Outcome::changes` was set correctly and nobody after this call ever
+        // read it, since the SQL-level `changes()` and `total_changes()`
+        // built-ins read the connection's own counters instead. A module has
+        // no triggers of its own, so every row this loop counted is both this
+        // statement's own change and the whole of what it changed.
+        self.record_changes(changed as i64, changed as i64);
         Ok(Outcome {
             rows: Vec::new(),
             names: Vec::new(),
@@ -1826,6 +2017,7 @@ impl ImportedDatabase {
                     // at a savepoint these writes are exactly what a later
                     // `ROLLBACK TO` an earlier point has to be able to undo.
                     undo: Some(&self.undo),
+                    uncommitted: self.uncommitted_handle_of(at),
                 };
                 let store = WriteStore {
                     database: super::file_of(
@@ -1927,6 +2119,7 @@ impl ImportedDatabase {
             schema: at,
             wrote: false,
             undo: None,
+            uncommitted: self.uncommitted_handle_of(at),
         };
         let store = WriteStore {
             database: super::file_of(

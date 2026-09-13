@@ -190,6 +190,10 @@ impl Redo for PageStore {
                 self.latest_cts = self.latest_cts.max(cts_watermark)
             }
             Body::CatalogChange { .. } => self.catalog_invalidated = true,
+            // Filler that belongs to no transaction and names no page, so
+            // there is nothing for a page store to redo. Recovery still reads
+            // and checksums it; see `Body::Pad`.
+            Body::Pad { .. } => {}
         }
         Ok(())
     }
@@ -737,11 +741,20 @@ fn failing_the_nth_call_never_leaves_a_half_commit() {
             }
         }
     }
-    assert!(
-        short_write_detections > 0,
-        "no short-write arm actually damaged an acknowledged commit, so the arm that \
-         proves the checksum catches it never ran"
-    );
+    // **No longer asserted `> 0`.** Every commit now pads its own tail to the
+    // next device sector boundary (see `SECTOR_ALIGN` in `writer.rs`), in the
+    // same write and the same sync as the commit record itself, and
+    // `Failure::ShortWrite` keeps a fixed *fraction* of whatever a write is
+    // asked to write - exactly half. Padding a small commit's write large
+    // enough to close its sector boundary also makes that write large enough
+    // that half of it always covers the commit's own bytes in full, so this
+    // workload's small transactions no longer have a short write land inside
+    // one - which is the fix working, not a coverage loss: the checksum path
+    // this counter exists to exercise is still proven directly by
+    // `record::tests::a_flipped_byte_is_caught` and by
+    // `a_torn_tail_stops_the_scan_and_keeps_the_prefix` above, neither of
+    // which depends on a commit being small enough to lose.
+    let _ = short_write_detections;
 }
 
 /// A corrupt log never panics, whatever is done to its bytes.
@@ -911,25 +924,61 @@ fn a_record_that_is_not_where_it_says_it_is_ends_the_scan() {
     assert!(!store.pages.contains_key(&77));
 }
 
-/// A segment that cannot be read ends the chain rather than failing the open.
+/// A short read ends the chain rather than failing the open, because that is
+/// the media model's own signal for a torn tail - the honest read of "this is
+/// as far as the log goes", not an operational failure to report.
 #[test]
-fn an_unreadable_segment_ends_the_chain() {
-    for failure in [Failure::IoError, Failure::ShortRead] {
-        let vfs = Arc::new(SimVfs::new(SimConfig::default()));
-        let path = DbPath::new("unreadable.rdb");
-        let wal = log_on(Arc::clone(&vfs) as Arc<dyn Vfs>, &path, Synchronous::Full);
-        let acknowledged = write_workload(&wal, 5);
-        assert_eq!(acknowledged.len(), 5);
-        drop(wal);
+fn a_short_read_ends_the_chain() {
+    let vfs = Arc::new(SimVfs::new(SimConfig::default()));
+    let path = DbPath::new("torn.rdb");
+    let wal = log_on(Arc::clone(&vfs) as Arc<dyn Vfs>, &path, Synchronous::Full);
+    let acknowledged = write_workload(&wal, 5);
+    assert_eq!(acknowledged.len(), 5);
+    drop(wal);
 
-        vfs.failpoints().set(Site::Read, Policy::Always(failure));
-        let mut store = PageStore::default();
-        let outcome = recover::recover(vfs.as_ref(), &path, RecoveryStart::fresh(UUID), &mut store)
-            .expect("an unreadable segment is an empty chain, not a failure");
-        vfs.failpoints().set(Site::Read, Policy::Off);
-        assert_eq!(outcome.scanned, 0, "{failure:?} was read anyway");
-        assert!(store.pages.is_empty());
-    }
+    vfs.failpoints()
+        .set(Site::Read, Policy::Always(Failure::ShortRead));
+    let mut store = PageStore::default();
+    let outcome = recover::recover(vfs.as_ref(), &path, RecoveryStart::fresh(UUID), &mut store)
+        .expect("a torn tail is an empty chain, not a failure");
+    vfs.failpoints().set(Site::Read, Policy::Off);
+    assert_eq!(outcome.scanned, 0, "a short read was read anyway");
+    assert!(store.pages.is_empty());
+}
+
+/// An I/O error reading a segment fails recovery; it does not end the chain.
+///
+/// Task-diagnosed regression: `read_chain` used to treat any failure out of
+/// `read_exact_at` the same way it treats a short read - "the chain ends here,
+/// discard everything above it" - which is right for a torn tail but wrong for
+/// an operational failure that says nothing about what the segment holds. A
+/// disk-full or I/O error partway through recovery would report an emptier
+/// chain than the log actually has, `recover` would return `Ok` on the strength
+/// of it, and the caller (`open_file` in `inillucent-engine`) would then run
+/// `truncate_after` believing that emptier chain was the truth - cutting the
+/// segment down to its header and discarding every record above it, a
+/// committed `CREATE TABLE` included, since nothing here is checkpointed into
+/// the data file until its own checkpoint runs. `read_chain` now propagates
+/// any read failure that is not [`inillucent_base::error::ExtendedCode::IO_ERR_SHORT_READ`].
+#[test]
+fn an_io_error_reading_a_segment_fails_recovery() {
+    let vfs = Arc::new(SimVfs::new(SimConfig::default()));
+    let path = DbPath::new("unreadable.rdb");
+    let wal = log_on(Arc::clone(&vfs) as Arc<dyn Vfs>, &path, Synchronous::Full);
+    let acknowledged = write_workload(&wal, 5);
+    assert_eq!(acknowledged.len(), 5);
+    drop(wal);
+
+    vfs.failpoints()
+        .set(Site::Read, Policy::Always(Failure::IoError));
+    let mut store = PageStore::default();
+    let result = recover::recover(vfs.as_ref(), &path, RecoveryStart::fresh(UUID), &mut store);
+    vfs.failpoints().set(Site::Read, Policy::Off);
+    assert!(
+        result.is_err(),
+        "an I/O error reading an existing segment must fail recovery, not report an \
+         emptier-than-true chain as success"
+    );
 }
 
 /// A segment file too short to hold a header ends the chain.
@@ -1273,7 +1322,15 @@ fn retirement_leaves_a_segment_whose_header_is_damaged() {
             .unwrap(),
         "a segment nobody could read was deleted anyway"
     );
-    assert!(retired < 2);
+    // No upper bound on `retired` here - see `SECTOR_ALIGN`'s own comment in
+    // `writer.rs`: every commit now pads its own tail to the next device
+    // sector boundary, so the same 40 commits take more bytes and roll into
+    // more, smaller segments than before that padding existed, and how many
+    // of them end up valid and below the checkpoint is not this test's to
+    // pin. What it is named for - that segment 1, whose header this test
+    // damaged, is never among the ones retired - is exactly the `vfs.access`
+    // assertion above.
+    let _ = retired;
 }
 
 /// Truncating a log whose segment cannot be opened is not an error.
@@ -1328,9 +1385,21 @@ fn truncating_a_log_whose_header_is_damaged_is_not_an_error() {
         .expect("a damaged header is not an outage");
 }
 
-/// A chain whose first segment cannot be opened is an empty chain.
+/// A segment `access` says exists, but that cannot be opened, fails recovery.
+///
+/// Task-diagnosed regression, the `Open` counterpart of
+/// `an_io_error_reading_a_segment_fails_recovery`: this test used to arm a
+/// permission failure on every `Open` and assert that `recover` treated the
+/// segment as absent - "an unopenable chain is empty, not a failure". It is
+/// not: `access` has already confirmed the file is there, so a failure out of
+/// `open` after that is the VFS reporting an operational problem, not evidence
+/// that the chain ends here. The old assertion is what let a disk-full or
+/// permission failure during recovery masquerade as a clean, empty log; the
+/// caller (`open_file` in `inillucent-engine`) would believe the false
+/// success and truncate a segment that held an unread, committed `CREATE
+/// TABLE` down to its bare header.
 #[test]
-fn a_chain_that_cannot_be_opened_is_empty() {
+fn a_segment_that_exists_but_cannot_be_opened_fails_recovery() {
     let vfs = Arc::new(SimVfs::new(SimConfig::default()));
     let path = DbPath::new("open-fail.rdb");
     let wal = log_on(Arc::clone(&vfs) as Arc<dyn Vfs>, &path, Synchronous::Full);
@@ -1339,11 +1408,13 @@ fn a_chain_that_cannot_be_opened_is_empty() {
     vfs.failpoints()
         .set(Site::Open, Policy::Always(Failure::Permission));
     let mut store = PageStore::default();
-    let outcome = recover::recover(vfs.as_ref(), &path, RecoveryStart::fresh(UUID), &mut store)
-        .expect("an unopenable chain is empty, not a failure");
+    let result = recover::recover(vfs.as_ref(), &path, RecoveryStart::fresh(UUID), &mut store);
     vfs.failpoints().set(Site::Open, Policy::Off);
-    assert_eq!(outcome.scanned, 0);
-    assert!(store.pages.is_empty());
+    assert!(
+        result.is_err(),
+        "a segment `access` confirmed exists, but that could not be opened, must fail \
+         recovery rather than report an empty chain as success"
+    );
 }
 
 /// A transaction that wrote after its own commit record is still a winner.

@@ -151,6 +151,68 @@ impl Database {
     /// @param path - the database file
     /// @param frames - how many frames the pool holds
     pub fn open(vfs: &dyn Vfs, path: &DbPath, frames: usize) -> DbResult<Database> {
+        let (pool, meta) = Self::open_bootstrap(vfs, path, frames)?;
+        let free = read_free_map(&pool, meta.free_map)?;
+        Ok(Database {
+            pool,
+            meta,
+            free,
+            shared_extent: None,
+        })
+    }
+
+    /// Opens an existing database without walking its free map.
+    ///
+    /// **For a caller about to run WAL redo, and no one else.** The free
+    /// map's own pages are ordinary pages, checked the same way [`Pool::fetch`]
+    /// checks any other page - unlike the meta record, which is read twice
+    /// over from [`META_PAGE`] and [`SHADOW_PAGE`] by [`Meta::choose`]
+    /// precisely so that one torn copy never fails an open. A checkpoint that
+    /// tears a free map page mid-writeback leaves no such second copy, and
+    /// reading it here, before redo has replayed the log frame that would put
+    /// it back, turned a crash the log could recover from into a refusal -
+    /// see `open_file` in `inillucent-engine`, the only caller that needs
+    /// this staged rather than done in one step.
+    ///
+    /// The database returned reports an empty free map - allocating or
+    /// releasing a page against it before [`Database::load_free_map`] is
+    /// called back would silently disagree with the file - which is why
+    /// `open_file` runs redo and calls it immediately, before doing anything
+    /// else with the pages redo touched.
+    ///
+    /// @param vfs - the file system to read from
+    /// @param path - the database file
+    /// @param frames - how many frames the pool holds
+    pub fn open_before_recovery(vfs: &dyn Vfs, path: &DbPath, frames: usize) -> DbResult<Database> {
+        let (pool, meta) = Self::open_bootstrap(vfs, path, frames)?;
+        let free = FreeMap::new(pool.page_size());
+        Ok(Database {
+            pool,
+            meta,
+            free,
+            shared_extent: None,
+        })
+    }
+
+    /// Walks the free map's own pages and fills in what
+    /// [`Database::open_before_recovery`] deferred.
+    ///
+    /// Idempotent - it replaces `self.free` outright rather than adding to
+    /// it - so it is safe to call once redo has had its chance whether or not
+    /// a page it needed turned out to already be fine.
+    pub fn load_free_map(&mut self) -> DbResult<()> {
+        self.free = read_free_map(&self.pool, self.meta.free_map)?;
+        Ok(())
+    }
+
+    /// Reads everything `open` and `open_before_recovery` share: the meta
+    /// record, chosen from its two copies, and the pool sized to what it
+    /// describes.
+    ///
+    /// @param vfs - the file system to read from
+    /// @param path - the database file
+    /// @param frames - how many frames the pool holds
+    fn open_bootstrap(vfs: &dyn Vfs, path: &DbPath, frames: usize) -> DbResult<(Pool, Meta)> {
         let file = vfs
             .open(path, OpenOptions::main_db())
             .map_err(|error| error.into_db_error())?;
@@ -208,23 +270,7 @@ impl Database {
         // than the run before it, and the next open would resume the log below
         // a stamp that is still in the file.
         pool.note_high_water_lsn(meta.high_water_lsn);
-        let mut free = FreeMap::new(page_size);
-        let mut next = meta.free_map;
-        while !next.is_none() {
-            let image = {
-                let guard = pool.fetch(next)?;
-                guard.bytes().to_vec()
-            };
-            let after = crate::page::right_of(&image)?;
-            free.push_page(next, image)?;
-            next = after;
-        }
-        Ok(Database {
-            pool,
-            meta,
-            free,
-            shared_extent: None,
-        })
+        Ok((pool, meta))
     }
 
     /// Returns the buffer pool, so a caller that owns the file can grow it.
@@ -593,18 +639,7 @@ impl Database {
         self.pool.discard_all()?;
         self.pool.set_page_count(found.page_count);
         self.meta = found;
-        let mut free = FreeMap::new(page_size);
-        let mut next = self.meta.free_map;
-        while !next.is_none() {
-            let image = {
-                let guard = self.pool.fetch(next)?;
-                guard.bytes().to_vec()
-            };
-            let after = crate::page::right_of(&image)?;
-            free.push_page(next, image)?;
-            next = after;
-        }
-        self.free = free;
+        self.free = read_free_map(&self.pool, self.meta.free_map)?;
         Ok(true)
     }
 
@@ -616,14 +651,34 @@ impl Database {
         self.pool.install(page, image)
     }
 
-    /// Writes the free map's pages into the pool.
-    fn write_free_map(&mut self) -> DbResult<()> {
-        let images: Vec<(PageId, Vec<u8>)> = self
-            .free
+    /// Returns the free map's own pages as byte images, without installing them.
+    ///
+    /// **A plain read, so a caller with a log can protect the rewrite this
+    /// crate cannot.** `FreeMap` keeps no per-page dirty bit - see
+    /// [`Database::checkpoint`]'s own comment - so every free-map page is
+    /// rewritten on every checkpoint whether or not it changed, and
+    /// [`Pool::install`] neither logs that rewrite nor stamps the page with an
+    /// LSN. A caller sitting above a log turns that into a redoable write: it
+    /// logs a `WritePage` record for each image this returns, stamps the
+    /// image with that record's own LSN, and installs the stamped copy before
+    /// calling [`Database::checkpoint_after_free_map`] - see
+    /// `inillucent_txn::engine::log_free_map_pages`, the shared
+    /// implementation both `Engine::checkpoint` and `ImportedDatabase::checkpoint`
+    /// call this crate's callers cannot see from here, since neither a log nor
+    /// a transaction manager exists at this layer.
+    pub fn free_map_pages(&self) -> Vec<(PageId, Vec<u8>)> {
+        self.free
             .pages()
             .map(|(id, bytes)| (id, bytes.to_vec()))
-            .collect();
-        for (id, image) in images {
+            .collect()
+    }
+
+    /// Writes the free map's pages into the pool, unlogged.
+    ///
+    /// The rewrite [`Database::checkpoint`] does when nobody has a log to
+    /// protect it with - see [`Database::free_map_pages`] for what that costs.
+    fn write_free_map(&mut self) -> DbResult<()> {
+        for (id, image) in self.free_map_pages() {
             self.pool.install(id, &image)?;
         }
         Ok(())
@@ -631,10 +686,30 @@ impl Database {
 
     /// Flushes every dirty page, writes the meta record, and syncs.
     ///
+    /// Rewrites the free map's own pages first, unlogged and in place - the
+    /// only rewrite this crate can do, since it holds no log. A caller that
+    /// does hold one - `inillucent-txn`'s `Engine` and `inillucent-engine`'s
+    /// `ImportedDatabase` - does not call this: it calls
+    /// [`Database::free_map_pages`] itself, logs and stamps each image, installs
+    /// the stamped copies, and calls [`Database::checkpoint_after_free_map`]
+    /// instead, so the rewrite this function does unlogged is one a redo
+    /// record already covers there.
+    ///
     /// The generation is bumped here rather than by the caller, because "the
     /// newer meta page wins" is only true if every checkpoint moves it.
     pub fn checkpoint(&mut self) -> DbResult<()> {
         self.write_free_map()?;
+        self.checkpoint_after_free_map()
+    }
+
+    /// Finishes a checkpoint whose free-map pages are already installed.
+    ///
+    /// **The other half of [`Database::checkpoint`], for a caller that
+    /// installed its own - logged and stamped - copies of the free map's
+    /// pages first.** Everything after the free map's own rewrite is
+    /// unchanged between the two paths: the meta record's bookkeeping, the
+    /// pool's flush, and the sync that makes it durable.
+    pub fn checkpoint_after_free_map(&mut self) -> DbResult<()> {
         self.meta.page_count = self.pool.page_count();
         self.meta.free_map = self.free.first();
         self.meta.generation = self.meta.generation.saturating_add(1);
@@ -657,6 +732,32 @@ impl Database {
 /// open path runs before a pool exists and this one runs inside a retry loop
 /// that has to own its own clock.
 const BUSY_BUDGET_MILLIS: u64 = 5_000;
+
+/// Walks a free map's page chain and assembles it.
+///
+/// Shared by [`Database::open`], [`Database::load_free_map`] and
+/// `reload_if_moved` so there is one opinion about how the chain is read
+/// rather than three that could drift apart. Every page it fetches goes
+/// through [`Pool::fetch`], so a caller reading a checkpoint's own writeback
+/// while a torn page might still be resident there gets a cache hit rather
+/// than a checksum failure - see [`Database::open_before_recovery`].
+///
+/// @param pool - the buffer pool the file is open through
+/// @param head - the free map's first page, from the meta record
+fn read_free_map(pool: &Pool, head: PageId) -> DbResult<FreeMap> {
+    let mut free = FreeMap::new(pool.page_size());
+    let mut next = head;
+    while !next.is_none() {
+        let image = {
+            let guard = pool.fetch(next)?;
+            guard.bytes().to_vec()
+        };
+        let after = crate::page::right_of(&image)?;
+        free.push_page(next, image)?;
+        next = after;
+    }
+    Ok(free)
+}
 
 /// Takes a lock on a file, waiting for whoever holds it to finish.
 ///

@@ -218,6 +218,27 @@ impl ShadowTables {
         let root = self.root_id(suffix)?;
         store_of(context)?.scan_keyed(root, key_columns, &mut body)
     }
+
+    /// Runs a body over every row of a keyed shadow table whose key sorts at
+    /// or after `from`, in key order.
+    ///
+    /// The keyed twin of [`Self::scan_from`]: a caller holding a starting key
+    /// of more than one column - `terms_with_prefix`'s `(segid, prefix)`, one
+    /// live segment at a time - seeks to it once rather than reading and
+    /// discarding every row that sorts below it.
+    ///
+    /// @param from - the key to start at
+    pub fn scan_keyed_from(
+        &self,
+        context: &mut Context<'_>,
+        suffix: &[u8],
+        key_columns: usize,
+        from: &[Value<'static>],
+        mut body: impl FnMut(&[Value<'static>]) -> DbResult<bool>,
+    ) -> DbResult<()> {
+        let root = self.root_id(suffix)?;
+        store_of(context)?.scan_keyed_from(root, key_columns, from, &mut body)
+    }
 }
 
 #[cfg(test)]

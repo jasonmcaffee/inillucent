@@ -1,12 +1,13 @@
 //! Writing through the public API, and reading it back.
 //!
-//! Invariant: every assertion here goes through `inillucent_legacy::Database`, the same
-//! surface an application uses. A test that reached into the pager could pass
-//! while the statement layer above it was broken, and the whole point of these
-//! is that the layers agree.
+//! Invariant: every assertion here goes through `inillucent_engine::connect::Database`, the
+//! same surface an application uses. A test that reached into the pager could
+//! pass while the statement layer above it was broken, and the whole point of
+//! these is that the layers agree.
 
 use inillucent_compat::workspace_root;
-use inillucent_legacy::{Database, Value};
+use inillucent_engine::connect::Database;
+use inillucent_tree::datum::OwnedDatum;
 
 /// Returns a scratch path nothing else is using.
 fn scratch(name: &str) -> std::path::PathBuf {
@@ -20,40 +21,44 @@ fn scratch(name: &str) -> std::path::PathBuf {
     path
 }
 
-/// Runs a script and returns the connection it ran on.
+/// Runs a script and returns the database it ran on.
 fn database(name: &str, script: &str) -> (Database, std::path::PathBuf) {
     let path = scratch(name);
     let database = Database::open(&path).expect("opens");
     {
-        let connection = database.connect().expect("connects");
+        let connection = database.connect();
         connection.execute_batch(script).expect("runs the script");
     }
     (database, path)
 }
 
 /// Returns every row a query produces, as owned values.
-fn query(database: &Database, sql: &str) -> Vec<Vec<Value<'static>>> {
-    let connection = database.connect().expect("connects");
+fn query(database: &Database, sql: &str) -> Vec<Vec<OwnedDatum>> {
+    let connection = database.connect();
     connection.query(sql).expect("queries")
 }
 
 /// Returns one cell as an integer, or `None` when it is not one.
-fn integer(rows: &[Vec<Value<'static>>], row: usize, column: usize) -> Option<i64> {
-    rows.get(row)?.get(column)?.as_integer()
+fn integer(rows: &[Vec<OwnedDatum>], row: usize, column: usize) -> Option<i64> {
+    match rows.get(row)?.get(column)? {
+        OwnedDatum::Int(value) => Some(*value),
+        _ => None,
+    }
 }
 
 /// Returns one cell as text.
-fn text(rows: &[Vec<Value<'static>>], row: usize, column: usize) -> Option<String> {
-    let value = rows.get(row)?.get(column)?;
-    let bytes = value.as_text()?.utf8_bytes().into_owned();
-    String::from_utf8(bytes).ok()
+fn text(rows: &[Vec<OwnedDatum>], row: usize, column: usize) -> Option<String> {
+    match rows.get(row)?.get(column)? {
+        OwnedDatum::Text(bytes) => String::from_utf8(bytes.clone()).ok(),
+        _ => None,
+    }
 }
 
 /// Reports whether one cell is NULL.
-fn is_null(rows: &[Vec<Value<'static>>], row: usize, column: usize) -> bool {
+fn is_null(rows: &[Vec<OwnedDatum>], row: usize, column: usize) -> bool {
     matches!(
         rows.get(row).and_then(|row| row.get(column)),
-        Some(Value::Null)
+        Some(OwnedDatum::Null)
     )
 }
 
@@ -89,7 +94,7 @@ fn the_counters_report_what_a_statement_changed() {
          INSERT INTO t VALUES(2, 'two');
          INSERT INTO t VALUES(3, 'three');",
     );
-    let connection = database.connect().expect("connects");
+    let connection = database.connect();
     connection
         .execute_batch("UPDATE t SET b = 'x' WHERE a >= 2")
         .expect("updates");
@@ -114,7 +119,7 @@ fn a_rolled_back_transaction_changes_nothing() {
         "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT);
          INSERT INTO t VALUES(1, 'kept');",
     );
-    let connection = database.connect().expect("connects");
+    let connection = database.connect();
     connection.execute_batch("BEGIN").expect("begins");
     connection
         .execute_batch("INSERT INTO t VALUES(2, 'gone'); DELETE FROM t WHERE a = 1;")
@@ -138,7 +143,7 @@ fn a_savepoint_undoes_only_what_it_covers() {
         "CREATE TABLE t(a INTEGER PRIMARY KEY);
          INSERT INTO t VALUES(1);",
     );
-    let connection = database.connect().expect("connects");
+    let connection = database.connect();
     connection
         .execute_batch(
             "BEGIN;
@@ -163,7 +168,7 @@ fn a_unique_constraint_refuses_a_duplicate() {
         "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT UNIQUE);
          INSERT INTO t VALUES(1, 'one');",
     );
-    let connection = database.connect().expect("connects");
+    let connection = database.connect();
     let failure = connection
         .execute_batch("INSERT INTO t VALUES(2, 'one')")
         .expect_err("the duplicate is refused");
@@ -190,7 +195,7 @@ fn not_null_and_check_are_enforced() {
         "constraints.db",
         "CREATE TABLE t(a INTEGER NOT NULL, b INTEGER CHECK (b > 0));",
     );
-    let connection = database.connect().expect("connects");
+    let connection = database.connect();
     let failure = connection
         .execute_batch("INSERT INTO t VALUES(NULL, 1)")
         .expect_err("NOT NULL refuses");
@@ -243,7 +248,7 @@ fn a_dropped_table_is_gone() {
          INSERT INTO keep VALUES(1);
          DROP TABLE go;",
     );
-    let connection = database.connect().expect("connects");
+    let connection = database.connect();
     assert!(connection.query("SELECT * FROM go").is_err());
     let rows = connection
         .query("SELECT count(*) FROM keep")
@@ -258,7 +263,7 @@ fn returning_reports_the_written_row() {
         "returning.db",
         "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT);",
     );
-    let connection = database.connect().expect("connects");
+    let connection = database.connect();
     let rows = connection
         .query("INSERT INTO t(b) VALUES('one') RETURNING a, b")
         .expect("inserts");
@@ -282,7 +287,7 @@ fn writes_survive_a_close_and_reopen() {
     let path = scratch("reopen.db");
     {
         let database = Database::open(&path).expect("opens");
-        let connection = database.connect().expect("connects");
+        let connection = database.connect();
         connection
             .execute_batch(
                 "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT);
@@ -292,7 +297,7 @@ fn writes_survive_a_close_and_reopen() {
             .expect("writes");
     }
     let database = Database::open(&path).expect("reopens");
-    let connection = database.connect().expect("connects");
+    let connection = database.connect();
     let rows = connection
         .query("SELECT a, b FROM t ORDER BY a")
         .expect("queries");
@@ -303,141 +308,15 @@ fn writes_survive_a_close_and_reopen() {
     );
 }
 
-/// The update hook reports every row a statement changed, in order.
-#[test]
-fn the_update_hook_reports_every_changed_row() {
-    use std::cell::RefCell;
-    use std::rc::Rc;
-
-    let (database, _path) = database(
-        "hooks.db",
-        "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT);
-         INSERT INTO t VALUES(1, 'one');
-         INSERT INTO t VALUES(2, 'two');",
-    );
-    let connection = database.connect().expect("connects");
-    let seen = Rc::new(RefCell::new(Vec::new()));
-    let recorder = Rc::clone(&seen);
-    connection.set_update_hook(Some(Box::new(move |kind, database, table, rowid| {
-        recorder.borrow_mut().push(format!(
-            "{} {}.{} {rowid}",
-            kind.as_str(),
-            String::from_utf8_lossy(database),
-            String::from_utf8_lossy(table)
-        ));
-    })));
-
-    connection
-        .execute_batch("INSERT INTO t VALUES(3, 'three')")
-        .expect("inserts");
-    connection
-        .execute_batch("UPDATE t SET b = 'x' WHERE a >= 2")
-        .expect("updates");
-    connection
-        .execute_batch("DELETE FROM t WHERE a = 1")
-        .expect("deletes");
-
-    assert_eq!(
-        seen.borrow().as_slice(),
-        [
-            "INSERT main.t 3",
-            "UPDATE main.t 2",
-            "UPDATE main.t 3",
-            "DELETE main.t 1",
-        ]
-    );
-
-    // Removing the hook stops the reports.
-    connection.set_update_hook(None);
-    connection
-        .execute_batch("INSERT INTO t VALUES(4, 'four')")
-        .expect("inserts");
-    assert_eq!(seen.borrow().len(), 4, "a removed hook still fired");
-}
-
-/// A commit hook can veto a commit, which becomes a rollback.
-#[test]
-fn a_commit_hook_can_veto_a_commit() {
-    use std::cell::Cell;
-    use std::rc::Rc;
-
-    let (database, _path) = database(
-        "commit-hook.db",
-        "CREATE TABLE t(a INTEGER PRIMARY KEY);
-         INSERT INTO t VALUES(1);",
-    );
-    let connection = database.connect().expect("connects");
-    let veto = Rc::new(Cell::new(false));
-    let rolled_back = Rc::new(Cell::new(0u32));
-    let asked = Rc::clone(&veto);
-    connection.set_commit_hook(Some(Box::new(move || asked.get())));
-    let counted = Rc::clone(&rolled_back);
-    connection.set_rollback_hook(Some(Box::new(move || {
-        counted.set(counted.get().saturating_add(1));
-    })));
-
-    // With the hook allowing it, the write lands.
-    connection
-        .execute_batch("INSERT INTO t VALUES(2)")
-        .expect("inserts");
-    assert_eq!(
-        connection.query("SELECT a FROM t").expect("queries").len(),
-        2
-    );
-    assert_eq!(rolled_back.get(), 0);
-
-    // With the hook vetoing, the write does not - and the veto is reported as
-    // a rollback rather than as an error.
-    veto.set(true);
-    connection
-        .execute_batch("INSERT INTO t VALUES(3)")
-        .expect("the veto is not an error");
-    assert_eq!(
-        connection.query("SELECT a FROM t").expect("queries").len(),
-        2,
-        "the vetoed row was written anyway"
-    );
-    assert_eq!(rolled_back.get(), 1, "the rollback hook did not fire");
-
-    // An explicit transaction is vetoed the same way.
-    connection.execute_batch("BEGIN").expect("begins");
-    connection
-        .execute_batch("INSERT INTO t VALUES(4)")
-        .expect("inserts");
-    connection
-        .execute_batch("COMMIT")
-        .expect("the veto is not an error");
-    assert_eq!(
-        connection.query("SELECT a FROM t").expect("queries").len(),
-        2
-    );
-    assert_eq!(rolled_back.get(), 2);
-}
-
-/// The rollback hook fires for an explicit ROLLBACK too.
-#[test]
-fn the_rollback_hook_fires_on_an_explicit_rollback() {
-    use std::cell::Cell;
-    use std::rc::Rc;
-
-    let (database, _path) = database("rollback-hook.db", "CREATE TABLE t(a INTEGER PRIMARY KEY);");
-    let connection = database.connect().expect("connects");
-    let fired = Rc::new(Cell::new(0u32));
-    let counted = Rc::clone(&fired);
-    connection.set_rollback_hook(Some(Box::new(move || {
-        counted.set(counted.get().saturating_add(1));
-    })));
-
-    connection
-        .execute_batch("BEGIN; INSERT INTO t VALUES(1); ROLLBACK;")
-        .expect("runs");
-    assert_eq!(fired.get(), 1);
-    connection
-        .execute_batch("INSERT INTO t VALUES(2)")
-        .expect("inserts");
-    assert_eq!(
-        fired.get(),
-        1,
-        "a successful commit fired the rollback hook"
-    );
-}
+// **The update/commit/rollback hook tests are gone, not rewritten.** The old
+// engine's `Connection::set_update_hook`/`set_commit_hook`/`set_rollback_hook`
+// have no analog on `inillucent_engine::connect::Connection` -
+// `docs/invariants/layering.toml`'s note on the `inillucent` facade names the
+// hooks as one of the features the new engine deliberately does not have,
+// alongside backup-by-step, blobs and serialize. There is nothing in the new
+// engine for a rewritten version of these three cases to assert, so the
+// content - "the update hook reports every changed row in order", "a commit
+// hook can veto a commit", "the rollback hook fires on an explicit ROLLBACK" -
+// is deleted rather than given a hollow replacement. If hooks are added to the
+// new engine later, these three cases (and their SQL scripts, preserved above
+// in this comment's neighbourhood in source history) are what to restore.

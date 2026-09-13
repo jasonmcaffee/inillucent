@@ -57,6 +57,8 @@ use crate::types::{
     COLUMN_ALL_TYPED, COLUMN_KEY,
 };
 
+mod delta;
+
 /// Byte offsets inside the leaf header, after the common header.
 pub mod leaf_header {
     /// Rows in the sorted region, 2 bytes.
@@ -574,11 +576,6 @@ impl<'p> LeafRef<'p> {
         self.row_count
     }
 
-    /// Returns the number of rows in the delta area.
-    pub fn delta_count(&self) -> usize {
-        self.delta_count
-    }
-
     /// Returns the number of columns.
     pub fn column_count(&self) -> usize {
         self.column_count
@@ -629,15 +626,6 @@ impl<'p> LeafRef<'p> {
     /// @param column - which column
     pub fn extent_at(&self, row: usize, column: usize) -> DbResult<ExtentRef> {
         self.column(column)?.extent(row)
-    }
-
-    /// Returns where the delta area begins.
-    ///
-    /// Exposed for [`crate::mutate`], which grows the area downwards and needs
-    /// to know where it currently starts. A reader has no use for it - every
-    /// delta accessor takes an index.
-    pub fn delta_start(&self) -> usize {
-        self.delta_start
     }
 
     /// Returns where the heap begins, which is where the delta area ends.
@@ -871,179 +859,6 @@ impl<'p> LeafRef<'p> {
         Ok(byte & (1u8 << (row % 8)) != 0)
     }
 
-    /// Walks the delta area, proving every row decodes and stops where it says.
-    fn validate_delta(&self) -> DbResult<()> {
-        let mut at = self.delta_start;
-        for index in 0..self.delta_count {
-            let length = page::read_u16(self.page, at)? as usize;
-            let start = at.saturating_add(2);
-            let end = start.saturating_add(length);
-            if end > self.heap_start {
-                return Err(corrupt(format!("delta row {index} runs into the heap")));
-            }
-            let row = self
-                .page
-                .get(start..end)
-                .ok_or_else(|| corrupt("delta row runs past the page"))?;
-            let mut cursor = 0usize;
-            for column in 0..self.column_count {
-                let rest = row.get(cursor..).unwrap_or(&[]);
-                let used = Datum::tagged_span(rest).map_err(|_| {
-                    corrupt(format!("delta row {index} column {column} is corrupt"))
-                })?;
-                // An out-of-line delta value is checked the way the sorted
-                // region's are: the reference has to decode and name a page.
-                if Datum::tag_of(rest)? == crate::datum::tag::EXTENT {
-                    ExtentRef::decode(rest.get(1..).unwrap_or(&[]))?;
-                }
-                cursor = cursor.saturating_add(used);
-            }
-            if cursor != length {
-                return Err(corrupt(format!(
-                    "delta row {index} declares {length} bytes and decodes {cursor}"
-                )));
-            }
-            at = end;
-        }
-        Ok(())
-    }
-
-    /// Returns the out-of-line reference a delta value names, if it names one.
-    ///
-    /// @param index - the row's position in the delta area
-    /// @param column - which column
-    pub fn delta_extent_at(&self, index: usize, column: usize) -> DbResult<Option<ExtentRef>> {
-        let row = self.delta_row(index)?;
-        let mut cursor = 0usize;
-        for position in 0..=column {
-            let rest = row.get(cursor..).unwrap_or(&[]);
-            if position == column {
-                if Datum::tag_of(rest)? != crate::datum::tag::EXTENT {
-                    return Ok(None);
-                }
-                return ExtentRef::decode(rest.get(1..).unwrap_or(&[])).map(Some);
-            }
-            cursor = cursor.saturating_add(Datum::tagged_span(rest)?);
-        }
-        Err(unreachable_branch("an inclusive range ran to its end"))
-    }
-
-    /// Reports whether any delta row holds an out-of-line value.
-    ///
-    /// The cheap half of the question `read_extents` asks: a leaf whose flag is
-    /// set may have spilled only in its sorted region, and walking the delta
-    /// area is a page walk this saves when it can.
-    pub fn any_delta_extent(&self) -> DbResult<bool> {
-        if !self.has_extents() {
-            return Ok(false);
-        }
-        self.any_delta_extent_unchecked()
-    }
-
-    /// The same, without believing the flag.
-    ///
-    /// For [`crate::mutate::LeafMut::remove_delta`], which is deciding what the
-    /// flag should say and so cannot start from what it does say.
-    pub fn any_delta_extent_unchecked_pub(&self) -> DbResult<bool> {
-        self.any_delta_extent_unchecked()
-    }
-
-    /// Reports whether one delta row holds an out-of-line value.
-    ///
-    /// @param index - the row's position in the delta area
-    pub fn delta_extents_in(&self, index: usize) -> DbResult<bool> {
-        let row = self.delta_row(index)?;
-        let mut cursor = 0usize;
-        while cursor < row.len() {
-            let rest = row.get(cursor..).unwrap_or(&[]);
-            if Datum::tag_of(rest)? == crate::datum::tag::EXTENT {
-                return Ok(true);
-            }
-            cursor = cursor.saturating_add(Datum::tagged_span(rest)?);
-        }
-        Ok(false)
-    }
-
-    /// The same, without believing the flag.
-    ///
-    /// The integrity check asks it, because what it is checking *is* the flag:
-    /// a reader that trusted it would agree with itself and find nothing.
-    fn any_delta_extent_unchecked(&self) -> DbResult<bool> {
-        for index in 0..self.delta_count {
-            let row = self.delta_row(index)?;
-            let mut cursor = 0usize;
-            while cursor < row.len() {
-                let rest = row.get(cursor..).unwrap_or(&[]);
-                if Datum::tag_of(rest)? == crate::datum::tag::EXTENT {
-                    return Ok(true);
-                }
-                cursor = cursor.saturating_add(Datum::tagged_span(rest)?);
-            }
-        }
-        Ok(false)
-    }
-
-    /// Returns the bytes of one delta row.
-    ///
-    /// @param index - the row's position in the delta area
-    pub fn delta_row(&self, index: usize) -> DbResult<&'p [u8]> {
-        if index >= self.delta_count {
-            return Err(misuse(format!("delta row {index} does not exist")));
-        }
-        let mut at = self.delta_start;
-        for _ in 0..index {
-            let length = page::read_u16(self.page, at)? as usize;
-            at = at.saturating_add(2).saturating_add(length);
-        }
-        let length = page::read_u16(self.page, at)? as usize;
-        let start = at.saturating_add(2);
-        self.page
-            .get(start..start.saturating_add(length))
-            .ok_or_else(|| corrupt("delta row runs past the page"))
-    }
-
-    /// Returns one value of one delta row.
-    ///
-    /// @param index - the row's position in the delta area
-    /// @param column - which column to decode
-    pub fn delta_value(&self, index: usize, column: usize) -> DbResult<Datum<'p>> {
-        let row = self.delta_row(index)?;
-        let mut cursor = 0usize;
-        for position in 0..=column {
-            let rest = row.get(cursor..).unwrap_or(&[]);
-            if position == column {
-                // **An out-of-line delta value is answered from the resolved
-                // values, or refused.** The seventeen bytes here are a page
-                // number and a length; handing them back as a blob would be a
-                // wrong answer that looked like a right one, which is the same
-                // rule the sorted region's `MiniColumn::value` follows.
-                if Datum::tag_of(rest)? == crate::datum::tag::EXTENT {
-                    let bytes = self
-                        .extents
-                        .and_then(|held| held.get_delta(index, column))
-                        .ok_or_else(|| {
-                            misuse(concat!(
-                                "this value is stored out of line; read the leaf's extents ",
-                                "through the tree first"
-                            ))
-                        })?;
-                    return Ok(match self.column(column)?.physical {
-                        PhysicalType::Blob => Datum::Blob(bytes),
-                        _ => Datum::Text(bytes),
-                    });
-                }
-                let (value, _) = Datum::decode_tagged(rest)?;
-                return Ok(value);
-            }
-            cursor = cursor.saturating_add(Datum::tagged_span(rest)?);
-        }
-        // Unreachable: the loop runs `0..=column` and returns when `position`
-        // reaches `column`, so it can only fall out of the bottom if the range
-        // were empty, which an inclusive range never is. A column past the end
-        // of the row fails earlier, in `decode_tagged`.
-        Err(unreachable_branch("an inclusive range ran to its end"))
-    }
-
     /// Returns one value of one sorted-region row.
     ///
     /// @param row - the row's position in the sorted region
@@ -1070,18 +885,7 @@ impl<'p> LeafRef<'p> {
     /// @param key_columns - how many leading columns form the key
     pub fn locate(&self, key: &[Datum<'_>], key_columns: usize) -> DbResult<crate::write::Located> {
         for index in 0..self.delta_count() {
-            let mut same = true;
-            for column in 0..key_columns {
-                let held = self.delta_value(index, column)?;
-                let wanted = key.get(column).copied().unwrap_or(Datum::Null);
-                if crate::types::compare_under(&held, &wanted, self.collation_of(column))
-                    != core::cmp::Ordering::Equal
-                {
-                    same = false;
-                    break;
-                }
-            }
-            if same {
+            if self.delta_key_matches(index, key, key_columns)? {
                 return Ok(crate::write::Located::Delta(index));
             }
         }
@@ -1571,16 +1375,13 @@ impl<'p> LeafRef<'p> {
         for index in 0..self.column_count {
             columns.push(self.column(index)?);
         }
-        // Each delta row decoded once. `delta_value` re-walks the row's tagged
-        // fields from the first for every column asked for, so decoding here is
-        // what turns a quadratic read of the delta area into a linear one.
+        // Each delta row decoded once, through `delta_row_values`, and reused
+        // by every comparison below - `compare_live` reads from this `Vec`
+        // rather than the page, so a row placed by binary search against `n`
+        // entries already here is not `n` more trips through `delta_value`.
         let mut delta: Vec<Vec<Datum<'p>>> = Vec::with_capacity(self.delta_count);
         for index in 0..self.delta_count {
-            let mut values = Vec::with_capacity(self.column_count);
-            for column in 0..self.column_count {
-                values.push(self.delta_value(index, column)?);
-            }
-            delta.push(values);
+            delta.push(self.delta_row_values(index)?);
         }
 
         let mut order: Vec<LiveRow> =
@@ -1709,10 +1510,10 @@ impl<'p> LeafRef<'p> {
         }
         let sorted_rows = rows.len();
         for index in 0..self.delta_count {
-            let mut values = Vec::with_capacity(self.column_count);
-            for column in 0..self.column_count {
-                values.push(self.delta_value(index, column)?);
-            }
+            // One pass over the row rather than one `delta_value` call per
+            // column - see `delta_row_values` for why that used to cost the
+            // square of the column count instead of the column count.
+            let values = self.delta_row_values(index)?;
             // The newest wins, and "newest" is the *lowest* delta index. A
             // shadowed entry is dropped here rather than sorted and deduped
             // afterwards, because a stable sort would keep whichever the
@@ -4558,6 +4359,71 @@ mod tests {
             .collect();
         assert_eq!(keys, vec![5, 10, 20, 25, 30]);
         leaf.integrity().unwrap();
+    }
+
+    /// `locate` decodes each delta row once, left to right, and stops at the
+    /// first column that differs - it does not re-measure a column it has
+    /// already read.
+    ///
+    /// Five delta rows share their first two key columns and differ only on
+    /// the third, so a probe that agrees with all five on those first two
+    /// columns forces every row's comparison to walk out to the third before
+    /// it can be ruled out - the shape that made `locate`'s old per-column
+    /// `delta_value` calls cost the square of the key's width: comparing
+    /// column two re-measured column zero's and column one's spans from
+    /// scratch, on every one of the five rows.
+    ///
+    /// `Datum::tagged_span` is the call that measured a span it was not about
+    /// to read - a skip past a column the caller wants no value from - so it
+    /// is what a re-walk shows up as, and it is a test-only counter
+    /// (`datum::probe`) rather than a clock, because a call count reads the
+    /// same on an idle box and a loaded one where a duration would not.
+    /// Reverting the fix and running only this test - with the counter kept -
+    /// reads exactly 15: `1 + 2` re-measured spans on each of the five rows.
+    #[test]
+    fn locate_stops_reading_a_delta_row_at_the_first_mismatched_column() {
+        let columns = vec![
+            ColumnSpec::key(PhysicalType::Int64),
+            ColumnSpec::key(PhysicalType::Int64),
+            ColumnSpec::key(PhysicalType::Text),
+        ];
+        let builder = LeafBuilder::new(8192, 1, columns, 3).unwrap();
+        // Sorted so it never collides with the delta rows' key: `999` sorts
+        // after every probe or delta key this test uses.
+        let sorted = vec![vec![Datum::Int(999), Datum::Int(0), Datum::Text(b"sorted")]];
+        let page = builder.encode(&sorted).unwrap();
+        let delta = vec![
+            vec![Datum::Int(0), Datum::Int(0), Datum::Text(b"row-0")],
+            vec![Datum::Int(0), Datum::Int(0), Datum::Text(b"row-1")],
+            vec![Datum::Int(0), Datum::Int(0), Datum::Text(b"row-2")],
+            vec![Datum::Int(0), Datum::Int(0), Datum::Text(b"row-3")],
+            vec![Datum::Int(0), Datum::Int(0), Datum::Text(b"row-4")],
+        ];
+        let page = with_delta(&page, &delta);
+        let leaf = LeafRef::parse(&page).unwrap();
+
+        // A hit is still found correctly - the walk is reordered, not the answer.
+        crate::datum::probe::reset_tagged_span_calls();
+        let found = leaf
+            .locate(&[Datum::Int(0), Datum::Int(0), Datum::Text(b"row-2")], 3)
+            .unwrap();
+        assert_eq!(found, crate::write::Located::Delta(2));
+
+        // A miss that agrees with every row on the first two columns is the
+        // case that used to pay for the re-walk five times over.
+        crate::datum::probe::reset_tagged_span_calls();
+        let missing = leaf
+            .locate(&[Datum::Int(0), Datum::Int(0), Datum::Text(b"nomatch")], 3)
+            .unwrap();
+        assert_eq!(missing, crate::write::Located::Absent);
+        assert_eq!(
+            crate::datum::probe::tagged_span_calls(),
+            0,
+            "locate should decode each of the 5 delta rows' 3 columns once, left \
+             to right, through decode_tagged - a re-walk that skips a column \
+             it is about to decode anyway would show up here as tagged_span \
+             calls greater than zero"
+        );
     }
 
     /// Every way a delta area can be malformed is refused, and none of them

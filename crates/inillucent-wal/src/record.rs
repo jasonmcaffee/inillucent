@@ -214,6 +214,21 @@ pub enum Body<'a> {
         /// The serialised delta, opaque to this crate.
         delta: &'a [u8],
     },
+    /// Filler, belonging to no transaction, so the next real record starts on
+    /// a fresh device sector rather than the tail of one an earlier,
+    /// already-durable record ends in.
+    ///
+    /// See `writer::SECTOR_ALIGN`'s own comment for the failure this closes:
+    /// a write that begins mid-sector puts the *whole* sector back in the
+    /// media's unsynced cache, so a later sync failure or crash can garble
+    /// bytes an earlier, independently acknowledged commit already had. The
+    /// payload is exactly as many zero bytes as needed to reach that
+    /// boundary; recovery reads and checksums them like any other record and
+    /// otherwise ignores them.
+    Pad {
+        /// How many zero bytes of filler this record carries.
+        len: u32,
+    },
 }
 
 impl Body<'_> {
@@ -239,6 +254,7 @@ impl Body<'_> {
             Body::Abort => kind::ABORT,
             Body::Checkpoint { .. } => kind::CHECKPOINT,
             Body::CatalogChange { .. } => kind::CATALOG_CHANGE,
+            Body::Pad { .. } => kind::PAD,
         }
     }
 }
@@ -271,6 +287,8 @@ pub mod kind {
     pub const CHECKPOINT: u8 = 12;
     /// [`super::Body::CatalogChange`].
     pub const CATALOG_CHANGE: u8 = 13;
+    /// [`super::Body::Pad`].
+    pub const PAD: u8 = 14;
 }
 
 /// One decoded log record.
@@ -312,7 +330,8 @@ impl<'a> Record<'a> {
             | Body::Commit { .. }
             | Body::Abort
             | Body::Checkpoint { .. }
-            | Body::CatalogChange { .. } => PageList::none(),
+            | Body::CatalogChange { .. }
+            | Body::Pad { .. } => PageList::none(),
         }
     }
 
@@ -544,6 +563,9 @@ fn encode_body(body: &Body<'_>, out: &mut Vec<u8>) -> DbResult<()> {
         Body::CatalogChange { delta } => {
             put_bytes(out, delta);
         }
+        Body::Pad { len } => {
+            out.resize(out.len().saturating_add(*len as usize), 0);
+        }
     }
     Ok(())
 }
@@ -638,6 +660,9 @@ fn decode_body(kind: u8, payload: &[u8]) -> DbResult<(Body<'_>, usize)> {
         },
         kind::CATALOG_CHANGE => Body::CatalogChange {
             delta: cursor.bytes()?,
+        },
+        kind::PAD => Body::Pad {
+            len: cursor.zero_rest()?,
         },
         other => {
             return Err(corrupt(format!(
@@ -739,6 +764,22 @@ impl<'a> Cursor<'a> {
         let page = self.u64()?;
         let bytes = self.bytes()?;
         Ok((tree, page, bytes))
+    }
+
+    /// Takes every remaining byte as pure filler and returns how many there
+    /// were.
+    ///
+    /// Every one of them must be zero: a `Pad` record's whole reason to exist
+    /// is to be inert, so bytes that are not zero are not filler, they are
+    /// damage - the same rule [`Record::decode`] already applies to a
+    /// record's alignment padding, extended to cover a record whose entire
+    /// payload is padding.
+    fn zero_rest(&mut self) -> DbResult<u32> {
+        let rest = self.take(self.remaining())?;
+        if rest.iter().any(|byte| *byte != 0) {
+            return Err(corrupt("a log record's padding is not zero"));
+        }
+        Ok(rest.len() as u32)
     }
 }
 
@@ -880,6 +921,7 @@ mod tests {
                 cts_watermark: 40,
             },
             Body::CatalogChange { delta: b"delta" },
+            Body::Pad { len: 16 },
         ]
     }
 

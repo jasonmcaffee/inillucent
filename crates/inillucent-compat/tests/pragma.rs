@@ -11,7 +11,8 @@
 //! files are the same shape before a single pragma is asked. That matters for
 //! the pager pragmas, whose answers are facts about the file.
 
-use inillucent_compat::differential::{compare, Step};
+use inillucent_compat::differential::{compare, start_inillucent, Step};
+use inillucent_tree::datum::OwnedDatum;
 
 /// Where this suite's scratch databases live.
 const AREA: &str = "pragma";
@@ -64,7 +65,19 @@ fn the_schema_pragmas_describe_the_schema() {
             // construction, so the comparison is of the rows that describe the
             // *schema* rather than of where the two files happen to be.
             Step::Query("SELECT seq, name FROM pragma_database_list"),
-            Step::Query("PRAGMA collation_list"),
+            // Raw `PRAGMA collation_list` also reports `decimal` and `uint`,
+            // this engine's bundled reference-CLI collations - documented in
+            // `docs/feature-comparison.md`'s "Collations - 5 of 5" section and
+            // excluded the same way in `registers.rs`'s
+            // `the_collation_register_agrees_exactly` - which the pinned
+            // library the oracle links against never registers, and its `seq`
+            // column is registration order, which the two engines have no
+            // reason to share. Comparing the *names* both agree on, minus the
+            // two documented additions, is the invariant that is actually
+            // true rather than a byte-identical raw pragma that never was.
+            Step::Query(
+                "SELECT name FROM pragma_collation_list WHERE name NOT IN ('decimal','uint') ORDER BY name",
+            ),
             Step::Query("PRAGMA foreign_key_list(w)"),
             Step::Query("PRAGMA foreign_key_list(t)"),
             Step::Query("PRAGMA main.table_info(t)"),
@@ -85,23 +98,48 @@ fn table_list_reports_every_table() {
 }
 
 /// What the pager pragmas report about the file.
+///
+/// `page_size` and `locking_mode` are asked of neither engine here - see
+/// [`the_documented_pager_choices_are_what_was_measured`] for why. Neither is
+/// `page_count`, and not for the same reason: it is not `page_size` this time,
+/// it is the file layout underneath it.
+///
+/// **Measured directly, not assumed**: a bare `CREATE TABLE t(a INTEGER
+/// PRIMARY KEY)` already answers 5 pages here against the reference's 2 -
+/// checked with `inillucent-shell` and the pinned `sqlite3` shell on the same
+/// one-statement script, before this suite's schema adds a single table,
+/// index or row. `.dbinfo` puts table `t`'s own root at page 4: this engine
+/// keeps a meta page and a shadow copy of it for atomic commits (`META_PAGE`
+/// and `SHADOW_PAGE` in `inillucent-pool/src/meta.rs`), a catalog b-tree that
+/// exists as its own tree from the first `CREATE` (`write_catalog(&mut
+/// database, &[])` in `ImportedDatabase::create_on`), and a free map that is
+/// its own page rather than folded into the header - four pages of
+/// bookkeeping before the first table, where SQLite's page 1 is the header
+/// and the schema table's root in one page and its freelist is a lazy trunk
+/// page that a fresh file does not yet have. `page_count` is answering
+/// correctly on both sides; the two files simply do not use pages for the
+/// same things, so a schema with more objects (this suite's) reports a larger
+/// gap (9 against 6) for the identical reason a schema with one does (5
+/// against 2). Comparing it would be asserting parity between two on-disk
+/// formats that were never the same format.
 #[test]
 fn the_pager_pragmas_describe_the_file() {
     check(
         "pager",
         &[
-            Step::Query("PRAGMA page_size"),
-            Step::Query("PRAGMA page_count"),
             Step::Query("PRAGMA freelist_count"),
             Step::Query("PRAGMA max_page_count"),
-            Step::Query("PRAGMA cache_size"),
+            // Not the untouched *default* - see
+            // [`the_documented_pager_choices_are_what_was_measured`] - but the
+            // pragma still round-trips an explicit value the same way on both
+            // engines, which is what the `PRAGMA cache_size = -4000` pair
+            // below checks.
             Step::Query("PRAGMA auto_vacuum"),
             Step::Query("PRAGMA encoding"),
             Step::Query("PRAGMA application_id"),
             Step::Query("PRAGMA user_version"),
             Step::Query("PRAGMA journal_mode"),
             Step::Query("PRAGMA journal_size_limit"),
-            Step::Query("PRAGMA locking_mode"),
             Step::Query("PRAGMA temp_store"),
             Step::Query("PRAGMA secure_delete"),
             Step::Exec("PRAGMA user_version = 42"),
@@ -115,6 +153,57 @@ fn the_pager_pragmas_describe_the_file() {
             Step::Exec("PRAGMA busy_timeout = 250"),
             Step::Query("PRAGMA busy_timeout"),
         ],
+    );
+}
+
+/// Reads one pragma's first column off a fresh inillucent connection.
+///
+/// Not compared against the reference - see
+/// [`the_documented_pager_choices_are_what_was_measured`], which uses this to
+/// check this engine's own two deliberately non-parity defaults rather than
+/// asking the oracle to agree with something `docs/feature-comparison.md`
+/// already says it does not.
+///
+/// @param name - a fresh scratch database's name, distinct per case
+/// @param sql - the pragma to read
+fn own_answer(name: &str, sql: &'static str) -> OwnedDatum {
+    let connection = start_inillucent(AREA, name);
+    let mut statement = connection.prepare(sql).expect("it prepares");
+    assert!(statement.step().expect("it steps"), "{sql} answered no row");
+    statement.row().first().expect("one column").clone()
+}
+
+/// `page_size`, `locking_mode` and the default `cache_size` are measured,
+/// permanent design choices, not spellings this engine got wrong.
+///
+/// `docs/feature-comparison.md` and `docs/sql.md` record all three: a 32 KiB
+/// page against the reference's 4 KiB cost the weighted performance gate
+/// 3.83x against 2.60x when 4096 was tried; `exclusive` locking put the
+/// headline at 3.83x against a 3.00x bar for `normal`; and the 128 MiB default
+/// pool against SQLite's 2 MiB (`-131072` against `-2000`) is the same
+/// `cache_size` a caller can still set to whatever they want - it is the
+/// untouched *default* that differs, 64x, and is measured all through the
+/// "Where the memory goes" section. Asking the differential harness to agree
+/// on any of the three would fail on a difference this engine chose on
+/// purpose and measured the cost of choosing otherwise - so this pins this
+/// engine's own answer instead, which turns red if any of the three ever
+/// moves without the documents being updated to match.
+#[test]
+fn the_documented_pager_choices_are_what_was_measured() {
+    assert_eq!(
+        own_answer("pager-page-size", "PRAGMA page_size"),
+        OwnedDatum::Int(32768),
+        "PRAGMA page_size is a measured, documented choice - see docs/feature-comparison.md"
+    );
+    assert_eq!(
+        own_answer("pager-locking-mode", "PRAGMA locking_mode"),
+        OwnedDatum::Text(b"exclusive".to_vec()),
+        "PRAGMA locking_mode is a measured, documented choice - see docs/feature-comparison.md"
+    );
+    assert_eq!(
+        own_answer("pager-cache-size", "PRAGMA cache_size"),
+        OwnedDatum::Int(-131072),
+        "the default PRAGMA cache_size is a measured, documented choice - see docs/feature-comparison.md"
     );
 }
 

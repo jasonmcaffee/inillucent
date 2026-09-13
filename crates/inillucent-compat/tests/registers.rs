@@ -140,6 +140,17 @@ const OURS_ONLY_MODULES: &[&str] = &[
     "zipfile",
 ];
 
+/// Collations this engine has and the pinned library does not register.
+///
+/// `decimal` and `uint` are the reference **CLI's** bundled extensions -
+/// `decimal` compares two numeric strings by value rather than by bytes, and
+/// `uint` compares a string of digits by magnitude - and this engine registers
+/// both too, documented in `docs/feature-comparison.md`'s "Collations - 5 of
+/// 5" section. The pinned library the oracle links against is the bare
+/// `sqlite3.c` amalgamation, which never loads a shell extension, so the two
+/// names are recorded here rather than asserted away.
+const OURS_ONLY_COLLATIONS: &[&str] = &["decimal", "uint"];
+
 /// Modules the pinned library has and this engine does not.
 ///
 /// **One, and it is about which front-end this suite drives.** The harness
@@ -277,16 +288,12 @@ fn the_pragma_register_agrees_exactly() {
     assert_one(compared);
 }
 
-/// The collation register agrees exactly.
+/// The collation register agrees, apart from the two names this engine
+/// bundles that the pinned library does not.
 #[test]
 fn the_collation_register_agrees_exactly() {
-    let compared = compare(
-        AREA,
-        "collations",
-        &[Step::Query(
-            "SELECT group_concat(name, ' ') FROM (SELECT DISTINCT name FROM pragma_collation_list ORDER BY name)",
-        )],
-    );
+    let query = listing("collation_list", &[OURS_ONLY_COLLATIONS]);
+    let compared = compare(AREA, "collations", &[Step::Query(fixed(query))]);
     assert_one(compared);
 }
 

@@ -7,10 +7,10 @@
 //! competitive number would be reading it wrong.
 //!
 //! Two things are measured that a read baseline has no equivalent of. The
-//! first is the *journal*: how many page images a commit had to write and how
-//! many times it had to sync, which is the price of the crash guarantee and
-//! the number any change to the commit path has to be judged against. The
-//! second is commit latency at p50, p95 and p99 rather than a mean, because a
+//! first is the *log*: how many records a commit had to append and how many
+//! times it had to sync, which is the price of the crash guarantee and the
+//! number any change to the commit path has to be judged against. The second
+//! is commit latency at p50, p95 and p99 rather than a mean, because a
 //! commit's cost is dominated by syncs and a mean hides the tail those
 //! produce.
 //!
@@ -18,8 +18,16 @@
 //! directory. A memory VFS would make the sync free, and a benchmark of a
 //! durability mechanism whose syncs are free is not a benchmark of it. The
 //! consequence is that the wall-clock columns move with the machine and the
-//! filesystem; the journal and page counters do not, and they are the ones a
+//! filesystem; the log and page counters do not, and they are the ones a
 //! later change should be read against.
+//!
+//! **There is one journal mechanism now, not five.** The old engine's
+//! `inillucent-transaction::journal::JournalMode` (delete/truncate/persist/
+//! memory/wal) is gone with the crate that read it; the new engine always
+//! writes a segmented write-ahead log (`inillucent-wal`), so the axis this file
+//! used to sweep across five journal modes now sweeps across the three
+//! `PRAGMA synchronous` levels instead - `off`, `normal`, `full` - which is the
+//! durability knob the new engine actually has.
 //!
 //! Usage: `cargo run --release -p inillucent-compat --bin inillucent-txnperf`
 
@@ -30,16 +38,15 @@ use std::time::{Duration, Instant};
 
 use inillucent_compat::report::json_string;
 use inillucent_compat::{platform_name, workspace_root};
-use inillucent_session::connection::{Connection, OpenOptions, SessionDatabase};
-use inillucent_session::statement;
+use inillucent_engine::connect::{Connection, Database};
+use inillucent_engine::ImportedDatabase;
+use inillucent_exec::physical::Params;
 use inillucent_sim::failpoint::Failure;
 use inillucent_sim::media::MediaModel;
 use inillucent_sim::sim_vfs::{SimConfig, SimVfs};
-use inillucent_storage::pager::PagerCounters;
-use inillucent_storage::JournalStats;
-use inillucent_transaction::journal::{JournalMode, JournalOptions, Synchronous};
 use inillucent_vfs::path::DbPath;
 use inillucent_vfs::Vfs;
+use inillucent_wal::Synchronous;
 
 /// How many rows each workload writes.
 const ROWS: usize = 2_000;
@@ -50,19 +57,27 @@ const BATCH: usize = 200;
 /// Which calls of the recovery workload's final commit are tried as the point
 /// the power goes.
 ///
-/// The first one that leaves a journal a recovery would replay is the one
+/// The first one that leaves a log a recovery would actually replay is the one
 /// measured. The commit's shape depends on how many pages the batch dirtied,
-/// so the right cut point is found rather than assumed; the campaign in
-/// `durability.rs` is what covers every cut point, and this only has to
-/// produce a hot journal to time the replay of.
+/// so the right cut point is found rather than assumed; the campaigns in
+/// `durability.rs`/`wal_crash.rs` are what cover every cut point, and this only
+/// has to produce a hot log to time the replay of.
 const RECOVERY_CUT_POINTS: [u64; 10] = [40, 36, 32, 28, 24, 20, 16, 12, 8, 4];
+
+/// Page size the crash-simulation database is built with - the engine's own
+/// default, so it matches what `Database::open` builds in `fresh()`.
+const PAGE_SIZE: usize = inillucent_engine::connect::PAGE_SIZE;
+
+/// Buffer-pool frame count the crash-simulation database is built with - the
+/// engine's own default, for the same reason.
+const FRAMES: usize = inillucent_engine::DEFAULT_FRAMES;
 
 /// One measured workload.
 #[derive(Clone, Debug)]
 struct Measurement {
     /// What was measured.
     workload: String,
-    /// The journal mode it ran under.
+    /// The journal mechanism it ran under - always `wal`, the only one the new engine has.
     mode: String,
     /// The durability level it ran under.
     synchronous: String,
@@ -78,13 +93,16 @@ struct Measurement {
     commit_p95: f64,
     /// Commit latency at the ninety-ninth percentile.
     commit_p99: f64,
-    /// Page images written to the journal.
+    /// Records appended to the write-ahead log.
     journal_records: u64,
-    /// Bytes written to the journal.
+    /// Bytes appended to the write-ahead log.
     journal_bytes: u64,
-    /// Times the journal was synced.
+    /// Times the write-ahead log was synced.
     journal_syncs: u64,
-    /// Pages written to the database file.
+    /// Pages written to the database file. Zero under WAL until a checkpoint
+    /// runs - the log is what a commit writes to, and the main file is only
+    /// caught up later - so a workload here that never checkpoints reports
+    /// zero correctly rather than reporting the log's own writes twice.
     page_writes: u64,
     /// Bytes written to the database file.
     bytes_written: u64,
@@ -143,15 +161,8 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let mut measurements = Vec::new();
-    for (mode, synchronous) in [
-        (JournalMode::Delete, Synchronous::Full),
-        (JournalMode::Delete, Synchronous::Normal),
-        (JournalMode::Truncate, Synchronous::Full),
-        (JournalMode::Persist, Synchronous::Full),
-        (JournalMode::Memory, Synchronous::Off),
-    ] {
-        let options = JournalOptions { mode, synchronous };
-        match run_suite(&scratch, options) {
+    for synchronous in [Synchronous::Full, Synchronous::Normal, Synchronous::Off] {
+        match run_suite(&scratch, synchronous) {
             Ok(mut measured) => measurements.append(&mut measured),
             Err(failure) => {
                 eprintln!("{failure}");
@@ -186,46 +197,61 @@ fn flag(arguments: &[String], name: &str) -> Option<PathBuf> {
     arguments.get(position.saturating_add(1)).map(PathBuf::from)
 }
 
-/// Runs every workload at one journal setting.
-fn run_suite(scratch: &Path, options: JournalOptions) -> Result<Vec<Measurement>, String> {
+/// Runs every workload at one durability setting.
+fn run_suite(scratch: &Path, synchronous: Synchronous) -> Result<Vec<Measurement>, String> {
     let mut measurements = vec![
-        insert_workload(scratch, options, "insert-autocommit", 1)?,
-        insert_workload(scratch, options, "insert-batched", BATCH)?,
-        update_workload(scratch, options, "update-autocommit", 1)?,
-        update_workload(scratch, options, "update-batched", BATCH)?,
-        delete_workload(scratch, options, "delete-autocommit", 1)?,
+        insert_workload(scratch, synchronous, "insert-autocommit", 1)?,
+        insert_workload(scratch, synchronous, "insert-batched", BATCH)?,
+        update_workload(scratch, synchronous, "update-autocommit", 1)?,
+        update_workload(scratch, synchronous, "update-batched", BATCH)?,
+        delete_workload(scratch, synchronous, "delete-autocommit", 1)?,
     ];
-    measurements.push(delete_workload(scratch, options, "delete-batched", BATCH)?);
-    measurements.push(savepoint_workload(scratch, options)?);
-    measurements.push(recovery_workload(scratch, options)?);
+    measurements.push(delete_workload(
+        scratch,
+        synchronous,
+        "delete-batched",
+        BATCH,
+    )?);
+    measurements.push(savepoint_workload(scratch, synchronous)?);
+    measurements.push(recovery_workload(scratch, synchronous)?);
     Ok(measurements)
 }
 
 /// Opens a fresh database with a schema, deleting whatever was there before.
-fn fresh(scratch: &Path, name: &str, options: JournalOptions) -> Result<Connection, String> {
+///
+/// Returns the `Database` alongside its `Connection`, rather than the
+/// connection alone the way the old engine's front end let this file do:
+/// `log_stats()`/`cache_stats()` are answered by the database, not the
+/// connection, and `snapshot`/`finish` below need both.
+fn fresh(
+    scratch: &Path,
+    name: &str,
+    synchronous: Synchronous,
+) -> Result<(&'static Database, Connection<'static>), String> {
     let path = scratch.join(format!("{name}.db"));
-    for suffix in ["", "-journal"] {
+    for suffix in ["", "-wal", "-wal.0000000001"] {
         let _ = std::fs::remove_file(scratch.join(format!("{name}.db{suffix}")));
     }
-    let database = SessionDatabase::open_with_options(
-        &path,
-        OpenOptions {
-            journal: options,
-            ..OpenOptions::default()
-        },
-    )
-    .map_err(text)?;
-    let connection = database.connect().map_err(text)?;
+    let database = Database::open(&path).map_err(text)?;
+    // Leaked for the same reason `differential::start_inillucent` leaks: the
+    // new engine's `Connection<'d>` borrows the `Database`, and this measurement
+    // program runs for a few seconds and exits.
+    let database: &'static Database = Box::leak(Box::new(database));
+    let connection = database.connect();
+    run(
+        &connection,
+        &format!("PRAGMA synchronous = {}", synchronous.name()),
+    )?;
     run(
         &connection,
         "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT, c INTEGER)",
     )?;
-    Ok(connection)
+    Ok((database, connection))
 }
 
 /// Runs one script, reporting a failure as a string.
-fn run(connection: &Connection, sql: &str) -> Result<(), String> {
-    statement::execute_batch(connection, sql.as_bytes()).map_err(text)
+fn run(connection: &Connection<'_>, sql: &str) -> Result<(), String> {
+    connection.execute_batch(sql).map_err(text)
 }
 
 /// Returns the row a workload writes at one index.
@@ -249,12 +275,12 @@ fn payload_of(index: usize) -> u64 {
 /// Measures inserting `ROWS` rows in transactions of `batch` rows each.
 fn insert_workload(
     scratch: &Path,
-    options: JournalOptions,
+    synchronous: Synchronous,
     name: &str,
     batch: usize,
 ) -> Result<Measurement, String> {
-    let connection = fresh(scratch, name, options)?;
-    let before = snapshot(&connection);
+    let (database, connection) = fresh(scratch, name, synchronous)?;
+    let before = snapshot(database);
     let mut latencies = Vec::new();
     let mut payload = 0u64;
     let started = Instant::now();
@@ -287,8 +313,8 @@ fn insert_workload(
     let elapsed = started.elapsed();
     Ok(finish(
         name,
-        options,
-        &connection,
+        synchronous,
+        database,
         before,
         ROWS as u64,
         elapsed,
@@ -300,17 +326,17 @@ fn insert_workload(
 /// Measures updating every row, in transactions of `batch` rows each.
 fn update_workload(
     scratch: &Path,
-    options: JournalOptions,
+    synchronous: Synchronous,
     name: &str,
     batch: usize,
 ) -> Result<Measurement, String> {
-    let connection = fresh(scratch, name, options)?;
+    let (database, connection) = fresh(scratch, name, synchronous)?;
     run(&connection, "BEGIN")?;
     for row in 0..ROWS {
         run(&connection, &row_sql(row))?;
     }
     run(&connection, "COMMIT")?;
-    let before = snapshot(&connection);
+    let before = snapshot(database);
     let mut latencies = Vec::new();
     let mut payload = 0u64;
     let started = Instant::now();
@@ -342,8 +368,8 @@ fn update_workload(
     let elapsed = started.elapsed();
     Ok(finish(
         name,
-        options,
-        &connection,
+        synchronous,
+        database,
         before,
         ROWS as u64,
         elapsed,
@@ -355,17 +381,17 @@ fn update_workload(
 /// Measures deleting every row, in transactions of `batch` rows each.
 fn delete_workload(
     scratch: &Path,
-    options: JournalOptions,
+    synchronous: Synchronous,
     name: &str,
     batch: usize,
 ) -> Result<Measurement, String> {
-    let connection = fresh(scratch, name, options)?;
+    let (database, connection) = fresh(scratch, name, synchronous)?;
     run(&connection, "BEGIN")?;
     for row in 0..ROWS {
         run(&connection, &row_sql(row))?;
     }
     run(&connection, "COMMIT")?;
-    let before = snapshot(&connection);
+    let before = snapshot(database);
     let mut latencies = Vec::new();
     let mut payload = 0u64;
     let started = Instant::now();
@@ -394,8 +420,8 @@ fn delete_workload(
     let elapsed = started.elapsed();
     Ok(finish(
         name,
-        options,
-        &connection,
+        synchronous,
+        database,
         before,
         ROWS as u64,
         elapsed,
@@ -408,9 +434,9 @@ fn delete_workload(
 ///
 /// The rows never reach the file, so what this measures is what an undo level
 /// costs in memory and what the transaction pays for having had one.
-fn savepoint_workload(scratch: &Path, options: JournalOptions) -> Result<Measurement, String> {
-    let connection = fresh(scratch, "savepoint", options)?;
-    let before = snapshot(&connection);
+fn savepoint_workload(scratch: &Path, synchronous: Synchronous) -> Result<Measurement, String> {
+    let (database, connection) = fresh(scratch, "savepoint", synchronous)?;
+    let before = snapshot(database);
     let mut latencies = Vec::new();
     let started = Instant::now();
     let mut index = 0usize;
@@ -431,8 +457,8 @@ fn savepoint_workload(scratch: &Path, options: JournalOptions) -> Result<Measure
     let elapsed = started.elapsed();
     Ok(finish(
         "savepoint-rollback",
-        options,
-        &connection,
+        synchronous,
+        database,
         before,
         ROWS as u64,
         elapsed,
@@ -454,71 +480,102 @@ fn savepoint_workload(scratch: &Path, options: JournalOptions) -> Result<Measure
 /// depends on how many pages the batch dirtied, so the workload tries each cut
 /// point in turn and keeps the first that leaves a journal a recovery would
 /// actually replay.
-fn recovery_workload(scratch: &Path, options: JournalOptions) -> Result<Measurement, String> {
-    if !options.mode.writes_a_file() {
-        // MEMORY and OFF have no journal to recover from, and saying so is
-        // more useful than a zero that looks like a fast recovery.
-        return Ok(empty("recovery", options));
-    }
-    let target = scratch.join("recovered.db");
-    let journal = scratch.join("recovered.db-journal");
-    let mut found = false;
+fn recovery_workload(scratch: &Path, synchronous: Synchronous) -> Result<Measurement, String> {
+    let target = scratch.join("recovery.db");
     for cut in RECOVERY_CUT_POINTS {
-        let Some((database, hot)) = crashed_image(options, cut)? else {
+        let Some(files) = crashed_image(synchronous, cut)? else {
             continue;
         };
-        let _ = std::fs::remove_file(&target);
-        let _ = std::fs::remove_file(&journal);
-        std::fs::write(&target, &database).map_err(text)?;
-        std::fs::write(&journal, &hot).map_err(text)?;
-        found = true;
-        break;
-    }
-    if !found {
-        // No cut point left a hot journal. Reporting that is better than
-        // reporting a recovery time for a recovery that did not happen.
-        return Ok(empty("recovery", options));
-    }
+        // Every file the crash produced is written out under its own basename,
+        // not renamed - the simulated path was `/sim/recovery.db`, so a segment
+        // the WAL wrote beside it comes back as `recovery.db-wal.NNNNNNNN`, and
+        // writing it under any other name would be guessing at a naming scheme
+        // rather than reproducing the one the engine actually used.
+        for existing in std::fs::read_dir(scratch).map_err(text)? {
+            let existing = existing.map_err(text)?.path();
+            if existing
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("recovery.db"))
+            {
+                let _ = std::fs::remove_file(existing);
+            }
+        }
+        let mut wrote_database = false;
+        let mut segment_bytes = 0u64;
+        for (name, bytes) in &files {
+            let Some(basename) = name.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            std::fs::write(scratch.join(basename), bytes).map_err(text)?;
+            if basename == "recovery.db" {
+                wrote_database = true;
+            } else {
+                segment_bytes = segment_bytes.saturating_add(bytes.len() as u64);
+            }
+        }
+        if !wrote_database {
+            continue;
+        }
 
-    let started = Instant::now();
-    let opened = SessionDatabase::open_with_options(
-        &target,
-        OpenOptions {
-            journal: options,
-            ..OpenOptions::default()
-        },
-    )
-    .map_err(text)?;
-    let recovered = opened.connect().map_err(text)?;
-    let elapsed = started.elapsed();
-    let counters = recovered.pager_counters();
-    let bytes = std::fs::metadata(&target)
-        .map(|data| data.len())
-        .unwrap_or(0);
-    Ok(Measurement {
-        workload: "recovery".to_string(),
-        mode: options.mode.as_str().to_string(),
-        synchronous: options.synchronous.as_str().to_string(),
-        rows: 1,
-        commits: 0,
-        nanos_per_row: elapsed.as_nanos() as f64,
-        commit_p50: micros(elapsed),
-        commit_p95: micros(elapsed),
-        commit_p99: micros(elapsed),
-        journal_records: 0,
-        journal_bytes: std::fs::metadata(&journal)
+        let started = Instant::now();
+        let Ok(recovered) = Database::open(&target) else {
+            // This cut point's file did not even open cleanly - try the next.
+            continue;
+        };
+        // `check()` is what confirms the recovery actually replayed something
+        // a caller can use, rather than opening a file whose log never got
+        // far enough to matter: it walks every tree's structure, which is what
+        // `inillucent-testrun`'s own crash suites use for the same reason.
+        if recovered.check().is_err() {
+            continue;
+        }
+        let elapsed = started.elapsed();
+        let counters = recovered.cache_stats();
+        let bytes = std::fs::metadata(&target)
             .map(|data| data.len())
-            .unwrap_or(0),
-        journal_syncs: 0,
-        page_writes: counters.page_writes,
-        bytes_written: bytes,
-        payload_bytes: 0,
-    })
+            .unwrap_or(0);
+        return Ok(Measurement {
+            workload: "recovery".to_string(),
+            mode: "wal".to_string(),
+            synchronous: synchronous.name().to_string(),
+            rows: 1,
+            commits: 0,
+            nanos_per_row: elapsed.as_nanos() as f64,
+            commit_p50: micros(elapsed),
+            commit_p95: micros(elapsed),
+            commit_p99: micros(elapsed),
+            journal_records: 0,
+            journal_bytes: segment_bytes,
+            journal_syncs: 0,
+            page_writes: counters.writes,
+            bytes_written: bytes,
+            payload_bytes: 0,
+        });
+    }
+    // No cut point left a log segment that both wrote a database and checked
+    // out after reopening. Reporting that is better than reporting a recovery
+    // time for a recovery that did not happen.
+    Ok(empty("recovery", synchronous))
 }
 
-/// Builds a crashed database and its hot journal, or `None` when that cut
-/// point left nothing to replay.
-fn crashed_image(options: JournalOptions, cut: u64) -> Result<Option<(Vec<u8>, Vec<u8>)>, String> {
+/// Builds a crashed database and whatever log segments were beside it, or
+/// `None` when that cut point left no database to recover.
+///
+/// Built directly against `inillucent_engine::ImportedDatabase` rather than the
+/// public `connect::Database` facade, because injecting the simulated `Vfs` a
+/// power-loss test needs is an engine-internal constructor
+/// (`ImportedDatabase::create_on`) that the public facade does not expose -
+/// deliberately, since an embedding application has no simulator to hand it.
+///
+/// Returns every file the simulated media held afterwards, keyed by its
+/// simulated path, rather than guessing which one is "the" log segment: the
+/// engine's log is written in numbered segments and this has no reason to
+/// know how many it made.
+fn crashed_image(
+    synchronous: Synchronous,
+    cut: u64,
+) -> Result<Option<std::collections::BTreeMap<PathBuf, Vec<u8>>>, String> {
     let path = DbPath::from("/sim/recovery.db");
     let sim = Arc::new(SimVfs::new(SimConfig {
         seed: 1786 + cut,
@@ -526,28 +583,40 @@ fn crashed_image(options: JournalOptions, cut: u64) -> Result<Option<(Vec<u8>, V
         ..SimConfig::default()
     }));
     {
-        let database = SessionDatabase::open_with(
-            path.as_path(),
-            Arc::clone(&sim) as Arc<dyn Vfs>,
-            OpenOptions {
-                journal: options,
-                ..OpenOptions::default()
-            },
-        )
-        .map_err(text)?;
-        let connection = database.connect().map_err(text)?;
-        run(
-            &connection,
-            "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT, c INTEGER)",
-        )?;
-        run(&connection, "BEGIN")?;
+        let vfs = Arc::clone(&sim) as Arc<dyn Vfs>;
+        let mut database =
+            ImportedDatabase::create_on(vfs, path.as_path().to_path_buf(), PAGE_SIZE, FRAMES)
+                .map_err(text)?;
+        database
+            .execute_any(
+                &format!("PRAGMA synchronous = {}", synchronous.name()),
+                &Params::new(),
+            )
+            .map_err(text)?;
+        database
+            .execute_any(
+                "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT, c INTEGER)",
+                &Params::new(),
+            )
+            .map_err(text)?;
+        database
+            .execute_any("BEGIN", &Params::new())
+            .map_err(text)?;
         for row in 0..ROWS {
-            run(&connection, &row_sql(row))?;
+            database
+                .execute_any(&row_sql(row), &Params::new())
+                .map_err(text)?;
         }
-        run(&connection, "COMMIT")?;
-        run(&connection, "BEGIN")?;
+        database
+            .execute_any("COMMIT", &Params::new())
+            .map_err(text)?;
+        database
+            .execute_any("BEGIN", &Params::new())
+            .map_err(text)?;
         for row in ROWS..ROWS.saturating_add(BATCH) {
-            run(&connection, &row_sql(row))?;
+            database
+                .execute_any(&row_sql(row), &Params::new())
+                .map_err(text)?;
         }
         // Arm the power loss for the commit only. Arming it before the inserts
         // would cut somewhere in the middle of a read, which leaves nothing to
@@ -555,33 +624,25 @@ fn crashed_image(options: JournalOptions, cut: u64) -> Result<Option<(Vec<u8>, V
         let base = sim.failpoints().sites_reached();
         sim.failpoints()
             .fail_nth_call(base.saturating_add(cut), Failure::Crash);
-        let _ = run(&connection, "COMMIT");
+        let _ = database.execute_any("COMMIT", &Params::new());
     }
     let crashed = sim.crash();
-    let mut database = Vec::new();
-    let mut hot = Vec::new();
-    for (name, bytes) in &crashed.files {
-        if name.display().to_string().ends_with("-journal") {
-            hot = bytes.clone();
-        } else {
-            database = bytes.clone();
-        }
-    }
-    let replayable = inillucent_transaction::journal::decode_journal(&hot)
-        .map_err(text)?
-        .is_some();
-    if database.is_empty() || !replayable {
+    let has_database = crashed
+        .files
+        .keys()
+        .any(|name| name.file_name().and_then(|name| name.to_str()) == Some("recovery.db"));
+    if !has_database {
         return Ok(None);
     }
-    Ok(Some((database, hot)))
+    Ok(Some(crashed.files))
 }
 
 /// Returns a measurement that says a workload did not apply.
-fn empty(workload: &str, options: JournalOptions) -> Measurement {
+fn empty(workload: &str, synchronous: Synchronous) -> Measurement {
     Measurement {
         workload: workload.to_string(),
-        mode: options.mode.as_str().to_string(),
-        synchronous: options.synchronous.as_str().to_string(),
+        mode: "wal".to_string(),
+        synchronous: synchronous.name().to_string(),
         rows: 0,
         commits: 0,
         nanos_per_row: 0.0,
@@ -598,32 +659,38 @@ fn empty(workload: &str, options: JournalOptions) -> Measurement {
 }
 
 /// Returns the counters a workload starts from.
-fn snapshot(connection: &Connection) -> (JournalStats, PagerCounters) {
-    (connection.journal_stats(), connection.pager_counters())
+fn snapshot(database: &Database) -> (inillucent_engine::connect::LogStats, u64) {
+    let log = database.log_stats();
+    (log, database.cache_stats().writes)
 }
 
 /// Builds the measurement from what the counters moved by.
 #[allow(clippy::too_many_arguments)]
 fn finish(
     workload: &str,
-    options: JournalOptions,
-    connection: &Connection,
-    before: (JournalStats, PagerCounters),
+    synchronous: Synchronous,
+    database: &Database,
+    before: (inillucent_engine::connect::LogStats, u64),
     rows: u64,
     elapsed: Duration,
     latencies: Vec<Duration>,
     payload_bytes: u64,
 ) -> Measurement {
-    let journal = connection.journal_stats();
-    let counters = connection.pager_counters();
+    let log = database.log_stats();
+    let page_writes = database.cache_stats().writes;
     let mut sorted: Vec<u128> = latencies.iter().map(Duration::as_nanos).collect();
     sorted.sort_unstable();
     Measurement {
         workload: workload.to_string(),
-        mode: options.mode.as_str().to_string(),
-        synchronous: options.synchronous.as_str().to_string(),
+        mode: "wal".to_string(),
+        synchronous: synchronous.name().to_string(),
         rows,
-        commits: counters.commits.saturating_sub(before.1.commits),
+        // The new engine has no separate "commit" counter; every commit that
+        // writes appends at least one log record, so the number of commits is
+        // recovered from how the caller shaped the workload instead - see each
+        // workload's own `explicit`/`batch` accounting, folded into `latencies`
+        // one entry per commit.
+        commits: latencies.len() as u64,
         nanos_per_row: if rows == 0 {
             0.0
         } else {
@@ -632,13 +699,17 @@ fn finish(
         commit_p50: percentile(&sorted, 50.0),
         commit_p95: percentile(&sorted, 95.0),
         commit_p99: percentile(&sorted, 99.0),
-        journal_records: journal.records.saturating_sub(before.0.records),
-        journal_bytes: journal.bytes_written.saturating_sub(before.0.bytes_written),
-        journal_syncs: journal.syncs.saturating_sub(before.0.syncs),
-        page_writes: counters.page_writes.saturating_sub(before.1.page_writes),
-        bytes_written: counters
-            .bytes_written
-            .saturating_sub(before.1.bytes_written),
+        journal_records: log.records.saturating_sub(before.0.records),
+        journal_bytes: log.bytes.saturating_sub(before.0.bytes),
+        journal_syncs: log.syncs.saturating_sub(before.0.syncs),
+        page_writes: page_writes.saturating_sub(before.1),
+        // The new engine's `CacheStats` has no separate "bytes written to the
+        // file" counter distinct from pages written; a page is the unit the
+        // pool writes in, so bytes are approximated from the page count at the
+        // database's own page size rather than left at zero.
+        bytes_written: page_writes
+            .saturating_sub(before.1)
+            .saturating_mul(PAGE_SIZE as u64),
         payload_bytes,
     }
 }

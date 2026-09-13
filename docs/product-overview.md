@@ -23,8 +23,9 @@ mailbox, a wiki, a repository, a set of tickets — by meaning and by exact term
 enough to do several searches inside one answer. Today that means PostgreSQL, the pgvector extension,
 and an embedding model served over a socket. inillucent replaces all three with a library.
 
-**Somebody who already uses SQLite and wants it faster.** The SQL is the same, 403 of 416 probed
-cases produce SQLite's exact bytes, and nothing is refused that SQLite answers. What changes is the
+**Somebody who already uses SQLite and wants it faster.** The SQL is the same: 391 of 416 probed
+cases produce SQLite's exact bytes, 12 are refused (every one a window function), 7 answer
+differently, and 6 are vector search features SQLite has no equivalent for. What changes is the
 storage underneath, and the measurement is 326% faster at 100,000 rows.
 
 ## Where it stands
@@ -37,7 +38,7 @@ Everything here is measured, and each row links to the page carrying the run.
 | **67% less processor time** | 422 ms against 1,266 for the same plan, one child process each | [Performance](performance.md) |
 | **15% more memory** | 42.6 MiB against 37.2, on the same 128 MiB budget. The one measurement SQLite wins | [Performance](performance.md#memory) |
 | **A file within 4% of SQLite's** | 1.036x on the same imported data | [Performance](performance.md#disk) |
-| **403 of 416 SQL cases byte for byte, none refused** | every case run through both shells over a fresh database and compared byte by byte | [SQL support](sql.md) |
+| **391 of 416 SQL cases byte for byte, 12 refused** | every case run through both shells over a fresh database and compared byte by byte; all twelve refusals are window functions | [SQL support](sql.md) |
 | **Better than pgvector on 15 of 17 graded comparisons, worse on none** | both engines reading byte identical vectors | [Retrieval quality](retrieval-quality.md) |
 | **175% faster unfiltered and 6,262% faster filtered** than pgvector | median in the calling process, against the correctly configured baseline | [Retrieval quality](retrieval-quality.md#latency) |
 

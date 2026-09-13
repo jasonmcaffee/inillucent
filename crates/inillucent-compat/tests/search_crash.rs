@@ -16,16 +16,22 @@
 //! numbered, and the run is repeated once per number with the failure armed at
 //! exactly that call.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use inillucent_session::connection::{Connection, OpenOptions, SessionDatabase};
+use inillucent_compat::newengine::ImportedDatabase;
+use inillucent_exec::physical::Params;
 use inillucent_sim::failpoint::Failure;
 use inillucent_sim::media::MediaModel;
 use inillucent_sim::sim_vfs::{CrashSnapshot, SimConfig, SimVfs};
-use inillucent_transaction::journal::{JournalMode, JournalOptions, Synchronous};
-use inillucent_value::Value;
-use inillucent_vfs::path::DbPath;
+use inillucent_tree::datum::OwnedDatum;
 use inillucent_vfs::Vfs;
+
+/// The page size these runs build at, matching `inillucent_engine::connect::PAGE_SIZE`.
+const PAGE_SIZE: usize = 32_768;
+
+/// How many frames the pool holds.
+const FRAMES: usize = 4_096;
 
 /// The schema every run starts from.
 ///
@@ -60,51 +66,72 @@ fn simulator(seed: u64) -> Arc<SimVfs> {
 }
 
 /// The path every run uses.
-fn path() -> DbPath {
-    DbPath::from("/sim/search.db")
+fn path() -> PathBuf {
+    PathBuf::from("/sim/search.db")
 }
 
-/// Opens a connection in one journal mode, reporting failure rather than panicking.
-fn try_connect(
+/// Creates the database on a simulator with nothing written to it yet, in one
+/// journal mode.
+///
+/// `mode` is asserted through `PRAGMA journal_mode`, the one place either
+/// engine lets an application choose it - `ImportedDatabase::create_on` takes
+/// no journal configuration of its own.
+fn create_fresh(
     vfs: Arc<dyn Vfs>,
-    mode: JournalMode,
-) -> Result<Connection, inillucent_base::DbError> {
-    let database = SessionDatabase::open_with(
-        path().as_path(),
-        vfs,
-        OpenOptions {
-            journal: JournalOptions {
-                mode,
-                synchronous: Synchronous::Full,
-            },
-            ..OpenOptions::default()
-        },
-    )?;
-    database.connect()
+    mode: &str,
+) -> Result<ImportedDatabase, inillucent_base::DbError> {
+    let mut engine = ImportedDatabase::create_on(vfs, path(), PAGE_SIZE, FRAMES)?;
+    run(&mut engine, &format!("PRAGMA journal_mode={mode}"))?;
+    Ok(engine)
 }
 
-/// Runs a script, reporting whether it succeeded.
-fn run(connection: &Connection, sql: &str) -> Result<(), inillucent_base::DbError> {
-    inillucent_session::statement::execute_batch(connection, sql.as_bytes())
+/// Reopens a database a prior connection already built, in one journal mode,
+/// reporting the failure rather than panicking - a crash is exactly the case
+/// where this refuses.
+fn reopen(vfs: Arc<dyn Vfs>, mode: &str) -> Result<ImportedDatabase, inillucent_base::DbError> {
+    let mut engine = ImportedDatabase::open_on(vfs, path(), PAGE_SIZE, FRAMES)?;
+    run(&mut engine, &format!("PRAGMA journal_mode={mode}"))?;
+    Ok(engine)
+}
+
+/// Runs a script of one or more statements, stopping at the first failure.
+fn run(engine: &mut ImportedDatabase, sql: &str) -> Result<(), inillucent_base::DbError> {
+    let mut rest = sql;
+    loop {
+        let trimmed = rest.trim_start();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+        let consumed = engine.statement_length(trimmed)?;
+        let Some(head) = trimmed.get(..consumed) else {
+            return Ok(());
+        };
+        if head.trim().is_empty() {
+            return Ok(());
+        }
+        engine.execute_any(head, &Params::new())?;
+        rest = trimmed.get(consumed..).unwrap_or("");
+    }
 }
 
 /// Returns one query's rows, each rendered as text.
-fn query(connection: &Connection, sql: &str) -> Result<Vec<String>, inillucent_base::DbError> {
-    let (mut statement, _) =
-        inillucent_session::statement::Statement::prepare(connection, sql.as_bytes())?;
+fn query(
+    engine: &mut ImportedDatabase,
+    sql: &str,
+) -> Result<Vec<String>, inillucent_base::DbError> {
+    let outcome = engine.execute_any(sql, &Params::new())?;
     let mut rows = Vec::new();
-    while statement.step()? {
-        let width = statement.column_count();
-        let mut parts = Vec::with_capacity(width);
-        for index in 0..width {
-            parts.push(match statement.value(index) {
-                Value::Null => "NULL".to_string(),
-                Value::Integer(number) => number.to_string(),
-                Value::Real(number) => format!("{number:.4}"),
-                Value::Text(text) => String::from_utf8_lossy(&text.utf8_bytes()).into_owned(),
-                Value::Blob(blob) => format!("blob:{}", blob.raw().len()),
-            });
-        }
+    for row in outcome.rows {
+        let parts: Vec<String> = row
+            .iter()
+            .map(|value| match value {
+                OwnedDatum::Null => "NULL".to_string(),
+                OwnedDatum::Int(number) => number.to_string(),
+                OwnedDatum::Real(number) => format!("{number:.4}"),
+                OwnedDatum::Text(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+                OwnedDatum::Blob(bytes) => format!("blob:{}", bytes.len()),
+            })
+            .collect();
         rows.push(parts.join("|"));
     }
     Ok(rows)
@@ -114,20 +141,17 @@ fn query(connection: &Connection, sql: &str) -> Result<Vec<String>, inillucent_b
 ///
 /// One string, on purpose. Splitting them would let a mixture match one half of
 /// a legitimate state and be classified as it.
-fn try_state(connection: &Connection) -> Result<Vec<String>, inillucent_base::DbError> {
+fn try_state(engine: &mut ImportedDatabase) -> Result<Vec<String>, inillucent_base::DbError> {
     let mut state = Vec::new();
-    for row in query(connection, "SELECT a, b FROM t ORDER BY a")? {
+    for row in query(engine, "SELECT a, b FROM t ORDER BY a")? {
         state.push(format!("t:{row}"));
     }
-    for row in query(
-        connection,
-        "SELECT rowid, title, body FROM docs ORDER BY rowid",
-    )? {
+    for row in query(engine, "SELECT rowid, title, body FROM docs ORDER BY rowid")? {
         state.push(format!("row:{row}"));
     }
     for probe in ["discount", "tirzepatide", "sunshine", "rain"] {
         let found = query(
-            connection,
+            engine,
             &format!("SELECT rowid FROM docs WHERE docs MATCH '{probe}' AND k = 10 ORDER BY rowid"),
         )?;
         state.push(format!("find {probe}:{}", found.join(",")));
@@ -136,15 +160,12 @@ fn try_state(connection: &Connection) -> Result<Vec<String>, inillucent_base::Db
 }
 
 /// Builds the database and returns the simulator holding it.
-fn built(seed: u64, mode: JournalMode) -> Arc<SimVfs> {
+fn built(seed: u64, mode: &str) -> Arc<SimVfs> {
     let vfs = simulator(seed);
-    let connection =
-        try_connect(Arc::clone(&vfs) as Arc<dyn Vfs>, mode).expect("the connection opens");
-    if mode == JournalMode::Wal {
-        run(&connection, "PRAGMA journal_mode=wal;").expect("wal mode is entered");
-    }
-    run(&connection, SCHEMA).expect("the schema builds");
-    drop(connection);
+    let mut engine =
+        create_fresh(Arc::clone(&vfs) as Arc<dyn Vfs>, mode).expect("the connection opens");
+    run(&mut engine, SCHEMA).expect("the schema builds");
+    drop(engine);
     vfs
 }
 
@@ -158,7 +179,7 @@ enum Recovery {
 }
 
 /// Reopens what a crash left behind.
-fn recovered(snapshot: &CrashSnapshot, seed: u64, mode: JournalMode) -> Recovery {
+fn recovered(snapshot: &CrashSnapshot, seed: u64, mode: &str) -> Recovery {
     let vfs = Arc::new(SimVfs::recovered(
         SimConfig {
             seed,
@@ -167,8 +188,8 @@ fn recovered(snapshot: &CrashSnapshot, seed: u64, mode: JournalMode) -> Recovery
         },
         snapshot,
     ));
-    match try_connect(Arc::clone(&vfs) as Arc<dyn Vfs>, mode)
-        .and_then(|connection| try_state(&connection))
+    match reopen(Arc::clone(&vfs) as Arc<dyn Vfs>, mode)
+        .and_then(|mut engine| try_state(&mut engine))
     {
         Ok(rows) => Recovery::Rows(rows),
         Err(failure) => Recovery::Broken(format!("{failure}")),
@@ -176,18 +197,18 @@ fn recovered(snapshot: &CrashSnapshot, seed: u64, mode: JournalMode) -> Recovery
 }
 
 /// The two states a run may legitimately end in.
-fn expected_states(mode: JournalMode) -> (Vec<String>, Vec<String>) {
+fn expected_states(mode: &str) -> (Vec<String>, Vec<String>) {
     let vfs = built(4242, mode);
     let before = {
-        let connection =
-            try_connect(Arc::clone(&vfs) as Arc<dyn Vfs>, mode).expect("the connection opens");
-        try_state(&connection).expect("the query runs")
+        let mut engine =
+            reopen(Arc::clone(&vfs) as Arc<dyn Vfs>, mode).expect("the connection opens");
+        try_state(&mut engine).expect("the query runs")
     };
     let after = {
-        let connection =
-            try_connect(Arc::clone(&vfs) as Arc<dyn Vfs>, mode).expect("the connection opens");
-        run(&connection, WORKLOAD).expect("the workload commits");
-        try_state(&connection).expect("the query runs")
+        let mut engine =
+            reopen(Arc::clone(&vfs) as Arc<dyn Vfs>, mode).expect("the connection opens");
+        run(&mut engine, WORKLOAD).expect("the workload commits");
+        try_state(&mut engine).expect("the query runs")
     };
     (before, after)
 }
@@ -199,9 +220,28 @@ fn expected_states(mode: JournalMode) -> (Vec<String>, Vec<String>) {
 /// cut can land there and the campaign would never observe the committed state
 /// - which would make it a test that only ever proves the transaction can be
 /// abandoned. `wal_crash.rs` uses the same device for the same reason.
-const TAIL: &str = "SELECT count(*) FROM t; SELECT count(*) FROM docs_content;";
+///
+/// **The checkpoint is what makes this campaign reach the rollback journal at
+/// all, and it was not here.** The two counts are served out of the buffer
+/// pool, so in `delete` mode they made no VFS call whatever and every cut the
+/// campaign covered fell inside the commit's own log writes. A commit that
+/// only reaches the log has not touched a rollback journal: the journal holds
+/// pre-images while a *checkpoint* moves pages out of the log and into the
+/// data file, and nowhere else. So `a_rollback_journal_commit_is_atomic_across_both`
+/// was, in fact, covering the log. It went from 42 cut points with 6 reaching
+/// the committed state to 22 with none as this ticket's other work changed how
+/// many calls a commit makes, and the campaign failed on `new > 0` - which was
+/// the first thing that had ever made the gap visible.
+///
+/// `PRAGMA wal_checkpoint` checkpoints under a rollback journal as well as
+/// under a log, answering `0|-1|-1` the way SQLite does when there is no log
+/// to count, so it is the statement that puts the journal on the path of every
+/// cut after the commit. `durability.rs` had the same gap and closed it the
+/// same way.
+const TAIL: &str =
+    "SELECT count(*) FROM t; SELECT count(*) FROM docs_content; PRAGMA wal_checkpoint;";
 
-fn campaign(name: &str, mode: JournalMode, failure: Failure, cuts_wanted: u64) -> String {
+fn campaign(name: &str, mode: &str, failure: Failure, cuts_wanted: u64) -> String {
     let (before, after) = expected_states(mode);
     assert_ne!(before, after, "the workload has to change something");
     let corruption_allowed = !matches!(failure, Failure::Crash);
@@ -216,9 +256,9 @@ fn campaign(name: &str, mode: JournalMode, failure: Failure, cuts_wanted: u64) -
         let base = vfs.failpoints().sites_reached();
         vfs.failpoints()
             .fail_nth_call(base.saturating_add(nth), failure);
-        let connection = try_connect(Arc::clone(&vfs) as Arc<dyn Vfs>, mode);
-        let committed = match &connection {
-            Ok(connection) => run(connection, WORKLOAD).is_ok() && run(connection, TAIL).is_ok(),
+        let mut connection = reopen(Arc::clone(&vfs) as Arc<dyn Vfs>, mode);
+        let committed = match &mut connection {
+            Ok(engine) => run(engine, WORKLOAD).is_ok() && run(engine, TAIL).is_ok(),
             Err(_) => false,
         };
         let reached = vfs.failpoints().sites_reached().saturating_sub(base);
@@ -266,10 +306,21 @@ fn campaign(name: &str, mode: JournalMode, failure: Failure, cuts_wanted: u64) -
         report.push_str(&format!("{nth}\t{verdict}\t{committed}\n"));
     }
     assert!(cuts > 20, "{name}: only {cuts} cut points were reached");
-    assert!(old > 0, "{name}: no cut left the old state");
-    assert!(new > 0, "{name}: no cut left the new state");
+    // The counts go in the message because what goes wrong here is almost
+    // never "the engine answered a third state". It is that the cuts stopped
+    // reaching as far into the run as they used to - a campaign that covered
+    // the commit now stops before it, and every cut then honestly reports the
+    // old database. Without the numbers those two read identically.
+    assert!(
+        old > 0,
+        "{name}: no cut left the old state ({cuts} cuts, {old} old, {new} new, {detected} reported)"
+    );
+    assert!(
+        new > 0,
+        "{name}: no cut left the new state ({cuts} cuts, {old} old, {new} new, {detected} reported)"
+    );
     format!(
-        "# {name}: {cuts} cuts, {old} old, {new} new, {detected} reported\ncut\tstate\treported\n{report}"
+        "# {name}: {cuts} cuts, {old} old, {new} new, {detected} damaged and detected\ncut\tstate\tcommitted\n{report}"
     )
 }
 
@@ -284,21 +335,21 @@ fn record(name: &str, report: &str) {
 /// other, in the rows *and* in the ranking.
 #[test]
 fn a_rollback_journal_commit_is_atomic_across_both() {
-    let report = campaign("journal-crash", JournalMode::Delete, Failure::Crash, 4000);
+    let report = campaign("journal-crash", "delete", Failure::Crash, 4000);
     record("journal-crash", &report);
 }
 
 /// The same, through a write-ahead log.
 #[test]
 fn a_wal_commit_is_atomic_across_both() {
-    let report = campaign("wal-crash", JournalMode::Wal, Failure::Crash, 4000);
+    let report = campaign("wal-crash", "wal", Failure::Crash, 4000);
     record("wal-crash", &report);
 }
 
 /// A device that fails a write and says so never produces a mixture either.
 #[test]
 fn a_reported_write_failure_never_produces_a_mixture() {
-    let report = campaign("journal-io", JournalMode::Delete, Failure::IoError, 4000);
+    let report = campaign("journal-io", "delete", Failure::IoError, 4000);
     record("journal-io", &report);
 }
 
@@ -310,7 +361,7 @@ fn a_reported_write_failure_never_produces_a_mixture() {
 /// intact, which is the same index and answers the same queries.
 #[test]
 fn a_crash_during_compaction_leaves_the_index_it_started_from() {
-    let mode = JournalMode::Delete;
+    let mode = "delete";
     // A separate workload, because the thing being cut is the compaction rather
     // than the ordinary commit.
     let schema = "CREATE VIRTUAL TABLE docs USING inillucent_search(title, body, compact = 0);
@@ -321,19 +372,19 @@ fn a_crash_during_compaction_leaves_the_index_it_started_from() {
 
     let build = |seed: u64| -> Arc<SimVfs> {
         let vfs = simulator(seed);
-        let connection =
-            try_connect(Arc::clone(&vfs) as Arc<dyn Vfs>, mode).expect("the connection opens");
-        run(&connection, schema).expect("the schema builds");
-        drop(connection);
+        let mut engine =
+            create_fresh(Arc::clone(&vfs) as Arc<dyn Vfs>, mode).expect("the connection opens");
+        run(&mut engine, schema).expect("the schema builds");
+        drop(engine);
         vfs
     };
-    let probe = |connection: &Connection| -> Result<Vec<String>, inillucent_base::DbError> {
+    let probe = |engine: &mut ImportedDatabase| -> Result<Vec<String>, inillucent_base::DbError> {
         let mut state = query(
-            connection,
+            engine,
             "SELECT rowid FROM docs WHERE docs MATCH 'discount' AND k = 10 ORDER BY rowid",
         )?;
         state.extend(query(
-            connection,
+            engine,
             "SELECT rowid, body FROM docs ORDER BY rowid",
         )?);
         Ok(state)
@@ -341,11 +392,11 @@ fn a_crash_during_compaction_leaves_the_index_it_started_from() {
 
     let reference = {
         let vfs = build(1234);
-        let connection =
-            try_connect(Arc::clone(&vfs) as Arc<dyn Vfs>, mode).expect("the connection opens");
-        let before = probe(&connection).expect("the query runs");
-        run(&connection, compaction).expect("the compaction runs");
-        let after = probe(&connection).expect("the query runs");
+        let mut engine =
+            reopen(Arc::clone(&vfs) as Arc<dyn Vfs>, mode).expect("the connection opens");
+        let before = probe(&mut engine).expect("the query runs");
+        run(&mut engine, compaction).expect("the compaction runs");
+        let after = probe(&mut engine).expect("the query runs");
         assert_eq!(before, after, "compaction changes no answer");
         before
     };
@@ -357,9 +408,9 @@ fn a_crash_during_compaction_leaves_the_index_it_started_from() {
         let base = vfs.failpoints().sites_reached();
         vfs.failpoints()
             .fail_nth_call(base.saturating_add(nth), Failure::Crash);
-        let connection = try_connect(Arc::clone(&vfs) as Arc<dyn Vfs>, mode);
-        if let Ok(connection) = &connection {
-            let _ = run(connection, compaction);
+        let mut connection = reopen(Arc::clone(&vfs) as Arc<dyn Vfs>, mode);
+        if let Ok(engine) = &mut connection {
+            let _ = run(engine, compaction);
         }
         let reached = vfs.failpoints().sites_reached().saturating_sub(base);
         let snapshot = vfs.crash();
@@ -376,8 +427,8 @@ fn a_crash_during_compaction_leaves_the_index_it_started_from() {
             },
             &snapshot,
         ));
-        let state = try_connect(Arc::clone(&vfs) as Arc<dyn Vfs>, mode)
-            .and_then(|connection| probe(&connection));
+        let state = reopen(Arc::clone(&vfs) as Arc<dyn Vfs>, mode)
+            .and_then(|mut engine| probe(&mut engine));
         match state {
             Ok(rows) => assert_eq!(
                 rows, reference,

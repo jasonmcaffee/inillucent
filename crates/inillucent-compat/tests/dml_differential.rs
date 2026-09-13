@@ -16,225 +16,21 @@
 //! and return, because the compatibility report is driven by recorded results
 //! and a run without the oracle should record nothing rather than assume a pass.
 
-use std::path::PathBuf;
-
-use inillucent_compat::oracle::{Driver, Observation, Op, TaggedValue};
-use inillucent_compat::workspace_root;
-use inillucent_session::connection::{Connection, OpenOptions, SessionDatabase};
-use inillucent_session::statement::Statement;
-use inillucent_value::Value;
-
-/// Returns the pinned SQLite oracle binary, if it has been built.
-fn sqlite_oracle() -> Option<PathBuf> {
-    if let Ok(explicit) = std::env::var("INILLUCENT_SQLITE_ORACLE") {
-        let path = PathBuf::from(explicit);
-        return path.is_file().then_some(path);
-    }
-    let directory = workspace_root().join(".sqlite-ref/3.53.4");
-    let path = directory.join(format!("sqlite-oracle{}", std::env::consts::EXE_SUFFIX));
-    path.is_file().then_some(path)
-}
-
-/// Starts the oracle on a fresh database, or reports why it could not.
-fn start_oracle(name: &str) -> Option<Driver> {
-    let program = sqlite_oracle()?;
-    let path = scratch(name, "sqlite");
-    let mut driver = Driver::start("sqlite", &program).ok()?;
-    let hello = driver.send(&Op::Hello).ok()?;
-    assert!(hello.ok, "the oracle did not answer hello");
-    let opened = driver
-        .send(&Op::Open(path.display().to_string()))
-        .expect("the oracle opens its database");
-    assert!(opened.ok, "the oracle could not open {}", path.display());
-    Some(driver)
-}
-
-/// Returns a fresh path for one engine's copy of one scenario.
-fn scratch(name: &str, engine: &str) -> PathBuf {
-    let directory = workspace_root().join("_agent_output/differential");
-    let _ = std::fs::create_dir_all(&directory);
-    let path = directory.join(format!("{name}-{engine}.db"));
-    for suffix in ["", "-journal"] {
-        let _ = std::fs::remove_file(directory.join(format!("{name}-{engine}.db{suffix}")));
-    }
-    path
-}
-
-/// Opens inillucent on its own copy of a scenario's database.
-fn start_inillucent(name: &str) -> Connection {
-    let path = scratch(name, "inillucent");
-    let database = SessionDatabase::open_with_options(
-        &path,
-        OpenOptions {
-            busy_timeout: std::time::Duration::from_secs(5),
-            ..OpenOptions::default()
-        },
-    )
-    .expect("inillucent opens its database");
-    database.connect().expect("inillucent connects")
-}
-
-/// Runs one statement on inillucent and reports it the way the oracle would.
-///
-/// The shapes have to match exactly, including the parts that are easy to get
-/// almost right: a failed statement still reports the connection state after
-/// it, and a query that produced no rows still reports its column names.
-fn observe(connection: &Connection, sql: &str, query: bool) -> Observation {
-    let mut observation = Observation::default();
-    let outcome = (|| -> Result<(Vec<Vec<TaggedValue>>, Vec<String>), inillucent_base::DbError> {
-        let mut rows = Vec::new();
-        let mut columns = Vec::new();
-        let mut offset = 0usize;
-        let bytes = sql.as_bytes();
-        while offset < bytes.len() {
-            let rest = bytes.get(offset..).unwrap_or(&[]);
-            let (mut statement, consumed) = Statement::prepare(connection, rest)?;
-            if query {
-                columns = statement
-                    .columns()
-                    .iter()
-                    .map(|column| String::from_utf8_lossy(&column.name).into_owned())
-                    .collect();
-            }
-            while statement.step()? {
-                if query {
-                    rows.push(statement.row().iter().map(tagged).collect());
-                }
-            }
-            statement.finalize()?;
-            if consumed == 0 {
-                break;
-            }
-            offset = offset.saturating_add(consumed);
-        }
-        Ok((rows, columns))
-    })();
-    let counters = connection.counters();
-    match outcome {
-        Ok((rows, columns)) => {
-            observation.ok = true;
-            observation.rows = rows;
-            observation.columns = columns;
-        }
-        Err(failure) => {
-            observation.ok = false;
-            observation.code = failure.code().value();
-            observation.extended = failure.extended().value();
-            observation.message = failure.message().to_string();
-        }
-    }
-    observation.changes = counters.changes;
-    observation.total_changes = counters.total_changes;
-    observation.last_insert_rowid = counters.last_insert_rowid;
-    observation.autocommit = connection.autocommit();
-    observation
-}
-
-/// Renders a inillucent value as the tagged value the protocol carries.
-fn tagged(value: &Value<'static>) -> TaggedValue {
-    match value {
-        Value::Null => TaggedValue::Null,
-        Value::Integer(integer) => TaggedValue::Integer(*integer),
-        Value::Real(real) => TaggedValue::Real(*real),
-        Value::Text(text) => TaggedValue::Text(text.utf8_bytes().into_owned()),
-        Value::Blob(blob) => TaggedValue::Blob(blob.raw().to_vec()),
-    }
-}
-
-/// One step of a scenario.
-#[derive(Clone, Copy, Debug)]
-enum Step {
-    /// SQL that is not expected to return rows.
-    Exec(&'static str),
-    /// SQL whose rows are compared.
-    Query(&'static str),
-}
+use inillucent_compat::differential::{self, Step};
 
 /// Runs a scenario against both engines and compares every reply.
 ///
 /// Returns how many statements were compared, so a scenario that silently
 /// stopped early cannot look like one that passed.
+///
+/// A thin wrapper over `inillucent_compat::differential::compare`, which used
+/// to be duplicated here (and in `foreign_keys.rs`) before phase 11 needed the
+/// same harness six more times and it was lifted into `src/differential.rs`.
+/// Keeping this two-argument `compare(name, steps)` shape, rather than
+/// updating every call below to the shared function's `(area, name, steps)`,
+/// is the whole reason this wrapper exists.
 fn compare(name: &str, steps: &[Step]) -> usize {
-    let Some(mut oracle) = start_oracle(name) else {
-        eprintln!("the pinned SQLite oracle is not built; run tools/sqlite-reference.{{ps1,sh}}");
-        return 0;
-    };
-    let connection = start_inillucent(name);
-    let mut compared = 0usize;
-    for (index, step) in steps.iter().enumerate() {
-        let (sql, query) = match step {
-            Step::Exec(sql) => (*sql, false),
-            Step::Query(sql) => (*sql, true),
-        };
-        let op = if query {
-            Op::Query(sql.to_string())
-        } else {
-            Op::Exec(sql.to_string())
-        };
-        let reference = oracle.send(&op).expect("the oracle answers");
-        let candidate = observe(&connection, sql, query);
-        assert_eq!(
-            candidate.ok,
-            reference.ok,
-            "step {index} `{sql}`: inillucent {} and SQLite {}\n  inillucent: {}\n  SQLite:  {}",
-            if candidate.ok { "succeeded" } else { "failed" },
-            if reference.ok { "succeeded" } else { "failed" },
-            candidate.message,
-            reference.message
-        );
-        if !reference.ok {
-            assert_eq!(
-                candidate.code, reference.code,
-                "step {index} `{sql}`: primary code\n  inillucent: {} ({})\n  SQLite:  {} ({})",
-                candidate.code, candidate.message, reference.code, reference.message
-            );
-            assert_eq!(
-                candidate.extended, reference.extended,
-                "step {index} `{sql}`: extended code\n  inillucent: {} ({})\n  SQLite:  {} ({})",
-                candidate.extended, candidate.message, reference.extended, reference.message
-            );
-        }
-        if query {
-            assert_eq!(
-                candidate.rows.len(),
-                reference.rows.len(),
-                "step {index} `{sql}`: row count"
-            );
-            for (row, (left, right)) in candidate.rows.iter().zip(reference.rows.iter()).enumerate()
-            {
-                assert_eq!(
-                    left.len(),
-                    right.len(),
-                    "step {index} `{sql}` row {row}: width"
-                );
-                for (column, (candidate, reference)) in left.iter().zip(right.iter()).enumerate() {
-                    assert!(
-                        candidate.identical(reference),
-                        "step {index} `{sql}` row {row} column {column}\n  inillucent: {candidate:?}\n  SQLite:  {reference:?}"
-                    );
-                }
-            }
-        }
-        assert_eq!(
-            candidate.changes, reference.changes,
-            "step {index} `{sql}`: changes()"
-        );
-        assert_eq!(
-            candidate.total_changes, reference.total_changes,
-            "step {index} `{sql}`: total_changes()"
-        );
-        assert_eq!(
-            candidate.last_insert_rowid, reference.last_insert_rowid,
-            "step {index} `{sql}`: last_insert_rowid()"
-        );
-        assert_eq!(
-            candidate.autocommit, reference.autocommit,
-            "step {index} `{sql}`: autocommit"
-        );
-        compared = compared.saturating_add(1);
-    }
-    let _ = oracle.send(&Op::Bye);
-    compared
+    differential::compare("dml_differential", name, steps)
 }
 
 /// The plain CRUD path: create, insert, update, delete, read back.
@@ -904,9 +700,120 @@ fn vacuum_matches_sqlite() {
             Step::Query("SELECT count(*) FROM t"),
             Step::Query("SELECT count(*) FROM w"),
             Step::Query("SELECT count(*) FROM sqlite_schema"),
+            // `PRAGMA foreign_keys` is a connection setting, not a fact about
+            // the file `VACUUM` rewrites - SQLite's own `VACUUM` never closes
+            // the connection, so nothing about it resets, and this engine's
+            // reopen has to put it back rather than default it.
+            Step::Exec("PRAGMA foreign_keys = ON"),
+            Step::Exec("VACUUM"),
+            Step::Query("PRAGMA foreign_keys"),
+            // `journal_mode` is the sharper version of the same question,
+            // because `wal` is also written into the file's own header - a
+            // `VACUUM` that lost it would leave every later opener of the
+            // file reading `delete` for what was set to `wal`, not just this
+            // connection.
+            Step::Exec("PRAGMA journal_mode = wal"),
+            Step::Exec("VACUUM"),
+            Step::Query("PRAGMA journal_mode"),
+            // A `TEMP` table is not a fact about `main`'s file either, and
+            // SQLite's `VACUUM` never closes the connection it lives on -
+            // checked against the pinned shell, which answers `1` for
+            // `CREATE TEMP TABLE t(x); INSERT INTO t VALUES(1); VACUUM;
+            // SELECT * FROM t;`. This engine's `VACUUM` does close the
+            // connection, twice, so it has to carry the temporary table
+            // across the reopen rather than simply never touching it.
+            Step::Exec("CREATE TEMP TABLE tt(v)"),
+            Step::Exec("INSERT INTO tt VALUES(42)"),
+            Step::Exec("VACUUM"),
+            Step::Query("SELECT v FROM tt"),
         ],
     );
-    assert!(compared == 0 || compared == 34, "compared {compared} steps");
+    assert!(compared == 0 || compared == 44, "compared {compared} steps");
+}
+
+/// `VACUUM` of `main` carries an attached database across, real file or
+/// `:memory:`, matching SQLite.
+///
+/// **Not a differential case** - `compare()` runs one file per engine with no
+/// second path either can attach, so this drives the engine directly rather
+/// than through the oracle harness. What it checks was itself checked against
+/// the pinned shell first: `ATTACH DATABASE '<path>' AS aux; CREATE TABLE
+/// aux.u(x); INSERT INTO aux.u VALUES(5); CREATE TABLE main.t(y); INSERT INTO
+/// t VALUES(7); VACUUM; SELECT * FROM aux.u; SELECT * FROM main.t;` answers
+/// `5` then `7`, and substituting `ATTACH DATABASE ':memory:' AS aux` answers
+/// the same - because SQLite's `VACUUM` of `main` never closes the connection
+/// an attachment lives on, real file or not. This engine's `VACUUM` does
+/// close the connection, twice, so `vacuum_in_place` carries `main`'s
+/// attachments across the reopen through `crate::rebuild::AttachedSchemas`
+/// rather than leaving them for a reopen that would never see them.
+#[test]
+fn vacuum_carries_an_attached_database_across_like_sqlite() {
+    use inillucent_compat::newengine::ImportedDatabase;
+    use inillucent_exec::physical::Params;
+
+    let main_path = std::env::temp_dir().join(format!(
+        "inillucent-vacuum-attach-main-{}.rdb",
+        std::process::id()
+    ));
+    let file_aux_path = std::env::temp_dir().join(format!(
+        "inillucent-vacuum-attach-aux-{}.rdb",
+        std::process::id()
+    ));
+    let mut engine =
+        ImportedDatabase::create(main_path.clone(), 4096, 256).expect("main is created");
+    engine
+        .execute_any(
+            &format!(
+                "ATTACH DATABASE '{}' AS file_aux",
+                file_aux_path.to_string_lossy().replace('\\', "/")
+            ),
+            &Params::new(),
+        )
+        .expect("the real-file database attaches");
+    engine
+        .execute_any("ATTACH DATABASE ':memory:' AS mem_aux", &Params::new())
+        .expect("the :memory: database attaches");
+    for sql in [
+        "CREATE TABLE main.t(y)",
+        "INSERT INTO t VALUES(7)",
+        "CREATE TABLE file_aux.u(x)",
+        // The real-file attachment gets its own index too, so the carry-over
+        // is checked against `covering` (a table root's index roots) as well
+        // as against the row data.
+        "CREATE INDEX file_aux.u_x ON u(x)",
+        "INSERT INTO file_aux.u VALUES(5)",
+        "CREATE TABLE mem_aux.w(z)",
+        "INSERT INTO mem_aux.w VALUES(9)",
+    ] {
+        engine
+            .execute_any(sql, &Params::new())
+            .expect("the fixture builds");
+    }
+    engine
+        .execute_any("VACUUM", &Params::new())
+        .expect("VACUUM carries the attachments across rather than refusing");
+
+    let (main_rows, _) = engine.run("SELECT y FROM t").expect("main still reads");
+    let (file_rows, _) = engine
+        .run("SELECT x FROM file_aux.u WHERE x = 5")
+        .expect("the real-file attachment's index still reads");
+    let (mem_rows, _) = engine
+        .run("SELECT z FROM mem_aux.w")
+        .expect("the :memory: attachment still reads");
+    assert_eq!(main_rows.len(), 1, "main's own row must survive VACUUM");
+    assert_eq!(
+        file_rows.len(),
+        1,
+        "the real-file attachment's indexed row must survive VACUUM of main"
+    );
+    assert_eq!(
+        mem_rows.len(),
+        1,
+        "the :memory: attachment's row must survive VACUUM of main"
+    );
+    drop(engine);
+    let _ = std::fs::remove_file(&main_path);
+    let _ = std::fs::remove_file(&file_aux_path);
 }
 
 /// `AUTOINCREMENT`, and the `sqlite_sequence` table that makes it work.

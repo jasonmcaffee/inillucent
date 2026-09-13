@@ -308,6 +308,22 @@ impl Chain {
 /// whose sequence is not the one the chain wants is refused rather than
 /// skipped - the chain stops there and everything above it is discarded.
 ///
+/// **A segment that exists but cannot be read fails the open; it does not end
+/// the chain.** `access` having just confirmed the file is there, an `open` or
+/// a read failing after that is the VFS reporting an operational problem - a
+/// full disk, an I/O error, a denied permission - not evidence about what the
+/// segment holds. Treating it as "no more segments" used to be indistinguishable
+/// from the legitimate end of the chain, and the difference matters: recovery
+/// would report success with an emptier-than-true chain, and the caller would
+/// then run `truncate_after` on the strength of that false success, cutting a
+/// segment that was never actually read down to its header and discarding
+/// every record after it - a committed `CREATE TABLE` included, since nothing
+/// this file logs is checkpointed into the data file until its own
+/// checkpoint runs. A short read that is [`inillucent_base::error::ExtendedCode::IO_ERR_SHORT_READ`]
+/// is kept as the genuine end-of-chain signal - that is what the media model
+/// reports for a torn tail - and every other failure out of `open` or the read
+/// propagates.
+///
 /// @param vfs - the file system
 /// @param base - the database file's path
 /// @param start - where to start
@@ -318,11 +334,16 @@ fn read_chain(vfs: &dyn Vfs, base: &DbPath, start: &RecoveryStart) -> DbResult<C
     let mut sequence = start.sequence.max(1);
     loop {
         let path = segment_path(&name, directory.as_deref(), sequence);
-        let Ok(true) = vfs.access(&path, AccessMode::Exists) else {
-            break;
-        };
-        let Ok(file) = vfs.open(&path, OpenOptions::of_kind(FileKind::Wal).read_only()) else {
-            break;
+        match vfs.access(&path, AccessMode::Exists) {
+            Ok(true) => {}
+            // Cannot even ask whether the segment exists - or it plainly does
+            // not - either way there is nothing to open, and neither case is
+            // new since `access` never used to be an injectable failpoint site.
+            Ok(false) | Err(_) => break,
+        }
+        let file = match vfs.open(&path, OpenOptions::of_kind(FileKind::Wal).read_only()) {
+            Ok(file) => file,
+            Err(error) => return Err(error.into_db_error()),
         };
         let size = file
             .file_size()
@@ -333,7 +354,14 @@ fn read_chain(vfs: &dyn Vfs, base: &DbPath, start: &RecoveryStart) -> DbResult<C
             break;
         }
         let mut bytes = vec![0u8; size as usize];
-        if file.read_exact_at(0, &mut bytes).is_err() {
+        if let Err(error) = file.read_exact_at(0, &mut bytes) {
+            if error.extended() != inillucent_base::error::ExtendedCode::IO_ERR_SHORT_READ {
+                // Not the media model's torn-tail signal, so this is an
+                // operational failure reading a segment `access` just said was
+                // there - propagate it rather than silently discarding
+                // everything in and after it.
+                return Err(error.into_db_error());
+            }
             // A short read here is media damage in the middle of the log rather
             // than at its tail, and the honest answer is the same: the chain
             // stops, and everything above is discarded.
@@ -656,6 +684,13 @@ fn should_replay(record: &Record<'_>, analysis: &Analysis) -> bool {
         // and an abort never is: its transaction's records are not applied, so
         // there is nothing for the abort to undo.
         Body::Abort => false,
+        // Filler. It belongs to no transaction, names no page and carries
+        // nothing an applier could do anything with, so handing it to one
+        // would make every `Redo` implementation carry an arm that does
+        // nothing and would count it among the records recovery applied. It is
+        // read and checksummed by the pass above like any other record, which
+        // is the whole of what it is for; see `Body::Pad`.
+        Body::Pad { .. } => false,
         // These belong to no transaction and are always part of the prefix: a
         // checkpoint is a marker, a catalog change invalidates a cache, and a
         // free-map bit is idempotent.

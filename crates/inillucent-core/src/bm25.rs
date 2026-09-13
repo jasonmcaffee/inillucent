@@ -127,6 +127,57 @@ pub struct Bm25Index {
     chunk_heading_lengths: Vec<u32>,
     total_length: u64,
     n_chunks: usize,
+    /// Every field `index_chunks` has added since [`Self::start_recording`] was
+    /// called, or since the last [`Self::drain_recording`] - `None` while
+    /// nobody is checkpointing this index, so an ordinary append pays nothing
+    /// extra for bookkeeping it will never read. See [`LexicalDelta`].
+    recording: Option<Recording>,
+}
+
+/// What [`Bm25Index::start_recording`] accumulates before it is drained into
+/// a [`LexicalDelta`] with a settled range.
+#[derive(Default)]
+struct Recording {
+    /// The first chunk `index_chunks` was called with while recording, if
+    /// it has been called at all.
+    start: Option<u32>,
+    end: u32,
+    chunk_lengths: Vec<u32>,
+    chunk_heading_lengths: Vec<u32>,
+    positions: Vec<u32>,
+    postings: Vec<(String, Posting)>,
+}
+
+/// Exactly what one or more calls to `index_chunks` added, in a form that
+/// can be replayed onto a *different* `Bm25Index` - one reconstructed from
+/// an earlier checkpoint, whose own `positions` array is a different length
+/// - without re-tokenising anything.
+///
+/// This is the lexical half of a segment delta's checkpoint
+/// (`inillucent_search::module::SearchTable::continue_merge`,
+/// `inillucent_core::persist`'s segment delta format): re-running
+/// `index_chunks` on replay would cost what building the lexical index cost
+/// in the first place, on every single chain resolution, which is exactly
+/// the blow-up `write_latency`'s worst-commit measurement caught before this
+/// existed - a chain of even a few links redoing real tokenisation work on
+/// every reload rather than copying already-computed postings.
+pub struct LexicalDelta {
+    /// The chunk range this delta covers.
+    pub range: std::ops::Range<u32>,
+    /// `chunk_lengths[range]`, in range order.
+    pub chunk_lengths: Vec<u32>,
+    /// `chunk_heading_lengths[range]`, in range order.
+    pub chunk_heading_lengths: Vec<u32>,
+    /// The token positions these chunks' postings point into, appended in
+    /// the order they were computed.
+    pub positions: Vec<u32>,
+    /// Every posting added while recording, term first - a new term gets one
+    /// entry the first time it is seen and another for every later chunk
+    /// that also holds it, exactly as `postings` itself would.
+    /// `Posting::positions_at` here is relative to this delta's own
+    /// `positions`, not to the index's whole array, since the two are
+    /// different lengths at record time and at replay time.
+    pub postings: Vec<(String, Posting)>,
 }
 
 impl Bm25Index {
@@ -167,6 +218,10 @@ impl Bm25Index {
             self.chunk_lengths.resize(range.end as usize, 0);
             self.chunk_heading_lengths.resize(range.end as usize, 0);
         }
+        if let Some(recording) = self.recording.as_mut() {
+            recording.start.get_or_insert(range.start);
+            recording.end = range.end;
+        }
 
         for chunk in range {
             let terms = tokenizer.terms(store.content(chunk));
@@ -174,6 +229,10 @@ impl Bm25Index {
             self.chunk_heading_lengths[chunk as usize] =
                 heading_token_count(store, tokenizer, chunk);
             self.total_length += terms.len() as u64;
+            if let Some(recording) = self.recording.as_mut() {
+                recording.chunk_lengths.push(self.chunk_lengths[chunk as usize]);
+                recording.chunk_heading_lengths.push(self.chunk_heading_lengths[chunk as usize]);
+            }
 
             // Positions as well as counts. Term frequency says a chunk mentions two
             // query words; positions say whether it mentions them next to each other,
@@ -202,11 +261,98 @@ impl Bm25Index {
                         new_terms.push(term.to_string());
                     }
                 }
+                if let Some(recording) = self.recording.as_mut() {
+                    recording.postings.push((
+                        term.to_string(),
+                        Posting {
+                            chunk,
+                            term_frequency: at.len() as u32,
+                            positions_at: recording.positions.len() as u32,
+                        },
+                    ));
+                    recording.positions.extend_from_slice(&at);
+                }
             }
         }
 
         self.n_chunks = store.n_chunks();
         self.merge_sorted_terms(new_terms)
+    }
+
+    /// Starts recording every field `index_chunks` adds, so a caller can
+    /// later replay exactly what happened onto a different instance without
+    /// re-tokenising anything. See [`LexicalDelta`].
+    pub fn start_recording(&mut self) {
+        self.recording.get_or_insert_with(Recording::default);
+    }
+
+    /// Returns and clears whatever has been recorded since
+    /// [`Self::start_recording`] or the last call to this method, or `None`
+    /// when nothing was ever indexed while recording was on.
+    pub fn drain_recording(&mut self) -> Option<LexicalDelta> {
+        let recording = self.recording.take()?;
+        self.recording = Some(Recording::default());
+        let start = recording.start?;
+        Some(LexicalDelta {
+            range: start..recording.end,
+            chunk_lengths: recording.chunk_lengths,
+            chunk_heading_lengths: recording.chunk_heading_lengths,
+            positions: recording.positions,
+            postings: recording.postings,
+        })
+    }
+
+    /// Applies a previously recorded delta directly - extending
+    /// `chunk_lengths`, `positions` and each touched term's postings with
+    /// exactly the values `index_chunks` computed the first time - instead
+    /// of re-tokenising the chunks that produced it.
+    ///
+    /// This is what makes replaying a segment delta chain cost what copying
+    /// bytes costs rather than what building the lexical index cost: an
+    /// index_chunks equivalent to the same range would tokenise the same
+    /// text again on every single chain resolution.
+    /// @param delta - what one checkpoint's own fold added
+    pub fn apply_lexical_delta(&mut self, delta: &LexicalDelta) {
+        if self.chunk_lengths.len() < delta.range.end as usize {
+            self.chunk_lengths.resize(delta.range.end as usize, 0);
+            self.chunk_heading_lengths.resize(delta.range.end as usize, 0);
+        }
+        for (offset, length) in delta.chunk_lengths.iter().enumerate() {
+            let Some(chunk) = delta.range.start.checked_add(offset as u32) else {
+                break;
+            };
+            if let Some(slot) = self.chunk_lengths.get_mut(chunk as usize) {
+                *slot = *length;
+            }
+            self.total_length += u64::from(*length);
+        }
+        for (offset, length) in delta.chunk_heading_lengths.iter().enumerate() {
+            let Some(chunk) = delta.range.start.checked_add(offset as u32) else {
+                break;
+            };
+            if let Some(slot) = self.chunk_heading_lengths.get_mut(chunk as usize) {
+                *slot = *length;
+            }
+        }
+        let positions_base = self.positions.len() as u32;
+        self.positions.extend_from_slice(&delta.positions);
+        let mut new_terms: Vec<String> = Vec::new();
+        for (term, relative) in &delta.postings {
+            let posting = Posting {
+                chunk: relative.chunk,
+                term_frequency: relative.term_frequency,
+                positions_at: positions_base.saturating_add(relative.positions_at),
+            };
+            match self.postings.get_mut(term) {
+                Some(list) => list.push(posting),
+                None => {
+                    self.postings.insert(term.clone(), vec![posting]);
+                    new_terms.push(term.clone());
+                }
+            }
+        }
+        self.n_chunks = self.n_chunks.max(delta.range.end as usize);
+        self.merge_sorted_terms(new_terms);
     }
 
     /// Folds newly seen terms into the sorted dictionary.
@@ -300,6 +446,7 @@ impl Bm25Index {
             chunk_heading_lengths,
             total_length,
             n_chunks,
+            recording: None,
         })
     }
 

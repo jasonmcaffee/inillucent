@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use inillucent_compat::{platform_name, workspace_root};
-use inillucent_legacy::{Connection, Database};
+use inillucent_engine::connect::{Connection, Database};
 
 /// How many allocations have been made since the process started.
 static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
@@ -79,7 +79,7 @@ struct Measurement {
     nanos_per_operation: f64,
     allocations_per_operation: f64,
     bytes_per_operation: f64,
-    instructions_per_operation: f64,
+    rows_per_operation: f64,
 }
 
 /// Runs the baselines and writes them.
@@ -129,7 +129,7 @@ fn measure(
         nanos_per_operation: elapsed / count,
         allocations_per_operation: allocations / count,
         bytes_per_operation: bytes / count,
-        instructions_per_operation: instructions as f64 / count,
+        rows_per_operation: instructions as f64 / count,
     }
 }
 
@@ -149,7 +149,7 @@ fn build_database(root: &Path) -> Result<PathBuf, String> {
         let _ = std::fs::remove_file(PathBuf::from(name));
     }
     let database = Database::open(&path).map_err(|failure| failure.to_string())?;
-    let connection = database.connect().map_err(|failure| failure.to_string())?;
+    let connection = database.connect();
     let mut script = vec![
         "CREATE TABLE fact (id INTEGER PRIMARY KEY, key TEXT, score REAL, tag INTEGER)".to_string(),
         "CREATE INDEX fact_by_key ON fact (key)".to_string(),
@@ -227,8 +227,16 @@ fn plan_workload(
 }
 
 /// Measures running one statement to completion.
+///
+/// The work counter is the number of rows the statement produced, not a
+/// bytecode-instruction count: the new engine compiles to an operator tree
+/// rather than to bytecode, so there is no instruction to count any more. A
+/// row is still a count rather than a clock reading, which is what the
+/// counters-not-clocks rule actually asks for - it is a different count, not a
+/// weaker one, for a DML statement that returns no rows either (the counter is
+/// then `changes()`, which is the row count a write always has).
 fn run_workload(
-    connection: &Connection,
+    connection: &Connection<'_>,
     workload: &str,
     scale: String,
     operations: u64,
@@ -238,9 +246,16 @@ fn run_workload(
         .prepare(sql)
         .map_err(|failure| format!("{sql}: {failure}"))?;
     Ok(measure(workload.to_string(), scale, operations, || {
-        let _ = statement.reset();
-        while statement.step().unwrap_or(false) {}
-        statement.steps()
+        statement.reset();
+        let mut rows = 0u64;
+        while statement.step().unwrap_or(false) {
+            rows = rows.saturating_add(1);
+        }
+        if rows == 0 {
+            statement.changes() as u64
+        } else {
+            rows
+        }
     }))
 }
 
@@ -248,7 +263,7 @@ fn run_workload(
 fn run(root: &Path) -> Result<usize, String> {
     let path = build_database(root)?;
     let database = Database::open(&path).map_err(|failure| failure.to_string())?;
-    let connection = database.connect().map_err(|failure| failure.to_string())?;
+    let connection = database.connect();
     let mut measurements = Vec::new();
 
     // Planning, at four join widths. Two and five are inside the exhaustive
@@ -399,9 +414,9 @@ fn run(root: &Path) -> Result<usize, String> {
             .prepare(&format!("INSERT INTO {table} (tag) VALUES (1)"))
             .map_err(|failure| failure.to_string())?;
         measurements.push(measure(workload.to_string(), "one-row", 2_000, || {
-            let _ = statement.reset();
+            statement.reset();
             while statement.step().unwrap_or(false) {}
-            statement.steps()
+            statement.changes() as u64
         }));
     }
 
@@ -414,8 +429,17 @@ fn run(root: &Path) -> Result<usize, String> {
 /// Kept next to the numbers rather than in a commit message, because a baseline
 /// is only useful to somebody who knows which of its rows are already known to
 /// be wrong.
+///
+/// **This finding describes the old, now-deleted bytecode engine
+/// (`inillucent-vm`), not the engine this binary measures today.** It is left
+/// here as the historical record it always was rather than rewritten to look
+/// like a finding about the current engine, which it is not. The `rows/op`
+/// column this binary now reports is a row count, not a bytecode-instruction
+/// count - there is no bytecode any more - so a fresh run cannot reproduce or
+/// contradict the "identical instruction and allocation counts" comparison
+/// below; it is describing a different engine's numbers.
 const FINDINGS: &str = "\n\
-## What the first run showed\n\
+## What the first run showed, against the engine this baseline used to measure\n\
 \n\
 **`DISTINCT` was quadratic, and is not any more.** It measured 447 ms against 18 ms for\n\
 the `GROUP BY` of the same shape, on *fewer* bytecode instructions - which is the tell:\n\
@@ -458,14 +482,14 @@ fn write_report(root: &Path, measurements: &[Measurement]) -> Result<(), String>
         json.push_str(&format!(
             "    {{\"workload\": \"{}\", \"scale\": \"{}\", \"operations\": {}, \
              \"nanos_per_operation\": {:.1}, \"allocations_per_operation\": {:.1}, \
-             \"bytes_per_operation\": {:.1}, \"instructions_per_operation\": {:.1}}}{}\n",
+             \"bytes_per_operation\": {:.1}, \"rows_per_operation\": {:.1}}}{}\n",
             measurement.workload,
             measurement.scale,
             measurement.operations,
             measurement.nanos_per_operation,
             measurement.allocations_per_operation,
             measurement.bytes_per_operation,
-            measurement.instructions_per_operation,
+            measurement.rows_per_operation,
             if index.saturating_add(1) == measurements.len() {
                 ""
             } else {
@@ -484,15 +508,15 @@ fn write_report(root: &Path, measurements: &[Measurement]) -> Result<(), String>
          cost model, the join enumerator or the write path has something to change it against.\n\
          They were taken only after the semantic gates were green, because a fast wrong answer\n\
          is not a measurement.\n\n\
-         The allocation and instruction counts matter more than the clock. Wall time on a shared\n\
+         The allocation and row counts matter more than the clock. Wall time on a shared\n\
          machine moves with whatever else is running; the number of heap allocations a plan makes\n\
-         and the number of bytecode instructions a query executes do not.\n\n\
+         and the number of rows a query produces do not.\n\n\
          The four `plan-join-N` rows are the ones worth watching. Join-order enumeration is\n\
          exhaustive up to eight terms and greedy past it, so twelve and thirty-two are measuring\n\
          a different algorithm from two and five - and recording all four means a change that\n\
          moves the cut-over shows up as a step rather than as a slope.\n\n",
     );
-    report.push_str("| Workload | Scale | Ops | ns/op | Allocs/op | Bytes/op | VM ops |\n");
+    report.push_str("| Workload | Scale | Ops | ns/op | Allocs/op | Bytes/op | rows/op |\n");
     report.push_str("|---|---|--:|--:|--:|--:|--:|\n");
     for measurement in measurements {
         report.push_str(&format!(
@@ -503,7 +527,7 @@ fn write_report(root: &Path, measurements: &[Measurement]) -> Result<(), String>
             measurement.nanos_per_operation,
             measurement.allocations_per_operation,
             measurement.bytes_per_operation,
-            measurement.instructions_per_operation
+            measurement.rows_per_operation
         ));
     }
     report.push_str(FINDINGS);

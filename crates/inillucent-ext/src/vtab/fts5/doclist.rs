@@ -49,25 +49,6 @@ pub struct DocEntry {
     pub columns: Vec<(usize, Vec<u32>)>,
 }
 
-impl DocEntry {
-    /// Returns how many times the term appears in one column.
-    pub fn count_in(&self, column: usize) -> usize {
-        self.columns
-            .iter()
-            .find(|(index, _)| *index == column)
-            .map(|(_, positions)| positions.len())
-            .unwrap_or(0)
-    }
-
-    /// Returns how many times the term appears anywhere in the row.
-    pub fn count(&self) -> usize {
-        self.columns
-            .iter()
-            .map(|(_, positions)| positions.len())
-            .sum()
-    }
-}
-
 /// Encodes a doclist.
 pub fn encode_doclist(entries: &[DocEntry]) -> Vec<u8> {
     let mut out = Vec::new();
@@ -250,18 +231,5 @@ mod tests {
         ];
         let encoded = encode_doclist(&entries);
         assert_eq!(decode_doclist(&encoded), entries);
-    }
-
-    /// A doclist entry counts its term per column and overall.
-    #[test]
-    fn an_entry_counts_per_column() {
-        let entry = DocEntry {
-            rowid: 1,
-            columns: vec![(0, vec![1, 2]), (2, vec![5])],
-        };
-        assert_eq!(entry.count_in(0), 2);
-        assert_eq!(entry.count_in(1), 0);
-        assert_eq!(entry.count_in(2), 1);
-        assert_eq!(entry.count(), 3);
     }
 }

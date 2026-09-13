@@ -1,39 +1,70 @@
-//! Turning an immutable base generation and a bounded delta log into the one
-//! index a query is answered from.
+//! Turning a manifest of immutable segments and a bounded delta log into the
+//! one index a query is answered from.
 //!
-//! Invariant: a query is answered by **one** index, never by two lists that
-//! were scored separately and glued together. That is not a convenience. BM25
-//! scores are relative to a corpus - the inverse document frequency of a term
-//! is a property of the whole collection - so a hit scored against a base
-//! generation and a hit scored against a five-row delta are two numbers on two
-//! different scales, and ordering them together produces a ranking that is
-//! wrong in a way no test on either half would catch. Merging first and scoring
-//! once is the only version of this that is correct.
+//! Invariant: a query is answered by **one** index, never by several lists
+//! that were scored separately and glued together. That is not a convenience.
+//! BM25 scores are relative to a corpus - the inverse document frequency of a
+//! term is a property of the whole collection - so a hit scored against one
+//! segment and a hit scored against another are two numbers on two different
+//! scales, and ordering them together by raw score produces a ranking that is
+//! wrong in a way no test on either half would catch.
 //!
-//! What makes that affordable is that the merge is incremental and cached. The
-//! base generation is loaded once; each delta is applied to the loaded index
-//! with the same `replace_document`/`tombstone` calls the existing engine
-//! already uses for a live sync; and the result is kept, keyed by the exact
-//! delta entries that produced it. A second query at the same snapshot pays
-//! nothing. A query after one insert pays one append. A query after a rollback
-//! finds that the cached entries are no longer a prefix of the visible ones and
-//! rebuilds - which is why the key is content-addressed rather than a sequence
-//! number, since a rolled-back transaction gives its sequence numbers back.
+//! That rules out the shape a segmented vector store usually takes - fan a
+//! query out to every segment, let each answer its own top k, merge the
+//! merged lists by score - for the lexical branch, and this module does not
+//! take it even for the vector branch, so that one codepath answers both. The
+//! segments a commit now writes (see `store::SegmentMeta`) are a **storage**
+//! device: they bound what a write has to serialise, not what a query has to
+//! score against. A query still folds every live segment into one logical
+//! index before it runs, the same `replace_document`/`tombstone` calls the
+//! existing engine already uses for a live sync, oldest segment first so a
+//! newer edit of the same row always lands last and therefore wins. The
+//! result is scored exactly as if it had been built from one pass over every
+//! row - because inserting the newest few thousand rows into an
+//! already-built index is a small amount of the same graph work committing
+//! from scratch would do, not a different, cheaper approximation of it -
+//! and it is cached, keyed by which segments and which delta entries produced
+//! it, so a second query at the same snapshot pays nothing and a query after
+//! one insert pays one append.
 //!
-//! Publishing a new generation is the other half, and there are two ways to do
-//! it. A commit whose delta log has passed its threshold **folds**: the built
-//! generation is loaded and the pending entries are inserted into it one at a
-//! time, so the graph work is one insert per delta entry. The `compact` and
-//! `rebuild` commands **build in one pass** over every row, which is one insert
-//! per row and leaves no tombstoned chunks in the index.
+//! Publishing a new segment is the write side, and there are three ways it
+//! happens:
 //!
-//! Automatic compaction used to take the second path, which meant one ordinary
-//! `INSERT` could pay a full graph build - nine and a half minutes on the
-//! 598,560 chunk corpus this engine is deployed on, in the middle of somebody
-//! else's transaction. That path was changed to fold pending deltas instead of
-//! rebuilding the whole graph; the single-pass build is now only ever asked for
-//! explicitly, by `compact` or `rebuild`.
+//! - **A commit whose delta log has passed its threshold flushes.** The
+//!   pending batch is built into a brand new segment from just those rows -
+//!   never by loading and rewriting an existing one - so a flush's cost is the
+//!   batch, never the corpus. This is `SearchTable::flush` in `module.rs`.
+//! - **A level that has accumulated enough segments merges.** Several small
+//!   segments are folded into one bigger one at the next level, by the same
+//!   incremental replay a query already does, so a merge costs the segments
+//!   being merged and nothing older. This is `SearchTable::merge_cascade`,
+//!   and it is itself bounded: a commit folds at most
+//!   `Options::merge_budget_chunks` chunks' worth before checkpointing what
+//!   it has done and leaving the rest for a later commit
+//!   (`SearchTable::continue_merge`), unless the level has fallen far enough
+//!   behind to trip `Options::crisis_at`, in which case one commit pays for
+//!   the whole thing rather than let the query-time fold keep growing.
+//! - **`compact` and `rebuild` build in one pass** over every row, discarding
+//!   every existing segment for one fresh one. This is what removes a
+//!   tombstoned chunk for good; folding and merging never do, because both
+//!   only ever append.
+//!
+//! Automatic compaction used to build in one pass on every commit that crossed
+//! the threshold, which meant one ordinary `INSERT` could pay a full graph
+//! build - nine and a half minutes on the 598,560 chunk corpus this engine is
+//! deployed on, in the middle of somebody else's transaction (task-1894). That
+//! was fixed by folding pending deltas into the existing generation instead of
+//! rebuilding it, which bounded the *graph* work; it left the *bytes* written
+//! by a publish proportional to the corpus, because a generation was one
+//! serialised index and publishing meant rewriting the whole thing however few
+//! rows changed (`docs/roadmap.md` item 10). Segments are what bounds that
+//! too: a flush's bytes are the batch's own segment, never the whole file -
+//! and once a constant flush cadence made flushing frequent enough that a
+//! whole level's worth of segments could need merging inside one commit, the
+//! merge bound above is what keeps *that* commit from paying for a level
+//! several batches wide in one go.
 
+use std::collections::BTreeSet;
 use std::sync::Mutex;
 
 use inillucent_base::DbResult;
@@ -44,7 +75,7 @@ use inillucent_core::store::ChunkInput;
 use inillucent_ext::vtab::{failure, Context};
 
 use crate::options::{Metric, Mode, Options};
-use crate::store::{state, Delta, Op, Row, Store};
+use crate::store::{state, Delta, Op, Row, SegmentMeta, Store};
 
 /// The source name every row of a search table is filed under.
 ///
@@ -96,8 +127,14 @@ pub struct Cache {
 
 /// What the cache is holding, and exactly which state it describes.
 struct Cached {
-    generation: i64,
-    covered: i64,
+    /// Which segments, in fold order, the cached index was built from.
+    ///
+    /// Compared against the live manifest on every query rather than trusted:
+    /// a flush or a merge changes this list, and a cache that kept answering
+    /// from the segments it was built over would be answering from a set a
+    /// newer commit has already superseded.
+    segments: Vec<i64>,
+    /// The delta entries folded in on top of `segments`, in order.
     applied: Vec<Delta>,
     rows: usize,
     index: Index,
@@ -108,8 +145,7 @@ impl std::fmt::Debug for Cached {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("Cached")
-            .field("generation", &self.generation)
-            .field("covered", &self.covered)
+            .field("segments", &self.segments)
             .field("applied", &self.applied.len())
             .field("rows", &self.rows)
             .finish()
@@ -409,81 +445,450 @@ pub fn build_from_rows(
     Ok((index, rows))
 }
 
-/// Folds a bounded batch of deltas into the generation that is already built.
+/// Builds a brand new segment from a bounded batch of deltas, touching no
+/// existing segment at all.
 ///
-/// **This is the automatic path, and the bound is the point.**
-/// The graph is not rebuilt. Each pending entry is one `replace_document`,
-/// which tombstones the old chunk and inserts one node through `Hnsw::insert` -
-/// a descent through the layers and one neighbour selection per layer. So the
-/// graph work is **one insert per entry in the delta log**, where the
-/// single-pass build it replaced was one insert per row in the table.
+/// **This is the automatic path, and never reading or rewriting anything
+/// already published is the point.** The batch is collapsed to its last
+/// operation per row - a row put and then deleted in the same batch leaves no
+/// chunk to build and one tombstoned id to record - and only the rows left
+/// with a `Put` become chunks in the new segment; a bare `Delete` becomes an
+/// entry in [`SegmentMeta::tombstoned`] instead, because there is no content
+/// to insert and a fold still has to be told the row is gone. The graph work
+/// this pays is a build over the batch's own rows, the same one insert per
+/// row that always happens for a corpus this size - it is bounded because the
+/// batch is bounded, not because inserting is somehow cheaper here than it is
+/// anywhere else.
 ///
-/// The delta log is a length the declaration sets. `compact = N` fixes it at
-/// `N`, and a table declared that way pays exactly `N` graph inserts per
-/// published generation however large it grows. The default rule is
-/// `max(1024, rows / 8)`, which grows with the corpus - it is a share rather
-/// than a constant because publishing a generation writes the whole serialised
-/// index, and a constant would write it far too often. An application that
-/// needs the write latency pinned names `compact` and accepts more generation
-/// writes; `docs/relational-architecture.md` publishes both sides.
-///
-/// Reading and writing the generation is still proportional to the corpus,
-/// because a generation is one serialised index. That is a byte copy rather
-/// than graph construction, and the two are reported separately for exactly
-/// that reason.
-///
-/// The graph this produces is not the graph a single-pass build produces. It is
-/// a valid approximate graph, and what it accumulates is tombstoned chunks: an
-/// update tombstones the old chunk and appends a new one, and only a single-pass
-/// build removes the old one. That is what the `compact` command is for, and
-/// what `state::FOLDS` and `state::CHUNKS` let an application see coming.
-///
+/// The delta log's length is what bounds the batch. `compact = N` fixes it at
+/// `N`; the default rule, `max(1024, rows / 8)`, grows with the corpus, so
+/// that a table is not flushing a handful of rows every commit once it is
+/// large - see `Options::compact_threshold`.
 /// @param context - the module's reach into the database
 /// @param store - the shadow tables
 /// @param options - the table's declaration
-/// @param generation - the generation to fold into
-/// @param pending - the delta entries not yet covered
-pub fn fold_generation(
+/// @param pending - the delta entries this flush is publishing
+pub fn build_segment_from_batch(
     context: &mut Context<'_>,
     store: &Store,
     options: &Options,
-    generation: i64,
     pending: &[Delta],
-) -> DbResult<(Index, usize)> {
-    let Some(bytes) = store.read_generation(context, generation)? else {
-        // Nothing to fold into. A first generation is built in one pass over
-        // the rows the transaction itself wrote, which is bounded by that
-        // transaction rather than by an index it is adding to.
-        let (index, _) = build_from_rows(context, store, options)?;
-        let inserted = index.store().n_chunks();
-        return Ok((index, inserted));
-    };
-    let mut index = inillucent_core::persist::read_index(&mut bytes.as_slice())
-        .map_err(|error| failure(format!("inillucent_search: unreadable generation: {error}")))?;
+) -> DbResult<(Index, usize, Vec<i64>)> {
+    let dims = options.dims.max(1);
+    let mut latest: Vec<(i64, Op)> = Vec::new();
+    for entry in pending {
+        match latest.iter_mut().find(|(id, _)| *id == entry.id) {
+            Some(slot) => slot.1 = entry.op,
+            None => latest.push((entry.id, entry.op)),
+        }
+    }
+    let mut chunks: Vec<ChunkInput> = Vec::new();
+    let mut vectors: Vec<Vec<f32>> = Vec::new();
+    let mut tombstoned: Vec<i64> = Vec::new();
+    for (id, op) in latest {
+        match op {
+            Op::Delete => tombstoned.push(id),
+            Op::Put => match store.read_row(context, id)? {
+                Some(row) => {
+                    chunks.push(chunk_of(id, &row));
+                    vectors.push(embedding_of(&row, dims));
+                }
+                // The log says the row was written and it is not there - the
+                // row store is authoritative, so this is read as a delete,
+                // exactly as the live-sync `apply` below already does.
+                None => tombstoned.push(id),
+            },
+        }
+    }
+    let inserted = chunks.len();
+    let mut index = Index::new(configuration(options));
+    if !chunks.is_empty() {
+        index.add(chunks, &vectors);
+    }
+    index.commit();
+    tombstoned.sort_unstable();
+    Ok((index, inserted, tombstoned))
+}
+
+/// What one call to [`fold_segment_recording`] actually applied, recorded
+/// rather than only counted - the chunks and vectors it replaced or added,
+/// and the bare ids it tombstoned, in the order it applied them.
+///
+/// This is what a merge checkpoint hands to
+/// `inillucent_core::persist::write_segment_delta`: the batch a checkpoint
+/// folds is bounded by the merge budget, so recording it rather than the
+/// accumulator's total content is what keeps a checkpoint's own write
+/// bounded the same way - see `persist.rs`'s segment delta section.
+#[derive(Default)]
+pub struct RecordedBatch {
+    /// Every chunk this fold replaced or added, paired with its vector, in
+    /// fold order.
+    pub puts: Vec<(ChunkInput, Vec<f32>)>,
+    /// Every `(source, external id)` pair this fold bare-tombstoned.
+    pub tombstoned: Vec<(String, String)>,
+}
+
+/// Folds one already-loaded segment onto an accumulator, recording exactly
+/// what was applied: its still-live documents by `replace_document`, then its
+/// own bare-deleted ids by `tombstone` - the same two steps a query's own
+/// fold ([`refresh`], below) already applies to every segment it walks, now
+/// shared by a merge checkpoint as well rather than only by a read.
+///
+/// **Fixes a defect this ticket's tests found.** Before this, folding a
+/// segment applied only the `replace_document` half and never consulted
+/// [`SegmentMeta::tombstoned`] at all - so a row deleted with no live chunk of
+/// its own in the segment that recorded the delete (the shape every bare
+/// delete takes; see `build_segment_from_batch`) came back alive after a
+/// merge, whenever an older segment folded into the same accumulator still
+/// held a live chunk for that id. `a_row_deleted_while_a_merge_is_in_flight_stays_deleted`
+/// in `inillucent-compat/tests/segment_merge_bound.rs` pins this: it fails
+/// without the `tombstone` loop below, since that is the only line that ever
+/// removes a chunk an *earlier* fold step added.
+///
+/// Only a segment's own still-live documents are read back for the first
+/// half - a segment that has itself already absorbed an internal tombstone
+/// (an earlier merge folding an older row together with a newer edit of it)
+/// answers for the edit and not the row it replaced, so replaying the dead
+/// half back in would resurrect it.
+/// @param accumulator - the index being built up
+/// @param segment - the segment being folded in
+/// @param tombstoned - the ids that segment's own metadata says are deleted
+pub fn fold_segment_recording(
+    accumulator: &mut Index,
+    segment: &Index,
+    tombstoned: &[i64],
+) -> DbResult<(usize, RecordedBatch)> {
+    // Every segment of one table is built under the same `configuration`, so
+    // a chunk's vector is already the accumulator's own width - there is
+    // nothing here to pad or reconcile, only to copy across.
+    let mut inserted = 0usize;
+    let mut recorded = RecordedBatch::default();
+    for (id, chunk, vector) in live_documents_of(segment) {
+        let stats = accumulator.replace_document(
+            SOURCE,
+            &id.to_string(),
+            vec![chunk.clone()],
+            &[vector.clone()],
+        );
+        inserted = inserted.saturating_add(stats.chunks_added);
+        recorded.puts.push((chunk, vector));
+    }
+    for id in tombstoned {
+        accumulator.tombstone(SOURCE, &id.to_string());
+        recorded
+            .tombstoned
+            .push((SOURCE.to_string(), id.to_string()));
+    }
+    Ok((inserted, recorded))
+}
+
+/// Folds one already-loaded segment onto an accumulator, the same as
+/// [`fold_segment_recording`] without keeping what it applied - what a
+/// caller that only wants the merged index (a query's own fold, `refresh`
+/// below) reaches for instead.
+/// @param accumulator - the index being built up
+/// @param segment - the segment being folded in
+/// @param tombstoned - the ids that segment's own metadata says are deleted
+pub fn fold_segment(
+    accumulator: &mut Index,
+    segment: &Index,
+    tombstoned: &[i64],
+) -> DbResult<usize> {
+    let (inserted, _recorded) = fold_segment_recording(accumulator, segment, tombstoned)?;
+    Ok(inserted)
+}
+
+/// Returns every id dead once a merge's accumulator is finished: everything
+/// any original input ever called live or ever bare-deleted, minus what the
+/// finished accumulator still calls live.
+///
+/// Reloads nothing itself - `originals` is every input the merge started
+/// with, read back fresh, which is safe because none of them is touched or
+/// removed until the caller (`SearchTable::finish_merge`) swaps the finished
+/// segment into the manifest in their place. Computing this from the
+/// originals, rather than threading a running touched set through every
+/// checkpoint, is what lets a merge resume across several commits without
+/// persisting anything beyond `MergeState` itself.
+/// @param base - the finished merge's accumulator
+/// @param originals - every input the merge started with, freshly loaded,
+///   paired with the metadata naming each one's own bare-deleted ids
+pub fn touched_and_dead(base: &Index, originals: &[(SegmentMeta, Index)]) -> Vec<i64> {
+    let mut touched: BTreeSet<i64> = BTreeSet::new();
+    for (meta, index) in originals {
+        for (id, _, _) in live_documents_of(index) {
+            touched.insert(id);
+        }
+        for id in &meta.tombstoned {
+            touched.insert(*id);
+        }
+    }
+    let live: BTreeSet<i64> = live_documents_of(base)
+        .into_iter()
+        .map(|(id, _, _)| id)
+        .collect();
+    let mut tombstoned: Vec<i64> = touched.difference(&live).copied().collect();
+    tombstoned.sort_unstable();
+    tombstoned
+}
+
+/// Returns a segment's own live documents, ready to be replayed onto another
+/// index or reported as a merge's touched set.
+///
+/// Reads the segment's own store and vector set rather than the rows it was
+/// built from - a segment answers for itself once it exists, and rebuilding
+/// its content from `%_content` would cost the corpus this function exists to
+/// avoid touching.
+/// @param index - the segment to read
+fn live_documents_of(index: &Index) -> Vec<(i64, ChunkInput, Vec<f32>)> {
+    let store = index.store();
+    let vectors = index.vectors();
+    let mut out = Vec::with_capacity(store.n_chunks());
+    for chunk in 0..store.n_chunks() {
+        let chunk = chunk as u32;
+        let Some(record) = store.chunks.get(chunk as usize) else {
+            continue;
+        };
+        let Some(document) = store.documents.get(record.doc as usize) else {
+            continue;
+        };
+        if document.deleted {
+            continue;
+        }
+        let Ok(id) = store.chunk_external_id(chunk).parse::<i64>() else {
+            continue;
+        };
+        let heading_path: Vec<String> = store
+            .heading_path(chunk)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let title = heading_path.first().cloned().unwrap_or_default();
+        out.push((
+            id,
+            ChunkInput {
+                source: SOURCE.to_string(),
+                external_doc_id: id.to_string(),
+                chunk_index: 0,
+                heading_path,
+                content: store.content(chunk).to_string(),
+                title,
+                url: String::new(),
+                space_key: None,
+                author: None,
+                author_id: None,
+                updated_at: None,
+                external_chunk_id: Some(id.to_string()),
+                labels: Vec::new(),
+                attributes: Vec::new(),
+                flags: Vec::new(),
+                deleted: false,
+            },
+            vectors.copy_of(chunk),
+        ));
+    }
+    out
+}
+
+/// Loads one segment's bytes back into a queryable index, refusing a segment
+/// delta chain (see `inillucent_core::persist`'s segment delta section) that
+/// has not been sealed.
+///
+/// **This is the strict reader**, used by everything except a merge resuming
+/// its own checkpoint: a query's fold, `finish_merge` publishing a merge's
+/// result, `integrity-check`. A chain missing its seal is exactly the
+/// half-written segment this format exists to make impossible to mistake for
+/// a whole one - see [`load_segment_resumable`] for the one caller allowed
+/// to see it anyway.
+/// @param context - the module's reach into the database
+/// @param store - the shadow tables
+/// @param options - the table's declaration, to validate the metric
+/// @param id - the segment's `%_gen` key
+pub fn load_segment(
+    context: &mut Context<'_>,
+    store: &Store,
+    options: &Options,
+    id: i64,
+) -> DbResult<Index> {
+    let index = load_segment_by_id(context, store, options, id, true)?;
     check_generation_metric(&index, options)?;
-    let inserted = apply(&mut index, context, store, options, pending)?;
-    Ok((index, inserted))
+    Ok(index)
+}
+
+/// Loads one segment's bytes back into a queryable index without requiring
+/// it to be sealed - the one caller allowed to see a segment delta chain
+/// still in progress, because it is the very merge extending it.
+///
+/// `crate::module::SearchTable::continue_merge` is the only caller: it
+/// re-reads its own accumulator to keep folding, and that accumulator's
+/// newest link has no seal until the merge folding it is actually finished.
+/// Every base link further back is read the same tolerant way regardless of
+/// which entry point is used, because a base link never carries a seal of
+/// its own - only the tip a caller asked for does, so [`load_segment`]'s
+/// strictness and this function's leniency differ only in what they demand
+/// of the *id given*, never of what that id's own base chain holds.
+/// @param context - the module's reach into the database
+/// @param store - the shadow tables
+/// @param options - the table's declaration, to validate the metric
+/// @param id - the segment's `%_gen` key, possibly still being extended
+pub fn load_segment_resumable(
+    context: &mut Context<'_>,
+    store: &Store,
+    options: &Options,
+    id: i64,
+) -> DbResult<Index> {
+    let index = load_segment_by_id(context, store, options, id, false)?;
+    check_generation_metric(&index, options)?;
+    Ok(index)
+}
+
+/// Loads one `%_gen` id's bytes, resolving a segment delta's base chain as
+/// many times as it points back - each base link read the same tolerant way
+/// regardless of `require_sealed`, which only ever governs `id` itself.
+/// @param context - the module's reach into the database
+/// @param store - the shadow tables
+/// @param options - the table's declaration
+/// @param id - the `%_gen` key to load
+/// @param require_sealed - whether `id` itself must carry a seal
+fn load_segment_by_id(
+    context: &mut Context<'_>,
+    store: &Store,
+    options: &Options,
+    id: i64,
+    require_sealed: bool,
+) -> DbResult<Index> {
+    let bytes = store.read_generation(context, id)?.ok_or_else(|| {
+        failure(format!(
+            "inillucent_search: segment {id} is named but not stored"
+        ))
+    })?;
+    load_segment_bytes(context, store, options, id, &bytes, require_sealed)
+}
+
+/// Turns one `%_gen` row's bytes into a queryable index, dispatching on
+/// whether they are an ordinary stream or a segment delta - see
+/// `inillucent_core::persist::is_segment_delta`.
+/// @param context - the module's reach into the database
+/// @param store - the shadow tables
+/// @param options - the table's declaration
+/// @param id - the id these bytes were read from, for error messages
+/// @param bytes - the bytes themselves
+/// @param require_sealed - whether these specific bytes must carry a seal;
+///   never propagated to a base link, which is read the same way regardless
+fn load_segment_bytes(
+    context: &mut Context<'_>,
+    store: &Store,
+    options: &Options,
+    id: i64,
+    bytes: &[u8],
+    require_sealed: bool,
+) -> DbResult<Index> {
+    if !inillucent_core::persist::is_segment_delta(bytes) {
+        let mut cursor: &[u8] = bytes;
+        return inillucent_core::persist::read_index(&mut cursor).map_err(|error| {
+            failure(format!(
+                "inillucent_search: unreadable segment {id}: {error}"
+            ))
+        });
+    }
+    let parsed = inillucent_core::persist::parse_segment_delta(bytes).map_err(|error| {
+        failure(format!(
+            "inillucent_search: unreadable segment {id}: {error}"
+        ))
+    })?;
+    if require_sealed && parsed.sealed.is_none() {
+        return Err(failure(format!(
+            "inillucent_search: segment {id} has not finished merging and cannot be read as a complete segment"
+        )));
+    }
+    let base = match parsed.base {
+        Some(base_id) => load_segment_by_id(context, store, options, base_id, false)?,
+        None => {
+            let mut index = Index::new(configuration(options));
+            index.commit();
+            index
+        }
+    };
+    let index = inillucent_core::persist::apply_segment_delta(base, &parsed);
+    if let Some((chunks, documents)) = parsed.sealed {
+        let actual_chunks = index.store().n_chunks() as u64;
+        let actual_documents = index.store().n_documents() as u64;
+        if actual_chunks != chunks || actual_documents != documents {
+            return Err(failure(format!(
+                "inillucent_search: segment {id} claims {chunks} chunks and {documents} documents, its \
+                 replayed content holds {actual_chunks} and {actual_documents}"
+            )));
+        }
+    }
+    Ok(index)
+}
+
+/// Every `%_gen` id reachable from `tip` by following its segment delta base
+/// pointer, tip first, stopping at the first id that is not itself a
+/// segment delta (an ordinary, already-published segment) or that is
+/// missing entirely.
+///
+/// A merge in progress protects only its own accumulator id in
+/// [`crate::store::state::MERGE`] - `crate::module::SearchTable`'s
+/// `drop-old-generations` used to assume that was the whole of what an
+/// in-flight merge depends on, which was true before this ticket, when an
+/// accumulator was always one self-contained blob. Now the newest link is a
+/// delta whose base is an *earlier* checkpoint's own id, unreferenced by
+/// anything else in `%_state` - so reclaiming generations by that older
+/// assumption would delete the very bytes the in-flight merge's next
+/// checkpoint needs to resume from. This is what lets the command protect
+/// the whole chain instead of only its tip.
+/// @param context - the module's reach into the database
+/// @param store - the shadow tables
+/// @param tip - the chain's newest id
+pub fn chain_ids(context: &mut Context<'_>, store: &Store, tip: i64) -> DbResult<Vec<i64>> {
+    let mut ids = Vec::new();
+    let mut current = tip;
+    loop {
+        ids.push(current);
+        let Some(bytes) = store.read_generation(context, current)? else {
+            break;
+        };
+        if !inillucent_core::persist::is_segment_delta(&bytes) {
+            break;
+        }
+        let parsed = inillucent_core::persist::parse_segment_delta(&bytes).map_err(|error| {
+            failure(format!(
+                "inillucent_search: unreadable segment {current}: {error}"
+            ))
+        })?;
+        match parsed.base {
+            Some(base) => current = base,
+            None => break,
+        }
+    }
+    Ok(ids)
 }
 
 /// Brings the cached index up to the snapshot the statement is reading.
 ///
 /// Three outcomes, in order of cost: nothing changed and the cache stands; the
-/// cached entries are a prefix of the visible ones and the remainder is
-/// applied; or the two disagree and the base generation is loaded again. The
-/// third is what a rollback produces, and it is the one that has to be right
-/// rather than fast.
+/// live segments are the ones the cache was built from and only the delta
+/// tail has grown, so the remainder is applied; or the segments themselves
+/// disagree with what the cache holds, and every live segment is folded in
+/// again from scratch. The third is what a flush, a merge, or a rollback
+/// produces, and it is the one that has to be right rather than fast.
 fn refresh(
     held: &mut Option<Cached>,
     context: &mut Context<'_>,
     store: &Store,
     options: &Options,
 ) -> DbResult<()> {
-    let generation = store.state(context, state::GENERATION)?;
-    let covered = store.state(context, state::COVERED)?;
+    let live = live_segments(context, store)?;
+    let covered = live
+        .iter()
+        .map(|segment| segment.covers_to)
+        .max()
+        .unwrap_or(0);
+    let mut ids: Vec<i64> = live.iter().map(|segment| segment.id).collect();
+    ids.sort_unstable();
     let visible = store.deltas_above(context, covered)?;
     if let Some(cached) = held.as_mut() {
-        if cached.generation == generation
-            && cached.covered == covered
+        if cached.segments == ids
             && visible.len() >= cached.applied.len()
             && visible.starts_with(&cached.applied)
         {
@@ -500,31 +905,87 @@ fn refresh(
             return Ok(());
         }
     }
-    let mut index = match store.read_generation(context, generation)? {
-        Some(bytes) => {
-            let index =
-                inillucent_core::persist::read_index(&mut bytes.as_slice()).map_err(|error| {
-                    failure(format!("inillucent_search: unreadable generation: {error}"))
-                })?;
-            check_generation_metric(&index, options)?;
-            index
+    let mut fold_order = live;
+    fold_order.sort_by_key(|segment| segment.covers_from);
+    let mut index = Index::new(configuration(options));
+    index.commit();
+    let mut first = true;
+    for segment in &fold_order {
+        let loaded = load_segment(context, store, options, segment.id)?;
+        if first {
+            // The oldest segment becomes the accumulator directly - it was
+            // already committed when it was built, so every later
+            // `replace_document` call updates it incrementally rather than
+            // forcing a second full graph build here.
+            index = loaded;
+            first = false;
+            for id in &segment.tombstoned {
+                index.tombstone(SOURCE, &id.to_string());
+            }
+        } else {
+            fold_segment(&mut index, &loaded, &segment.tombstoned)?;
         }
-        None => {
-            let mut fresh = Index::new(configuration(options));
-            fresh.commit();
-            fresh
-        }
-    };
+    }
     apply(&mut index, context, store, options, &visible)?;
     let rows = live_rows_of(&index);
     *held = Some(Cached {
-        generation,
-        covered,
+        segments: ids,
         applied: visible,
         rows,
         index,
     });
     Ok(())
+}
+
+/// Reads the live segment manifest, migrating a pre-segment file's one
+/// generation into a manifest of one on the fly.
+///
+/// **This is the one place "no `%_state` row named `segments`" is read, and it
+/// must never read as "zero segments".** A table written before task-1911 has
+/// no manifest at all - it has exactly the one generation `state::GENERATION`
+/// and `state::COVERED` already name, which is one live segment covering
+/// every row the log had folded by the time it was last published. Reading
+/// the absence as an empty manifest would make a query over that file answer
+/// zero rows, which is the exact defect `docs/roadmap.md`'s "What task-1911
+/// closed" already records once for this engine.
+/// @param context - the module's reach into the database
+/// @param store - the shadow tables
+pub fn live_segments(context: &mut Context<'_>, store: &Store) -> DbResult<Vec<SegmentMeta>> {
+    if let Some(segments) = store.read_segments(context)? {
+        return Ok(segments);
+    }
+    let generation = store.state(context, state::GENERATION)?;
+    let covered = store.state(context, state::COVERED)?;
+    let chunks = store.state(context, state::CHUNKS)?;
+    Ok(legacy_manifest(generation, covered, chunks)
+        .into_iter()
+        .collect())
+}
+
+/// Synthesises the one-segment manifest a pre-task-1911 file implies, from
+/// the three counters that file always had.
+///
+/// Pulled out of [`live_segments`] as a pure function so the "must not read
+/// as zero segments" claim can be checked directly, without a database
+/// behind it: `generation == 0` is the only case with nothing to
+/// synthesise - a table that has never published anything - and every other
+/// value has to come back as exactly one segment naming that generation,
+/// however small `covered` or `chunks` are.
+/// @param generation - `state::GENERATION`, as a legacy file left it
+/// @param covered - `state::COVERED`, as a legacy file left it
+/// @param chunks - `state::CHUNKS`, as a legacy file left it
+fn legacy_manifest(generation: i64, covered: i64, chunks: i64) -> Option<SegmentMeta> {
+    if generation == 0 {
+        return None;
+    }
+    Some(SegmentMeta {
+        id: generation,
+        level: i32::MAX,
+        covers_from: 0,
+        covers_to: covered,
+        chunks,
+        tombstoned: Vec::new(),
+    })
 }
 
 /// Applies a run of delta entries to a loaded index.
@@ -787,5 +1248,41 @@ mod tests {
             ),
             None
         );
+    }
+
+    /// A table that has never published a generation has no segment to
+    /// synthesise - there is nothing on disk for `live_segments` to name.
+    #[test]
+    fn a_table_that_never_published_has_no_legacy_segment() {
+        assert_eq!(legacy_manifest(0, 0, 0), None);
+    }
+
+    /// A pre-task-1911 file - one generation, no manifest row - reads as
+    /// exactly one live segment naming that generation, covering everything
+    /// up to `covered`. This is the claim `docs/roadmap.md`'s "What
+    /// task-1911 closed" already had to fix once for a different reason: a
+    /// table with rows and a published generation must never be answered as
+    /// if it held zero segments.
+    ///
+    /// **Fails without the change:** this is a new function, so there is
+    /// nothing to revert it against; it exists because reverting
+    /// `crates/inillucent-search` and asking `live_segments` this same
+    /// question would return `Vec::new()` - the pre-task-1911 code has no
+    /// concept of a segment at all, and every query over a real, non-empty
+    /// legacy file would then search an empty index and answer zero rows.
+    #[test]
+    fn a_legacy_generation_reads_as_one_live_segment() {
+        let segment = legacy_manifest(4, 812, 4_096).expect("a published table has one segment");
+        assert_eq!(
+            segment.id, 4,
+            "the segment is named by the old generation counter"
+        );
+        assert_eq!(
+            segment.covers_from, 0,
+            "it covers everything from the start"
+        );
+        assert_eq!(segment.covers_to, 812);
+        assert_eq!(segment.chunks, 4_096);
+        assert!(segment.tombstoned.is_empty());
     }
 }

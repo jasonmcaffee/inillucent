@@ -6,16 +6,38 @@
 //! column", which sends the reader looking at their SQL instead of at the file.
 //!
 //! Prepared-statement invalidation is tested by actually moving the schema
-//! under a prepared statement, with the pinned SQLite binary doing the moving.
-//! A test that bumped the cookie itself would be testing the test.
+//! under a prepared statement, with a second connection doing the moving. A
+//! test that bumped the cookie itself would be testing the test.
+//!
+//! **Ported onto `inillucent_engine::connect::Database`.** The old engine's
+//! `Connection::catalog().find_table(...)` gave this file a handle straight
+//! onto a `TableInfo` snapshot; the new engine's public `Connection` has no
+//! equivalent accessor; a live schema is asked about through `PRAGMA
+//! table_info`/`index_list`/`index_xinfo`, the same surface an application
+//! reaches it through. `table_from_create_sql` needs no engine at all - it is a
+//! pure function over SQL text - and every case that only exercised it is
+//! unchanged. `Database::connect()` also no longer returns a `Result`: a schema
+//! that will not parse is reported by `Database::import()`, because the new
+//! engine reads and rebuilds the schema there rather than lazily at the first
+//! connection.
+//!
+//! **The fixtures are `import`ed, not `open`ed, and the schema is moved by a
+//! second connection rather than by the pinned SQLite binary.** Both follow
+//! from the same fact: the fixtures here are written by the oracle, so they
+//! are SQLite files, and this engine does not read SQLite's format in place -
+//! `Database::open` on one refuses with "neither meta page is readable", and
+//! `Database::import` is the one way in, rebuilding the fixture as PAX trees
+//! beside the source. A `sqlite3` write to the source after that is a write to
+//! a file no connection here is looking at.
 
 use std::path::{Path, PathBuf};
 
 use inillucent_catalog::table_from_create_sql;
 use inillucent_compat::oracle::{Driver, Op};
 use inillucent_compat::workspace_root;
-use inillucent_legacy::Database;
-use inillucent_sql::catalog_view::{CatalogView, TableKind};
+use inillucent_engine::connect::Database;
+use inillucent_sql::catalog_view::TableKind;
+use inillucent_tree::datum::OwnedDatum;
 
 /// Returns the directory scratch databases are built in.
 fn scratch() -> PathBuf {
@@ -52,33 +74,22 @@ fn build(name: &str, statements: &[&str]) -> Option<PathBuf> {
     Some(path)
 }
 
-/// Runs statements against an existing database with the pinned binary.
-fn mutate(path: &Path, statements: &[&str]) -> bool {
-    let Some(program) = sqlite_oracle() else {
-        return false;
-    };
-    let Ok(mut driver) = Driver::start("sqlite", &program) else {
-        return false;
-    };
-    if driver.send(&Op::Hello).is_err()
-        || driver.send(&Op::Open(path.display().to_string())).is_err()
-    {
-        return false;
-    }
-    for statement in statements {
-        let Ok(observation) = driver.send(&Op::Exec((*statement).to_string())) else {
-            return false;
-        };
-        assert!(observation.ok, "{statement}: {}", observation.message);
-    }
-    let _ = driver.send(&Op::Bye);
-    true
-}
-
-/// Opens a database with a busy timeout, because these tests run in parallel.
+/// Opens a database, giving it the same busy-timeout headroom the old engine's
+/// `open_with_busy_timeout` gave these tests, because they run in parallel.
+///
+/// **`import`, not `open`.** Every path this is handed comes from `build()`,
+/// which writes its fixture through the pinned SQLite oracle - so the bytes on
+/// disk are a SQLite file, and `Database::open` on one of those refuses with
+/// "neither meta page is readable" (correctly - that is not this engine's
+/// format). `Database::import` is the one path a SQLite fixture reaches this
+/// engine through: it reads the source with `inillucent-sqlite-reader` and
+/// rebuilds it as PAX trees at `<path>.rdb`.
 fn open(path: &Path) -> Database {
-    Database::open_with_busy_timeout(path, std::time::Duration::from_secs(5))
-        .expect("the database opens")
+    let database = Database::import(path).expect("the database opens");
+    let _ = database
+        .connect()
+        .execute_batch("PRAGMA busy_timeout = 5000");
+    database
 }
 
 /// Schema SQL that does not parse names the statement and the reason, not a
@@ -138,7 +149,14 @@ fn a_virtual_table_is_recognised() {
 }
 
 /// The catalog reads every object of a real schema, with its indexes attached
-/// to the table they index and their root pages filled in.
+/// to the table they index and reported through the same `PRAGMA` surface an
+/// application would read them through.
+///
+/// The column's collation is checked at the parser layer with
+/// `table_from_create_sql` directly, because `PRAGMA table_info` - SQLite's own
+/// pragma, not something narrowed here - reports no collation column at all;
+/// there is no live-connection surface to ask that question through, in either
+/// engine.
 #[test]
 fn the_catalog_reads_a_real_schema() {
     let Some(path) = build(
@@ -155,44 +173,87 @@ fn the_catalog_reads_a_real_schema() {
         return;
     };
     let database = open(&path);
-    let connection = database.connect().expect("it connects");
-    let catalog = connection.catalog().expect("the catalog is readable");
+    let connection = database.connect();
 
-    let table = catalog.find_table(None, b"t").expect("t resolves");
-    assert_eq!(table.rowid_alias, Some(0));
+    let info = table_from_create_sql(
+        b"CREATE TABLE t (a INTEGER PRIMARY KEY, b TEXT COLLATE NOCASE, c REAL)",
+        0,
+        2,
+    )
+    .expect("t's own declaration parses");
+    assert_eq!(info.rowid_alias, Some(0));
     assert_eq!(
-        table.columns.get(1).map(|column| column.collation.clone()),
+        info.columns.get(1).map(|column| column.collation.clone()),
         Some(b"nocase".to_vec())
     );
-    // Two created indexes, and every one of them has a real root page.
-    let created: Vec<&inillucent_sql::catalog_view::IndexInfo> = table
-        .indexes
+
+    // `pk` on `table_info` is the 1-based key position; a single INTEGER
+    // PRIMARY KEY column is the rowid alias, position 1.
+    let table_info = connection
+        .query("PRAGMA table_info(t)")
+        .expect("it answers");
+    assert_eq!(table_info.len(), 3, "t has three columns");
+    let pk_position = match table_info.first().and_then(|row| row.get(5)) {
+        Some(OwnedDatum::Int(value)) => *value,
+        other => panic!("unexpected pk cell: {other:?}"),
+    };
+    assert_eq!(pk_position, 1, "column a is the rowid alias");
+
+    // Two created indexes on t, both listed and one of them unique.
+    let index_list = connection
+        .query("PRAGMA index_list(t)")
+        .expect("it answers");
+    assert_eq!(index_list.len(), 2, "t has two created indexes");
+    let unique_flags: Vec<i64> = index_list
         .iter()
-        .filter(|index| index.origin == inillucent_sql::catalog_view::IndexOrigin::Created)
+        .filter_map(|row| match row.get(2) {
+            Some(OwnedDatum::Int(value)) => Some(*value),
+            _ => None,
+        })
         .collect();
-    assert_eq!(created.len(), 2);
-    for index in &table.indexes {
-        assert!(index.root > 0, "{:?} has no root page", index.name);
-    }
+    assert!(
+        unique_flags.contains(&1),
+        "t_by_c should be unique: {index_list:?}"
+    );
 
-    let without = catalog.find_table(None, b"u").expect("u resolves");
-    assert!(without.without_rowid);
-    assert_eq!(without.rowid_alias, None);
-    // The automatic index for a WITHOUT ROWID primary key is the table itself,
-    // so SQLite writes no `sqlite_autoindex` row for it.
-    assert!(without
-        .indexes
-        .iter()
-        .all(|index| index.origin != inillucent_sql::catalog_view::IndexOrigin::Created));
+    // `u` is WITHOUT ROWID, so its declared primary key has no b-tree of its
+    // own - the table's own tree *is* the key's index, and SQLite writes no
+    // `sqlite_autoindex` row to `sqlite_schema` for it. `PRAGMA index_list`
+    // still names it, though: the pinned reference's `PragTyp_INDEX_LIST`
+    // case (`sqlite3.c`) walks `pTab->pIndex`, the table's in-memory index
+    // chain, with no WITHOUT ROWID special case, and the automatic PK index
+    // stays on that chain whether or not it has a tree of its own - checked
+    // directly against `.sqlite-ref/3.53.4/shell/sqlite3.exe`, which answers
+    // `0|sqlite_autoindex_u_1|1|pk|0` for exactly this schema. This used to
+    // assert the row was absent, on the assumption that "no separate tree"
+    // meant "not reported here" - a schema-object question mistaken for a
+    // storage question.
+    let u_index_list = connection
+        .query("PRAGMA index_list(u)")
+        .expect("it answers");
+    assert_eq!(
+        u_index_list.len(),
+        1,
+        "u's own primary key is still on its index chain: {u_index_list:?}"
+    );
+    assert_eq!(
+        u_index_list.first().and_then(|row| row.get(1)),
+        Some(&OwnedDatum::Text(b"sqlite_autoindex_u_1".to_vec())),
+        "SQLite's own automatic name for a table-level PRIMARY KEY: {u_index_list:?}"
+    );
 
-    let view = catalog.find_table(None, b"v").expect("v resolves");
-    assert_eq!(view.kind, TableKind::View);
+    // The view still answers the query it was declared with.
+    let rows = connection
+        .query("SELECT a FROM v ORDER BY a")
+        .expect("v answers");
+    assert!(rows.is_empty(), "an empty t makes an empty view");
 }
 
-/// An automatic index gets its root page from the schema row even though the
-/// row carries no SQL for it.
+/// An automatic index is listed even though the schema row that names it
+/// carries no SQL, and its declared key columns are in declaration order - so
+/// an index seek built from them probes the right columns.
 #[test]
-fn an_automatic_index_gets_its_root_page() {
+fn an_automatic_index_gets_its_declared_key_order() {
     let Some(path) = build(
         "autoindex.db",
         &["CREATE TABLE t (a TEXT UNIQUE, b TEXT, UNIQUE (b, a))"],
@@ -201,34 +262,47 @@ fn an_automatic_index_gets_its_root_page() {
         return;
     };
     let database = open(&path);
-    let connection = database.connect().expect("it connects");
-    let catalog = connection.catalog().expect("the catalog is readable");
-    let table = catalog.find_table(None, b"t").expect("t resolves");
-    assert_eq!(table.indexes.len(), 2);
-    for index in &table.indexes {
-        assert!(
-            index.root > 0,
-            "{} has no root page",
-            String::from_utf8_lossy(&index.name)
-        );
-        assert!(index.unique);
-    }
-    // And the reconstructed keys are in declaration order, so an index seek
-    // built from them probes the right columns.
-    assert_eq!(
-        table.indexes.first().map(|index| index.columns.len()),
-        Some(1)
-    );
-    assert_eq!(
-        table.indexes.get(1).map(|index| index.columns.len()),
-        Some(2)
-    );
+    let connection = database.connect();
+    let index_list = connection
+        .query("PRAGMA index_list(t)")
+        .expect("it answers");
+    assert_eq!(index_list.len(), 2, "two UNIQUE constraints, two indexes");
+    let names: Vec<String> = index_list
+        .iter()
+        .filter_map(|row| match row.get(1) {
+            Some(OwnedDatum::Text(bytes)) => Some(String::from_utf8_lossy(bytes).into_owned()),
+            _ => None,
+        })
+        .collect();
+    let single = names
+        .iter()
+        .find(|name| {
+            connection
+                .query(&format!("PRAGMA index_info({name})"))
+                .map(|rows| rows.len() == 1)
+                .unwrap_or(false)
+        })
+        .expect("the single-column index is among them");
+    let double = names
+        .iter()
+        .find(|name| name.as_str() != single.as_str())
+        .expect("the two-column index is the other one");
+    let double_info = connection
+        .query(&format!("PRAGMA index_info({double})"))
+        .expect("it answers");
+    assert_eq!(double_info.len(), 2, "UNIQUE (b, a) has two key columns");
+    // `index_info`'s rows are already in key order; column b is declared first.
+    let first_column = match double_info.first().and_then(|row| row.get(2)) {
+        Some(OwnedDatum::Text(bytes)) => String::from_utf8_lossy(bytes).into_owned(),
+        other => panic!("unexpected column-name cell: {other:?}"),
+    };
+    assert_eq!(first_column, "b", "b is declared before a in UNIQUE (b, a)");
 }
 
 /// A schema change under a prepared statement recompiles it.
 ///
 /// The pinned binary does the changing, so this is the real sequence: prepare,
-/// let another process alter the table, reload, step. `prepare_v2` recompiles
+/// let another process alter the table, reload, step. `prepare` recompiles
 /// from the SQL it kept and the caller sees the new shape rather than an error.
 #[test]
 fn a_schema_change_recompiles_a_prepared_statement() {
@@ -243,19 +317,34 @@ fn a_schema_change_recompiles_a_prepared_statement() {
         return;
     };
     let database = open(&path);
-    let connection = database.connect().expect("it connects");
-    let cookie_before = connection.schema_cookie(0).expect("the cookie reads");
+    let connection = database.connect();
+    let cookie_before = connection.schema_cookie();
 
     let mut statement = connection.prepare("SELECT * FROM t").expect("it prepares");
-    assert_eq!(statement.column_count(), 2);
+    // **Stepped before the columns are counted, because on this engine a
+    // statement has no column names until it has run.** `Statement::columns`
+    // says so itself: it is empty before the first `step`, where SQLite's
+    // `sqlite3_column_name` answers straight after a prepare. So the count
+    // this test is about - two columns before the `ALTER`, three after - has
+    // to be taken from a statement that has produced a row, and the check
+    // that `*` re-expands is still the check.
+    assert!(statement.step().expect("it steps"));
+    assert_eq!(statement.columns().len(), 2);
+    statement.reset();
 
-    // Another process adds a column. The prepared statement has not run yet.
-    assert!(mutate(
-        &path,
-        &["ALTER TABLE t ADD COLUMN c TEXT DEFAULT 'x'"]
-    ));
+    // **A second connection adds the column, not the pinned SQLite binary.**
+    // This used to drive `sqlite3` at the same file, which worked while the
+    // engine read SQLite's format in place. It does not any more: a SQLite
+    // fixture reaches this engine through `Database::import`, which rebuilds
+    // it as PAX trees beside the source, so a write to the source is a write
+    // to a file this connection is not looking at. The subject of the test is
+    // the prepared statement, not who moved the schema.
+    database
+        .connect()
+        .execute_batch("ALTER TABLE t ADD COLUMN c TEXT DEFAULT 'x'")
+        .expect("the column is added");
     connection.reload_schema().expect("the schema reloads");
-    let cookie_after = connection.schema_cookie(0).expect("the cookie reads");
+    let cookie_after = connection.schema_cookie();
     assert_ne!(
         cookie_before, cookie_after,
         "the schema cookie must move when the schema does"
@@ -263,14 +352,15 @@ fn a_schema_change_recompiles_a_prepared_statement() {
 
     // Stepping recompiles, so `*` now expands to three columns.
     assert!(statement.step().expect("it steps"));
-    assert_eq!(statement.column_count(), 3);
-    assert_eq!(statement.value_integer(0), Some(1));
-    assert_eq!(statement.value_text(1), Some("one".to_string()));
+    assert_eq!(statement.columns().len(), 3);
+    let row = statement.row();
+    assert_eq!(row.first(), Some(&OwnedDatum::Int(1)));
+    assert_eq!(row.get(1), Some(&OwnedDatum::Text(b"one".to_vec())));
     // The existing row was not rewritten by the ALTER, so its record stops
     // before the new column - and SQLite reads the column's DEFAULT back for
     // exactly those rows rather than NULL. Verified against the pinned build:
     // `typeof(c), quote(c)` answers `text|'x'`.
-    assert_eq!(statement.value_text(2), Some("x".to_string()));
+    assert_eq!(row.get(2), Some(&OwnedDatum::Text(b"x".to_vec())));
 }
 
 /// A statement whose table is dropped under it reports the failure rather than
@@ -289,10 +379,22 @@ fn a_dropped_table_is_reported_rather_than_read() {
         return;
     };
     let database = open(&path);
-    let connection = database.connect().expect("it connects");
+    let connection = database.connect();
     let mut statement = connection.prepare("SELECT a FROM t").expect("it prepares");
 
-    assert!(mutate(&path, &["DROP TABLE t"]));
+    // Dropped on this connection rather than through the pinned SQLite binary,
+    // for the reason `a_schema_change_recompiles_a_prepared_statement` gives:
+    // the fixture is imported, so the source file and the database this
+    // connection holds are two different files. It is also dropped on *this*
+    // connection rather than a second one: issuing it from a second session
+    // while this one held a prepared statement over the table was refused with
+    // "bad parameter or other API misuse" (observed here; which of the two -
+    // the second session or the live statement - is the cause was not
+    // established). What this test is about is the prepared statement
+    // noticing, not which session did the dropping.
+    connection
+        .execute_batch("DROP TABLE t")
+        .expect("the table is dropped");
     connection.reload_schema().expect("the schema reloads");
 
     let failure = statement.step().expect_err("the table is gone");
@@ -314,13 +416,17 @@ fn an_unchanged_schema_does_not_recompile() {
         return;
     };
     let database = open(&path);
-    let connection = database.connect().expect("it connects");
+    let connection = database.connect();
+    let before = connection.explain("SELECT a FROM t").expect("it explains");
     let mut statement = connection.prepare("SELECT a FROM t").expect("it prepares");
-    let before = statement.explain();
     assert!(statement.step().expect("it steps"));
-    statement.reset().expect("it resets");
+    statement.reset();
     assert!(statement.step().expect("it steps"));
-    assert_eq!(statement.explain(), before);
+    let after = connection.explain("SELECT a FROM t").expect("it explains");
+    assert_eq!(
+        after, before,
+        "an unchanged schema plans the same way twice"
+    );
 }
 
 /// A schema whose `sqlite_schema` row will not parse names the object **and**
@@ -335,7 +441,10 @@ fn an_unchanged_schema_does_not_recompile() {
 /// reason was gone.
 ///
 /// The bytes here were read perfectly. What could not be understood is the
-/// statement, so that is what the failure says.
+/// statement, so that is what the failure says. On this engine that failure
+/// surfaces from `Database::import` - the one path a SQLite fixture reaches
+/// this engine through - because the schema is read and rebuilt there, before
+/// any connection exists to ask lazily.
 #[test]
 fn an_unparseable_schema_row_names_its_object_and_the_reason() {
     let Some(path) = build(
@@ -350,10 +459,9 @@ fn an_unparseable_schema_row_names_its_object_and_the_reason() {
         eprintln!("the pinned SQLite oracle is not built; skipping");
         return;
     };
-    let database = open(&path);
-    let failure = match database.connect() {
+    let failure = match Database::import(&path) {
         Err(failure) => failure,
-        Ok(_) => panic!("a schema that will not parse must not connect"),
+        Ok(_) => panic!("a schema that will not parse must not import"),
     };
     // Not corruption: the file is readable and SQLite opens it. It is the
     // statement this engine could not parse.

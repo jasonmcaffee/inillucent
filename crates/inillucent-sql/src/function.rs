@@ -709,6 +709,33 @@ impl JsonFunc {
                 | JsonFunc::SetB
         )
     }
+
+    /// Returns whether this function's first argument names a document to be
+    /// read, rather than a value to be embedded or quoted.
+    ///
+    /// The distinction an executor's document-cache optimisation needs: it
+    /// may only substitute a pre-parsed JSONB blob for the first argument
+    /// when that argument *is* the document a call reads, such as `X` in
+    /// `json_extract(X, P)`. `json_array`, `json_object` and `json_quote`
+    /// take that same position as a **value** - one that merely happens to
+    /// look like JSON is still meant to be embedded or quoted as a string,
+    /// per the subtype rule this module's own doc comment states. Handing
+    /// them a blob instead answered "JSON cannot hold BLOB values" for a
+    /// perfectly ordinary unmarked string, which is what
+    /// `json_array('[1]')` did before this existed. `Valid` reads its
+    /// argument as a document too, but is excluded by its caller for the
+    /// unrelated reason that substituting a re-encoded blob changes what its
+    /// flags answer about the original text.
+    pub fn first_argument_is_a_document(self) -> bool {
+        !matches!(
+            self,
+            JsonFunc::Array
+                | JsonFunc::ArrayB
+                | JsonFunc::Object
+                | JsonFunc::ObjectB
+                | JsonFunc::Quote
+        )
+    }
 }
 
 /// Returns the JSON function a folded name spells.

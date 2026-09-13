@@ -234,6 +234,28 @@ fn an_order_book_keeps_its_references() {
     );
 }
 
+/// The running balance, expressed as a correlated subquery rather than a
+/// window function.
+///
+/// **This story used to write it as
+/// `sum(pence) OVER (PARTITION BY account ORDER BY seq ROWS BETWEEN UNBOUNDED
+/// PRECEDING AND CURRENT ROW)`.** The shipping engine refuses every window
+/// function outright - "the new engine's physical pass does not handle a
+/// window function reaching the pipeline builder yet" - a genuinely missing
+/// capability, not a defect: recorded as `sql.select.window` and
+/// `functions.window`, both `status = "missing"`, in
+/// `compat/sqlite-3.53.4.toml`, and in `docs/feature-comparison.md`'s
+/// "Window functions" section. This story is not about window syntax, though
+/// - per this file's own header, it is about **an ordering that must survive
+/// a reopen** - and a correlated subquery answers exactly the same running
+/// total, checked byte for byte against the window form on the pinned
+/// SQLite before this changed. Swap it back for the `OVER` form once window
+/// functions ship, to start covering that too.
+const RUNNING_BALANCE: &str = "SELECT account, seq, pence, \
+     (SELECT sum(prior.pence) FROM entries prior \
+      WHERE prior.account = entries.account AND prior.seq <= entries.seq) \
+     FROM entries ORDER BY account, seq";
+
 /// An append-only ledger: entries with a running balance, ordered by a sequence
 /// that has to mean the same thing after a reopen.
 #[test]
@@ -275,24 +297,12 @@ fn a_ledger_reads_the_same_after_a_reopen() {
         }
         drop(insert);
         assert_eq!(connection.total_changes(), 6);
-        before = ask(
-            &connection,
-            "SELECT account, seq, pence, \
-             sum(pence) OVER (PARTITION BY account ORDER BY seq \
-                              ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) \
-             FROM entries ORDER BY account, seq",
-        );
+        before = ask(&connection, RUNNING_BALANCE);
     }
 
     let database = reopen_and_check(&path);
     let connection = database.connect();
-    let after = ask(
-        &connection,
-        "SELECT account, seq, pence, \
-         sum(pence) OVER (PARTITION BY account ORDER BY seq \
-                          ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) \
-         FROM entries ORDER BY account, seq",
-    );
+    let after = ask(&connection, RUNNING_BALANCE);
     assert_eq!(before, after, "the running balance changed across a reopen");
     assert_eq!(
         after,

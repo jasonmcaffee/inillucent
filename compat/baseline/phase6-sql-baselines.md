@@ -8,23 +8,23 @@ parser, the planner or the machine has something to change it against. They were
 only after the semantic gates were green, because a fast wrong answer is not a
 measurement.
 
-The allocation and instruction counts matter more than the clock. Wall time on a shared
+The allocation and row counts matter more than the clock. Wall time on a shared
 machine moves with whatever else is running; the number of heap allocations a parse makes
-and the number of bytecode instructions a query executes do not, and they are what a
+and the number of rows a query produces do not, and they are what a
 later change will actually have moved.
 
-| Workload | Scale | Ops | ns/op | Allocs/op | Bytes/op | VM ops |
+| Workload | Scale | Ops | ns/op | Allocs/op | Bytes/op | rows/op |
 |---|---|--:|--:|--:|--:|--:|
-| `lex` | representative | 20000 | 390.3 | 0.0 | 0 | 71 |
-| `parse` | representative | 20000 | 3867.1 | 81.0 | 7267 | 25 |
-| `prepare` | representative | 20000 | 66790.2 | 1858.0 | 63020 | 83 |
-| `prepare-cached` | representative | 20000 | 163.5 | 3.0 | 1577 | 1 |
-| `schema-load` | 104-objects | 200 | 376704.5 | 6840.0 | 615719 | 1 |
-| `point-select-rowid` | 20000-rows | 5000 | 10019.9 | 8.0 | 608 | 12 |
-| `point-select-index` | 20000-rows | 5000 | 11523.1 | 56.0 | 3235 | 20 |
-| `range-select-rowid` | 20000-rows | 5000 | 488827.6 | 111.0 | 14612 | 1012 |
-| `scan-count` | 20000-rows | 20 | 1257940.0 | 570.0 | 760264 | 40012 |
-| `scan-project` | 20000-rows | 20 | 93467000.0 | 160558.8 | 11635600 | 200006 |
-| `sort` | 20000-rows | 20 | 10501995.0 | 120677.5 | 9212767 | 180510 |
-| `aggregate-grouped` | 20000-rows | 20 | 8136935.0 | 80593.8 | 7750002 | 200162 |
-| `distinct` | 20000-rows | 20 | 6795220.0 | 100582.0 | 5757100 | 120024 |
+| `lex` | representative | 20000 | 8337.4 | 0.0 | 0 | 71 |
+| `parse` | representative | 20000 | 51248.4 | 81.0 | 7267 | 25 |
+| `prepare` | representative | 20000 | 45112.5 | 69.0 | 403 | 1 |
+| `prepare-cached` | representative | 20000 | 155.2 | 1.0 | 9 | 1 |
+| `schema-load` | 104-objects | 200 | 19.0 | 0.0 | 0 | 1 |
+| `point-select-rowid` | 20000-rows | 5000 | 8239.3 | 7.0 | 228 | 1 |
+| `point-select-index` | 20000-rows | 5000 | 16712.4 | 17.0 | 567 | 1 |
+| `range-select-rowid` | 20000-rows | 5000 | 34543.1 | 115.0 | 10202 | 100 |
+| `scan-count` | 20000-rows | 20 | 209940.0 | 19.0 | 2440 | 1 |
+| `scan-project` | 20000-rows | 20 | 13029460.0 | 40037.0 | 3679794 | 20000 |
+| `sort` | 20000-rows | 20 | 35120.0 | 116.0 | 10490 | 100 |
+| `aggregate-grouped` | 20000-rows | 20 | 15865495.0 | 40152.0 | 1020275 | 17 |
+| `distinct` | 20000-rows | 20 | 13585010.0 | 40067.0 | 1011499 | 17 |

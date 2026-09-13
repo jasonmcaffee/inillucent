@@ -58,6 +58,12 @@ use inillucent_base::DbResult;
 // `inillucent-engine`, so it stays reachable here after the move to `constant`.
 use crate::constant::constant_value;
 pub use crate::constant::{literal_value, literal_value_in};
+// `Compiled`, `Slot` and `try_compile` moved to `crate::compiled` to keep this
+// file under its recorded ceiling; re-exported here so every existing
+// `physical::Slot` / `physical::Compiled` / `physical::try_compile` reference
+// - `inillucent-engine`'s `Cached::Select` among them - did not have to move
+// with them.
+pub use crate::compiled::{try_compile, Compiled, Slot};
 use inillucent_pool::Pool;
 use inillucent_sql::ast::{BinaryOp, NullOrder, PatternOp, SortOrder, UnaryOp};
 use inillucent_sql::bind::{
@@ -426,13 +432,13 @@ pub trait TreeCatalog {
 /// layouts and the modules the statement sees. Wrapping rather than threading a
 /// parameter through every builder is what keeps a recursive query from
 /// changing the shape of a signature nothing else uses.
-struct WithQueue<'a> {
+pub(crate) struct WithQueue<'a> {
     /// The catalog underneath, which answers everything but the queue.
-    inner: &'a dyn TreeCatalog,
+    pub(crate) inner: &'a dyn TreeCatalog,
     /// The FROM term this queue belongs to.
-    cte: usize,
+    pub(crate) cte: usize,
     /// The rows the previous pass produced.
-    rows: &'a [Vec<OwnedDatum>],
+    pub(crate) rows: &'a [Vec<OwnedDatum>],
 }
 
 impl TreeCatalog for WithQueue<'_> {
@@ -2074,7 +2080,7 @@ impl Space<'_> {
             .map(|(_, column)| *column)
     }
 
-    fn column(&self, source: usize, declared: usize) -> Option<usize> {
+    pub(crate) fn column(&self, source: usize, declared: usize) -> Option<usize> {
         let mut found = None;
         for (index, stage) in self.stages.iter().enumerate() {
             if stage.source != source {
@@ -2127,7 +2133,7 @@ impl Space<'_> {
         None
     }
 
-    fn rowid(&self, source: usize) -> Option<usize> {
+    pub(crate) fn rowid(&self, source: usize) -> Option<usize> {
         for (index, stage) in self.stages.iter().enumerate() {
             if stage.source != source {
                 continue;
@@ -2249,7 +2255,7 @@ impl HeldSpace {
 ///
 /// @param catalog - where the layouts come from
 /// @param prepared - the structural choices [`prepare`] made
-fn space_of(catalog: &dyn TreeCatalog, prepared: &Prepared) -> DbResult<HeldSpace> {
+pub(crate) fn space_of(catalog: &dyn TreeCatalog, prepared: &Prepared) -> DbResult<HeldSpace> {
     let mut layouts = Vec::with_capacity(prepared.stages.len());
     let mut types: Vec<StaticType> = Vec::new();
     for stage in &prepared.stages {
@@ -2332,14 +2338,54 @@ struct Chain<'t> {
 /// @param space - the joined column space
 /// @param params - the values bound to `?1`, `?2`, ...
 /// @param sink - the end of the pipeline
-fn build_chain<'t>(
+/// Everything [`build_upper`] built: the source-independent half of a chain.
+///
+/// Kept apart from [`Chain`] because every field here is genuinely `'static` -
+/// which is what [`Compiled`] needs. [`Statement`] widens this into a chain
+/// with the inner stages and any correlated block wrapped around it, which is
+/// where a borrow of the catalog first appears.
+pub(crate) struct Upper {
+    /// Every operator above the source, holding no borrow of anything.
+    pub(crate) head: Box<dyn Sink>,
+    /// The operator descriptions, sink first.
+    pub(crate) operators: Vec<String>,
+    /// The output column names.
+    pub(crate) names: Vec<Vec<u8>>,
+    /// The statement's constant `LIMIT`, which the source may use.
+    pub(crate) limit: Option<usize>,
+    /// The statement's correlated blocks, prepared but not yet wrapped around
+    /// `head` - building [`crate::correlate::Correlated`] needs a catalog
+    /// borrowed for the chain's own lifetime, which is exactly what this
+    /// function does not take.
+    pub(crate) correlations: Vec<crate::correlate::Correlation>,
+}
+
+/// Builds every operator above the source, short of the inner join stages and
+/// the correlation operator - the part of a chain that holds no borrow of the
+/// catalog it was built against.
+///
+/// Split out of [`build_chain`] so [`Compiled`] - kept with no lifetime at all
+/// so it can sit in an `Rc` across executions - can build this part once.
+/// `catalog` is borrowed only long enough to resolve a function to its body
+/// and translate a residual predicate; an index nested loop, a correlated
+/// block or a lateral module - every place that would hold onto the borrow -
+/// is built by [`build_chain`] instead, over what this returns.
+///
+/// @param plan - the planner's output
+/// @param catalog - where a registered function's body comes from, borrowed
+///   only for this call
+/// @param prepared - the structural choices [`prepare`] made
+/// @param space - the joined column space
+/// @param params - the values bound to `?1`, `?2`, ...
+/// @param sink - the end of the pipeline
+pub(crate) fn build_upper(
     plan: &PhysicalPlan,
-    catalog: &'t dyn TreeCatalog,
+    catalog: &dyn TreeCatalog,
     prepared: &Prepared,
     space: &Space<'_>,
     params: &Params,
     sink: Box<dyn Sink>,
-) -> DbResult<Chain<'t>> {
+) -> DbResult<Upper> {
     let select = &plan.select;
     refuse_unhandled(select)?;
     // **A correlated block is answered beside the row, not inside an
@@ -2701,18 +2747,61 @@ fn build_chain<'t>(
         operators.push("FILTER RESIDUAL".to_string());
     }
 
+    let names = select
+        .columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect();
+
+    Ok(Upper {
+        head: chain,
+        operators,
+        names,
+        limit: source_limit.map(|limit| limit.saturating_add(offset)),
+        correlations,
+    })
+}
+
+/// Builds every operator above the source.
+///
+/// Separated from [`build_prepared`] because a [`Statement`] builds this once
+/// and rebuilds only the source per execution. The split is also what makes
+/// the rebinding test possible: the parameter reads this function makes are
+/// the ones baked into the chain, and a statement is only re-runnable when
+/// there are none.
+///
+/// Everything that holds no borrow of `catalog` is [`build_upper`]'s to
+/// build; this adds the two things that do - the correlation operator and the
+/// inner join stages - which is where the chain widens from `'static` to `'t`.
+///
+/// @param plan - the planner's output
+/// @param catalog - where the trees and layouts come from
+/// @param prepared - the structural choices [`prepare`] made
+/// @param space - the joined column space
+/// @param params - the values bound to `?1`, `?2`, ...
+/// @param sink - the end of the pipeline
+fn build_chain<'t>(
+    plan: &PhysicalPlan,
+    catalog: &'t dyn TreeCatalog,
+    prepared: &Prepared,
+    space: &Space<'_>,
+    params: &Params,
+    sink: Box<dyn Sink>,
+) -> DbResult<Chain<'t>> {
+    let upper = build_upper(plan, catalog, prepared, space, params, sink)?;
+    let mut operators = upper.operators;
     // The inner stages, innermost first, so each ends up above the one before
     // it in the chain the source pushes into. The chain widens from `'static`
     // to `'t` here and only here: an index nested loop borrows its inner tree,
     // and it wraps everything built so far rather than being wrapped by it.
-    let mut chain: Box<dyn Sink + 't> = chain;
+    let mut chain: Box<dyn Sink + 't> = upper.head;
     // The correlation operator goes *below* every join and *above* every
     // filter: the value it computes reads the whole joined row, and the `WHERE`
     // that tests it runs after the last join has widened that row.
-    if !correlations.is_empty() {
+    if !upper.correlations.is_empty() {
         operators.push("CORRELATED SUBQUERY".to_string());
         chain = Box::new(crate::correlate::Correlated::new(
-            correlations,
+            upper.correlations,
             catalog,
             params,
             chain,
@@ -2736,17 +2825,11 @@ fn build_chain<'t>(
         ));
     }
 
-    let names = select
-        .columns
-        .iter()
-        .map(|column| column.name.clone())
-        .collect();
-
     Ok(Chain {
         head: chain,
         operators,
-        names,
-        limit: source_limit.map(|limit| limit.saturating_add(offset)),
+        names: upper.names,
+        limit: upper.limit,
     })
 }
 
@@ -2819,6 +2902,17 @@ impl<'t> Statement<'t> {
 
     /// Runs the statement against one parameter set.
     ///
+    /// **Folds this execution's uncorrelated subqueries first, every time.**
+    /// The chain was folded once at [`build_statement`] time, which is correct
+    /// for anything baked into the chain - a folded value read there is
+    /// counted against [`Statement::rebindable`]. It is *not* correct for the
+    /// **source**: a seek key from `WHERE id = (SELECT max(id) FROM t)` calls
+    /// [`source_for_run`] on every run, which used to see the raw `params` this
+    /// method was handed - subquery slots empty, nothing having folded them
+    /// since the one-time pass - and answered "a correlated subquery used as a
+    /// value" for a block that was never correlated. Folding costs about 40 ns
+    /// and no allocation on the ordinary statement, which has none.
+    ///
     /// @param params - the values bound to `?1`, `?2`, ...
     pub fn run(&mut self, params: &Params) -> DbResult<()> {
         if !self.rebindable {
@@ -2826,6 +2920,8 @@ impl<'t> Statement<'t> {
                 "this statement folded a parameter into its operator chain and cannot be re-run                  against different values",
             ));
         }
+        let folded = crate::subquery::fold(self.plan, self.catalog, params)?;
+        let params = folded.as_ref().unwrap_or(params);
         // The chain reads the cell it was built with; this is where that cell
         // learns what this execution bound. See `Statement::bindings`.
         let source = params.bindings();
@@ -2838,7 +2934,7 @@ impl<'t> Statement<'t> {
         let source = {
             let mut space = self.held.view(&self.prepared.stages);
             space.catalog = Some(self.catalog);
-            source_for(
+            source_for_run(
                 self.plan,
                 self.catalog,
                 &space,
@@ -2846,7 +2942,6 @@ impl<'t> Statement<'t> {
                 &self.prepared,
                 self.limit,
             )?
-            .0
         };
         self.head.reset()?;
         source.run(self.pool, self.head.as_mut())
@@ -2912,7 +3007,10 @@ pub fn build_statement<'t>(
 ///
 /// @param catalog - where the trees and their pools come from
 /// @param prepared - the structural choices `prepare` made
-fn source_pool<'t>(catalog: &'t dyn TreeCatalog, prepared: &Prepared) -> Option<&'t Pool> {
+pub(crate) fn source_pool<'t>(
+    catalog: &'t dyn TreeCatalog,
+    prepared: &Prepared,
+) -> Option<&'t Pool> {
     catalog.pool_for(prepared.stages.first()?.root)
 }
 
@@ -2936,6 +3034,32 @@ fn source_for<'t>(
     prepared: &Prepared,
     limit: Option<usize>,
 ) -> DbResult<(Source<'t>, String)> {
+    let source = source_for_run(plan, catalog, space, params, prepared, limit)?;
+    Ok((source, describe_source(prepared)))
+}
+
+/// Returns what drives a pipeline, without the `EXPLAIN` line.
+///
+/// The same three shapes [`source_for`] builds, for a caller that would
+/// otherwise format and throw away a `String` every execution - which is
+/// exactly what [`Statement::run`] used to do. `source_for` is this plus
+/// [`describe_source`], so the two answers about what a plan with no stages
+/// drives cannot drift apart.
+///
+/// @param plan - the planner's output
+/// @param catalog - where the trees come from
+/// @param space - the joined column space
+/// @param params - the bound parameters
+/// @param prepared - the structural choices `prepare` made
+/// @param limit - the statement's `LIMIT`, when it has a constant one
+pub(crate) fn source_for_run<'t>(
+    plan: &PhysicalPlan,
+    catalog: &'t dyn TreeCatalog,
+    space: &Space<'_>,
+    params: &Params,
+    prepared: &Prepared,
+    limit: Option<usize>,
+) -> DbResult<Source<'t>> {
     match prepared.stages.first() {
         // A materialised subquery: the inner pipeline runs to completion into a
         // buffer, and the buffer drives the outer one. It is built here rather
@@ -2956,24 +3080,18 @@ fn source_for<'t>(
                 // same bound statement, so a column that is read is a column
                 // that is materialised.
                 let needed = plan.select.columns_read(term.id);
-                return Ok((
-                    Source::Virtual(Box::new(VirtualScanSource {
-                        catalog,
-                        table: term.table.clone(),
-                        path: term.path.clone(),
-                        params: params.clone(),
-                        needed,
-                    })),
-                    describe_source(prepared),
-                ));
+                return Ok(Source::Virtual(Box::new(VirtualScanSource {
+                    catalog,
+                    table: term.table.clone(),
+                    path: term.path.clone(),
+                    params: params.clone(),
+                    needed,
+                })));
             }
             let rows = materialise_stage(plan, catalog, params, stage, limit)?;
-            Ok((Source::Rows(rows), describe_source(prepared)))
+            Ok(Source::Rows(rows))
         }
-        Some(stage) => Ok((
-            build_source(plan, catalog, space, params, stage, limit)?,
-            describe_source(prepared),
-        )),
+        Some(stage) => build_source(plan, catalog, space, params, stage, limit),
         // A `VALUES` arm has no FROM term either, and its rows *are* its
         // answer: every expression is a constant, so they are evaluated once
         // here rather than projected out of an empty row.
@@ -2994,11 +3112,11 @@ fn source_for<'t>(
                 }
                 rows.push(out);
             }
-            Ok((Source::Rows(rows), "SCAN VALUES".to_string()))
+            Ok(Source::Rows(rows))
         }
         // A query with no FROM term: one row of no columns, and the whole
         // answer comes out of the projection.
-        None => Ok((Source::Constant(1), describe_source(prepared))),
+        None => Ok(Source::Constant(1)),
     }
 }
 
@@ -3049,7 +3167,7 @@ fn push_materialised(
 /// Returns the `EXPLAIN` line for whatever drives a plan.
 ///
 /// @param prepared - the structural choices `prepare` made
-fn describe_source(prepared: &Prepared) -> String {
+pub(crate) fn describe_source(prepared: &Prepared) -> String {
     match prepared.stages.first() {
         Some(stage) => format!("{} tree {}", stage.kind.describe(), stage.root),
         None => "SCAN CONSTANT ROW".to_string(),
@@ -3512,7 +3630,7 @@ fn build_nested<'t>(
 /// @param params - the bound parameters
 /// @param stage - the inner stage
 /// @param index - the stage's position, which names its residual
-fn has_equi_key(
+pub(crate) fn has_equi_key(
     plan: &PhysicalPlan,
     space: &Space<'_>,
     params: &Params,
@@ -3540,14 +3658,22 @@ fn has_equi_key(
 /// beside it. The first can be folded once; the second cannot be folded at all.
 ///
 /// @param expr - the argument expression
-fn reads_a_column(expr: &BoundExpr) -> bool {
+pub(crate) fn reads_a_column(expr: &BoundExpr) -> bool {
     let mut used = inillucent_sql::bind::ColumnUse::default();
     // Asked about *every* source: an argument reading this term's own column
     // would be a cycle the binder does not produce, so any column at all means
     // an outer one.
     for source in 0..MAX_SOURCES {
         expr.columns_read(source, &mut used);
-        if used.opaque || !used.columns.is_empty() {
+        // A rowid read is still a column read. `ColumnUse` keeps it in its own
+        // `rowid` flag rather than in `columns` - see `BoundExpr::columns_read`
+        // - because a rowid is not one of the term's declared slots, and
+        // dropping it here answered `false` for `docs JOIN owner ON owner.id =
+        // docs.rowid`: `owner.id` is `owner`'s rowid alias, so the join's own
+        // key read only set `used.rowid`, this function said the module's term
+        // read no outer column, and a value that only exists per outer row was
+        // then folded once as if it were a statement-wide constant.
+        if used.opaque || used.rowid || !used.columns.is_empty() {
             return true;
         }
     }
@@ -3768,7 +3894,7 @@ fn build_materialised_join<'t>(
 /// may reorder them, which it decided before this pass ran.
 ///
 /// @param join - the join as the statement wrote it
-fn join_kind_of(join: inillucent_sql::ast::JoinKind) -> JoinKind {
+pub(crate) fn join_kind_of(join: inillucent_sql::ast::JoinKind) -> JoinKind {
     match join {
         inillucent_sql::ast::JoinKind::Left => JoinKind::Left,
         inillucent_sql::ast::JoinKind::Right => JoinKind::Right,
@@ -3824,7 +3950,15 @@ fn materialise_stage(
             seeds,
             steps,
             width,
-        } => run_recursive(source_term.id, seeds, steps, *width, catalog, params, limit),
+        } => crate::recursive::run_recursive(
+            source_term.id,
+            seeds,
+            steps,
+            *width,
+            catalog,
+            params,
+            limit,
+        ),
         // The queue the fill loop is on, handed in by `run_recursive` through a
         // catalog that answers it. A plan reaching this outside such a loop is
         // a plan the binder should not have produced.
@@ -3857,121 +3991,12 @@ fn materialise_stage(
 /// not end, and the only difference between that and a slow one is a number, so
 /// there is a number. SQLite's own guard is the same idea under a different
 /// name: it stops when the queue is empty, and a `LIMIT` is what a person adds
-/// to a recursion that would not.
-const MAX_RECURSIVE_PASSES: usize = 1_000_000;
-
-/// Fills a recursive CTE and returns every row it produced.
-///
-/// **The seed arms once, then the step arms until a pass produces nothing.**
-/// Each pass runs the step arms over the rows the *previous* pass produced -
-/// not over every row so far - which is what makes the work proportional to the
-/// rows rather than to their square, and it is SQLite's own rule.
-///
-/// `UNION` de-duplicates against everything already produced and `UNION ALL`
-/// does not, which is also the difference between a graph walk that terminates
-/// on a cycle and one that does not.
-///
-/// @param cte - the FROM term whose queue this is
-/// @param seeds - the arms that do not reference the CTE
-/// @param steps - the arms that do
-/// @param width - how many columns a row holds
-/// @param catalog - where the trees and layouts come from
-/// @param params - the bound parameters
-/// @param limit - the rows the statement above will keep, when it says
-fn run_recursive(
-    cte: usize,
-    seeds: &[(inillucent_sql::ast::CompoundOp, PhysicalPlan)],
-    steps: &[(inillucent_sql::ast::CompoundOp, PhysicalPlan)],
-    width: usize,
-    catalog: &dyn TreeCatalog,
-    params: &Params,
-    limit: Option<usize>,
-) -> DbResult<Vec<Vec<OwnedDatum>>> {
-    let distinct = seeds
-        .iter()
-        .chain(steps.iter())
-        .any(|(op, _)| *op == inillucent_sql::ast::CompoundOp::Union);
-    let collations = vec![Collation::Binary; width.max(1)];
-    let mut produced: Vec<Vec<OwnedDatum>> = Vec::new();
-    for (_, arm) in seeds {
-        let (rows, _) = run_any(arm, catalog, params)?;
-        produced.extend(rows);
-    }
-    if distinct {
-        produced = distinct_rows(produced, &collations, &mut Vec::new());
-    }
-    let mut answer = produced.clone();
-    let mut working = produced;
-    // **A recursion with no base case is stopped by the `LIMIT` above it.**
-    // `WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n)
-    //  SELECT ... FROM (SELECT x FROM n LIMIT 1000)` is how every counter and
-    // every series generator is written, and it never terminates on its own -
-    // the step arm always produces a row. This ran it to the million-pass guard
-    // and then refused a query SQLite answers, which is the same shape
-    // fixed for a virtual table's scan: a producer has to be
-    // stoppable by the consumer above it rather than run to completion first.
-    let enough = |answer: &Vec<Vec<OwnedDatum>>| limit.is_some_and(|want| answer.len() >= want);
-    for _ in 0..MAX_RECURSIVE_PASSES {
-        if working.is_empty() || enough(&answer) {
-            return Ok(answer);
-        }
-        let queued = WithQueue {
-            inner: catalog,
-            cte,
-            rows: &working,
-        };
-        let mut fresh: Vec<Vec<OwnedDatum>> = Vec::new();
-        for (_, arm) in steps {
-            let (rows, _) = run_any(arm, &queued, params)?;
-            fresh.extend(rows);
-        }
-        if distinct {
-            fresh = distinct_rows(fresh, &collations, &mut answer.clone());
-        }
-        if fresh.is_empty() {
-            return Ok(answer);
-        }
-        answer.extend(fresh.clone());
-        if enough(&answer) {
-            return Ok(answer);
-        }
-        working = fresh;
-    }
-    Err(misuse(
-        "a recursive CTE did not settle; it produced rows for a million passes",
-    ))
-}
-
-/// Returns the rows that are neither duplicates of each other nor already seen.
-///
-/// @param rows - the rows a pass produced
-/// @param collations - the collation of each column
-/// @param seen - the rows already produced, extended with the ones kept
-#[allow(clippy::ptr_arg)]
-fn distinct_rows(
-    rows: Vec<Vec<OwnedDatum>>,
-    collations: &[Collation],
-    seen: &mut Vec<Vec<OwnedDatum>>,
-) -> Vec<Vec<OwnedDatum>> {
-    let mut keys = SetKeys::new(collations.to_vec());
-    for row in seen.iter() {
-        keys.remember(row);
-    }
-    let mut kept = Vec::with_capacity(rows.len());
-    for row in rows {
-        if keys.remember(&row) {
-            kept.push(row);
-        }
-    }
-    kept
-}
-
 /// Returns the key expressions an inner stage probes with.
 ///
 /// @param path - the FROM term's access path
 /// @param space - the joined column space
 /// @param params - the bound parameters
-fn nested_key(
+pub(crate) fn nested_key(
     path: &AccessPath,
     table: &inillucent_sql::catalog_view::TableInfo,
     space: &Space<'_>,

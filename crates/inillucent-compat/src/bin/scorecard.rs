@@ -31,7 +31,9 @@ use inillucent_compat::perf::{
 };
 use inillucent_compat::report::json_string;
 use inillucent_compat::{platform_name, workspace_root};
-use inillucent_legacy::{Connection, Database, Levers, Value};
+use inillucent_engine::connect::{Connection, Database, Statement};
+use inillucent_sql::plan::Levers;
+use inillucent_tree::datum::OwnedDatum;
 
 /// How many paired rounds a scale is measured over.
 ///
@@ -329,13 +331,31 @@ fn run_sqlite(bench: &Path, plan: &Path, database: &Path) -> Result<Vec<Sample>,
         .collect())
 }
 
-/// Opens a database with the plan's settings applied.
-fn open(plan: &Plan, path: &Path, disabled: u32) -> Result<(Database, Connection), String> {
+/// Opens a database, applies the plan's settings, and hands the one
+/// connection it makes to a callback - then checkpoints and closes.
+///
+/// **Not leaked, and not returned.** `Connection<'d>` borrows the `Database`
+/// it came from, so a helper that tried to hand one back across a function
+/// boundary would need the database to outlive the call; the old code before
+/// this rearchitecture never had that problem because its `Connection` did
+/// not borrow anything. Rather than leak the database for the rest of the
+/// process (which was tried and produced "database disk image is malformed" -
+/// the pristine build's file handle was still open when the round loop copied
+/// it as a template), the database and its connection now live and die inside
+/// this one function: the callback does the real work, the checkpoint runs
+/// while the connection is still valid, and the database closes when this
+/// function returns.
+///
+/// @param body - runs with the open, configured connection
+fn with_inillucent<T>(
+    plan: &Plan,
+    path: &Path,
+    disabled: u32,
+    body: impl FnOnce(&Connection<'_>) -> Result<T, String>,
+) -> Result<T, String> {
     let database = Database::open(path)
         .map_err(|error| format!("cannot open {path:?}: {}", error.message()))?;
-    let connection = database
-        .connect()
-        .map_err(|error| format!("cannot connect: {}", error.message()))?;
+    let connection = database.connect();
     connection.disable_optimizations(disabled);
     for pragma in [
         format!("PRAGMA page_size={};", plan.page_size),
@@ -347,32 +367,44 @@ fn open(plan: &Plan, path: &Path, disabled: u32) -> Result<(Database, Connection
             .execute_batch(&pragma)
             .map_err(|error| format!("{pragma}: {}", error.message()))?;
     }
-    Ok((database, connection))
+    let result = body(&connection)?;
+    drop(connection);
+    // Checkpointed on every call, not only the pristine build: it is cheap
+    // next to a workload round, it runs after every timed sample is already
+    // collected so it cannot skew a measurement, and a working copy that gets
+    // inspected after a failure is as entitled to a consistent file as the
+    // template it was cloned from.
+    database
+        .checkpoint()
+        .map_err(|error| format!("checkpoint: {}", error.message()))?;
+    Ok(result)
 }
 
 /// Builds the inillucent pristine image from the plan's setup statements.
 fn build_inillucent(plan: &Plan, path: &Path, disabled: u32) -> Result<(), String> {
-    let (_database, connection) = open(plan, path, disabled)?;
-    for statement in &plan.setup {
-        connection
-            .execute_batch(statement)
-            .map_err(|error| format!("{statement}: {}", error.message()))?;
-    }
-    Ok(())
+    with_inillucent(plan, path, disabled, |connection| {
+        for statement in &plan.setup {
+            connection
+                .execute_batch(statement)
+                .map_err(|error| format!("{statement}: {}", error.message()))?;
+        }
+        Ok(())
+    })
 }
 
 /// Runs every workload of the plan on inillucent, returning one sample each.
 fn run_inillucent(plan: &Plan, path: &Path, disabled: u32) -> Result<Vec<Sample>, String> {
-    let (_database, connection) = open(plan, path, disabled)?;
-    let mut samples = Vec::with_capacity(plan.workloads.len());
-    for workload in &plan.workloads {
-        samples.push(run_one(&connection, workload, plan.rows)?);
-    }
-    Ok(samples)
+    with_inillucent(plan, path, disabled, |connection| {
+        let mut samples = Vec::with_capacity(plan.workloads.len());
+        for workload in &plan.workloads {
+            samples.push(run_one(connection, workload, plan.rows)?);
+        }
+        Ok(samples)
+    })
 }
 
 /// Runs one workload, timing exactly what the reference times.
-fn run_one(connection: &Connection, workload: &Workload, rows: u32) -> Result<Sample, String> {
+fn run_one(connection: &Connection<'_>, workload: &Workload, rows: u32) -> Result<Sample, String> {
     if let Some(pre) = &workload.pre {
         connection
             .execute_batch(pre)
@@ -417,9 +449,7 @@ fn run_one(connection: &Connection, workload: &Workload, rows: u32) -> Result<Sa
             produced = produced.saturating_add(1);
         }
         if !workload.prepare_each {
-            statement
-                .reset()
-                .map_err(|error| format!("{}: {}", workload.sql, error.message()))?;
+            statement.reset();
             statement.clear_bindings();
         }
         if let Grouping::Every(size) = workload.grouping {
@@ -454,48 +484,47 @@ fn run_one(connection: &Connection, workload: &Workload, rows: u32) -> Result<Sa
 }
 
 /// Opens a transaction.
-fn begin(connection: &Connection) -> Result<(), String> {
+fn begin(connection: &Connection<'_>) -> Result<(), String> {
     connection
         .execute_batch("BEGIN")
         .map_err(|error| format!("BEGIN: {}", error.message()))
 }
 
 /// Closes a transaction.
-fn commit(connection: &Connection) -> Result<(), String> {
+fn commit(connection: &Connection<'_>) -> Result<(), String> {
     connection
         .execute_batch("COMMIT")
         .map_err(|error| format!("COMMIT: {}", error.message()))
 }
 
 /// Adds one produced value to the digest, tagged the way the reference tags it.
-fn eat(digest: &mut Digest, value: &Value<'static>) {
+fn eat(digest: &mut Digest, value: &OwnedDatum) {
     match value {
-        Value::Null => digest.tag(0),
-        Value::Integer(number) => {
+        OwnedDatum::Null => digest.tag(0),
+        OwnedDatum::Int(number) => {
             digest.tag(1);
             digest.word(*number as u64);
         }
-        Value::Real(number) => {
+        OwnedDatum::Real(number) => {
             digest.tag(2);
             digest.word(number.to_bits());
         }
-        Value::Text(text) => {
-            let bytes = text.utf8_bytes();
+        OwnedDatum::Text(bytes) => {
             digest.tag(3);
             digest.word(bytes.len() as u64);
-            digest.bytes(&bytes);
+            digest.bytes(bytes);
         }
-        Value::Blob(blob) => {
+        OwnedDatum::Blob(bytes) => {
             digest.tag(4);
-            digest.word(blob.raw().len() as u64);
-            digest.bytes(blob.raw());
+            digest.word(bytes.len() as u64);
+            digest.bytes(bytes);
         }
     }
 }
 
 /// Binds one parameter, by the same formula the reference uses.
 fn bind_one(
-    statement: &mut inillucent_legacy::Statement<'_>,
+    statement: &mut Statement<'_>,
     position: u32,
     bind: Bind,
     iteration: u32,

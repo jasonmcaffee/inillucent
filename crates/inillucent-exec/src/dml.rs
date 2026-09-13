@@ -85,6 +85,36 @@ use crate::trigger::{self, Depth};
 /// row, and the write path never holds a row in any other shape.
 pub type Row = Vec<OwnedDatum>;
 
+/// What [`write_one`] actually did with a row, so its caller can tell a
+/// genuine insert from a conflict `DO UPDATE` resolved onto a row that was
+/// already there.
+///
+/// **`last_insert_rowid()` only moves for the first of these.** SQLite's rule
+/// is that it is set by `INSERT`, never by `UPDATE` - and an upsert's `DO
+/// UPDATE` arm is an update, whatever statement it is spelled inside. Before
+/// this distinction existed, both arms fed the same row image into
+/// `Changes::last_rowid`, so `INSERT INTO t VALUES(3, 'one', 9) ON
+/// CONFLICT(b) DO UPDATE SET hits = excluded.hits` - which updates the row
+/// `b = 'one'` already names - reported *that* row's rowid as the last one
+/// inserted, where the reference leaves `last_insert_rowid()` at whatever the
+/// last genuine `INSERT` set it to.
+enum Stored {
+    /// A new row was placed in the tree.
+    Inserted(Row),
+    /// An existing row was rewritten in place, by an `ON CONFLICT ... DO
+    /// UPDATE` arm.
+    Updated(Row),
+}
+
+impl Stored {
+    /// Returns the row, however it got there.
+    fn row(&self) -> &[OwnedDatum] {
+        match self {
+            Stored::Inserted(row) | Stored::Updated(row) => row,
+        }
+    }
+}
+
 /// What a data-modifying statement did.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Changes {
@@ -132,6 +162,30 @@ pub struct Changes {
 fn count_row(changes: &mut Changes, target: &dyn WriteTarget, depth: Depth) {
     changes.rows = changes.rows.saturating_add(1);
     target.count_row(depth.0 == 0);
+}
+
+/// Counts one row an `INSTEAD OF` trigger dispatched, on the statement's own
+/// tally only - never on the target's.
+///
+/// **A view write is never the target's "outer" row, whatever depth it ran
+/// at.** `count_row` above marks a write as the user's own exactly when
+/// `depth.0 == 0`, which is right for an ordinary table: the statement wrote
+/// the row itself. A view has no tree of its own, so `insert_into_view`,
+/// `update_view` and `delete_view` never write anything directly - the
+/// `INSTEAD OF` trigger's own body does, through its own nested
+/// `insert_at`/`update_at`/`delete_at` call one depth deeper, which already
+/// counts correctly there. Routing the view dispatch itself through
+/// `count_row` double-counted: the outer `INSERT INTO v ...` reported
+/// `changes()` as 1 where SQLite reports 0, because the dispatch loop ran at
+/// depth 0 and `count_row` read that as the statement's own write rather than
+/// the trigger's. SQLite's own rule is not a special case for views - it is
+/// the same "a trigger body's rows go into `total_changes()`, never into
+/// `changes()`" rule, applied to a statement whose entire effect is the
+/// trigger body's.
+///
+/// @param changes - the statement's own tally
+fn count_view_row(changes: &mut Changes) {
+    changes.rows = changes.rows.saturating_add(1);
 }
 
 /// A map from root page to tree, whichever map the caller happens to hold.
@@ -877,7 +931,7 @@ pub fn insert_at(
             TriggerTime::After,
             trigger::TriggerRows {
                 old: None,
-                new: Some(stored.as_slice()),
+                new: Some(stored.row()),
             },
             &layout.slots,
             layout.rowid,
@@ -889,20 +943,27 @@ pub fn insert_at(
             continue;
         }
         count_row(&mut changes, target, depth);
-        if let Some(OwnedDatum::Int(assigned)) = layout.rowid.and_then(|at| stored.get(at)) {
-            changes.last_rowid = Some(*assigned);
-            target.count_rowid(*assigned);
-            // A key the statement supplied raises the mark too: `INSERT INTO t
-            // VALUES (50, ...)` makes the next allocated key 51.
-            high_water = high_water.max(*assigned);
+        // **`last_insert_rowid()` moves for an insert, never for an upsert's
+        // `DO UPDATE` arm.** See [`Stored`]'s own doc comment: both used to
+        // feed the same row image into `changes.last_rowid`, so resolving a
+        // conflict onto an existing row reported *that* row's rowid as newly
+        // inserted.
+        if let Stored::Inserted(row) = &stored {
+            if let Some(OwnedDatum::Int(assigned)) = layout.rowid.and_then(|at| row.get(at)) {
+                changes.last_rowid = Some(*assigned);
+                target.count_rowid(*assigned);
+                // A key the statement supplied raises the mark too: `INSERT
+                // INTO t VALUES (50, ...)` makes the next allocated key 51.
+                high_water = high_water.max(*assigned);
+            }
         }
         if captured {
-            changes.written.push(stored.clone());
+            changes.written.push(stored.row().to_vec());
         }
         if !plan.returning.is_empty() {
             let mut out = Vec::with_capacity(plan.returning.len());
             for eval in &plan.returning {
-                out.push(space.evaluate(eval.as_ref(), &[stored.as_slice()])?);
+                out.push(space.evaluate(eval.as_ref(), &[stored.row()])?);
             }
             changes.returned.push(out);
         }
@@ -979,7 +1040,7 @@ fn insert_into_view(
         {
             continue;
         }
-        count_row(&mut changes, target, depth);
+        count_view_row(&mut changes);
         if !plan.returning.is_empty() {
             let mut out = Vec::with_capacity(plan.returning.len());
             for eval in &plan.returning {
@@ -1032,7 +1093,7 @@ fn write_one(
     params: &Params,
     depth: Depth,
     indexes: IndexExprs<'_>,
-) -> DbResult<Option<Row>> {
+) -> DbResult<Option<Stored>> {
     let table = &statement.table;
     // **The common insert asks the table once.**
     //
@@ -1063,7 +1124,7 @@ fn write_one(
         && unique_indexes(table).next().is_none()
     {
         if place_row_absent(table, layout, target, &row, indexes)? {
-            return Ok(Some(row));
+            return Ok(Some(Stored::Inserted(row)));
         }
         let clash = conflicting_row(table, layout, target, &row, None, indexes)?;
         let constraint = clash.as_ref().and_then(|found| found.conflict);
@@ -1109,9 +1170,10 @@ fn write_one(
                 // `None` is the arm's `WHERE` declining, which leaves the row
                 // as it is and writes nothing - the same outcome as
                 // `DO NOTHING`, and not an error.
-                return upsert_row(
+                return Ok(upsert_row(
                     statement, table, layout, space, plan, target, &clash, &row, indexes, arm,
-                );
+                )?
+                .map(Stored::Updated));
             }
             // `ABORT`, `FAIL` and `ROLLBACK` all raise here and differ only in
             // how much of what has been written goes back - which this layer
@@ -1125,7 +1187,7 @@ fn write_one(
         }
     }
     place_row(table, layout, target, None, &row, indexes)?;
-    Ok(Some(row))
+    Ok(Some(Stored::Inserted(row)))
 }
 
 /// What an insert does about a row that collides with one already there.
@@ -2842,7 +2904,7 @@ fn update_view(
         {
             continue;
         }
-        count_row(&mut changes, target, depth);
+        count_view_row(&mut changes);
     }
     Ok(changes)
 }
@@ -2880,7 +2942,7 @@ fn delete_view(
         {
             continue;
         }
-        count_row(&mut changes, target, depth);
+        count_view_row(&mut changes);
     }
     Ok(changes)
 }

@@ -13,19 +13,33 @@
 //! it by reading the log from its first byte - which is the path a real crash
 //! takes and the one worth exercising.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use inillucent_session::connection::{Connection, OpenOptions, SessionDatabase};
+use inillucent_compat::newengine::ImportedDatabase;
+use inillucent_exec::physical::Params;
 use inillucent_sim::failpoint::Failure;
 use inillucent_sim::media::MediaModel;
 use inillucent_sim::sim_vfs::{CrashSnapshot, SimConfig, SimVfs};
-use inillucent_transaction::journal::{JournalMode, JournalOptions, Synchronous};
-use inillucent_value::Value;
-use inillucent_vfs::path::DbPath;
+use inillucent_tree::datum::OwnedDatum;
 use inillucent_vfs::Vfs;
 
+/// The page size these runs build at, matching `inillucent_engine::connect::PAGE_SIZE`.
+const PAGE_SIZE: usize = 32_768;
+
+/// How many frames the pool holds. Large enough that nothing evicts or
+/// checkpoints on its own during a run this small.
+const FRAMES: usize = 4_096;
+
 /// The schema every run starts from.
+///
+/// `journal_mode` and `synchronous` are set through the pragmas rather than
+/// through a constructor option: the new engine's `ImportedDatabase::create_on`
+/// takes no journal configuration of its own, because a pragma is the one
+/// place SQLite lets an application ask for either, and this engine answers
+/// both for real (`crates/inillucent-engine/src/pragma.rs`).
 const SCHEMA: &str = "PRAGMA journal_mode=wal;
+     PRAGMA synchronous=full;
      CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT, c INTEGER);
      CREATE INDEX t_b ON t(b);
      INSERT INTO t VALUES(1, 'one', 10);
@@ -49,52 +63,59 @@ fn simulator(seed: u64) -> Arc<SimVfs> {
 }
 
 /// The path every run uses.
-fn path() -> DbPath {
-    DbPath::from("/sim/wal.db")
+fn path() -> PathBuf {
+    PathBuf::from("/sim/wal.db")
 }
 
-/// The options a WAL connection opens with.
-fn options() -> JournalOptions {
-    JournalOptions {
-        mode: JournalMode::Wal,
-        synchronous: Synchronous::Full,
+/// Creates the database on a simulator with nothing written to it yet.
+fn create_fresh(vfs: Arc<dyn Vfs>) -> Result<ImportedDatabase, inillucent_base::DbError> {
+    ImportedDatabase::create_on(vfs, path(), PAGE_SIZE, FRAMES)
+}
+
+/// Reopens a database a prior connection already built, reporting the failure
+/// rather than panicking - a crash is exactly the case where this refuses.
+fn reopen(vfs: Arc<dyn Vfs>) -> Result<ImportedDatabase, inillucent_base::DbError> {
+    ImportedDatabase::open_on(vfs, path(), PAGE_SIZE, FRAMES)
+}
+
+/// Runs a script of one or more statements, stopping at the first failure.
+fn run(engine: &mut ImportedDatabase, sql: &str) -> Result<(), inillucent_base::DbError> {
+    let mut rest = sql;
+    loop {
+        let trimmed = rest.trim_start();
+        if trimmed.is_empty() {
+            return Ok(());
+        }
+        let consumed = engine.statement_length(trimmed)?;
+        let Some(head) = trimmed.get(..consumed) else {
+            return Ok(());
+        };
+        if head.trim().is_empty() {
+            return Ok(());
+        }
+        engine.execute_any(head, &Params::new())?;
+        rest = trimmed.get(consumed..).unwrap_or("");
     }
 }
 
-/// Opens a connection, reporting the failure rather than panicking.
-fn try_connect(vfs: Arc<dyn Vfs>) -> Result<Connection, inillucent_base::DbError> {
-    let database = SessionDatabase::open_with(
-        path().as_path(),
-        vfs,
-        OpenOptions {
-            journal: options(),
-            ..OpenOptions::default()
-        },
-    )?;
-    database.connect()
-}
-
-/// Runs a script, reporting whether it succeeded.
-fn run(connection: &Connection, sql: &str) -> Result<(), inillucent_base::DbError> {
-    inillucent_session::statement::execute_batch(connection, sql.as_bytes())
-}
-
 /// The rows a database holds, in a stable order.
-fn try_contents(connection: &Connection) -> Result<Vec<String>, inillucent_base::DbError> {
-    let (mut statement, _) = inillucent_session::statement::Statement::prepare(
-        connection,
-        b"SELECT a, b, c FROM t ORDER BY a",
-    )?;
+fn try_contents(engine: &mut ImportedDatabase) -> Result<Vec<String>, inillucent_base::DbError> {
+    let outcome = engine.execute_any("SELECT a, b, c FROM t ORDER BY a", &Params::new())?;
     let mut rows = Vec::new();
-    while statement.step()? {
-        let row = statement.row();
-        rows.push(format!(
-            "{:?}|{:?}|{:?}",
-            row.first().and_then(Value::as_integer),
-            row.get(1)
-                .and_then(|value| value.as_text().map(|text| text.utf8_bytes().into_owned())),
-            row.get(2).and_then(Value::as_integer),
-        ));
+    for row in outcome.rows {
+        let a = match row.first() {
+            Some(OwnedDatum::Int(number)) => Some(*number),
+            _ => None,
+        };
+        let b = match row.get(1) {
+            Some(OwnedDatum::Text(bytes)) => Some(String::from_utf8_lossy(bytes).into_owned()),
+            _ => None,
+        };
+        let c = match row.get(2) {
+            Some(OwnedDatum::Int(number)) => Some(*number),
+            _ => None,
+        };
+        rows.push(format!("{a:?}|{b:?}|{c:?}"));
     }
     Ok(rows)
 }
@@ -102,9 +123,9 @@ fn try_contents(connection: &Connection) -> Result<Vec<String>, inillucent_base:
 /// Builds the database and returns the simulator holding it.
 fn built(seed: u64) -> Arc<SimVfs> {
     let vfs = simulator(seed);
-    let connection = try_connect(Arc::clone(&vfs) as Arc<dyn Vfs>).expect("the connection opens");
-    run(&connection, SCHEMA).expect("the schema builds");
-    drop(connection);
+    let mut engine = create_fresh(Arc::clone(&vfs) as Arc<dyn Vfs>).expect("the connection opens");
+    run(&mut engine, SCHEMA).expect("the schema builds");
+    drop(engine);
     vfs
 }
 
@@ -112,15 +133,13 @@ fn built(seed: u64) -> Arc<SimVfs> {
 fn expected_states() -> (Vec<String>, Vec<String>) {
     let vfs = built(4242);
     let before = {
-        let connection =
-            try_connect(Arc::clone(&vfs) as Arc<dyn Vfs>).expect("the connection opens");
-        try_contents(&connection).expect("the query runs")
+        let mut engine = reopen(Arc::clone(&vfs) as Arc<dyn Vfs>).expect("the connection opens");
+        try_contents(&mut engine).expect("the query runs")
     };
     let after = {
-        let connection =
-            try_connect(Arc::clone(&vfs) as Arc<dyn Vfs>).expect("the connection opens");
-        run(&connection, WORKLOAD).expect("the workload commits");
-        try_contents(&connection).expect("the query runs")
+        let mut engine = reopen(Arc::clone(&vfs) as Arc<dyn Vfs>).expect("the connection opens");
+        run(&mut engine, WORKLOAD).expect("the workload commits");
+        try_contents(&mut engine).expect("the query runs")
     };
     (before, after)
 }
@@ -144,10 +163,8 @@ fn recovered(snapshot: &CrashSnapshot, seed: u64) -> Recovery {
         },
         snapshot,
     ));
-    match try_connect(Arc::clone(&vfs) as Arc<dyn Vfs>).and_then(|connection| {
-        let rows = try_contents(&connection)?;
-        Ok(rows)
-    }) {
+    match reopen(Arc::clone(&vfs) as Arc<dyn Vfs>).and_then(|mut engine| try_contents(&mut engine))
+    {
         Ok(rows) => Recovery::Rows(rows),
         Err(failure) => Recovery::Broken(format!("{failure}")),
     }
@@ -188,9 +205,9 @@ fn campaign(
         // crash is, and it matters here: a connection that had been closed
         // would have checkpointed its log and deleted it on the way out, so
         // every cut would be testing the checkpoint rather than the commit.
-        let connection = try_connect(Arc::clone(&vfs) as Arc<dyn Vfs>);
-        let committed = match &connection {
-            Ok(connection) => run(connection, WORKLOAD).is_ok() && run(connection, tail).is_ok(),
+        let mut connection = reopen(Arc::clone(&vfs) as Arc<dyn Vfs>);
+        let committed = match &mut connection {
+            Ok(engine) => run(engine, WORKLOAD).is_ok() && run(engine, tail).is_ok(),
             Err(_) => false,
         };
         let reached = vfs.failpoints().sites_reached().saturating_sub(base);
@@ -232,10 +249,30 @@ fn campaign(
         report.push_str(&format!("{nth}\t{verdict}\t{committed}\n"));
     }
     assert!(cuts > 20, "{name}: only {cuts} cut points were reached");
-    assert!(old > 0, "{name}: no cut left the old state");
+    // **Not asserted for a short write.** Every commit now pads its own tail
+    // to the next device sector boundary, in the same write and the same
+    // sync as the commit record itself - see `inillucent_wal::writer`'s
+    // `SECTOR_ALIGN` for the acknowledged-commit-loss defect that closes, and
+    // `durability::a_full_disk_at_every_cut_point_is_recoverable` for where it
+    // is measured directly. `Failure::ShortWrite` keeps a fixed *fraction* of
+    // whatever a write asked to write - exactly half - so padding a small
+    // commit's write large enough to close its sector boundary also makes
+    // that write large enough that half of it always covers the commit's own
+    // bytes in full. `tests/crash/wal-short-write.tsv` at the commit this
+    // ticket found the defect in `HEAD` shows precisely that: `old` fell from
+    // 7 of 24 cuts to 0, and every one of the cuts that used to land on the
+    // schema's own small commits and produce `old` now produces `new`
+    // instead - a commit that used to be small enough to lose entirely to a
+    // short write keeps its own bytes now and loses only the padding after
+    // it. That is the fix working, not a coverage regression: `old` was never
+    // this campaign's own property to guarantee, it was evidence that a
+    // small commit's tail *could* be lost, and closing that is the point.
+    if failure != Failure::ShortWrite {
+        assert!(old > 0, "{name}: no cut left the old state");
+    }
     assert!(new > 0, "{name}: no cut left the new state");
     format!(
-        "# {cuts} cuts: {old} old, {new} new, {detected} reported\ncut\tstate\treported\n{report}"
+        "# {cuts} cuts: {old} old, {new} new, {detected} damaged and detected\ncut\tstate\tcommitted\n{report}"
     )
 }
 
@@ -295,8 +332,8 @@ fn a_crash_during_wal_recovery_is_idempotent() {
         let base = vfs.failpoints().sites_reached();
         vfs.failpoints()
             .fail_nth_call(base.saturating_add(first), Failure::Crash);
-        if let Ok(connection) = try_connect(Arc::clone(&vfs) as Arc<dyn Vfs>) {
-            let _ = run(&connection, WORKLOAD);
+        if let Ok(mut engine) = reopen(Arc::clone(&vfs) as Arc<dyn Vfs>) {
+            let _ = run(&mut engine, WORKLOAD);
         }
         let snapshot = vfs.crash();
         // Recover it, crashing inside the recovery, and then recover *that*.
@@ -313,8 +350,8 @@ fn a_crash_during_wal_recovery_is_idempotent() {
             broken
                 .failpoints()
                 .fail_nth_call(base.saturating_add(second), Failure::Crash);
-            if let Ok(connection) = try_connect(Arc::clone(&broken) as Arc<dyn Vfs>) {
-                let _ = try_contents(&connection);
+            if let Ok(mut engine) = reopen(Arc::clone(&broken) as Arc<dyn Vfs>) {
+                let _ = try_contents(&mut engine);
             }
             let twice = broken.crash();
             let state = recovered(&twice, 9900 + second);
@@ -343,3 +380,29 @@ fn record(name: &str, body: &str) {
     let _ = std::fs::create_dir_all(&directory);
     let _ = std::fs::write(directory.join(name), body);
 }
+
+// A `diagnose_checkpoint_cut_29` test lived here, labelled "TASK1899-DIAG
+// (temporary)" - a single cut point isolated from `every_cut_of_a_wal_
+// checkpoint_is_recoverable`'s sweep, printing what recovery did with
+// `eprintln!` rather than asserting anything. It confirmed cut 29 is real -
+// `committed=false`, then `open_on failed: message=None detail=Some("database
+// disk image is malformed")` - which is `every_cut_of_a_wal_checkpoint_is_
+// recoverable` itself failing at "checkpoint cut 29", so nothing here proved
+// anything the sweep does not already prove and assert on its own. Removed
+// as a diagnostic that should never have shipped rather than kept as a
+// second, weaker copy of the same case: `tests/inillucent-testing-tdd.md`
+// rule 1.2, a test that cannot fail is worse than no test, and a `#[test]`
+// with no assertion cannot.
+//
+// The defect it isolated is real and is not fixed here. `Database::checkpoint`
+// (`crates/inillucent-pool/src/file.rs`) calls `write_free_map`
+// unconditionally rather than only when the free map actually changed;
+// `FreeMap` has no per-page dirty tracking to make that conditional on; and
+// `Pool::install` (`crates/inillucent-pool/src/pool.rs`) writes the resulting
+// page bytes into the pool without a WAL record or an LSN bump behind them.
+// So a checkpoint's rewrite of free-map pages - even when their bytes are
+// unchanged from the last checkpoint - has no log entry a crash mid-writeback
+// could recover from, and `every_cut_of_a_wal_checkpoint_is_recoverable`'s cut
+// 29 lands inside exactly that window. See the report this ticket published
+// for which other currently-failing durability cases are the same defect and
+// which are something else.

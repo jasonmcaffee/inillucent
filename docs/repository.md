@@ -44,7 +44,7 @@ them out of `vcvars64.bat` once and export them into the shell before `cargo bui
 | shared foundation | `inillucent-base`, `inillucent-vfs`, `inillucent-value`, `inillucent-sim` | 15,431 |
 | shared SQL front end | `inillucent-sql` (lexer, parser, binder, planner), `inillucent-scalar` (functions, JSON, window frames), `inillucent-catalog`, `inillucent-ext` (registry, virtual table contract, FTS5, R-Tree) | 37,400 |
 | the engine | `inillucent-pool`, `inillucent-wal`, `inillucent-tree`, `inillucent-txn`, `inillucent-exec`, `inillucent-engine`, `inillucent-model` (a test oracle), `inillucent-sqlite-reader` (import only) | 54,341 |
-| the old engine, awaiting deletion | `inillucent-storage`, `inillucent-transaction`, `inillucent-vm`, `inillucent-session`, `inillucent-legacy`, `inillucent-capi` | 48,694 |
+| kept for reading SQLite files | `inillucent-storage`, `inillucent-transaction` — the old engine's pager and transaction manager, kept because `inillucent-sqlite-reader` reads a SQLite file through them and migrating away from SQLite is what that reader is for | 18,764 |
 | retrieval | `inillucent-core` (the engine), `inillucent-search` (the virtual table), `inillucent-bench` (the grading harness) | 29,825 |
 | facade and tooling | `inillucent` (a re-export of the engine), `inillucent-compat` (the manifest, the oracle, the gates, 77 test files), `inillucent-cli`, `inillucent-migrate`, `inillucent-remote` | 32,031 |
 
@@ -53,10 +53,11 @@ them out of `vcvars64.bat` once and export them into the shell before `cargo bui
 `prepare_with_tail` and `explain`. `inillucent::Database` is a re-export of it — the two surfaces do
 not differ, so there is no wrapper.
 
-The old engine is the one that reached SQLite file format parity: 264 of 271 capabilities pass, with
-seven optional ones missing. It was measured between 30% and 95% slower than SQLite across the
-families, which is why the current engine was written. [Roadmap](roadmap.md#7-deleting-the-old-engine)
-says what its deletion is waiting on.
+The old engine was the one that reached SQLite file format parity: 264 of 271 capabilities passed,
+with seven optional ones missing. It was measured between 30% and 95% slower than SQLite across the
+families, which is why the current engine was written, and it has now been deleted -
+[Roadmap](roadmap.md#7-deleting-the-old-engine) records what its four crates were and what still
+reads a SQLite file in their place.
 
 ## The other directories
 
@@ -122,7 +123,7 @@ Seventeen tests fail today and every one is accounted for:
   simulator — so "the simulator behaves like a disk" is a checked claim rather than a hope.
 - **100% branch coverage** held on the page pool's interior, latch, meta, extent, free map and swip
   modules, and on the tree's key codec.
-- **28 of the 31 crates deny `unwrap`, `expect`, `panic` and slice indexing**, and 25 forbid
+- **23 of the 29 crates deny `unwrap`, `expect`, `panic` and slice indexing**, and 22 forbid
   `unsafe`, on every path that reads SQL text, database pages, log frames, network bytes or file
   system results.
 
@@ -151,6 +152,11 @@ target/release/inillucent-fullgate <dir>/medium-run1.db --scale medium --rounds 
 target/release/inillucent-readgate    <dir>/medium-read.db --scale medium
 target/release/inillucent-shellrss
 target/release/inillucent-vectorprobe --rows 20000 --dims 256
+# a report, not a gate: it prints the retrieval consumer's absolute cost on
+# this engine's own storage and always exits 0 unless something actually
+# errors. It used to compare against the old engine's storage; that engine is
+# deleted and no recorded floor exists to gate against in its place, so it
+# reports rather than passing or failing.
 target/release/inillucent-searchgate  --documents 500 --rounds 30
 
 # the parity manifest and the dependency contract

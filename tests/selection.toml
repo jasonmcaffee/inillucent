@@ -222,11 +222,6 @@ kind = "lib"
 tier = "unit"
 
 [[target]]
-package = "inillucent-capi"
-kind = "lib"
-tier = "unit"
-
-[[target]]
 package = "inillucent-catalog"
 kind = "lib"
 tier = "unit"
@@ -276,11 +271,6 @@ kind = "lib"
 tier = "unit"
 
 [[target]]
-package = "inillucent-legacy"
-kind = "lib"
-tier = "unit"
-
-[[target]]
 package = "inillucent-migrate"
 kind = "lib"
 tier = "unit"
@@ -297,11 +287,6 @@ tier = "unit"
 
 [[target]]
 package = "inillucent-scalar"
-kind = "lib"
-tier = "unit"
-
-[[target]]
-package = "inillucent-session"
 kind = "lib"
 tier = "unit"
 
@@ -351,11 +336,6 @@ kind = "lib"
 tier = "unit"
 
 [[target]]
-package = "inillucent-vm"
-kind = "lib"
-tier = "unit"
-
-[[target]]
 package = "inillucent-wal"
 kind = "lib"
 tier = "unit"
@@ -388,7 +368,7 @@ package = "inillucent-compat"
 kind = "test"
 name = "dml"
 tier = "engine"
-covers = ["inillucent-legacy"]
+covers = ["inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
@@ -409,7 +389,7 @@ package = "inillucent-compat"
 kind = "test"
 name = "levers"
 tier = "engine"
-covers = ["inillucent-legacy"]
+covers = ["inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
@@ -540,7 +520,35 @@ covers = ["inillucent-engine"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
+name = "compiled_chain_reuse"
+tier = "engine"
+covers = ["inillucent-engine", "inillucent-exec"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
 name = "search"
+tier = "engine"
+covers = ["inillucent-search", "inillucent-engine"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "segmented_generations"
+tier = "engine"
+covers = ["inillucent-search"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "segment_merge_bound"
+tier = "engine"
+covers = ["inillucent-search"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "segment_delta_chain"
 tier = "engine"
 covers = ["inillucent-search"]
 
@@ -549,7 +557,7 @@ package = "inillucent-compat"
 kind = "test"
 name = "sql"
 tier = "engine"
-covers = ["inillucent-legacy"]
+covers = ["inillucent-engine"]
 requires = ["fixtures"]
 
 [[target]]
@@ -579,7 +587,7 @@ package = "inillucent-compat"
 kind = "test"
 name = "vtab"
 tier = "engine"
-covers = ["inillucent-session"]
+covers = ["inillucent-engine", "inillucent-ext"]
 
 [[target]]
 package = "inillucent-compat"
@@ -687,17 +695,9 @@ requires = ["oracle"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
-name = "capi"
-tier = "differential"
-covers = ["inillucent-capi"]
-requires = ["shell", "cc"]
-
-[[target]]
-package = "inillucent-compat"
-kind = "test"
 name = "catalog"
 tier = "differential"
-covers = ["inillucent-legacy"]
+covers = ["inillucent-engine"]
 requires = ["oracle"]
 
 [[target]]
@@ -721,7 +721,7 @@ package = "inillucent-compat"
 kind = "test"
 name = "dml_differential"
 tier = "differential"
-covers = ["inillucent-session"]
+covers = ["inillucent-engine"]
 requires = ["oracle"]
 
 [[target]]
@@ -745,7 +745,7 @@ package = "inillucent-compat"
 kind = "test"
 name = "fts5"
 tier = "differential"
-covers = ["inillucent-session"]
+covers = ["inillucent-engine"]
 requires = ["oracle"]
 
 [[target]]
@@ -760,7 +760,7 @@ package = "inillucent-compat"
 kind = "test"
 name = "json"
 tier = "differential"
-covers = ["inillucent-session"]
+covers = ["inillucent-engine"]
 requires = ["oracle"]
 
 [[target]]
@@ -768,7 +768,7 @@ package = "inillucent-compat"
 kind = "test"
 name = "lifecycle"
 tier = "differential"
-covers = ["inillucent-legacy"]
+covers = ["inillucent-engine"]
 requires = ["oracle"]
 
 [[target]]
@@ -856,7 +856,7 @@ package = "inillucent-compat"
 kind = "test"
 name = "pragma"
 tier = "differential"
-covers = ["inillucent-session"]
+covers = ["inillucent-engine"]
 requires = ["oracle"]
 
 [[target]]
@@ -864,7 +864,7 @@ package = "inillucent-compat"
 kind = "test"
 name = "registers"
 tier = "differential"
-covers = ["inillucent-search", "inillucent-session"]
+covers = ["inillucent-search", "inillucent-engine"]
 requires = ["oracle"]
 
 [[target]]
@@ -872,7 +872,7 @@ package = "inillucent-compat"
 kind = "test"
 name = "rtree"
 tier = "differential"
-covers = ["inillucent-session"]
+covers = ["inillucent-engine", "inillucent-ext"]
 requires = ["shell"]
 
 [[target]]
@@ -896,7 +896,7 @@ package = "inillucent-compat"
 kind = "test"
 name = "services"
 tier = "differential"
-covers = ["inillucent-legacy"]
+covers = ["inillucent-engine"]
 requires = ["shell"]
 
 [[target]]
@@ -929,7 +929,7 @@ package = "inillucent-compat"
 kind = "test"
 name = "concurrency"
 tier = "durability"
-covers = ["inillucent-session"]
+covers = ["inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
@@ -943,7 +943,7 @@ package = "inillucent-compat"
 kind = "test"
 name = "durability"
 tier = "durability"
-covers = ["inillucent-session"]
+covers = ["inillucent-engine", "inillucent-sim"]
 
 [[target]]
 package = "inillucent-compat"
@@ -957,14 +957,14 @@ package = "inillucent-compat"
 kind = "test"
 name = "faults"
 tier = "durability"
-covers = ["inillucent-session"]
+covers = ["inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
 name = "multi_database_crash"
 tier = "durability"
-covers = ["inillucent-session"]
+covers = ["inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
@@ -990,9 +990,16 @@ covers = ["inillucent-engine", "inillucent-txn", "inillucent-pool"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
+name = "free_map_checkpoint_crash"
+tier = "durability"
+covers = ["inillucent-engine", "inillucent-txn", "inillucent-pool"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
 name = "search_crash"
 tier = "durability"
-covers = ["inillucent-search", "inillucent-session"]
+covers = ["inillucent-search", "inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"
@@ -1006,7 +1013,7 @@ package = "inillucent-compat"
 kind = "test"
 name = "wal_crash"
 tier = "durability"
-covers = ["inillucent-session"]
+covers = ["inillucent-engine", "inillucent-wal"]
 
 [[target]]
 package = "inillucent-pool"

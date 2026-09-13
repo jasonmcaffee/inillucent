@@ -339,6 +339,7 @@ fn run(fixture: &Path, iterations: u32, page_size: usize) -> Result<(), String> 
     }
     reused_chain(fixture, iterations, page_size)?;
     second_pass(fixture, iterations, page_size)?;
+    paired_write_range_update(fixture, page_size)?;
     Ok(())
 }
 
@@ -406,17 +407,71 @@ fn second_pass(fixture: &Path, iterations: u32, page_size: usize) -> Result<(), 
     Ok(())
 }
 
-/// The same read, run twice: chain rebuilt per execution, and chain reused.
+/// How many executions make up one block of the paired measurement.
 ///
-/// **The prize, measured before anything is refactored to collect it.**
-/// `physical::build_statement` already holds the operator chain across
-/// executions and rebuilds only the source, and nothing in the engine's
-/// execution path calls it. This runs both sides over the same plan, the same
-/// prepared stages and the same parameters, so the difference is the chain build
-/// and nothing else.
+/// @see [`reused_chain`]
+const PAIRED_BLOCK: u32 = 200;
+
+/// How many blocks of each arm the paired measurement runs, order swapped
+/// every round.
+///
+/// @see [`reused_chain`]
+const PAIRED_ROUNDS: u32 = 40;
+
+/// Returns the middle value of a list, sorting it in place.
+///
+/// The even-length case averages the two middle values, which is the
+/// ordinary definition and matters here because `PAIRED_ROUNDS` is even.
+///
+/// @param values - the numbers to find the median of
+fn median(values: &mut [f64]) -> f64 {
+    values.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let len = values.len();
+    if len == 0 {
+        return 0.0;
+    }
+    if len % 2 == 1 {
+        values[len / 2]
+    } else {
+        (values[len / 2 - 1] + values[len / 2]) / 2.0
+    }
+}
+
+/// The same read, run two ways: chain rebuilt per execution, and chain reused
+/// - **paired**, because run sequentially the two arms disagree with
+/// themselves.
+///
+/// **The sequential version was not trustworthy at every size.** It ran the
+/// rebuilt arm to completion and then the reused arm to completion, twice each
+/// with the order reversed to cancel a warming advantage - and that is still
+/// wrong when the box itself moves during the run rather than only at the
+/// start. Measured here on a 200-row range scan, the two arms disagreed by
+/// about 30% between otherwise identical runs, which is more than the 11-14%
+/// the sequential numbers reported as the reused arm's saving. A number that
+/// size cannot be told apart from the machine's own noise by running each arm
+/// once.
+///
+/// So the two arms are interleaved: each round runs one block of
+/// [`PAIRED_BLOCK`] executions of one arm and then one block of the other,
+/// both blocks over the **same key sequence** so neither arm gets an easier
+/// set of rowids, and which arm goes first alternates every round so a
+/// systematic first-mover effect (a page fault, a branch predictor warming up)
+/// falls on both arms equally across the run. [`PAIRED_ROUNDS`] rounds are run
+/// and the reported "saved" is the **median of the per-round differences**,
+/// with a count of how many of the rounds the reused arm actually won - the
+/// two numbers a reader needs to tell a real effect from a coin flip.
+///
+/// **The reused arm is `physical::try_compile` and `physical::Compiled::run`
+/// - what `Cached::Select` actually calls - not `physical::Statement`.**
+/// `Statement<'t>` could already hold a whole join tower across executions
+/// before roadmap item 3 existed, because it borrows the catalog for `'t`;
+/// measuring it would report what was already possible in the crate rather
+/// than what the engine's cache now ships. A shape `try_compile` refuses -
+/// none, once Stage 2 added the join tower - is skipped with a line saying so
+/// rather than silently measuring nothing.
 ///
 /// @param fixture - the pristine database
-/// @param iterations - how many executions to average over
+/// @param iterations - how many executions the warm-up pass uses
 /// @param page_size - the page size to import at
 fn reused_chain(fixture: &Path, iterations: u32, page_size: usize) -> Result<(), String> {
     use inillucent_exec::physical;
@@ -424,20 +479,26 @@ fn reused_chain(fixture: &Path, iterations: u32, page_size: usize) -> Result<(),
     let database = ImportedDatabase::import_with(copy, page_size, 4_096)
         .map_err(|error| format!("import failed: {error:?}"))?;
     println!();
-    println!("## the same statement, chain rebuilt against chain reused");
     println!(
-        "  {:<40} {:>10} {:>10} {:>9}",
-        "statement", "rebuilt", "reused", "saved"
+        "## the same statement, chain rebuilt against chain reused (paired, {PAIRED_ROUNDS} \
+         rounds of {PAIRED_BLOCK}, arm order swapped every round)"
+    );
+    println!(
+        "  {:<62} {:>10} {:>10} {:>7} {:>10}",
+        "statement", "rebuilt", "reused", "saved", "rounds won"
     );
     for sql in [
         "SELECT 1",
         "SELECT label FROM main_table WHERE id = ?1",
         "SELECT sum(length(label)) FROM main_table WHERE key BETWEEN ?1 AND ?1 + 200",
+        "SELECT count(key) FROM main_table WHERE key BETWEEN ?1 AND ?1 + 200",
+        "SELECT count(*) FROM main_table JOIN side_table ON side_table.owner = \
+         main_table.id WHERE main_table.id = ?1",
     ] {
         let plan = match database.plan(sql) {
             Ok(plan) => plan,
             Err(error) => {
-                println!("  {sql:<40} plan refused: {error:?}");
+                println!("  {sql:<62} plan refused: {error:?}");
                 continue;
             }
         };
@@ -450,71 +511,199 @@ fn reused_chain(fixture: &Path, iterations: u32, page_size: usize) -> Result<(),
                 Params::new()
             }
         };
-        // **One closure per arm, and each arm is run twice.** The first version
-        // of this ran the rebuilt arm and then the reused one over a freshly
-        // imported database, and reported a point lookup at 4,840 ns rebuilt
-        // against 840 reused. Most of that was the **pool**: the first arm paid
-        // every page fault and the second inherited a warm cache. Both arms now
-        // get a warm pass of their own, and the whole pair runs twice with the
-        // order reversed, so a warming advantage cancels instead of being
-        // reported as a speed-up.
-        let run_rebuilt = |count: u32| -> Result<f64, String> {
+        // One block of `count` executions of the rebuilt arm, starting at key
+        // `base` in the same scattered sequence every arm reads.
+        let run_rebuilt_block = |base: u32, count: u32| -> Result<f64, String> {
             let started = Instant::now();
-            for iteration in 0..count {
+            for offset in 0..count {
                 let sink = Box::new(inillucent_exec::ops::CollectInto::new(std::rc::Rc::new(
                     std::cell::RefCell::new(Vec::new()),
                 )));
-                let (mut pipeline, _) =
-                    physical::build_prepared(&plan, &database, &prepared, &binds(iteration), sink)
-                        .map_err(|error| format!("{sql}: {error:?}"))?;
+                let (mut pipeline, _) = physical::build_prepared(
+                    &plan,
+                    &database,
+                    &prepared,
+                    &binds(base.wrapping_add(offset)),
+                    sink,
+                )
+                .map_err(|error| format!("{sql}: {error:?}"))?;
                 pipeline
                     .run()
                     .map_err(|error| format!("{sql}: {error:?}"))?;
             }
             Ok(started.elapsed().as_nanos() as f64 / f64::from(count.max(1)))
         };
-        let warm = iterations.clamp(1, 500);
-        run_rebuilt(warm)?;
-        let rebuilt_first = run_rebuilt(iterations)?;
 
-        let collected = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-        let mut statement = physical::build_statement(
-            &plan,
-            &database,
-            &prepared,
-            &binds(0),
-            Box::new(inillucent_exec::ops::CollectInto::new(std::rc::Rc::clone(
-                &collected,
-            ))),
-        )
-        .map_err(|error| format!("{sql}: {error:?}"))?;
-        if !statement.rebindable() {
-            println!("  {sql:<40} the chain kept a parameter and refuses to re-run");
-            continue;
-        }
-        let mut run_reused = |count: u32| -> Result<f64, String> {
+        // **The reused arm is `physical::Compiled`, not `physical::Statement`.**
+        // `Statement<'t>` already held a chain across executions before this
+        // ticket and could already build the whole join tower once, because
+        // it borrows the catalog for `'t` - so measuring it would report what
+        // was already possible rather than what `Cached::Select`'s
+        // `physical::Slot` actually ships. `try_compile` is the function the
+        // engine calls on a cache miss; measuring its own `Compiled::run` is
+        // what makes this number the one to trust for roadmap item 3.
+        let mut compiled = match physical::try_compile(&plan, &database, &prepared, &binds(0)) {
+            Ok(Some(compiled)) => compiled,
+            Ok(None) => {
+                println!("  {sql:<62} not eligible for a compiled chain (try_compile refused)");
+                continue;
+            }
+            Err(error) => return Err(format!("{sql}: {error:?}")),
+        };
+        // One block of `count` executions of the reused arm, over the same key
+        // sequence as `run_rebuilt_block`.
+        let mut run_reused_block = |base: u32, count: u32| -> Result<f64, String> {
             let started = Instant::now();
-            for iteration in 0..count {
-                collected.borrow_mut().clear();
-                statement
-                    .run(&binds(iteration))
+            for offset in 0..count {
+                compiled
+                    .run(&plan, &database, &binds(base.wrapping_add(offset)))
                     .map_err(|error| format!("{sql}: {error:?}"))?;
             }
             Ok(started.elapsed().as_nanos() as f64 / f64::from(count.max(1)))
         };
-        run_reused(warm)?;
-        let reused_second = run_reused(iterations)?;
-        let reused_first = run_reused(iterations)?;
-        let rebuilt_second = run_rebuilt(iterations)?;
-        let rebuilt = rebuilt_first.min(rebuilt_second);
-        let reused = reused_first.min(reused_second);
+
+        // A throwaway warm-up over both arms, before any round is measured,
+        // so the pages both arms read are already in the pool going in.
+        let warm = PAIRED_BLOCK.min(iterations.max(1));
+        run_rebuilt_block(0, warm)?;
+        run_reused_block(0, warm)?;
+
+        let mut rebuilt_ns = Vec::with_capacity(PAIRED_ROUNDS as usize);
+        let mut reused_ns = Vec::with_capacity(PAIRED_ROUNDS as usize);
+        let mut saved_pct = Vec::with_capacity(PAIRED_ROUNDS as usize);
+        let mut reused_faster = 0u32;
+        for round in 0..PAIRED_ROUNDS {
+            let base = round.saturating_mul(PAIRED_BLOCK);
+            let (rebuilt, reused) = if round % 2 == 0 {
+                let rebuilt = run_rebuilt_block(base, PAIRED_BLOCK)?;
+                let reused = run_reused_block(base, PAIRED_BLOCK)?;
+                (rebuilt, reused)
+            } else {
+                let reused = run_reused_block(base, PAIRED_BLOCK)?;
+                let rebuilt = run_rebuilt_block(base, PAIRED_BLOCK)?;
+                (rebuilt, reused)
+            };
+            if reused < rebuilt {
+                reused_faster = reused_faster.saturating_add(1);
+            }
+            saved_pct.push((rebuilt - reused) / rebuilt.max(1.0) * 100.0);
+            rebuilt_ns.push(rebuilt);
+            reused_ns.push(reused);
+        }
         println!(
-            "  {:<40} {:>9.0}ns {:>9.0}ns {:>8.0}%",
+            "  {:<62} {:>8.0}ns {:>8.0}ns {:>6.0}% {:>6} of {}",
             sql,
-            rebuilt,
-            reused,
-            (rebuilt / reused.max(1.0) - 1.0) * 100.0
+            median(&mut rebuilt_ns),
+            median(&mut reused_ns),
+            median(&mut saved_pct),
+            reused_faster,
+            PAIRED_ROUNDS,
         );
     }
+    Ok(())
+}
+
+/// Stage 3, paired the same way as the read side: the same `UPDATE` with a
+/// range `WHERE`, run through a connection whose `Cached::Update` is never
+/// reused (`Levers::PLAN_CACHE` off, so every `execute_any` call compiles a
+/// fresh one) against one where it is (the default).
+///
+/// **A range, not a rowid equality, on purpose.** `WHERE id = ?1` is answered
+/// by `physical::rowid_seek_key` before `CachedQuery`'s slot is ever asked -
+/// that shape was already free - so this measures `WHERE id BETWEEN ?1 AND
+/// ?1 + 5` instead, the shape Stage 3 actually changed anything for.
+///
+/// **Two database copies, not two arms over one file.** A write is not
+/// idempotent the way a read is: running the same `UPDATE` twice over the
+/// same file is two different questions, not the same question asked twice.
+/// So the "rebuilt" and "reused" arms are two separate copies of the fixture,
+/// each fed the *same* scattered key sequence and each accumulating its own
+/// writes - which is still a fair pairing, because what is being compared is
+/// the cost of the statement, not the cost of undoing it, and the block
+/// order still swaps every round so neither database's own cache state (a
+/// warmer pool, a page split just paid for) always lands on the same arm.
+///
+/// `write.delete` is not measured here: a paired `DELETE` shrinks its own
+/// table round by round in a way an `UPDATE` does not, and making that
+/// comparable (re-inserting between rounds, or bounding a delete to rows that
+/// no longer exist) is a harness of its own rather than a small addition to
+/// this one - left undone rather than rushed.
+///
+/// @param fixture - the pristine database
+/// @param page_size - the page size to import at
+fn paired_write_range_update(fixture: &Path, page_size: usize) -> Result<(), String> {
+    println!();
+    println!(
+        "## the same UPDATE with a range WHERE, chain rebuilt against chain reused (paired, \
+         {PAIRED_ROUNDS} rounds of {PAIRED_BLOCK}, arm order swapped every round)"
+    );
+    println!(
+        "  {:<62} {:>10} {:>10} {:>7} {:>10}",
+        "statement", "rebuilt", "reused", "saved", "rounds won"
+    );
+    let sql = "UPDATE side_table SET note = ?2 WHERE id BETWEEN ?1 AND ?1 + 5";
+
+    let rebuilt_copy = restore(fixture, "write-rebuilt")?;
+    let mut rebuilt_db = ImportedDatabase::import_with(rebuilt_copy, page_size, 4_096)
+        .map_err(|error| format!("import failed: {error:?}"))?;
+    rebuilt_db.disable_optimizations(inillucent_sql::plan::Levers::PLAN_CACHE);
+
+    let reused_copy = restore(fixture, "write-reused")?;
+    let mut reused_db = ImportedDatabase::import_with(reused_copy, page_size, 4_096)
+        .map_err(|error| format!("import failed: {error:?}"))?;
+
+    let binds = |iteration: u32| vec![OwnedDatum::Int(scatter(iteration)), text(iteration)];
+
+    // One block of `count` autocommit executions, starting at key `base` in
+    // the scattered sequence both databases read. Autocommit, not a batch,
+    // because `write.update.indexed`'s own grouping is one transaction per
+    // statement - the shape this is meant to stand in for.
+    let run_block =
+        |database: &mut ImportedDatabase, base: u32, count: u32| -> Result<f64, String> {
+            let started = Instant::now();
+            for offset in 0..count {
+                let params = Params::from_values(binds(base.wrapping_add(offset)));
+                database
+                    .execute_any(sql, &params)
+                    .map_err(|error| format!("{sql}: {error:?}"))?;
+            }
+            Ok(started.elapsed().as_nanos() as f64 / f64::from(count.max(1)))
+        };
+
+    let warm = PAIRED_BLOCK;
+    run_block(&mut rebuilt_db, 0, warm)?;
+    run_block(&mut reused_db, 0, warm)?;
+
+    let mut rebuilt_ns = Vec::with_capacity(PAIRED_ROUNDS as usize);
+    let mut reused_ns = Vec::with_capacity(PAIRED_ROUNDS as usize);
+    let mut saved_pct = Vec::with_capacity(PAIRED_ROUNDS as usize);
+    let mut reused_faster = 0u32;
+    for round in 0..PAIRED_ROUNDS {
+        let base = round.saturating_mul(PAIRED_BLOCK);
+        let (rebuilt, reused) = if round % 2 == 0 {
+            let rebuilt = run_block(&mut rebuilt_db, base, PAIRED_BLOCK)?;
+            let reused = run_block(&mut reused_db, base, PAIRED_BLOCK)?;
+            (rebuilt, reused)
+        } else {
+            let reused = run_block(&mut reused_db, base, PAIRED_BLOCK)?;
+            let rebuilt = run_block(&mut rebuilt_db, base, PAIRED_BLOCK)?;
+            (rebuilt, reused)
+        };
+        if reused < rebuilt {
+            reused_faster = reused_faster.saturating_add(1);
+        }
+        saved_pct.push((rebuilt - reused) / rebuilt.max(1.0) * 100.0);
+        rebuilt_ns.push(rebuilt);
+        reused_ns.push(reused);
+    }
+    println!(
+        "  {:<62} {:>8.0}ns {:>8.0}ns {:>6.0}% {:>6} of {}",
+        sql,
+        median(&mut rebuilt_ns),
+        median(&mut reused_ns),
+        median(&mut saved_pct),
+        reused_faster,
+        PAIRED_ROUNDS,
+    );
     Ok(())
 }

@@ -39,6 +39,18 @@ corpus.jsonl
 # the log segment beside it is still output.
 !/examples/rag-agent/greek-philosophy.rdb
 
+# The same for `.db`, but only inside a crate, because `.db` is also SQLite's
+# own extension and `compat/fixtures/` holds a hundred tracked files that are
+# genuinely source - the files a reader is meant to open with SQLite to check a
+# claim. A test that opens a database on the real file system by a relative
+# name leaves it in whichever crate directory `cargo test` ran from, and the
+# ones seen so far are `app.db`, its log segments, and the scratch file a
+# `VACUUM` leaves beside them.
+/crates/*/*.db
+/crates/*/*.db-wal.*
+/crates/*/*.db-journal
+/crates/*/*.db.vacuum-*
+
 # Editor and operating system noise.
 .DS_Store
 /.quill/

@@ -303,18 +303,18 @@ may_test_with = ["inillucent-vfs"]
 # may not name a pager can only be a table of pure functions.
 #
 # The direction is still downward and still acyclic: `inillucent-ext` reads the
-# front end and the storage engine, and `inillucent-vm` reads `inillucent-ext`. What it
-# still may not reach is the catalog or the session; a module never resolves a
-# name or opens a transaction of its own, and is handed the roots of its shadow
-# tables by the host that already resolved them.
-# **Both edges into the retired engine were removed.** A module reaches its
-# shadow rows through `inillucent_sql::vtab::ShadowStore`, which the new engine
-# implements over PAX trees and the old one implements in
-# `inillucent_vm::shadow_pager` - so the crate the *new* engine links no longer
-# names the storage model the rearchitecture retired. The `inillucent-transaction`
+# front end and the storage engine. What it still may not reach is the catalog
+# or a connection; a module never resolves a name or opens a transaction of its
+# own, and is handed the roots of its shadow tables by the host that already
+# resolved them.
+# **Both edges into the retired engine are gone, because the retired engine is
+# gone.** A module reaches its shadow rows through `inillucent_sql::vtab::ShadowStore`,
+# which the surviving engine implements over PAX trees; the old engine's own
+# implementation, over `inillucent_vm::shadow_pager`, was deleted with the crate
+# that held it (task-1911's audit, closed here). The `inillucent-transaction`
 # edge was never used by a line of code; the `inillucent-storage` one was two
 # things, a pager arm inside every `ShadowTables` method and an
-# `impl Host for Pager`, and both moved down to crates that are retired with it.
+# `impl Host for Pager`, and both moved down to crates that were retired with it.
 [[crate]]
 name = "inillucent-ext"
 kind = "production"
@@ -332,36 +332,23 @@ may_depend_on = [
   "inillucent-scalar",
 ]
 
-[[crate]]
-name = "inillucent-vm"
-kind = "production"
-layer = 7
-may_depend_on = [
-  "inillucent-base",
-  "inillucent-value",
-  "inillucent-scalar",
-  "inillucent-sql",
-  "inillucent-catalog",
-  "inillucent-storage",
-  "inillucent-transaction",
-  "inillucent-ext",
-]
-
 # `inillucent-engine` is the rearchitected engine as a database: the pool, the
 # trees, the log, the catalog, DDL, the pragma set, the statement path and the
 # virtual-table host, assembled into something a caller can open.
 #
-# It sits at layer 8, beside `inillucent-session` rather than above or below it,
-# because it is the crate that replaces it. The two do not depend on each other
-# and must not: while both exist there are two engines in this workspace, and an
-# edge either way would make one of them the other's implementation detail.
+# It sat at layer 8, beside `inillucent-session`, because it was the crate that
+# replaced it; the two never depended on each other, because while both existed
+# there were two engines in this workspace and an edge either way would have made
+# one of them the other's implementation detail.
 #
-# Its whole point is what is *absent* from `may_depend_on`: no `inillucent-storage`,
-# no `inillucent-transaction`, no `inillucent-vm`. Phases 1 to 4 built this code
-# inside `inillucent-compat`, where that separation was true by accident - a test
-# crate depends on everything - and it was later lifted out so the separation is
-# checked. When the old engine is deleted this entry loses nothing and
-# `inillucent-session`'s goes.
+# Its whole point is still what is *absent* from `may_depend_on`: no
+# `inillucent-storage`, no `inillucent-transaction`, no `inillucent-vm` - the
+# last of those is gone from the workspace entirely now. Phases 1 to 4 built this
+# code inside `inillucent-compat`, where that separation was true by accident - a
+# test crate depends on everything - and it was later lifted out so the
+# separation is checked. The old engine has now been deleted and this entry lost
+# nothing: it never named `inillucent-session`, `inillucent-vm`, `inillucent-capi`
+# or `inillucent-legacy` in the first place.
 [[crate]]
 name = "inillucent-engine"
 kind = "production"
@@ -379,45 +366,22 @@ may_depend_on = [
   "inillucent-txn",
   "inillucent-exec",
   "inillucent-sqlite-reader",
-  # The retrieval engine, for the reason `inillucent-session` names one entry
-  # below: `Registry::with_builtins` sits two layers under it, so a database is
-  # the first thing that both builds a registry and may know the module exists.
+  # The retrieval engine. `Registry::with_builtins` sits two layers under it,
+  # so a database is the first thing that both builds a registry and may know
+  # the module exists - the same placement the old engine's now-deleted
+  # `inillucent-session` entry used to carry this comment about.
   "inillucent-search",
-]
-
-# The edge from `inillucent-session` down to `inillucent-search` is where the retrieval
-# engine becomes a first-party module, placed here rather than one
-# layer up for a concrete reason. `Registry::with_builtins` lives in
-# `inillucent-ext`, two layers below the retrieval engine, so the module cannot be
-# registered there without dragging a vector index into every database that only
-# wanted SQL. The connection is the first place that both builds a registry and
-# is allowed to know the engine exists, which is exactly what the TDD's crate
-# table says `inillucent-search` is for.
-[[crate]]
-name = "inillucent-session"
-kind = "production"
-layer = 8
-may_depend_on = [
-  "inillucent-base",
-  "inillucent-value",
-  "inillucent-vfs",
-  "inillucent-storage",
-  "inillucent-catalog",
-  "inillucent-transaction",
-  "inillucent-sql",
-  "inillucent-ext",
-  "inillucent-search",
-  "inillucent-vm",
 ]
 
 # **The facade reaches the new engine.** `inillucent::Database`
-# is the name an application outside this workspace writes against, and until
-# now it reached `inillucent-session` - the SQLite-file-format engine the
-# rearchitecture replaced. It is a re-export rather than a wrapper: the two surfaces do not
-# differ any more, and a wrapper whose every method forwards is a file to keep
-# in step for nothing. The surface is smaller by exactly the features the new
-# engine does not have - backup, blobs, serialize, the hooks - and a facade that
-# kept their names and answered "unsupported" would stop the compiler saying so.
+# is the name an application outside this workspace writes against. It used to
+# reach `inillucent-session` - the SQLite-file-format engine the rearchitecture
+# replaced, deleted along with that crate - and is a re-export rather than a
+# wrapper: the two surfaces did not differ by the end, and a wrapper whose every
+# method forwards is a file to keep in step for nothing. The surface is smaller
+# by exactly the features the old engine had that the new one does not - backup,
+# blobs, serialize, the hooks - and a facade that kept their names and answered
+# "unsupported" would stop the compiler saying so.
 [[crate]]
 name = "inillucent"
 kind = "production"
@@ -428,26 +392,6 @@ may_depend_on = [
   "inillucent-tree",
   "inillucent-sql",
   "inillucent-engine",
-]
-
-# The old facade, under its own name, unchanged and still over the old engine.
-#
-# It has exactly one consumer left: `inillucent-capi`, the `sqlite3_*` C ABI,
-# whose replacement is the driver crate below. When that lands, this crate,
-# `inillucent-capi`, `inillucent-session`, `inillucent-vm`,
-# `inillucent-transaction` and `inillucent-storage` go together - deleting them
-# before it would leave the workspace with no C ABI at all, which is why
-# this entry stops here and says so rather than doing it anyway.
-[[crate]]
-name = "inillucent-legacy"
-kind = "production"
-layer = 9
-may_depend_on = [
-  "inillucent-base",
-  "inillucent-value",
-  "inillucent-storage",
-  "inillucent-catalog",
-  "inillucent-session",
 ]
 
 # `inillucent-migrate` is the one production crate that names both engines, and it
@@ -516,12 +460,6 @@ may_depend_on = [
   "inillucent-tree",
   "inillucent-engine",
 ]
-
-[[crate]]
-name = "inillucent-capi"
-kind = "production"
-layer = 10
-may_depend_on = ["inillucent-legacy"]
 
 # The shell runs on the new engine. It reaches `inillucent-engine`
 # for the connection, `inillucent-tree` because a row is a vector of
@@ -633,18 +571,13 @@ may_depend_on = [
   "inillucent-sql",
   "inillucent-catalog",
   "inillucent-transaction",
-  "inillucent-vm",
-  "inillucent-session",
-  # The harness stands in for the session layer until Phase 5 builds
-  # one, and a virtual table needs the module registry - `CREATE VIRTUAL TABLE`
+  # A virtual table needs the module registry - `CREATE VIRTUAL TABLE`
   # asks a module what shadow tables to build, and a scan asks it for its rows.
   # `inillucent-exec` still cannot reach this crate: the module runs on the
   # harness's side of `TreeCatalog` and only its rows cross.
   "inillucent-ext",
-  # Phase 5 built that layer, so the harness no longer stands in for
-  # it - it *uses* it. `inillucent_compat::newengine` is now a re-export of
-  # `inillucent-engine`, which is where the code above this line moved to, so every
-  # gate and campaign written against the old path still names the same engine.
+  # `inillucent_compat::newengine` is a re-export of `inillucent-engine`, so
+  # every gate and campaign written against the new engine names it directly.
   "inillucent-engine",
   # And `inillucent-migrate`, because the migration acceptance is a test: every
   # fixture in the SQLite parity corpus through the tool, checked against the pinned SQLite shell
@@ -660,10 +593,10 @@ may_depend_on = [
   # `capabilities` command answers the same rows `tests/capability.rs` probes.
   "inillucent-driver",
   "inillucent",
-  # And the old facade, because the seven profiling binaries and the seven
-  # suites that measure and test the *old* engine still do, and moving them
-  # onto the new one would be measuring something else.
-  "inillucent-legacy",
+  # `obligations.rs` reads `drivers/inillucent-driver-capi/src` as text to build
+  # the C ABI symbol register, and `evidence.rs` and `testrun.rs` name the
+  # package as a string to `cargo test`/`cargo build` it - none of the three
+  # import it as a crate, so no dependency edge is declared for it.
   "inillucent-pool",
   "inillucent-tree",
   "inillucent-scalar",

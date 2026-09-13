@@ -1,8 +1,15 @@
 //! What the hot types cost to move.
 //!
 //! Invariant: this reports sizes, it changes nothing. A `Result` returned once
-//! per bytecode instruction is memcpy'd once per bytecode instruction, so how
-//! big its error half is belongs in a profile next to the timings.
+//! per row is memcpy'd once per row, so how big its error half is belongs in a
+//! profile next to the timings.
+//!
+//! **The old VM's `Instruction`/`Opcode` sizes were reported here and are not
+//! any more.** The new engine compiles to an operator tree rather than
+//! bytecode, so there is no per-instruction `Result` for those two types'
+//! sizes to matter against - the question this file answers stopped applying
+//! to them when `inillucent-vm` was deleted, rather than having an answer that
+//! moved somewhere else.
 //!
 //! Usage: `cargo run --release -p inillucent-compat --bin inillucent-sizecheck`
 
@@ -30,10 +37,4 @@ fn main() {
         "Value",
         size_of::<inillucent_value::Value<'static>>()
     );
-    println!(
-        "{:<44} {:>6}",
-        "Instruction",
-        size_of::<inillucent_vm::Instruction>()
-    );
-    println!("{:<44} {:>6}", "Opcode", size_of::<inillucent_vm::Opcode>());
 }

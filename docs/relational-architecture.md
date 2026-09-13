@@ -148,23 +148,125 @@ recovery can catch a wrong answer about it. Fixed in task-1888; the case study i
 [Removing PostgreSQL from a 5.8 GB Gmail assistant](real-world-use-cases/nikaya-postgres-to-inillucent.md)
 is where it was diagnosed.
 
+**A journal is not gone until the directory says so.** This one corrupted a database that had
+already committed cleanly, and it was found by pointing the old engine's crash campaigns at this one
+for the first time. Every connection opens in `DELETE` journal mode for a moment before
+`PRAGMA journal_mode = wal` switches it, and that moment creates a rollback journal.
+`Journal::finish()`'s `Delete` arm then dropped the file handle and unlinked the file **without
+syncing either**: the pre-images that same checkpoint's flush had just written sat unsynced in the
+device's write-behind cache, and the unlink passed `sync_dir: false`, so the directory entry removal
+was not durable either. A power loss in that window leaves the directory still naming a journal that
+looks perfectly hot and whose last bytes are torn - and the next cold open's `replay_hot_journal`
+puts that garbled pre-image back over a good page. The result is `database disk image is malformed`
+on a database whose commit had completed, which reads like a recovery failure and is not one. Fixed
+in task-1911: the journal's own bytes are synced before the handle goes, and the unlink syncs the
+directory.
+
+**Then the same campaigns were run in `TRUNCATE` and `PERSIST` mode, which nothing had ever done,
+and found three more - and closing the gap that hid them found a fourth in `wal`.** Every one could
+destroy a database that the power loss itself had left whole, so they are written out here rather
+than summarised.
+
+**The journal was never synced before a page was overwritten.** `Pool::checkpoint` sealed the
+journal at its head. That is before `flush` has saved a single pre-image, because pre-images are
+saved by the writeback loop `flush` runs next - so the seal synced an empty file, and every
+pre-image the checkpoint wrote afterwards was still in the file's buffers while the same loop
+overwrote the pages those pre-images belonged to. `flush` now takes two passes under a rollback
+journal: save every pre-image, sync once, then write the pages. A checkpoint of a thousand pages
+still pays for one sync, and `writeback` asks for the sync per page only because the page evictor
+reaches it with no flush around it.
+
+**The journal had no checksums, so recovery wrote torn bytes over a good database.** At the cut
+point where the campaign failed, the database file was correct - page 3 stored the checksum
+`b59f5196` and computed `b59f5196` - and the `database disk image is malformed` the test reported
+had been manufactured by recovery, out of a journal whose seventeen sectors the crash model had left
+Torn, Garbage and Dropped. There was nothing in the format that could tell a replay that a
+pre-image was not the bytes somebody wrote. Every record now carries a CRC over the transaction's
+nonce, the page id and the image; the header carries one over itself; and `replay_hot_journal` stops
+at the first record that fails. That restores everything the journal owes, because a record is only
+unverifiable if it was written after the last sync, and a page is only overwritten after the sync
+covering its own pre-image - so a failing record names a page the crash never reached, as does every
+record appended after it. The nonce is what stops `PERSIST` mode's leftover records from a previous
+transaction passing this one's check. The magic is `RDBJRNL2`; a journal an older build left behind
+is removed rather than replayed.
+
+**The two meta pages were the only pages a checkpoint overwrote without a pre-image.** With the
+first two fixed the campaigns reached cut point 47 and recovered a database with no tables in it.
+The journal had correctly put the data pages back to before the checkpoint, and the meta page still
+read `generation 5, checkpoint_lsn 17160` - a checkpoint that never finished. Redo believed that
+number, started above it, and skipped the very records that would have re-applied what the journal
+had undone. The catalog's own root page was one of the pages the journal put back, which is why the
+tables went. The shadow meta page does not protect against this: `checkpoint` writes the *same*
+image to both slots, so the second one is a second chance for the new record to survive rather than
+an older copy to fall back on. A checkpoint now journals `META_PAGE` and `SHADOW_PAGE` and syncs
+before writing them, so the record that claims a checkpoint happened is undone by the same mechanism
+as the pages it describes.
+
+`Journal::finish` also synced at `SyncMode::Normal` in its `truncate` and `persist` arms. What makes
+a journal stop being hot in those two modes is a change to the journal file itself, and `Normal` is
+the level that is allowed not to reach the media - so until it lands, the next open still finds
+pre-images naming a database whose commit already completed. Both are `Full` now, which is what the
+`delete` arm does.
+
+**A write-ahead log does not remove the need for a rollback journal, and that is a consequence of
+this log being logical.** With the campaigns above reaching further into the checkpoint, `wal_crash.rs`
+and `search_crash.rs` both failed at cut 32 - different files, different workloads, the same call. A
+checkpoint writes pages into the data file *in place*. Once a page's content is below the recorded
+checkpoint point, the records that built it are redundant and their segments are retired, so the log
+no longer describes it; a page the checkpoint half wrote before a power loss is then content nothing
+can rebuild. The meta record was correct - it still named the previous checkpoint - and the log still
+held every record above it. Recovery failed on the one page neither could supply:
+`page 3 checksum fe9063aa is not the computed f53956bb`.
+
+SQLite is not exposed to this for a structural reason: its log holds whole page images and a
+checkpoint is a copy, so an interrupted one is simply redone. Here a connection in `wal` takes a
+`delete` journal (`journal_for` in `crates/inillucent-engine/src/lib.rs`), which holds the pre-images
+for the duration of a checkpoint and removes the file once the checkpoint's meta record is durable.
+That is the cost the default mode already pays, and it makes an interrupted checkpoint undoable in
+every mode rather than in three of the five. `off` is the one mode that gets nothing, because that
+is what it asks for.
+
+All four are fixed in task-1911, and the evidence is checked in: `tests/crash/truncate-full-crash.txt`
+and `tests/crash/persist-full-crash.txt` record 101 cut points each, every one recovering to the old
+database or the new one, with no detected damage at any of them. The files are seeded, so a diff on
+them is a change in what the engine does under failure.
+
 **Checked by:** `crates/inillucent-compat/tests/new_engine_free_map_recovery.rs`,
 `new_engine_recovery_shapes.rs`, `wal_crash.rs`, `multi_database_crash.rs`, and the `durability`
 tier's fault campaigns, which crash at a chosen sync and then read back what the *file* holds.
+Those campaigns drove the retired engine until task-1911 deleted it; re-pointing them at this one is
+what found the journal defect above, and `new_engine_recovery_shapes.rs` did not, because it crashes
+at one fixed point rather than at every cut of a commit.
 
 ---
 
 ## 6. Backup, restore and copies
 
-- **`VACUUM`** folds the log into the file. It is a checkpoint rather than SQLite's rebuild: pages
-  are reclaimed by the free map as they are released, so what is left is making everything durable.
-  `PRAGMA freelist_count` says what is free either way.
-- **`VACUUM INTO`** writes a compacted copy by *rebuilding* rather than copying bytes, because a
-  byte copy reproduces the free pages and half-empty leaves it was asked to remove. It never
-  overwrites, which is what makes it safe in a backup script.
-- **Neither may run inside an explicit transaction.** A checkpoint folds committed frames into the
-  file and an open transaction's are not committed.
+- **`VACUUM`** is a *logical* rebuild, the same shape SQLite's own `sqlite3RunVacuum` takes: the
+  schema is replayed by running its `CREATE` statements again, the rows are copied back in through
+  the ordinary write path, and the result is written beside the database and **renamed** over it -
+  a single directory-entry update a crash cannot catch halfway, where the byte copy this used to do
+  could be interrupted at any offset. See `crates/inillucent-engine/src/rebuild.rs`.
+- **`VACUUM INTO`** writes a compacted copy the same way - by rebuilding rather than copying bytes,
+  because a byte copy reproduces the free pages and half-empty leaves it was asked to remove. It
+  never overwrites, which is what makes it safe in a backup script.
+- **Neither may run inside an explicit transaction.** A rebuild reads a schema and its rows, and a
+  transaction still open has neither committed.
 - Both paths are confined by `--root` (§8).
+- **Both act on the real file system directly, not through the connection's `Vfs`.** `rebuild.rs`
+  builds the rebuilt file and swaps it into place with `std::fs::create`/`rename`/`remove_file`
+  against the database's path string, regardless of what `Vfs` the connection was opened on. For a
+  connection on `OsVfs` - every connection opened by path, which is the ordinary case - this is the
+  real file being rebuilt and is exactly right. For a connection given some other `Vfs` (a
+  `MemoryVfs`, or a test double such as `inillucent-sim`'s `SimVfs`), `VACUUM` and `VACUUM INTO`
+  reach the **real disk** at whatever that path string happens to be, entirely bypassing the `Vfs`
+  the rest of the connection uses - an embedder that supplies its own `Vfs` gets a `VACUUM` that
+  writes somewhere its own file system was never asked about. This is a pre-existing limitation
+  rather than something a `VACUUM` change should quietly fix; threading the `Vfs` through the
+  rebuild is a larger change than a rename fix should absorb; and it is why a crash campaign for
+  `VACUUM` cannot yet be driven through `SimVfs`'s fault injection - the simulator never sees the
+  calls the rebuild and the rename actually make. `crates/inillucent-engine/src/rebuild.rs`'s
+  `vacuum_crash` tests cover the rename's own crash safety directly, against real files, instead.
 
 `integrity-check` walks every tree. **It is not a proof that a database opens**: the case study
 above records a file that answered `ok` and could not be opened, because the damage was in the log
@@ -307,29 +409,32 @@ publishing commit that is slower, not ordinary writes.
 
 The gap narrows as the corpus grows — at 12,000 documents it was 1,215 ms against 881 ms, and at
 40,000 it is 5,189.0 ms against 4,085.1 ms — because graph construction grows faster than a byte copy
-does. Segmented generations would close it rather than narrow it, and they are not built; the
-paragraph below says what they are.
+did. **Segmented generations closed it in task-1911**, and the paragraph below says what they cost
+instead.
 
 ### The supported operating range
 
 | declaration | what it does | what it costs |
 |---|---|---|
-| no `compact` clause | the delta log is `max(1024, rows / 8)`, so it grows with the table | a commit's graph work grows with the table too: one commit in every eight rows pays `rows / 8` inserts |
-| `compact = N` | the delta log is pinned at `N` entries | the graph work per published generation is pinned at `N` inserts, and the generation is written every `N` rows instead of every `rows / 8` |
+| no `compact` clause | the delta log is **1,024 entries, a constant** | a commit's cost no longer grows with the table: a flush builds a segment out of its own batch and writes nothing else |
+| `compact = N` | the delta log is pinned at `N` entries | the graph work per flush is pinned at `N` inserts. Raising it trades more work per flush for fewer segments to fold at query time; lowering it does the opposite |
 | `compact = 0` | nothing is published automatically | the delta log grows without limit, and every query pays the whole log until `compact` is run. This is what a bulk load wants, and it is what the migration declares |
 | `threads = N` | a fold and a build use `N` cores | `threads = 1` keeps the engine on one core, which is what the rest of it does, and makes a fold roughly `N` times slower |
 | `mode = 'exact'` (the default) | every vector search compares every candidate | recall is 1.000 by construction and folding cannot change an answer. `mode = 'approximate'` is what makes a vector search use the graph, and what a corpus past a few tens of thousands of rows wants |
 
-**Choosing `N`.** A generation is one serialised index, so publishing one reads and writes the whole
-thing. `N` is a trade between how long the worst commit takes and how often the file is rewritten,
-and the default resolves it as a share of the table rather than a constant because a constant would
-rewrite a large index far too often. Pin `N` when a bounded write latency matters more than write
-throughput; leave it alone otherwise.
+**Choosing `N`.** A flush builds a segment out of its own batch and writes nothing else, so `N` is
+how much work one flush does rather than how much of the file it rewrites. Raising it means fewer,
+larger segments — less to fold at query time, more work in the commit that flushes. Lowering it means
+the opposite. Leave it alone unless one of those two is what you are short of.
 
-**What is not built.** Segmented generations — many small immutable segments merged at read time, the
-way an LSM tree works — would make the bytes written proportional to the batch as well. Until that
-exists the bytes are proportional to the corpus, and the fold bounds only the graph.
-[Roadmap](roadmap.md) records it.
+**The default stopped being a share of the table in task-1911.** It was `max(1024, rows / 8)`, and the
+reason was sound at the time: a flush rewrote the whole base generation, so flushing often was
+expensive and the trigger had to grow with the table to keep a write's amortised cost independent of
+its size. Segments removed that premise — and while the trigger was still proportional to the table,
+**so was the batch each flush built**, which is exactly the cost segments exist to remove. Measured on
+100,000 documents, one row per commit, with segments in place: the median commit went from 0.152 ms to
+**0.032 ms** and the 99th percentile from 0.923 ms to **0.097 ms** when the trigger became the
+constant 1,024.
 
 ### What an application can read back
 

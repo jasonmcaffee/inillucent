@@ -247,17 +247,29 @@ fn help_lists_everything() {
 #[test]
 fn a_session_runs_end_to_end() {
     let mut held = context();
+    let mut session = mcp::Session::default();
     let opening = held_answer(
         &mut held,
-        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{}}",
+        &mut session,
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\
+         \"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\
+         \"clientInfo\":{\"name\":\"command-parity\"}}}",
     );
     assert!(opening.contains("\"serverInfo\""));
+    assert!(opening.contains("\"protocolVersion\":\"2025-06-18\""));
     assert!(
         opening.contains("\"tools\""),
         "a server that declares no tools capability is one a client will not call"
     );
+    assert!(mcp::handle_with_session(
+        &mut held,
+        &mut session,
+        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}",
+    )
+    .is_none());
     let listed = held_answer(
         &mut held,
+        &mut session,
         "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}",
     );
     for command in command::COMMANDS.iter().filter(|c| c.cli_only.is_none()) {
@@ -267,8 +279,15 @@ fn a_session_runs_end_to_end() {
             command.name
         );
     }
+    assert!(mcp::handle_with_session(
+        &mut held,
+        &mut session,
+        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}",
+    )
+    .is_none());
     let made = held_answer(
         &mut held,
+        &mut session,
         "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\
          \"name\":\"inillucent_batch\",\"arguments\":{\"sql\":\
          \"CREATE TABLE t (a INTEGER, b TEXT); INSERT INTO t VALUES (1,'one'),(2,'two')\"}}}",
@@ -276,6 +295,7 @@ fn a_session_runs_end_to_end() {
     assert!(made.contains("\"isError\":false"), "{made}");
     let read = held_answer(
         &mut held,
+        &mut session,
         "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\",\"params\":{\
          \"name\":\"inillucent_query\",\"arguments\":{\"sql\":\
          \"SELECT b FROM t WHERE a = ?1\",\"params\":[2]}}}",
@@ -290,7 +310,9 @@ fn a_session_runs_end_to_end() {
 /// Sends one request to the server and returns its answer.
 ///
 /// @param context - the open database
+/// @param session - state retained for the client connection
 /// @param request - the JSON-RPC request
-fn held_answer(context: &mut Context, request: &str) -> String {
-    mcp::handle(context, request).unwrap_or_else(|| panic!("no answer to {request}"))
+fn held_answer(context: &mut Context, session: &mut mcp::Session, request: &str) -> String {
+    mcp::handle_with_session(context, session, request)
+        .unwrap_or_else(|| panic!("no answer to {request}"))
 }

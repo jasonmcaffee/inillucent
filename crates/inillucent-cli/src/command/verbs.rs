@@ -556,7 +556,12 @@ fn row_count(context: &mut Context, table: &str) -> i64 {
 /// `export`: writes rows out in a chosen format.
 pub fn export(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
     let sql = match (arguments.text("sql"), arguments.text("table")) {
-        (Some(sql), _) => sql.to_string(),
+        (Some(_), Some(_)) => {
+            return Err(Failed::misuse(
+                "export accepts either 'sql' or 'table', not both.",
+            ))
+        }
+        (Some(sql), None) => sql.to_string(),
         (None, Some(name)) => format!("SELECT * FROM {}", quoted(name)),
         (None, None) => return Err(Failed::misuse("export needs either 'sql' or 'table'.")),
     };
@@ -1337,6 +1342,17 @@ mod source_tests {
         let said = format!("{error:?}");
         assert!(said.contains("--root"), "{said}");
         assert!(said.contains(SOURCE_URL_VARIABLE), "{said}");
+    }
+
+    /// Export refuses an ambiguous request before reading either data source.
+    #[test]
+    fn export_refuses_table_and_sql_together() {
+        let mut arguments = Arguments::default();
+        arguments.set("table", crate::json::text("expected"));
+        arguments.set("sql", crate::json::text("SELECT 'other' AS v"));
+        let failure = export(&mut context(None), &arguments)
+            .expect_err("export must require one data source");
+        assert!(failure.message.contains("not both"), "{}", failure.message);
     }
 
     /// `-` with the variable set takes the variable and never touches stdin.

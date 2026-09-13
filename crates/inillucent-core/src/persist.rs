@@ -25,11 +25,12 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use crate::binio;
 use crate::bm25::Bm25Index;
 use crate::hnsw::{Hnsw, HnswParams};
 use crate::index::{Index, IndexConfig};
 use crate::rank::{AdaptiveWeights, Fusion};
-use crate::store::Store;
+use crate::store::{ChunkInput, Store};
 use crate::vectors::VectorSet;
 
 /// Bumped whenever any file layout changes.
@@ -769,6 +770,657 @@ fn read_section(r: &mut impl Read) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+// -- segment deltas: a segment writable in pieces ---------------------------
+//
+// `write_index`/`read_index` above serialise a whole index in one call, which
+// is right for a flush (the batch is already bounded) and for `compact`
+// building a clean generation from scratch, but wrong for a size tiered
+// merge's own checkpoint: the accumulator it is folding into can already be a
+// large fraction of the corpus, so re-serialising the whole thing on every
+// checkpoint - what `crates/inillucent-search` used to do - makes one commit's
+// write proportional to the corpus however finely the folding work itself is
+// spread across commits (`docs/roadmap.md` item 10, phase 2).
+//
+// A segment delta is the fix: a checkpoint's bytes are a pointer to whatever
+// it continues, plus only the rows that checkpoint itself folded. Reading one
+// back means walking the chain of pointers and replaying each link's own
+// content, in order, onto whatever the chain bottoms out at - an ordinary
+// `KIND_STREAM` blob, or another segment delta one level further back. A
+// chain therefore costs a caller who resolves it the same thing a single
+// large blob always cost to read; what changes is that *writing* the newest
+// link never touches the bytes of any earlier one.
+//
+// **Replay has to reproduce the real work, not redo it.** The store and the
+// vectors are replayed as operations - `Store::add_chunks`, `VectorSet::push`
+// - because appending to them is a pure, cheap function of the rows given,
+// no more expensive on replay than it was to begin with. The graph and the
+// lexical index are the opposite: an insert's cost is a search proportional
+// to the graph it is searching, and indexing a chunk means tokenising its
+// text, so *re-running* either on every chain resolution costs what building
+// them cost the first time, on every single reload. An early version of this
+// format replayed the graph and the lexical index as operations too, the
+// same as the store, and it measured *worse* than the whole-accumulator
+// rewrite it was replacing - `write_latency`'s 100,000 document arm went from
+// about 105 seconds to that, not down from it, because reloading a chain
+// several links deep re-tokenised and re-inserted everything in it, every
+// time. So the graph and the lexical index are instead recorded as *content*
+// - which adjacency lists actually ended up different, which postings
+// actually got added - captured once, as a byproduct of the one real fold
+// that already had to happen, and replayed by copying that content directly
+// (`Hnsw::apply_touched`, `Bm25Index::apply_lexical_delta`). Replaying a
+// chain then costs what copying bytes costs, which is what serialising it
+// always cost, on either side of this ticket.
+
+/// The tag marking a segment written as a chain of small checkpoints rather
+/// than as one monolithic stream.
+///
+/// A delta's own bytes are never mixed into a `KIND_STREAM` blob and a
+/// `KIND_STREAM` blob is never asked to carry a base pointer - the two tags
+/// are how a caller holding a `%_gen` row's bytes tells which reader to use
+/// before it has read anything past the header, the same way `KIND_STORE`
+/// through `KIND_LEXICAL` already say which section of `save`'s directory
+/// form a file holds. See [`is_segment_delta`].
+const KIND_SEGMENT_DELTA: u8 = 7;
+
+/// Points at the id this delta continues: an eight byte little endian `i64`.
+const PART_BASE: u8 = 1;
+/// One folded input's own batch: the chunks and vectors it contributed, then
+/// the `(source, external id)` pairs it bare-tombstoned - in that order,
+/// because a later batch's tombstone may need an *earlier* batch's put to
+/// already have landed (a bare tombstone in one input can shadow a live
+/// chunk a different, older input still carries for the same id), which is
+/// exactly the order `merge::fold_segment_recording` applies them in live.
+/// One segment delta carries one of these per input the checkpoint folded,
+/// in fold order - never one combined batch for the whole checkpoint, which
+/// would let a later input's tombstone run before an earlier input's put
+/// that it depends on.
+const PART_BATCH: u8 = 2;
+/// The graph's recorded content for this checkpoint: its entry point, the
+/// top layer of every node added, and every adjacency list that changed -
+/// see [`GraphRecording`].
+const PART_GRAPH: u8 = 3;
+/// The lexical index's recorded content for this checkpoint - see
+/// [`crate::bm25::LexicalDelta`].
+const PART_LEXICAL: u8 = 4;
+/// Present only on a chain's final link: the chunk and document counts the
+/// fully replayed chain must produce, and the marker that makes this link -
+/// and therefore the chain up to it - a complete, readable segment.
+///
+/// **This is the whole of how a partial segment stays invisible.** Every
+/// earlier link a merge writes while it is still folding inputs has no seal
+/// at all, and [`parse_segment_delta`] reports that plainly rather than
+/// guessing: `ParsedDelta::sealed` is `None` for one, and a caller that
+/// requires a finished segment - a query, `finish_merge`, an integrity check
+/// - is the one that decides whether the absence of a seal is refused,
+/// exactly as `crates/inillucent-search`'s `load_segment` does for every
+/// caller except the merge itself resuming its own checkpoint.
+const PART_SEAL: u8 = 5;
+
+/// A ceiling on any count this format reads before allocating for it - the
+/// same defence [`read_section`]'s byte ceiling is, restated for a count of
+/// items rather than a count of bytes, because a `%_gen` row is exactly as
+/// untrusted as any other database page.
+const MAX_PART_LIST: u64 = 100_000_000;
+
+/// Whether `bytes` is a segment delta rather than an ordinary `KIND_STREAM`
+/// blob.
+///
+/// Reads nothing but the one byte the two forms disagree on - the kind byte
+/// `header` always writes at offset twelve, after the eight byte magic and
+/// the four byte version - so a caller can decide which reader to use before
+/// paying for a full parse. A buffer too short to hold a header answers
+/// `false` rather than erroring: whichever reader is tried next will refuse
+/// it with a proper header complaint.
+/// @param bytes - the stored bytes
+pub fn is_segment_delta(bytes: &[u8]) -> bool {
+    bytes.get(12) == Some(&KIND_SEGMENT_DELTA)
+}
+
+/// One folded input's own contribution to a checkpoint: what it put, and
+/// what it bare-tombstoned. See [`PART_BATCH`] for why a checkpoint that
+/// folded several inputs keeps them as separate batches rather than one
+/// combined list.
+#[derive(Default)]
+pub struct DeltaBatch {
+    /// The chunks this input contributed, each with its vector, in fold order.
+    pub puts: Vec<(ChunkInput, Vec<f32>)>,
+    /// The `(source, external id)` pairs this input bare-tombstoned.
+    pub tombstoned: Vec<(String, String)>,
+}
+
+/// What a checkpoint's own fold recorded in the graph: its entry point, the
+/// top layer of every node added since the checkpoint this one continues,
+/// and every adjacency list that ended up different - the *result* of the
+/// insert, not the insert itself. See the section header above for why.
+#[derive(Default)]
+pub struct GraphRecording {
+    /// The graph's entry point after this checkpoint's fold.
+    pub entry: Option<u32>,
+    /// How many levels the graph has after this checkpoint's fold.
+    ///
+    /// **Needed even though every touched entry already names its own
+    /// layer.** A node promoted to a level higher than the graph has ever
+    /// held leaves every layer above the old top legitimately empty at
+    /// every node - "empty lists above the old entry's level", exactly what
+    /// a live insert leaves behind - so a level like that can carry zero
+    /// touched entries and still have to exist when the graph is
+    /// serialised. Without this a replay that only ever grows `layers` in
+    /// response to a touched entry would never create that level at all.
+    pub layers_len: usize,
+    /// The top layer of every node added since the checkpoint this one
+    /// continues, in node order.
+    pub node_top_tail: Vec<u8>,
+    /// Every `(layer, node)` this checkpoint's fold changed, with that
+    /// node's current neighbour list at that layer.
+    pub touched: Vec<(u8, u32, Vec<u32>)>,
+}
+
+/// Writes one checkpoint of a segment being built up in pieces.
+///
+/// This is the write side of [`parse_segment_delta`]; see that function, the
+/// tags' own doc comments and the section header above for the format and
+/// the invariant it keeps.
+/// @param w - where the bytes go
+/// @param base - the id this checkpoint continues, or `None` to start a
+///   chain with no prior content at all
+/// @param batches - one entry per input this checkpoint folded, in fold order
+/// @param graph - what this checkpoint's fold changed in the graph
+/// @param lexical - what this checkpoint's fold added to the lexical index,
+///   or `None` if nothing was indexed (a checkpoint that only tombstoned)
+/// @param seal - `Some((chunks, documents))` once every input a merge owns
+///   has been folded, sealing the chain as a complete segment; `None` for a
+///   checkpoint a later commit will still extend
+pub fn write_segment_delta(
+    w: &mut impl Write,
+    base: Option<i64>,
+    batches: &[DeltaBatch],
+    graph: &GraphRecording,
+    lexical: Option<&crate::bm25::LexicalDelta>,
+    seal: Option<(u64, u64)>,
+) -> Result<()> {
+    header(w, KIND_SEGMENT_DELTA)?;
+    if let Some(id) = base {
+        write_part(w, PART_BASE, |buf| {
+            buf.extend_from_slice(&id.to_le_bytes());
+            Ok(())
+        })?;
+    }
+    for batch in batches {
+        write_part(w, PART_BATCH, |buf| {
+            buf.extend_from_slice(&(batch.puts.len() as u64).to_le_bytes());
+            for (chunk, vector) in &batch.puts {
+                write_chunk_input(buf, chunk)?;
+                write_vector_f32(buf, vector);
+            }
+            buf.extend_from_slice(&(batch.tombstoned.len() as u64).to_le_bytes());
+            for (source, id) in &batch.tombstoned {
+                binio::write_str(buf, source)?;
+                binio::write_str(buf, id)?;
+            }
+            Ok(())
+        })?;
+    }
+    write_part(w, PART_GRAPH, |buf| {
+        buf.extend_from_slice(&graph.entry.unwrap_or(u32::MAX).to_le_bytes());
+        buf.extend_from_slice(&(graph.layers_len as u64).to_le_bytes());
+        buf.extend_from_slice(&(graph.node_top_tail.len() as u64).to_le_bytes());
+        buf.extend_from_slice(&graph.node_top_tail);
+        buf.extend_from_slice(&(graph.touched.len() as u64).to_le_bytes());
+        for (layer, node, neighbours) in &graph.touched {
+            buf.push(*layer);
+            buf.extend_from_slice(&node.to_le_bytes());
+            buf.extend_from_slice(&(neighbours.len() as u64).to_le_bytes());
+            buf.extend_from_slice(bytemuck::cast_slice(neighbours));
+        }
+        Ok(())
+    })?;
+    if let Some(lexical) = lexical {
+        write_part(w, PART_LEXICAL, |buf| {
+            buf.extend_from_slice(&lexical.range.start.to_le_bytes());
+            buf.extend_from_slice(&lexical.range.end.to_le_bytes());
+            buf.extend_from_slice(&(lexical.chunk_lengths.len() as u64).to_le_bytes());
+            buf.extend_from_slice(bytemuck::cast_slice(&lexical.chunk_lengths));
+            buf.extend_from_slice(&(lexical.chunk_heading_lengths.len() as u64).to_le_bytes());
+            buf.extend_from_slice(bytemuck::cast_slice(&lexical.chunk_heading_lengths));
+            buf.extend_from_slice(&(lexical.positions.len() as u64).to_le_bytes());
+            buf.extend_from_slice(bytemuck::cast_slice(&lexical.positions));
+            buf.extend_from_slice(&(lexical.postings.len() as u64).to_le_bytes());
+            for (term, posting) in &lexical.postings {
+                binio::write_str(buf, term)?;
+                buf.extend_from_slice(&posting.chunk.to_le_bytes());
+                buf.extend_from_slice(&posting.positions_at.to_le_bytes());
+                buf.extend_from_slice(&posting.term_frequency.to_le_bytes());
+            }
+            Ok(())
+        })?;
+    }
+    if let Some((chunks, documents)) = seal {
+        write_part(w, PART_SEAL, |buf| {
+            buf.extend_from_slice(&chunks.to_le_bytes());
+            buf.extend_from_slice(&documents.to_le_bytes());
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
+/// Writes one length-prefixed part: a one byte tag, an eight byte length,
+/// then whatever `body` wrote into a scratch buffer.
+///
+/// Buffered rather than streamed straight to `w`, because the length has to
+/// be written before the bytes it counts and `w` is not assumed seekable -
+/// the same reason `write_index` builds each of its own sections into a
+/// `Vec<u8>` first.
+/// @param w - where the part goes
+/// @param tag - which part this is
+/// @param body - writes the part's payload into a fresh buffer
+fn write_part(w: &mut impl Write, tag: u8, body: impl FnOnce(&mut Vec<u8>) -> Result<()>) -> Result<()> {
+    let mut buf = Vec::new();
+    body(&mut buf)?;
+    w.write_all(&[tag])?;
+    w.write_all(&(buf.len() as u64).to_le_bytes())?;
+    w.write_all(&buf)?;
+    Ok(())
+}
+
+/// Writes one chunk's every field, so a delta can replay
+/// `Index::replace_document` with the exact input it was given rather than a
+/// derived approximation of it.
+/// @param w - where the bytes go
+/// @param chunk - the chunk to write
+fn write_chunk_input(w: &mut impl Write, chunk: &ChunkInput) -> Result<()> {
+    binio::write_str(w, &chunk.source)?;
+    binio::write_str(w, &chunk.external_doc_id)?;
+    binio::write_u32(w, chunk.chunk_index)?;
+    write_str_vec(w, &chunk.heading_path)?;
+    binio::write_str(w, &chunk.content)?;
+    binio::write_str(w, &chunk.title)?;
+    binio::write_str(w, &chunk.url)?;
+    write_opt_str(w, chunk.space_key.as_deref())?;
+    write_opt_str(w, chunk.author.as_deref())?;
+    write_opt_str(w, chunk.author_id.as_deref())?;
+    write_opt_i64(w, chunk.updated_at)?;
+    write_opt_str(w, chunk.external_chunk_id.as_deref())?;
+    write_str_vec(w, &chunk.labels)?;
+    w.write_all(&(chunk.attributes.len() as u64).to_le_bytes())?;
+    for (name, values) in &chunk.attributes {
+        binio::write_str(w, name)?;
+        write_str_vec(w, values)?;
+    }
+    write_str_vec(w, &chunk.flags)?;
+    w.write_all(&[u8::from(chunk.deleted)])?;
+    Ok(())
+}
+
+/// A `Vec<String>` as a count and each string, length prefixed.
+fn write_str_vec(w: &mut impl Write, values: &[String]) -> Result<()> {
+    w.write_all(&(values.len() as u64).to_le_bytes())?;
+    for value in values {
+        binio::write_str(w, value)?;
+    }
+    Ok(())
+}
+
+/// An `Option<&str>` as a one byte presence flag and, when present, the text.
+fn write_opt_str(w: &mut impl Write, value: Option<&str>) -> Result<()> {
+    match value {
+        Some(value) => {
+            w.write_all(&[1])?;
+            binio::write_str(w, value)?;
+        }
+        None => w.write_all(&[0])?,
+    }
+    Ok(())
+}
+
+/// An `Option<i64>` as a one byte presence flag and, when present, the value.
+fn write_opt_i64(w: &mut impl Write, value: Option<i64>) -> Result<()> {
+    match value {
+        Some(value) => {
+            w.write_all(&[1])?;
+            binio::write_i64(w, value)?;
+        }
+        None => w.write_all(&[0])?,
+    }
+    Ok(())
+}
+
+/// A vector as a count and its little endian `f32` bytes.
+fn write_vector_f32(buf: &mut Vec<u8>, vector: &[f32]) {
+    buf.extend_from_slice(&(vector.len() as u64).to_le_bytes());
+    buf.extend_from_slice(bytemuck::cast_slice(vector));
+}
+
+/// What one segment delta's own bytes record, before its base chain is
+/// resolved - resolving it means fetching another id's bytes, which only the
+/// caller (a shadow table row, a generation directory) knows how to do.
+pub struct ParsedDelta {
+    /// The id this delta continues, or `None` for one with no prior content.
+    pub base: Option<i64>,
+    /// One entry per input this checkpoint folded, in fold order.
+    pub batches: Vec<DeltaBatch>,
+    /// What this checkpoint's fold changed in the graph.
+    pub graph: GraphRecording,
+    /// What this checkpoint's fold added to the lexical index, or `None` if
+    /// nothing was indexed.
+    pub lexical: Option<crate::bm25::LexicalDelta>,
+    /// `Some((chunks, documents))` once this is the chain's sealed, complete
+    /// link; `None` for a checkpoint a later commit will still extend.
+    pub sealed: Option<(u64, u64)>,
+}
+
+/// Reads one segment delta's own parts back, without resolving its base.
+///
+/// A truncated or malformed delta is refused rather than partially trusted:
+/// every read here is bounds checked against what is actually left in the
+/// buffer, the same rule [`read_section`] follows for bytes that may have
+/// come out of a database another process could write to.
+/// @param bytes - one `%_gen` row's worth of bytes, already known to be a
+///   segment delta by [`is_segment_delta`]
+pub fn parse_segment_delta(bytes: &[u8]) -> Result<ParsedDelta> {
+    let mut cursor: &[u8] = bytes;
+    check_header(&mut cursor, KIND_SEGMENT_DELTA)?;
+    let mut base = None;
+    let mut batches = Vec::new();
+    let mut graph = GraphRecording::default();
+    let mut lexical = None;
+    let mut sealed = None;
+    while !cursor.is_empty() {
+        let tag = take_u8(&mut cursor)?;
+        let length = take_u64(&mut cursor)? as usize;
+        let payload = take(&mut cursor, length)?;
+        let mut inner: &[u8] = payload;
+        match tag {
+            PART_BASE => base = Some(take_i64(&mut inner)?),
+            PART_BATCH => batches.push(take_delta_batch(&mut inner)?),
+            PART_GRAPH => graph = take_graph_recording(&mut inner)?,
+            PART_LEXICAL => lexical = Some(take_lexical_delta(&mut inner)?),
+            PART_SEAL => {
+                let chunks = take_u64(&mut inner)?;
+                let documents = take_u64(&mut inner)?;
+                sealed = Some((chunks, documents));
+            }
+            other => anyhow::bail!("a segment delta holds an unrecognised part {other}"),
+        }
+    }
+    Ok(ParsedDelta { base, batches, graph, lexical, sealed })
+}
+
+/// Replays one delta's own recorded content onto an already resolved base
+/// index.
+///
+/// The store and the vectors are replayed as operations
+/// (`Index::tombstone`/`Index::append_store_and_vectors`), which is cheap and
+/// exact because both are pure functions of the rows given. The graph and
+/// the lexical index are replayed from their own recorded *content*
+/// (`Index::apply_graph_recording`/`Index::apply_lexical_recording`) instead
+/// of being reinserted or re-tokenised - see this section's header comment
+/// for why redoing either on every chain resolution is not an option.
+/// @param base - the index this delta continues, already committed
+/// @param delta - one delta's own parsed content
+pub fn apply_segment_delta(mut base: Index, delta: &ParsedDelta) -> Index {
+    for batch in &delta.batches {
+        for (chunk, vector) in &batch.puts {
+            base.tombstone(&chunk.source, &chunk.external_doc_id);
+            base.append_store_and_vectors(vec![chunk.clone()], std::slice::from_ref(vector));
+        }
+        for (source, id) in &batch.tombstoned {
+            base.tombstone(source, id);
+        }
+    }
+    base.apply_graph_recording(
+        delta.graph.entry,
+        delta.graph.layers_len,
+        &delta.graph.node_top_tail,
+        &delta.graph.touched,
+    );
+    if let Some(lexical) = &delta.lexical {
+        base.apply_lexical_recording(lexical);
+    }
+    base
+}
+
+/// Reads one `PART_BATCH` payload back.
+fn take_delta_batch(cursor: &mut &[u8]) -> Result<DeltaBatch> {
+    let n_puts = take_u64(cursor)?;
+    if n_puts > MAX_PART_LIST {
+        anyhow::bail!("a segment delta claims an implausible put batch of {n_puts}");
+    }
+    let mut puts = Vec::with_capacity((n_puts as usize).min(1024));
+    for _ in 0..n_puts {
+        let chunk = take_chunk_input(cursor)?;
+        let vector = take_vector(cursor)?;
+        puts.push((chunk, vector));
+    }
+    let n_tombstoned = take_u64(cursor)?;
+    if n_tombstoned > MAX_PART_LIST {
+        anyhow::bail!("a segment delta claims an implausible tombstone batch of {n_tombstoned}");
+    }
+    let mut tombstoned = Vec::with_capacity((n_tombstoned as usize).min(1024));
+    for _ in 0..n_tombstoned {
+        let source = take_str(cursor)?;
+        let id = take_str(cursor)?;
+        tombstoned.push((source, id));
+    }
+    Ok(DeltaBatch { puts, tombstoned })
+}
+
+/// Reads one `PART_GRAPH` payload back.
+fn take_graph_recording(cursor: &mut &[u8]) -> Result<GraphRecording> {
+    let raw_entry = take_u32(cursor)?;
+    let entry = if raw_entry == u32::MAX { None } else { Some(raw_entry) };
+    let layers_len = take_u64(cursor)?;
+    if layers_len > MAX_PART_LIST {
+        anyhow::bail!("a segment delta claims an implausible layer count of {layers_len}");
+    }
+    let layers_len = layers_len as usize;
+    let node_top_len = take_u64(cursor)?;
+    if node_top_len > MAX_PART_LIST {
+        anyhow::bail!("a segment delta claims an implausible node count of {node_top_len}");
+    }
+    let node_top_tail = take(cursor, node_top_len as usize)?.to_vec();
+    let n_touched = take_u64(cursor)?;
+    if n_touched > MAX_PART_LIST {
+        anyhow::bail!("a segment delta claims an implausible touched-node count of {n_touched}");
+    }
+    let mut touched = Vec::with_capacity((n_touched as usize).min(1024));
+    for _ in 0..n_touched {
+        let layer = take_u8(cursor)?;
+        let node = take_u32(cursor)?;
+        let degree = take_u64(cursor)?;
+        if degree > MAX_PART_LIST {
+            anyhow::bail!("a segment delta claims an implausible degree of {degree}");
+        }
+        let neighbour_bytes = take(cursor, (degree as usize).saturating_mul(4))?;
+        let mut neighbours = vec![0u32; degree as usize];
+        bytemuck::cast_slice_mut::<u32, u8>(&mut neighbours).copy_from_slice(neighbour_bytes);
+        touched.push((layer, node, neighbours));
+    }
+    Ok(GraphRecording { entry, layers_len, node_top_tail, touched })
+}
+
+/// Reads one `PART_LEXICAL` payload back.
+fn take_lexical_delta(cursor: &mut &[u8]) -> Result<crate::bm25::LexicalDelta> {
+    let start = take_u32(cursor)?;
+    let end = take_u32(cursor)?;
+    let n_lengths = take_u64(cursor)?;
+    if n_lengths > MAX_PART_LIST {
+        anyhow::bail!("a segment delta claims an implausible chunk count of {n_lengths}");
+    }
+    let chunk_lengths = take_u32_vec(cursor, n_lengths as usize)?;
+    let n_heading = take_u64(cursor)?;
+    if n_heading > MAX_PART_LIST {
+        anyhow::bail!("a segment delta claims an implausible heading count of {n_heading}");
+    }
+    let chunk_heading_lengths = take_u32_vec(cursor, n_heading as usize)?;
+    let n_positions = take_u64(cursor)?;
+    if n_positions > MAX_PART_LIST {
+        anyhow::bail!("a segment delta claims an implausible position count of {n_positions}");
+    }
+    let positions = take_u32_vec(cursor, n_positions as usize)?;
+    let n_postings = take_u64(cursor)?;
+    if n_postings > MAX_PART_LIST {
+        anyhow::bail!("a segment delta claims an implausible posting count of {n_postings}");
+    }
+    let mut postings = Vec::with_capacity((n_postings as usize).min(1024));
+    for _ in 0..n_postings {
+        let term = take_str(cursor)?;
+        let chunk = take_u32(cursor)?;
+        let positions_at = take_u32(cursor)?;
+        let term_frequency = take_u32(cursor)?;
+        postings.push((term, crate::bm25::Posting { chunk, positions_at, term_frequency }));
+    }
+    Ok(crate::bm25::LexicalDelta {
+        range: start..end,
+        chunk_lengths,
+        chunk_heading_lengths,
+        positions,
+        postings,
+    })
+}
+
+/// Reads `n` `u32`s off the front of `cursor`.
+/// @param cursor - the remaining bytes, advanced past what is taken
+/// @param n - how many `u32`s to take
+fn take_u32_vec(cursor: &mut &[u8], n: usize) -> Result<Vec<u32>> {
+    let bytes = take(cursor, n.saturating_mul(4))?;
+    let mut values = vec![0u32; n];
+    bytemuck::cast_slice_mut::<u32, u8>(&mut values).copy_from_slice(bytes);
+    Ok(values)
+}
+
+/// Takes `n` bytes off the front of `cursor`, refusing rather than panicking
+/// when fewer than `n` remain.
+/// @param cursor - the remaining bytes, advanced past what is taken
+/// @param n - how many bytes to take
+fn take<'a>(cursor: &mut &'a [u8], n: usize) -> Result<&'a [u8]> {
+    if cursor.len() < n {
+        anyhow::bail!("a segment delta ended before it should have");
+    }
+    let (head, tail) = cursor.split_at(n);
+    *cursor = tail;
+    Ok(head)
+}
+
+fn take_u8(cursor: &mut &[u8]) -> Result<u8> {
+    Ok(take(cursor, 1)?.first().copied().unwrap_or(0))
+}
+
+fn take_u32(cursor: &mut &[u8]) -> Result<u32> {
+    let bytes = take(cursor, 4)?;
+    let array: [u8; 4] = bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("a segment delta's integer is malformed"))?;
+    Ok(u32::from_le_bytes(array))
+}
+
+fn take_u64(cursor: &mut &[u8]) -> Result<u64> {
+    let bytes = take(cursor, 8)?;
+    let array: [u8; 8] = bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("a segment delta's integer is malformed"))?;
+    Ok(u64::from_le_bytes(array))
+}
+
+fn take_i64(cursor: &mut &[u8]) -> Result<i64> {
+    let bytes = take(cursor, 8)?;
+    let array: [u8; 8] = bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("a segment delta's integer is malformed"))?;
+    Ok(i64::from_le_bytes(array))
+}
+
+fn take_str(cursor: &mut &[u8]) -> Result<String> {
+    let len = take_u32(cursor)? as usize;
+    let bytes = take(cursor, len)?;
+    String::from_utf8(bytes.to_vec())
+        .map_err(|_| anyhow::anyhow!("a segment delta holds text that is not UTF-8"))
+}
+
+fn take_opt_str(cursor: &mut &[u8]) -> Result<Option<String>> {
+    match take_u8(cursor)? {
+        0 => Ok(None),
+        _ => Ok(Some(take_str(cursor)?)),
+    }
+}
+
+fn take_opt_i64(cursor: &mut &[u8]) -> Result<Option<i64>> {
+    match take_u8(cursor)? {
+        0 => Ok(None),
+        _ => Ok(Some(take_i64(cursor)?)),
+    }
+}
+
+fn take_str_vec(cursor: &mut &[u8]) -> Result<Vec<String>> {
+    let n = take_u64(cursor)?;
+    if n > MAX_PART_LIST {
+        anyhow::bail!("a segment delta claims an implausible list length of {n}");
+    }
+    let mut out = Vec::with_capacity((n as usize).min(1024));
+    for _ in 0..n {
+        out.push(take_str(cursor)?);
+    }
+    Ok(out)
+}
+
+fn take_chunk_input(cursor: &mut &[u8]) -> Result<ChunkInput> {
+    let source = take_str(cursor)?;
+    let external_doc_id = take_str(cursor)?;
+    let chunk_index = take_u32(cursor)?;
+    let heading_path = take_str_vec(cursor)?;
+    let content = take_str(cursor)?;
+    let title = take_str(cursor)?;
+    let url = take_str(cursor)?;
+    let space_key = take_opt_str(cursor)?;
+    let author = take_opt_str(cursor)?;
+    let author_id = take_opt_str(cursor)?;
+    let updated_at = take_opt_i64(cursor)?;
+    let external_chunk_id = take_opt_str(cursor)?;
+    let labels = take_str_vec(cursor)?;
+    let n_attributes = take_u64(cursor)?;
+    if n_attributes > MAX_PART_LIST {
+        anyhow::bail!("a segment delta claims an implausible attribute count of {n_attributes}");
+    }
+    let mut attributes = Vec::with_capacity((n_attributes as usize).min(1024));
+    for _ in 0..n_attributes {
+        let name = take_str(cursor)?;
+        let values = take_str_vec(cursor)?;
+        attributes.push((name, values));
+    }
+    let flags = take_str_vec(cursor)?;
+    let deleted = take_u8(cursor)? != 0;
+    Ok(ChunkInput {
+        source,
+        external_doc_id,
+        chunk_index,
+        heading_path,
+        content,
+        title,
+        url,
+        space_key,
+        author,
+        author_id,
+        updated_at,
+        external_chunk_id,
+        labels,
+        attributes,
+        flags,
+        deleted,
+    })
+}
+
+fn take_vector(cursor: &mut &[u8]) -> Result<Vec<f32>> {
+    let n = take_u64(cursor)?;
+    if n > MAX_PART_LIST {
+        anyhow::bail!("a segment delta claims an implausible vector width of {n}");
+    }
+    let n = n as usize;
+    let bytes = take(cursor, n.saturating_mul(4))?;
+    let mut vector = vec![0f32; n];
+    bytemuck::cast_slice_mut::<f32, u8>(&mut vector).copy_from_slice(bytes);
+    Ok(vector)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1414,5 +2066,196 @@ mod tests {
         let loaded = read_index(&mut bytes.as_slice()).unwrap();
         assert_eq!(loaded.config().metric, crate::distance::Metric::L2);
         assert_eq!(loaded.vectors().copy_of(5), original.vectors().copy_of(5));
+    }
+
+    // -- segment deltas ------------------------------------------------------
+
+    /// The batch one merge checkpoint would fold: a handful of brand new
+    /// documents plus one tombstone of a document already in the base -
+    /// `small_index`'s own chunk 0 is source `slack`, document `d0`.
+    fn small_batch() -> (Vec<(ChunkInput, Vec<f32>)>, Vec<(String, String)>) {
+        let puts: Vec<(ChunkInput, Vec<f32>)> = (0..5)
+            .map(|i| {
+                let chunk = ChunkInput {
+                    source: "slack".into(),
+                    external_doc_id: format!("extra{i}"),
+                    content: format!("an extra chunk {i} about tirzepatide"),
+                    title: format!("extra {i}"),
+                    url: "u".into(),
+                    labels: vec!["fresh".into()],
+                    ..Default::default()
+                };
+                let mut v: Vec<f32> = (0..16).map(|d| ((i * 16 + d) as f32 * 0.05).cos()).collect();
+                normalize(&mut v);
+                (chunk, v)
+            })
+            .collect();
+        let tombstoned = vec![("slack".to_string(), "d0".to_string())];
+        (puts, tombstoned)
+    }
+
+    /// Folds one batch onto an index the same way
+    /// `inillucent_search::merge::fold_segment_recording` does live: tombstone
+    /// then append, one document at a time, then the bare tombstones.
+    /// @param index - the index being folded into
+    /// @param puts - the chunks and vectors to replace or add
+    /// @param tombstoned - the `(source, external id)` pairs to bare-tombstone
+    fn fold_batch(index: &mut Index, puts: &[(ChunkInput, Vec<f32>)], tombstoned: &[(String, String)]) {
+        for (chunk, vector) in puts {
+            index.replace_document(
+                &chunk.source,
+                &chunk.external_doc_id,
+                vec![chunk.clone()],
+                std::slice::from_ref(vector),
+            );
+        }
+        for (source, id) in tombstoned {
+            index.tombstone(source, id);
+        }
+    }
+
+    /// A segment written in pieces reads back byte identical to the same
+    /// segment written whole: the same base, the same batch folded onto two
+    /// independent copies of it - one the ordinary way, one with recording
+    /// on so its graph and lexical content can be captured, chained through
+    /// a delta and replayed - serialised through the ordinary `write_index`
+    /// both times so the comparison is over exactly what a query or a later
+    /// merge would see.
+    ///
+    /// **Fails without the change**: `write_segment_delta`, `parse_segment_delta`
+    /// and `apply_segment_delta` do not exist before this ticket, so there is
+    /// no "in pieces" side to compare against - the strongest form "fails
+    /// without the change" takes.
+    #[test]
+    fn a_segment_written_in_pieces_reads_back_byte_identical_to_one_written_whole() {
+        let base = small_index();
+        let mut base_bytes = Vec::new();
+        write_index(&base, &mut base_bytes).unwrap();
+        let (puts, tombstoned) = small_batch();
+
+        // Written whole: the batch folded in one pass onto a freshly loaded
+        // copy of the base, exactly what a live fold does.
+        let mut whole = read_index(&mut base_bytes.as_slice()).unwrap();
+        fold_batch(&mut whole, &puts, &tombstoned);
+        let mut whole_bytes = Vec::new();
+        write_index(&whole, &mut whole_bytes).unwrap();
+
+        // The same fold, on another fresh copy, with recording on - this is
+        // the one real fold a checkpoint pays for; everything after it is a
+        // copy of what was recorded, never a second fold.
+        let mut accumulator = read_index(&mut base_bytes.as_slice()).unwrap();
+        let before_nodes = accumulator.graph_shape().1;
+        accumulator.start_recording();
+        fold_batch(&mut accumulator, &puts, &tombstoned);
+        let graph = GraphRecording {
+            entry: accumulator.graph_shape().0,
+            layers_len: accumulator.graph_shape().2,
+            node_top_tail: accumulator.graph_node_top_tail(before_nodes),
+            touched: accumulator.drain_graph_recording(),
+        };
+        let lexical = accumulator.drain_lexical_recording();
+        assert!(!graph.touched.is_empty(), "the fixture's batch must touch the graph");
+        assert!(lexical.is_some(), "the fixture's batch must touch the lexical index");
+
+        // Written in pieces: a delta referencing the base by an id, carrying
+        // only the recorded content, read back through the same chain a
+        // merge checkpoint's own reload uses.
+        let mut delta_bytes = Vec::new();
+        write_segment_delta(
+            &mut delta_bytes,
+            Some(1),
+            &[DeltaBatch { puts: puts.clone(), tombstoned: tombstoned.clone() }],
+            &graph,
+            lexical.as_ref(),
+            Some((accumulator.store().n_chunks() as u64, accumulator.store().n_documents() as u64)),
+        )
+        .unwrap();
+        let parsed = parse_segment_delta(&delta_bytes).unwrap();
+        assert_eq!(parsed.base, Some(1));
+        assert_eq!(parsed.batches.len(), 1);
+        assert_eq!(parsed.batches[0].puts.len(), puts.len());
+        assert_eq!(parsed.batches[0].tombstoned, tombstoned);
+        let resolved_base = read_index(&mut base_bytes.as_slice()).unwrap();
+        let pieces = apply_segment_delta(resolved_base, &parsed);
+        let mut pieces_bytes = Vec::new();
+        write_index(&pieces, &mut pieces_bytes).unwrap();
+
+        assert_eq!(
+            pieces_bytes, whole_bytes,
+            "a segment written in pieces must read back byte identical to the same segment written whole"
+        );
+    }
+
+    /// A checkpoint written before a merge has folded every input carries no
+    /// seal, and `parse_segment_delta` reports that plainly rather than
+    /// guessing one - this is the fact `inillucent_search::merge::load_segment`
+    /// refuses on, and `load_segment_resumable` accepts.
+    #[test]
+    fn a_delta_with_no_seal_reports_none() {
+        let (puts, tombstoned) = small_batch();
+        let mut bytes = Vec::new();
+        write_segment_delta(
+            &mut bytes,
+            Some(1),
+            &[DeltaBatch { puts, tombstoned }],
+            &GraphRecording::default(),
+            None,
+            None,
+        )
+        .unwrap();
+        let parsed = parse_segment_delta(&bytes).unwrap();
+        assert_eq!(parsed.base, Some(1));
+        assert!(parsed.sealed.is_none(), "an unfinished checkpoint must not report a seal");
+    }
+
+    /// The final checkpoint of a merge carries a seal, and its counts survive
+    /// the round trip - what a caller compares its replayed content against
+    /// before trusting the chain as complete.
+    #[test]
+    fn a_sealed_delta_reports_its_seal_counts() {
+        let mut bytes = Vec::new();
+        write_segment_delta(&mut bytes, None, &[], &GraphRecording::default(), None, Some((42, 7))).unwrap();
+        let parsed = parse_segment_delta(&bytes).unwrap();
+        assert_eq!(parsed.base, None);
+        assert_eq!(parsed.sealed, Some((42, 7)));
+    }
+
+    /// `is_segment_delta` tells the two stream forms apart from the header
+    /// alone, before either is parsed - what lets a caller holding a `%_gen`
+    /// row's bytes choose which reader to use.
+    #[test]
+    fn is_segment_delta_distinguishes_the_two_stream_forms() {
+        let original = small_index();
+        let mut stream_bytes = Vec::new();
+        write_index(&original, &mut stream_bytes).unwrap();
+        assert!(!is_segment_delta(&stream_bytes));
+
+        let mut delta_bytes = Vec::new();
+        write_segment_delta(&mut delta_bytes, Some(1), &[], &GraphRecording::default(), None, None).unwrap();
+        assert!(is_segment_delta(&delta_bytes));
+    }
+
+    /// A delta whose payload is truncated mid part is refused rather than
+    /// panicking or silently reading past the end - the same "no unwrap, no
+    /// indexing on untrusted bytes" rule `read_section` already follows.
+    #[test]
+    fn a_truncated_delta_is_refused_not_panicked_on() {
+        let (puts, tombstoned) = small_batch();
+        let mut bytes = Vec::new();
+        write_segment_delta(
+            &mut bytes,
+            Some(1),
+            &[DeltaBatch { puts, tombstoned }],
+            &GraphRecording::default(),
+            None,
+            Some((5, 5)),
+        )
+        .unwrap();
+        bytes.truncate(bytes.len() - 5);
+        let error = match parse_segment_delta(&bytes) {
+            Ok(_) => panic!("a truncated delta must not parse"),
+            Err(error) => error,
+        };
+        assert!(format!("{error:#}").contains("ended before it should have"), "{error:#}");
     }
 }

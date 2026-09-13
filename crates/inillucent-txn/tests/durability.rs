@@ -440,16 +440,28 @@ fn recovering_checkpointing_and_recovering_again_is_the_same_database() {
         )
         .expect("the second reopen");
         assert_recovered(&engine, &acknowledged, "the second reopen");
-        // The only record above the checkpoint's own start is the `Checkpoint`
-        // marker the first reopen wrote. Every page image is below it and in
-        // the file, which is what the checkpoint was for; a second reopen that
-        // replayed one would mean the checkpoint recorded a start it had not
-        // actually reached.
+        // The only record above the checkpoint's own start that anything is
+        // done with is the `Checkpoint` marker the first reopen wrote. Every
+        // page image is below it and in the file, which is what the checkpoint
+        // was for; a second reopen that replayed one would mean the checkpoint
+        // recorded a start it had not actually reached.
+        //
+        // `applied` is the number that carries that, and `scanned` is not:
+        // the writer pads each synced write out to a device sector boundary,
+        // so the log above the start also holds however many `Body::Pad`
+        // records that alignment needed. They are read and checksummed like
+        // any other record and applied to nothing. Asserting on `scanned`
+        // meant asserting on the byte alignment of the records before it,
+        // which is not what this test is about and which changed the day the
+        // padding arrived.
         let outcome = engine.recovered();
         assert_eq!(
-            (outcome.scanned, outcome.applied),
-            (1, 1),
+            outcome.applied, 1,
             "the second reopen replayed records the checkpoint had already put in the file"
+        );
+        assert!(
+            outcome.scanned >= outcome.applied,
+            "every applied record was scanned first"
         );
         assert!(outcome.last_checkpoint.is_some());
         (1..=10u64)

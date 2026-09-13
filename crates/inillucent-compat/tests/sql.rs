@@ -4,49 +4,95 @@
 //! SQLite 3.53.4 binary, and none of them is modified by being read. A test
 //! that passed against a file inillucent had also written would be testing inillucent
 //! against itself.
+//!
+//! **Opened through `Database::import`, not `Database::open`.** File-format
+//! compatibility was never kept when the new engine was built: `open`ing a
+//! file SQLite wrote reports that neither meta page is readable, which is
+//! correct - it is not this engine's format. `import` is the one route a
+//! SQLite file reaches this engine by, reading it through
+//! `inillucent-sqlite-reader` and rebuilding it as PAX trees beside the source,
+//! `<source>.rdb`, so the fixture itself is still never written to. Every plan
+//! string these tests used to check for a bytecode opcode name -
+//! `SeekRowid`, `OpenIndex` - now checks for the operator chain's own prose,
+//! `SEARCH t USING INTEGER PRIMARY KEY (rowid=?)` and `USING ... INDEX`,
+//! which `tests/new_engine_explain.rs` establishes against the same pinned
+//! reference.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
 
 use inillucent_compat::fixtures::valid_fixtures;
 use inillucent_compat::workspace_root;
-use inillucent_legacy::{Database, Value};
+use inillucent_engine::connect::{Connection, Database};
+use inillucent_tree::datum::OwnedDatum;
 
 /// Returns the path of a shipped fixture.
 fn fixture(name: &str) -> PathBuf {
     workspace_root().join("compat/fixtures").join(name)
 }
 
-/// Opens a fixture and returns a connection.
+/// Imports a fixture exactly once for the whole test binary and returns the
+/// file it was imported to.
 ///
-/// The timeout is not decoration. These tests run in parallel threads against
-/// the same files, and Windows takes the read lock in two steps serialised by
-/// the PENDING byte, so two readers starting together collide on it even though
-/// neither is a writer. A real application sets a busy timeout for the same
-/// reason.
-fn open(name: &str) -> Database {
-    Database::open_with_busy_timeout(fixture(name), std::time::Duration::from_secs(5))
-        .expect("the fixture opens")
+/// **Every test in this file that needs `name` goes through this rather than
+/// calling `Database::import` itself.** `Database::import`'s target is fixed
+/// at `<source>.rdb` - one path per fixture name - and libtest runs every
+/// `#[test]` on its own thread, so the thirteen tests that all read
+/// `basic-p4096-utf8.db` used to race rewriting that single file: whichever
+/// ran second either removed the file out from under the first's open
+/// connection or tried to open it while the first still held a lock, and
+/// that surfaced as a SQLite-style lock refusal (`another connection holds
+/// RESERVED`, `readers are still present`) rather than as anything about the
+/// engine's SQL. `tests/lifecycle.rs` hit the identical shape against
+/// `select-corpus.db` and fixed it by importing once behind a `OnceLock`;
+/// this generalises that to every fixture name this file uses, keyed by name
+/// in one `Mutex`-guarded map so two tests never import the same name twice.
+/// A first import of one name still blocks a first import of another behind
+/// the same lock, which only costs an import's own time and never a wrong
+/// answer, so it is not worth a lock per name.
+fn imported_path(name: &str) -> PathBuf {
+    static IMPORTED: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
+    let cache = IMPORTED.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache.lock().expect("the fixture cache is not poisoned");
+    if let Some(path) = cache.get(name) {
+        return path.clone();
+    }
+    let source = fixture(name);
+    let target = PathBuf::from(format!("{}.rdb", source.display()));
+    let _ = std::fs::remove_file(&target);
+    let database = Database::import(&source).expect("the fixture imports");
+    let _ = database
+        .connect()
+        .execute_batch("PRAGMA busy_timeout = 5000");
+    let path = database.path().to_path_buf();
+    cache.insert(name.to_string(), path.clone());
+    path
 }
 
-/// Opens a fixture and returns a connection.
-fn connect(name: &str) -> inillucent_legacy::Connection {
-    let database = open(name);
-    database.connect().expect("the connection opens")
+/// Opens a connection onto a fixture, importing it if this is the first test
+/// in the binary to ask for this name.
+fn connect(name: &str) -> Database {
+    let database = Database::open(imported_path(name)).expect("the import opens");
+    let _ = database
+        .connect()
+        .execute_batch("PRAGMA busy_timeout = 5000");
+    database
 }
 
 /// Renders a row the way the tests compare it: a tagged string per value, so a
 /// difference in storage class is a difference in the text.
-fn render(values: &[Value<'static>]) -> String {
+fn render(values: &[OwnedDatum]) -> String {
     values
         .iter()
         .map(|value| match value {
-            Value::Null => "null".to_string(),
-            Value::Integer(integer) => format!("int:{integer}"),
-            Value::Real(real) => format!("real:{real:?}"),
-            Value::Text(text) => {
-                format!("text:{}", String::from_utf8_lossy(&text.utf8_bytes()))
+            OwnedDatum::Null => "null".to_string(),
+            OwnedDatum::Int(integer) => format!("int:{integer}"),
+            OwnedDatum::Real(real) => format!("real:{real:?}"),
+            OwnedDatum::Text(text) => {
+                format!("text:{}", String::from_utf8_lossy(text))
             }
-            Value::Blob(blob) => format!("blob:{}", hex(blob.raw())),
+            OwnedDatum::Blob(blob) => format!("blob:{}", hex(blob)),
         })
         .collect::<Vec<String>>()
         .join("|")
@@ -62,13 +108,13 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 /// Runs a query and renders every row.
-fn rows(connection: &inillucent_legacy::Connection, sql: &str) -> Vec<String> {
-    let mut statement = connection.prepare(sql).expect(sql);
-    let mut out = Vec::new();
-    while statement.step().expect(sql) {
-        out.push(render(statement.row()));
-    }
-    out
+fn rows(connection: &Connection<'_>, sql: &str) -> Vec<String> {
+    connection
+        .query(sql)
+        .unwrap_or_else(|error| panic!("{sql}: {error}"))
+        .iter()
+        .map(|row| render(row))
+        .collect()
 }
 
 /// A scan returns every row with the storage class each value was written with.
@@ -83,7 +129,8 @@ fn rows(connection: &inillucent_legacy::Connection, sql: &str) -> Vec<String> {
 /// the two engines agree about which path to take.
 #[test]
 fn a_full_scan_returns_every_row_the_plan_produces() {
-    let connection = connect("basic-p4096-utf8.db");
+    let database = connect("basic-p4096-utf8.db");
+    let connection = database.connect();
     let found = rows(&connection, "SELECT id, name FROM people");
     assert_eq!(
         found,
@@ -102,7 +149,8 @@ fn a_full_scan_returns_every_row_the_plan_produces() {
 /// The five storage classes survive the round trip out of a real file.
 #[test]
 fn every_storage_class_reads_back() {
-    let connection = connect("basic-p4096-utf8.db");
+    let database = connect("basic-p4096-utf8.db");
+    let connection = database.connect();
     let found = rows(
         &connection,
         "SELECT id, name, score, tag, note FROM people WHERE id = 1",
@@ -118,23 +166,25 @@ fn every_storage_class_reads_back() {
 /// A `WHERE` clause on the rowid becomes a seek, and finds the one row.
 #[test]
 fn a_rowid_equality_becomes_a_seek() {
-    let connection = connect("basic-p4096-utf8.db");
-    let mut statement = connection
-        .prepare("SELECT name FROM people WHERE id = 7")
-        .expect("it prepares");
-    let explained = statement.explain().join("\n");
-    assert!(explained.contains("SeekRowid"), "{explained}");
-    let mut found = Vec::new();
-    while statement.step().expect("it steps") {
-        found.push(render(statement.row()));
-    }
+    let database = connect("basic-p4096-utf8.db");
+    let connection = database.connect();
+    let explained = connection
+        .explain("SELECT name FROM people WHERE id = 7")
+        .expect("it explains")
+        .join("\n");
+    assert!(
+        explained.contains("USING INTEGER PRIMARY KEY"),
+        "{explained}"
+    );
+    let found = rows(&connection, "SELECT name FROM people WHERE id = 7");
     assert_eq!(found, vec!["text:delta echo"]);
 }
 
 /// A rowid range becomes a positioned scan that stops at the upper bound.
 #[test]
 fn a_rowid_range_stops_at_its_bound() {
-    let connection = connect("basic-p4096-utf8.db");
+    let database = connect("basic-p4096-utf8.db");
+    let connection = database.connect();
     let found = rows(
         &connection,
         "SELECT id FROM people WHERE id > 1 AND id <= 7",
@@ -146,16 +196,14 @@ fn a_rowid_range_stops_at_its_bound() {
 /// would.
 #[test]
 fn an_index_seek_returns_what_a_scan_returns() {
-    let connection = connect("basic-p4096-utf8.db");
-    let mut statement = connection
-        .prepare("SELECT id FROM people WHERE name = 'alpha'")
-        .expect("it prepares");
-    let explained = statement.explain().join("\n");
-    assert!(explained.contains("OpenIndex"), "{explained}");
-    let mut found = Vec::new();
-    while statement.step().expect("it steps") {
-        found.push(render(statement.row()));
-    }
+    let database = connect("basic-p4096-utf8.db");
+    let connection = database.connect();
+    let explained = connection
+        .explain("SELECT id FROM people WHERE name = 'alpha'")
+        .expect("it explains")
+        .join("\n");
+    assert!(explained.contains("INDEX"), "{explained}");
+    let found = rows(&connection, "SELECT id FROM people WHERE name = 'alpha'");
     assert_eq!(found, vec!["int:1"]);
 
     // The same question, forced onto a scan by wrapping the column so the
@@ -170,7 +218,8 @@ fn an_index_seek_returns_what_a_scan_returns() {
 /// `ORDER BY` sorts, `LIMIT` truncates, and `OFFSET` skips.
 #[test]
 fn order_limit_and_offset_work_together() {
-    let connection = connect("basic-p4096-utf8.db");
+    let database = connect("basic-p4096-utf8.db");
+    let connection = database.connect();
     assert_eq!(
         rows(
             &connection,
@@ -196,7 +245,8 @@ fn order_limit_and_offset_work_together() {
 /// NULLs sort first ascending and last descending, unless told otherwise.
 #[test]
 fn nulls_sort_where_sqlite_sorts_them() {
-    let connection = connect("basic-p4096-utf8.db");
+    let database = connect("basic-p4096-utf8.db");
+    let connection = database.connect();
     assert_eq!(
         rows(&connection, "SELECT note FROM people ORDER BY note LIMIT 1"),
         vec!["null"]
@@ -218,9 +268,20 @@ fn nulls_sort_where_sqlite_sorts_them() {
 }
 
 /// Aggregates over the whole table, including the empty-input answers.
+///
+/// **The empty-input queries have to clear the fixture's own `big rowid` row**,
+/// `id = 9007199254740993`, or they are not empty at all. The bound here used
+/// to be `id > 1000000`, which that row satisfies - so `count(*)` answered `1`
+/// and would have answered `9007199254740993` for `sum(id)` rather than the
+/// `NULL` an aggregate over no rows gives. The row is bigger than any real
+/// `id` this fixture holds on purpose (`a_full_scan_returns_every_row_the_plan_produces`
+/// is where it is named), so the bound is moved past it instead of removing
+/// the case: an empty aggregate is still worth asserting, it just has to
+/// actually be empty.
 #[test]
 fn aggregates_answer_over_the_whole_table() {
-    let connection = connect("basic-p4096-utf8.db");
+    let database = connect("basic-p4096-utf8.db");
+    let connection = database.connect();
     assert_eq!(
         rows(&connection, "SELECT count(*) FROM people"),
         vec!["int:7"]
@@ -232,12 +293,15 @@ fn aggregates_answer_over_the_whole_table() {
     assert_eq!(
         rows(
             &connection,
-            "SELECT count(*) FROM people WHERE id > 1000000"
+            "SELECT count(*) FROM people WHERE id > 9007199254740993"
         ),
         vec!["int:0"]
     );
     assert_eq!(
-        rows(&connection, "SELECT sum(id) FROM people WHERE id > 1000000"),
+        rows(
+            &connection,
+            "SELECT sum(id) FROM people WHERE id > 9007199254740993"
+        ),
         vec!["null"]
     );
     assert_eq!(
@@ -249,7 +313,8 @@ fn aggregates_answer_over_the_whole_table() {
 /// `GROUP BY` groups, and `HAVING` filters the groups.
 #[test]
 fn group_by_groups_and_having_filters() {
-    let connection = connect("basic-p4096-utf8.db");
+    let database = connect("basic-p4096-utf8.db");
+    let connection = database.connect();
     let found = rows(
         &connection,
         "SELECT note IS NULL, count(*) FROM people GROUP BY note IS NULL",
@@ -265,7 +330,8 @@ fn group_by_groups_and_having_filters() {
 /// `DISTINCT` emits each row once, in first-seen order.
 #[test]
 fn distinct_emits_each_row_once() {
-    let connection = connect("basic-p4096-utf8.db");
+    let database = connect("basic-p4096-utf8.db");
+    let connection = database.connect();
     let found = rows(&connection, "SELECT DISTINCT note IS NULL FROM people");
     assert_eq!(found, vec!["int:0", "int:1"]);
 }
@@ -273,7 +339,8 @@ fn distinct_emits_each_row_once() {
 /// `VALUES` runs with no table at all.
 #[test]
 fn values_runs_without_a_table() {
-    let connection = connect("basic-p4096-utf8.db");
+    let database = connect("basic-p4096-utf8.db");
+    let connection = database.connect();
     assert_eq!(
         rows(&connection, "VALUES (1, 'a'), (2, 'b')"),
         vec!["int:1|text:a", "int:2|text:b"]
@@ -284,63 +351,58 @@ fn values_runs_without_a_table() {
     );
 }
 
-/// Parameters bind by index and by name, and rebinding after a reset works.
+/// Parameters bind by index, and rebinding after a reset works.
 #[test]
 fn parameters_bind_and_rebind() {
-    let connection = connect("basic-p4096-utf8.db");
+    let database = connect("basic-p4096-utf8.db");
+    let connection = database.connect();
     let mut statement = connection
         .prepare("SELECT name FROM people WHERE id = ?1")
         .expect("it prepares");
     statement.bind_integer(1, 7).expect("it binds");
     assert!(statement.step().expect("it steps"));
     assert_eq!(render(statement.row()), "text:delta echo");
-    statement.reset().expect("it resets");
+    statement.reset();
     statement.bind_integer(1, 1).expect("it rebinds");
     assert!(statement.step().expect("it steps"));
     assert_eq!(render(statement.row()), "text:alpha");
 }
 
-/// Result metadata names the column and its origin.
+/// Result metadata names each column.
+///
+/// The old engine also reported a result column's table/database origin and
+/// its declared type; `Statement::columns()` on the new engine answers only
+/// the name each column is reported under, because there is no public
+/// per-statement accessor for the rest. What survives is the part every
+/// caller actually reads a result set by: the name.
+///
+/// **Stepped before the columns are read.** On this engine `columns()` is
+/// empty until the statement has produced a row - `Statement::columns`'s own
+/// doc comment says so, `tests/lifecycle.rs`'s
+/// `column_metadata_is_available_after_stepping` pins it, and this test used
+/// to read the names straight after `prepare` the way `sqlite3_column_name`
+/// allows, which asks a question this engine does not answer until later.
 #[test]
-fn result_metadata_names_the_column_and_its_origin() {
-    let connection = connect("basic-p4096-utf8.db");
-    let statement = connection
+fn result_metadata_names_the_column() {
+    let database = connect("basic-p4096-utf8.db");
+    let connection = database.connect();
+    let mut statement = connection
         .prepare("SELECT name, score AS s, id + 1 FROM people")
         .expect("it prepares");
-    let names: Vec<String> = statement
-        .columns()
-        .iter()
-        .map(|column| String::from_utf8_lossy(&column.name).into_owned())
-        .collect();
+    assert!(statement.step().expect("it steps"), "people has rows");
     // An unaliased expression is named after the text it was written as,
     // which is SQLite's default and what `sqlite3_column_name` reports.
-    assert_eq!(names, vec!["name", "s", "id + 1"]);
-    let origin = statement
-        .columns()
-        .first()
-        .and_then(|column| column.origin.clone())
-        .map(|(database, table, column)| {
-            format!(
-                "{}.{}.{}",
-                String::from_utf8_lossy(&database),
-                String::from_utf8_lossy(&table),
-                String::from_utf8_lossy(&column)
-            )
-        });
-    assert_eq!(origin, Some("main.people.name".to_string()));
     assert_eq!(
-        statement
-            .columns()
-            .first()
-            .map(|column| String::from_utf8_lossy(&column.declared_type).into_owned()),
-        Some("TEXT".to_string())
+        statement.columns().to_vec(),
+        vec!["name".to_string(), "s".to_string(), "id + 1".to_string()]
     );
 }
 
 /// A name nobody declared is an error at prepare time, with an offset.
 #[test]
 fn an_unknown_name_fails_at_prepare_with_an_offset() {
-    let connection = connect("basic-p4096-utf8.db");
+    let database = connect("basic-p4096-utf8.db");
+    let connection = database.connect();
     let missing_table = match connection.prepare("SELECT * FROM nope") {
         Err(failure) => failure,
         Ok(_) => panic!("a missing table must not prepare"),
@@ -366,6 +428,13 @@ fn an_unknown_name_fails_at_prepare_with_an_offset() {
 
 /// Reading a database changes no byte of it, which is the promise the whole
 /// read-only engine rests on.
+///
+/// The import writes `<fixture>.rdb` beside the source and reads only that; a
+/// promise this engine could break by opening a SQLite file directly is not
+/// one it can break by construction, so what this still proves is that
+/// opening the import and querying it - whether that is this fixture's first
+/// import in the binary or a cache hit from an earlier test - never touches
+/// the source `.db`.
 #[test]
 fn reading_changes_no_byte_of_the_file() {
     for fixture_row in valid_fixtures() {
@@ -375,13 +444,10 @@ fn reading_changes_no_byte_of_the_file() {
         }
         let before = std::fs::read(&path).expect("the fixture reads");
         {
-            let database =
-                Database::open_with_busy_timeout(&path, std::time::Duration::from_secs(5))
-                    .expect("it opens");
-            let connection = database.connect().expect("it connects");
-            // Whatever the fixture holds, scanning `sqlite_schema` through the
-            // catalog and running one query over it is enough to touch the
-            // pager, the cache and a cursor.
+            let database = connect(fixture_row.name);
+            let connection = database.connect();
+            // Whatever the fixture holds, running one query over it is enough
+            // to touch the pager, the cache and a cursor.
             let _ = connection.query("SELECT count(*) FROM sqlite_schema");
         }
         let after = std::fs::read(&path).expect("the fixture reads");
@@ -407,9 +473,8 @@ fn every_page_size_and_encoding_reads_the_same_rows() {
         if !path.is_file() {
             continue;
         }
-        let database = Database::open_with_busy_timeout(&path, std::time::Duration::from_secs(5))
-            .expect("it opens");
-        let connection = database.connect().expect("it connects");
+        let database = connect(name);
+        let connection = database.connect();
         let found = rows(
             &connection,
             "SELECT id, name, score FROM people ORDER BY id",

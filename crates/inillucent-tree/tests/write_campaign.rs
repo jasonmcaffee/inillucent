@@ -15,12 +15,14 @@
 use std::collections::BTreeMap;
 
 use inillucent_base::rng::Rng;
+use inillucent_base::DbResult;
 use inillucent_pool::{Database, Options, PageId};
 use inillucent_tree::datum::{Datum, OwnedDatum};
 use inillucent_tree::types::{ColumnSpec, PhysicalType};
-use inillucent_tree::write::NoLog;
+use inillucent_tree::write::{NoLog, TreeLog};
 use inillucent_tree::PagedTree;
 use inillucent_vfs::{DbPath, MemoryVfs};
+use inillucent_wal::record::Body;
 
 /// The tree's shape: an integer key, a text label, and an integer counter.
 ///
@@ -621,4 +623,113 @@ fn a_bulk_built_leaf_compacts_rather_than_splitting() {
          a compaction was refused and split instead"
     );
     tree.check(database.pool()).expect("integrity");
+}
+
+/// A [`TreeLog`] that hands out increasing LSNs like [`NoLog`] and additionally
+/// counts how many times each [`Body`] kind was logged.
+///
+/// For pinning what a split writes to the log without a real WAL: `NoLog`
+/// discards the body entirely, which is right for every other campaign in this
+/// file and wrong for this one, where the body's *kind* is the thing under
+/// test.
+#[derive(Default)]
+struct CountingLog {
+    next: u64,
+    write_pages: u64,
+    structural: u64,
+}
+
+impl TreeLog for CountingLog {
+    fn log(&mut self, body: Body<'_>) -> DbResult<u64> {
+        match body {
+            Body::WritePage { .. } => self.write_pages = self.write_pages.saturating_add(1),
+            Body::Structural { .. } => self.structural = self.structural.saturating_add(1),
+            _ => {}
+        }
+        self.next = self.next.saturating_add(8);
+        Ok(self.next)
+    }
+}
+
+/// A split does not log its parent's page twice.
+///
+/// `docs/roadmap.md` item 5 measured the write gate's `write.insert.batch`
+/// writing a `WritePage` record for every one of 40 splits, 8,240 bytes each -
+/// 321.9 KiB of a 1,985.8 KiB workload - and every one of those splits also
+/// logged a `Structural` record carrying the very same page as `parent_image`.
+/// `PagedTree::split_carrying` reads the parent back and logs it whole inside
+/// `Structural` regardless, so the earlier `WritePage` inside `build_root` and
+/// `insert_separator`'s "the parent has room" branch had already written bytes
+/// the `Structural` record was about to write again.
+///
+/// This campaign forces the same shape without a real WAL: an ascending insert
+/// under a page too small to hold them, which grows the tree past one level and
+/// keeps splitting while the new interior root still has room for another
+/// separator - `insert_separator`'s "fits" branch, never its "the parent is
+/// also full" one, which is the one case this ticket left unoptimised because
+/// nothing else in the log ever names that page again.
+#[test]
+fn a_split_does_not_log_its_parents_image_twice() {
+    // A page too small for 40 rows so leaves still split, and one no interior
+    // page can fill in 300 of them: an interior separator is a handful of
+    // bytes, so 4 KiB holds hundreds. This is deliberately the gate's own
+    // shape - `write.insert.batch` splits 40 times over 8 KiB pages and never
+    // once reaches `insert_separator`'s "the parent is also full" branch
+    // either.
+    let (mut database, mut tree, mut model) = fixture(4_096, 16, 40);
+    let mut log = CountingLog::default();
+    let before_height = tree.height();
+
+    let labels: Vec<Vec<u8>> = (0..300)
+        .map(|key| format!("a much longer label so pages fill up, number {key:06}").into_bytes())
+        .collect();
+    for key in 0..300i64 {
+        let label = labels.get(key as usize).cloned().unwrap_or_default();
+        let row = vec![
+            Datum::Int(key + 1_000),
+            Datum::Text(&label),
+            Datum::Int(key),
+        ];
+        tree.insert(&mut database, &mut log, &row)
+            .unwrap_or_else(|error| panic!("inserting {key} failed: {error:?}"));
+        model.insert(
+            key + 1_000,
+            Row {
+                label,
+                counter: key,
+            },
+        );
+    }
+    assert!(
+        tree.height() > before_height,
+        "the tree did not grow an interior level, so this campaign never reached \
+         insert_separator's \"the parent has room\" branch at all"
+    );
+    let splits = tree.write_stats().splits;
+    assert!(
+        splits > 1,
+        "only {splits} split happened; this needs at least one after the root's \
+         own, or the campaign is not testing what it claims"
+    );
+    assert_eq!(
+        log.write_pages, 0,
+        "{} of {splits} splits logged a separate WritePage for the parent \
+         `insert_separator` or `build_root` just built, and `split_carrying` then \
+         logged the same page a second time inside its Structural record - see \
+         `folded_by_caller` in write.rs",
+        log.write_pages
+    );
+    assert_eq!(
+        log.structural, splits,
+        "every split should log exactly one Structural record; {} logged against \
+         {splits} splits",
+        log.structural
+    );
+    assert_agrees(
+        &database,
+        &tree,
+        &model,
+        "after a campaign that only splits",
+    );
+    tree.check(database.pool()).expect("integrity after splits");
 }

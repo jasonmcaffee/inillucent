@@ -541,6 +541,31 @@ pub fn refusal(said: impl Into<String>) -> DbError {
         .with_detail(said)
 }
 
+/// Builds a `SQLITE_ERROR` refusal about the caller's own statement - the
+/// same shape as [`refusal`], but for the far more common case where SQLite's
+/// real answer is code 1 rather than `SQLITE_MISUSE`'s 21.
+///
+/// **Most engine-level statement refusals are `SQLITE_ERROR`, and `refusal`
+/// answers `SQLITE_MISUSE` unconditionally.** `bind.rs`'s own `refused`
+/// function found and fixed this for the parser and binder - `PrimaryCode::
+/// from `ParseError::code`, not from `refusal`'s hardcoded `Misuse` - because
+/// a parse or bind refusal is `SQLITE_ERROR` in SQLite, measured through
+/// `dml_differential.rs`. Refusals raised directly by the engine's execution
+/// code (`CREATE VIRTUAL TABLE` naming no such module, `VACUUM` from inside a
+/// transaction) go through `refusal` directly rather than through a
+/// `ParseError`, so they did not get that fix and still answer 21 where the
+/// pinned reference answers 1. This is the same fix, for that path: use it in
+/// place of `refusal` once the reference has been checked and answers 1 - do
+/// not switch a call over on the strength of this doc comment alone.
+///
+/// @param said - the sentence, safe for a caller to read
+pub fn statement_refusal(said: impl Into<String>) -> DbError {
+    let said = said.into();
+    DbError::primary(PrimaryCode::Error)
+        .with_message(said.clone())
+        .with_detail(said)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

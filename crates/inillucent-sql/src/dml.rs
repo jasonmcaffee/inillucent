@@ -664,6 +664,19 @@ impl<'a> Binder<'a> {
     /// A trigger already being bound is skipped rather than bound again, which
     /// is SQLite's behaviour with its default `recursive_triggers = off` and is
     /// also the only reason inlining terminates.
+    ///
+    /// **Walked newest first.** `live.triggers` is in the order
+    /// `inillucent_catalog::paged::tables_from_entries` appended them while
+    /// reading `sqlite_schema` - the order the triggers were created in - and
+    /// SQLite fires two triggers of the same timing and event in the opposite
+    /// order: it keeps each table's trigger list with the most recently
+    /// created one first, so that one fires first.
+    /// `dml_differential.rs`'s `row_triggers_match_sqlite` has two `AFTER
+    /// INSERT` triggers on one table - `t_ai`, created first, and `t_high`,
+    /// created after it - and the pinned reference fires `t_high` before
+    /// `t_ai` on every insert. Reversing the walk here, once, at the one place
+    /// that reads `live.triggers` into a statement's own trigger list, is
+    /// enough: nothing downstream reorders it again.
     fn bind_triggers(
         &mut self,
         table: &TableInfo,
@@ -684,7 +697,7 @@ impl<'a> Binder<'a> {
             TriggerEventInfo::Update(_) => (true, true),
         };
         let mut bound = Vec::new();
-        for trigger in &live.triggers {
+        for trigger in live.triggers.iter().rev() {
             if !trigger.fires_for(&event, changed) {
                 continue;
             }

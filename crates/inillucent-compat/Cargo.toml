@@ -20,12 +20,9 @@ inillucent-sim = { workspace = true }
 inillucent-sql = { workspace = true }
 inillucent-catalog = { workspace = true }
 inillucent-ext = { workspace = true }
-inillucent-vm = { workspace = true }
-inillucent-session = { workspace = true }
 inillucent-transaction = { workspace = true }
 inillucent = { workspace = true }
-inillucent-legacy = { workspace = true }
-# The rearchitected engine, measured beside the old one.
+# The rearchitected engine.
 inillucent-pool = { workspace = true }
 inillucent-tree = { workspace = true }
 # The engine's own JSON reader, which `inillucent-testrun` parses cargo's
@@ -238,18 +235,23 @@ path = "src/bin/release.rs"
 name = "inillucent-checkpointperf"
 path = "src/bin/checkpointperf.rs"
 
+[[bin]]
+name = "inillucent-writelogattrib"
+path = "src/bin/writelogattrib.rs"
+
 [features]
 # Builds `inillucent-testrun`. See the comment on its `[[bin]]` section: the
 # feature exists to keep the runner out of the build the runner itself starts.
 testrun = []
 
-# Passed through to the virtual machine so `inillucent-hotprofile` can attribute
-# time and allocations to individual opcodes.
-opcode-probe = [
-    "inillucent-vm/opcode-probe",
-    "inillucent-storage/opcode-probe",
-    "inillucent-session/opcode-probe",
-]
+# `opcode-probe` used to pass through to the old virtual machine so
+# `inillucent-hotprofile` could attribute time and allocations to individual
+# opcodes. It is gone along with `inillucent-vm` and `inillucent-session`: the
+# new engine compiles to an operator tree rather than bytecode, so there is no
+# per-opcode cost to attribute, and `inillucent-hotprofile`/`inillucent-txnprofile`
+# no longer read `inillucent_base::probe::OPCODE_*` at all. `inillucent-storage`
+# still has its own `opcode-probe` feature for the code that reads it while
+# migrating a SQLite file, but nothing in this crate turns it on any more.
 
 # The workspace's lint table; see the note beside it in the root manifest.
 [lints]
