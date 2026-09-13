@@ -3,9 +3,10 @@
 **What a test in this repository is for, how the suite is organised, how to run
 only the part a change can break, and what all of it costs.**
 
-Written on 2026-09-08. Every number below was measured on the
-machine described in [Timings](#timings), by the tools this document describes,
-and the commands that produce them are given so they can be taken again.
+Written on 2026-09-08, with the target/test counts and §6's timings refreshed on
+2026-09-13 after task-1911. Every number below was measured on the machine
+described in [Timings](#timings), by the tools this document describes, and the
+commands that produce them are given so they can be taken again.
 
 ---
 
@@ -124,22 +125,26 @@ the two numbers and what was expected of them.
 
 ## 2. The shape of the suite
 
-**129 test targets, 2,336 tests, in nine tiers.** A target is one binary
+**149 test targets, 2,645 tests, in nine tiers.** A target is one binary
 `cargo test` builds; a tier is a band you can ask for by name. Every target is
 in exactly one tier, so the tiers partition the suite rather than overlapping
-it.
+it. (Was 129 targets, 2,336 tests when this document was written; task-1911's
+re-point of 36 files onto the shipping engine, its free-map durability fix
+and its other roadmap work added 20 targets and 309 tests, mostly to `engine`,
+`differential`, `unit` and `durability` — counted fresh against
+`tests/selection.toml` and a full run rather than carried forward by hand.)
 
 | tier | targets | tests | what it is for |
 |---|---:|---:|---|
 | `smoke` | 1 | 8 | the ten-second answer: a real file opened, written, reopened, read |
-| `unit` | 28 | 1,124 | every crate's own `#[cfg(test)]` modules |
-| `engine` | 34 | 222 | SQL and storage behaviour over real database files |
-| `differential` | 30 | 304 | graded against the pinned SQLite 3.53.4 |
-| `durability` | 17 | 149 | crashes, injected faults, corruption and concurrency |
-| `e2e` | 8 | 55 | the public surfaces an application binds to, end to end |
-| `perf` | 1 | 5 | the cost guards — **runs alone**, see §5 |
-| `retrieval` | 6 | 438 | the embedding and retrieval engine, and its graded harness |
-| `tooling` | 4 | 31 | the checks that keep the repository's own rules true |
+| `unit` | 26 | 1,230 | every crate's own `#[cfg(test)]` modules |
+| `engine` | 44 | 299 | SQL and storage behaviour over real database files |
+| `differential` | 29 | 292 | graded against the pinned SQLite 3.53.4 |
+| `durability` | 20 | 158 | crashes, injected faults, corruption and concurrency |
+| `e2e` | 15 | 94 | the public surfaces an application binds to, end to end |
+| `perf` | 1 | 6 | the cost guards — **runs alone**, see §5 |
+| `retrieval` | 6 | 506 | the embedding and retrieval engine, and its graded harness |
+| `tooling` | 7 | 49 | the checks that keep the repository's own rules true |
 
 The map that assigns them is `tests/selection.toml`, and it is data rather than
 code so that a person can read the whole arrangement in one file.
@@ -261,10 +266,11 @@ conflating them would let a tier choice quietly narrow a correctness question.
 ### 4.1 Why `cargo test` is not enough
 
 `cargo test` runs test binaries **one at a time**. That is right for a crate and
-wrong for a workspace of 129 targets on a 24-core machine, and the shape of this
-suite makes it especially wrong: **131 of the 194 binaries finish in under a
-tenth of a second**, while five account for most of the clock. Running them in
-sequence leaves the machine idle for almost all of a run.
+wrong for a workspace of 149 targets on a 24-core machine, and the shape of this
+suite makes it especially wrong: most binaries finish in under a tenth of a
+second (131 of 194 when this was last measured, before task-1911 added targets;
+not re-counted this pass), while five account for most of the clock. Running
+them in sequence leaves the machine idle for almost all of a run.
 
 It also starts 43 bin harnesses that hold no tests, to be told they have
 nothing to run.
@@ -438,49 +444,81 @@ warm build. `cargo build` time is excluded except where stated.
 
 ### 6.1 The whole suite
 
+Re-measured after task-1911 (149 targets, 2,642 tests, up from 129/2,336) on a
+box that was not quiet — several agent terminals were active in this tree at
+the time, which is exactly the load §1.7 and §7.3 warn a wall-clock reading
+is sensitive to. The counts are exact; the wall-clock figures below are this
+run, not a guaranteed one, and worth a re-read on a quiet box before they are
+leaned on for anything more than a rough sense of scale.
+
+A later pass in the same ticket fixed a real checkpoint data-loss defect
+Fable's review found and added three regression tests plus a fourth crash
+sweep pinning it and the two independent bugs the fix itself needed (§2 above
+has the current total, 2,645); the wall-clock figures below were not
+re-measured against that count, since three more tests change nothing at this
+scale.
+
 | | wall | note |
 |---|---:|---|
-| `cargo test --workspace` (serial) | **315 s** | includes ~70 s of build; 164 binaries + 30 doc-test targets |
-| `inillucent-testrun` (parallel, everything) | **~155 s** | 129 targets, 2,336 tests, 1,438 s of processor time — **9.0x** |
-| `inillucent-testrun` without `retrieval` | **~35 s** | 123 targets, 1,898 tests |
+| `cargo test --workspace` (serial) | **315 s** *(not re-measured this pass)* | includes ~70 s of build; 164 binaries + 30 doc-test targets |
+| `inillucent-testrun` (parallel, everything) | **~302 s** | 149 targets, 2,642 tests, 2,676 s of processor time — **8.9x** |
+| `inillucent-testrun` without `retrieval` | **~89 s** | 143 targets, 2,136 tests |
 
-The retrieval tier is 121 s of the 155 s, and its two largest targets —
-`inillucent-core::lib` and `inillucent-bench` — are 100 s+ each on their own.
-**They are the floor of a full parallel run**: no scheduling improves on the
-longest single binary. Everything else finishes in the time they take.
+The retrieval tier is 213.8 s on its own (§6.2), and its two largest targets —
+`inillucent-core::lib` and `inillucent-bench` — are 250 s+ each on their own in
+a full run because of the same contention. **They are the floor of a full
+parallel run**: no scheduling improves on the longest single binary. Everything
+else finishes in the time they take.
 
 ### 6.2 Tier by tier
 
+Each tier run in isolation (`--tier <name>` alone), not carved out of the full
+run above - so these do not sum to 6.1's total, and each one is its own
+build-plus-run rather than a slice of one shared build.
+
 | tier | wall | targets | tests |
 |---|---:|---:|---:|
-| `smoke` | **1.0 s** | 1 | 8 |
-| `e2e` | 3.2 s | 8 | 55 |
-| `tooling` | 4.6 s | 4 | 31 |
-| `unit` | 7.1 s | 28 | 1,124 |
-| `perf` | 9.1 s | 1 | 5 |
-| `durability` | 22.6 s | 17 | 149 |
-| `differential` | 13.8 s | 30 | 304 |
-| `engine` | 29.7 s | 34 | 222 |
-| `retrieval` | 121.2 s | 6 | 438 |
+| `smoke` | 0.8 s | 1 | 8 |
+| `tooling` | 5.0 s | 7 | 49 |
+| `e2e` | 8.6 s | 15 | 94 |
+| `unit` | 6.8 s | 26 | 1,230 |
+| `perf` | 35.1 s | 1 | 6 |
+| `durability` | 134.7 s | 20 | 158 |
+| `differential` | 36.1 s | 29 | 292 |
+| `engine` | 37.8 s | 44 | 299 |
+| `retrieval` | 213.8 s | 6 | 506 |
 
-Each figure includes the runner's own startup and its `cargo` target listing,
-about 1.2 s — which is why `smoke` reads 1.3 s and its binary reads 0.1 s.
+`perf`'s 35.1 s agrees with §5.1's "about half a minute" where the old 9.1 s
+in this table did not; that inconsistency predates this pass and is corrected
+here rather than carried forward. Each figure includes the runner's own
+startup and its `cargo` target listing, about 1.2 s.
 
-### 6.3 The five that matter
+### 6.3 The eight that matter
 
-Under the parallel runner, where contention inflates each:
+Re-measured post task-1911. Three of the original five (`inillucent-migrate::corpus`,
+`inillucent-compat::corruption`, `inillucent-compat::semantics`) are still slow
+but no longer the tail; the free-map durability fix's own crash campaigns and
+the differential re-point's new fixture-heavy suites now dominate it, so the
+list is longer rather than swapped one-for-one. Under the parallel runner,
+where contention inflates each, and on a box that was not quiet (see §6.1):
 
 | target | wall |
 |---|---:|
-| `inillucent-core::lib` | 134 s |
-| `inillucent-bench::inillucent-bench` | 99 s |
-| `inillucent-migrate::corpus` | 59 s |
-| `inillucent-compat::corruption` | 49 s |
-| `inillucent-compat::semantics` | 44 s |
+| `inillucent-core::lib` | 261 s |
+| `inillucent-bench::inillucent-bench` | 249 s |
+| `inillucent-compat::search_crash` | 224 s |
+| `inillucent-compat::durability` | 213 s |
+| `inillucent-compat::wal_crash` | 179 s |
+| `inillucent-compat::new_engine_recovery_shapes` | 152 s |
+| `inillucent-compat::semantics` | 122 s |
+| `inillucent-migrate::corpus` | 98 s |
 
-Serially they are 40 s, 59 s, 20 s, 20 s and 10 s. The inflation is the price of
-running twenty-four at once and it is worth paying: the sum is 244 s serial
-against 146 s wall parallel.
+Serial figures for this list were not re-measured this pass — the original
+five's serial numbers (40 s, 59 s, 20 s, 20 s, 10 s) do not apply to the three
+new entries, which did not exist when they were taken. What is still true is
+the shape: these are the floor of a full parallel run, and running twenty-four
+at once is worth paying for regardless of the exact serial-versus-parallel
+ratio on any given day.
 
 ---
 

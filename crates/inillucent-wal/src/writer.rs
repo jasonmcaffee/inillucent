@@ -397,6 +397,49 @@ impl Wal {
         }
     }
 
+    /// Returns the segment that holds a given LSN.
+    ///
+    /// **A checkpoint's own recovery point is not always in the segment the
+    /// checkpoint just rolled to, and pairing it with that segment anyway is a
+    /// real bug, not a simplification.** `roll_segment` moves the active
+    /// segment forward before a checkpoint computes its recovery point, so the
+    /// two used to be assumed to march together; that held as long as recovery
+    /// could only ever start at the log's own durable end. Once
+    /// `ImportedDatabase::checkpoint` began bounding the recovery point by a
+    /// held-back page's earlier, already-checkpointed `rec_lsn` too - the fix
+    /// for the checkpoint-during-an-open-transaction defect - the recovery
+    /// point can land in an *earlier* segment than the one just rolled to, and
+    /// `RecoveryStart::sequence` has to name that one: `read_chain` starts
+    /// reading at the segment number it is given and never looks earlier, so
+    /// pairing an old LSN with the new segment made recovery start scanning
+    /// bytes that do not contain it, silently skipping every record between
+    /// the true segment and the new one - among them the very commit the
+    /// bound exists to keep. Reproduced by
+    /// `a_checkpoint_during_a_later_open_transaction_keeps_the_earlier_commit`
+    /// in `inillucent-compat`'s `durability.rs`.
+    ///
+    /// Walks backward from the segment being written, because that is the one
+    /// call already answers with no I/O, and stops at the first segment whose
+    /// own `first_lsn` is at or below `lsn` - segments are contiguous and
+    /// numbered in order, so that segment is the one that holds it. A segment
+    /// whose header cannot be read (already retired, or genuinely gone) ends
+    /// the walk at the last one that could - `lsn` has to be at or above the
+    /// current segment's own retention floor for this to be asked at all, so
+    /// that is always a real, present segment.
+    ///
+    /// @param lsn - the stream position to locate
+    pub fn sequence_containing(&self, lsn: u64) -> u64 {
+        let mut candidate = self.sequence();
+        while candidate > 1 {
+            match self.first_lsn_of(candidate) {
+                Some(first) if first <= lsn => break,
+                Some(_) => candidate = candidate.saturating_sub(1),
+                None => break,
+            }
+        }
+        candidate
+    }
+
     /// Reports whether a failed write has stopped the log.
     pub fn is_poisoned(&self) -> bool {
         self.with_inner(|inner| inner.poisoned.is_some())
