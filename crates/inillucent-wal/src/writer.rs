@@ -389,6 +389,17 @@ impl Wal {
         self.with_inner(|inner| inner.stats)
     }
 
+    /// Returns the database identity every segment of this log is stamped
+    /// with.
+    ///
+    /// Exists for a caller that wants to scan its own log with
+    /// `inillucent_wal::recover` - `RecoveryStart` needs this to reject a
+    /// segment belonging to a different database, and nothing before this
+    /// exposed it outside the crate.
+    pub fn uuid(&self) -> u128 {
+        self.shared.uuid
+    }
+
     /// Returns the sequence number of the segment being written.
     pub fn sequence(&self) -> u64 {
         match self.shared.io.lock() {
@@ -397,7 +408,8 @@ impl Wal {
         }
     }
 
-    /// Returns the segment that holds a given LSN.
+    /// Returns the segment that holds a given LSN, or refuses if none present
+    /// does.
     ///
     /// **A checkpoint's own recovery point is not always in the segment the
     /// checkpoint just rolled to, and pairing it with that segment anyway is a
@@ -421,23 +433,50 @@ impl Wal {
     /// Walks backward from the segment being written, because that is the one
     /// call already answers with no I/O, and stops at the first segment whose
     /// own `first_lsn` is at or below `lsn` - segments are contiguous and
-    /// numbered in order, so that segment is the one that holds it. A segment
-    /// whose header cannot be read (already retired, or genuinely gone) ends
-    /// the walk at the last one that could - `lsn` has to be at or above the
-    /// current segment's own retention floor for this to be asked at all, so
-    /// that is always a real, present segment.
+    /// numbered in order, so that segment is the one that holds it.
+    ///
+    /// **Refuses rather than guesses the moment a segment cannot be read -
+    /// continuing past it is not a fix, because `read_chain` cannot skip a
+    /// gap either way.** An earlier version of this function kept walking
+    /// lower after an unreadable segment, on the theory that an *earlier*
+    /// surviving segment might still legitimately hold `lsn`. Codex Sol's
+    /// review of this ticket named the flaw directly: even when such an
+    /// earlier segment exists and its own `first_lsn` is at or below `lsn`,
+    /// `read_chain` reads segments in strict, unbroken sequence from where it
+    /// starts - the gap left by the unreadable one still ends the chain
+    /// before it ever reaches the records above it, silently discarding them
+    /// the same way pairing `recovery_from` with the wrong segment did
+    /// originally. There is no number this function could return in that
+    /// situation that `read_chain` could actually use, so it has to say so
+    /// rather than hand back one anyway.
+    ///
+    /// This is also why the walk needs no explicit upper-bound check on a
+    /// candidate: every rejection of the segment *above* it already proved
+    /// `lsn` is below that segment's own `first_lsn`, so a candidate accepted
+    /// here is bounded on both sides by segments confirmed present and
+    /// confirmed contiguous with it.
     ///
     /// @param lsn - the stream position to locate
-    pub fn sequence_containing(&self, lsn: u64) -> u64 {
+    pub fn sequence_containing(&self, lsn: u64) -> DbResult<u64> {
         let mut candidate = self.sequence();
-        while candidate > 1 {
+        loop {
             match self.first_lsn_of(candidate) {
-                Some(first) if first <= lsn => break,
-                Some(_) => candidate = candidate.saturating_sub(1),
-                None => break,
+                Some(first) if first <= lsn => return Ok(candidate),
+                Some(first) if candidate <= 1 => {
+                    return Err(misuse(format!(
+                        "no present segment holds lsn {lsn}: segment 1 starts at {first}, \
+                         still above it"
+                    )));
+                }
+                Some(_) => candidate -= 1,
+                None => {
+                    return Err(misuse(format!(
+                        "no present segment holds lsn {lsn}: segment {candidate} could not be \
+                         read, and the gap it leaves cannot be skipped over"
+                    )));
+                }
             }
         }
-        candidate
     }
 
     /// Reports whether a failed write has stopped the log.

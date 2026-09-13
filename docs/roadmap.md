@@ -334,6 +334,30 @@ publishes the measured range and how to choose `N`.
 Every platform's archive is built on that platform, and there is no macOS build machine.
 `cargo install inillucent-cli` builds it from source in the meantime.
 
+## 12. Recovery can read a page before redo has had a chance to rewrite it
+
+Found while hardening a test for task-1911's free-map checkpoint fix, not root-caused further.
+Recovery reads page 4 and fails its checksum before the redo pass that would have rebuilt it ever
+runs, so a page the log could have repaired makes the whole open fail instead. Reproduced at cut 7
+of the free-map checkpoint crash campaign (`crates/inillucent-compat/tests/free_map_checkpoint_crash.rs`)
+under `PRAGMA journal_mode = off`, with every current checkpoint fix in place - it is not the
+free-map defect that campaign exists to check, and does not reproduce under the default `delete`
+journal, whose rollback journal still repairs a torn page on its own.
+
+It is the same shape `open_file`'s own comment describes for the catalog root - a page whose current
+bytes fail their checksum before anything has replayed a single record, at a point in `open_file`
+where recovery has not run yet and cannot run first either, because its own row decoder needs a
+shape that comes from the very read that is failing. The catalog root has a repair pass for exactly
+this circle: a tolerant first pass replays what it can without the catalog, then the catalog is read
+again. Page 4 is not the catalog root, so that repair pass does not reach it.
+
+`journal_mode = off` is documented (`crates/inillucent-pool/src/journal.rs`) to mean a torn
+checkpoint page is not recoverable at all, so part of this is that mode behaving as specified. What
+is not explained by that alone is the read happening before redo rather than after - `Applier::page_lsn`
+already answers `Ok(None)` for a page it cannot read, precisely so redo can rebuild one instead of
+failing on it, which means the failing read here is happening somewhere earlier than redo, on a path
+the catalog root's own repair pass does not generalize to. Not investigated past this.
+
 ## What task-1911 closed
 
 Eight items came off this list, and the numbering above is what is left. Each is named here so a

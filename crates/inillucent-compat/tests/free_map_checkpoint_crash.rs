@@ -42,7 +42,10 @@ use inillucent_sim::failpoint::Failure;
 use inillucent_sim::media::MediaModel;
 use inillucent_sim::sim_vfs::{CrashSnapshot, SimConfig, SimVfs};
 use inillucent_tree::datum::OwnedDatum;
-use inillucent_vfs::Vfs;
+use inillucent_vfs::path::DbPath;
+use inillucent_vfs::{AccessMode, Vfs};
+use inillucent_wal::record::{Body, Record};
+use inillucent_wal::recover::{recover, RecoveryStart, Redo};
 
 /// The page size this fixture builds at, and the frames the pool holds.
 ///
@@ -368,6 +371,24 @@ const FRESH_ID: i64 = 999;
 /// state before this checkpoint or the state after it, which is exactly what
 /// stamping the image with its own record's LSN before installing it fixes -
 /// see `inillucent_txn::engine::log_free_map_pages`.
+///
+/// **Runs under the default `delete` journal, on purpose - not `off`.** A
+/// first version of this test switched to `PRAGMA journal_mode = off` to keep
+/// the rollback journal's own hot-journal repair from masking the defect, the
+/// same reasoning `durability.rs`'s `Journal::NO_ROLLBACK_JOURNAL` doc comment
+/// gives for the no-steal campaigns. That reasoning does not transfer here:
+/// `off` is documented (`inillucent-pool/src/journal.rs`) to mean a torn
+/// checkpoint page is simply not recoverable, so a test that crashes under
+/// `off` and expects recovery anyway is asking for the one thing that mode
+/// explicitly does not promise - it found a real, separate gap (a page read
+/// before redo can rewrite it, the same shape as the catalog-root circle
+/// `open_file` describes; see `docs/roadmap.md`), not the free-map defect
+/// this test exists to check. [`a_real_free_map_change_is_logged_as_a_write_page_record`]
+/// is what proves the `WritePage` branch runs and is required, directly,
+/// without depending on a crash or a journal mode at all - this sweep is
+/// still worth keeping under the default mode, because a real free-map
+/// change surviving a crash under the mode this engine actually ships with
+/// is still worth measuring.
 #[test]
 fn a_crash_during_a_free_map_checkpoint_that_actually_changed_still_reopens() {
     let (expected_ids, expected_count) = {
@@ -440,5 +461,147 @@ fn a_crash_during_a_free_map_checkpoint_that_actually_changed_still_reopens() {
     assert!(
         cut_points >= 5,
         "a sweep that reached {cut_points} cut points inside the checkpoint is not a sweep"
+    );
+}
+
+/// Notes which pages a scanned log's `Body::WritePage` records name.
+///
+/// A dry run in the sense that matters here: nothing about this touches a
+/// data file or rebuilds a page, so it can answer "what did the log record"
+/// as a question distinct from "what did recovery do with it" - the two the
+/// crash sweeps above conflate, since a mode or a repair pass can make the
+/// second one succeed regardless of the first.
+#[derive(Default)]
+struct WritePagePages {
+    /// Every page number a `Body::WritePage` record was found for.
+    pages: std::collections::BTreeSet<u64>,
+}
+
+impl Redo for WritePagePages {
+    /// Always "not yet applied" - this observer rebuilds nothing, so every
+    /// record's pages are always worth handing to `redo`.
+    ///
+    /// @param page - unused
+    fn page_lsn(&mut self, _page: u64) -> inillucent_base::DbResult<Option<u64>> {
+        Ok(None)
+    }
+
+    /// Notes the page a `Body::WritePage` record names; ignores every other
+    /// record body, because this observer answers one question only.
+    ///
+    /// @param record - the record to inspect
+    /// @param wanted - unused - every page is always "wanted" (see `page_lsn`)
+    fn redo(&mut self, record: &Record<'_>, _wanted: &[bool]) -> inillucent_base::DbResult<()> {
+        if let Body::WritePage { page, .. } = record.body {
+            self.pages.insert(page);
+        }
+        Ok(())
+    }
+}
+
+/// Returns the lowest segment number that still has a file behind it.
+///
+/// **Neither end of the range is safe to assume.** Segment 1 can already be
+/// retired by an earlier checkpoint - `built`'s own fixture checkpoint runs
+/// before the one under test - so `RecoveryStart::fresh` (which always names
+/// segment 1) can point `read_chain` at a segment that is not there, and an
+/// absent first segment ends the chain empty rather than skipping ahead to
+/// the next one. Nor is `Wal::sequence` (the segment being written *right
+/// now*) safe to assume either: `roll_if_full` can roll to a new segment
+/// mid-checkpoint, purely because the current one crossed its size, which
+/// puts the checkpoint's own `Checkpoint` marker record in a later segment
+/// than the `WritePage` record the same checkpoint appended moments before -
+/// measured directly, the first version of this function scanned only
+/// `Wal::sequence`'s segment and found the marker record and nothing else.
+/// The lowest segment that still exists is the one guaranteed to hold
+/// everything from there forward, including whichever segment the
+/// `WritePage` record actually landed in.
+///
+/// @param vfs - the file system the log lives on
+/// @param wal - the log, read only for its own current segment number
+fn lowest_present_segment(vfs: &dyn Vfs, wal: &inillucent_wal::Wal) -> u64 {
+    let current = wal.sequence();
+    for candidate in 1..=current {
+        if vfs
+            .access(&wal.segment_path(candidate), AccessMode::Exists)
+            .unwrap_or(false)
+        {
+            return candidate;
+        }
+    }
+    current
+}
+
+/// Returns which pages a `Body::WritePage` record names, scanning every
+/// segment still on disk.
+///
+/// @param vfs - the file system the log lives on
+/// @param wal - the log to scan, read only for its own identity
+fn write_page_targets(vfs: &dyn Vfs, wal: &inillucent_wal::Wal) -> std::collections::BTreeSet<u64> {
+    let mut observer = WritePagePages::default();
+    let start = RecoveryStart {
+        uuid: wal.uuid(),
+        checkpoint_lsn: 0,
+        sequence: lowest_present_segment(vfs, wal),
+        cts_watermark: 0,
+        doubtful: std::collections::BTreeSet::new(),
+    };
+    recover(vfs, &DbPath::new(path()), start, &mut observer).expect("the log scans");
+    observer.pages
+}
+
+/// The checkpoint that changes the free map for real logs a `Body::WritePage`
+/// record for it - not only the redundant "unchanged" checkpoint the sibling
+/// campaign already proves is safe to crash during.
+///
+/// **Asserts the branch Codex Sol's review of this ticket found unproven,
+/// directly - not through a crash, and not through a journal mode.** The
+/// crash sweep above tried proving this by removing the rollback journal
+/// (`PRAGMA journal_mode = off`) so its hot-journal repair could not mask a
+/// missing `WritePage` record; that reasoning does not transfer from
+/// `durability.rs`'s no-steal campaigns, because `off` does not promise a
+/// torn checkpoint page is recoverable at all - it found a real, separate gap
+/// (write-up in `docs/roadmap.md`) instead of proving anything about the free
+/// map. This test asks the narrower, truer question: after a checkpoint that
+/// changed the free map, does the log it just wrote contain a `WritePage`
+/// record for it, full stop - read straight out of the log with
+/// `inillucent_wal::recover`'s `Redo` trait via [`write_page_targets`], which
+/// never touches the data file and so cannot be satisfied by any journal or
+/// repair mechanism instead of the record itself.
+///
+/// Checked by hand: removing `log_free_map_pages`'s `wal.append(0,
+/// Body::WritePage { .. })` call (and its LSN stamp) makes this assertion
+/// fail - the free map still changes correctly in memory and in the file,
+/// but the log never says so, which is exactly the gap Fable's review named
+/// and the crash sweep above could not, on its own, prove closed.
+#[test]
+fn a_real_free_map_change_is_logged_as_a_write_page_record() {
+    let vfs = built(8_000);
+    let mut engine =
+        ImportedDatabase::open_on(Arc::clone(&vfs) as Arc<dyn Vfs>, path(), PAGE_SIZE, FRAMES)
+            .expect("the fixture reopens");
+    // An unrelated transaction, left open through the checkpoint under test.
+    // Without this, the free map's own WritePage record is retired as part
+    // of the very checkpoint that appended it - the instant its page reaches
+    // the file, `recovery_from` advances past the record's own LSN and
+    // `retire_segments_below` reclaims the segment holding it, correctly,
+    // because nothing left dirty still needs it. That is what a first version
+    // of this test found: the log scanned clean every time, fix or no fix,
+    // because there was never anything left to find. Holding an unrelated
+    // page open pins `recovery_from` below this checkpoint's new records -
+    // the free map's own pages are untouched by it and still flush normally -
+    // so the segment survives long enough to inspect.
+    run(&mut engine, "BEGIN");
+    insert(&mut engine, 500, 'x');
+    delete(&mut engine, 1);
+    insert(&mut engine, FRESH_ID, 'z');
+    engine
+        .checkpoint()
+        .expect("the checkpoint under test, unarmed");
+    let logged = write_page_targets(vfs.as_ref(), engine.wal());
+    assert!(
+        !logged.is_empty(),
+        "the checkpoint changed the free map for real, but no Body::WritePage record for it \
+         is anywhere in the log"
     );
 }
