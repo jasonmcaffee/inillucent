@@ -68,6 +68,8 @@ struct Invocation {
     no_follow: bool,
     /// The options this engine has no equivalent for, with the reason for each.
     refused: Vec<(String, &'static str)>,
+    /// The words that are shaped like an option and are not one of them.
+    unknown: Vec<String>,
 }
 
 /// The options that name a SQLite internal this engine does not have.
@@ -183,11 +185,15 @@ const REFUSED: &[(&str, bool, &str)] = &[
 
 /// Parses the command line the way `sqlite3` does.
 ///
-/// Options come first, then the file, then any statements. An unknown option is
-/// not an error: `sqlite3` treats it as the file name, and a script that passes
-/// one through is better served by opening a strangely-named file than by an
-/// argument parser with opinions. `--` ends the options, so a file whose name
-/// begins with a dash can still be opened.
+/// Options come first, then the file, then any statements. An unrecognised word
+/// that begins with a dash is an error, which is what `sqlite3` itself does:
+/// version 3.53.4 answers `sqlite3 --db app.db "SELECT 1"` with `Error: unknown
+/// option: -db`, opens nothing and exits non-zero. This shell used to take such
+/// a word as the file name instead, so a mistyped option created a database
+/// called `--db` in whatever directory the caller was standing in, and files
+/// named `--`, `-d` and `--db` turned up in a repository from exactly that.
+/// `--` still ends the options, so a file whose name begins with a dash can be
+/// opened by writing it after one.
 fn parse(arguments: impl Iterator<Item = String>) -> Invocation {
     let mut invocation = Invocation {
         path: ":memory:".to_string(),
@@ -200,6 +206,7 @@ fn parse(arguments: impl Iterator<Item = String>) -> Invocation {
         if_exists: false,
         no_follow: false,
         refused: Vec::new(),
+        unknown: Vec::new(),
     };
     let mut named = false;
     let mut only_positional = false;
@@ -269,6 +276,11 @@ fn parse(arguments: impl Iterator<Item = String>) -> Invocation {
                     invocation.commands.push(value);
                 }
             }
+            // Reaching here means no option matched, so a word still carrying
+            // a leading dash is a mistyped option rather than a file name.
+            // Everything after `--` skips this arm entirely, which is how a
+            // file whose name begins with a dash is still opened.
+            _ if argument.starts_with('-') => invocation.unknown.push(argument),
             _ => take_positional(&mut invocation, argument, &mut named),
         }
     }
@@ -336,6 +348,18 @@ fn main() {
     if invocation.help {
         usage();
         return;
+    }
+    // Before anything is opened, and before the refusals below: a word that is
+    // shaped like an option and is not one means the rest of the line was
+    // probably misread too. The file name is the word after it, so carrying on
+    // would create a database under the typo's name and run the real file name
+    // as a statement.
+    if !invocation.unknown.is_empty() {
+        for option in &invocation.unknown {
+            eprintln!("Error: unknown option: {option}");
+        }
+        eprintln!("Use -help for a list of options.");
+        std::process::exit(2);
     }
     // Before anything is opened: an option nobody can honour means the command
     // line was misunderstood, and running most of it would be worse than
@@ -478,6 +502,51 @@ mod tests {
     fn no_file_means_memory() {
         let parsed = parse(std::iter::empty());
         assert_eq!(parsed.path, ":memory:");
+    }
+
+    /// A word shaped like an option and matching none of them is not the file.
+    #[test]
+    fn an_unknown_option_is_not_the_file_name() {
+        let parsed = parse(
+            ["--db", "app.rdb", "SELECT 1"]
+                .iter()
+                .map(|word| (*word).to_string()),
+        );
+        assert_eq!(parsed.unknown, vec!["--db"]);
+        assert_eq!(parsed.path, "app.rdb");
+        assert_eq!(parsed.statements, vec!["SELECT 1"]);
+    }
+
+    /// The short spellings that turned up on disk are caught the same way.
+    #[test]
+    fn every_dashed_word_that_is_not_an_option_is_reported() {
+        let parsed = parse(
+            ["-d", "app.rdb", "--nonsense"]
+                .iter()
+                .map(|word| (*word).to_string()),
+        );
+        assert_eq!(parsed.unknown, vec!["-d", "--nonsense"]);
+    }
+
+    /// After `--`, a name that begins with a dash is a file again.
+    #[test]
+    fn the_separator_still_opens_a_dashed_file() {
+        let parsed = parse(["--", "-weird.rdb"].iter().map(|word| (*word).to_string()));
+        assert!(parsed.unknown.is_empty());
+        assert_eq!(parsed.path, "-weird.rdb");
+    }
+
+    /// A refused option is still a refusal rather than an unknown word.
+    #[test]
+    fn a_refused_option_is_not_reported_as_unknown() {
+        let parsed = parse(
+            ["-mmap", "268435456", "app.rdb"]
+                .iter()
+                .map(|word| (*word).to_string()),
+        );
+        assert!(parsed.unknown.is_empty());
+        assert_eq!(parsed.refused.len(), 1);
+        assert_eq!(parsed.path, "app.rdb");
     }
 
     /// An option that takes a value consumes the next word.

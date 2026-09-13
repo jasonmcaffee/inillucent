@@ -25,6 +25,15 @@
 #![deny(clippy::unwrap_used)]
 #![deny(clippy::expect_used)]
 #![deny(clippy::panic)]
+#![cfg_attr(
+    test,
+    allow(
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::unwrap_used
+    )
+)]
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -92,10 +101,14 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     };
     // A bare file name is the shell, the way `sqlite3 app.db` is. It is the one
-    // piece of guessing this parser does, and it is safe because no verb in the
-    // table is a plausible file name.
+    // piece of guessing this parser does, and `names_a_database` is the guard on
+    // it: a word that could not be a file name is a mistyped command, and
+    // handing one to the shell creates a database named after the typo.
     let Some(command) = command::find(&verb) else {
-        return shell_like(&arguments);
+        if names_a_database(&verb) {
+            return shell_like(&arguments);
+        }
+        return unknown_verb(&verb);
     };
     match command.name {
         "shell" => shell_like(&invocation.rest),
@@ -106,6 +119,130 @@ fn main() -> ExitCode {
         }
         _ => dispatch(command, &invocation),
     }
+}
+
+/// Returns whether a word the command table does not know could name a database.
+///
+/// **This is the guard on the `sqlite3`-shaped fallback, and the fallback is
+/// why it has to exist.** `inillucent <file> [SQL...]` runs the shell, so a
+/// first word that is not a command used to be handed straight to it - and the
+/// shell opens a database that is not there by creating it. A mistyped command
+/// therefore exited 0, printed nothing, and left a 128 KiB file and a log
+/// segment named after the typo in whatever directory the caller was standing
+/// in.
+///
+/// A word is read as a database when it is the in-memory spelling, a `file:`
+/// URI, something that is already there, or something written the way a path is
+/// written: a separator inside it, a drive letter in front of it, or an
+/// extension on the end. A mistyped command has none of those. A caller who
+/// does want a new file with no extension in the current directory writes
+/// `./name`, which has a separator, and the refusal says so.
+///
+/// @param word - the first word of the command line
+fn names_a_database(word: &str) -> bool {
+    if word == ":memory:" || word.starts_with("file:") {
+        return true;
+    }
+    if std::path::Path::new(word).exists() {
+        return true;
+    }
+    if word.contains('/') || word.contains('\\') {
+        return true;
+    }
+    // `C:app.rdb` is drive-relative: it names a file on Windows while carrying
+    // no separator at all.
+    let mut letters = word.chars();
+    if letters
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic())
+        && letters.next() == Some(':')
+    {
+        return true;
+    }
+    std::path::Path::new(word).extension().is_some()
+}
+
+/// Refuses a first word that is neither a command nor a possible file name.
+///
+/// Exit code 2, "a command line nobody could act on", rather than 1: nothing
+/// ran, so there is no statement that could have failed.
+///
+/// @param word - what was written where a command was expected
+fn unknown_verb(word: &str) -> ExitCode {
+    eprintln!("inillucent: '{word}' is not a command, and it does not name a database file.");
+    let nearest = nearest_commands(word);
+    if !nearest.is_empty() {
+        eprintln!("  Did you mean: {}?", nearest.join(", "));
+    }
+    eprintln!(
+        "  Run 'inillucent help' for the {} commands there are.",
+        command::COMMANDS.len()
+    );
+    eprintln!(
+        "  To open a file of that name as a database, write it as a path: inillucent ./{word}"
+    );
+    ExitCode::from(2)
+}
+
+/// Returns the command names closest to a word somebody mistyped.
+///
+/// Up to three, nearest first: a command the word is the start of, or one
+/// within two single-character edits of it. Past two edits a suggestion stops
+/// being a suggestion and becomes the command list, which the next line of the
+/// refusal points at anyway.
+///
+/// @param word - what was written
+fn nearest_commands(word: &str) -> Vec<&'static str> {
+    let lowered = word.to_ascii_lowercase();
+    let mut scored: Vec<(usize, &'static str)> = command::COMMANDS
+        .iter()
+        .filter_map(|candidate| {
+            if !lowered.is_empty() && candidate.name.starts_with(&lowered) {
+                return Some((0, candidate.name));
+            }
+            let gap = distance(&lowered, candidate.name);
+            (gap <= 2).then_some((gap, candidate.name))
+        })
+        .collect();
+    scored.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(right.1)));
+    scored.truncate(3);
+    scored.into_iter().map(|(_, name)| name).collect()
+}
+
+/// Returns how many single-character edits separate two words.
+///
+/// The ordinary two-row edit distance, written over `get` rather than indexes
+/// because this binary denies `clippy::indexing_slicing`.
+///
+/// @param from - the word somebody wrote
+/// @param to - the command it is being compared against
+fn distance(from: &str, to: &str) -> usize {
+    let target: Vec<char> = to.chars().collect();
+    let mut previous: Vec<usize> = (0..=target.len()).collect();
+    for (row, wrote) in from.chars().enumerate() {
+        let mut current: Vec<usize> = Vec::with_capacity(target.len().saturating_add(1));
+        current.push(row.saturating_add(1));
+        for (column, expected) in target.iter().enumerate() {
+            let substitution = previous
+                .get(column)
+                .copied()
+                .unwrap_or(usize::MAX)
+                .saturating_add(usize::from(wrote != *expected));
+            let deletion = previous
+                .get(column.saturating_add(1))
+                .copied()
+                .unwrap_or(usize::MAX)
+                .saturating_add(1);
+            let insertion = current
+                .get(column)
+                .copied()
+                .unwrap_or(usize::MAX)
+                .saturating_add(1);
+            current.push(substitution.min(deletion).min(insertion));
+        }
+        previous = current;
+    }
+    previous.last().copied().unwrap_or(0)
 }
 
 /// Returns the command help topic requested with a shared help flag.
@@ -455,4 +592,62 @@ fn print_overview() {
     );
     println!();
     println!("Exit codes: 0 ok, 1 failed, 2 bad command line, 3 the engine has not built that.");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A mistyped command is not taken for the name of a database to create.
+    #[test]
+    fn a_mistyped_command_does_not_name_a_database() {
+        for word in ["bogusverb", "qeury", "descrbe", "quer", ""] {
+            assert!(!names_a_database(word), "{word} was read as a file name");
+        }
+    }
+
+    /// Every spelling a database is actually written in is still read as one.
+    #[test]
+    fn a_database_is_recognised_by_how_it_is_written() {
+        for word in [
+            ":memory:",
+            "app.rdb",
+            "./app",
+            "data/app",
+            "C:\\tmp\\app",
+            "C:app",
+            "file:app.rdb?mode=ro",
+        ] {
+            assert!(names_a_database(word), "{word} was not read as a file name");
+        }
+    }
+
+    /// A typo is answered with the command it is closest to.
+    #[test]
+    fn the_nearest_command_is_suggested() {
+        assert!(nearest_commands("qeury").contains(&"query"));
+        assert!(nearest_commands("descr").contains(&"describe"));
+        assert!(nearest_commands("expor").contains(&"export"));
+    }
+
+    /// A word close to nothing is answered with no suggestion at all.
+    #[test]
+    fn a_word_close_to_nothing_suggests_nothing() {
+        assert!(nearest_commands("zzzzzzzzzzzz").is_empty());
+    }
+
+    /// At most three suggestions, so the refusal stays readable.
+    #[test]
+    fn there_are_never_more_than_three_suggestions() {
+        assert!(nearest_commands("e").len() <= 3);
+    }
+
+    /// The edit distance is the ordinary one.
+    #[test]
+    fn the_distance_counts_single_character_edits() {
+        assert_eq!(distance("query", "query"), 0);
+        assert_eq!(distance("quer", "query"), 1);
+        assert_eq!(distance("qeury", "query"), 2);
+        assert_eq!(distance("", "query"), 5);
+    }
 }

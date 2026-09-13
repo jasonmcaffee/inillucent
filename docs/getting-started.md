@@ -82,6 +82,48 @@ The shell answers 63 of `sqlite3`'s 65 dot commands, `.tables`, `.schema`, `.mod
 `.dump` among them. The two it does not answer are `.expert` and `.session`; [SQL support](sql.md)
 says why.
 
+## A first word that is not a command
+
+`inillucent` reads its first word as a command. When the command table does not have that word, it is
+read as a database to open in the shell instead, so `inillucent app.rdb "SELECT 1"` works the way
+`sqlite3 app.rdb "SELECT 1"` does. The file is created if it is not there yet, so a word read as a
+database is a file written to disk.
+
+So a word is read as a database only when it could be a file name.
+
+| the first word | what it opens |
+|---|---|
+| `:memory:` | a database held in memory |
+| `file:app.rdb?mode=ro` | the database the URI names |
+| a word that is already a file on disk | that file |
+| a word with a separator in it, such as `./ledger` or `data/app` | that path |
+| a word with a drive letter in front of it, such as `C:\tmp\app` | that path |
+| a word with an extension on the end, such as `app.rdb` | that file, created if it is not there |
+| anything else | nothing: it is refused |
+
+Anything else is a mistyped command. It is refused before anything is opened, with exit code 2:
+
+```text
+inillucent: 'qeury' is not a command, and it does not name a database file.
+  Did you mean: query?
+  Run 'inillucent help' for the 30 commands there are.
+  To open a file of that name as a database, write it as a path: inillucent ./qeury
+```
+
+To open a file whose name has no extension, write it as a path: `inillucent ./ledger "SELECT 1"`.
+
+`inillucent-shell` applies the same reasoning to its options. A word that begins with a dash and is
+not one of the options it knows is refused rather than taken for the file name, which is what
+`sqlite3` itself does:
+
+```text
+Error: unknown option: --db
+Use -help for a list of options.
+```
+
+To open a file whose name begins with a dash, put `--` in front of it, as in
+`inillucent-shell -- -ledger.rdb`.
+
 ## Bind parameters, do not paste values
 
 ```sh
