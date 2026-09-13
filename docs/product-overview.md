@@ -18,9 +18,9 @@ PostgreSQL or MySQL server.
 
 ## Who it is for
 
-**Somebody running a local AI agent.** The agent needs to query a body of written material — a
-mailbox, a wiki, a repository, a set of tickets — by meaning and by exact term, and needs it fast
-enough to do several searches inside one answer. Today that means PostgreSQL, the pgvector extension,
+**Somebody running a local AI agent.** The agent queries a body of written material: a mailbox, a
+wiki, a repository, a set of tickets. It needs both meaning and exact term, and it needs them fast
+enough to run several searches inside one answer. Today that means PostgreSQL, the pgvector extension,
 and an embedding model served over a socket. inillucent replaces all three with a library.
 
 **Somebody who already uses SQLite and wants it faster.** The SQL is the same: 391 of 416 probed
@@ -42,8 +42,9 @@ Everything here is measured, and each row links to the page carrying the run.
 | **Better than pgvector on 15 of 17 graded comparisons, worse on none** | both engines reading byte identical vectors | [Retrieval quality](retrieval-quality.md) |
 | **175% faster unfiltered and 6,262% faster filtered** than pgvector | median in the calling process, against the correctly configured baseline | [Retrieval quality](retrieval-quality.md#latency) |
 
-Six of the thirty timed workloads are slower than SQLite, and **no family is under the floor the
-performance contract sets** — `transaction` was, on four consecutive runs, and is now 152% faster.
+Six of the thirty timed workloads are slower than SQLite. **All ten families meet the 1.00x floor
+the performance contract sets.** The `transaction` family missed the floor in four earlier runs and
+now measures 152% faster.
 [The workloads that are slower](performance.md#the-workloads-that-are-slower) names each one and what
 it costs.
 
@@ -89,10 +90,9 @@ index fits in memory everything PostgreSQL does to survive a power cut is overhe
 - **This engine's own file format.** SQLite files are imported once with
   [`inillucent migrate`](migrating.md), not opened in place.
 - **No replication, no backups beyond a verified file copy, no wire protocol.** It is a library.
-- **Publishing a retrieval generation costs the whole corpus.** Adding content no longer rebuilds
-  the graph — a commit folds each new row into the published generation, one graph insert per row
-  written. What is still proportional to the corpus is writing the generation out, because a
-  generation is one serialised index. [Roadmap item 10](roadmap.md#10-a-generation-is-one-blob-so-publishing-one-still-costs-the-whole-corpus)
+- **Publishing a retrieval generation costs the whole corpus.** Adding content folds each new row
+  into the published generation, one graph insert per row written. Writing the generation out is
+  still proportional to the corpus, because a generation is one serialised index. [Roadmap item 10](roadmap.md#10-a-generation-is-one-blob-so-publishing-one-still-costs-the-whole-corpus)
   has the measurements and the setting that pins write latency.
 - **Six of the thirty workloads are slower than SQLite**, listed on
   [the performance page](performance.md#the-workloads-that-are-slower).
@@ -112,8 +112,8 @@ database in the process:
 | real questions the keyword branch answered with nothing | 57% | **0%** |
 | index inside the database | 3,167 MB of a 5,849 MB database | deleted |
 
-The table above is the **retrieval** move. A second move took the **record** off PostgreSQL as well
-— 16 tables and 1.63 million rows — by which time the same mailbox had grown to 602,022 passages.
+The table above is the **retrieval** move. A second move took the **record** off PostgreSQL as well:
+16 tables and 1.63 million rows, by which time the same mailbox had grown to 602,022 passages.
 That one found six query shapes that go quadratic on this engine, and one recovery failure to read
 before a migration. Both are in
 [Removing PostgreSQL from a 5.8 GB Gmail assistant](real-world-use-cases/nikaya-postgres-to-inillucent.md),
@@ -121,8 +121,8 @@ along with what each one cost and how it was fixed.
 
 ## Where to go next
 
-- [Getting started](getting-started.md) — install it and run a query
-- [Architecture](architecture.md) — how the retrieval engine works
-- [SQL support](sql.md) — what runs, what differs, what is refused
-- [Vector search](vector-search.md) — the retrieval engine from SQL and from the library
-- [Roadmap](roadmap.md) — what is not there yet
+- [Getting started](getting-started.md): install it and run a query
+- [Architecture](architecture.md): how the retrieval engine works
+- [SQL support](sql.md): what runs, what differs, what is refused
+- [Vector search](vector-search.md): the retrieval engine from SQL and from the library
+- [Roadmap](roadmap.md): what is not there yet

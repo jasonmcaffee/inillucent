@@ -5,7 +5,7 @@ passes.**
 
 Both engines read byte identical vectors and are handed the same embedded query, so the embedding
 model cancels out and what is left measures indexing and ranking. The baseline is a correctly
-configured PostgreSQL, not a default one — [The baseline](#the-baseline) says exactly how it is
+configured PostgreSQL, not a default one. [The baseline](#the-baseline) says exactly how it is
 configured and why each setting has the value it has.
 
 The corpus is 185,078 chunks assembled from public data by this repository:
@@ -13,9 +13,9 @@ The corpus is 185,078 chunks assembled from public data by this repository:
 by anyone with this repository, an internet connection and a few hours.
 
 **Every figure on this page is the grading run of 2026-09-08.** The score card checked in at the
-repository root, `inillucent-scorecard.md`, is the run of **2026-09-01**, and the two do not agree
-row for row — [Which run a number comes from](#which-run-a-number-comes-from) names every row that
-moved. Read the card for the method, the intervals and the p-values, which did not change.
+repository root, `inillucent-scorecard.md`, is the run of **2026-09-01**. The two runs differ on
+seven rows. [Which run a number comes from](#which-run-a-number-comes-from) lists the seven rows.
+Read the card for the method, the intervals and the p-values, which did not change.
 
 ## Ranking
 
@@ -123,10 +123,10 @@ them.
 
 | | inillucent | PostgreSQL + pgvector | |
 |---|---|---|---|
-| index on disk, 185,078 chunks | 952 MB, int8 quantised | 800 MB — 722 MB of HNSW plus 78 MB of GIN | 19% more on disk |
+| index on disk, 185,078 chunks | 952 MB, int8 quantised | 800 MB: 722 MB of HNSW plus 78 MB of GIN | 19% more on disk |
 | the whole store the queries run against | the 952 MB index | a 1,750 MB database | **46% less on disk** |
 | the serving process | **1,216 MiB**, one process, opening a saved index in **0.8 s** | a PostgreSQL server, whose `shared_buffers` alone is 10,240 MiB on this machine | see below |
-| processes to keep alive | **none** — it is a library inside the caller | PostgreSQL, plus an embedding server | **two fewer** |
+| processes to keep alive | **none**, because it is a library inside the caller | PostgreSQL, plus an embedding server | **two fewer** |
 
 **The resident set row is a note rather than a percentage** because PostgreSQL's memory is not one
 number that can be placed beside a single process's. It is a shared memory segment charged to every
@@ -203,9 +203,9 @@ rather than guessed at, and lets a run be judged again after a relevance judgeme
 ## The baseline
 
 Beating a badly configured PostgreSQL would prove nothing, so the baseline is a correctly configured
-one. It runs the same shape of SQL against the same schema with the same HNSW parameters — `m = 16`,
-`ef_construction = 64` — fuses its two result lists with the same reciprocal rank fusion constants,
-and reads the same vectors.
+one. It runs the same shape of SQL against the same schema, with `m = 16` and
+`ef_construction = 64` on its HNSW index. It fuses its two result lists with the same reciprocal
+rank fusion constants, and it reads the same vectors.
 
 Each scan setting was chosen from a measured sweep against an exhaustive comparison:
 

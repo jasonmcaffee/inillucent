@@ -1,7 +1,7 @@
 # inillucent
 
 **An embedded database for agents, written in Rust. It runs SQLite's SQL dialect 330% faster than
-SQLite does, and it holds vector search and keyword search in the same file — so a local AI agent can
+SQLite does, and it holds vector search and keyword search in the same file. A local AI agent can
 query a body of written material by meaning and by exact term without standing up PostgreSQL,
 pgvector and an embedding server.**
 
@@ -20,7 +20,7 @@ tables, a full text index and a vector index, and all three commit and roll back
 | **70% less processor time** | 390 ms against SQLite's 1,320 for the same plan | [Performance](docs/performance.md) |
 | **391 of 416 SQL cases byte for byte, 12 refused** | every case run through both engines and compared byte by byte; all twelve refusals are window functions | [SQL support](docs/sql.md) |
 | **Better than pgvector on 15 of 17 graded comparisons, worse on none** | both engines reading identical vectors | [Retrieval quality](docs/retrieval-quality.md) |
-| **14% more memory than SQLite** | 42.4 MiB against 37.2 — the one measurement SQLite still wins | [Performance](docs/performance.md#memory) |
+| **14% more memory than SQLite** | 42.4 MiB against 37.2. The one measurement SQLite still wins | [Performance](docs/performance.md#memory) |
 
 [Performance](docs/performance.md) carries every figure with its 95% interval, and names the six
 workloads that are slower than SQLite along with what each one costs.
@@ -72,12 +72,12 @@ private and Go's public checksum database cannot read it.
 | | |
 |---|---|
 | **npm** | `npm install -g inillucent`, or `npx inillucent help` with nothing installed |
-| **pip** | `pip install inillucent` — the wheel carries the programs and an in process driver |
-| **cargo** | `cargo install inillucent-cli` — builds from source, and the fallback on any platform with no prebuilt archive |
+| **pip** | `pip install inillucent`. The wheel carries the programs and an in process driver |
+| **cargo** | `cargo install inillucent-cli`. It builds from source, and it is the fallback on any platform with no prebuilt archive |
 | **Homebrew** | `brew install black-rainbow-labs/inillucent/inillucent` |
 | **Composer** | `composer require black-rainbow-labs/inillucent && vendor/bin/inillucent-install` |
 
-None of those five answers yet — each is waiting on an account, a CAPTCHA a person
+None of those five answers yet. Each is waiting on an account, a CAPTCHA a person
 has to solve, or the macOS archive. `packaging/PUBLISHING.md` says which, per
 registry, and what unblocks it. Use the two commands at the top meanwhile.
 
@@ -107,7 +107,7 @@ sees.
 ## A first search
 
 [**`examples/rag-agent/`**](examples/rag-agent/README.md) is a database of Greek philosophy that is
-already built and already embedded — 80 Wikipedia articles, 2,661 passages, a 768 dimension vector on
+already built and already embedded: 80 Wikipedia articles, 2,661 passages, a 768 dimension vector on
 every one of them, and a BM25 index, committed. There is no vector index on that table on purpose:
 2,661 passages is an exhaustive cosine over 8 MB of vectors, and that example's readme says when to
 build one. Install the embedding model, point a coding agent at that directory, and ask it a
@@ -192,9 +192,8 @@ triggers, foreign keys with all five referential actions, `ATTACH`, partial and 
 `RETURNING`, `ON CONFLICT DO UPDATE`, 190 built in function names, 67 pragmas. 416 cases were run
 through this engine and through a pinned `sqlite3` 3.53.4 over a fresh database each, and every byte
 of both streams compared: **391 produce SQLite's exact bytes, 12 are refused and 7 answer
-differently**. Every one of the twelve refusals is a window function — `OVER (...)`, `PARTITION BY`,
-the frame clauses, and the eleven functions that need them — and that is the whole of what this
-engine refuses.
+differently**. Every one of the twelve refusals is a window function: `OVER (...)`, `PARTITION BY`,
+the frame clauses, and the eleven functions that need them. Nothing else in the probe is refused.
 
 Those numbers went *down* during task-1911 and nothing got worse. They were 403 same and 0 refused,
 and they had been measured through `inillucent-shell` while that shell still ran the engine this
@@ -218,13 +217,13 @@ bounds, separate from the score that ordered the list. Asked questions the corpu
 PostgreSQL with pgvector returns a confident top result every single time; inillucent does it on
 about one question in a hundred. → [Retrieval quality](docs/retrieval-quality.md#abstention)
 
-**The embedding model inside your process.** One command installs it on Windows, macOS or Linux —
+**The embedding model inside your process.** One command installs it on Windows, macOS or Linux.
 `inillucent setup-embeddings all` fetches ONNX Runtime and `nomic-embed-text-v1.5`, checks every byte
 against a pinned digest, and leaves `embed(TEXT)` answering with nothing exported by hand, in a
-binary built with the embedding feature. Full
-precision, on the processor or across several GPUs. No embedding server, no socket, no second thing
-to keep alive — and three profiles for when the weights are in memory, because loading them costs
-800 ms and an embedding costs 12 ms. → [Embeddings](docs/embeddings.md)
+binary built with the embedding feature. It runs at full precision, on the processor or across
+several GPUs. There is no embedding server, no socket and no second thing to keep alive. Three
+profiles decide when the weights are in memory, because loading them costs 800 ms and an embedding
+costs 12 ms. → [Embeddings](docs/embeddings.md)
 
 **A way in from whatever you already have.** `inillucent migrate` reads a SQLite file, or a running
 PostgreSQL or MySQL server over its own wire protocol inside one repeatable read snapshot, so every
@@ -267,9 +266,9 @@ To serve a database to an agent over MCP:
 The 28 MCP tools are generated from the same command table the command line reads, so the two cannot
 drift apart. `--readonly` refuses every statement that changes something, decided by the binder
 rather than by reading the text. `--root DIR` refuses every path that *resolves* outside one
-directory — junctions and symbolic links followed, and enforced in the VFS, so `ATTACH DATABASE`,
-`VACUUM INTO`, `backup`, `import` and every other file a request opens are covered by the same
-decision.
+directory, with junctions and symbolic links followed. It is enforced in the VFS, so
+`ATTACH DATABASE`, `VACUUM INTO`, `backup`, `import` and every other file a request opens are covered
+by the same decision.
 
 ## In production
 
@@ -284,8 +283,8 @@ database in the process:
 | real questions the keyword branch answered with nothing | 57% | **0%** |
 | index inside the database | 3,167 MB of a 5,849 MB database | deleted |
 
-The table above is the **retrieval** move. A second move took the **record** off PostgreSQL as well
-— 16 tables and 1.63 million rows, no other database left in the process — by which time the same
+The table above is the **retrieval** move. A second move took the **record** off PostgreSQL as well:
+16 tables and 1.63 million rows, with no other database left in the process. By then the same
 mailbox had grown to 602,022 passages. That one found six query shapes that go quadratic on this
 engine, and one recovery failure to read before a migration. Both are written up in full, with what
 each cost and how each was fixed:
@@ -333,10 +332,10 @@ each cost and how each was fixed:
   [Performance](docs/performance.md#linux). The Linux arm has not been re-measured since the Windows
   headline reached 330%.
 - **Publishing a retrieval generation costs the whole corpus.** Adding content folds each new row
-  into the published generation rather than rebuilding the graph, but a generation is one serialised
-  index, so writing a new one reads and writes all of it however few rows changed. A build from
-  scratch, which is what `INSERT INTO t(t) VALUES('compact')` asks for, is 132.6 s over 185,078
-  passages on one thread.
+  into the published generation. Writing the generation still reads and writes the full index,
+  however few rows changed, because a generation is one serialised structure. A build from scratch,
+  which is what `INSERT INTO t(t) VALUES('compact')` asks for, is 132.6 s over 185,078 passages on
+  one thread.
 - **There is no macOS archive yet**, because each platform's archive is built on that platform.
 
 ## Building it

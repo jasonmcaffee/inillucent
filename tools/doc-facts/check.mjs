@@ -15,6 +15,12 @@
  *
  * Usage:
  *   node tools/doc-facts/check.mjs [--site <path to inillucent-site>] [--json]
+ *   node tools/doc-facts/check.mjs --run-tests      # adds the test counts, about five minutes
+ *   node tools/doc-facts/check.mjs --self-test      # shows that the test-run judgement can fail
+ *
+ * `--run-tests` fails when the runner is absent, when its output cannot be read, and when it reports
+ * a failing or undetermined test. The one nonzero exit it accepts is `--strict` reporting that
+ * `live_postgres` and `live_mysql` had no server, which `docs/repository.md` documents.
  *
  * It exits 1 when anything disagrees.
  */
@@ -41,7 +47,31 @@ function binary(name) {
 }
 
 /**
+ * Runs a program and returns its output, its exit code and whether it was cut off.
+ *
+ * @param name - the program, looked for in target/release then target/debug
+ * @param argv - its arguments
+ * @param input - what to write to its standard input
+ * @param timeout - how long to wait, in milliseconds
+ */
+function runDetailed(name, argv, input, timeout = 120000) {
+  const exe = binary(name);
+  if (!exe) return { built: false, text: '', status: null, timedOut: false };
+  const result = spawnSync(exe, argv, { encoding: 'utf8', input, timeout });
+  return {
+    built: true,
+    text: `${result.stdout || ''}${result.stderr || ''}`,
+    status: result.status,
+    timedOut: result.error?.code === 'ETIMEDOUT',
+  };
+}
+
+/**
  * Runs a program and returns its combined output, or null when it is not built.
+ *
+ * The exit code is deliberately discarded here, because every caller of this asks a program a
+ * question and reads the answer out of what it printed. The test runner is the one program whose
+ * exit code carries meaning, and it goes through `runDetailed` instead.
  *
  * @param name - the program, looked for in target/release then target/debug
  * @param argv - its arguments
@@ -49,10 +79,8 @@ function binary(name) {
  * @param timeout - how long to wait, in milliseconds
  */
 function run(name, argv, input, timeout = 120000) {
-  const exe = binary(name);
-  if (!exe) return null;
-  const result = spawnSync(exe, argv, { encoding: 'utf8', input, timeout });
-  return `${result.stdout || ''}${result.stderr || ''}`;
+  const outcome = runDetailed(name, argv, input, timeout);
+  return outcome.built ? outcome.text : null;
 }
 
 /* ------------------------------------------------------------------ the facts */
@@ -186,21 +214,144 @@ function crateLints() {
   return { members, forbidsUnsafe, deniesFour };
 }
 
+/** The prerequisites `--strict` is allowed to report as absent on a machine with no server on it. */
+const OPTIONAL_PREREQUISITES = ['postgres', 'mysql'];
+
 /**
  * Runs the test runner, for the test and target counts.
  *
  * Behind `--run-tests`, because it is about five minutes and the rest of this file is about one
  * second. The counts it produces are what `docs/repository.md` and inillucent.com publish.
+ *
+ * **Every way this can go wrong is a failure rather than a skip.** It used to answer `null` when the
+ * runner was absent and again when its output did not parse, and `null` read as "nothing to compare
+ * against", so the two test assertions were skipped and the whole check exited 0. A review found it
+ * twice over: `cargo build --release --bins` does not build this runner at all, because
+ * `crates/inillucent-compat/Cargo.toml` puts it behind a required `testrun` feature, and a run that
+ * reported one failing test still printed that every fact was right. A check that cannot fail is
+ * worse than no check, which is rule 1.5 of `tests/inillucent-testing-tdd.md`.
+ *
+ * `--strict` exits 1 on this machine even when every test passes, because `live_postgres` and
+ * `live_mysql` have no server to run against, and `docs/repository.md` documents that. That one
+ * outcome is accepted, and only when the suites it names are on the list above.
  */
+/**
+ * Decides what one `inillucent-testrun --strict` outcome means.
+ *
+ * Separate from the running so it can be exercised against staged outcomes. `--self-test` does
+ * exactly that, which is how the three failure paths below are shown to fail rather than asserted to.
+ *
+ * @param outcome - what `runDetailed` returned for the runner
+ */
+export function judgeTestRun(outcome) {
+  if (!outcome.built) {
+    return {
+      error: [
+        'inillucent-testrun is not built, and `cargo build --release --bins` does not build it:',
+        'it is behind a required `testrun` feature. Build it with',
+        '  cargo build --release -p inillucent-compat --bin inillucent-testrun --features testrun',
+      ].join('\n          '),
+    };
+  }
+  if (outcome.timedOut) {
+    return { error: 'inillucent-testrun did not finish inside 30 minutes, so its counts are unknown.' };
+  }
+  const match = /(\d+) target\(s\), (\d+) test\(s\), (\d+) failed, (\d+) undetermined/.exec(outcome.text);
+  if (!match) {
+    const tail = outcome.text.trim().split('\n').slice(-5).join('\n          ');
+    return { error: `inillucent-testrun printed no summary line, so its counts are unknown. Its last output was:\n          ${tail}` };
+  }
+
+  // The runner says how many suites went without a prerequisite before it lists them, and both
+  // numbers are read. A line this pattern cannot parse would otherwise vanish and leave the list
+  // looking entirely optional, which is how `--self-test` caught a suite needing a GPU being
+  // accepted as though only postgres and mysql were absent.
+  const declared = /^(\d+) suite\(s\) ran without a prerequisite/m.exec(outcome.text);
+  const result = {
+    targets: Number(match[1]),
+    tests: Number(match[2]),
+    failed: Number(match[3]),
+    undetermined: Number(match[4]),
+    status: outcome.status,
+    declaredWithoutPrerequisite: declared ? Number(declared[1]) : 0,
+    missingPrerequisites: [...outcome.text.matchAll(/^\s+(\S+)\s+needs (\S+)$/gm)].map((row) => ({ suite: row[1], needs: row[2] })),
+  };
+
+  const problems = [];
+  if (result.failed > 0) problems.push(`${result.failed} test(s) failed`);
+  if (result.undetermined > 0) problems.push(`${result.undetermined} test(s) were undetermined`);
+  if (result.missingPrerequisites.length !== result.declaredWithoutPrerequisite) {
+    problems.push(`it said ${result.declaredWithoutPrerequisite} suite(s) had no prerequisite and this could read ${result.missingPrerequisites.length} of them`);
+  }
+  if (outcome.status !== 0) {
+    const unexplained = result.missingPrerequisites.filter((row) => !OPTIONAL_PREREQUISITES.includes(row.needs));
+    if (result.missingPrerequisites.length === 0) {
+      problems.push(`it exited ${outcome.status} and named no missing prerequisite to explain it`);
+    } else if (unexplained.length > 0) {
+      problems.push(`it exited ${outcome.status} for a prerequisite that is not optional: ${unexplained.map((row) => `${row.suite} needs ${row.needs}`).join(', ')}`);
+    }
+  }
+  if (problems.length > 0) result.error = `inillucent-testrun --strict: ${problems.join('; ')}.`;
+  return result;
+}
+
 function testRun() {
-  if (!binary('inillucent-testrun')) return null;
   if (!process.argv.includes('--run-tests')) return null;
+  if (!binary('inillucent-testrun')) return judgeTestRun({ built: false, text: '', status: null, timedOut: false });
   // The whole suite is about five minutes, and a two minute cap killed it and read the missing
   // summary line as "the runner is not built" rather than as "it was cut off".
-  const out = run('inillucent-testrun', ['--strict'], undefined, 1_800_000);
-  const match = /(\d+) target\(s\), (\d+) test\(s\), (\d+) failed/.exec(out || '');
-  if (!match) return null;
-  return { targets: Number(match[1]), tests: Number(match[2]), failed: Number(match[3]) };
+  return judgeTestRun(runDetailed('inillucent-testrun', ['--strict'], undefined, 1_800_000));
+}
+
+/**
+ * Runs `judgeTestRun` over staged outcomes, so each way it refuses is shown rather than claimed.
+ *
+ * The transcripts below are the runner's real output, taken from a full `--strict` pass on this
+ * machine and then edited only in the number under test.
+ */
+function selfTest() {
+  const passing = [
+    'running 149 target(s), 24 at a time, 2 thread(s) each',
+    '',
+    '--- summary ---',
+    '149 target(s), 2646 test(s), 0 failed, 0 undetermined',
+    'wall 300.9s; the same work run one at a time is 3163.8s of processor time (10.5x)',
+    '',
+    '2 suite(s) ran without a prerequisite and evidenced nothing:',
+    '  inillucent-remote::live_postgres             needs postgres',
+    '  inillucent-remote::live_mysql                needs mysql',
+    '',
+    'not ok - every test passed, and 2 suite(s) evidenced nothing',
+  ].join('\n');
+
+  const cases = [
+    { name: 'the runner is not built', outcome: { built: false, text: '', status: null, timedOut: false }, wantError: true },
+    { name: 'its output cannot be read', outcome: { built: true, text: 'inillucent 0.1.1 - an embedded SQL database\n', status: 0, timedOut: false }, wantError: true },
+    { name: 'it was cut off', outcome: { built: true, text: passing, status: null, timedOut: true }, wantError: true },
+    { name: 'a test failed', outcome: { built: true, text: passing.replace('0 failed', '1 failed'), status: 1, timedOut: false }, wantError: true },
+    { name: 'a test was undetermined', outcome: { built: true, text: passing.replace('0 undetermined', '3 undetermined'), status: 1, timedOut: false }, wantError: true },
+    { name: 'it exited nonzero for no stated reason', outcome: { built: true, text: passing.replace(/\n2 suite\(s\)[\s\S]*$/, ''), status: 1, timedOut: false }, wantError: true },
+    { name: 'it exited nonzero for a prerequisite that is not optional', outcome: { built: true, text: passing.replace('needs postgres', 'needs a GPU'), status: 1, timedOut: false }, wantError: true },
+    { name: 'every test passed, and only postgres and mysql were absent', outcome: { built: true, text: passing, status: 1, timedOut: false }, wantError: false },
+    { name: 'every test passed, and nothing was absent', outcome: { built: true, text: passing.replace(/\n2 suite\(s\)[\s\S]*$/, ''), status: 0, timedOut: false }, wantError: false },
+  ];
+
+  let wrong = 0;
+  for (const item of cases) {
+    const verdict = judgeTestRun(item.outcome);
+    const errored = Boolean(verdict.error);
+    const right = errored === item.wantError;
+    if (!right) wrong += 1;
+    console.log(`  ${right ? 'ok  ' : 'WRONG'}  ${item.name} -> ${errored ? 'refused' : 'accepted'}`);
+    if (errored) console.log(`          ${verdict.error.split('\n')[0]}`);
+  }
+  console.log(`\n${cases.length - wrong} of ${cases.length} staged outcomes were judged as intended.`);
+  return wrong;
+}
+
+if (args.includes('--self-test')) {
+  console.log('judgeTestRun, over staged runner outcomes\n');
+  process.exit(selfTest() > 0 ? 1 : 0);
 }
 
 /** Counts the chapters in the site's documentation book, when the site is on this machine. */
@@ -311,12 +462,23 @@ const measured = {
   probe: probed, registers: audit, crates: lints, tests, bookChapters: chapters,
 };
 
+// A run that could not produce a fact is a failure of this file, not a reason to say nothing. The
+// test runner is the only instrument here that can fail rather than merely be absent, so its own
+// trouble is reported beside the facts and counted in the exit code.
+const instrumentErrors = [];
+if (tests?.error) instrumentErrors.push(tests.error);
+
 if (asJson) {
-  console.log(JSON.stringify({ measured, checks }, null, 2));
+  console.log(JSON.stringify({ measured, checks, instrumentErrors }, null, 2));
 } else {
   console.log('what the engine reports\n');
   for (const [name, value] of Object.entries(measured)) {
     console.log(`  ${name.padEnd(26)} ${value === null ? '(not built, or not run)' : JSON.stringify(value)}`);
+  }
+  if (tests?.missingPrerequisites?.length > 0 && !tests.error) {
+    console.log('\n  the test run exited nonzero for prerequisites this machine does not have, which');
+    console.log('  docs/repository.md documents, and every test passed:');
+    for (const row of tests.missingPrerequisites) console.log(`    ${row.suite} needs ${row.needs}`);
   }
   console.log('\nwhat the documents say\n');
   for (const check of checks) {
@@ -326,11 +488,17 @@ if (asJson) {
     console.log(`  FAIL  ${check.label} — the engine says ${check.expected}`);
     for (const place of check.wrong) console.log(`          ${place.file}:${place.line} says ${place.written}`);
   }
+  for (const problem of instrumentErrors) console.log(`  FAIL  the instrument itself — ${problem}`);
 }
 
 const failed = checks.filter((check) => !check.skipped && (check.wrong.length > 0 || check.seen === 0));
-if (failed.length > 0) {
-  if (!asJson) console.log(`\n${failed.length} fact(s) disagree with the engine.`);
+if (failed.length > 0 || instrumentErrors.length > 0) {
+  if (!asJson) {
+    const parts = [];
+    if (failed.length > 0) parts.push(`${failed.length} fact(s) disagree with the engine`);
+    if (instrumentErrors.length > 0) parts.push(`${instrumentErrors.length} instrument(s) could not answer`);
+    console.log(`\n${parts.join(', and ')}.`);
+  }
   process.exit(1);
 }
 if (!asJson) console.log('\nEvery fact a document states is the fact the engine reports.');
