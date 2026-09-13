@@ -138,7 +138,8 @@ still counts the row, both trigger times still fire, `RETURNING` still returns, 
 already skipped an entry that had not moved.
 
 And because making that case cheap would otherwise have turned `txn.large` into a workload that
-measures an operation doing no work, which is a test that cannot fail, **the workload was corrected too**.
+measures an operation doing no work, which is a test that cannot fail, **the workload was corrected
+too**.
 `txn.batched` and `txn.large` now reset `side_table.note` first, outside the timed region on both
 arms, where `sqlite_bench.c` already runs a workload's setup. `txn.large` reads **0.09x** on the old
 workload with the old engine, **0.59x** on the old workload with this one, and **3.63x** once the
@@ -259,7 +260,8 @@ and **the two platforms then run the same speed**, 38.97 against 38.20. On the W
 runtime's heap is 59% of the time.
 
 SQLite does per statement work with the operating system that Windows charges heavily for and Linux
-barely does. SQLite's arm is the denominator of every ratio on this page, and it moves across platforms
+barely does. SQLite's arm is the denominator of every ratio on this page, and it moves across
+platforms
 while this engine's does not. The absolute work is the same on both, and lowering it is what the
 missed bars need. Neither the allocator change that took Windows from 3.24x to 3.86x nor anything
 since has been measured on Linux.
@@ -276,7 +278,8 @@ since has been measured on Linux.
   it is better at the ends than in the middle is the same one: FTS5's build is four ordinary row
   writes per document, and a row write is where the per-statement cost lands.
 - **One machine.** Windows 11 on x64. The disk matters more than it looks: part way through a four
-  run sequence, `txn.batched` is 200 commits and 200 `fsync`s, and it goes from 309 ms to 895 ms **on
+  run sequence, `txn.batched` is 200 commits and 200 `fsync`s, and it goes from 309 ms to 895 ms
+  **on
   SQLite's own arm**, on the same fixture with the same binary, because the volume stops keeping up
   with the couple of gigabytes a sequence writes. That row is published beside every run so a reader
   can tell a slow volume from a slow engine. Twelve runs across three sequences were taken and the
