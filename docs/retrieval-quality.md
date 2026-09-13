@@ -284,7 +284,8 @@ Defaults: `--database-url postgres://127.0.0.1:5433/inillucent_synth`,
   holds, but the absolute figures are optimistic.
 - **The graph and the keyword postings are held in memory.** This suits a corpus that fits in memory,
   which this one does. A corpus far larger than the memory available needs a different design.
-- **Only searching was measured.** Adding content to an existing index rebuilds the graph.
+- **Only searching was measured.** Adding content folds the rows from that commit into the current
+  generation. An explicit compact or rebuild operation reconstructs the full graph.
 - **A prefix of this corpus is not a sample of it.** Chunks are numbered in ingestion order and that
   order correlates with source, so `--limit N` gives nearly all one source. `strided_sample` exists
   for this reason and `synth-check` asserts the property still holds.

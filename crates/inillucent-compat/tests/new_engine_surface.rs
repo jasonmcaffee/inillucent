@@ -92,19 +92,18 @@ const SURFACE: &[(&str, &str, Answers)] = &[
     ("join", "SELECT t.a FROM t JOIN t AS u ON t.id = u.id", Yes),
     ("union", "SELECT a FROM t UNION SELECT a FROM t", Yes),
     ("cte", "WITH q AS (SELECT a FROM t) SELECT * FROM q", Yes),
-    // Was `Yes` before the `inillucent-compat` re-point onto
-    // `inillucent_engine::connect`; this inventory caught it moving the other
-    // way. The shipping engine refuses every window function outright - "the
-    // new engine's physical pass does not handle a window function reaching
-    // the pipeline builder yet" - the same gap `semantics.rs` retired
-    // `select.window` for. Recorded as `sql.select.window` /
-    // `functions.window`, both `status = "missing"`, in
-    // `compat/sqlite-3.53.4.toml`, and in `docs/feature-comparison.md`'s
-    // "Window functions" section.
+    // Was `Yes`, went to `NotYet` on the `inillucent-compat` re-point onto
+    // `inillucent_engine::connect`, and is `Yes` again as of task-1932. The
+    // inventory was right both times and it is worth saying what it actually
+    // caught: not a missing evaluator, but a refusal one layer above one.
+    // `compiled::try_compile` bailed out on `plan.compounds` and had no check
+    // for `plan.select.windows`, so re-pointing onto `connect` - which goes
+    // through the cached path, as every application does - started hitting
+    // that refusal where `run_with` had gone to `run_windowed` and answered.
     (
         "window",
         "SELECT a, row_number() OVER (ORDER BY id) FROM t",
-        NotYet,
+        Yes,
     ),
     (
         "subquery.from",

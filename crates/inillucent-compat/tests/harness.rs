@@ -109,10 +109,15 @@ const IN_PROGRESS_ROWS: [&str; 3] = [
 /// update/commit/rollback hook triple the new connection never wired up
 /// (`txn.hooks`). The same re-point found a fourth and fifth: the new
 /// engine's physical pass refuses every window function outright
-/// (`sql.select.window`, `functions.window`) - `windows_match_the_oracle`,
+/// (`sql.select.window`, `functions.window`). **Those two were wrong and are
+/// gone from this list as of task-1932.** The physical pass did not refuse
+/// window functions; `compiled::try_compile` did, by bailing out on
+/// `plan.compounds` and not on `plan.select.windows`, so the cached path that
+/// every application entry point uses never reached `run_windowed`. All three
+/// retired tests - `windows_match_the_oracle`,
 /// `ordered_statements_match_the_oracle` and the `select.window` case in
-/// `semantics.rs` were all graded against the old engine, which had them. A
-/// sixth, `txn.oom-injection`, split off `txn.resource-failures`: the old
+/// `semantics.rs` - are back and green against the shipping engine. A sixth,
+/// `txn.oom-injection`, split off `txn.resource-failures`: the old
 /// engine's allocation-failure fault injection
 /// (`inillucent_base::buffer::fail_allocation_after`) has no equivalent in the
 /// shipping write path, which allocates through ordinary `Vec`/`Box` rather
@@ -126,12 +131,10 @@ const IN_PROGRESS_ROWS: [&str; 3] = [
 /// so; this list exists only so a finished phase can still hold a row that
 /// will never be `pass`, without loosening the check for every other row in
 /// the same phase.
-const DELIBERATELY_MISSING: [&str; 7] = [
+const DELIBERATELY_MISSING: [&str; 5] = [
     "vm.bytecode.verifier",
     "vm.statement.interrupt",
     "txn.hooks",
-    "sql.select.window",
-    "functions.window",
     "txn.oom-injection",
     "txn.writer-contention",
 ];

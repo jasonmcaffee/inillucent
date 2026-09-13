@@ -1082,7 +1082,11 @@ fn real_or_null<'p>(value: f64) -> Datum<'p> {
 /// @param op - the operator
 /// @param left - the left operand
 /// @param right - the right operand
-fn generic_arith<'p>(op: ArithOp, left: &Datum<'_>, right: &Datum<'_>) -> DbResult<Computed<'p>> {
+pub(crate) fn generic_arith<'p>(
+    op: ArithOp,
+    left: &Datum<'_>,
+    right: &Datum<'_>,
+) -> DbResult<Computed<'p>> {
     if left.is_null() || right.is_null() {
         return Ok(Computed::Borrowed(Datum::Null));
     }

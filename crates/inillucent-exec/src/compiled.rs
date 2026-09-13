@@ -409,6 +409,23 @@ pub fn try_compile(
     if !plan.compounds.is_empty() {
         return Ok(None);
     }
+    // **A window function has no single pipeline to compile either, and until
+    // task-1932 nothing here said so.** `prepare_any` bails on
+    // `plan.select.windows` beside `plan.compounds` for the same reason - a
+    // window pass plans an inner query of its own - but this function checked
+    // only the compound. A windowed statement therefore reached `build_upper`,
+    // whose `refuse_unhandled` returned `unsupported("a window function
+    // reaching the pipeline builder")`, and `run_cached_query` propagated that
+    // with `?` instead of falling back the way a compound does. Every entry
+    // point an application uses goes through this path, so `run_windowed` -
+    // which works, and which `run_any_prepared` dispatches to - was reachable
+    // only from `run_with`, which nothing but a test calls. The compat manifest
+    // recorded the symptom as a missing capability. Bailing out here sends a
+    // windowed statement through `run_any_prepared` to `run_windowed`, exactly
+    // as a compound goes to `run_compound`.
+    if !plan.select.windows.is_empty() {
+        return Ok(None);
+    }
     // Every uncorrelated subquery is answered once, here, so a source key or
     // a join key that reads one builds correctly on this first attempt too -
     // the same reason `build_statement` folds before building.
