@@ -248,6 +248,16 @@ pub(crate) fn open_file(
         WalOptions::default(),
     )?);
     database.pool().set_durable_lsn(wal.write_ahead_point());
+    // **Seeds `Pool::note_dirty_from`'s floor from this file's own last
+    // checkpoint**, so a page whose stamp predates it cannot repeat, across a
+    // reopen, the bug `Pool::retained_lsn`'s doc comment describes within one
+    // session. `database.meta()` reflects `resume_above_every_stamp`'s own
+    // corrective checkpoint above when it ran, so this always reads the
+    // recovery point actually in force for this file right now, not the one
+    // this open started from.
+    database
+        .pool()
+        .set_retained_lsn(database.meta().checkpoint_lsn);
     let_the_pool_ask_the_log(database.pool(), &wal);
 
     // The catalog is read again, because recovery may have changed it: a

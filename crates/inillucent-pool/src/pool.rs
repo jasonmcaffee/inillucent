@@ -390,6 +390,30 @@ pub struct Pool {
     /// every sync, and [`Pool::writeback`] refuses a page the log has not
     /// caught up with.
     durable_lsn: Cell<u64>,
+    /// The lowest LSN a checkpoint has ever persisted as this file's recovery
+    /// point, which is the lowest LSN `retire_segments_below` has ever been
+    /// asked to keep.
+    ///
+    /// **Not `durable_lsn`, and the difference is the whole fix.** `durable_lsn`
+    /// advances on every sync of the log - including the sync a commit does for
+    /// its own record, which happens before that commit's own change reaches
+    /// this pool's `modify`. Using it as `note_dirty_from`'s floor would clamp
+    /// a page's `rec_lsn` up past the very record that just dirtied it, so a
+    /// later checkpoint that has to hold the page back (because a *different*,
+    /// still-open transaction touched it too) would believe that record no
+    /// longer needs replay - the record is not in the file (correctly held
+    /// back) and now not replayed either, which is the data loss this field
+    /// exists to prevent rather than the one `checkpoint.rs`'s module comment
+    /// describes.
+    ///
+    /// This field only moves when a checkpoint actually persists a new
+    /// recovery point and retires segments against it, so it names exactly
+    /// what is physically still guaranteed to be on disk - never more.
+    /// `u64::MAX` means no checkpoint has run yet in this pool's lifetime
+    /// (a fresh build, or before `recovery::open_file` seeds it from the
+    /// file's own last checkpoint), which disables the clamp rather than
+    /// asserting a floor nothing has earned.
+    retained_lsn: Cell<u64>,
     /// The highest LSN this pool has written into the data file.
     ///
     /// **A page's stamp has to be a position in the stream beside the file, and
@@ -524,6 +548,9 @@ impl Pool {
             // bulk build and a read-only open both run this way, and both are
             // correct to: a page cannot be ahead of a log that does not exist.
             durable_lsn: Cell::new(u64::MAX),
+            // No checkpoint has run yet in this pool's lifetime, so nothing is
+            // floored - see the field's own doc comment.
+            retained_lsn: Cell::new(u64::MAX),
             // Nothing has been written yet, and zero is what the meta page
             // means by "no high water recorded".
             high_water_lsn: Cell::new(0),
@@ -544,6 +571,23 @@ impl Pool {
     /// @param lsn - the position past the last durable byte of the log
     pub fn set_durable_lsn(&self, lsn: u64) {
         self.durable_lsn.set(lsn);
+    }
+
+    /// Records the lowest LSN a checkpoint has persisted as this file's
+    /// recovery point - the floor [`Pool::note_dirty_from`] clamps a newly
+    /// dirtied page's `rec_lsn` against.
+    ///
+    /// A caller with a log calls this from the same place it calls
+    /// [`Pool::set_durable_lsn`] during a checkpoint - `recovery_from`, not
+    /// `durable`, because `durable` can already include a record this exact
+    /// call is about to dirty a page with. It also has to be called once at
+    /// open, from the file's own `meta.checkpoint_lsn`, or a page whose stale
+    /// stamp predates a checkpoint from a *previous* session would repeat the
+    /// bug across a reopen instead of within one.
+    ///
+    /// @param lsn - the checkpoint's own recovery point
+    pub fn set_retained_lsn(&self, lsn: u64) {
+        self.retained_lsn.set(lsn);
     }
 
     /// Registers what the pool may call when a page it must write is ahead of
@@ -1604,19 +1648,40 @@ impl Pool {
     /// @param change - what to do to its bytes
     /// Records where recovery has to start for a page that is about to change.
     ///
-    /// **The LSN the page carried *before* the change**, kept from the moment a
-    /// clean frame first becomes dirty until it is written. This is ARIES's
-    /// `recLSN` and it exists because the obvious alternative is wrong: a
-    /// checkpoint cannot start recovery at "the oldest open transaction",
-    /// because a page held out of the file for an open transaction may *also*
-    /// carry an older committed change that is not in the file either. Starting
-    /// above that change loses it, and the model campaign found exactly that -
-    /// a committed row missing from a recovery that had nothing left to replay
-    /// it from.
+    /// **The LSN the page carried *before* the change, floored at the log's
+    /// retained point.** This is ARIES's `recLSN`, and the floor is not an
+    /// extra precaution - without it this function is wrong, not merely
+    /// conservative. A page's header LSN only changes when the page itself is
+    /// modified, not when it is merely checkpointed: a leaf page can go a dozen
+    /// checkpoints without being touched, carrying the same old stamp the whole
+    /// time while `retire_segments_below` keeps deleting the segments below
+    /// each checkpoint's own, much higher, recovery point. The page is still
+    /// perfectly correct on disk - nothing has changed about it since that old
+    /// stamp, so every checkpoint in between was right to consider it fully
+    /// caught up - but the stamp itself is now a lie about what the log still
+    /// holds. The moment this page dirties again, using that stale stamp as
+    /// `rec_lsn` asks the *next* checkpoint to point recovery at a segment that
+    /// is already gone, which is worse than the bug this field exists to fix:
+    /// reproduced directly by a page that shares a table with an unrelated
+    /// later commit (`a_checkpoint_during_a_later_open_transaction_keeps_the_earlier_commit`
+    /// in `inillucent-compat`'s `durability.rs`), where `rec_lsn` came back
+    /// below a bound an earlier checkpoint had already retired past and the
+    /// row that commit inserted did not survive a crash.
     ///
-    /// Taking the LSN from before the change rather than after it is
-    /// deliberately conservative: recovery may re-apply a record the page
-    /// already has, and the page-LSN rule makes that a no-op.
+    /// **`retained_lsn`, not `durable_lsn`, is the floor - `durable_lsn` is
+    /// already wrong by the time this runs.** `durable_lsn` advances on every
+    /// sync of the log, including the sync a commit does for its own record -
+    /// which happens *before* that same commit's change reaches this call. A
+    /// first attempt at this fix clamped to `durable_lsn` and it stayed broken:
+    /// the very insert this comment's reproduction depends on dirtied its page
+    /// with `durable_lsn` already past its own record's LSN, so the clamp
+    /// swallowed the one record a later checkpoint would need to replay for a
+    /// page it has to hold back - the same symptom, for a new reason, on a
+    /// clean build with the naive fix applied. `retained_lsn` only moves when
+    /// a checkpoint actually persists a new recovery point and retires
+    /// segments against it, so it never names a point later than what is
+    /// truly, physically retained, and never later than the record that is
+    /// dirtying this page right now.
     ///
     /// @param frame - the frame about to change
     fn note_dirty_from(&self, frame: u32) {
@@ -1631,23 +1696,64 @@ impl Pool {
             return;
         }
         let lsn = self.lsn_of(frame).unwrap_or(0);
+        let floor = self.retained_lsn.get();
+        let lsn = if floor == u64::MAX {
+            lsn
+        } else {
+            lsn.max(floor)
+        };
         let mut state = self.state.borrow_mut();
         if let Some(meta) = state.frames.get_mut(frame as usize) {
             meta.rec_lsn = lsn;
         }
     }
 
-    /// Returns the lowest LSN recovery must start at to rebuild every dirty page.
+    /// Returns the lowest LSN recovery must start at to rebuild every page a
+    /// checkpoint's flush is actually going to hold back.
     ///
     /// `u64::MAX` when nothing is dirty, which is what lets a checkpoint that
     /// wrote everything advance the recovery point to the log's durable end.
+    ///
+    /// **Only a page `holds_uncommitted` will actually hold back, not every
+    /// dirty page - counting the rest is a real bug, not extra caution.** A
+    /// freshly allocated page can sit dirty with its header LSN still at its
+    /// zeroed, never-stamped default; with no transaction open,
+    /// `holds_uncommitted` answers false for every page regardless of that
+    /// stamp, so a checkpoint's flush writes all of them and holds nothing
+    /// back. Folding that page's `rec_lsn` into this minimum anyway pinned
+    /// `recovery_from` at its stale-or-zero stamp on every such checkpoint,
+    /// forever - `retire_segments_below` then has nothing below the pinned
+    /// point to reclaim, and a build that should shrink its log to a few
+    /// kilobytes never sheds a single segment. Reproduced directly:
+    /// `a_checkpoint_reclaims_the_log` in `inillucent-compat`'s
+    /// `new_engine_log_retire.rs`, which measures exactly this - the log
+    /// shrinking after a checkpoint with nothing open at all.
+    ///
+    /// So a page only contributes when `uncommitted_lsn` names an open
+    /// transaction *and* this page's current stamp is at or above it - the
+    /// same test `holds_uncommitted` itself makes, checked here rather than
+    /// shared with it because `writeback` needs the answer for one frame at a
+    /// time and this needs the minimum over all of them before any of them
+    /// move.
     pub fn oldest_dirty_lsn(&self) -> u64 {
+        let uncommitted = self.uncommitted_lsn.load(Ordering::SeqCst);
+        if uncommitted == u64::MAX {
+            // No transaction is open, so no page is held back this
+            // checkpoint - every dirty page's stamp is about to be written,
+            // and none of them bound what recovery still needs.
+            return u64::MAX;
+        }
         let state = self.state.borrow();
         state
             .frames
             .iter()
-            .filter(|meta| meta.dirty && meta.state != FrameState::Free)
-            .map(|meta| meta.rec_lsn)
+            .enumerate()
+            .filter(|(_, meta)| meta.dirty && meta.state != FrameState::Free)
+            .filter(|(frame, _)| {
+                self.lsn_of(*frame as u32)
+                    .is_ok_and(|stamp| stamp >= uncommitted)
+            })
+            .map(|(_, meta)| meta.rec_lsn)
             .min()
             .unwrap_or(u64::MAX)
     }

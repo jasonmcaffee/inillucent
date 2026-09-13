@@ -1077,3 +1077,139 @@ fn a_transaction_the_evictor_writes_back_never_survives_uncommitted() {
     }
     assert!(cut_points > 0, "no cut point of the eviction ran");
 }
+
+/// An already-committed row must survive a checkpoint taken while a
+/// *different*, later transaction is still open - even though that
+/// transaction touches the same page.
+///
+/// **Pins the defect Fable's review of this ticket found in
+/// `ImportedDatabase::checkpoint`.** No-steal correctly holds back a page an
+/// open transaction has changed, but the recovery point that
+/// `checkpoint`/`checkpoint.rs` used to record was bounded only by
+/// `Pool::uncommitted_lsn` - the open transaction's own first record - not by
+/// `Pool::oldest_dirty_lsn`, the oldest record *any* held-back page still
+/// needs. Those are not the same number when the held-back page's dirty state
+/// began with an *earlier*, already-committed write: row 4 is inserted and
+/// committed first, moving the page's on-disk copy behind by one record; a
+/// second connection then opens a transaction and updates row 1, on the same
+/// page, which is what actually makes `holds_uncommitted` true and holds the
+/// page back - but the record that page is missing is row 4's insert, not
+/// row 1's update, and `uncommitted_lsn` alone names a point *above* it.
+/// `PRAGMA user_version` checkpoints unconditionally (`pragma.rs`, unlike
+/// `PRAGMA wal_checkpoint`, which refuses with a transaction open) and was
+/// the reproduction: without the fix, row 4 - already committed before the
+/// second connection ever opened - is gone after a crash that follows.
+///
+/// **Bounding `recovery_from` by `oldest_dirty_lsn` was necessary but not
+/// sufficient - this test kept failing after that fix landed, for a second,
+/// independent reason.** `Wal::sequence` reads the segment `roll_segment` just
+/// rolled to, and `checkpoint.rs` used to pair `recovery_from` with that
+/// segment number unconditionally - which is only correct when `durable`
+/// itself is the bound. The moment `oldest_dirty_lsn` pulls `recovery_from`
+/// below `durable` - exactly what this test does - the true LSN can sit in an
+/// *earlier* segment than the one just rolled to, and pairing it with the new
+/// segment's number told the next open's `read_chain` to start reading a
+/// segment that does not contain it, silently skipping every record between
+/// the two - row 4's insert among them. The fix is `Wal::sequence_containing`,
+/// which this test is what caught needing to exist: `checkpoint.rs` now asks
+/// it which segment `recovery_from` is actually in, rather than assuming the
+/// newest one.
+///
+/// No fault injection is needed: the defect is in what the recovery point
+/// *records* on an uninterrupted, successfully finished checkpoint, not in
+/// surviving an interruption of one.
+#[test]
+fn a_checkpoint_during_a_later_open_transaction_keeps_the_earlier_commit() {
+    let journal = Journal::NO_ROLLBACK_JOURNAL;
+    let vfs = simulator(70_700);
+    {
+        let mut engine = create(Arc::clone(&vfs) as Arc<dyn Vfs>, journal);
+        run_script(&mut engine, &SCHEMA).expect("the schema builds");
+    }
+    let expected = {
+        let mut engine = open(Arc::clone(&vfs) as Arc<dyn Vfs>, journal).expect("it reopens");
+        exec(&mut engine, "INSERT INTO t VALUES(4, 'four', 40)")
+            .expect("the autocommit insert commits");
+        let rows = contents(&mut engine);
+        exec(&mut engine, "BEGIN").expect("the transaction opens");
+        exec(&mut engine, "UPDATE t SET c = c + 1 WHERE a = 1")
+            .expect("the open transaction's own write runs");
+        exec(&mut engine, "PRAGMA user_version = 7").expect("the checkpoint runs");
+        rows
+    };
+    let snapshot = vfs.crash();
+    let recovery = recovered(journal, &snapshot, 70_701);
+    assert_eq!(
+        recovery,
+        Recovery::Rows(expected),
+        "the row 4 insert, committed before the second transaction ever opened, \
+         did not survive a checkpoint taken while that later transaction was still open"
+    );
+}
+
+/// A page untouched through several checkpoints must not ask recovery to
+/// start below a segment those checkpoints already retired.
+///
+/// **Pins `Pool::note_dirty_from`'s `retained_lsn` floor - the fix
+/// `a_checkpoint_during_a_later_open_transaction_keeps_the_earlier_commit`
+/// needed alongside `Wal::sequence_containing`, and a distinct failure mode
+/// from either.** A page's `rec_lsn` is only refreshed when the page itself
+/// is next modified, not on every checkpoint: table `t`'s page carries the
+/// LSN of its own build the whole time nothing touches it, while several
+/// *unrelated* checkpoints - on a different table, on different pages - each
+/// retire the segments below their own, much higher, recovery point,
+/// including the one holding `t`'s original build. `t`'s page is still
+/// perfectly correct on disk throughout - nothing has changed about it - but
+/// the stamp it carries is now a lie about what the log still holds. The
+/// moment it dirties again and a *different*, later transaction forces a
+/// checkpoint to hold it back, `oldest_dirty_lsn` would report that stale
+/// stamp verbatim and ask recovery to start at a segment that no longer
+/// exists - a strictly worse failure than the sibling test's, since here even
+/// `Wal::sequence_containing` cannot locate a genuinely deleted segment.
+///
+/// No fault injection is needed, for the same reason as the sibling test:
+/// the defect is in what an uninterrupted, successfully finished checkpoint
+/// records.
+#[test]
+fn a_page_untouched_through_several_checkpoints_never_asks_recovery_for_a_retired_segment() {
+    let journal = Journal::NO_ROLLBACK_JOURNAL;
+    let vfs = simulator(70_800);
+    {
+        let mut engine = create(Arc::clone(&vfs) as Arc<dyn Vfs>, journal);
+        run_script(&mut engine, &SCHEMA).expect("the schema builds");
+    }
+    let expected = {
+        let mut engine = open(Arc::clone(&vfs) as Arc<dyn Vfs>, journal).expect("it reopens");
+        exec(&mut engine, "CREATE TABLE noise(x INTEGER)").expect("the scratch table builds");
+        // Each round writes an unrelated page and checkpoints with nothing
+        // open, which retires every segment below that checkpoint's own
+        // recovery point - table `t`'s page included, since nothing has
+        // touched it since this reopen's own initial checkpoint. A handful of
+        // rounds is well past what one retirement needs; it is not tuned to
+        // the minimum that works.
+        for round in 0..5 {
+            exec(&mut engine, &format!("INSERT INTO noise VALUES({round})"))
+                .expect("the unrelated insert commits");
+            exec(&mut engine, &format!("PRAGMA user_version = {round}"))
+                .expect("the unrelated checkpoint runs");
+        }
+        exec(&mut engine, "INSERT INTO t VALUES(4, 'four', 40)")
+            .expect("the autocommit insert commits");
+        let rows = contents(&mut engine);
+        exec(&mut engine, "BEGIN").expect("the transaction opens");
+        exec(&mut engine, "UPDATE t SET c = c + 1 WHERE a = 1")
+            .expect("the open transaction's own write runs");
+        exec(&mut engine, "PRAGMA user_version = 100").expect("the checkpoint runs");
+        rows
+    };
+    let snapshot = vfs.crash();
+    let recovery = recovered(journal, &snapshot, 70_801);
+    assert_eq!(
+        recovery,
+        Recovery::Rows(expected),
+        "the row 4 insert, committed before table t's page was dirtied again, \
+         did not survive a checkpoint that had to hold that page back - the \
+         recovery point pointed at a segment several unrelated checkpoints \
+         had already retired"
+    );
+}

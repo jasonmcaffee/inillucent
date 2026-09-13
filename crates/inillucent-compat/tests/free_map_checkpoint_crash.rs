@@ -307,3 +307,138 @@ fn a_crash_during_a_redundant_free_map_checkpoint_still_reopens() {
         "a sweep that reached {cut_points} cut points inside the checkpoint is not a sweep"
     );
 }
+
+/// Reopens the fixture and takes a second checkpoint, with the free map
+/// genuinely changed since the first one and a failure armed at the `n`th
+/// injectable call of that checkpoint alone.
+///
+/// Deletes id 1 and inserts a fresh row before the checkpoint under test, so
+/// the free map's own bytes differ from what the first checkpoint installed -
+/// the only way to reach `log_free_map_pages`'s `Body::WritePage` branch
+/// rather than its "unchanged, skip it" one. `base` is read after those two
+/// statements rather than right after `built()`, so their own I/O is not part
+/// of the countdown and every `nth` this sweeps lands inside the checkpoint
+/// itself, the same as the sibling attempt function above.
+///
+/// @param seed - the media model's seed for this attempt
+/// @param nth - which call of the checkpoint under test to fail
+fn attempt_with_a_real_change(seed: u64, nth: u64) -> Attempt {
+    let vfs = built(seed);
+    let mut engine =
+        ImportedDatabase::open_on(Arc::clone(&vfs) as Arc<dyn Vfs>, path(), PAGE_SIZE, FRAMES)
+            .expect("the fixture reopens");
+    delete(&mut engine, 1);
+    insert(&mut engine, FRESH_ID, 'z');
+    let base = vfs.failpoints().sites_reached();
+    vfs.failpoints()
+        .fail_nth_call(base.saturating_add(nth), Failure::Crash);
+    let committed = engine.checkpoint().is_ok();
+    let reached = vfs.failpoints().sites_reached().saturating_sub(base);
+    Attempt {
+        committed,
+        snapshot: vfs.crash(),
+        reached,
+    }
+}
+
+/// The id a fresh row takes in [`attempt_with_a_real_change`] and its
+/// baseline, fixed because every attempt starts from its own fresh `vfs` and
+/// there is no collision to avoid across them.
+const FRESH_ID: i64 = 999;
+
+/// A crash at every cut point of a free-map checkpoint that *actually
+/// changed* the map still reopens to exactly the state that checkpoint would
+/// have left.
+///
+/// **The sibling test above never exercises `log_free_map_pages`'s
+/// `Body::WritePage` branch - only proves the "unchanged, skip it" one is
+/// safe to crash during.** Its own checkpoint changes nothing between the
+/// fixture's first checkpoint and the one under test, on purpose (see this
+/// file's module comment), so the fast path fires on every attempt and no
+/// `WritePage` record is ever written, let alone torn by a crash. Fable's
+/// review of the free-map durability fix (`inillucent-engine/src/checkpoint.rs`)
+/// named this gap directly: "checkpoint cut 29" and every other crash sweep in
+/// this campaign passed because of the skip, not because the log-and-stamp
+/// path was ever exercised.
+///
+/// Here, deleting id 1 and inserting a fresh row between the reopen and the
+/// checkpoint under test changes the free map for real, so this sweep is the
+/// first one that can catch a torn `WritePage` record: a crash mid-write used
+/// to leave `load_free_map` unable to tell whether the page reflects the
+/// state before this checkpoint or the state after it, which is exactly what
+/// stamping the image with its own record's LSN before installing it fixes -
+/// see `inillucent_txn::engine::log_free_map_pages`.
+#[test]
+fn a_crash_during_a_free_map_checkpoint_that_actually_changed_still_reopens() {
+    let (expected_ids, expected_count) = {
+        let vfs = built(6_000);
+        let mut engine =
+            ImportedDatabase::open_on(Arc::clone(&vfs) as Arc<dyn Vfs>, path(), PAGE_SIZE, FRAMES)
+                .expect("the fixture reopens");
+        delete(&mut engine, 1);
+        insert(&mut engine, FRESH_ID, 'z');
+        engine
+            .checkpoint()
+            .expect("the checkpoint under test, unarmed");
+        (ids(&mut engine), freelist_count(&mut engine))
+    };
+    assert!(
+        !expected_ids.contains(&1),
+        "the baseline's own delete has to have taken effect"
+    );
+
+    let mut cut_points = 0u64;
+    for nth in 1..=100u64 {
+        let outcome = attempt_with_a_real_change(190_000 + nth, nth);
+        if outcome.reached < nth {
+            assert!(
+                outcome.committed,
+                "an unarmed checkpoint must succeed; call {nth} was never reached"
+            );
+            break;
+        }
+        cut_points = cut_points.saturating_add(1);
+        let recovered: Arc<dyn Vfs> = Arc::new(SimVfs::recovered(
+            SimConfig {
+                seed: 195_000 + nth,
+                model: MediaModel::default(),
+                ..SimConfig::default()
+            },
+            &outcome.snapshot,
+        ));
+        let mut engine = ImportedDatabase::open_on(recovered, path(), PAGE_SIZE, FRAMES)
+            .unwrap_or_else(|error| {
+                panic!(
+                    "cut {nth}: a crash during a free-map checkpoint that actually changed \
+                     the map left an unreadable database: {} ({})",
+                    error.message(),
+                    error.detail().unwrap_or_default()
+                )
+            });
+        assert_eq!(
+            ids(&mut engine),
+            expected_ids,
+            "cut {nth}: the rows do not match the checkpoint that was supposed to commit"
+        );
+        assert_bodies_intact(
+            &mut engine,
+            &[(3, 'c'), (5, 'e'), (6, 'f'), (FRESH_ID, 'z')],
+        );
+        assert_eq!(
+            freelist_count(&mut engine),
+            expected_count,
+            "cut {nth}: the free page count does not match the checkpoint that was supposed \
+             to commit"
+        );
+        // The recovered free map is not just numerically right: a further
+        // allocation still lands somewhere nothing else owns, and reads back
+        // whole - the same check the sibling test makes.
+        let another_id = 300 + nth as i64;
+        insert(&mut engine, another_id, 'y');
+        assert_bodies_intact(&mut engine, &[(another_id, 'y')]);
+    }
+    assert!(
+        cut_points >= 5,
+        "a sweep that reached {cut_points} cut points inside the checkpoint is not a sweep"
+    );
+}
