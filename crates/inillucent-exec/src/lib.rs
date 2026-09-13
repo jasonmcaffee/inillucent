@@ -43,6 +43,7 @@
 pub mod aggregate;
 pub mod autoindex;
 pub mod batch;
+pub mod compiled;
 pub mod constant;
 pub mod correlate;
 pub mod declared;
@@ -54,6 +55,7 @@ pub mod lateral;
 pub mod ops;
 pub mod paged;
 pub mod physical;
+pub mod recursive;
 pub mod scalar;
 pub mod scan;
 pub mod sequence;

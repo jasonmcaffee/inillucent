@@ -1,37 +1,75 @@
-//! Statement lifecycle, result metadata, parameters, and the verifier.
+//! Statement lifecycle, result metadata and parameters.
 //!
 //! Invariant: the public API behaves the way SQLite's does, including when it
 //! is misused. A statement stepped past its end reports done rather than
-//! panicking, a parameter index that does not exist is a misuse error rather
-//! than a silent no-op, and an interrupt stops the machine at a safe point and
-//! leaves it resettable.
+//! panicking, and a parameter index that does not exist is a misuse error
+//! rather than a silent no-op.
 //!
-//! The verifier tests are the other half of the same argument: the machine is
-//! safe because programs are proved before they run, so the proof has to be
-//! shown to reject the programs it claims to.
+//! **Three tests that used to live here are gone, and are not replaced,
+//! because there is nothing left in the new engine to replace them with:**
+//!
+//! - `an_interrupt_stops_a_running_statement` needed `Connection::interrupt`/
+//!   `clear_interrupt`. `inillucent_engine::connect::Connection` has neither, and
+//!   nothing else in `inillucent-engine` implements a cross-thread interrupt
+//!   under another name - this is a real capability gap, not a test-writing
+//!   one, and `compat/sqlite-3.53.4.toml`'s `vm.statement.interrupt` row (which
+//!   claims `status = "pass"` on the strength of exactly this one test) needs
+//!   a person to look at it: its `tests` array is now empty, which fails
+//!   `harness.rs::the_shipped_manifest_is_structurally_sound`.
+//! - `the_verifier_rejects_generated_invalid_programs` and
+//!   `the_verifier_rejects_mismatched_operands` tested `inillucent_vm::verify`/
+//!   `verify_operands` over a hand-built `Program` of `Instruction`s and
+//!   `Opcode`s. The new engine compiles to an operator tree
+//!   (`inillucent-exec`), not bytecode, and has no verifier of any shape -
+//!   `inillucent-exec` was searched for `verify`/`Program` and has neither.
+//!   `compat/sqlite-3.53.4.toml`'s `vm.bytecode.verifier` row cites only these
+//!   two tests and is now empty for the same reason.
+//! - `the_machine_runs_a_verified_program` drove `inillucent_vm::machine::Machine`
+//!   directly. There is no `Machine` in the new engine to drive; a statement is
+//!   run through `Connection::prepare`/`Statement::step`, which the tests below
+//!   already exercise.
 
 use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
 
-use inillucent_base::limits::Limits;
+use inillucent_compat::differential::tagged;
 use inillucent_compat::oracle::{Driver, Op, TaggedValue};
 use inillucent_compat::workspace_root;
-use inillucent_legacy::{Database, PrimaryCode, Value};
-use inillucent_vm::machine::Machine;
-use inillucent_vm::program::{Instruction, Opcode, Operand, Program, ProgramDependencies};
-use inillucent_vm::{verify, verify_operands};
+use inillucent_engine::connect::{Connection, Database};
+use inillucent_tree::datum::OwnedDatum;
 
 /// Returns the corpus fixture's path.
 fn fixture() -> PathBuf {
     workspace_root().join("compat/fixtures/select-corpus.db")
 }
 
+/// Returns the corpus fixture rebuilt as a native database, importing it
+/// exactly once for the whole test binary.
+///
+/// **Imported, not opened directly.** The fixture is a SQLite file, and this
+/// engine's file format is not SQLite's - `Database::open` on one reports that
+/// neither meta page is readable, which is correct and is not what this suite
+/// wants. `Database::import` reads it once through `inillucent-sqlite-reader`
+/// and rebuilds it as PAX trees at `<fixture>.rdb`, beside the source - one
+/// fixed path, so every test in this file that imported it separately (and in
+/// parallel, since libtest runs `#[test]`s on their own threads) would have
+/// raced rewriting the same file. Importing once, behind a `OnceLock`, and
+/// handing every test a plain `Database::open` on the result avoids that.
+fn imported_path() -> &'static PathBuf {
+    static IMPORTED: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    IMPORTED.get_or_init(|| {
+        Database::import(fixture())
+            .expect("the fixture imports")
+            .path()
+            .to_path_buf()
+    })
+}
+
 /// Opens a connection onto the corpus fixture.
-fn connect() -> inillucent_legacy::Connection {
-    let database = Database::open_with_busy_timeout(fixture(), std::time::Duration::from_secs(5))
-        .expect("the fixture opens");
-    database.connect().expect("the connection opens")
+fn connect() -> Connection<'static> {
+    let database: &'static Database = Box::leak(Box::new(
+        Database::open(imported_path()).expect("the import opens"),
+    ));
+    database.connect()
 }
 
 /// A statement steps to done and then keeps reporting done.
@@ -56,34 +94,45 @@ fn reset_runs_again_and_keeps_bindings() {
         .expect("it prepares");
     statement.bind_integer(1, 1).expect("it binds");
     assert!(statement.step().expect("it steps"));
-    let first = statement.value_text(0);
+    let first = statement.row().first().cloned();
     assert!(!statement.step().expect("it steps"));
 
-    statement.reset().expect("it resets");
+    statement.reset();
     assert!(statement.step().expect("it steps"));
-    assert_eq!(statement.value_text(0), first);
+    assert_eq!(statement.row().first().cloned(), first);
 
-    statement.reset().expect("it resets");
+    statement.reset();
     statement.clear_bindings();
     // With the binding cleared the parameter is NULL, and `id = NULL` is never
     // true, so the statement returns nothing rather than failing.
     assert!(!statement.step().expect("it steps"));
 }
 
-/// A parameter index that does not exist is a misuse, not a silent no-op.
+/// An out-of-range parameter index is reported as `Range`, not a silent no-op.
+///
+/// This used to assert `Misuse` for both the too-high index and the
+/// below-range zero one, which is not what SQLite itself does: its own
+/// `vdbeUnbind` (`.sqlite-ref/3.53.4/src/sqlite3.c`) reserves `SQLITE_MISUSE`
+/// for a statement that is busy or already finalized, and answers a plain
+/// out-of-range index - whichever direction, since the 1-based index arrives
+/// there already converted to a 0-based one that underflows for `0` - with
+/// `SQLITE_RANGE`. Neither case here is a name that fails to resolve; both
+/// are a positional index outside `[1, nVar]`, which is exactly the case the
+/// C API docs for `sqlite3_bind_*` name: "If the second parameter to these
+/// routines is out of range, then SQLITE_RANGE is returned."
 #[test]
-fn an_unknown_parameter_is_a_misuse() {
+fn an_out_of_range_parameter_index_is_a_range_error() {
     let connection = connect();
     let mut statement = connection.prepare("SELECT ?1").expect("it prepares");
     assert!(statement.bind_integer(1, 1).is_ok());
     let failure = statement
         .bind_integer(2, 1)
         .expect_err("parameter 2 does not exist");
-    assert_eq!(failure.code(), PrimaryCode::Misuse);
+    assert_eq!(failure.code(), inillucent_base::PrimaryCode::Range);
     let zero = statement
         .bind_integer(0, 1)
         .expect_err("parameters are one-based");
-    assert_eq!(zero.code(), PrimaryCode::Misuse);
+    assert_eq!(zero.code(), inillucent_base::PrimaryCode::Range);
 }
 
 /// Every bindable class round-trips through a parameter.
@@ -93,53 +142,32 @@ fn every_class_binds_and_returns() {
     let mut statement = connection
         .prepare("SELECT ?1, ?2, ?3, ?4, ?5")
         .expect("it prepares");
-    statement.bind_null(1).expect("it binds");
+    statement.bind(1, OwnedDatum::Null).expect("it binds");
     statement.bind_integer(2, -7).expect("it binds");
-    statement.bind_real(3, 1.5).expect("it binds");
+    statement.bind(3, OwnedDatum::Real(1.5)).expect("it binds");
     statement.bind_text(4, "text").expect("it binds");
     statement.bind_blob(5, &[0x00, 0xff]).expect("it binds");
     assert!(statement.step().expect("it steps"));
     let row = statement.row();
-    assert!(row.first().is_some_and(Value::is_null));
-    assert_eq!(row.get(1).and_then(Value::as_integer), Some(-7));
-    assert_eq!(row.get(2).and_then(Value::as_real), Some(1.5));
-    assert_eq!(
-        row.get(3)
-            .and_then(Value::as_text)
-            .map(|text| text.utf8_bytes().into_owned()),
-        Some(b"text".to_vec())
-    );
-    assert_eq!(
-        row.get(4)
-            .and_then(Value::as_blob)
-            .map(|blob| blob.raw().to_vec()),
-        Some(vec![0x00, 0xff])
-    );
+    assert_eq!(row.first(), Some(&OwnedDatum::Null));
+    assert_eq!(row.get(1), Some(&OwnedDatum::Int(-7)));
+    assert_eq!(row.get(2), Some(&OwnedDatum::Real(1.5)));
+    assert_eq!(row.get(3), Some(&OwnedDatum::Text(b"text".to_vec())));
+    assert_eq!(row.get(4), Some(&OwnedDatum::Blob(vec![0x00, 0xff])));
 }
 
-/// An interrupt stops the machine and reports the interrupt code.
+/// A connection is in autocommit until a transaction is opened on it.
+///
+/// This used to also assert that a prepared `SELECT` is read-only;
+/// `inillucent_engine::connect::Statement` has no `is_readonly` of any kind,
+/// which is a smaller gap than the interrupt/verifier ones above (nothing
+/// downstream depends on the flag existing) but is still a capability the old
+/// engine had and the new one does not expose.
 #[test]
-fn an_interrupt_stops_a_running_statement() {
-    let connection = connect();
-    connection.interrupt();
-    let mut statement = connection
-        .prepare("SELECT count(*) FROM people")
-        .expect("it prepares");
-    let failure = statement.step().expect_err("it is interrupted");
-    assert_eq!(failure.code(), PrimaryCode::Interrupt);
-    connection.clear_interrupt();
-    statement.reset().expect("it resets");
-    assert!(statement.step().expect("it steps"));
-}
-
-/// A read-only connection is always in autocommit, and every statement it can
-/// prepare is read-only.
-#[test]
-fn the_connection_is_in_autocommit_and_read_only() {
+fn the_connection_is_in_autocommit() {
     let connection = connect();
     assert!(connection.autocommit());
-    let statement = connection.prepare("SELECT 1").expect("it prepares");
-    assert!(statement.is_readonly());
+    let _ = connection.prepare("SELECT 1").expect("it prepares");
 }
 
 /// Prepare reports the tail so a caller can walk a script.
@@ -149,47 +177,74 @@ fn prepare_reports_the_tail() {
     let sql = "SELECT 1; SELECT 2;";
     let (mut first, consumed) = connection.prepare_with_tail(sql).expect("it prepares");
     assert!(first.step().expect("it steps"));
-    assert_eq!(first.value_integer(0), Some(1));
+    assert_eq!(first.row().first(), Some(&OwnedDatum::Int(1)));
     let rest = sql.get(consumed..).unwrap_or("");
     let (mut second, _) = connection.prepare_with_tail(rest).expect("it prepares");
     assert!(second.step().expect("it steps"));
-    assert_eq!(second.value_integer(0), Some(2));
+    assert_eq!(second.row().first(), Some(&OwnedDatum::Int(2)));
 }
 
-/// Column metadata is available before the first step, which is what a caller
-/// binding a result set needs.
+/// Column metadata is available only **after** the first step, and the names
+/// it then gives are the ones a caller reads results by.
+///
+/// **The "before" half of this test is a recorded difference from SQLite**, and
+/// the engine states it itself, on `Statement::columns`: "Empty before the
+/// first `step`, which is where this differs from `sqlite3_column_name`: that
+/// answers straight after a prepare, because SQLite compiles the column names
+/// as part of compiling the statement. This statement materialises on its first
+/// step and learns its shape from what came back, so there is nothing to report
+/// until then. A caller that asked first got an empty list and printed no
+/// header, which is how the difference was found."
+///
+/// So the empty answer is asserted rather than the three names, and the three
+/// names are asserted after a step. A caller binding a result set before
+/// running it - which is what this test used to be named for - cannot do that
+/// here, and an engine that later compiles the names at prepare time turns the
+/// first assertion red, which is the point of keeping it.
 #[test]
-fn column_metadata_is_available_before_stepping() {
+fn column_metadata_is_available_after_stepping() {
     let connection = connect();
-    let statement = connection
+    let mut statement = connection
         .prepare("SELECT id, name AS who, id + 1 FROM people")
         .expect("it prepares");
-    assert_eq!(statement.column_count(), 3);
-    assert_eq!(statement.column_name(0), Some(b"id".as_slice()));
-    assert_eq!(statement.column_name(1), Some(b"who".as_slice()));
+    assert_eq!(
+        statement.columns().len(),
+        0,
+        "this engine reports no column names until the first step; if it now \
+         reports three, `Statement::columns`'s own doc comment is out of date \
+         and this test should assert the names here instead"
+    );
+    assert!(statement.step().expect("it steps"));
+    assert_eq!(statement.columns().len(), 3);
+    assert_eq!(statement.columns().first().map(String::as_str), Some("id"));
+    assert_eq!(statement.columns().get(1).map(String::as_str), Some("who"));
     // An expression with no alias is named after the text it was written as,
     // which is what SQLite's default `short_column_names` produces and what an
     // application reading results by name depends on.
-    assert_eq!(statement.column_name(2), Some(b"id + 1".as_slice()));
-    assert_eq!(statement.column_name(3), None);
+    assert_eq!(
+        statement.columns().get(2).map(String::as_str),
+        Some("id + 1")
+    );
+    assert_eq!(statement.columns().get(3), None);
 }
 
 /// Reading a database changes nothing about it, even after many statements.
 #[test]
 fn a_long_session_changes_no_byte() {
-    let before = std::fs::read(fixture()).expect("the fixture reads");
-    {
-        let connection = connect();
-        for sql in [
-            "SELECT count(*) FROM people",
-            "SELECT * FROM people ORDER BY name",
-            "SELECT team, count(*) FROM people GROUP BY team",
-            "SELECT DISTINCT team FROM people",
-        ] {
-            let _ = connection.query(sql).expect("it runs");
-        }
+    let path = imported_path().clone();
+    let database = Database::open(&path).expect("the import opens");
+    let before = std::fs::read(&path).expect("the database reads");
+    let connection = database.connect();
+    for sql in [
+        "SELECT count(*) FROM people",
+        "SELECT * FROM people ORDER BY name",
+        "SELECT team, count(*) FROM people GROUP BY team",
+        "SELECT DISTINCT team FROM people",
+    ] {
+        let _ = connection.query(sql).expect("it runs");
     }
-    let after = std::fs::read(fixture()).expect("the fixture reads");
+    drop(connection);
+    let after = std::fs::read(&path).expect("the database reads");
     assert_eq!(before, after);
 }
 
@@ -210,10 +265,10 @@ fn two_statements_interleave_on_one_connection() {
         let more_first = first.step().expect("it steps");
         let more_second = second.step().expect("it steps");
         if more_first {
-            ascending.push(first.value_integer(0));
+            ascending.push(first.row().first().cloned());
         }
         if more_second {
-            descending.push(second.value_integer(0));
+            descending.push(second.row().first().cloned());
         }
         if !more_first && !more_second {
             break;
@@ -222,142 +277,6 @@ fn two_statements_interleave_on_one_connection() {
     descending.reverse();
     assert_eq!(ascending, descending);
     assert_eq!(ascending.len(), 10);
-}
-
-/// Builds a minimal valid program for the verifier tests to damage.
-fn valid_program() -> Program {
-    Program {
-        ephemeral_count: 0,
-        instructions: vec![
-            Instruction::new(Opcode::Init, 0, 1, 0),
-            Instruction::new(Opcode::Load, 0, 1, 0).with_p4(Operand::Integer(7)),
-            Instruction::new(Opcode::ResultRow, 1, 1, 0),
-            Instruction::new(Opcode::Halt, 0, 0, 0),
-        ],
-        register_count: 2,
-        cursor_count: 0,
-        sorter_count: 0,
-        distinct_count: 0,
-        aggregate_count: 0,
-        result_columns: Vec::new(),
-        dependencies: ProgramDependencies::default(),
-        readonly: true,
-        optimizations_used: 0,
-        parameter_count: 0,
-    }
-}
-
-/// The verifier accepts the valid program and rejects every generated mutation
-/// of it that breaks an invariant.
-///
-/// The mutations are generated rather than listed so that the check is about
-/// the invariants rather than about the eight cases somebody thought of.
-#[test]
-fn the_verifier_rejects_generated_invalid_programs() {
-    assert!(verify(&valid_program()).is_empty());
-    let mut rejected = 0usize;
-    let mut accepted = Vec::new();
-    for address in 0..valid_program().instructions.len() {
-        for delta in [-1i32, 1, 40, i32::MAX] {
-            for field in 0..3 {
-                let mut program = valid_program();
-                let Some(instruction) = program.instructions.get_mut(address) else {
-                    continue;
-                };
-                match field {
-                    0 => instruction.p1 = instruction.p1.saturating_add(delta),
-                    1 => instruction.p2 = instruction.p2.saturating_add(delta),
-                    _ => instruction.p3 = instruction.p3.saturating_add(delta),
-                }
-                let problems = verify(&program);
-                // A mutation that is still a valid program is fine; what must
-                // never happen is a mutation that breaks an invariant and is
-                // accepted anyway. Anything that reads a register nothing
-                // wrote, jumps outside, or leaves the frame is caught.
-                let breaks_invariant = breaks_an_invariant(&program);
-                if breaks_invariant && problems.is_empty() {
-                    accepted.push(format!("{address}/{field}/{delta}"));
-                }
-                if !problems.is_empty() {
-                    rejected = rejected.saturating_add(1);
-                }
-            }
-        }
-    }
-    assert!(rejected > 10, "only {rejected} mutations were rejected");
-    assert!(
-        accepted.is_empty(),
-        "accepted invalid programs: {accepted:?}"
-    );
-}
-
-/// Returns whether a program breaks an invariant the verifier promises to
-/// catch, decided independently of the verifier itself.
-fn breaks_an_invariant(program: &Program) -> bool {
-    let registers = program.register_count as i32;
-    let length = program.instructions.len() as i32;
-    for instruction in &program.instructions {
-        if instruction.opcode.jumps() && (instruction.p2 < 0 || instruction.p2 > length) {
-            return true;
-        }
-        match instruction.opcode {
-            Opcode::Load if (instruction.p2 < 0 || instruction.p2 >= registers) => {
-                return true;
-            }
-            Opcode::ResultRow
-                if (instruction.p1 < 0
-                    || instruction.p2 < 0
-                    || instruction.p1.saturating_add(instruction.p2) > registers) =>
-            {
-                return true;
-            }
-            _ => {}
-        }
-    }
-    // A result row that reads a register the load did not write.
-    let loaded: Vec<i32> = program
-        .instructions
-        .iter()
-        .filter(|instruction| instruction.opcode == Opcode::Load)
-        .map(|instruction| instruction.p2)
-        .collect();
-    program.instructions.iter().any(|instruction| {
-        instruction.opcode == Opcode::ResultRow
-            && (0..instruction.p2).any(|offset| !loaded.contains(&(instruction.p1 + offset)))
-    })
-}
-
-/// An instruction carrying the wrong kind of operand is rejected.
-#[test]
-fn the_verifier_rejects_mismatched_operands() {
-    let mut program = valid_program();
-    if let Some(instruction) = program.instructions.get_mut(1) {
-        instruction.opcode = Opcode::Compare;
-        instruction.p1 = 1;
-        instruction.p2 = 1;
-        instruction.p3 = 1;
-        instruction.p4 = Operand::Integer(0);
-    }
-    assert!(!verify_operands(&program).is_empty());
-}
-
-/// The machine runs a verified program and produces the row it describes.
-#[test]
-fn the_machine_runs_a_verified_program() {
-    let program = valid_program();
-    assert!(verify(&program).is_empty());
-    let mut machine = Machine::new(
-        Arc::new(program),
-        Arc::new(AtomicBool::new(false)),
-        Limits::default(),
-    );
-    // A program with no cursors needs no pager beyond one to satisfy the
-    // signature, so this is driven through the public API instead: the point
-    // proved here is that the verifier's acceptance and the machine's success
-    // are the same programs.
-    assert_eq!(machine.state(), inillucent_vm::MachineState::Prepared);
-    machine.reset();
-    assert_eq!(machine.steps(), 0);
 }
 
 /// Returns the pinned oracle, if it has been built.
@@ -387,18 +306,22 @@ fn lifecycle_and_metadata_match_the_oracle() {
     let connection = connect();
 
     // Column names, for the three forms SQLite names differently.
+    //
+    // **Stepped before the names are read**, because this engine has none
+    // until then - see `column_metadata_is_available_after_stepping` above and
+    // `Statement::columns`'s own doc comment. The oracle answers straight after
+    // a prepare, so the comparison is of what each engine reports once it has
+    // produced a row, which is the point at which both agree and the point an
+    // application reads a result by name.
     for (sql, expected) in [
         ("SELECT id FROM people", vec!["id"]),
         ("SELECT id AS x FROM people", vec!["x"]),
         ("SELECT id, name FROM people", vec!["id", "name"]),
     ] {
         let observation = driver.send(&Op::Query(sql.to_string())).expect("it runs");
-        let statement = connection.prepare(sql).expect("it prepares");
-        let ours: Vec<String> = statement
-            .columns()
-            .iter()
-            .map(|column| String::from_utf8_lossy(&column.name).into_owned())
-            .collect();
+        let mut statement = connection.prepare(sql).expect("it prepares");
+        assert!(statement.step().expect("it steps"), "{sql} produced no row");
+        let ours: Vec<String> = statement.columns().to_vec();
         assert_eq!(observation.columns, expected, "{sql}");
         assert_eq!(ours, expected, "{sql}");
         assert!(observation.autocommit);
@@ -425,10 +348,14 @@ fn lifecycle_and_metadata_match_the_oracle() {
             .expect("it runs");
         let mut statement = connection.prepare("SELECT ?1").expect("it prepares");
         statement
-            .bind(1, tagged_to_value(&value))
+            .bind(1, tagged_to_datum(&value))
             .expect("it binds");
         assert!(statement.step().expect("it steps"));
-        let ours = value_to_tagged(&statement.value(0));
+        let ours = statement
+            .row()
+            .first()
+            .map(tagged)
+            .unwrap_or(TaggedValue::Null);
         let theirs = observation
             .rows
             .first()
@@ -441,23 +368,12 @@ fn lifecycle_and_metadata_match_the_oracle() {
 }
 
 /// Converts a protocol value into an engine value.
-fn tagged_to_value(value: &TaggedValue) -> Value<'static> {
+fn tagged_to_datum(value: &TaggedValue) -> OwnedDatum {
     match value {
-        TaggedValue::Null => Value::Null,
-        TaggedValue::Integer(integer) => Value::Integer(*integer),
-        TaggedValue::Real(real) => Value::Real(*real),
-        TaggedValue::Text(text) => Value::owned_text(text).unwrap_or(Value::Null),
-        TaggedValue::Blob(bytes) => Value::owned_blob(bytes).unwrap_or(Value::Null),
-    }
-}
-
-/// Converts an engine value into a protocol value.
-fn value_to_tagged(value: &Value<'_>) -> TaggedValue {
-    match value {
-        Value::Null => TaggedValue::Null,
-        Value::Integer(integer) => TaggedValue::Integer(*integer),
-        Value::Real(real) => TaggedValue::Real(*real),
-        Value::Text(text) => TaggedValue::Text(text.utf8_bytes().into_owned()),
-        Value::Blob(blob) => TaggedValue::Blob(blob.raw().to_vec()),
+        TaggedValue::Null => OwnedDatum::Null,
+        TaggedValue::Integer(integer) => OwnedDatum::Int(*integer),
+        TaggedValue::Real(real) => OwnedDatum::Real(*real),
+        TaggedValue::Text(text) => OwnedDatum::Text(text.clone()),
+        TaggedValue::Blob(bytes) => OwnedDatum::Blob(bytes.clone()),
     }
 }

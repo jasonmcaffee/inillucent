@@ -1,18 +1,28 @@
-//! The R-Tree module, compared against the pinned SQLite 3.53.4 and then handed
-//! to it.
+//! The R-Tree module, compared against the pinned SQLite 3.53.4.
 //!
-//! Invariant: the format is the claim. Answering the same questions is the easy
-//! half; the half that matters is that a file one engine wrote is a file the
-//! other opens, queries and *writes*, because that is what an application does
-//! when it moves between the two. So the last two tests here do not compare
-//! answers at all - they build a database with one engine and use it with the
-//! other.
+//! Invariant: answering the same questions the pinned reference does is what
+//! every scenario here asks, over `compare`'s statement-by-statement grading.
+//!
+//! **The two cross-open tests this file used to end with are gone.** They
+//! built a database with one engine and handed the file to the other, because
+//! the retired engine wrote SQLite's own on-disk format and the file was the
+//! claim. The rearchitected engine makes no such claim: `docs/roadmap.md` and
+//! `inillucent_engine::connect::Database::import`'s own doc comment say so -
+//! file-format compatibility is not a goal of the rearchitecture, and a file
+//! this engine writes is one only this engine reads. `Database::open` on a
+//! SQLite file reports that neither meta page is readable, which is true and
+//! is what it should say. So there is no "the pinned shell reads what this
+//! engine wrote" left to assert, in either direction; a fixture built through
+//! SQLite still reaches this engine, but only through `Database::import`,
+//! which `crates/inillucent-compat/tests/migrate_sqlite.rs` already covers.
+//! `a_split_tree_answers_every_query` still proves the tree structure itself,
+//! entirely against this engine.
 
 use std::path::PathBuf;
-use std::process::Command;
 
 use inillucent_compat::differential::{compare, sqlite_oracle, Step};
-use inillucent_compat::workspace_root;
+use inillucent_engine::connect::Database;
+use inillucent_tree::datum::OwnedDatum;
 
 /// Where this suite's scratch databases live.
 const AREA: &str = "rtree";
@@ -36,31 +46,6 @@ fn check(name: &str, steps: &[Step]) {
         return;
     }
     assert_eq!(compared, all.len(), "every step was compared");
-}
-
-/// Returns the pinned SQLite shell, if it has been downloaded.
-fn shell() -> Option<PathBuf> {
-    let directory = workspace_root().join(".sqlite-ref/3.53.4/shell");
-    let path = directory.join(format!("sqlite3{}", std::env::consts::EXE_SUFFIX));
-    path.is_file().then_some(path)
-}
-
-/// Runs SQL through the pinned shell and returns what it printed.
-fn run_shell(database: &PathBuf, sql: &str) -> String {
-    let Some(shell) = shell() else {
-        return String::new();
-    };
-    let output = Command::new(shell)
-        .arg(database)
-        .arg(sql)
-        .output()
-        .expect("the pinned shell runs");
-    assert!(
-        output.status.success(),
-        "the pinned shell refused: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n")
 }
 
 /// A table is created with the shadow tables the format needs.
@@ -128,9 +113,7 @@ fn writes_reach_the_module() {
 ///
 /// The interesting number is the one that overflows a node: a tree that never
 /// splits is one where the interior nodes, the parent table and the descent
-/// have never run at all. The comparison here is against the *structure* rather
-/// than against the oracle, because the two cross-open tests below already ask
-/// the oracle to read a tree this deep - and they are the stronger claim.
+/// have never run at all.
 #[test]
 fn a_split_tree_answers_every_query() {
     let path = inillucent_compat::differential::scratch(AREA, "deep", "inillucent");
@@ -162,10 +145,13 @@ fn a_split_tree_answers_every_query() {
             > 8,
         "the tree should have split: {nodes:?}"
     );
-    let connection = open_existing(&path);
-    inillucent_session::statement::execute_batch(&connection, b"DELETE FROM spots WHERE id > 200")
-        .expect("deletes");
-    drop(connection);
+    {
+        let database = open_existing(&path);
+        let connection = database.connect();
+        connection
+            .execute_batch("DELETE FROM spots WHERE id > 200")
+            .expect("deletes");
+    }
     assert_eq!(
         query_with_inillucent(&path, "SELECT count(*) FROM spots"),
         ["200"]
@@ -176,128 +162,41 @@ fn a_split_tree_answers_every_query() {
     );
 }
 
-/// A tree inillucent built is one the pinned release opens, queries and writes.
-#[test]
-fn the_pinned_release_reads_what_inillucent_wrote() {
-    let Some(shell) = shell() else {
-        return;
-    };
-    let _ = shell;
-    let path = inillucent_compat::differential::scratch(AREA, "cross-out", "inillucent");
-    build_with_inillucent(&path, 200);
-
-    let listed = run_shell(
-        &path,
-        "SELECT count(*) FROM spots; \
-         SELECT id FROM spots WHERE minX >= 100.0 AND maxX <= 104.0 ORDER BY id; \
-         PRAGMA integrity_check;",
-    );
-    assert_eq!(
-        listed.trim(),
-        "200\n100\n101\n102\n103\nok",
-        "the pinned release read: {listed}"
-    );
-
-    // And it writes: a row it adds is one inillucent then finds.
-    run_shell(
-        &path,
-        "INSERT INTO spots VALUES (9999, 500.0, 501.0, 500.0, 501.0);",
-    );
-    let found = query_with_inillucent(&path, "SELECT id FROM spots WHERE minX >= 499.0");
-    assert_eq!(found, vec!["9999"], "inillucent reads the row SQLite added");
-}
-
-/// A tree the pinned release built is one inillucent opens, queries and writes.
-#[test]
-fn inillucent_reads_what_the_pinned_release_wrote() {
-    let Some(shell) = shell() else {
-        return;
-    };
-    let _ = shell;
-    let path = inillucent_compat::differential::scratch(AREA, "cross-in", "sqlite");
-    let mut sql = String::from(
-        "CREATE VIRTUAL TABLE spots USING rtree(id, minX, maxX, minY, maxY);\nBEGIN;\n",
-    );
-    for index in 1..=200 {
-        sql.push_str(&format!(
-            "INSERT INTO spots VALUES ({index}, {index}.0, {}.0, {index}.0, {}.0);\n",
-            index + 1,
-            index + 1
-        ));
-    }
-    sql.push_str("COMMIT;\n");
-    run_shell(&path, &sql);
-
-    let counted = query_with_inillucent(&path, "SELECT count(*) FROM spots");
-    assert_eq!(counted, vec!["200"]);
-    let found = query_with_inillucent(
-        &path,
-        "SELECT id FROM spots WHERE minX >= 100.0 AND maxX <= 104.0 ORDER BY id",
-    );
-    assert_eq!(found, vec!["100", "101", "102", "103"]);
-
-    // And inillucent writes: a row it adds is one the pinned release then finds.
-    let connection = open_existing(&path);
-    inillucent_session::statement::execute_batch(
-        &connection,
-        b"INSERT INTO spots VALUES (9999, 500.0, 501.0, 500.0, 501.0)",
-    )
-    .expect("inillucent inserts");
-    drop(connection);
-    let listed = run_shell(&path, "SELECT id FROM spots WHERE minX >= 499.0;");
-    assert_eq!(listed.trim(), "9999");
-}
-
 /// Builds a tree with inillucent, from nothing.
 fn build_with_inillucent(path: &PathBuf, rows: usize) {
-    let database = inillucent_session::connection::SessionDatabase::open_with_options(
-        path,
-        inillucent_session::connection::OpenOptions::default(),
-    )
-    .expect("inillucent opens");
-    let connection = database.connect().expect("inillucent connects");
-    inillucent_session::statement::execute_batch(
-        &connection,
-        b"CREATE VIRTUAL TABLE spots USING rtree(id, minX, maxX, minY, maxY)",
-    )
-    .expect("the table is made");
-    inillucent_session::statement::execute_batch(&connection, b"BEGIN").expect("begins");
+    let database = Database::open(path).expect("inillucent opens");
+    let connection = database.connect();
+    connection
+        .execute_batch("CREATE VIRTUAL TABLE spots USING rtree(id, minX, maxX, minY, maxY)")
+        .expect("the table is made");
+    connection.execute_batch("BEGIN").expect("begins");
     for index in 1..=rows {
         let sql = format!(
             "INSERT INTO spots VALUES ({index}, {index}.0, {}.0, {index}.0, {}.0)",
             index + 1,
             index + 1
         );
-        inillucent_session::statement::execute_batch(&connection, sql.as_bytes()).expect("inserts");
+        connection.execute_batch(&sql).expect("inserts");
     }
-    inillucent_session::statement::execute_batch(&connection, b"COMMIT").expect("commits");
+    connection.execute_batch("COMMIT").expect("commits");
 }
 
 /// Opens a database inillucent did not create.
-fn open_existing(path: &PathBuf) -> inillucent_session::connection::Connection {
-    let database = inillucent_session::connection::SessionDatabase::open_with_options(
-        path,
-        inillucent_session::connection::OpenOptions::default(),
-    )
-    .expect("inillucent opens");
-    database.connect().expect("inillucent connects")
+fn open_existing(path: &PathBuf) -> Database {
+    Database::open(path).expect("inillucent opens")
 }
 
 /// Runs one query with inillucent and returns its first column as text.
 fn query_with_inillucent(path: &PathBuf, sql: &str) -> Vec<String> {
-    let connection = open_existing(path);
-    let mut statement =
-        inillucent_session::statement::Statement::prepare(&connection, sql.as_bytes())
-            .expect("it prepares")
-            .0;
+    let database = open_existing(path);
+    let connection = database.connect();
+    let mut statement = connection.prepare(sql).expect("it prepares");
     let mut rows = Vec::new();
     while statement.step().expect("it steps") {
-        rows.push(match statement.value(0) {
-            inillucent_value::Value::Integer(number) => number.to_string(),
-            inillucent_value::Value::Real(number) => number.to_string(),
-            inillucent_value::Value::Text(text) => {
-                String::from_utf8_lossy(&text.utf8_bytes()).into_owned()
-            }
+        rows.push(match statement.row().first() {
+            Some(OwnedDatum::Int(number)) => number.to_string(),
+            Some(OwnedDatum::Real(number)) => number.to_string(),
+            Some(OwnedDatum::Text(text)) => String::from_utf8_lossy(text).into_owned(),
             other => format!("{other:?}"),
         });
     }

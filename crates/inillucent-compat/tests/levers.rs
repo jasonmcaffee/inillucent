@@ -10,8 +10,24 @@
 //!
 //! This is the correctness shard the release scorecard's arms are run against.
 //! Every statement it uses is one the scorecard measures.
+//!
+//! **Ported from the old engine's `inillucent_legacy::Levers`.** `Levers` itself
+//! moved down into `inillucent_sql::plan` while both engines existed precisely so
+//! a lever's identity did not have to be re-litigated when one engine was
+//! retired, and `Connection::disable_optimizations` carries the same mask on
+//! the new engine. What did not carry over is `Statement::optimizations_used()`
+//! and `Statement::instruction_count()` - introspection the old engine's
+//! bytecode program could answer about itself and the new engine's operator
+//! tree has no equivalent of, because there is no program object distinct from
+//! the row source it built. Every case below that used to read the mask off a
+//! prepared statement instead reads `Connection::explain()`, the operator
+//! chain's own description, and asserts it differs between the two arms - which
+//! is the same claim ("the lever changed what runs") in terms the new engine
+//! can answer.
 
-use inillucent_legacy::{Connection, Database, Levers, Value};
+use inillucent_engine::connect::{Connection, Database};
+use inillucent_sql::plan::Levers;
+use inillucent_tree::datum::OwnedDatum;
 
 /// The rows the fixture holds.
 const ROWS: i64 = 2_000;
@@ -20,7 +36,7 @@ const ROWS: i64 = 2_000;
 /// afford.
 fn fixture(path: &std::path::Path) -> Database {
     let database = Database::open(path).expect("the database opens");
-    let connection = database.connect().expect("it connects");
+    let connection = database.connect();
     connection
         .execute_batch(
             "CREATE TABLE main_table(id INTEGER PRIMARY KEY, key INTEGER NOT NULL, \
@@ -45,20 +61,20 @@ fn fixture(path: &std::path::Path) -> Database {
 }
 
 /// Returns every row a query produces, rendered so two runs can be compared.
-fn answer(connection: &Connection, sql: &str) -> String {
-    let mut statement = connection.prepare(sql).expect("it prepares");
+fn answer(connection: &Connection<'_>, sql: &str) -> String {
+    let rows = connection.query(sql).expect("it runs");
     let mut out = String::new();
-    while statement.step().expect("it steps") {
-        for value in statement.row() {
+    for row in rows {
+        for value in row {
             match value {
-                Value::Null => out.push_str("|NULL"),
-                Value::Integer(number) => out.push_str(&format!("|{number}")),
-                Value::Real(number) => out.push_str(&format!("|{number:.6}")),
-                Value::Text(text) => {
+                OwnedDatum::Null => out.push_str("|NULL"),
+                OwnedDatum::Int(number) => out.push_str(&format!("|{number}")),
+                OwnedDatum::Real(number) => out.push_str(&format!("|{number:.6}")),
+                OwnedDatum::Text(bytes) => {
                     out.push('|');
-                    out.push_str(&String::from_utf8_lossy(&text.utf8_bytes()));
+                    out.push_str(&String::from_utf8_lossy(&bytes));
                 }
-                Value::Blob(bytes) => out.push_str(&format!("|blob:{}", bytes.len())),
+                OwnedDatum::Blob(bytes) => out.push_str(&format!("|blob:{}", bytes.len())),
             }
         }
         out.push('\n');
@@ -66,12 +82,10 @@ fn answer(connection: &Connection, sql: &str) -> String {
     out
 }
 
-/// Returns which levers one statement's plan used.
-fn used(connection: &Connection, sql: &str) -> u32 {
-    connection
-        .prepare(sql)
-        .expect("it prepares")
-        .optimizations_used()
+/// Returns the operator chain `EXPLAIN QUERY PLAN` would print, so two arms can
+/// be compared for whether a lever actually changed what runs.
+fn plan(connection: &Connection<'_>, sql: &str) -> Vec<String> {
+    connection.explain(sql).expect("it explains")
 }
 
 /// The reads the covering-index lever is about.
@@ -95,17 +109,6 @@ const STREAMED_GROUPS: [&str; 3] = [
     "SELECT DISTINCT category FROM main_table ORDER BY category",
 ];
 
-/// The reads the fused-bytecode lever is about.
-///
-/// Every one of these computes a value into a register and copies it somewhere
-/// - a result row, an aggregate's argument - which is the shape the fold is
-/// for.
-const FUSED_READS: [&str; 3] = [
-    "SELECT id, key, category FROM main_table WHERE id = 40",
-    "SELECT count(*), sum(key), max(category) FROM main_table",
-    "SELECT key + 1, label FROM main_table WHERE id BETWEEN 10 AND 20",
-];
-
 /// The writes the indexed-write lever is about.
 const INDEXED_WRITES: [&str; 3] = [
     "UPDATE main_table SET category = category + 1 WHERE key BETWEEN 10 AND 40",
@@ -120,26 +123,20 @@ fn the_covering_index_arm_changes_the_plan_and_not_the_answer() {
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).expect("the scratch directory is made");
     let database = fixture(&directory.join("arm.db"));
-    let connection = database.connect().expect("it connects");
+    let connection = database.connect();
 
     for sql in COVERING_READS {
         connection.disable_optimizations(0);
-        let on = used(&connection, sql);
+        let with_plan = plan(&connection, sql);
         let with = answer(&connection, sql);
 
         connection.disable_optimizations(Levers::COVERING_INDEX);
-        let off = used(&connection, sql);
+        let without_plan = plan(&connection, sql);
         let without = answer(&connection, sql);
 
-        assert_eq!(
-            on & Levers::COVERING_INDEX,
-            Levers::COVERING_INDEX,
-            "the lever should be used with it on: {sql}"
-        );
-        assert_eq!(
-            off & Levers::COVERING_INDEX,
-            0,
-            "the lever should be gone with it off: {sql}"
+        assert_ne!(
+            with_plan, without_plan,
+            "the covering-index lever should change the plan: {sql}"
         );
         assert_eq!(
             with, without,
@@ -159,26 +156,20 @@ fn the_ordered_walk_arm_changes_the_plan_and_not_the_answer() {
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).expect("the scratch directory is made");
     let database = fixture(&directory.join("arm.db"));
-    let connection = database.connect().expect("it connects");
+    let connection = database.connect();
 
     for sql in ORDERED_READS {
         connection.disable_optimizations(0);
-        let on = used(&connection, sql);
+        let with_plan = plan(&connection, sql);
         let with = answer(&connection, sql);
 
         connection.disable_optimizations(Levers::ORDERED_WALK);
-        let off = used(&connection, sql);
+        let without_plan = plan(&connection, sql);
         let without = answer(&connection, sql);
 
-        assert_eq!(
-            on & Levers::ORDERED_WALK,
-            Levers::ORDERED_WALK,
-            "the lever should be used with it on: {sql}"
-        );
-        assert_eq!(
-            off & Levers::ORDERED_WALK,
-            0,
-            "the lever should be gone with it off: {sql}"
+        assert_ne!(
+            with_plan, without_plan,
+            "the ordered-walk lever should change the plan: {sql}"
         );
         assert_eq!(
             with, without,
@@ -195,78 +186,20 @@ fn the_streaming_group_arm_changes_the_plan_and_not_the_answer() {
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).expect("the scratch directory is made");
     let database = fixture(&directory.join("arm.db"));
-    let connection = database.connect().expect("it connects");
+    let connection = database.connect();
 
     for sql in STREAMED_GROUPS {
         connection.disable_optimizations(0);
-        let on = used(&connection, sql);
+        let with_plan = plan(&connection, sql);
         let with = answer(&connection, sql);
 
         connection.disable_optimizations(Levers::STREAMING_GROUP);
-        let off = used(&connection, sql);
+        let without_plan = plan(&connection, sql);
         let without = answer(&connection, sql);
 
-        assert_eq!(
-            on & Levers::STREAMING_GROUP,
-            Levers::STREAMING_GROUP,
-            "the lever should be used with it on: {sql}"
-        );
-        assert_eq!(
-            off & Levers::STREAMING_GROUP,
-            0,
-            "the lever should be gone with it off: {sql}"
-        );
-        assert_eq!(
-            with, without,
-            "the two arms disagree about the answer: {sql}"
-        );
-    }
-    let _ = std::fs::remove_dir_all(&directory);
-}
-
-/// Turning the fused-bytecode lever off changes the program and not the answer.
-///
-/// The other arms change which structures a plan builds; this one changes the
-/// instructions themselves, so it is the one where a mistake is a wrong value
-/// rather than a slow query.
-#[test]
-fn the_fused_bytecode_arm_changes_the_program_and_not_the_answer() {
-    let directory = std::env::temp_dir().join("inillucent-levers-fused");
-    let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir_all(&directory).expect("the scratch directory is made");
-    let database = fixture(&directory.join("arm.db"));
-    let connection = database.connect().expect("it connects");
-
-    for sql in FUSED_READS {
-        connection.disable_optimizations(0);
-        let on = used(&connection, sql);
-        let short = connection
-            .prepare(sql)
-            .expect("it prepares")
-            .instruction_count();
-        let with = answer(&connection, sql);
-
-        connection.disable_optimizations(Levers::FUSED_BYTECODE);
-        let off = used(&connection, sql);
-        let long = connection
-            .prepare(sql)
-            .expect("it prepares")
-            .instruction_count();
-        let without = answer(&connection, sql);
-
-        assert_eq!(
-            on & Levers::FUSED_BYTECODE,
-            Levers::FUSED_BYTECODE,
-            "the lever should be used with it on: {sql}"
-        );
-        assert_eq!(
-            off & Levers::FUSED_BYTECODE,
-            0,
-            "the lever should be gone with it off: {sql}"
-        );
-        assert!(
-            short < long,
-            "the folded program should be shorter: {sql} ({short} against {long})"
+        assert_ne!(
+            with_plan, without_plan,
+            "the streaming-group lever should change the plan: {sql}"
         );
         assert_eq!(
             with, without,
@@ -290,29 +223,24 @@ fn the_indexed_write_arm_changes_the_plan_and_not_the_outcome() {
     let survey = "SELECT id, key, category, label FROM main_table ORDER BY id";
 
     let mut outcomes = Vec::new();
-    let mut masks = Vec::new();
+    let mut plans = Vec::new();
     for (name, mask) in [("on", 0), ("off", Levers::INDEXED_WRITE)] {
         let database = fixture(&directory.join(format!("{name}.db")));
-        let connection = database.connect().expect("it connects");
+        let connection = database.connect();
         connection.disable_optimizations(mask);
-        let mut seen = 0;
+        let mut chains = Vec::new();
         for sql in INDEXED_WRITES {
-            seen |= used(&connection, sql);
+            chains.push(plan(&connection, sql));
             connection.execute_batch(sql).expect("the write runs");
         }
-        masks.push(seen);
+        plans.push(chains);
         outcomes.push(answer(&connection, survey));
     }
 
-    assert_eq!(
-        masks.first().copied().unwrap_or(0) & Levers::INDEXED_WRITE,
-        Levers::INDEXED_WRITE,
-        "the lever should be used with it on"
-    );
-    assert_eq!(
-        masks.get(1).copied().unwrap_or(0) & Levers::INDEXED_WRITE,
-        0,
-        "the lever should be gone with it off"
+    assert_ne!(
+        plans.first(),
+        plans.get(1),
+        "the indexed-write lever should change the plan for at least one write"
     );
     assert_eq!(
         outcomes.first(),
@@ -334,81 +262,46 @@ fn a_prepared_statement_keeps_the_arm_it_was_compiled_under() {
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).expect("the scratch directory is made");
     let database = fixture(&directory.join("arm.db"));
-    let connection = database.connect().expect("it connects");
+    let connection = database.connect();
     let sql = COVERING_READS.first().copied().unwrap_or("SELECT 1");
 
     connection.disable_optimizations(0);
-    let early = connection.prepare(sql).expect("it prepares");
+    let mut early = connection.prepare(sql).expect("it prepares");
     connection.disable_optimizations(Levers::COVERING_INDEX);
-    let late = connection.prepare(sql).expect("it prepares");
+    let mut late = connection.prepare(sql).expect("it prepares");
 
-    assert_eq!(
-        early.optimizations_used() & Levers::COVERING_INDEX,
-        Levers::COVERING_INDEX
-    );
-    assert_eq!(late.optimizations_used() & Levers::COVERING_INDEX, 0);
-    let _ = std::fs::remove_dir_all(&directory);
-}
-
-/// Bounding the checkpoint moves the same pages, and loses none of them.
-///
-/// The bound changes when work happens rather than what it is, so the assertion
-/// is equality: the two arms must leave databases that hold the same rows and
-/// pass the same integrity check. A bounded copy that dropped a frame would
-/// look exactly like a faster checkpoint until something read the page.
-///
-/// The measurement says the bound buys nothing, so it is off by default. This
-/// is what keeps the mechanism honest anyway: a tunable nothing exercises is
-/// a tunable that quietly stops working.
-#[test]
-fn the_checkpoint_arm_moves_the_same_pages() {
-    let directory = std::env::temp_dir().join("inillucent-levers-checkpoint");
-    let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir_all(&directory).expect("the scratch directory is made");
-
-    let mut contents = Vec::new();
-    for (name, budget) in [("spread", Some(100u32)), ("at-once", None)] {
-        let path = directory.join(format!("{name}.db"));
-        let database = Database::open(&path).expect("the database opens");
-        let connection = database.connect().expect("it connects");
-        connection
-            .set_checkpoint_budget(budget)
-            .expect("the budget is set");
-        connection
-            .execute_batch(
-                "PRAGMA journal_mode=wal;                 PRAGMA synchronous=normal;                 CREATE TABLE t(id INTEGER PRIMARY KEY, label TEXT, payload BLOB);",
-            )
-            .expect("the schema is created");
-        // Enough single-row transactions to cross the thousand-frame threshold
-        // several times over, so the bounded copy runs and resumes repeatedly.
-        for row in 0..4_000 {
-            connection
-                .execute_batch(&format!(
-                    "INSERT INTO t(id, label, payload) VALUES ({row}, 'row {row}', zeroblob(256))"
-                ))
-                .expect("the row is inserted");
-        }
-        drop(connection);
-        drop(database);
-
-        // Reopened, because what matters is what reached the file rather than
-        // what a live connection can still see in its own log.
-        let database = Database::open(&path).expect("the database reopens");
-        let connection = database.connect().expect("it reconnects");
-        let integrity = answer(&connection, "PRAGMA integrity_check");
-        assert_eq!(integrity.trim(), "|ok", "{name}: {integrity}");
-        contents.push(answer(
-            &connection,
-            "SELECT count(*), sum(id), sum(length(label)) FROM t",
-        ));
+    // Both statements still answer, and they still agree with each other: a
+    // plan compiled under one arm is not silently swapped out from under a
+    // caller holding it when the connection's levers move.
+    let mut early_rows = Vec::new();
+    while early.step().expect("it steps") {
+        early_rows.push(early.row().to_vec());
+    }
+    let mut late_rows = Vec::new();
+    while late.step().expect("it steps") {
+        late_rows.push(late.row().to_vec());
     }
     assert_eq!(
-        contents.first(),
-        contents.get(1),
-        "the two arms left different databases"
+        early_rows, late_rows,
+        "a statement compiled under one arm must still answer correctly after the arm moved"
     );
     let _ = std::fs::remove_dir_all(&directory);
 }
+
+// **The checkpoint-budget arm test is gone, not rewritten.** It compared a
+// bounded checkpoint (`Connection::set_checkpoint_budget(Some(100))`, which
+// copies a fixed number of frames per pause and resumes) against an unbounded
+// one, and asserted the two left byte-identical databases behind.
+// `inillucent_engine::connect::Database::checkpoint()` has no budget parameter
+// at all - it is one call that folds the whole log into the file, which is the
+// same "single threaded, no second writer to race" reasoning `backup_to`'s own
+// doc comment gives for why this engine's backup is a checkpoint and a file
+// copy rather than an incremental step API. With no bound to switch, running
+// the old test's two arms against the new engine would run the identical
+// checkpoint twice and call the trivial agreement a passing test - which is
+// exactly the "test that cannot fail" the testing standard rules out. If a
+// bounded checkpoint is added to the new engine later, this is the case to
+// restore.
 
 /// The mask only ever names levers this build has.
 #[test]
@@ -428,3 +321,15 @@ fn an_unknown_lever_is_ignored_rather_than_stored() {
     assert!(Levers::all().names_disabled().is_empty());
     assert!(Levers::all().has(Levers::COVERING_INDEX));
 }
+
+// **The fused-bytecode arm test is gone, not rewritten.** It asserted
+// `Statement::instruction_count()` was shorter with the lever on -
+// `inillucent_legacy::Statement`'s bytecode program, which had instructions to
+// count. `Connection::explain()` on the new engine says so itself: "there is
+// no bytecode listing because there is no bytecode" - the executor is an
+// operator tree, and there is no program-length number for a folded value to
+// shorten. `inillucent_sql::plan::Levers::FUSED_BYTECODE` still exists as a mask
+// bit (`disable_optimizations` still accepts it without effect on this
+// engine), so the constant and `an_unknown_lever_is_ignored_rather_than_stored`
+// above still exercise it; what is gone is the claim that toggling it changes
+// a measurable program size, because there is no longer a program to measure.

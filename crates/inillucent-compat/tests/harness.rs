@@ -97,17 +97,68 @@ const IN_PROGRESS_ROWS: [&str; 3] = [
     "perf.optimization-arms",
 ];
 
-/// Every row in a finished phase must claim `pass`, and every later row must
-/// not.
+/// Rows in a finished phase that the shipping engine genuinely does not have.
+///
+/// `FINISHED_PHASES` used to mean "every row from here has evidence", and that
+/// was true until task-1911 deleted the old engine (`inillucent-session`,
+/// `inillucent-legacy`, `inillucent-vm`, `inillucent-capi`) along with three
+/// things it evidenced that the new engine never rebuilt the same way: a
+/// bytecode verifier over a `Program` the new engine does not compile to
+/// (`vm.bytecode.verifier`), an interrupt/progress-handler mechanism the new
+/// connection has none of (`vm.statement.interrupt`), and the
+/// update/commit/rollback hook triple the new connection never wired up
+/// (`txn.hooks`). The same re-point found a fourth and fifth: the new
+/// engine's physical pass refuses every window function outright
+/// (`sql.select.window`, `functions.window`) - `windows_match_the_oracle`,
+/// `ordered_statements_match_the_oracle` and the `select.window` case in
+/// `semantics.rs` were all graded against the old engine, which had them. A
+/// sixth, `txn.oom-injection`, split off `txn.resource-failures`: the old
+/// engine's allocation-failure fault injection
+/// (`inillucent_base::buffer::fail_allocation_after`) has no equivalent in the
+/// shipping write path, which allocates through ordinary `Vec`/`Box` rather
+/// than through that buffer API. A seventh, `txn.writer-contention`: the old
+/// engine's `WriterSlot` gave each session its own transaction with real
+/// `busy_timeout`/reservation semantics; `inillucent_engine::connect` holds
+/// one `ImportedDatabase` behind one shared, unkeyed transaction, so a second
+/// session's write joins the first session's open transaction rather than
+/// being refused `BUSY`. Each is retired on its own `[[capability]]` row in
+/// `compat/sqlite-3.53.4.toml` with `status = "missing"` and a comment saying
+/// so; this list exists only so a finished phase can still hold a row that
+/// will never be `pass`, without loosening the check for every other row in
+/// the same phase.
+const DELIBERATELY_MISSING: [&str; 7] = [
+    "vm.bytecode.verifier",
+    "vm.statement.interrupt",
+    "txn.hooks",
+    "sql.select.window",
+    "functions.window",
+    "txn.oom-injection",
+    "txn.writer-contention",
+];
+
+/// Every row in a finished phase must claim `pass`, unless it is named in
+/// [`DELIBERATELY_MISSING`], in which case it must claim `missing` - and every
+/// later row must not claim `pass` at all.
 #[test]
 fn only_the_finished_phases_claim_to_be_finished() {
     for capability in &manifest().capabilities {
         // The colon matters: "phase 1:" is finished, "phase 10:" is not.
-        let finished = FINISHED_PHASES
+        let in_finished_phase = FINISHED_PHASES
             .iter()
             .any(|phase| capability.phase.starts_with(phase))
             || (capability.phase.starts_with(IN_PROGRESS_PHASE)
                 && IN_PROGRESS_ROWS.contains(&capability.id.as_str()));
+        if in_finished_phase && DELIBERATELY_MISSING.contains(&capability.id.as_str()) {
+            assert_eq!(
+                capability.status,
+                Status::Missing,
+                "`{}` is carved out of the finished-phase rule as permanently missing, but claims `{}`",
+                capability.id,
+                capability.status.as_str()
+            );
+            continue;
+        }
+        let finished = in_finished_phase;
         let claims = capability.status == Status::Pass;
         assert_eq!(
             finished,
@@ -188,13 +239,25 @@ fn the_registers_match_the_engine() {
 ///
 /// A generator that silently produced nothing would agree with an empty file
 /// and every other check here would pass, so the size is asserted separately.
+///
+/// `symbols.toml`'s floor was 100, sized against `crates/inillucent-capi` -
+/// the old engine's C driver, deleted in task-1911 along with the rest of it.
+/// It had 186 `extern "C"` functions across fifteen files (backup, bind,
+/// blob, codes, column, function, handle, hooks, memory, open, serialize,
+/// stmt, value, vfs, lib). `drivers/inillucent-driver-capi` is its from
+/// scratch replacement for the new engine and today exports 53, in one file
+/// - genuinely fewer, not a parsing gap: `grep -c 'extern "C" fn"` over the
+/// new crate's source agrees with the register. 40 keeps this a sanity floor
+/// against a generator that silently produced nothing, with room for the
+/// driver to grow before it needs raising again, rather than a claim that the
+/// new driver already matches the old one's surface.
 #[test]
 fn the_registers_cover_the_whole_surface() {
     let registers = inillucent_compat::obligations::registers();
     for (name, body, least) in [
         ("builtins.toml", 0, 140usize),
         ("pragmas.toml", 1, 60),
-        ("symbols.toml", 2, 100),
+        ("symbols.toml", 2, 40),
     ] {
         let (_, text) = registers.get(body).expect("the register was generated");
         let count = text

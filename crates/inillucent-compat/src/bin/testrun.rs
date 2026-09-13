@@ -547,11 +547,12 @@ fn changed_paths(root: &Path, revision: &str) -> Result<Vec<String>, String> {
 
 /// Builds every test binary, and the two programs the shell suites run.
 ///
-/// The second half matters for parallelism. `cli.rs`, `capi.rs` and
-/// `semantics.rs` each shell out to `cargo build` from inside the test, because
-/// they drive a *program* rather than a library. Run at once, they would each
-/// wait on cargo's lock on the target directory. Building those programs here,
-/// before anything starts, makes each of those in-test builds a no-op.
+/// The second half matters for parallelism. `cli.rs` and `semantics.rs` in this
+/// crate, and `conformance.rs` in `inillucent-driver-capi`, each shell out to
+/// `cargo build` from inside the test, because they drive a *program* rather
+/// than a library. Run at once, they would each wait on cargo's lock on the
+/// target directory. Building those programs here, before anything starts,
+/// makes each of those in-test builds a no-op.
 ///
 /// @param root - the workspace root
 fn build(root: &Path) -> Result<(), String> {
@@ -575,7 +576,13 @@ fn build(root: &Path) -> Result<(), String> {
     }
     let status = Command::new(cargo())
         .current_dir(root)
-        .args(["build", "-p", "inillucent-cli", "-p", "inillucent-capi"])
+        .args([
+            "build",
+            "-p",
+            "inillucent-cli",
+            "-p",
+            "inillucent-driver-capi",
+        ])
         .status()
         .map_err(|error| format!("cannot run cargo: {error}"))?;
     if !status.success() {

@@ -1,10 +1,16 @@
 //! What each phase 11 and 12 feature family costs, measured against SQLite.
 //!
 //! Invariant: this measures, it does not judge. Both engines run the identical
-//! workload through their own front door - inillucent through the C ABI it now
-//! exports, SQLite through the pinned shell or amalgamation - and what is
-//! recorded is what each took. A ratio is printed because that is the number a
-//! reader wants, and nothing here decides whether a ratio is acceptable.
+//! workload through their own front door - inillucent through `inillucent-engine`
+//! directly (the shipped engine, since the old `inillucent-session` this file
+//! used to open was retired with the rest of that engine), SQLite through the
+//! pinned shell or amalgamation - and what is recorded is what each took. A
+//! ratio is printed because that is the number a reader wants, and nothing here
+//! decides whether a ratio is acceptable.
+//!
+//! FTS5 and R-Tree need no explicit registration on the new engine: both are
+//! part of `inillucent_ext::registry::Registry::with_builtins()`, which every
+//! `Database::open` builds its module registry from.
 //!
 //! Six families, chosen because each exercises a different thing the phase
 //! added and would show a different regression:
@@ -30,8 +36,7 @@ use std::time::{Duration, Instant};
 
 use inillucent_compat::report::json_string;
 use inillucent_compat::{platform_name, workspace_root};
-use inillucent_session::connection::{OpenOptions, SessionDatabase};
-use inillucent_session::statement::Statement;
+use inillucent_engine::connect::{Connection, Database};
 
 /// One measured family.
 struct Measurement {
@@ -105,27 +110,25 @@ fn run(out: &Path) -> Result<String, String> {
 }
 
 /// Returns a fresh in-memory connection.
-fn open() -> Result<inillucent_session::Connection, String> {
-    let database = SessionDatabase::open_with_options(":memory:", OpenOptions::default())
-        .map_err(|error| error.message().to_string())?;
-    let connection = database
-        .connect()
-        .map_err(|error| error.message().to_string())?;
+fn open() -> Result<Connection<'static>, String> {
+    let database = Database::open(":memory:").map_err(|error| error.message().to_string())?;
     // The database is leaked so the connection can be returned alone. This is a
     // measurement program that runs for a second and exits.
-    Box::leak(Box::new(database));
-    Ok(connection)
+    let database: &'static Database = Box::leak(Box::new(database));
+    Ok(database.connect())
 }
 
 /// Runs a statement for its effect.
-fn exec(connection: &inillucent_session::Connection, sql: &str) -> Result<(), String> {
-    inillucent_session::statement::execute_batch(connection, sql.as_bytes())
+fn exec(connection: &Connection<'_>, sql: &str) -> Result<(), String> {
+    connection
+        .execute_batch(sql)
         .map_err(|error| format!("{sql}: {}", error.message()))
 }
 
 /// Steps a statement to completion, returning how many rows it produced.
-fn drain(connection: &inillucent_session::Connection, sql: &str) -> Result<u32, String> {
-    let (mut statement, _) = Statement::prepare(connection, sql.as_bytes())
+fn drain(connection: &Connection<'_>, sql: &str) -> Result<u32, String> {
+    let mut statement = connection
+        .prepare(sql)
         .map_err(|error| format!("{sql}: {}", error.message()))?;
     let mut rows = 0;
     while statement

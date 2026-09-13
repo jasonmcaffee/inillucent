@@ -2,12 +2,28 @@
 //!
 //! Invariant: this measures, it does not optimise, and it is not a comparison
 //! against SQLite. The scorecard says *which* families lose; this says *why* one
-//! query is slow, in the two currencies that turned out to matter - how many
-//! heap allocations a row costs, and how many bytecode instructions it runs.
+//! query is slow, in the currency that turned out to matter - how many heap
+//! allocations a row costs.
 //!
 //! The scorecard's own small-scale schema is rebuilt here so the numbers line up
 //! with the ones the release candidate reports, rather than describing a
 //! different table that happens to have the same name.
+//!
+//! **The per-opcode and per-stage breakdowns this file used to print are gone,
+//! and not because the old engine was deleted out from under them.** They read
+//! `inillucent_base::probe::OPCODE_*`/`STAGE_*`, and that module's own doc
+//! comment says why there is nothing left to read: the opcode tables are
+//! "written only by a build with the virtual machine's `opcode-probe` feature
+//! on", and the new engine has no virtual machine - it compiles to an operator
+//! tree, not bytecode, so there is no instruction for an allocation to be
+//! attributed to. The stage tables have no writer anywhere in the workspace at
+//! all any more; grepping for `record_stage`/`record_stage_allocating` finds
+//! only their own definitions. Both breakdowns would have printed nothing on
+//! this engine even before the deletion - `inillucent-vm`'s own bracket points
+//! were the only callers of `record_stage`, wired through a feature this crate
+//! never turned on for a normal build. What survives is per-row and per-prepare
+//! allocation counting, which reads a plain global-allocator counter this file
+//! installs itself and owes nothing to either engine.
 //!
 //! Usage: `cargo run --release -p inillucent-compat --bin inillucent-hotprofile`
 
@@ -17,7 +33,7 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
-use inillucent_legacy::{Connection, Database};
+use inillucent_engine::connect::{Connection, Database};
 
 /// How many allocations the process has made.
 static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
@@ -36,7 +52,6 @@ unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
         ALLOCATED_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
-        inillucent_base::probe::ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
         // SAFETY: forwarded unchanged to the system allocator.
         unsafe { System.alloc(layout) }
     }
@@ -53,7 +68,6 @@ unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
         ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
         ALLOCATED_BYTES.fetch_add(size as u64, Ordering::Relaxed);
-        inillucent_base::probe::ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
         // SAFETY: forwarded unchanged to the allocator that made the pointer.
         unsafe { System.realloc(pointer, layout, size) }
     }
@@ -74,14 +88,10 @@ struct Profile {
     elapsed_nanos: u128,
     /// How many rows every repeat returned together.
     rows: u64,
-    /// How many bytecode instructions every repeat ran together.
-    steps: u64,
     /// How many heap allocations they cost.
     allocations: u64,
     /// How many bytes those allocations asked for.
     bytes: u64,
-    /// What each opcode cost: its name, runs, nanoseconds and allocations.
-    opcodes: Vec<(String, u64, u64, u64)>,
 }
 
 impl Profile {
@@ -93,16 +103,6 @@ impl Profile {
     /// Returns how many allocations one returned row cost.
     fn allocations_per_row(&self) -> f64 {
         self.allocations as f64 / self.rows.max(1) as f64
-    }
-
-    /// Returns how many allocations one bytecode instruction cost.
-    fn allocations_per_step(&self) -> f64 {
-        self.allocations as f64 / self.steps.max(1) as f64
-    }
-
-    /// Returns how many nanoseconds one bytecode instruction cost.
-    fn nanos_per_step(&self) -> f64 {
-        self.elapsed_nanos as f64 / self.steps.max(1) as f64
     }
 }
 
@@ -122,7 +122,7 @@ fn run(root: &Path) -> Result<(), String> {
     std::fs::create_dir_all(root).map_err(|failure| failure.to_string())?;
     let path = build_database(root)?;
     let database = Database::open(&path).map_err(|failure| failure.to_string())?;
-    let connection = database.connect().map_err(|failure| failure.to_string())?;
+    let connection = database.connect();
 
     let workloads: Vec<(&'static str, &'static str, u64)> = vec![
         (
@@ -163,55 +163,7 @@ fn run(root: &Path) -> Result<(), String> {
 
     report(&profiles);
     report_prepares(&connection)?;
-    report_prepare_stages();
     Ok(())
-}
-
-/// Prints what each bracketed stage of preparing a statement cost.
-fn report_prepare_stages() {
-    const NAMES: [(usize, &str); 6] = [
-        (10, "parse"),
-        (11, "catalog snapshot"),
-        (12, "functions+collations"),
-        (13, "bind"),
-        (14, "compile"),
-        (15, "verify"),
-    ];
-    let mut any = false;
-    for (slot, name) in NAMES {
-        let runs = match inillucent_base::probe::STAGE_RUNS.get(slot) {
-            Some(counter) => counter.load(Ordering::Relaxed),
-            None => 0,
-        };
-        if runs == 0 {
-            continue;
-        }
-        if !any {
-            println!();
-            println!("--- preparing a statement, by stage ---");
-            println!(
-                "  {:<24} {:>10} {:>12} {:>12} {:>12}",
-                "stage", "runs", "ns/run", "allocs", "alloc/run"
-            );
-            any = true;
-        }
-        let nanos = match inillucent_base::probe::STAGE_NANOS.get(slot) {
-            Some(counter) => counter.load(Ordering::Relaxed),
-            None => 0,
-        };
-        let allocations = match inillucent_base::probe::STAGE_ALLOCATIONS.get(slot) {
-            Some(counter) => counter.load(Ordering::Relaxed),
-            None => 0,
-        };
-        println!(
-            "  {:<24} {:>10} {:>12.1} {:>12} {:>12.2}",
-            name,
-            runs,
-            nanos as f64 / runs.max(1) as f64,
-            allocations,
-            allocations as f64 / runs.max(1) as f64
-        );
-    }
 }
 
 /// Measures preparing a statement, which is where parsing and planning happen.
@@ -219,7 +171,7 @@ fn report_prepare_stages() {
 /// Reported apart from the running workloads because it is a different
 /// question: `SELECT 1` touches no table, so whatever it costs is what a
 /// prepare costs before any row is read.
-fn report_prepares(connection: &Connection) -> Result<(), String> {
+fn report_prepares(connection: &Connection<'_>) -> Result<(), String> {
     const ROUNDS: u64 = 4_000;
     println!();
     println!(
@@ -234,7 +186,6 @@ fn report_prepares(connection: &Connection) -> Result<(), String> {
         connection
             .prepare(sql)
             .map_err(|failure| format!("{sql}: {failure}"))?;
-        inillucent_base::probe::reset_stages();
         let before = ALLOCATIONS.load(Ordering::Relaxed);
         let started = Instant::now();
         for _ in 0..ROUNDS {
@@ -258,7 +209,7 @@ fn report_prepares(connection: &Connection) -> Result<(), String> {
 
 /// Runs one workload and records what it cost.
 fn profile_workload(
-    connection: &Connection,
+    connection: &Connection<'_>,
     name: &'static str,
     sql: &'static str,
     repeats: u64,
@@ -268,21 +219,18 @@ fn profile_workload(
         .map_err(|failure| format!("{sql}: {failure}"))?;
     // One untimed pass, so the page cache and every lazily built structure is
     // warm and the measurement is of the query rather than of the first one.
-    statement.reset().map_err(|failure| failure.to_string())?;
+    statement.reset();
     while statement.step().map_err(|failure| failure.to_string())? {}
 
-    inillucent_base::probe::reset_opcodes();
     let allocations_before = ALLOCATIONS.load(Ordering::Relaxed);
     let bytes_before = ALLOCATED_BYTES.load(Ordering::Relaxed);
     let started = Instant::now();
     let mut rows = 0u64;
-    let mut steps = 0u64;
     for _ in 0..repeats {
-        statement.reset().map_err(|failure| failure.to_string())?;
+        statement.reset();
         while statement.step().map_err(|failure| failure.to_string())? {
             rows = rows.saturating_add(1);
         }
-        steps = steps.saturating_add(statement.steps());
     }
     let elapsed_nanos = started.elapsed().as_nanos();
     let allocations = ALLOCATIONS
@@ -298,65 +246,25 @@ fn profile_workload(
         repeats,
         elapsed_nanos,
         rows,
-        steps,
         allocations,
         bytes,
-        opcodes: opcode_costs(),
     })
-}
-
-/// Reads the per-opcode tables the profiling build fills in.
-///
-/// An ordinary build leaves them empty, and the report says so rather than
-/// printing a table of zeroes that looks like a measurement.
-fn opcode_costs() -> Vec<(String, u64, u64, u64)> {
-    let mut rows = Vec::new();
-    for slot in 0..inillucent_base::probe::OPCODE_SLOTS {
-        let runs = match inillucent_base::probe::OPCODE_RUNS.get(slot) {
-            Some(counter) => counter.load(Ordering::Relaxed),
-            None => 0,
-        };
-        if runs == 0 {
-            continue;
-        }
-        let nanos = match inillucent_base::probe::OPCODE_NANOS.get(slot) {
-            Some(counter) => counter.load(Ordering::Relaxed),
-            None => 0,
-        };
-        let allocations = match inillucent_base::probe::OPCODE_ALLOCATIONS.get(slot) {
-            Some(counter) => counter.load(Ordering::Relaxed),
-            None => 0,
-        };
-        rows.push((opcode_name(slot), runs, nanos, allocations));
-    }
-    rows.sort_by_key(|row| std::cmp::Reverse(row.2));
-    rows
-}
-
-/// Names an opcode by its discriminant.
-fn opcode_name(slot: usize) -> String {
-    inillucent_vm::Opcode::from_index(slot)
-        .map(|opcode| opcode.name().to_string())
-        .unwrap_or_else(|| format!("opcode-{slot}"))
 }
 
 /// Prints the table.
 fn report(profiles: &[Profile]) {
     println!(
-        "{:<16} {:>8} {:>10} {:>12} {:>11} {:>9} {:>12} {:>10}",
-        "workload", "repeats", "rows", "ns/row", "steps", "ns/step", "allocs", "alloc/step"
+        "{:<16} {:>8} {:>10} {:>12} {:>12}",
+        "workload", "repeats", "rows", "ns/row", "allocs"
     );
     for profile in profiles {
         println!(
-            "{:<16} {:>8} {:>10} {:>12.1} {:>11} {:>9.2} {:>12} {:>10.3}",
+            "{:<16} {:>8} {:>10} {:>12.1} {:>12}",
             profile.name,
             profile.repeats,
             profile.rows,
             profile.nanos_per_row(),
-            profile.steps,
-            profile.nanos_per_step(),
             profile.allocations,
-            profile.allocations_per_step(),
         );
     }
     println!();
@@ -369,29 +277,6 @@ fn report(profiles: &[Profile]) {
             profile.sql
         );
     }
-    println!();
-    for profile in profiles {
-        if profile.opcodes.is_empty() {
-            continue;
-        }
-        println!("--- {} ---", profile.name);
-        println!(
-            "  {:<18} {:>12} {:>14} {:>10} {:>12} {:>10}",
-            "opcode", "runs", "nanos", "ns/run", "allocs", "alloc/run"
-        );
-        for (name, runs, nanos, allocations) in profile.opcodes.iter().take(12) {
-            println!(
-                "  {:<18} {:>12} {:>14} {:>10.1} {:>12} {:>10.3}",
-                name,
-                runs,
-                nanos,
-                *nanos as f64 / (*runs).max(1) as f64,
-                allocations,
-                *allocations as f64 / (*runs).max(1) as f64,
-            );
-        }
-        println!();
-    }
 }
 
 /// Builds the scorecard's small-scale database.
@@ -401,7 +286,7 @@ fn build_database(root: &Path) -> Result<PathBuf, String> {
         std::fs::remove_file(&path).map_err(|failure| failure.to_string())?;
     }
     let database = Database::open(&path).map_err(|failure| failure.to_string())?;
-    let connection = database.connect().map_err(|failure| failure.to_string())?;
+    let connection = database.connect();
     let setup = [
         "CREATE TABLE main_table(id INTEGER PRIMARY KEY, key INTEGER NOT NULL, \
          category INTEGER NOT NULL, label TEXT NOT NULL, payload BLOB)",

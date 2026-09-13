@@ -30,6 +30,14 @@
 //! high water mark for a whole process and two arms sharing one would report
 //! the larger of them twice.
 //!
+//! **Runs on `inillucent-engine`, not the retired `inillucent-session`.** This
+//! file used to open the old engine directly, which meant it was measuring
+//! M8's fold-versus-rebuild behaviour over the old engine's storage rather
+//! than the one that ships. `inillucent_search` is storage-agnostic - it reads
+//! its shadow tables through `inillucent_sql::vtab::ShadowStore`, which each
+//! engine implements over its own trees - so the module and the M8 fix are
+//! unchanged; only which storage answers `docs`'s shadow tables changes here.
+//!
 //! Usage:
 //!   inillucent-foldgate [--documents N] [--queries N] [--dims N]
 //!   inillucent-foldgate --arm fold|build [...]   (one arm, machine readable)
@@ -40,8 +48,8 @@ use std::time::{Duration, Instant};
 
 use inillucent_compat::procstat::{mebibytes, ProcessCost};
 use inillucent_compat::workspace_root;
-use inillucent_session::connection::{Connection, OpenOptions, SessionDatabase};
-use inillucent_session::statement::{execute_batch, Statement};
+use inillucent_engine::connect::{Connection, Database};
+use inillucent_tree::datum::OwnedDatum;
 
 /// The lexical queries the reader thread and the recovery check both run.
 const QUERIES: [&str; 4] = [
@@ -455,9 +463,8 @@ fn run_one(
     let mut arm = Arm::default();
     let expected = {
         let database = open(&path)?;
-        let connection = database
-            .connect()
-            .map_err(|error| error.message().to_string())?;
+        let connection = database.connect();
+        set_busy_timeout(&connection)?;
         declare(&connection, folding, dims, fixed)?;
         let reader = start_reader(&path);
         write_corpus(&connection, &mut arm, documents, dims, folding, fixed)?;
@@ -473,9 +480,7 @@ fn run_one(
     };
     let started = Instant::now();
     let database = open(&path)?;
-    let connection = database
-        .connect()
-        .map_err(|error| error.message().to_string())?;
+    let connection = database.connect();
     let after = answers(&connection)?;
     arm.recovery_millis = started.elapsed().as_secs_f64() * 1e3;
     arm.recovered = after == expected;
@@ -490,18 +495,21 @@ fn area() -> PathBuf {
     directory
 }
 
-/// Opens a database with a busy timeout long enough for a reader to wait.
+/// Opens a database.
 ///
 /// @param path - the file to open
-fn open(path: &Path) -> Result<SessionDatabase, String> {
-    SessionDatabase::open_with_options(
-        path,
-        OpenOptions {
-            busy_timeout: Duration::from_secs(30),
-            ..OpenOptions::default()
-        },
-    )
-    .map_err(|error| error.message().to_string())
+fn open(path: &Path) -> Result<Database, String> {
+    Database::open(path).map_err(|error| error.message().to_string())
+}
+
+/// Sets a connection's busy timeout long enough for a reader to wait out a
+/// writer holding the file.
+///
+/// @param connection - the connection
+fn set_busy_timeout(connection: &Connection<'_>) -> Result<(), String> {
+    connection
+        .execute_batch("PRAGMA busy_timeout = 30000")
+        .map_err(|error| error.message().to_string())
 }
 
 /// Creates the arm's search table.
@@ -521,7 +529,7 @@ fn open(path: &Path) -> Result<SessionDatabase, String> {
 /// @param dims - how wide a vector is
 /// @param fixed - a delta log length to pin, or the default rule
 fn declare(
-    connection: &Connection,
+    connection: &Connection<'_>,
     folding: bool,
     dims: usize,
     fixed: Option<usize>,
@@ -553,7 +561,7 @@ fn declare(
 /// @param folding - whether the module publishes generations by itself
 /// @param fixed - a delta log length to pin, or the default rule
 fn write_corpus(
-    connection: &Connection,
+    connection: &Connection<'_>,
     arm: &mut Arm,
     documents: usize,
     dims: usize,
@@ -651,7 +659,7 @@ fn hex(vector: &[f32]) -> String {
 /// @param dims - how wide a vector is
 /// @param documents - how many rows the table holds
 fn measure_recall(
-    connection: &Connection,
+    connection: &Connection<'_>,
     queries: usize,
     dims: usize,
     documents: usize,
@@ -687,7 +695,7 @@ fn measure_recall(
 /// Returns what the lexical query set answers, as one comparable list.
 ///
 /// @param connection - the database
-fn answers(connection: &Connection) -> Result<Vec<Vec<String>>, String> {
+fn answers(connection: &Connection<'_>) -> Result<Vec<Vec<String>>, String> {
     let mut out = Vec::new();
     for query in QUERIES {
         out.push(first_column(connection, query)?);
@@ -699,7 +707,7 @@ fn answers(connection: &Connection) -> Result<Vec<Vec<String>>, String> {
 ///
 /// @param connection - the database
 /// @param key - the state key
-fn state(connection: &Connection, key: &str) -> Result<i64, String> {
+fn state(connection: &Connection<'_>, key: &str) -> Result<i64, String> {
     let rows = first_column(
         connection,
         &format!("SELECT v FROM docs_state WHERE k = '{key}'"),
@@ -711,8 +719,8 @@ fn state(connection: &Connection, key: &str) -> Result<i64, String> {
 ///
 /// @param connection - the database
 /// @param sql - the statement
-fn run(connection: &Connection, sql: &str) -> Result<(), String> {
-    execute_batch(connection, sql.as_bytes()).map_err(|error| {
+fn run(connection: &Connection<'_>, sql: &str) -> Result<(), String> {
+    connection.execute_batch(sql).map_err(|error| {
         let head: String = sql.chars().take(96).collect();
         format!("{head}: {}", error.message())
     })
@@ -722,21 +730,21 @@ fn run(connection: &Connection, sql: &str) -> Result<(), String> {
 ///
 /// @param connection - the database
 /// @param sql - the query
-fn first_column(connection: &Connection, sql: &str) -> Result<Vec<String>, String> {
-    let mut statement = Statement::prepare(connection, sql.as_bytes())
-        .map_err(|error| format!("{sql}: {}", error.message()))?
-        .0;
+fn first_column(connection: &Connection<'_>, sql: &str) -> Result<Vec<String>, String> {
+    let mut statement = connection
+        .prepare(sql)
+        .map_err(|error| format!("{sql}: {}", error.message()))?;
     let mut out = Vec::new();
     while statement
         .step()
         .map_err(|error| format!("{sql}: {}", error.message()))?
     {
-        out.push(match statement.value(0) {
-            inillucent_value::Value::Null => "NULL".to_string(),
-            inillucent_value::Value::Integer(number) => number.to_string(),
-            inillucent_value::Value::Real(number) => format!("{number:.6}"),
-            inillucent_value::Value::Text(text) => String::from_utf8_lossy(text.raw()).into_owned(),
-            inillucent_value::Value::Blob(blob) => format!("blob:{}", blob.raw().len()),
+        out.push(match statement.row().first() {
+            None | Some(OwnedDatum::Null) => "NULL".to_string(),
+            Some(OwnedDatum::Int(number)) => number.to_string(),
+            Some(OwnedDatum::Real(number)) => format!("{number:.6}"),
+            Some(OwnedDatum::Text(text)) => String::from_utf8_lossy(text).into_owned(),
+            Some(OwnedDatum::Blob(blob)) => format!("blob:{}", blob.len()),
         });
     }
     Ok(out)
@@ -798,27 +806,34 @@ fn start_reader(path: &Path) -> Reader {
 fn read_until(path: &Path, flag: &std::sync::atomic::AtomicBool) -> (Vec<f64>, usize) {
     let mut times = Vec::new();
     let mut refused = 0usize;
-    let mut held: Option<(SessionDatabase, Connection)> = None;
+    // Held as the `Database` alone, with a fresh `Connection` borrowed from it
+    // every query, rather than as a `(Database, Connection)` pair: the new
+    // engine's `Connection<'d>` borrows the `Database` it came from, so the two
+    // cannot be held together in one local without the struct borrowing from
+    // itself. `connect()` is cheap - a session number - so re-deriving it each
+    // pass costs nothing this measurement cares about.
+    let mut held: Option<Database> = None;
     while !flag.load(std::sync::atomic::Ordering::Relaxed) {
         if held.is_none() {
-            held = open(path)
-                .ok()
-                .and_then(|database| match database.connect() {
-                    Ok(connection) => Some((database, connection)),
-                    Err(_) => None,
-                });
+            held = open(path).ok().and_then(|database| {
+                let connection = database.connect();
+                set_busy_timeout(&connection).ok()?;
+                drop(connection);
+                Some(database)
+            });
         }
-        let Some((_, connection)) = held.as_ref() else {
+        let Some(database) = held.as_ref() else {
             refused = refused.saturating_add(1);
             std::thread::sleep(READ_INTERVAL);
             continue;
         };
+        let connection = database.connect();
         for query in QUERIES {
             if flag.load(std::sync::atomic::Ordering::Relaxed) {
                 break;
             }
             let started = Instant::now();
-            match first_column(connection, query) {
+            match first_column(&connection, query) {
                 Ok(_) => times.push(started.elapsed().as_secs_f64() * 1e3),
                 Err(_) => {
                     refused = refused.saturating_add(1);

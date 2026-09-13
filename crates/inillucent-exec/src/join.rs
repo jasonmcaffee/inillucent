@@ -545,7 +545,13 @@ pub struct IndexNestedLoopJoin<'t> {
     /// The pool the inner tree's pages live in.
     pool: &'t Pool,
     /// The key expressions over the outer batch's columns.
-    outer_keys: Vec<Box<dyn Eval>>,
+    ///
+    /// Shared rather than owned: a compiled chain rebuilds this join fresh
+    /// every execution - see `inillucent_exec::compiled::JoinRecipe` - and a
+    /// `Box<dyn Eval>` cannot be cloned, so the recipe and every execution's
+    /// join share one `Rc` over the same compiled expressions instead of
+    /// re-translating them.
+    outer_keys: std::rc::Rc<[Box<dyn Eval>]>,
     /// Which inner columns to emit, in order.
     inner_projection: Projection,
     /// Whether the key is a full inner key (a probe) or a prefix (a range).
@@ -562,7 +568,8 @@ impl<'t> IndexNestedLoopJoin<'t> {
     /// @param kind - how unmatched outer rows are treated
     /// @param inner - the tree to probe
     /// @param pool - the buffer pool
-    /// @param outer_keys - the key expressions over the outer batch
+    /// @param outer_keys - the key expressions over the outer batch, shared
+    ///   with whatever else is rebuilding this join across executions
     /// @param inner_projection - which inner columns to emit
     /// @param full_key - whether the key names every inner key column
     /// @param downstream - what to push joined rows into
@@ -571,11 +578,12 @@ impl<'t> IndexNestedLoopJoin<'t> {
         kind: JoinKind,
         inner: &'t PagedTree,
         pool: &'t Pool,
-        outer_keys: Vec<Box<dyn Eval>>,
+        outer_keys: impl Into<std::rc::Rc<[Box<dyn Eval>]>>,
         inner_projection: Projection,
         full_key: bool,
         downstream: Box<dyn Sink + 't>,
     ) -> IndexNestedLoopJoin<'t> {
+        let outer_keys = outer_keys.into();
         IndexNestedLoopJoin {
             kind,
             inner,

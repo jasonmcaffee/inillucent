@@ -1289,10 +1289,13 @@ impl PagedTree {
         };
         page::set_right(&mut left_image, right_page)?;
 
+        // `true`: the `Structural` record logged a few lines below reads this
+        // exact page back and carries it whole as `parent_image`, so neither
+        // branch needs to log it a second time here.
         let parent = if path.is_empty() {
-            self.build_root(database, log, left_page, &separator, right_page)?
+            self.build_root(database, log, left_page, &separator, right_page, true)?
         } else {
-            self.insert_separator(database, log, page, path, &separator, right_page)?
+            self.insert_separator(database, log, page, path, &separator, right_page, true)?
         };
         let parent_image = {
             let guard = database.pool().fetch(parent)?;
@@ -1332,11 +1335,26 @@ impl PagedTree {
     /// caller, so this only has to write the new root and record that the tree
     /// is a level taller.
     ///
+    /// **`folded_by_caller` skips this function's own log record.** A leaf
+    /// split's direct call (`split_carrying`, the common case at every scale
+    /// this tree has been measured at) re-reads the root it just built and logs
+    /// it again, whole, as the `Structural` record's `parent_image` a few lines
+    /// later - so writing it here too logged the same bytes twice. Measured on
+    /// the write gate's `write.insert.batch` (2,000 inserts into `main_table`
+    /// and its two secondary indexes, one transaction): 40 splits, 40 of these
+    /// `WritePage` records, one every time, at 8,240 bytes each - 321.9 KiB of
+    /// the workload's 1,985.8 KiB, gone once the caller stopped asking for both.
+    /// The one caller that does *not* immediately fold this into a `Structural`
+    /// record - `insert_separator`'s own recursion, propagating a separator
+    /// insertion up past a full interior page - passes `false` and keeps
+    /// logging here, because nothing else ever will.
+    ///
     /// @param database - the file
     /// @param log - where the record goes
     /// @param left - the page holding what the root used to hold
     /// @param separator - the right half's first key
     /// @param right - the right half's page
+    /// @param folded_by_caller - whether the caller logs this page's image itself
     fn build_root(
         &mut self,
         database: &mut Database,
@@ -1344,6 +1362,7 @@ impl PagedTree {
         left: PageId,
         separator: &[u8],
         right: PageId,
+        folded_by_caller: bool,
     ) -> DbResult<PageId> {
         let level = self.height().saturating_add(1);
         let builder = InteriorBuilder::new(self.page_size(), self.tree_id(), level)?;
@@ -1352,12 +1371,19 @@ impl PagedTree {
             &[Swip::unswizzled(left), Swip::unswizzled(right)],
         )?;
         let root = self.root();
-        let lsn = log.log(Body::WritePage {
-            page: root.0,
-            image: &image,
-        })?;
-        page::write_u64(&mut image, page::header::LSN, lsn)?;
-        database.install(root, &image)?;
+        if folded_by_caller {
+            // The caller reads this page back and logs it whole a few lines
+            // after this returns; the LSN it carries until then is never read,
+            // because nothing evicts a page this function is still building.
+            database.install(root, &image)?;
+        } else {
+            let lsn = log.log(Body::WritePage {
+                page: root.0,
+                image: &image,
+            })?;
+            page::write_u64(&mut image, page::header::LSN, lsn)?;
+            database.install(root, &image)?;
+        }
         self.note_height(level);
         Ok(root)
     }
@@ -1367,12 +1393,24 @@ impl PagedTree {
     /// Returns the page the separator landed in, which is what the caller
     /// stamps with the split's LSN.
     ///
+    /// **`folded_by_caller` is for the common case, where the parent has room.**
+    /// A leaf split's direct call passes `true`: `split_carrying` is about to
+    /// re-read this exact page and log it whole inside the `Structural` record
+    /// it writes next, so a `WritePage` here would be the same bytes logged
+    /// twice for one split. See [`PagedTree::build_root`]'s comment for the
+    /// measurement. It is always `false` one level up: propagating a separator
+    /// past a full interior page recurses into this function again, and that
+    /// recursive call's result is never folded into anything - it is the only
+    /// record its page gets, so it always logs.
+    ///
     /// @param database - the file
     /// @param log - where the record goes
     /// @param left - the page that was split
     /// @param path - the interior pages above `left`, root first
     /// @param separator - the right half's first key, encoded
     /// @param right - the right half's page
+    /// @param folded_by_caller - whether the immediate caller logs this page's image itself
+    #[allow(clippy::too_many_arguments)]
     fn insert_separator(
         &mut self,
         database: &mut Database,
@@ -1381,6 +1419,7 @@ impl PagedTree {
         path: &[PageId],
         separator: &[u8],
         right: PageId,
+        folded_by_caller: bool,
     ) -> DbResult<PageId> {
         let parent = path
             .last()
@@ -1403,12 +1442,18 @@ impl PagedTree {
                 .map(|page| Swip::unswizzled(*page))
                 .collect();
             let mut image = builder.build(&keys, &swips)?;
-            let lsn = log.log(Body::WritePage {
-                page: parent.0,
-                image: &image,
-            })?;
-            page::write_u64(&mut image, page::header::LSN, lsn)?;
-            database.install(parent, &image)?;
+            if folded_by_caller {
+                // The caller reads this page back and logs it whole inside its
+                // own `Structural` record a few lines after this returns.
+                database.install(parent, &image)?;
+            } else {
+                let lsn = log.log(Body::WritePage {
+                    page: parent.0,
+                    image: &image,
+                })?;
+                page::write_u64(&mut image, page::header::LSN, lsn)?;
+                database.install(parent, &image)?;
+            }
             return Ok(parent);
         }
 
@@ -1484,10 +1529,15 @@ impl PagedTree {
             })?;
             page::write_u64(&mut moved_image, page::header::LSN, moved_lsn)?;
             database.install(moved, &moved_image)?;
-            self.build_root(database, log, moved, &promoted, sibling)?;
+            // `false`: this call's result is not about to be folded into a
+            // `Structural` record - it is the interior level's own standalone
+            // page, and this is the only record that will ever describe it.
+            self.build_root(database, log, moved, &promoted, sibling, false)?;
             return Ok(if landed == parent { moved } else { sibling });
         }
-        self.insert_separator(database, log, parent, ancestors, &promoted, sibling)?;
+        // Same reasoning as above: propagating a separator past a full
+        // interior page has no enclosing `Structural` record to fold into.
+        self.insert_separator(database, log, parent, ancestors, &promoted, sibling, false)?;
         Ok(landed)
     }
 

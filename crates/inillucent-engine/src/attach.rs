@@ -35,9 +35,10 @@ use inillucent_vfs::memory::MemoryVfs;
 use inillucent_vfs::os::OsVfs;
 use inillucent_vfs::{DbPath, Vfs};
 
+use super::recovery::{open_file, OpenedFile};
 use super::{
-    load_schema, open_file, write_catalog, Attached, ImportedDatabase, LoadedSchema, OpenedFile,
-    FIRST_ATTACHED, FIRST_CREATED_ROOT, MAIN, MAX_ATTACHED,
+    load_schema, write_catalog, Attached, ImportedDatabase, LoadedSchema, FIRST_ATTACHED,
+    FIRST_CREATED_ROOT, MAIN, MAX_ATTACHED,
 };
 
 /// The name a caller writes to ask for a database with no file behind it.
@@ -159,12 +160,42 @@ impl ImportedDatabase {
             fresh.checkpoint()?;
             drop(fresh);
         }
+        // **A hot rollback journal is replayed before anything reads a
+        // page, exactly as `ImportedDatabase::open_on` does for `main`.**
+        // An attached file checkpoints in place the same way `main` does, so
+        // one a previous process left mid-checkpoint - by crashing, or by
+        // being attached here straight off a crash - is describing a
+        // database that cannot be trusted until its pre-images are put back.
+        // Skipping this for an attached file is what let `ATTACH` open such a
+        // file, write and checkpoint into it, and retire the log segments
+        // that could have rebuilt it - after which the file's own hot journal
+        // is stale and a later `main` open of it would replay old pages back
+        // over the newer ones this session wrote.
+        inillucent_pool::journal::replay_hot_journal(vfs.as_ref(), &path)?;
         let OpenedFile {
             database,
             wal,
             catalog_tree,
             highest_txn,
         } = open_file(&vfs, &path, self.frames, &self.doubt_for(&path)?)?;
+        // **This attachment gets its own rollback journal, matching `main`.**
+        // `Pool::checkpoint` writes an attached file's pages in place exactly
+        // as it does `main`'s, so without this a checkpoint interrupted on an
+        // attached file is exactly as unrecoverable as `main` used to be
+        // before `journal_for` existed. The mode is the connection's, not a
+        // per-file choice - `PRAGMA journal_mode` names the whole connection
+        // - but the page size is this file's own, read off the file it just
+        // opened, because an attached file can have been created at a
+        // different page size than this connection's default.
+        let journal = super::journal_for(self.journal_mode).map(|protection| {
+            inillucent_pool::journal::Journal::new(
+                Arc::clone(&vfs),
+                &path,
+                protection,
+                database.page_size(),
+            )
+        });
+        database.pool().set_journal(journal);
         // **The connection has one transaction counter and now two logs.** A
         // file attached mid-session may hold higher numbers than anything this
         // connection has issued, and a number reused across the two would make

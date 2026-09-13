@@ -21,10 +21,6 @@ target = "inillucent-bench::inillucent-bench"
 milliseconds = 111720
 
 [[timing]]
-target = "inillucent-capi::lib"
-milliseconds = 3849
-
-[[timing]]
 target = "inillucent-catalog::lib"
 milliseconds = 4545
 
@@ -377,10 +373,6 @@ target = "inillucent-ext::lib"
 milliseconds = 6634
 
 [[timing]]
-target = "inillucent-legacy::lib"
-milliseconds = 3844
-
-[[timing]]
 target = "inillucent-migrate::corpus"
 milliseconds = 74306
 
@@ -423,10 +415,6 @@ milliseconds = 2100
 [[timing]]
 target = "inillucent-search::lib"
 milliseconds = 5260
-
-[[timing]]
-target = "inillucent-session::lib"
-milliseconds = 2212
 
 [[timing]]
 target = "inillucent-sim::lib"
@@ -483,10 +471,6 @@ milliseconds = 5737
 [[timing]]
 target = "inillucent-vfs::lib"
 milliseconds = 3837
-
-[[timing]]
-target = "inillucent-vm::lib"
-milliseconds = 2013
 
 [[timing]]
 target = "inillucent-wal::lib"

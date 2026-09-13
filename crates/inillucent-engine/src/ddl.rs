@@ -38,7 +38,7 @@
 
 use std::collections::HashMap;
 
-use inillucent_base::error::refusal;
+use inillucent_base::error::{refusal, statement_refusal};
 use inillucent_base::DbResult;
 use inillucent_catalog::ddl::canonical_sql;
 use inillucent_catalog::load::{index_from_create_sql, table_from_create_sql};
@@ -114,6 +114,16 @@ fn schema_change(directive: &Directive) -> bool {
             | Directive::Alter { .. }
     )
 }
+
+/// `(schema, transaction, whether a rollback has anything to undo, log,
+/// no-steal handle)` - what [`ImportedDatabase::catalog_write`] hands back.
+type CatalogWrite = (
+    usize,
+    u64,
+    bool,
+    std::rc::Rc<inillucent_wal::Wal>,
+    std::sync::Arc<std::sync::atomic::AtomicU64>,
+);
 
 impl ImportedDatabase {
     /// Returns how many times the catalog has changed.
@@ -359,16 +369,29 @@ impl ImportedDatabase {
             },
             // A `SAVEPOINT` outside a transaction opens one, which is what
             // SQLite does: it is the only way to name a point inside a
-            // statement that would otherwise be its own transaction.
+            // statement that would otherwise be its own transaction. Recorded
+            // as `implicit_transaction` so `release` knows this transaction is
+            // the savepoint stack's own, and not one an explicit `BEGIN`
+            // opened around it - see that field's own doc comment.
             Directive::Savepoint(name) => {
                 if self.batch.get().is_none() {
                     self.begin_batch();
+                    self.implicit_transaction.set(true);
                 }
                 self.savepoint(&name)?;
                 Ok(Outcome::empty())
             }
             Directive::Release(name) => {
                 self.release(&name)?;
+                // **The last savepoint of a transaction the savepoint stack
+                // itself opened releases like a `COMMIT`.** A `SAVEPOINT`
+                // inside an explicit `BEGIN` also empties `marks` when
+                // released, and that transaction stays open for the `COMMIT`
+                // that follows - `implicit_transaction` is what tells the two
+                // apart.
+                if self.marks.is_empty() && self.implicit_transaction.get() {
+                    self.commit_batch()?;
+                }
                 Ok(Outcome::empty())
             }
             // **A second database, opened beside the one this connection was
@@ -399,9 +422,11 @@ impl ImportedDatabase {
             // Neither form may run inside an explicit transaction, which is
             // SQLite's rule and is not a formality here either: a checkpoint
             // folds committed frames into the file, and an open transaction's
-            // are not committed. The message is SQLite's.
+            // are not committed. The message is SQLite's, and so is the code:
+            // `SQLITE_ERROR` (1), not `refusal`'s `SQLITE_MISUSE` (21) -
+            // `dml_differential.rs`'s `vacuum_matches_sqlite` grades it.
             Directive::Vacuum { .. } if self.batch.get().is_some() => {
-                Err(refusal("cannot VACUUM from within a transaction"))
+                Err(statement_refusal("cannot VACUUM from within a transaction"))
             }
             Directive::Vacuum { into: None, .. } => {
                 self.vacuum_in_place()?;
@@ -725,6 +750,25 @@ impl ImportedDatabase {
         self.statements.borrow_mut().clear();
     }
 
+    /// Returns what a catalog-row write on `self.ddl_schema` needs that is not
+    /// the borrow of `self.undo` a method cannot hand back - callers still
+    /// write their own `WalLog` literal so that borrow stays disjoint from the
+    /// `&mut self.database` they take right after, the reason
+    /// [`super::file_of`] is a free function too.
+    fn catalog_write(&self) -> DbResult<CatalogWrite> {
+        let at = self.ddl_schema;
+        let wal = self
+            .log_of(at)
+            .ok_or_else(|| refusal("a statement names a database that is not attached"))?;
+        Ok((
+            at,
+            self.current_txn(),
+            self.batch.get().is_some(),
+            wal,
+            self.uncommitted_handle_of(at),
+        ))
+    }
+
     /// Writes one row into the catalog tree and records it.
     ///
     /// @param entry - the object to record
@@ -740,23 +784,16 @@ impl ImportedDatabase {
         // row records somewhere else.
         let at = self.ddl_schema;
         entry.tree_id = self.local_of(at, root);
-        let txn = self.current_txn();
-        let open = self.batch.get().is_some();
-        let wal = self
-            .log_of(at)
-            .ok_or_else(|| refusal("a statement names a database that is not attached"))?;
         let catalog_handle = self.catalog_handle_of(at);
         {
+            let (_, txn, open, wal, uncommitted) = self.catalog_write()?;
             let mut log = WalLog {
                 wal,
                 txn,
                 schema: at,
                 wrote: false,
-                // **A catalog row is a row.** A `CREATE TABLE` inside a
-                // transaction has to come back out when the transaction is
-                // abandoned, and the way it comes back out is the same way a
-                // deleted row does: the catalog tree's before-image, restored.
                 undo: open.then_some(&self.undo),
+                uncommitted,
             };
             let tree = self
                 .trees
@@ -943,10 +980,26 @@ impl ImportedDatabase {
                 Some((held.rowid, moved))
             })
             .collect();
+        if stale.is_empty() {
+            return Ok(());
+        }
         for (rowid, entry) in stale {
             self.rewrite(rowid, entry)?;
         }
-        Ok(())
+        // **Sealed here, because nothing else will.** `rewrite` logs under
+        // `current_txn()`, which outside a batch and outside a running
+        // statement is `next_txn` read but not advanced - `current_txn`'s own
+        // doc comment says a fresh one there "is then committed by
+        // `ImportedDatabase::seal` at the end of the statement". A checkpoint
+        // is not a statement, so nothing called it: the rewrite's records sat
+        // in the log under a transaction number nobody ever committed, and
+        // `should_replay` never replays an uncommitted transaction's record.
+        // A crash mid-writeback of the page that landed on had no redo behind
+        // it at all - the same shape of gap `log_free_map_pages` closes for
+        // the free map's own pages, reached here because a stale row is
+        // rewritten on every checkpoint whose catalog root is small enough
+        // that the rewrite lands on the same page a torn write can still hit.
+        self.seal()
     }
 
     /// Replaces one catalog row in place, by rowid.
@@ -958,22 +1011,14 @@ impl ImportedDatabase {
     /// @param entry - what it should now say
     fn rewrite(&mut self, rowid: i64, entry: SchemaEntry) -> DbResult<()> {
         {
-            let txn = self.current_txn();
-            let open = self.batch.get().is_some();
-            let at = self.ddl_schema;
-            let wal = self
-                .log_of(at)
-                .ok_or_else(|| refusal("a statement names a database that is not attached"))?;
+            let (at, txn, open, wal, uncommitted) = self.catalog_write()?;
             let mut log = WalLog {
                 wal,
                 txn,
                 schema: at,
                 wrote: false,
-                // **A catalog row is a row.** A `CREATE TABLE` inside a
-                // transaction has to come back out when the transaction is
-                // abandoned, and the way it comes back out is the same way a
-                // deleted row does: the catalog tree's before-image, restored.
                 undo: open.then_some(&self.undo),
+                uncommitted,
             };
             let catalog_handle = self.catalog_handle_of(at);
             let tree = self
@@ -1005,22 +1050,14 @@ impl ImportedDatabase {
     /// @param rowid - the row's key
     fn forget(&mut self, rowid: i64) -> DbResult<()> {
         {
-            let txn = self.current_txn();
-            let open = self.batch.get().is_some();
-            let at = self.ddl_schema;
-            let wal = self
-                .log_of(at)
-                .ok_or_else(|| refusal("a statement names a database that is not attached"))?;
+            let (at, txn, open, wal, uncommitted) = self.catalog_write()?;
             let mut log = WalLog {
                 wal,
                 txn,
                 schema: at,
                 wrote: false,
-                // **A catalog row is a row.** A `CREATE TABLE` inside a
-                // transaction has to come back out when the transaction is
-                // abandoned, and the way it comes back out is the same way a
-                // deleted row does: the catalog tree's before-image, restored.
                 undo: open.then_some(&self.undo),
+                uncommitted,
             };
             let catalog_handle = self.catalog_handle_of(at);
             let tree = self
@@ -1110,24 +1147,17 @@ impl ImportedDatabase {
         layout: SourceLayout,
         rows: &dyn inillucent_tree::leaf::Rows<'d>,
     ) -> DbResult<PageId> {
-        let txn = self.current_txn();
         let at = self.ddl_schema;
         let local = self.local_of(at, root);
-        let wal = self
-            .log_of(at)
-            .ok_or_else(|| refusal("a statement names a database that is not attached"))?;
         let tree = {
-            let open = self.batch.get().is_some();
+            let (_, txn, open, wal, uncommitted) = self.catalog_write()?;
             let mut log = WalLog {
                 wal,
                 txn,
                 schema: at,
                 wrote: false,
-                // **A catalog row is a row.** A `CREATE TABLE` inside a
-                // transaction has to come back out when the transaction is
-                // abandoned, and the way it comes back out is the same way a
-                // deleted row does: the catalog tree's before-image, restored.
                 undo: open.then_some(&self.undo),
+                uncommitted,
             };
             let session = self.session.get();
             let database = super::file_of(
@@ -1365,6 +1395,7 @@ impl ImportedDatabase {
             schema: at,
             wrote: false,
             undo: None,
+            uncommitted: self.uncommitted_handle_of(at),
         };
         let Some(tree) = self.trees.get_mut(&root) else {
             return Ok(());

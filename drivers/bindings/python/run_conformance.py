@@ -216,7 +216,7 @@ def main():
     unsupported = [row for row in rows if row["supported"] == inillucent.SUPPORT_NO]
     for row in unsupported:
         print(f"  not supported: {row['name']}")
-    assert inillucent.supports("cancel") == inillucent.SUPPORT_NO
+    assert inillucent.supports("cancel") == inillucent.SUPPORT_PARTIAL
     assert inillucent.supports("time_travel") == inillucent.SUPPORT_UNKNOWN, (
         "a capability nobody declared must answer UNKNOWN rather than NO - they mean "
         "different things, and one of them is a checked absence"

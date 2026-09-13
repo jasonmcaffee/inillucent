@@ -1,18 +1,24 @@
-//! `open.prepare` on the existing engine, with the plan cache and without it.
+//! `open.prepare` on the shipped engine, with the plan cache and without it.
 //!
 //! Invariant: both arms prepare the *same* SQL against the *same* database and
 //! step the resulting statement, and each arm's answer is checked before its
 //! time is read. The only difference between them is one lever.
 //!
-//! ## What this measures and why it is on the old engine
+//! ## What this measures
 //!
-//! The rearchitecture design puts a plan cache in the new engine's
-//! prepare path and asks for it measured on the existing front end first, "this
-//! proves the cache independently of the new storage". So the arms are the
-//! shipped engine and the shipped engine with `Levers::PLAN_CACHE` switched
-//! off, and the reference is `sqlite-bench` running the same plan file - which
-//! is exactly the `open.prepare` family the scorecard measures, extracted so it
-//! can be run without a full scorecard.
+//! The arms are the shipped engine and the shipped engine with
+//! `Levers::PLAN_CACHE` switched off, and the reference is `sqlite-bench`
+//! running the same plan file - which is exactly the `open.prepare` family the
+//! scorecard measures, extracted so it can be run without a full scorecard.
+//!
+//! **This used to measure the old, pre-rearchitecture engine** (`inillucent-session`,
+//! reached through `inillucent-legacy`), on the reasoning that the plan cache
+//! landed in the new engine's prepare path and needed proving "independently of
+//! the new storage" before that storage existed to measure it against. The old
+//! engine is deleted now and the new one is what ships, so this measures
+//! `inillucent-engine` directly - the same plan cache, `Levers::PLAN_CACHE`, moved
+//! down into `inillucent_sql::plan` where both engines could read it, and now
+//! only one does.
 //!
 //! The family is `prepare_each: true`: the timed loop re-prepares the same text
 //! every iteration, which is the shape an application that does not hold
@@ -28,7 +34,9 @@ use std::time::Instant;
 
 use inillucent_compat::perf::{bootstrap, median, Digest, Sample};
 use inillucent_compat::workspace_root;
-use inillucent_legacy::{Database, Levers, Value};
+use inillucent_engine::connect::Database;
+use inillucent_sql::plan::Levers;
+use inillucent_tree::datum::OwnedDatum;
 
 /// The seed the bootstrap uses, fixed so a report is reproducible.
 const SEED: u64 = 17_900_001;
@@ -162,11 +170,11 @@ fn run(fixture: &Path, rounds: u32) -> Result<(), String> {
 ///
 /// @param fixture - the database to open
 fn breakdown(fixture: &Path) -> Result<(), String> {
-    let database = Database::open_with_busy_timeout(fixture, std::time::Duration::from_secs(5))
-        .map_err(|error| format!("open: {}", error.message()))?;
-    let connection = database
-        .connect()
-        .map_err(|error| format!("connect: {}", error.message()))?;
+    let database = Database::open(fixture).map_err(|error| format!("open: {}", error.message()))?;
+    let connection = database.connect();
+    connection
+        .execute_batch("PRAGMA busy_timeout = 5000")
+        .map_err(|error| format!("busy_timeout: {}", error.message()))?;
     println!("## where one prepare-and-step goes, nanoseconds");
     println!(
         "  {:<18} {:>10} {:>10} {:>10} {:>10} {:>12}",
@@ -302,11 +310,11 @@ fn record(
 /// @param fixture - the database to open
 /// @param disabled - the levers to switch off
 fn time_inillucent(fixture: &Path, disabled: u32) -> Result<Vec<Sample>, String> {
-    let database = Database::open_with_busy_timeout(fixture, std::time::Duration::from_secs(5))
-        .map_err(|error| format!("open: {}", error.message()))?;
-    let connection = database
-        .connect()
-        .map_err(|error| format!("connect: {}", error.message()))?;
+    let database = Database::open(fixture).map_err(|error| format!("open: {}", error.message()))?;
+    let connection = database.connect();
+    connection
+        .execute_batch("PRAGMA busy_timeout = 5000")
+        .map_err(|error| format!("busy_timeout: {}", error.message()))?;
     connection.disable_optimizations(disabled);
     let mut samples = Vec::with_capacity(WORKLOADS.len());
     for (name, sql, binds) in WORKLOADS {
@@ -381,27 +389,26 @@ fn scatter(iteration: u32) -> i64 {
 ///
 /// @param digest - the running digest
 /// @param value - the value to fold in
-fn eat(digest: &mut Digest, value: &Value<'static>) {
+fn eat(digest: &mut Digest, value: &OwnedDatum) {
     match value {
-        Value::Null => digest.tag(0),
-        Value::Integer(number) => {
+        OwnedDatum::Null => digest.tag(0),
+        OwnedDatum::Int(number) => {
             digest.tag(1);
             digest.word(*number as u64);
         }
-        Value::Real(number) => {
+        OwnedDatum::Real(number) => {
             digest.tag(2);
             digest.word(number.to_bits());
         }
-        Value::Text(text) => {
-            let bytes = text.utf8_bytes();
+        OwnedDatum::Text(bytes) => {
             digest.tag(3);
             digest.word(bytes.len() as u64);
-            digest.bytes(&bytes);
+            digest.bytes(bytes);
         }
-        Value::Blob(blob) => {
+        OwnedDatum::Blob(bytes) => {
             digest.tag(4);
-            digest.word(blob.raw().len() as u64);
-            digest.bytes(blob.raw());
+            digest.word(bytes.len() as u64);
+            digest.bytes(bytes);
         }
     }
 }

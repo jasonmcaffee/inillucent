@@ -2,15 +2,24 @@
 //!
 //! Invariant: this measures, it does not optimise, and it is not a comparison
 //! against SQLite. It exists because the scorecard reports the same statement -
-//! `UPDATE side_table SET note = ?2 WHERE id = ?1` - at 0.87x in autocommit,
-//! 0.80x batched ten at a time, and 0.037x inside one transaction. A statement
-//! whose ratio depends on how many of its siblings share its transaction is not
-//! a slow statement; it is a cost that grows with the transaction, and the way
-//! to tell which is to vary only that.
+//! `UPDATE side_table SET note = ?2 WHERE id = ?1` - at ratios that move with
+//! how many of its siblings share its transaction. A statement whose ratio
+//! depends on how many of its siblings share its transaction is not a slow
+//! statement; it is a cost that grows with the transaction, and the way to
+//! tell which is to vary only that.
 //!
 //! A flat nanoseconds-per-write column means the cost is per write. A column
 //! that climbs with the batch size means it is quadratic in the batch, and the
 //! slope says how much of it is.
+//!
+//! **The per-opcode and per-stage breakdowns this file used to print are
+//! gone.** They read `inillucent_base::probe::OPCODE_*`/`STAGE_*`, which that
+//! module's own doc comment ties to the old virtual machine's `opcode-probe`
+//! feature - and the new engine has no virtual machine to attribute an
+//! allocation to an opcode of. The stage tables have no writer left in the
+//! workspace at all (`record_stage`/`record_stage_allocating` have no caller
+//! outside their own definitions), so both sections would have printed
+//! nothing on this engine regardless of the deletion.
 //!
 //! Usage: `cargo run --release -p inillucent-compat --bin inillucent-txnprofile`
 
@@ -18,7 +27,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
-use inillucent_legacy::{Connection, Database};
+use inillucent_engine::connect::{Connection, Database};
 
 /// How many rows the table holds, which every batch size updates within.
 const ROWS: u32 = 20_000;
@@ -58,107 +67,7 @@ fn run(root: &Path) -> Result<(), String> {
     println!();
     let per_insert = measure_inserts(root)?;
     println!("insert into a two-index table: {per_insert:.1} ns each");
-    report_opcodes();
-    report_stages();
     Ok(())
-}
-
-/// Prints what each bracketed stage of a page edit cost.
-fn report_stages() {
-    use std::sync::atomic::Ordering;
-    const NAMES: [&str; 10] = [
-        "record_image",
-        "get+copy_bytes",
-        "the edit itself",
-        "parse_edited",
-        "publish_with",
-        "idx: find_key",
-        "idx: build_cell",
-        "idx: place_cell",
-        "idx: placed in place",
-        "idx: balanced",
-    ];
-    let mut any = false;
-    for (slot, name) in NAMES.iter().enumerate() {
-        let runs = match inillucent_base::probe::STAGE_RUNS.get(slot) {
-            Some(counter) => counter.load(Ordering::Relaxed),
-            None => 0,
-        };
-        if runs == 0 {
-            continue;
-        }
-        if !any {
-            println!();
-            println!("--- one page edit, by stage ---");
-            println!(
-                "  {:<18} {:>10} {:>14} {:>12}",
-                "stage", "runs", "nanos", "ns/run"
-            );
-            any = true;
-        }
-        let nanos = match inillucent_base::probe::STAGE_NANOS.get(slot) {
-            Some(counter) => counter.load(Ordering::Relaxed),
-            None => 0,
-        };
-        println!(
-            "  {:<18} {:>10} {:>14} {:>12.1}",
-            name,
-            runs,
-            nanos,
-            nanos as f64 / runs.max(1) as f64
-        );
-    }
-}
-
-/// Prints what each opcode cost during the last, largest batch.
-///
-/// Empty in an ordinary build; the numbers come from the virtual machine's
-/// `opcode-probe` feature, which is off unless this binary was built with it.
-fn report_opcodes() {
-    use std::sync::atomic::Ordering;
-    let mut rows: Vec<(String, u64, u64, u64)> = Vec::new();
-    for slot in 0..inillucent_base::probe::OPCODE_SLOTS {
-        let runs = match inillucent_base::probe::OPCODE_RUNS.get(slot) {
-            Some(counter) => counter.load(Ordering::Relaxed),
-            None => 0,
-        };
-        if runs == 0 {
-            continue;
-        }
-        let nanos = match inillucent_base::probe::OPCODE_NANOS.get(slot) {
-            Some(counter) => counter.load(Ordering::Relaxed),
-            None => 0,
-        };
-        let allocations = match inillucent_base::probe::OPCODE_ALLOCATIONS.get(slot) {
-            Some(counter) => counter.load(Ordering::Relaxed),
-            None => 0,
-        };
-        let name = inillucent_vm::Opcode::from_index(slot)
-            .map(|opcode| opcode.name().to_string())
-            .unwrap_or_else(|| format!("opcode-{slot}"));
-        rows.push((name, runs, nanos, allocations));
-    }
-    if rows.is_empty() {
-        return;
-    }
-    rows.sort_by_key(|row| std::cmp::Reverse(row.2));
-    println!();
-    println!("--- the last batch, by opcode ---");
-    println!(
-        "  {:<18} {:>10} {:>14} {:>12} {:>12} {:>10}",
-        "opcode", "runs", "nanos", "ns/run", "allocs", "alloc/run"
-    );
-    for (name, runs, nanos, allocations) in rows.iter().take(16) {
-        println!(
-            "  {:<18} {:>10} {:>14} {:>12.1} {:>12} {:>10.3}",
-            name,
-            runs,
-            nanos,
-            *nanos as f64 / (*runs).max(1) as f64,
-            allocations,
-            *allocations as f64 / (*runs).max(1) as f64,
-        );
-    }
 }
 
 /// Measures the cost of an FTS5 insert as the index grows.
@@ -181,7 +90,7 @@ fn measure_fts(root: &Path) -> Result<(), String> {
             std::fs::remove_file(&path).map_err(|failure| failure.to_string())?;
         }
         let database = Database::open(&path).map_err(|failure| failure.to_string())?;
-        let connection = database.connect().map_err(|failure| failure.to_string())?;
+        let connection = database.connect();
         connection
             .execute_batch("CREATE VIRTUAL TABLE documents USING fts5(title, body)")
             .map_err(|failure| failure.to_string())?;
@@ -193,7 +102,7 @@ fn measure_fts(root: &Path) -> Result<(), String> {
             .map_err(|failure| failure.to_string())?;
         let started = Instant::now();
         for index in 0..count {
-            insert.reset().map_err(|failure| failure.to_string())?;
+            insert.reset();
             insert
                 .bind_text(1, "lorem ipsum dolor sit amet")
                 .map_err(|failure| failure.to_string())?;
@@ -231,7 +140,7 @@ fn measure_inserts(root: &Path) -> Result<f64, String> {
         std::fs::remove_file(&path).map_err(|failure| failure.to_string())?;
     }
     let database = Database::open(&path).map_err(|failure| failure.to_string())?;
-    let connection = database.connect().map_err(|failure| failure.to_string())?;
+    let connection = database.connect();
     for statement in [
         "CREATE TABLE main_table(id INTEGER PRIMARY KEY, key INTEGER NOT NULL,          category INTEGER NOT NULL, label TEXT NOT NULL, payload BLOB)",
         "CREATE INDEX main_key ON main_table(key)",
@@ -250,11 +159,9 @@ fn measure_inserts(root: &Path) -> Result<f64, String> {
         .execute_batch("BEGIN")
         .map_err(|failure| failure.to_string())?;
     const COUNT: u32 = 20_000;
-    inillucent_base::probe::reset_opcodes();
-    inillucent_base::probe::reset_stages();
     let started = Instant::now();
     for index in 0..COUNT {
-        insert.reset().map_err(|failure| failure.to_string())?;
+        insert.reset();
         insert
             .bind_integer(1, i64::from(index) + 1)
             .map_err(|failure| failure.to_string())?;
@@ -287,7 +194,7 @@ fn measure_batch(root: &Path, batch: u32) -> Result<f64, String> {
         std::fs::remove_file(&path).map_err(|failure| failure.to_string())?;
     }
     let database = Database::open(&path).map_err(|failure| failure.to_string())?;
-    let connection = database.connect().map_err(|failure| failure.to_string())?;
+    let connection = database.connect();
     build(&connection)?;
 
     let mut update = connection
@@ -296,17 +203,12 @@ fn measure_batch(root: &Path, batch: u32) -> Result<f64, String> {
     connection
         .execute_batch("BEGIN")
         .map_err(|failure| failure.to_string())?;
-    // Reset here rather than around the whole call, so the tables describe the
-    // updates being timed and not the twenty thousand inserts that built the
-    // table for them.
-    inillucent_base::probe::reset_opcodes();
-    inillucent_base::probe::reset_stages();
     let started = Instant::now();
     for index in 0..batch {
         // Scattered rather than sequential, so the pages a batch touches grow
         // with the batch the way the scorecard's binding does.
         let row = i64::from((index.wrapping_mul(7_919)) % ROWS) + 1;
-        update.reset().map_err(|failure| failure.to_string())?;
+        update.reset();
         update
             .bind_integer(1, row)
             .map_err(|failure| failure.to_string())?;
@@ -323,7 +225,7 @@ fn measure_batch(root: &Path, batch: u32) -> Result<f64, String> {
 }
 
 /// Builds the table the updates run against.
-fn build(connection: &Connection) -> Result<(), String> {
+fn build(connection: &Connection<'_>) -> Result<(), String> {
     for statement in [
         "CREATE TABLE side_table(id INTEGER PRIMARY KEY, owner INTEGER NOT NULL, note TEXT)",
         "CREATE INDEX side_owner ON side_table(owner)",

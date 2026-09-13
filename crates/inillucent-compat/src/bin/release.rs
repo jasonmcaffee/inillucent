@@ -130,10 +130,16 @@ fn run(out: &Path, measurements: Option<&Path>) -> Result<bool, String> {
     let root = workspace_root();
     std::fs::create_dir_all(out).map_err(|error| format!("cannot create {out:?}: {error}"))?;
     let suffix = std::env::consts::EXE_SUFFIX;
+    // `inillucent-capi`, the drop-in `sqlite3_*` C ABI, was deleted with the old
+    // engine it sat over. `inillucent-driver-capi` is what replaced it - a
+    // bespoke API of its own rather than a `sqlite3.h` workalike - and it names
+    // its artifact after the crate rather than the header for the reason its
+    // own manifest gives: a `cdylib` named `inillucent_driver` would collide
+    // with the `inillucent-driver` rlib it links.
     let library = if cfg!(windows) {
-        "target/release/inillucent_capi.dll"
+        "target/release/inillucent_driver_capi.dll"
     } else {
-        "target/release/libinillucent_capi.so"
+        "target/release/libinillucent_driver_capi.so"
     };
     let wanted: Vec<(&str, String, &str)> = vec![
         (
@@ -149,7 +155,7 @@ fn run(out: &Path, measurements: Option<&Path>) -> Result<bool, String> {
         (
             "capi",
             library.to_string(),
-            "the C library, linked against the official sqlite3.h",
+            "the C ABI over inillucent-driver, for every language that is not Rust",
         ),
         (
             "report",

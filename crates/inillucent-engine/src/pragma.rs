@@ -61,7 +61,7 @@
 //!   now nothing on SQLite's own list.
 
 use inillucent_base::error::refusal;
-use inillucent_base::DbResult;
+use inillucent_base::{DbError, DbResult, PrimaryCode};
 use inillucent_sql::declare::{argument_boolean, argument_integer, argument_text};
 use inillucent_sql::directive::PragmaArgument;
 use inillucent_tree::datum::OwnedDatum;
@@ -97,23 +97,33 @@ impl ImportedDatabase {
             b"defer_foreign_keys" => self.pragma_defer(argument),
             b"foreign_key_check" => self.pragma_foreign_key_check(argument),
             b"journal_mode" => self.pragma_journal_mode(argument),
-            b"encoding" => self.pragma_fixed_word(argument, b"UTF-8"),
+            b"encoding" => self.pragma_fixed_word(argument, "encoding", b"UTF-8"),
             b"locking_mode" => self.pragma_locking_mode(argument),
-            b"integrity_check" | b"quick_check" => self.pragma_integrity_check(),
+            b"integrity_check" => self.pragma_integrity_check("integrity_check"),
+            b"quick_check" => self.pragma_integrity_check("quick_check"),
             b"wal_checkpoint" => self.pragma_wal_checkpoint(),
-            b"page_size" => Ok(one_integer(self.page_size as i64)),
-            b"page_count" => Ok(one_integer(self.database.pool().page_count() as i64)),
-            b"freelist_count" => Ok(one_integer(self.database.free_pages() as i64)),
+            b"page_size" => Ok(named_integer("page_size", self.page_size as i64)),
+            b"page_count" => Ok(named_integer(
+                "page_count",
+                self.database.pool().page_count() as i64,
+            )),
+            b"freelist_count" => Ok(named_integer(
+                "freelist_count",
+                self.database.free_pages() as i64,
+            )),
             b"user_version" => self.pragma_user_version(argument),
             b"application_id" => self.pragma_application_id(argument),
-            b"schema_version" => Ok(one_integer(i64::from(self.database.schema_cookie()))),
+            b"schema_version" => Ok(named_integer(
+                "schema_version",
+                i64::from(self.database.schema_cookie()),
+            )),
             // **A connection-visible counter, not a file one.** SQLite's
             // `data_version` changes when *another* connection has committed;
             // one connection watching its own writes always sees the same
             // number, and this engine holds the file exclusively, so that
             // number is 1 and stays 1. It is reported rather than refused
             // because the answer is correct, not because the subject is absent.
-            b"data_version" => Ok(one_integer(1)),
+            b"data_version" => Ok(named_integer("data_version", 1)),
             b"max_page_count" => self.pragma_max_page_count(argument),
             // **Remembered, and exceeded.** `analysis_limit` caps how many rows
             // `ANALYZE` samples per index; this engine's `ANALYZE` walks the
@@ -202,7 +212,7 @@ impl ImportedDatabase {
             b"index_list" => self.pragma_index_list(argument)?,
             b"index_info" => self.pragma_index_info(argument, false)?,
             b"index_xinfo" => self.pragma_index_info(argument, true)?,
-            b"table_list" => self.pragma_table_list()?,
+            b"table_list" => self.pragma_table_list(argument)?,
             b"collation_list" => self.pragma_collation_list(),
             b"pragma_list" => list_of("name", SQLITE_PRAGMAS),
             b"module_list" => {
@@ -312,7 +322,8 @@ impl ImportedDatabase {
         let page_size = self.page_size.max(1);
         let Some(argument) = argument else {
             let bytes = self.frames.saturating_mul(page_size);
-            return Ok(one_integer(
+            return Ok(named_integer(
+                "cache_size",
                 self.cache_size.unwrap_or(-((bytes / 1024) as i64)),
             ));
         };
@@ -351,11 +362,14 @@ impl ImportedDatabase {
     /// Reads or sets how much of a commit reaches the platter.
     fn pragma_synchronous(&mut self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
         let Some(argument) = argument else {
-            return Ok(one_integer(match self.wal.synchronous() {
-                Synchronous::Off => 0,
-                Synchronous::Normal => 1,
-                Synchronous::Full => 2,
-            }));
+            return Ok(named_integer(
+                "synchronous",
+                match self.wal.synchronous() {
+                    Synchronous::Off => 0,
+                    Synchronous::Normal => 1,
+                    Synchronous::Full => 2,
+                },
+            ));
         };
         let text = argument_text(argument).trim().to_ascii_lowercase();
         let policy = match text.as_str() {
@@ -374,12 +388,17 @@ impl ImportedDatabase {
     }
 
     /// Reads or sets how long a writer waits for the writer slot.
+    ///
+    /// **The one flag pragma whose column is not its own name.** SQLite calls
+    /// this column `timeout`, not `busy_timeout` - checked against the pinned
+    /// library's own `returnSingleInt(pParse, "timeout", ...)` call site - so a
+    /// script that reads it by name gets what the reference gives it.
     fn pragma_busy_timeout(&mut self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
         match argument {
-            None => Ok(one_integer(self.busy_timeout_ms as i64)),
+            None => Ok(named_integer("timeout", self.busy_timeout_ms as i64)),
             Some(argument) => {
                 self.busy_timeout_ms = argument_integer(argument).max(0) as u64;
-                Ok(one_integer(self.busy_timeout_ms as i64))
+                Ok(named_integer("timeout", self.busy_timeout_ms as i64))
             }
         }
     }
@@ -387,7 +406,7 @@ impl ImportedDatabase {
     /// Reads or sets a boolean flag the engine records and reports.
     fn pragma_flag(&mut self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
         match argument {
-            None => Ok(one_integer(i64::from(self.foreign_keys))),
+            None => Ok(named_integer("foreign_keys", i64::from(self.foreign_keys))),
             Some(argument) => {
                 let asked = argument_boolean(argument);
                 // **The compiled statements go with it.** Whether keys are
@@ -415,7 +434,10 @@ impl ImportedDatabase {
     /// @param argument - the value it was given, when it was given one
     fn pragma_defer(&mut self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
         match argument {
-            None => Ok(one_integer(i64::from(self.defer_foreign_keys))),
+            None => Ok(named_integer(
+                "defer_foreign_keys",
+                i64::from(self.defer_foreign_keys),
+            )),
             Some(argument) => {
                 let asked = argument_boolean(argument);
                 if asked != self.defer_foreign_keys {
@@ -536,10 +558,12 @@ impl ImportedDatabase {
     /// distinction exists to prevent.
     ///
     /// @param argument - the value it was given, when it was given one
+    /// @param name - the column SQLite reports this pragma's answer under
     /// @param fixed - the one setting
     fn pragma_fixed_word(
         &mut self,
         argument: Option<&PragmaArgument>,
+        name: &str,
         fixed: &[u8],
     ) -> DbResult<Outcome> {
         if let Some(argument) = argument {
@@ -553,7 +577,7 @@ impl ImportedDatabase {
         }
         Ok(Outcome {
             rows: vec![vec![OwnedDatum::Text(fixed.to_vec())]],
-            names: vec!["value".into()],
+            names: vec![name.into()],
             changes: Default::default(),
         })
     }
@@ -562,7 +586,17 @@ impl ImportedDatabase {
     ///
     /// `ok` when they all hold, and the first failure otherwise, which is the
     /// shape SQLite's answer has.
-    fn pragma_integrity_check(&mut self) -> DbResult<Outcome> {
+    ///
+    /// **One check, two names.** `integrity_check` and `quick_check` are the
+    /// same pass here - this engine has no faster, sampled variant of the
+    /// walk - and SQLite's own two pragmas name their column after whichever
+    /// of the two was asked, not after a shared implementation. Reporting
+    /// `integrity_check` for both told a caller that ran `PRAGMA quick_check`
+    /// it had received the wrong pragma's answer.
+    ///
+    /// @param column - which of the two names asked for this, and so which one
+    ///   the answer is reported under
+    fn pragma_integrity_check(&mut self, column: &str) -> DbResult<Outcome> {
         let answer = match self.check_trees() {
             Ok(()) => b"ok".to_vec(),
             Err(error) => error
@@ -573,7 +607,7 @@ impl ImportedDatabase {
         };
         Ok(Outcome {
             rows: vec![vec![OwnedDatum::Text(answer)]],
-            names: vec!["integrity_check".into()],
+            names: vec![column.into()],
             changes: Default::default(),
         })
     }
@@ -592,6 +626,21 @@ impl ImportedDatabase {
     /// bigger number meaning something else; the pages written is the same
     /// physical quantity SQLite's frame count is.
     fn pragma_wal_checkpoint(&mut self) -> DbResult<Outcome> {
+        // **Refused, not answered `1 | -1 | -1`, once the open transaction has
+        // written anything.** The pinned reference checkpoints fine after a
+        // bare `BEGIN` - no write lock is held yet - and answers `database
+        // table is locked` (`SQLITE_LOCKED`) the moment a statement has
+        // written, because this connection is itself the lock a checkpoint
+        // needs. A `busy` row here would let a script read it, believe
+        // nothing happened, and `COMMIT` over a checkpoint that in fact never
+        // ran; recording the checkpoint's start no earlier than the open
+        // transaction's own first record - which is what letting it proceed
+        // would require - is exactly the no-steal argument `holds_uncommitted`
+        // makes, so this is refused rather than made honest.
+        if self.batch.get().is_some() && self.touched != 0 {
+            return Err(DbError::primary(PrimaryCode::Locked)
+                .with_detail("cannot checkpoint: a transaction has written and not committed"));
+        }
         // **Minus one twice when there is no log to check point.** SQLite
         // answers `0|-1|-1` under a rollback journal because the two counts are
         // "frames in the log" and "frames moved", and a database with no
@@ -786,8 +835,19 @@ impl ImportedDatabase {
                 changes: Default::default(),
             });
         };
-        let count = table.indexes.len();
-        let rows = table
+        // **A `WITHOUT ROWID` table's own primary key has no tree of its own
+        // - and `PRAGMA index_list` reports it anyway.** SQLite writes no
+        // `sqlite_autoindex` row to `sqlite_schema` for it and builds no
+        // second b-tree (`convertToWithoutRowidTable` repoints the in-memory
+        // `Index` at the table's own root and skips the schema write), but
+        // that `Index` stays on the table's index chain, and `index_list`
+        // walks the chain rather than the schema table. So the reference
+        // answers `[0, "sqlite_autoindex_u_1", 1, "pk", 0]` for a `WITHOUT
+        // ROWID` table's composite key, which this row used to filter out on
+        // the theory that SQLite never lists it - checked against the pinned
+        // `sqlite3.c`'s own `PragTyp_INDEX_LIST` case, which has no such
+        // filter.
+        let rows: Vec<Vec<OwnedDatum>> = table
             .indexes
             .iter()
             .rev()
@@ -813,7 +873,6 @@ impl ImportedDatabase {
                 ]
             })
             .collect();
-        let _ = count;
         Ok(Outcome {
             rows,
             names,
@@ -904,19 +963,36 @@ impl ImportedDatabase {
         })
     }
 
-    /// Lists every table in the schema.
+    /// Lists every table in the schema, or one of them by name.
     ///
     /// **A view is reported as a view, and the schema tables are reported.**
     /// Every row used to say `table`, so a caller reading this to decide what
     /// it could write to was told a view was writable; and `sqlite_schema` and
     /// `sqlite_temp_schema` were missing, which SQLite lists last and a tool
     /// walking the catalog expects to find.
-    fn pragma_table_list(&self) -> DbResult<Outcome> {
+    ///
+    /// **`PRAGMA table_list(t)` narrows to one table.** The pinned reference's
+    /// own `PragTyp_TABLE_LIST` case skips every row whose name does not match
+    /// the argument case-insensitively; this used to answer the full list
+    /// regardless, which told a caller asking about one table what every
+    /// table looked like.
+    ///
+    /// @param argument - the table to narrow to, when one was given
+    fn pragma_table_list(&self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
+        let wanted = argument.map(|argument| argument_text(argument).to_ascii_lowercase());
+        let matches = |folded: &[u8]| {
+            wanted
+                .as_deref()
+                .is_none_or(|wanted| folded == wanted.as_bytes())
+        };
         let mut rows: Vec<Vec<OwnedDatum>> = Vec::new();
         // Newest first, which is the order SQLite reports and the order
         // `index_list` already uses for the same reason.
         for table in self.tables.iter().rev() {
             if table.folded == b"sqlite_schema" || table.folded == b"sqlite_temp_schema" {
+                continue;
+            }
+            if !matches(&table.folded) {
                 continue;
             }
             let kind: &[u8] = match table.kind {
@@ -934,7 +1010,14 @@ impl ImportedDatabase {
                 OwnedDatum::Text(table.name.clone()),
                 OwnedDatum::Text(kind.to_vec()),
                 OwnedDatum::Int(ncol),
-                OwnedDatum::Int(0),
+                // **`wr` reported the table's own flag, not a constant.** Every
+                // row said 0 regardless of how the table was declared, so a
+                // `CREATE TABLE ... WITHOUT ROWID` table was told apart from an
+                // ordinary one by nothing this pragma answers - `table_info`
+                // still named its columns correctly, but a caller that reads
+                // `table_list` to decide whether a table has a rowid before
+                // choosing how to reference a row was told every table did.
+                OwnedDatum::Int(i64::from(table.without_rowid)),
                 OwnedDatum::Int(i64::from(table.strict)),
             ]);
         }
@@ -942,6 +1025,9 @@ impl ImportedDatabase {
             (b"main".as_slice(), b"sqlite_schema".as_slice()),
             (b"temp".as_slice(), b"sqlite_temp_schema".as_slice()),
         ] {
+            if !matches(name) {
+                continue;
+            }
             rows.push(vec![
                 OwnedDatum::Text(schema.to_vec()),
                 OwnedDatum::Text(name.to_vec()),
@@ -978,7 +1064,10 @@ impl ImportedDatabase {
     /// @param argument - the value it was given, when it was given one
     fn pragma_user_version(&mut self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
         let Some(argument) = argument else {
-            return Ok(one_integer(i64::from(self.database.user_version())));
+            return Ok(named_integer(
+                "user_version",
+                i64::from(self.database.user_version()),
+            ));
         };
         let value = argument_integer(argument) as i32;
         self.database.set_user_version(value);
@@ -997,7 +1086,10 @@ impl ImportedDatabase {
     /// @param argument - the value it was given, when it was given one
     fn pragma_application_id(&mut self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
         let Some(argument) = argument else {
-            return Ok(one_integer(i64::from(self.database.application_id())));
+            return Ok(named_integer(
+                "application_id",
+                i64::from(self.database.application_id()),
+            ));
         };
         let value = argument_integer(argument) as i32;
         self.database.set_application_id(value);
@@ -1019,7 +1111,7 @@ impl ImportedDatabase {
             let held = self.database.pool().page_count() as i64;
             self.max_page_count = asked.max(held).min(DEFAULT_MAX_PAGE_COUNT);
         }
-        Ok(one_integer(self.max_page_count))
+        Ok(named_integer("max_page_count", self.max_page_count))
     }
 
     /// Sets whether `LIKE` compares ASCII letters exactly.
@@ -1057,7 +1149,7 @@ impl ImportedDatabase {
         if let Some(argument) = argument {
             self.analysis_limit = argument_integer(argument).max(0);
         }
-        Ok(one_integer(self.analysis_limit))
+        Ok(named_integer("analysis_limit", self.analysis_limit))
     }
 
     /// Reads or sets `locking_mode`.
@@ -1071,14 +1163,14 @@ impl ImportedDatabase {
     /// @param argument - the mode, when one was given
     fn pragma_locking_mode(&mut self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
         let Some(argument) = argument else {
-            return Ok(word_row(self.locking_word()));
+            return Ok(word_row("locking_mode", self.locking_word()));
         };
         match argument_text(argument).trim().to_ascii_lowercase().as_str() {
             "normal" => self.set_locking_exclusive(false)?,
             "exclusive" => self.set_locking_exclusive(true)?,
             _ => {}
         }
-        Ok(word_row(self.locking_word()))
+        Ok(word_row("locking_mode", self.locking_word()))
     }
 
     /// Returns the word `locking_mode` reports.
@@ -1104,7 +1196,7 @@ impl ImportedDatabase {
     /// @param argument - the mode, when one was given
     fn pragma_journal_mode(&mut self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
         let Some(argument) = argument else {
-            return Ok(word_row(self.journal_mode().word()));
+            return Ok(word_row("journal_mode", self.journal_mode().word()));
         };
         let asked = argument_text(argument);
         if let Some(mode) = inillucent_pool::journal::JournalMode::named(asked.trim()) {
@@ -1115,11 +1207,11 @@ impl ImportedDatabase {
             // connection that has asked to be protected from itself cannot have
             // it.
             if self.defensive && mode == inillucent_pool::journal::JournalMode::Off {
-                return Ok(word_row(self.journal_mode().word()));
+                return Ok(word_row("journal_mode", self.journal_mode().word()));
             }
             self.set_journal_mode(mode)?;
         }
-        Ok(word_row(self.journal_mode().word()))
+        Ok(word_row("journal_mode", self.journal_mode().word()))
     }
 
     /// Reads or sets `auto_vacuum`.
@@ -1135,7 +1227,7 @@ impl ImportedDatabase {
     /// @param argument - the mode, when one was given
     fn pragma_auto_vacuum(&mut self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
         let Some(argument) = argument else {
-            return Ok(one_integer(i64::from(self.auto_vacuum)));
+            return Ok(named_integer("auto_vacuum", i64::from(self.auto_vacuum)));
         };
         let asked = match argument_text(argument).trim().to_ascii_lowercase().as_str() {
             "0" | "none" => Some(0u8),
@@ -1181,13 +1273,19 @@ impl ImportedDatabase {
     /// @param argument - the setting, when one was given
     fn pragma_secure_delete(&mut self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
         let Some(argument) = argument else {
-            return Ok(one_integer(i64::from(self.secure_delete)));
+            return Ok(named_integer(
+                "secure_delete",
+                i64::from(self.secure_delete),
+            ));
         };
         self.secure_delete = match argument_text(argument).trim().to_ascii_lowercase().as_str() {
             "2" | "fast" => 2,
             _ => u8::from(argument_boolean(argument)),
         };
-        Ok(one_integer(i64::from(self.secure_delete)))
+        Ok(named_integer(
+            "secure_delete",
+            i64::from(self.secure_delete),
+        ))
     }
 
     /// Reads or sets `ignore_check_constraints`.
@@ -1204,7 +1302,10 @@ impl ImportedDatabase {
         argument: Option<&PragmaArgument>,
     ) -> DbResult<Outcome> {
         let Some(argument) = argument else {
-            return Ok(one_integer(i64::from(self.ignore_check_constraints)));
+            return Ok(named_integer(
+                "ignore_check_constraints",
+                i64::from(self.ignore_check_constraints),
+            ));
         };
         let asked = argument_boolean(argument);
         if asked != self.ignore_check_constraints {
@@ -1219,7 +1320,10 @@ impl ImportedDatabase {
     /// @param argument - the setting, when one was given
     fn pragma_automatic_index(&mut self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
         let Some(argument) = argument else {
-            return Ok(one_integer(i64::from(self.automatic_index)));
+            return Ok(named_integer(
+                "automatic_index",
+                i64::from(self.automatic_index),
+            ));
         };
         let asked = argument_boolean(argument);
         if asked != self.automatic_index {
@@ -1246,7 +1350,7 @@ impl ImportedDatabase {
             // here it is the literal truth: there is nothing this engine's
             // catalog will let a statement write with the flag on that it
             // refuses with it off.
-            return Ok(one_integer(0));
+            return Ok(named_integer("writable_schema", 0));
         };
         self.writable_schema = argument_boolean(argument);
         Ok(Outcome::empty())
@@ -1261,7 +1365,7 @@ impl ImportedDatabase {
     /// @param argument - the value it was given, when it was given one
     fn pragma_query_only(&mut self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
         let Some(argument) = argument else {
-            return Ok(one_integer(i64::from(self.query_only)));
+            return Ok(named_integer("query_only", i64::from(self.query_only)));
         };
         self.query_only = argument_boolean(argument);
         Ok(Outcome::empty())
@@ -1280,7 +1384,10 @@ impl ImportedDatabase {
         argument: Option<&PragmaArgument>,
     ) -> DbResult<Outcome> {
         let Some(argument) = argument else {
-            return Ok(one_integer(i64::from(self.recursive_triggers)));
+            return Ok(named_integer(
+                "recursive_triggers",
+                i64::from(self.recursive_triggers),
+            ));
         };
         let asked = argument_boolean(argument);
         if asked != self.recursive_triggers {
@@ -1301,7 +1408,7 @@ impl ImportedDatabase {
     /// @param argument - the value it was given, when it was given one
     fn pragma_temp_store(&mut self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
         let Some(argument) = argument else {
-            return Ok(one_integer(self.temp_store));
+            return Ok(named_integer("temp_store", self.temp_store));
         };
         let text = argument_text(argument).trim().to_ascii_lowercase();
         self.temp_store = match text.as_str() {
@@ -1367,24 +1474,40 @@ impl ImportedDatabase {
     }
 }
 
-/// Returns the answer a pragma that reports one number gives.
+/// Returns a one-row, one-column answer holding a word, named after the
+/// pragma that reports it.
 ///
-/// @param value - the number
-/// Returns a one-row, one-column answer holding a word.
+/// **Named after the pragma, because that is what SQLite names it.** SQLite's
+/// own `returnSingleInt`/`returnSingleText` helpers take the label as an
+/// argument at every call site rather than deriving it, and for a simple
+/// single-value pragma the label its own call sites pass is the pragma's own
+/// name - `PRAGMA journal_mode` answers a column called `journal_mode`, not
+/// `value`. A caller that reads the column by name rather than by position -
+/// which is exactly what a script comparing this engine's answer against
+/// SQLite's would do - was being told the wrong column existed.
 ///
+/// @param name - the column name SQLite reports for this pragma
 /// @param word - the value
-fn word_row(word: &str) -> Outcome {
+fn word_row(name: &str, word: &str) -> Outcome {
     Outcome {
         rows: vec![vec![OwnedDatum::Text(word.as_bytes().to_vec())]],
-        names: vec!["value".into()],
+        names: vec![name.into()],
         changes: Default::default(),
     }
 }
 
-fn one_integer(value: i64) -> Outcome {
+/// Returns a one-row, one-column answer holding a number, named after the
+/// pragma that reports it.
+///
+/// See [`word_row`] for why the column is named after the pragma rather than
+/// called `value`.
+///
+/// @param name - the column name SQLite reports for this pragma
+/// @param value - the number
+fn named_integer(name: &str, value: i64) -> Outcome {
     Outcome {
         rows: vec![vec![OwnedDatum::Int(value)]],
-        names: vec!["value".into()],
+        names: vec![name.into()],
         changes: Default::default(),
     }
 }
@@ -1440,7 +1563,7 @@ fn pragma_fixed_number(
     accepted: &[&str],
 ) -> DbResult<Outcome> {
     let Some(argument) = argument else {
-        return Ok(one_integer(value));
+        return Ok(named_integer(name, value));
     };
     let text = argument_text(argument).trim().to_ascii_lowercase();
     if accepted.iter().any(|held| *held == text) {

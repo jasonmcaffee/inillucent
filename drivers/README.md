@@ -31,12 +31,13 @@ driver, and it has two consequences you have to design for rather than discover:
    that now works each turn it red. That second half is what makes it worth
    trusting; see [The capability table](#the-capability-table).
 
-Today the engine answers all but one row, and `cancel` is the exception:
+The engine reports `cancel` as partial support. A running statement stops at a
+scan leaf or result batch, while an indivisible operator finishes before it can
+observe the request:
 
 ```
 $ python bindings/python/run_conformance.py
 24 capabilities reported
-  not supported: cancel
 ```
 
 ---
@@ -91,7 +92,8 @@ match connection.query(statement, &[], 0) {
 **No SQL statement answers `Unsupported` today.** The 416-case differential probe refuses nothing
 SQLite answers, and `VACUUM` — which this example used to name — rebuilds the file. Write the arm
 anyway: it is four lines, and the alternative is rewriting every call site the first time a construct
-arrives that does return it. `cancel` is the one capability the table still reports as absent.
+arrives that does return it. `cancel` reports partial support because cancellation is observed between
+executor units of work rather than at every instruction.
 
 Rust does **not** go through the C ABI. DuckDB routes even its own first-party
 Rust binding through its C API because its core is C++ and the ABI is the
@@ -313,9 +315,8 @@ still compiling.
 
 - **stable** — the signature will not change and the symbol will not be removed.
 - **provisional** — it exists and may change in a minor version. Today that is
-  `inillucent_cancel` alone, which returns `UNSUPPORTED` and is present so a
-  binding can wire it once and have it begin working the day the capability
-  flips.
+  `inillucent_cancel` alone. It requests cancellation of a running statement,
+  which reports `INTERRUPTED` once the executor reaches a cancellation point.
 
 Per-symbol rather than per-library is the shape DuckDB v2.0 moved its C API to
 in August 2026, and it is the one thing from that design worth copying wholesale.

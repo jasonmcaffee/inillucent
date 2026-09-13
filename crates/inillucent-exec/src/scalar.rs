@@ -461,7 +461,10 @@ impl JsonCall {
         // says 1 and `json_valid('{}', 4)` was 1 where SQLite says 0 - wrong in
         // both directions, from an optimisation that is invisible everywhere
         // else.
-        if marks.first() == Some(&false) && self.func != JsonFunc::Valid {
+        if marks.first() == Some(&false)
+            && self.func != JsonFunc::Valid
+            && self.func.first_argument_is_a_document()
+        {
             let replacement = values.first().and_then(|first| self.binary(first));
             if let (Some(blob), Some(slot)) = (replacement, values.first_mut()) {
                 *slot = blob;

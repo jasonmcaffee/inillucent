@@ -49,6 +49,8 @@ struct Invocation {
     rest: Vec<String>,
     /// The database to open.
     database: String,
+    /// Whether the command line explicitly named a database.
+    database_was_named: bool,
     /// Whether the result is printed as JSON.
     json: bool,
     /// Whether writes are refused.
@@ -64,6 +66,9 @@ struct Invocation {
 /// Runs whatever the command line named.
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(topic) = help_topic(&arguments) {
+        return dispatch_help(topic);
+    }
     match arguments.first().map(String::as_str) {
         None | Some("--help") | Some("-h") | Some("help") if arguments.len() <= 1 => {
             print_overview();
@@ -95,8 +100,50 @@ fn main() -> ExitCode {
     match command.name {
         "shell" => shell_like(&invocation.rest),
         "mcp" => serve(&invocation),
+        "create" if invocation.database_was_named => {
+            eprintln!("create takes its database path as its argument and does not accept --db.");
+            ExitCode::from(2)
+        }
         _ => dispatch(command, &invocation),
     }
+}
+
+/// Returns the command help topic requested with a shared help flag.
+///
+/// @param arguments - the complete command line after the program name
+fn help_topic(arguments: &[String]) -> Option<&str> {
+    let topic = arguments
+        .iter()
+        .find(|argument| command::find(argument).is_some())?;
+    arguments
+        .iter()
+        .any(|argument| matches!(argument.as_str(), "--help" | "-h"))
+        .then_some(topic)
+}
+
+/// Prints the detailed help text for one known command.
+///
+/// @param topic - the command the caller asked about
+fn dispatch_help(topic: &str) -> ExitCode {
+    let Some(command) = command::find(topic) else {
+        eprintln!("there is no '{topic}' command. Run 'inillucent help' for the list.");
+        return ExitCode::from(2);
+    };
+    let invocation = Invocation {
+        verb: Some("help".to_string()),
+        rest: vec![command.name.to_string()],
+        database: ":memory:".to_string(),
+        database_was_named: false,
+        json: false,
+        readonly: false,
+        root: None,
+        limit: 200,
+        null: String::new(),
+    };
+    let Some(help) = command::find("help") else {
+        return ExitCode::from(2);
+    };
+    dispatch(help, &invocation)
 }
 
 /// Splits the shared options out of the command line.
@@ -111,6 +158,7 @@ fn split(arguments: &[String]) -> Result<Invocation, String> {
         verb: None,
         rest: Vec::new(),
         database: std::env::var("INILLUCENT_DB").unwrap_or_else(|_| ":memory:".to_string()),
+        database_was_named: false,
         json: false,
         readonly: false,
         root: None,
@@ -121,6 +169,7 @@ fn split(arguments: &[String]) -> Result<Invocation, String> {
     while let Some(argument) = walk.next() {
         match argument.as_str() {
             "--db" | "-d" => {
+                invocation.database_was_named = true;
                 invocation.database = walk
                     .next()
                     .cloned()
@@ -185,11 +234,12 @@ fn dispatch(command: &'static Command, invocation: &Invocation) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let mut context = match Context::open(
-        &invocation.database,
-        invocation.readonly,
-        invocation.root.clone(),
-    ) {
+    let database = if command.name == "create" {
+        ":memory:"
+    } else {
+        &invocation.database
+    };
+    let mut context = match Context::open(database, invocation.readonly, invocation.root.clone()) {
         Ok(context) => context,
         Err(failure) => return report(&failure, invocation.json, command.name),
     };

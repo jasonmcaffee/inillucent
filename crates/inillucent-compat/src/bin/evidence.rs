@@ -29,7 +29,15 @@ use inillucent_vfs::path::DbPath;
 /// Every crate that carries engine behaviour is here, including the C ABI and
 /// the shell: a manifest row that names one of their tests can only be believed
 /// if the run that produced the results actually ran it.
-const PACKAGES: [&str; 17] = [
+///
+/// `inillucent-vm`, `inillucent-session` and `inillucent-capi` are gone from
+/// this list because they are gone from the workspace: the old engine they
+/// carried was deleted, and every capability row that used to cite one of
+/// their tests now cites the crate the behaviour actually lives in today -
+/// `inillucent-scalar` for the built-in/pattern/arithmetic tests `inillucent-vm`
+/// used to carry, `inillucent-engine` for what `inillucent-session` carried,
+/// and `inillucent-driver-capi` for the C ABI `inillucent-capi` carried.
+const PACKAGES: [&str; 23] = [
     "inillucent-base",
     "inillucent-vfs",
     "inillucent-sim",
@@ -40,10 +48,16 @@ const PACKAGES: [&str; 17] = [
     "inillucent-catalog",
     "inillucent-ext",
     "inillucent-search",
-    "inillucent-vm",
-    "inillucent-session",
+    "inillucent-pool",
+    "inillucent-tree",
+    "inillucent-wal",
+    "inillucent-txn",
+    "inillucent-scalar",
+    "inillucent-exec",
+    "inillucent-engine",
     "inillucent",
-    "inillucent-capi",
+    "inillucent-driver",
+    "inillucent-driver-capi",
     "inillucent-cli",
     "inillucent-migrate",
     "inillucent-compat",

@@ -10,19 +10,18 @@
 //! one exists so that a scenario a test found can be replayed by hand without
 //! the test around it.
 
-use inillucent_session::connection::{OpenOptions, SessionDatabase};
+use inillucent_engine::connect::Database;
 
 /// Reads SQL from standard input, runs each statement, and prints the outcome.
 fn main() {
     let path = std::env::args().nth(1).unwrap_or_else(|| ":memory:".into());
-    // A second argument means "open what is there", which is how a file the
-    // other engine wrote is read back.
-    if std::env::args().nth(2).is_none() {
+    // A second argument means "open what is there", which is how a file a
+    // scenario already wrote is read back.
+    if std::env::args().nth(2).is_none() && path != ":memory:" {
         let _ = std::fs::remove_file(&path);
     }
-    let database =
-        SessionDatabase::open_with_options(&path, OpenOptions::default()).expect("opens");
-    let connection = database.connect().expect("connects");
+    let database = Database::open(&path).expect("opens");
+    let connection = database.connect();
     let mut sql = String::new();
     for line in std::io::stdin().lines() {
         sql.push_str(&line.expect("reads"));
@@ -38,10 +37,10 @@ fn main() {
 }
 
 /// Runs one statement and prints its rows, or the whole error it failed with.
-fn run(connection: &inillucent_session::connection::Connection, statement: &str) {
-    match inillucent_session::statement::Statement::prepare(connection, statement.as_bytes()) {
+fn run(connection: &inillucent_engine::connect::Connection<'_>, statement: &str) {
+    match connection.prepare(statement) {
         Err(error) => println!("PREPARE FAILED {statement}\n  {error:?}"),
-        Ok((mut prepared, _)) => {
+        Ok(mut prepared) => {
             let mut rows = Vec::new();
             loop {
                 match prepared.step() {

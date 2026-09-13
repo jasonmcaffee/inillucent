@@ -14,46 +14,43 @@
 //! the direct engine underneath it.
 
 use inillucent_compat::differential::{scratch, start_inillucent};
-use inillucent_session::statement::{execute_batch, Statement};
-use inillucent_session::Connection;
-use inillucent_value::Value;
+use inillucent_engine::connect::{Connection, Database};
+use inillucent_tree::datum::OwnedDatum;
 
 /// Where this suite's scratch databases live.
 const AREA: &str = "search";
 
 /// Runs a statement for its effect.
-fn exec(connection: &Connection, sql: &str) {
-    execute_batch(connection, sql.as_bytes())
+fn exec(connection: &Connection<'_>, sql: &str) {
+    connection
+        .execute_batch(sql)
         .unwrap_or_else(|error| panic!("{sql}: {}", error.message()));
 }
 
 /// Runs a statement, returning whatever error it produced.
-fn try_exec(connection: &Connection, sql: &str) -> Result<(), String> {
-    execute_batch(connection, sql.as_bytes()).map_err(|error| error.message().to_string())
+fn try_exec(connection: &Connection<'_>, sql: &str) -> Result<(), String> {
+    connection
+        .execute_batch(sql)
+        .map_err(|error| error.message().to_string())
 }
 
 /// Returns every row of a query, each column rendered as text.
-fn rows(connection: &Connection, sql: &str) -> Vec<Vec<String>> {
-    let mut statement = Statement::prepare(connection, sql.as_bytes())
-        .unwrap_or_else(|error| panic!("{sql}: {}", error.message()))
-        .0;
+fn rows(connection: &Connection<'_>, sql: &str) -> Vec<Vec<String>> {
+    let mut statement = connection
+        .prepare(sql)
+        .unwrap_or_else(|error| panic!("{sql}: {}", error.message()));
     let mut out = Vec::new();
     while statement
         .step()
         .unwrap_or_else(|error| panic!("{sql}: {}", error.message()))
     {
-        let width = statement.column_count();
-        let mut row = Vec::with_capacity(width);
-        for index in 0..width {
-            row.push(render(&statement.value(index)));
-        }
-        out.push(row);
+        out.push(statement.row().iter().map(render).collect());
     }
     out
 }
 
 /// Returns the first column of every row.
-fn column(connection: &Connection, sql: &str) -> Vec<String> {
+fn column(connection: &Connection<'_>, sql: &str) -> Vec<String> {
     rows(connection, sql)
         .into_iter()
         .filter_map(|row| row.into_iter().next())
@@ -61,13 +58,13 @@ fn column(connection: &Connection, sql: &str) -> Vec<String> {
 }
 
 /// Renders one value as text.
-fn render(value: &Value<'static>) -> String {
+fn render(value: &OwnedDatum) -> String {
     match value {
-        Value::Null => "NULL".to_string(),
-        Value::Integer(number) => number.to_string(),
-        Value::Real(number) => format!("{number:.6}"),
-        Value::Text(text) => String::from_utf8_lossy(&text.utf8_bytes()).into_owned(),
-        Value::Blob(blob) => format!("blob:{}", blob.raw().len()),
+        OwnedDatum::Null => "NULL".to_string(),
+        OwnedDatum::Int(number) => number.to_string(),
+        OwnedDatum::Real(number) => format!("{number:.6}"),
+        OwnedDatum::Text(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+        OwnedDatum::Blob(bytes) => format!("blob:{}", bytes.len()),
     }
 }
 
@@ -102,7 +99,7 @@ const CORPUS: &[(i64, &str, &str)] = &[
 ];
 
 /// Creates a lexical-only search table and fills it.
-fn seed(connection: &Connection) {
+fn seed(connection: &Connection<'_>) {
     exec(
         connection,
         "CREATE VIRTUAL TABLE docs USING inillucent_search(title, body)",
@@ -240,9 +237,8 @@ fn a_rolled_back_write_is_invisible_to_the_search() {
 fn a_committed_write_survives_reopening() {
     let path = scratch(AREA, "reopen", "inillucent");
     {
-        let database =
-            inillucent_session::connection::SessionDatabase::open(&path).expect("it opens");
-        let connection = database.connect().expect("it connects");
+        let database = Database::open(&path).expect("it opens");
+        let connection = database.connect();
         seed(&connection);
         exec(&connection, "BEGIN");
         exec(
@@ -251,9 +247,8 @@ fn a_committed_write_survives_reopening() {
         );
         exec(&connection, "COMMIT");
     }
-    let database =
-        inillucent_session::connection::SessionDatabase::open(&path).expect("it reopens");
-    let connection = database.connect().expect("it connects");
+    let database = Database::open(&path).expect("it reopens");
+    let connection = database.connect();
     let found = column(
         &connection,
         "SELECT rowid FROM docs WHERE docs MATCH 'tirzepatide'",
@@ -672,7 +667,7 @@ fn hex(vector: &[f32]) -> String {
 /// @param connection - the database
 /// @param table - the search table's name
 /// @param key - the state key to read
-fn state(connection: &Connection, table: &str, key: &str) -> i64 {
+fn state(connection: &Connection<'_>, table: &str, key: &str) -> i64 {
     column(
         connection,
         &format!("SELECT v FROM {table}_state WHERE k = '{key}'"),
@@ -684,17 +679,19 @@ fn state(connection: &Connection, table: &str, key: &str) -> i64 {
 
 /// Opens a database that is already there, without emptying it first.
 ///
+/// **Leaked rather than borrowed**, for the same reason
+/// `differential::start_inillucent` leaks: the new engine's `Connection<'d>`
+/// borrows the `Database` it came from, and this helper's whole job is to hand
+/// a connection back to a caller that never sees the database, the way the old
+/// engine's owned `Connection` did.
+///
 /// @param path - the file to open
-fn open_at(path: &std::path::Path) -> Connection {
-    let database = inillucent_session::connection::SessionDatabase::open_with_options(
-        path,
-        inillucent_session::connection::OpenOptions {
-            busy_timeout: std::time::Duration::from_secs(5),
-            ..inillucent_session::connection::OpenOptions::default()
-        },
-    )
-    .expect("the database opens");
-    database.connect().expect("it connects")
+fn open_at(path: &std::path::Path) -> Connection<'static> {
+    let database: &'static Database =
+        Box::leak(Box::new(Database::open(path).expect("the database opens")));
+    let connection = database.connect();
+    let _ = connection.execute_batch("PRAGMA busy_timeout = 5000");
+    connection
 }
 
 /// Writes `count` rows, each in its own transaction, from `first`.
@@ -706,7 +703,7 @@ fn open_at(path: &std::path::Path) -> Connection {
 /// @param connection - the database
 /// @param first - the first rowid to write
 /// @param count - how many rows to write
-fn write_rows(connection: &Connection, first: i64, count: i64) {
+fn write_rows(connection: &Connection<'_>, first: i64, count: i64) {
     for offset in 0..count {
         let id = first + offset;
         exec(
@@ -870,19 +867,35 @@ fn an_update_leaves_a_dead_chunk_until_the_rebuild_removes_it() {
 }
 
 /// A folded index survives being closed and opened again.
+///
+/// **The first connection is a plain, stack-owned `Database` rather than
+/// `open_at`'s leaked one.** This engine holds a writer's main-file lock for
+/// the connection's whole life - see `pragma.rs`'s `data_version` comment -
+/// and `open_at` leaks its `Database` on purpose so a `Connection<'static>`
+/// can outlive the function that built it, which is exactly wrong here: a
+/// leaked `Database` is never dropped, so its lock is never released, and a
+/// second, independent open of the same path is refused with `BUSY` no
+/// matter how cleanly the first connection finished its writes. Scoping an
+/// owned `Database` to this block, so it drops - and releases the lock -
+/// before `reopened` is opened, is what makes "closed and opened again" the
+/// question this test actually asks.
 #[test]
 fn a_folded_index_reopens_and_answers() {
     const QUERY: &str = "SELECT rowid FROM docs WHERE docs MATCH 'eligible accounts' \
                          AND k = 10 ORDER BY rank";
     let path = scratch(AREA, "fold-reopen", "inillucent");
     let expected = {
-        let connection = open_at(&path);
+        let database = Database::open(&path).expect("the database opens");
+        let connection = database.connect();
+        let _ = connection.execute_batch("PRAGMA busy_timeout = 5000");
         exec(
             &connection,
             "CREATE VIRTUAL TABLE docs USING inillucent_search(title, body, compact = 8)",
         );
         write_rows(&connection, 1, 40);
         column(&connection, QUERY)
+        // `connection`, then `database`, drop here - closing the first
+        // connection for real, rather than leaking it.
     };
     let reopened = open_at(&path);
     assert_eq!(column(&reopened, QUERY), expected);

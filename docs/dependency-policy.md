@@ -186,13 +186,18 @@ Two properties are worth stating because they are what a downloader gets wrong:
 
 The rearchitecture (task-1816) replaced `inillucent-storage`, `inillucent-transaction`
 and `inillucent-vm` with `inillucent-pool`, `inillucent-tree`, `inillucent-wal`,
-`inillucent-txn` and `inillucent-exec`. Both sets are in the workspace until the
-old engine is deleted, and `docs/roadmap.md` has recorded that as unfinished work
-for several tickets — which is the problem. Prose does not stop a new edge: the
-way a crate acquires one is that somebody adds a line to a manifest because the
-type they wanted lives there, and nothing says no.
+`inillucent-txn` and `inillucent-exec`. `inillucent-vm` is gone from the workspace
+now, along with `inillucent-session`, `inillucent-legacy` and `inillucent-capi` -
+the engine that reached SQLite file-format parity, and the connection, facade and
+C ABI built over it. Nothing outside `inillucent-compat`'s own test and profiling
+binaries named any of the four, so their deletion changed no shipped binary's
+dependency graph. `inillucent-storage` and `inillucent-transaction` stay: they are
+what `inillucent-sqlite-reader` reads a SQLite file through, and migrating away
+from SQLite is what that reader is for. Prose does not stop a new edge to *those*
+two: the way a crate acquires one is that somebody adds a line to a manifest
+because the type they wanted lives there, and nothing says no.
 
-So the crates that may still name a retired one are **listed by name in a test**
+So the crates that may still name one of the two are **listed by name in a test**
 (`policy.rs::no_new_crate_reaches_into_the_retired_engine`). A crate that is not
 on the list fails the moment it grows the edge, and the list only ever gets
 shorter: removing a name is the work, adding one is a decision somebody has to
@@ -202,19 +207,18 @@ argue for in a review.
 |---|---|---|
 | `inillucent-catalog` | its old-engine schema reader, which the new engine's `paged` module already replaces | deleting the arm, once nothing calls it |
 | `inillucent-sqlite-reader` | it reads **SQLite's** file format and uses the old pager *as* the format reader | a second b-tree reader, not a dependency edit |
-| `inillucent-session`, `inillucent-legacy` | they **are** the old engine's connection and facade | they go when it does |
-| `inillucent-capi` | the `sqlite3_*` ABI over that facade | it goes with them, which `layering.toml` already records |
-| `inillucent-compat` | test-only; comparing the two engines is what it is for | nothing — a test-only crate cannot put an edge in a shipped binary |
+| `inillucent-compat` | test-only; reading a SQLite file through `inillucent-storage`'s pager to migrate away from it is what it is for | nothing — a test-only crate cannot put an edge in a shipped binary |
 
 **task-1894 removed `inillucent-ext`** from that list, which was the only entry
 the *new* engine links — and therefore the only one that put two storage models
 in a shipped binary rather than merely in the workspace. Its
 `inillucent-transaction` edge was never used by a line of code. Its
 `inillucent-storage` edge was two things: a pager arm inside every method of
-`ShadowTables`, and an `impl Host for Pager`. Both moved down into
+`ShadowTables`, and an `impl Host for Pager`. Both moved down into what was then
 `inillucent-vm`, behind `inillucent_sql::vtab::ShadowStore` — the trait the new
-engine already implemented — so both engines now reach a module's shadow rows
-the same way and only the retired crates name the retired storage.
+engine already implemented — so both engines reached a module's shadow rows the
+same way, and now only the two storage crates the migration path still needs are
+left to name.
 
 ## The clean-reference workflow
 

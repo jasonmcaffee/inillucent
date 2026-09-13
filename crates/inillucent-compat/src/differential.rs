@@ -24,9 +24,8 @@ use std::path::PathBuf;
 
 use crate::oracle::{Driver, Observation, Op, TaggedValue};
 use crate::workspace_root;
-use inillucent_session::connection::{Connection, OpenOptions, SessionDatabase};
-use inillucent_session::statement::Statement;
-use inillucent_value::Value;
+use inillucent_engine::connect::{Connection, Database};
+use inillucent_tree::datum::OwnedDatum;
 
 /// One step of a scenario.
 #[derive(Clone, Copy, Debug)]
@@ -84,27 +83,37 @@ pub fn start_oracle(area: &str, name: &str) -> Option<Driver> {
 }
 
 /// Opens inillucent on its own copy of a scenario's database.
-pub fn start_inillucent(area: &str, name: &str) -> Connection {
+///
+/// **Leaked rather than borrowed.** The new engine's `Connection<'d>` borrows
+/// the `Database` it came from - the pool is the database's, and a connection
+/// is a session number against it - so a helper that hands back a bare
+/// `Connection` the way the old one did needs the database to outlive the
+/// function that opened it. A scenario's database is opened once and used for
+/// exactly one test, so leaking it for the process's lifetime costs nothing a
+/// test run cares about and keeps every call site that used to write
+/// `start_inillucent(area, name)` unchanged.
+pub fn start_inillucent(area: &str, name: &str) -> Connection<'static> {
     let path = scratch(area, name, "inillucent");
-    let database = SessionDatabase::open_with_options(
-        &path,
-        OpenOptions {
-            busy_timeout: std::time::Duration::from_secs(5),
-            ..OpenOptions::default()
-        },
-    )
-    .expect("inillucent opens its database");
-    database.connect().expect("inillucent connects")
+    let database: &'static Database = Box::leak(Box::new(
+        Database::open(&path).expect("inillucent opens its database"),
+    ));
+    let connection = database.connect();
+    // Matches the old engine's default: the harness compares single-connection
+    // scenarios against a separate oracle process, so nothing here contends for
+    // the lock, but a scenario that does open a second connection should not
+    // fail on a busy database for want of a timeout the old engine always set.
+    let _ = connection.execute_batch("PRAGMA busy_timeout = 5000");
+    connection
 }
 
 /// Renders a inillucent value as the tagged value the protocol carries.
-pub fn tagged(value: &Value<'static>) -> TaggedValue {
+pub fn tagged(value: &OwnedDatum) -> TaggedValue {
     match value {
-        Value::Null => TaggedValue::Null,
-        Value::Integer(integer) => TaggedValue::Integer(*integer),
-        Value::Real(real) => TaggedValue::Real(*real),
-        Value::Text(text) => TaggedValue::Text(text.utf8_bytes().into_owned()),
-        Value::Blob(blob) => TaggedValue::Blob(blob.raw().to_vec()),
+        OwnedDatum::Null => TaggedValue::Null,
+        OwnedDatum::Int(integer) => TaggedValue::Integer(*integer),
+        OwnedDatum::Real(real) => TaggedValue::Real(*real),
+        OwnedDatum::Text(text) => TaggedValue::Text(text.clone()),
+        OwnedDatum::Blob(blob) => TaggedValue::Blob(blob.clone()),
     }
 }
 
@@ -113,29 +122,37 @@ pub fn tagged(value: &Value<'static>) -> TaggedValue {
 /// The shapes have to match exactly, including the parts that are easy to get
 /// almost right: a failed statement still reports the connection state after
 /// it, and a query that produced no rows still reports its column names.
-pub fn observe(connection: &Connection, sql: &str, query: bool) -> Observation {
+pub fn observe(connection: &Connection<'_>, sql: &str, query: bool) -> Observation {
     let mut observation = Observation::default();
     let outcome = (|| -> Result<(Vec<Vec<TaggedValue>>, Vec<String>), inillucent_base::DbError> {
         let mut rows = Vec::new();
         let mut columns = Vec::new();
         let mut offset = 0usize;
-        let bytes = sql.as_bytes();
-        while offset < bytes.len() {
-            let rest = bytes.get(offset..).unwrap_or(&[]);
-            let (mut statement, consumed) = Statement::prepare(connection, rest)?;
-            if query {
-                columns = statement
-                    .columns()
-                    .iter()
-                    .map(|column| String::from_utf8_lossy(&column.name).into_owned())
-                    .collect();
-            }
+        while offset < sql.len() {
+            let rest = sql.get(offset..).unwrap_or("");
+            let (mut statement, consumed) = connection.prepare_with_tail(rest)?;
+            // **Read after the first step, not before it.** This engine
+            // resolves a statement's result columns when it runs rather than
+            // when it is prepared - `Statement::columns` says so in as many
+            // words - so asking before the first `step` answers an empty list.
+            // It was asked before, because the engine this suite used to drive
+            // resolved them at prepare time, and the whole file therefore
+            // compared an empty column list against SQLite's real one and
+            // failed every case on a difference that was the harness's own.
+            // Taken on every step rather than only the first so that a
+            // statement returning no rows at all still reports its shape.
             while statement.step()? {
                 if query {
+                    if columns.is_empty() {
+                        columns = statement.columns().to_vec();
+                    }
                     rows.push(statement.row().iter().map(tagged).collect());
                 }
             }
-            statement.finalize()?;
+            if query && columns.is_empty() {
+                columns = statement.columns().to_vec();
+            }
+            drop(statement);
             if consumed == 0 {
                 break;
             }
@@ -143,7 +160,6 @@ pub fn observe(connection: &Connection, sql: &str, query: bool) -> Observation {
         }
         Ok((rows, columns))
     })();
-    let counters = connection.counters();
     match outcome {
         Ok((rows, columns)) => {
             observation.ok = true;
@@ -157,9 +173,9 @@ pub fn observe(connection: &Connection, sql: &str, query: bool) -> Observation {
             observation.message = failure.message().to_string();
         }
     }
-    observation.changes = counters.changes;
-    observation.total_changes = counters.total_changes;
-    observation.last_insert_rowid = counters.last_insert_rowid;
+    observation.changes = connection.changes();
+    observation.total_changes = connection.total_changes();
+    observation.last_insert_rowid = connection.last_insert_rowid();
     observation.autocommit = connection.autocommit();
     observation
 }

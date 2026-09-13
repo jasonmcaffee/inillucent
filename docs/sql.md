@@ -1,21 +1,25 @@
 # SQL support
 
 inillucent speaks SQLite's SQL dialect on its own storage. This page says which SQL runs, which
-thirteen cases out of 416 do not produce SQLite's exact bytes, and which constructs are refused.
+cases out of 416 do not produce SQLite's exact bytes, and which constructs are refused.
 
-**None of the thirteen is a missing feature, and none of them is silent.** All thirteen answer, and
-each reports something a caller can read. [Feature comparison](feature-comparison.md) is the same
-material in full, table by table.
+**Twelve cases are refused outright, and every one of them is a window function.** Of the other
+thirteen that are not byte for byte, seven answer differently and six are vector search features
+SQLite has no equivalent for. None of those thirteen is silent - each answers, and each reports
+something a caller can read. [Feature comparison](feature-comparison.md) is the same material in
+full, table by table.
 
 ## How this was measured
 
 416 SQL scripts were run through `inillucent-shell` and through a pinned `sqlite3` 3.53.4, each over
 its own fresh database, and every byte of both output streams was compared.
 
-- **403 of 416 produce SQLite's exact bytes.**
-- **409 of 416 work**, once the six vector search cases are counted for what they are: features
-  SQLite does not have, so there is no SQLite output for them to match.
-- **0 are refused here that SQLite answers, and 0 are accepted here that SQLite rejects.**
+- **391 of 416 produce SQLite's exact bytes** - 94.0% of the total, and 95.4% of the 410 cases that
+  have a SQLite answer to compare against.
+- **12 are refused here that SQLite answers, and every one of the twelve is a window function.**
+  0 are accepted here that SQLite rejects.
+- **7 answer differently, and 6 are vector search features SQLite has no equivalent for**, so there
+  is no SQLite output for them to match.
 
 208 of those cases are also a checked in test, `crates/inillucent-compat/tests/semantics.rs`, so a
 construct that changes its answer in either direction fails a build rather than waiting for somebody
@@ -30,7 +34,7 @@ Counted against SQLite's own enumerations rather than against a case list: **212
 or a scan. `GROUP BY`, `HAVING`, `DISTINCT`, `ORDER BY`, `LIMIT` and `OFFSET`. Compound selects
 (`UNION`, `UNION ALL`, `EXCEPT`, `INTERSECT`). Common table expressions, including recursive ones.
 Derived tables in `FROM`. Subqueries in `WHERE`, in `IN`, in `EXISTS` and as values, including
-correlated ones. Window functions with all three frame units.
+correlated ones.
 
 **Writes.** `INSERT`, `UPDATE` and `DELETE`, with `RETURNING`, with `ON CONFLICT DO UPDATE` and
 `DO NOTHING`, and with `UPDATE ... FROM`. `WITH` on all three. Row values in every comparison and in
@@ -74,7 +78,16 @@ any eponymous module a caller registers.
 Every extension's shadow tables are ordinary trees in the same file, so they commit and roll back
 with the transaction that wrote them.
 
-## The thirteen cases that are not byte for byte
+## The twenty-five cases that are not byte for byte
+
+### Twelve are refused: every window function
+
+`OVER (...)`, `PARTITION BY`, the `ROWS`, `RANGE` and `GROUPS` frame clauses, and the eleven functions
+that need them: `row_number`, `rank`, `dense_rank`, `percent_rank`, `cume_dist`, `ntile`, `lag`,
+`lead`, `first_value`, `last_value`, `nth_value`. The engine's physical pass does not yet handle a
+window function reaching the pipeline builder, so every statement using one is refused rather than
+run. `sql.select.window` and `functions.window` are both `status = "missing"` in
+`compat/sqlite-3.53.4.toml`.
 
 ### Six are vector search, which SQLite does not have
 
@@ -121,7 +134,7 @@ program, including every program that never opens a second connection.
 
 **`.recover`** differs on one line of nineteen, and it is the line that names the page size.
 
-Adopting SQLite's values in the first two would take the byte for byte number from 403 to 406, at a
+Adopting SQLite's values in the first two would take the byte for byte number from 391 to 394, at a
 measured cost to the performance bars.
 
 ### One is the two pinned reference artifacts disagreeing with each other
@@ -139,6 +152,7 @@ exit code `3` rather than `1`, so a caller can tell "not built" from "your SQL i
 
 | construct | why |
 |---|---|
+| every window function: `OVER (...)`, `PARTITION BY`, the frame clauses, and the eleven functions that need them | the engine's physical pass does not yet handle a window function reaching the pipeline builder |
 | `.expert` and `.session` | the two of `sqlite3`'s 65 dot commands this shell has not got |
 | `fts5(...)`, `fts5_locale()`, `fts5_get_locale()`, `fts5_insttoken()` | four function names that hand out C pointers or belong to FTS5's locale machinery. A stub would be a wrong answer rather than a missing one |
 | `fts3_tokenizer()` | the same, and absent from the pinned SQLite library too, so it is a difference against the shell rather than against the library an application links |
@@ -154,7 +168,7 @@ exit code `3` rather than `1`, so a caller can tell "not built" from "your SQL i
 | file format | `.rdb`, with its own redo log segments | SQLite's |
 | page size | 32 KiB by default, 8 to 64 KiB allowed | 4 KiB by default |
 | page cache | a pool of frames, 4,096 frames at 128 MiB by default, set when the file is opened. A frame's page is allocated the first time that frame is claimed, so the budget is a ceiling rather than an amount taken at open | `cache_size`, 2 MiB by default, also grown into |
-| journal modes | all six, and `delete` is the default as it is in SQLite. `PRAGMA journal_mode = wal` selects the redo log, and a database left in WAL reopens in WAL | six |
+| journal modes | all six, and `delete` is the default as it is in SQLite. `PRAGMA journal_mode = wal` selects the redo log, and a database left in WAL reopens in WAL. What the mode selects here is how a **checkpoint** is protected: an application's `ROLLBACK` is undone from the log under every mode, including `off`, so `memory` and `off` are one choice rather than two | six |
 | writers | one at a time; readers never block, under snapshot isolation | one at a time; readers block in rollback mode, not in WAL |
 | processes on one file | many, under `PRAGMA locking_mode = normal` | many, over byte range locks |
 | threads | one | serialised or multi thread |

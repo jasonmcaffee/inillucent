@@ -1,6 +1,6 @@
 # inillucent
 
-**An embedded database for agents, written in Rust. It runs SQLite's SQL dialect 326% faster than
+**An embedded database for agents, written in Rust. It runs SQLite's SQL dialect 330% faster than
 SQLite does, and it holds vector search and keyword search in the same file — so a local AI agent can
 query a body of written material by meaning and by exact term without standing up PostgreSQL,
 pgvector and an embedding server.**
@@ -16,11 +16,11 @@ tables, a full text index and a vector index, and all three commit and roll back
 
 |  |  |  |
 |---|---|---|
-| **326% faster than SQLite 3.53.4** | the same ten workload families at 100,000 rows | [Performance](docs/performance.md) |
-| **67% less processor time** | 422 ms against SQLite's 1,266 for the same plan | [Performance](docs/performance.md) |
-| **403 of 416 SQL cases byte for byte, none refused** | every case run through both engines and compared byte by byte | [SQL support](docs/sql.md) |
+| **330% faster than SQLite 3.53.4** | the same ten workload families at 100,000 rows | [Performance](docs/performance.md) |
+| **70% less processor time** | 390 ms against SQLite's 1,320 for the same plan | [Performance](docs/performance.md) |
+| **391 of 416 SQL cases byte for byte, 12 refused** | every case run through both engines and compared byte by byte; all twelve refusals are window functions | [SQL support](docs/sql.md) |
 | **Better than pgvector on 15 of 17 graded comparisons, worse on none** | both engines reading identical vectors | [Retrieval quality](docs/retrieval-quality.md) |
-| **15% more memory than SQLite** | 42.6 MiB against 37.2 — the one measurement SQLite still wins | [Performance](docs/performance.md#memory) |
+| **14% more memory than SQLite** | 42.4 MiB against 37.2 — the one measurement SQLite still wins | [Performance](docs/performance.md#memory) |
 
 [Performance](docs/performance.md) carries every figure with its 95% interval, and names the six
 workloads that are slower than SQLite along with what each one costs.
@@ -115,9 +115,8 @@ coding agent at that directory, and ask it a question:
 inillucent setup-embeddings all          # ONNX Runtime and the weights, about 620 MB, once
 
 inillucent --db examples/rag-agent/greek-philosophy.rdb query \
-  "SELECT p.title, p.body
-   FROM passage p, (SELECT embed('search_query: ' || ?1) AS q) AS probe
-   ORDER BY vector_distance_cos(p.v, probe.q) LIMIT 5" \
+  "SELECT title, body FROM passage
+   ORDER BY vector_distance_cos(v, embed('search_query: ' || ?1)) LIMIT 5" \
   --params '["who was Seneca"]'
 ```
 
@@ -178,16 +177,25 @@ engine. [The driver](drivers/README.md) is the C ABI underneath, for anybody wri
 ## What it does
 
 **SQLite's SQL, on its own storage.** Joins, common table expressions including recursive ones,
-window functions, triggers, foreign keys with all five referential actions, `ATTACH`, partial and
-expression indexes, `RETURNING`, `ON CONFLICT DO UPDATE`, 212 built in function names, 67 pragmas.
-416 cases were run through `inillucent-shell` and through a pinned `sqlite3` 3.53.4 over a fresh
-database each, and every byte of both streams compared: **403 produce SQLite's exact bytes, 13 do
-not, and none is refused or silently different**. → [SQL support](docs/sql.md)
+triggers, foreign keys with all five referential actions, `ATTACH`, partial and expression indexes,
+`RETURNING`, `ON CONFLICT DO UPDATE`, 212 built in function names, 67 pragmas. 416 cases were run
+through this engine and through a pinned `sqlite3` 3.53.4 over a fresh database each, and every byte
+of both streams compared: **391 produce SQLite's exact bytes, 12 are refused and 7 answer
+differently**. Every one of the twelve refusals is a window function — `OVER (...)`, `PARTITION BY`,
+the frame clauses, and the eleven functions that need them — and that is the whole of what this
+engine refuses.
+
+Those numbers went *down* during task-1911 and nothing got worse. They were 403 same and 0 refused,
+and they had been measured through `inillucent-shell` while that shell still ran the engine this
+project has since retired. Nobody had re-run them against the engine that ships. →
+[SQL support](docs/sql.md)
 
 **Vector search in the same file.** A `VECTOR(N)` column, `vector_distance_cos`, `vector_distance_l2`
 and `vector_dot`, `CREATE INDEX ... USING inillucent_hnsw`, and a planner that turns
 `ORDER BY vector_distance_cos(v, ?) LIMIT k` into a probe of that index. Recall against an exhaustive
-cosine is **1.000**. → [Vector search](docs/vector-search.md)
+cosine is **1.000**. An index minimises cosine unless it was declared `WITH (metric = 'l2')`, and a
+query whose distance function does not match its index's metric plans as a scan rather than answering
+out of a structure that ranked by something else. → [Vector search](docs/vector-search.md)
 
 **Keyword search that finds the identifier a user typed.** BM25 over an inverted index, with
 stemming, identifiers kept whole, and weights for coverage, proximity, phrase order and prefix. Fused

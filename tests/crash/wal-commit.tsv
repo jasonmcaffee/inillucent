@@ -1,5 +1,5 @@
-# 24 cuts: 23 old, 1 new, 0 reported
-cut	state	reported
+# 22 cuts: 21 old, 1 new, 0 damaged and detected
+cut	state	committed
 1	old	false
 2	old	false
 3	old	false
@@ -21,6 +21,4 @@ cut	state	reported
 19	old	false
 20	old	false
 21	old	false
-22	old	false
-23	old	false
-24	new	false
+22	new	false

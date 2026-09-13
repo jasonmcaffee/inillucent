@@ -56,6 +56,7 @@ pub mod keyword;
 pub mod lexer;
 pub mod parser;
 pub mod plan;
+pub mod pragma_register;
 pub mod precedence;
 pub mod rewrite;
 pub mod vtab;

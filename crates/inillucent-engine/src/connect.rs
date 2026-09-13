@@ -200,6 +200,20 @@ impl Database {
     /// which is SQLite's rule and is graded against it - so a connection is a
     /// number the engine can tell apart, rather than a borrow that is
     /// indistinguishable from every other borrow.
+    ///
+    /// **A session does not scope the transaction, and the difference matters.**
+    /// Every connection returned here borrows one `ImportedDatabase`, and the
+    /// open transaction lives on that, so a `BEGIN` on any handle opens a
+    /// transaction every other handle then joins: a write issued through a
+    /// second connection lands inside the first one's transaction and is undone
+    /// by its `ROLLBACK`. Two connections are two sessions over one writer, not
+    /// two writers.
+    ///
+    /// Two *processes* are genuinely independent, over the same SHARED,
+    /// RESERVED, PENDING and EXCLUSIVE protocol SQLite uses; see
+    /// `docs/roadmap.md` item 9, which is where concurrency is graded. An
+    /// application that needs two independent transactions needs two processes,
+    /// or two `Database` values over two files.
     pub fn connect(&self) -> Connection<'_> {
         let session = self.engine.borrow().open_session();
         Connection {
@@ -461,9 +475,26 @@ impl<'d> Connection<'d> {
     /// The operator chain, which is what `EXPLAIN QUERY PLAN` answers. There is
     /// no bytecode listing because there is no bytecode.
     ///
+    /// **Goes through the textual `EXPLAIN QUERY PLAN` path rather than
+    /// [`crate::ImportedDatabase::plan`].** That method only binds a `SELECT` -
+    /// it is the entry point for the "plan once, execute many" profiling
+    /// harnesses, which only ever measure reads - so calling it on an `UPDATE`
+    /// or `DELETE` answered "is not a read-only statement" even though the
+    /// engine can describe a write's plan: `compile()` already does, for the
+    /// same reason SQLite can `EXPLAIN QUERY PLAN` a write - the plan being
+    /// described is the search that finds the rows to change, not the change
+    /// itself. Running the query this way reaches that code path instead.
+    ///
     /// @param sql - the statement
     pub fn explain(&self, sql: &str) -> DbResult<Vec<String>> {
-        Ok(self.engine().plan(sql)?.describe())
+        let rows = self.query(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|mut row| match row.pop() {
+                Some(OwnedDatum::Text(bytes)) => Some(String::from_utf8_lossy(&bytes).into_owned()),
+                _ => None,
+            })
+            .collect())
     }
 
     /// Registers a scalar an application defined, replacing one of the same
@@ -614,11 +645,14 @@ impl<'d> Connection<'d> {
         // `UPDATE` or a `DELETE` quietly answered against the wrong rows.
         let declared = self.engine().parameter_count(sql)?;
         let compiled = self.engine().prepare_statement(sql)?;
+        let generation = self.engine().schema_generation();
         let mut params = Params::new();
         params.expect(declared);
         Ok(Statement {
             database: self.database,
+            sql: sql.to_string(),
             compiled,
+            generation,
             params,
             rows: Vec::new(),
             names: Vec::new(),
@@ -687,8 +721,21 @@ impl<'d> Connection<'d> {
 pub struct Statement<'d> {
     /// The database the statement runs against.
     database: &'d Database,
-    /// The engine's compiled handle, reused across executions.
+    /// The text this statement was compiled from.
+    ///
+    /// Kept so a schema change can be answered by recompiling, the way
+    /// SQLite's own automatic reprepare does - see the schema check in
+    /// [`Statement::step`].
+    sql: String,
+    /// The engine's compiled handle, reused across executions **while the
+    /// schema it was compiled against is still current**.
     compiled: crate::Statement,
+    /// The schema generation `compiled` was built against.
+    ///
+    /// Compared against [`crate::ImportedDatabase::schema_generation`] at the
+    /// start of every fresh run, so a statement recompiles itself rather than
+    /// answering from a plan built against a schema that has since moved.
+    generation: u64,
     /// The values bound so far.
     params: Params,
     /// The rows the last execution produced.
@@ -777,6 +824,15 @@ impl Statement<'_> {
     /// Runs the statement if it has not run, then advances to the next row.
     ///
     /// Returns whether a row is available to [`Statement::row`].
+    ///
+    /// **Recompiles first when the schema has moved under it.** A plan
+    /// carries decisions - which tree it reads, how many columns `*` expands
+    /// to - that a schema change can make wrong, and this is the one caller
+    /// that still holds the old plan after [`Connection::reload_schema`] has
+    /// cleared the connection's cache and moved on: a fresh `prepare` of the
+    /// same text would already get the new plan, so an already-prepared
+    /// statement answering with the old one is the gap. SQLite's own
+    /// `sqlite3_step` does the equivalent automatic reprepare.
     pub fn step(&mut self) -> DbResult<bool> {
         if !self.run {
             let mut held = self.database.engine.borrow_mut();
@@ -784,6 +840,10 @@ impl Statement<'_> {
             // `temp` means that connection's temporary database and the plan was
             // bound against it.
             held.use_session(self.session);
+            if held.schema_generation() != self.generation {
+                self.compiled = held.prepare_statement(&self.sql)?;
+                self.generation = held.schema_generation();
+            }
             let outcome = held.execute_statement(&self.compiled, &self.params)?;
             self.changed = outcome.changes.rows;
             self.database.changes.set(self.changed as i64);

@@ -31,9 +31,12 @@
 use std::collections::HashMap;
 
 use inillucent_base::DbResult;
-use inillucent_sql::plan::Levers;
+use inillucent_exec::dml::Changes;
+use inillucent_exec::physical::{self, Params};
+use inillucent_sql::plan::{Levers, PhysicalPlan};
+use inillucent_tree::datum::OwnedDatum;
 
-use crate::{Cached, ImportedDatabase};
+use crate::{Cached, ImportedDatabase, Outcome};
 
 impl ImportedDatabase {
     /// Returns the key a compiled statement is held under.
@@ -129,4 +132,162 @@ impl ImportedDatabase {
             .insert(sql.to_string(), std::rc::Rc::clone(&compiled));
         Ok(compiled)
     }
+
+    /// Runs a `SELECT` through its compiled chain when one is available,
+    /// falling back to a fresh build otherwise.
+    ///
+    /// A thin wrapper over [`ImportedDatabase::run_cached_query`], which does
+    /// the actual slot dispatch and is shared with the write path - an
+    /// `UPDATE`/`DELETE`'s keys query, an `INSERT ... SELECT`'s source, and a
+    /// virtual table write's rowid query all go through the same function.
+    /// What only a `SELECT` needs is the column names, which come straight
+    /// off the plan rather than off whichever arm answered: `Shape::names` is
+    /// never anything but `plan.select.columns`'s own names, copied at build
+    /// time, so reading them from the plan directly is one fewer thing the
+    /// reused arm and the fresh-build arm could disagree about.
+    ///
+    /// @param plan - the planner's output
+    /// @param prepared - the structural choice `prepare` made
+    /// @param slot - this statement's compiled-chain cache
+    /// @param params - the bound parameters
+    pub(crate) fn execute_select_cached(
+        &self,
+        plan: &PhysicalPlan,
+        prepared: &physical::Prepared,
+        slot: &std::cell::RefCell<physical::Slot>,
+        params: &Params,
+    ) -> DbResult<Outcome> {
+        let rows = self.run_cached_query(plan, prepared, slot, params)?;
+        Ok(Outcome {
+            rows,
+            names: column_names(plan),
+            changes: Changes::default(),
+        })
+    }
+
+    /// Runs a plan through its compiled chain when one is available, falling
+    /// back to a fresh, uncached build otherwise.
+    ///
+    /// **The one place every cached plan - read or write - decides whether to
+    /// reuse.** [`ImportedDatabase::execute_select_cached`] calls this for a
+    /// `SELECT`; [`ImportedDatabase::keys_of`] calls it for an `UPDATE` or
+    /// `DELETE`'s keys query; `apply_compiled` calls it directly for an
+    /// `INSERT ... SELECT`'s source and for `VirtualUpdate`/`VirtualDelete`'s
+    /// rowid query. One function deciding *whether* to reuse is what keeps
+    /// the write path from growing a second opinion about the question
+    /// `physical::Slot` already answers.
+    ///
+    /// **The slot is tried once and remembered - see [`physical::Slot`].**
+    /// [`physical::Slot::Untried`] attempts [`physical::try_compile`] and
+    /// stores whatever it decided, `Reusable` or `Never`, so every later
+    /// execution of the same query answers instantly without asking the
+    /// builder again. A slot already borrowed - the same statement
+    /// re-entering its own chain, through a registered function, a trigger,
+    /// or (on the write side) a statement whose own `WHERE` reads the table a
+    /// trigger it fires also writes - runs a fresh, uncached build for that
+    /// one call rather than panicking or refusing: `RefCell::try_borrow_mut`
+    /// is exactly the tool for "reusable, except while it is already in use".
+    ///
+    /// **Returns before the caller's write ever takes `&mut self`.** This
+    /// method takes `&self`, borrows the slot, runs the chain, and returns an
+    /// owned `Vec` - nothing about the slot or the chain is still borrowed
+    /// once it returns, which is what lets [`ImportedDatabase::keys_of`] be
+    /// called before `self.write` needs `&mut self`.
+    ///
+    /// @param plan - the planner's output
+    /// @param prepared - the structural choice `prepare` made
+    /// @param slot - this query's compiled-chain cache
+    /// @param params - the bound parameters
+    pub(crate) fn run_cached_query(
+        &self,
+        plan: &PhysicalPlan,
+        prepared: &physical::Prepared,
+        slot: &std::cell::RefCell<physical::Slot>,
+        params: &Params,
+    ) -> DbResult<Vec<Vec<OwnedDatum>>> {
+        let Ok(mut held) = slot.try_borrow_mut() else {
+            return Ok(physical::run_any_prepared(plan, self, prepared, params)?.0);
+        };
+        match &mut *held {
+            physical::Slot::Reusable(compiled) => {
+                compiled.run(plan, self, params)?;
+                return Ok(compiled.take_rows());
+            }
+            physical::Slot::Never => {}
+            // `try_compile` returns `Some` whenever it actually built
+            // something, whether or not that build turns out to be
+            // reusable - see its own doc comment for why. So this always
+            // runs the build it was handed, exactly once, and only *then*
+            // decides whether to keep it: a build that read a parameter it
+            // should not have already paid for whatever reading it cost
+            // (evaluating a deterministic function, folding a subquery), and
+            // asking `run_any_prepared` to build it again would pay that
+            // cost a second time for the same first execution.
+            physical::Slot::Untried => match physical::try_compile(plan, self, prepared, params)? {
+                Some(mut compiled) => {
+                    compiled.run(plan, self, params)?;
+                    let rows = compiled.take_rows();
+                    *held = if compiled.rebindable() {
+                        physical::Slot::Reusable(Box::new(compiled))
+                    } else {
+                        physical::Slot::Never
+                    };
+                    return Ok(rows);
+                }
+                None => *held = physical::Slot::Never,
+            },
+        }
+        drop(held);
+        Ok(physical::run_any_prepared(plan, self, prepared, params)?.0)
+    }
+}
+
+/// A plan and structural choice compiled once and reused through a slot - the
+/// write path's equivalent of `Cached::Select`, for whichever rows a write
+/// has to read first: the keys an `UPDATE`/`DELETE` touches, the rowids
+/// `VirtualUpdate`/`VirtualDelete` hand a module, or the rows an `INSERT ...
+/// SELECT` reads. Replaces the bare `(Box<PhysicalPlan>, Box<Prepared>)` pair
+/// every one of those used to carry, which had no way to remember that a
+/// `Compiled` chain had already been tried.
+///
+/// Lives beside [`ImportedDatabase::run_cached_query`] rather than in
+/// `lib.rs`, where the rest of `Cached`'s variants are declared: the slot
+/// this carries is exactly what that method reads and writes, and `lib.rs`
+/// was at its recorded ceiling when the write path gained one of these per
+/// statement kind.
+pub(crate) struct CachedQuery {
+    /// The planner's output.
+    pub(crate) plan: Box<PhysicalPlan>,
+    /// The structural choice `prepare` made.
+    pub(crate) prepared: Box<physical::Prepared>,
+    /// This query's compiled-chain cache. A `RefCell` for the same reason
+    /// `Cached::Select`'s is: `cached` is a shared `&Rc<Cached>`, and interior
+    /// mutability is what lets one execution build the chain and a later one,
+    /// through the same `Rc`, find it already there.
+    pub(crate) slot: std::cell::RefCell<physical::Slot>,
+}
+
+impl CachedQuery {
+    /// Returns a query with an untried slot.
+    ///
+    /// @param plan - the planner's output
+    /// @param prepared - the structural choice `prepare` made
+    pub(crate) fn new(plan: PhysicalPlan, prepared: physical::Prepared) -> CachedQuery {
+        CachedQuery {
+            plan: Box::new(plan),
+            prepared: Box::new(prepared),
+            slot: std::cell::RefCell::new(physical::Slot::default()),
+        }
+    }
+}
+
+/// Returns a plan's result column names, decoded from UTF-8 lossily.
+///
+/// @param plan - the planner's output
+fn column_names(plan: &PhysicalPlan) -> Vec<String> {
+    plan.select
+        .columns
+        .iter()
+        .map(|column| String::from_utf8_lossy(&column.name).into_owned())
+        .collect()
 }

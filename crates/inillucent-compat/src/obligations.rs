@@ -70,10 +70,10 @@ fn builtins() -> String {
 fn pragmas() -> String {
     let mut out = header(
         "Every PRAGMA this engine answers.",
-        "it is read straight out of `inillucent_session::pragma::REGISTER`.",
+        "it is read straight out of `inillucent_sql::pragma_register::REGISTER`.",
     );
-    let mut entries: Vec<&inillucent_session::pragma::PragmaSpec> =
-        inillucent_session::pragma::REGISTER.iter().collect();
+    let mut entries: Vec<&inillucent_sql::pragma_register::PragmaSpec> =
+        inillucent_sql::pragma_register::REGISTER.iter().collect();
     entries.sort_by(|left, right| left.name.cmp(right.name));
     out.push_str(&format!("count = {}\n\n", entries.len()));
     for entry in entries {
@@ -94,10 +94,10 @@ fn pragmas() -> String {
 fn symbols() -> String {
     let mut out = header(
         "Every symbol the C ABI exports, with the signature a caller links against.",
-        "it is read out of the `extern \"C\"` declarations in `inillucent-capi`.",
+        "it is read out of the `extern \"C\"` declarations in `inillucent-driver-capi`.",
     );
     let mut found = Vec::new();
-    let source = workspace_root().join("crates/inillucent-capi/src");
+    let source = workspace_root().join("drivers/inillucent-driver-capi/src");
     for file in rust_files(&source) {
         let Ok(text) = std::fs::read_to_string(&file) else {
             continue;

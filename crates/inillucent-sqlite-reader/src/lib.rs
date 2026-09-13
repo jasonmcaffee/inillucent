@@ -57,7 +57,7 @@ use inillucent_storage::pager::Pager;
 use inillucent_transaction::recovery::{open_database, DatabaseOptions};
 use inillucent_tree::datum::{Datum, OwnedDatum};
 use inillucent_value::record::{FieldSpan, KeyInfo, RecordRef};
-use inillucent_value::{TextEncoding, Value};
+use inillucent_value::Value;
 use inillucent_vfs::path::DbPath;
 use inillucent_vfs::{OsVfs, Vfs};
 
@@ -219,17 +219,28 @@ impl SqliteFile {
     }
 
     /// Returns every row of `sqlite_schema`.
+    ///
+    /// **Reads the file's own header encoding, not a fixed one.** This and the
+    /// two record readers below used to build every `RecordRef` with
+    /// `TextEncoding::Utf8` regardless of what the file's header at offset 56
+    /// declared, so a UTF-16LE or UTF-16BE fixture came back with every text
+    /// field decoded as if it were UTF-8: two bytes per character, so ASCII
+    /// text like `alpha` read back as `a\0l\0p\0h\0a\0`. `Pager::text_encoding`
+    /// already parses that header field correctly - `cursor.rs`, `mutate.rs`
+    /// and `schema.rs` in `inillucent-storage` all read it before decoding a
+    /// record - this crate simply never asked.
     pub fn schema(&mut self) -> DbResult<Vec<SchemaObject>> {
         let root = PageId::from_persisted(1)?;
         let mut cursor = BTreeCursor::table(root);
         let mut payload: Vec<u8> = Vec::with_capacity(512);
         let mut fields: Vec<FieldSpan> = Vec::with_capacity(8);
         let mut out = Vec::new();
+        let encoding = self.pager.text_encoding();
         let mut more = cursor.first(&mut self.pager)?;
         while more {
             cursor.payload_into(&mut self.pager, &self.limits, &mut payload)?;
             let header_len = RecordRef::parse_into(&payload, &self.limits, &mut fields)?;
-            let record = RecordRef::with_fields(&payload, &fields, header_len, TextEncoding::Utf8);
+            let record = RecordRef::with_fields(&payload, &fields, header_len, encoding);
             out.push(SchemaObject {
                 kind: text_at(&record, 0)?,
                 name: text_at(&record, 1)?,
@@ -269,12 +280,13 @@ impl SqliteFile {
         let mut payload: Vec<u8> = Vec::with_capacity(512);
         let mut fields: Vec<FieldSpan> = Vec::with_capacity(16);
         let mut out = Vec::new();
+        let encoding = self.pager.text_encoding();
         let mut more = cursor.first(&mut self.pager)?;
         while more {
             let rowid = cursor.rowid()?;
             cursor.payload_into(&mut self.pager, &self.limits, &mut payload)?;
             let header_len = RecordRef::parse_into(&payload, &self.limits, &mut fields)?;
-            let record = RecordRef::with_fields(&payload, &fields, header_len, TextEncoding::Utf8);
+            let record = RecordRef::with_fields(&payload, &fields, header_len, encoding);
             let mut row = Vec::with_capacity(columns.saturating_add(1));
             row.push(OwnedDatum::Int(rowid));
             for index in 0..columns {
@@ -302,11 +314,12 @@ impl SqliteFile {
         let mut payload: Vec<u8> = Vec::with_capacity(512);
         let mut fields: Vec<FieldSpan> = Vec::with_capacity(16);
         let mut out = Vec::new();
+        let encoding = self.pager.text_encoding();
         let mut more = cursor.first(&mut self.pager)?;
         while more {
             cursor.payload_into(&mut self.pager, &self.limits, &mut payload)?;
             let header_len = RecordRef::parse_into(&payload, &self.limits, &mut fields)?;
-            let record = RecordRef::with_fields(&payload, &fields, header_len, TextEncoding::Utf8);
+            let record = RecordRef::with_fields(&payload, &fields, header_len, encoding);
             let mut row = Vec::with_capacity(columns);
             for index in 0..columns {
                 row.push(owned_from_record(&record, index)?);

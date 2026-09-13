@@ -230,7 +230,47 @@ struct State {
 /// default because an application that has not thought about concurrency is
 /// better served by taking turns than by an error it does not handle, and
 /// `PRAGMA busy_timeout` moves it either way.
-const DEFAULT_BUSY_MILLIS: u64 = 5_000;
+pub(crate) const DEFAULT_BUSY_MILLIS: u64 = 5_000;
+
+/// Raises a lock on a file, waiting up to a budget for the holder to let go.
+///
+/// **Waiting is the whole of what a busy timeout is.** A lock another process
+/// holds is not an error - it is a lock that will be released - and reporting
+/// failure immediately would make every concurrent pair of writers fail rather
+/// than take turns. The sleep grows so that a long wait is not a spin, and the
+/// last attempt reports what it found.
+///
+/// A free function rather than a `Pool` method so that
+/// [`crate::journal::replay_hot_journal`] can escalate a lock on the file it
+/// opens for replay with the same retry `Pool::lock_within` uses, instead of
+/// a second, independently invented backoff.
+///
+/// @param file - the file to lock
+/// @param level - the level to raise to
+/// @param budget_millis - how long to keep trying
+pub(crate) fn lock_with_wait(
+    file: &dyn VfsFile,
+    level: FileLock,
+    budget_millis: u64,
+) -> DbResult<()> {
+    if file.lock_level() >= level {
+        return Ok(());
+    }
+    let mut waited = 0u64;
+    let mut pause = 1u64;
+    loop {
+        match file.lock(level) {
+            Ok(()) => return Ok(()),
+            Err(error) if waited >= budget_millis => {
+                return Err(error.into_db_error());
+            }
+            Err(_) => {}
+        }
+        std::thread::sleep(std::time::Duration::from_millis(pause));
+        waited = waited.saturating_add(pause);
+        pause = pause.saturating_mul(2).min(50);
+    }
+}
 
 /// A pinned, borrowed page.
 pub struct PageGuard<'p> {
@@ -1270,7 +1310,18 @@ impl Pool {
         // reach the file by a route that skipped its pre-image, exactly as it
         // cannot skip the write-ahead rule two lines above. In WAL mode the
         // journal is not a rollback journal and this costs a branch.
-        self.journal_page(page)?;
+        //
+        // **And the pre-image is synced here, not once at the head of the
+        // checkpoint.** A writeback also reaches this line from the evictor,
+        // one page at a time, with no checkpoint around it; and the checkpoint
+        // itself used to seal before it had saved anything, so every pre-image
+        // it wrote was still in the file's buffers when the page it belonged to
+        // was overwritten. `flush` now saves the whole batch before the first
+        // page moves, which leaves this call with nothing outstanding on all
+        // but the first page - see `Journal::seal`.
+        if self.journal_page(page)? {
+            self.seal_journal()?;
+        }
         self.file
             .write_all_at(page.0.saturating_mul(self.page_size as u64), &image)
             .map_err(|error| error.into_db_error())?;
@@ -1632,6 +1683,14 @@ impl Pool {
     ///
     /// Pages go out in page-id order so the write pattern is sequential, which
     /// is the checkpointer's rule and costs nothing to honour here.
+    ///
+    /// Under a rollback journal it takes two passes over the same list: every
+    /// pre-image first, then one sync, then the pages. The pre-images have to
+    /// be on the media before the first page is overwritten, and doing it in
+    /// two passes is what lets a batch of a thousand pages pay for one sync
+    /// instead of a thousand. The writeback loop still asks for the sync per
+    /// page, because the evictor reaches it without a flush around it; after
+    /// this pass there is nothing left for it to sync.
     pub fn flush(&self) -> DbResult<usize> {
         let mut dirty: Vec<(PageId, u32)> = {
             let state = self.state.borrow();
@@ -1644,6 +1703,12 @@ impl Pool {
                 .collect()
         };
         dirty.sort_unstable();
+        if self.journal.borrow().is_some() {
+            for (page, _) in &dirty {
+                self.journal_page(*page)?;
+            }
+            self.seal_journal()?;
+        }
         for (page, frame) in &dirty {
             self.writeback(*frame, *page)?;
         }
@@ -1666,10 +1731,14 @@ impl Pool {
     ///
     /// @param meta - the record to write, with its generation already bumped
     pub fn checkpoint(&self, meta: &mut Meta) -> DbResult<()> {
-        // **The journal is sealed before the first page moves.** Everything
-        // `save` wrote is in the file's buffers until this; a page image
-        // reaching the database before its pre-image reaches the disk is the
-        // one ordering a rollback journal exists to forbid.
+        // **The journal is sealed before the first page moves**, and `flush`
+        // is where that happens: it saves every pre-image the batch needs and
+        // syncs once before it writes anything. This call used to be the only
+        // one, and it ran here - before `flush` had saved a single pre-image -
+        // so it synced an empty file and the ordering a rollback journal exists
+        // to forbid held anyway. It is kept because anything a caller saved
+        // before reaching a checkpoint is still owed a sync, and it costs
+        // nothing when there is none.
         self.seal_journal()?;
         self.flush()?;
         self.file
@@ -1682,6 +1751,29 @@ impl Pool {
         meta.high_water_lsn = meta.high_water_lsn.max(self.high_water_lsn.get());
         let mut image = vec![0u8; self.page_size];
         meta.encode(&mut image)?;
+        // **The meta pages are journaled too, and they were the last pages that
+        // were not.** A rollback journal has to hold a pre-image of every page
+        // the checkpoint overwrites, and these two are pages the checkpoint
+        // overwrites. Leaving them out left a crash here able to produce a file
+        // whose data pages the journal put back to before the checkpoint and
+        // whose meta record says the checkpoint finished: the recorded
+        // `checkpoint_lsn` then tells redo that everything up to it is already
+        // in the file, so the records that would have re-applied the pages the
+        // journal just undid are skipped, and the database comes back as
+        // neither its old self nor its new one. It came back with no tables at
+        // all, because the catalog's own page is one of the pages the journal
+        // put back.
+        //
+        // The shadow page does not cover this. Both slots take the same image
+        // in the loop below, so the second one is not an older copy to fall
+        // back on - it is a second chance for the *new* record to survive, and
+        // `Meta::choose` believing either of them is the failure. What makes
+        // the checkpoint undoable is the previous record being on the disk in
+        // the journal, which is the same thing that makes every other page
+        // undoable.
+        self.journal_page(META_PAGE)?;
+        self.journal_page(SHADOW_PAGE)?;
+        self.seal_journal()?;
         for slot in [META_PAGE, SHADOW_PAGE] {
             self.file
                 .write_all_at(slot.0.saturating_mul(self.page_size as u64), &image)
@@ -1698,7 +1790,13 @@ impl Pool {
         Ok(())
     }
 
-    /// Saves one page's current contents to the rollback journal.
+    /// Saves one page's current contents to the rollback journal, reporting
+    /// whether it saved anything.
+    ///
+    /// The answer is what tells `writeback` whether it owes a sync: a page
+    /// already saved by this checkpoint's first pass needs neither the read
+    /// below nor a second sync, and in write-ahead-log mode there is no
+    /// journal and the answer is always no.
     ///
     /// Reads the page **from the file**, not from the pool: the pre-image the
     /// journal needs is what is durably there, and the frame holds the new
@@ -1707,23 +1805,42 @@ impl Pool {
     /// transaction created.
     ///
     /// @param page - the page about to be overwritten
-    fn journal_page(&self, page: PageId) -> DbResult<()> {
+    fn journal_page(&self, page: PageId) -> DbResult<bool> {
         let mut journal = self.journal.borrow_mut();
         let Some(journal) = journal.as_mut() else {
-            return Ok(());
+            return Ok(false);
         };
-        if page.0 >= self.page_count.get() {
-            return Ok(());
+        if page.0 >= self.page_count.get() || !journal.wants(page) {
+            return Ok(false);
+        }
+        // **A read that fails is a refusal, not an absence** - unless the page
+        // is genuinely not in the file yet. This used to answer "no pre-image
+        // needed" for *any* read error, and both callers then carried on and
+        // overwrote the page, so a transient read error followed by a crash
+        // left a modified page with nothing to put back. That is the one thing
+        // the invariant at the top of `crate::journal` forbids.
+        //
+        // The page count above is not the test for "not in the file yet", and
+        // using it as one is what made the first attempt at this refuse every
+        // growing transaction: `page_count` is the pool's logical count, and it
+        // runs ahead of the file whenever pages have been allocated but not yet
+        // written. The file's own length is the answer. A page at or past it
+        // has no pre-image because it has no image, and restoring it would mean
+        // writing zeros over a page the transaction created.
+        let offset = page.0.saturating_mul(self.page_size as u64);
+        let length = self
+            .file
+            .file_size()
+            .map_err(|error| error.into_db_error())?;
+        if offset.saturating_add(self.page_size as u64) > length {
+            return Ok(false);
         }
         let mut before = vec![0u8; self.page_size];
-        if self
-            .file
-            .read_exact_at(page.0.saturating_mul(self.page_size as u64), &mut before)
-            .is_err()
-        {
-            return Ok(());
-        }
-        journal.save(page, &before)
+        self.file
+            .read_exact_at(offset, &mut before)
+            .map_err(|error| error.into_db_error())?;
+        journal.save(page, &before)?;
+        Ok(true)
     }
 
     /// Puts a rollback journal in force, or takes it out of force.
@@ -1773,23 +1890,7 @@ impl Pool {
     /// @param level - the level to raise to
     /// @param budget_millis - how long to keep trying
     pub fn lock_within(&self, level: FileLock, budget_millis: u64) -> DbResult<()> {
-        if self.file.lock_level() >= level {
-            return Ok(());
-        }
-        let mut waited = 0u64;
-        let mut pause = 1u64;
-        loop {
-            match self.file.lock(level) {
-                Ok(()) => return Ok(()),
-                Err(error) if waited >= budget_millis => {
-                    return Err(error.into_db_error());
-                }
-                Err(_) => {}
-            }
-            std::thread::sleep(std::time::Duration::from_millis(pause));
-            waited = waited.saturating_add(pause);
-            pause = pause.saturating_mul(2).min(50);
-        }
+        lock_with_wait(self.file.as_ref(), level, budget_millis)
     }
 
     /// Lowers the lock on the database file.

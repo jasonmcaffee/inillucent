@@ -599,13 +599,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "inillucent-capi"
-version = "0.1.1"
-dependencies = [
- "inillucent-legacy",
-]
-
-[[package]]
 name = "inillucent-catalog"
 version = "0.1.1"
 dependencies = [
@@ -645,11 +638,9 @@ dependencies = [
  "inillucent-engine",
  "inillucent-exec",
  "inillucent-ext",
- "inillucent-legacy",
  "inillucent-migrate",
  "inillucent-pool",
  "inillucent-scalar",
- "inillucent-session",
  "inillucent-sim",
  "inillucent-sql",
  "inillucent-sqlite-reader",
@@ -659,7 +650,6 @@ dependencies = [
  "inillucent-txn",
  "inillucent-value",
  "inillucent-vfs",
- "inillucent-vm",
  "inillucent-wal",
  "libc",
  "windows-sys 0.59.0",
@@ -740,17 +730,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "inillucent-legacy"
-version = "0.1.1"
-dependencies = [
- "inillucent-base",
- "inillucent-catalog",
- "inillucent-session",
- "inillucent-storage",
- "inillucent-value",
-]
-
-[[package]]
 name = "inillucent-migrate"
 version = "0.1.1"
 dependencies = [
@@ -816,22 +795,6 @@ dependencies = [
  "inillucent-core",
  "inillucent-ext",
  "inillucent-value",
-]
-
-[[package]]
-name = "inillucent-session"
-version = "0.1.1"
-dependencies = [
- "inillucent-base",
- "inillucent-catalog",
- "inillucent-ext",
- "inillucent-search",
- "inillucent-sql",
- "inillucent-storage",
- "inillucent-transaction",
- "inillucent-value",
- "inillucent-vfs",
- "inillucent-vm",
 ]
 
 [[package]]
@@ -921,19 +884,6 @@ dependencies = [
  "inillucent-base",
  "libc",
  "windows-sys 0.59.0",
-]
-
-[[package]]
-name = "inillucent-vm"
-version = "0.1.1"
-dependencies = [
- "inillucent-base",
- "inillucent-catalog",
- "inillucent-ext",
- "inillucent-scalar",
- "inillucent-sql",
- "inillucent-storage",
- "inillucent-value",
 ]
 
 [[package]]

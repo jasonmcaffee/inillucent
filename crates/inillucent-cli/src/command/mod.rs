@@ -59,6 +59,25 @@ impl Kind {
             Kind::Values => "array",
         }
     }
+
+    /// Returns whether a JSON value has this parameter kind.
+    ///
+    /// @param value - the value a client supplied
+    pub fn accepts(self, value: &Json) -> bool {
+        match self {
+            Kind::Text => matches!(value, Json::Text(_)),
+            Kind::Integer => value.integer().is_some(),
+            Kind::Boolean => matches!(value, Json::Bool(_)),
+            Kind::Values => value.array().is_some_and(|items| {
+                items.iter().all(|item| {
+                    matches!(
+                        item,
+                        Json::Null | Json::Bool(_) | Json::Int(_) | Json::Real(_) | Json::Text(_)
+                    )
+                })
+            }),
+        }
+    }
 }
 
 /// One parameter a command takes.
@@ -130,6 +149,20 @@ impl Command {
         }
         line
     }
+
+    /// Returns the finite text values a parameter accepts when it has any.
+    ///
+    /// @param name - the parameter name
+    pub fn allowed_values(&self, name: &str) -> Option<&'static [&'static str]> {
+        match (self.name, name) {
+            (_, "output") => Some(&["text", "json"]),
+            ("import", "format") => Some(&["csv", "tabs", "ascii"]),
+            ("export", "format") => Some(&[
+                "csv", "json", "tabs", "markdown", "insert", "quote", "line", "html",
+            ]),
+            _ => None,
+        }
+    }
 }
 
 /// The values a command was given.
@@ -142,14 +175,45 @@ pub struct Arguments {
 impl Arguments {
     /// Builds an argument set from an MCP `arguments` object.
     ///
-    /// @param object - the object the client sent, or any other value
-    pub fn from_json(object: &Json) -> Arguments {
-        match object {
-            Json::Object(pairs) => Arguments {
-                values: pairs.clone(),
-            },
-            _ => Arguments::default(),
+    /// @param command - the command that declares the accepted arguments
+    /// @param object - the object the client sent
+    pub fn from_json(command: &Command, object: &Json) -> Result<Arguments, Failed> {
+        let Json::Object(pairs) = object else {
+            return Err(Failed::misuse("tool arguments must be an object."));
+        };
+        for (name, value) in pairs {
+            let Some(param) = command.param(name) else {
+                return Err(Failed::misuse(format!(
+                    "'{}' has no '{name}' argument.",
+                    command.name
+                )));
+            };
+            if !param.kind.accepts(value) {
+                return Err(Failed::misuse(format!(
+                    "'{name}' has to be a {}.",
+                    param.kind.schema_type()
+                )));
+            }
+            if let Some(allowed) = command.allowed_values(name) {
+                let Some(text) = value.text() else {
+                    return Err(Failed::misuse(format!("'{name}' has to be text.")));
+                };
+                if !allowed.contains(&text) {
+                    return Err(Failed::misuse(format!(
+                        "'{name}' must be one of: {}.",
+                        allowed.join(", ")
+                    )));
+                }
+            }
         }
+        for param in command.params {
+            if param.required && !pairs.iter().any(|(name, _)| name == param.name) {
+                return Err(Failed::misuse(format!("'{}' is required.", param.name)));
+            }
+        }
+        Ok(Arguments {
+            values: pairs.clone(),
+        })
     }
 
     /// Records one value.

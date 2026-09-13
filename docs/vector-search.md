@@ -218,9 +218,11 @@ whatever this is set to.
 
 - **Adding content folds into the graph rather than rebuilding it.** A commit loads the published
   generation and inserts each entry of the delta log into it, so the cost is one graph insert per row
-  written rather than one per row in the table. Publishing the new generation is still proportional
-  to the corpus, because a generation is one serialised index; [the roadmap](roadmap.md) has what is
-  left. The single-pass build over everything is still reachable, by
+  written rather than one per row in the table. **Publishing is proportional to the batch too, since
+  task-1911**: a flush builds a new immutable segment out of its own rows and writes nothing else,
+  and a search folds the live segments, with a newer one shadowing an older for the same row. The
+  default flush trigger is a constant 1,024 entries rather than a share of the table, because the
+  share existed only to make a whole-index rewrite rare and there is no longer a whole-index rewrite. The single-pass build over everything is still reachable, by
   `INSERT INTO t(t) VALUES('compact')`.
 - **The graph and the keyword postings are held in memory.** The vectors are not, by default. A
   3.1 GB index of 600,589 chunks serves from 1.3 GB resident with the vectors filed.

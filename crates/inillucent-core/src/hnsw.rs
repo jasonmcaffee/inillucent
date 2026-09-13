@@ -14,7 +14,7 @@
 //! which is the behaviour pgvector bolts on afterwards as `hnsw.iterative_scan`.
 
 use std::cmp::Ordering;
-use std::collections::BinaryHeap;
+use std::collections::{BTreeSet, BinaryHeap};
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -151,6 +151,12 @@ pub struct Hnsw {
     entry: Option<u32>,
     rng: StdRng,
     level_factor: f64,
+    /// Every `(layer, node)` whose neighbour list `insert`/`link` has written
+    /// since [`Self::start_recording`] was called, or since the last
+    /// [`Self::drain_recording`] - `None` while nobody is checkpointing this
+    /// graph, so an ordinary insert pays nothing extra for bookkeeping it
+    /// will never read. See [`Self::drain_recording`] for why this exists.
+    touched: Option<BTreeSet<(u8, u32)>>,
 }
 
 impl Hnsw {
@@ -164,6 +170,141 @@ impl Hnsw {
             entry: None,
             rng: StdRng::seed_from_u64(params.seed),
             level_factor,
+            touched: None,
+        }
+    }
+
+    /// Starts recording which adjacency lists change, so a caller can later
+    /// replay exactly what happened onto a different, already reconstructed
+    /// graph without running the search and insert algorithm again.
+    ///
+    /// **This is what keeps replaying a segment delta chain cheap.** An
+    /// insert's cost is a traversal proportional to the graph it is
+    /// searching, not to the batch being added; redoing that traversal on
+    /// every single chain resolution - once per checkpoint, compounding as
+    /// the chain grows - is what made an early version of the segment delta
+    /// format (`inillucent_search`'s `continue_merge`) measure *worse* than
+    /// the whole-accumulator rewrite it was replacing, on `write_latency`'s
+    /// 100,000 document arm. Recording the *result* of an insert - which
+    /// nodes' lists actually changed, and to what - and replaying that
+    /// directly costs what copying those lists costs, which is what
+    /// `write_index` always cost to serialise them in the first place.
+    pub fn start_recording(&mut self) {
+        self.touched.get_or_insert_with(BTreeSet::new);
+    }
+
+    /// Returns and clears every `(layer, node)` this graph's own adjacency
+    /// lists have changed at since recording started or since the last call
+    /// to this method, together with each one's current neighbour list -
+    /// the final content, not a history of intermediate writes, which is all
+    /// a replay needs to reproduce this graph exactly.
+    pub fn drain_recording(&mut self) -> Vec<(u8, u32, Vec<u32>)> {
+        let Some(touched) = self.touched.take() else {
+            return Vec::new();
+        };
+        let mut out = Vec::with_capacity(touched.len());
+        for (layer, node) in touched {
+            let neighbours = self
+                .layers
+                .get(layer as usize)
+                .and_then(|l| l.get(node as usize))
+                .cloned()
+                .unwrap_or_default();
+            out.push((layer, node, neighbours));
+        }
+        self.touched = Some(BTreeSet::new());
+        out
+    }
+
+    /// Records that one layer's neighbour list changed, when recording is on.
+    /// @param layer - which layer
+    /// @param node - whose list changed
+    fn mark_touched(&mut self, layer: usize, node: u32) {
+        if let Some(touched) = self.touched.as_mut() {
+            touched.insert((layer as u8, node));
+        }
+    }
+
+    /// How many nodes this graph currently spans.
+    pub fn node_count(&self) -> usize {
+        self.node_top.len()
+    }
+
+    /// This graph's current entry point, for a caller checkpointing it.
+    pub fn entry_point(&self) -> Option<u32> {
+        self.entry
+    }
+
+    /// Every node's top layer from `from` to the graph's current end, for a
+    /// caller appending only the nodes it added since it last checkpointed.
+    /// @param from - the first node ordinal to include
+    pub fn node_top_tail(&self, from: usize) -> &[u8] {
+        self.node_top.get(from..).unwrap_or(&[])
+    }
+
+    /// Grows `layers` to hold at least `count` levels - what a caller
+    /// replaying a recorded checkpoint uses before applying any touched node
+    /// that lives at a level this graph has not seen yet.
+    ///
+    /// A freshly added level is immediately padded with an empty neighbour
+    /// list for every node this graph already has, matching what a live
+    /// insert leaves behind when it creates a new top level over an existing
+    /// graph - every *other* layer already has one entry per existing node,
+    /// and a new layer that started shorter would serialise to a different
+    /// length than the graph this is reproducing.
+    /// @param count - how many levels this graph must have afterwards
+    pub fn ensure_layers(&mut self, count: usize) {
+        while self.layers.len() < count {
+            self.layers.push(vec![Vec::new(); self.node_top.len()]);
+        }
+    }
+
+    /// Appends one more node's top layer - what replaying a recorded
+    /// checkpoint uses in place of `insert` assigning one as a side effect
+    /// of choosing a random level.
+    ///
+    /// Also pads every existing layer with an empty neighbour list for this
+    /// node, the same as `insert` does for every node regardless of which
+    /// layers it actually occupies - so a level with no touched entry at all
+    /// (legitimately empty everywhere, above a promoted entry's old top) ends
+    /// up exactly as long as every other layer once every node has been
+    /// pushed, rather than only as long as whatever node last happened to
+    /// touch it.
+    /// @param top - the node's top layer
+    pub fn push_node_top(&mut self, top: u8) {
+        let node = self.node_top.len();
+        self.node_top.push(top);
+        for layer in self.layers.iter_mut() {
+            while layer.len() <= node {
+                layer.push(Vec::new());
+            }
+        }
+    }
+
+    /// Sets this graph's entry point directly, for a caller replaying a
+    /// recorded checkpoint rather than letting an insert promote one.
+    /// @param entry - the new entry point
+    pub fn set_entry(&mut self, entry: Option<u32>) {
+        self.entry = entry;
+    }
+
+    /// Applies one previously recorded touch directly - overwriting a
+    /// layer's neighbour list for one node with exactly what was recorded,
+    /// growing `layers` and `node_top` as needed - instead of running the
+    /// search and insert algorithm that originally produced it.
+    /// @param layer - which layer this list belongs to
+    /// @param node - which node
+    /// @param neighbours - its neighbour list at that layer
+    pub fn apply_touched(&mut self, layer: u8, node: u32, neighbours: Vec<u32>) {
+        self.ensure_layers(layer as usize + 1);
+        let Some(level) = self.layers.get_mut(layer as usize) else {
+            return;
+        };
+        while level.len() <= node as usize {
+            level.push(Vec::new());
+        }
+        if let Some(slot) = level.get_mut(node as usize) {
+            *slot = neighbours;
         }
     }
 
@@ -290,6 +431,7 @@ impl Hnsw {
             entry,
             rng: StdRng::seed_from_u64(params.seed),
             level_factor,
+            touched: None,
         })
     }
 
@@ -389,6 +531,7 @@ impl Hnsw {
             let selected = self.select_neighbours(vectors, &candidates, self.max_degree(layer));
 
             self.layers[layer][node as usize] = selected.clone();
+            self.mark_touched(layer, node);
             for neighbour in selected {
                 self.link(vectors, neighbour, node, layer);
             }
@@ -413,7 +556,9 @@ impl Hnsw {
             return;
         }
         list.push(to);
-        if list.len() <= cap {
+        let len = list.len();
+        self.mark_touched(layer, from);
+        if len <= cap {
             return;
         }
         let from_vec = vectors.copy_of(from);
@@ -966,7 +1111,17 @@ impl Hnsw {
     /// @param last - one past the last new node
     pub fn insert_batch(&mut self, vectors: &VectorSet, first: u32, last: u32) {
         let batch = last.saturating_sub(first);
-        if self.params.build_threads <= 1
+        // Recording is only wired up for the sequential path below - `link_locked`
+        // and `publish_neighbours` never call `mark_touched` - so a caller that
+        // has turned recording on always gets the sequential loop, regardless of
+        // how wide the batch is or how many threads are configured. Every
+        // caller that records is folding one document at a time anyway
+        // (`inillucent_search::merge::fold_segment_recording`), well under
+        // `PARALLEL_INSERT_FLOOR`, so this never costs anything there; it only
+        // guards a future caller from silently losing touches to the untracked
+        // parallel path.
+        if self.touched.is_some()
+            || self.params.build_threads <= 1
             || batch < PARALLEL_INSERT_FLOOR
             || self.entry.is_none()
         {

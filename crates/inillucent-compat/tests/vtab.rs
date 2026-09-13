@@ -16,6 +16,7 @@
 //! columns that are really arguments.
 
 use inillucent_compat::differential::{compare, compare_queries, start_inillucent, Step};
+use inillucent_tree::datum::OwnedDatum;
 
 /// Where this suite's scratch databases live.
 const AREA: &str = "vtab";
@@ -32,19 +33,14 @@ fn check(name: &str, queries: &[&'static str]) {
 /// Returns one column of every row of a query, as text.
 fn column(name: &str, sql: &str) -> Vec<String> {
     let connection = start_inillucent(AREA, name);
-    let mut statement =
-        inillucent_session::statement::Statement::prepare(&connection, sql.as_bytes())
-            .expect("it prepares")
-            .0;
+    let mut statement = connection.prepare(sql).expect("it prepares");
     let mut rows = Vec::new();
     while statement.step().expect("it steps") {
-        let value = statement.value(0);
+        let value = statement.row().first().expect("one column");
         rows.push(match value {
-            inillucent_value::Value::Integer(number) => number.to_string(),
-            inillucent_value::Value::Text(text) => {
-                String::from_utf8_lossy(&text.utf8_bytes()).into_owned()
-            }
-            inillucent_value::Value::Null => "NULL".to_string(),
+            OwnedDatum::Int(number) => number.to_string(),
+            OwnedDatum::Text(text) => String::from_utf8_lossy(text).into_owned(),
+            OwnedDatum::Null => "NULL".to_string(),
             other => format!("{other:?}"),
         });
     }
@@ -120,45 +116,53 @@ fn a_module_can_satisfy_the_ordering() {
 #[test]
 fn a_virtual_table_joins() {
     let connection = start_inillucent(AREA, "join");
-    inillucent_session::statement::execute_batch(
-        &connection,
-        b"CREATE TABLE t(a INTEGER); INSERT INTO t VALUES (2),(4);",
-    )
-    .expect("the schema is made");
-    let mut statement = inillucent_session::statement::Statement::prepare(
-        &connection,
-        b"SELECT t.a, s.value FROM t JOIN generate_series(1,5) AS s ON s.value = t.a ORDER BY t.a",
-    )
-    .expect("it prepares")
-    .0;
+    connection
+        .execute_batch("CREATE TABLE t(a INTEGER); INSERT INTO t VALUES (2),(4);")
+        .expect("the schema is made");
+    let mut statement = connection
+        .prepare(
+            "SELECT t.a, s.value FROM t JOIN generate_series(1,5) AS s ON s.value = t.a ORDER BY t.a",
+        )
+        .expect("it prepares");
     let mut rows = Vec::new();
     while statement.step().expect("it steps") {
         let pair = statement.row();
         rows.push(format!(
             "{:?}/{:?}",
-            pair.first().and_then(inillucent_value::Value::as_integer),
-            pair.get(1).and_then(inillucent_value::Value::as_integer)
+            as_integer(pair.first()),
+            as_integer(pair.get(1))
         ));
     }
     assert_eq!(rows, vec!["Some(2)/Some(2)", "Some(4)/Some(4)"]);
 }
 
+/// Returns an `OwnedDatum` as a plain integer, when it is one.
+///
+/// @param value - the column value
+fn as_integer(value: Option<&OwnedDatum>) -> Option<i64> {
+    match value {
+        Some(OwnedDatum::Int(number)) => Some(*number),
+        _ => None,
+    }
+}
+
 /// `SELECT *` shows the visible columns and not the arguments.
+///
+/// **Stepped once before `columns()` is read.** This statement materialises
+/// on its first `step` and learns its shape from what came back - see
+/// `Statement::columns`'s own doc comment - so a caller that asks first gets
+/// an empty list, which is what this test did before it drove the old
+/// engine, where `sqlite3_column_name` answers straight after `prepare`.
+/// `generate_series(1,2)` produces at least one row, so one `step` is enough
+/// to learn the shape without changing what the assertion is about.
 #[test]
 fn hidden_columns_stay_hidden() {
     let connection = start_inillucent(AREA, "hidden");
-    let statement = inillucent_session::statement::Statement::prepare(
-        &connection,
-        b"SELECT * FROM generate_series(1,2)",
-    )
-    .expect("it prepares")
-    .0;
-    let names: Vec<String> = statement
-        .columns()
-        .iter()
-        .map(|column| String::from_utf8_lossy(&column.name).into_owned())
-        .collect();
-    assert_eq!(names, vec!["value"]);
+    let mut statement = connection
+        .prepare("SELECT * FROM generate_series(1,2)")
+        .expect("it prepares");
+    assert!(statement.step().expect("it steps"));
+    assert_eq!(statement.columns(), &["value".to_string()]);
 }
 
 /// `json_each` and `json_tree`, against the engine that defines them.

@@ -14,31 +14,55 @@
 //! Recovery is put through the same treatment: the run that crashed is
 //! recovered with a *second* crash armed inside the recovery, which is what
 //! makes "recovery is idempotent" a measurement rather than an argument.
+//!
+//! Re-pointed from the old engine (`inillucent-session`) onto the new one
+//! (`inillucent-engine`). The campaign machinery - `SimVfs`, its failpoints, its
+//! crash snapshots - lives below both engines and is unchanged; what moved is
+//! how a database is opened on a chosen `Vfs` and how a statement runs. The old
+//! engine took an `OpenOptions { journal: JournalOptions { mode, synchronous } }`
+//! at open time; the new engine's `PRAGMA journal_mode` and `PRAGMA synchronous`
+//! are real switches now (`inillucent-engine`'s own `pragma` module says so), so
+//! the journal configuration each campaign wants is set as SQL right after
+//! opening rather than passed to the constructor. This is the same pattern
+//! `new_engine_recovery_shapes.rs` already uses to drive `ImportedDatabase`
+//! directly on a `SimVfs`: there is no connection/session layer between them,
+//! because a crash campaign only ever has one writer at a time.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use inillucent_session::connection::{Connection, OpenOptions, SessionDatabase};
+use inillucent_compat::newengine::ImportedDatabase;
+use inillucent_exec::physical::Params;
 use inillucent_sim::failpoint::Failure;
 use inillucent_sim::media::MediaModel;
 use inillucent_sim::sim_vfs::{CrashSnapshot, SimConfig, SimVfs};
-use inillucent_transaction::journal::{JournalMode, JournalOptions, Synchronous};
-use inillucent_value::Value;
+use inillucent_tree::datum::OwnedDatum;
 use inillucent_vfs::path::DbPath;
 use inillucent_vfs::Vfs;
 
+/// The page size these tests build at, and the frames the pool holds.
+///
+/// Large enough that nothing is evicted and no checkpoint happens on its own
+/// mid-workload, which is what leaves the whole workload reachable in the log.
+const PAGE_SIZE: usize = 4_096;
+const FRAMES: usize = 8_192;
+
 /// The database every run in this file builds.
-const SCHEMA: &str = "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT, c INTEGER);
-     CREATE INDEX t_b ON t(b);
-     INSERT INTO t VALUES(1, 'one', 10);
-     INSERT INTO t VALUES(2, 'two', 20);
-     INSERT INTO t VALUES(3, 'three', 30);";
+const SCHEMA: [&str; 4] = [
+    "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT, c INTEGER)",
+    "CREATE INDEX t_b ON t(b)",
+    "INSERT INTO t VALUES(1, 'one', 10), (2, 'two', 20), (3, 'three', 30)",
+    "",
+];
 
 /// The transaction each run tries to commit on top of it.
-const WORKLOAD: &str = "BEGIN;
-     INSERT INTO t VALUES(4, 'four', 40);
-     UPDATE t SET c = c + 1 WHERE a <= 2;
-     DELETE FROM t WHERE a = 3;
-     COMMIT;";
+const WORKLOAD: [&str; 5] = [
+    "BEGIN",
+    "INSERT INTO t VALUES(4, 'four', 40)",
+    "UPDATE t SET c = c + 1 WHERE a <= 2",
+    "DELETE FROM t WHERE a = 3",
+    "COMMIT",
+];
 
 /// A transaction that makes the file grow, so a rollback has to shrink it.
 ///
@@ -46,24 +70,123 @@ const WORKLOAD: &str = "BEGIN;
 /// the pages it already had. The test below crashes partway through that
 /// commit, which is the only way to leave a database larger than the page count
 /// its journal will restore.
-const GROWING_WORKLOAD: &str = "BEGIN;
-     INSERT INTO t SELECT 1000 + n, printf('%.400c', 120), n
-       FROM (WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 400)
-             SELECT n FROM c);
-     COMMIT;";
+const GROWING_WORKLOAD: [&str; 2] = [
+    "BEGIN",
+    "INSERT INTO t SELECT 1000 + n, printf('%.400c', 120), n \
+       FROM (WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 400) \
+             SELECT n FROM c)",
+];
+/// `GROWING_WORKLOAD`'s commit, kept apart so a crash can be armed anywhere in
+/// the insert without also covering the commit itself.
+const GROWING_COMMIT: &str = "COMMIT";
 
-/// Returns the page size and page count a database header declares.
+/// Runs one statement, using the engine's write path directly.
+///
+/// @param engine - the database
+/// @param sql - the statement
+fn exec(engine: &mut ImportedDatabase, sql: &str) -> Result<(), inillucent_base::DbError> {
+    engine.execute_any(sql, &Params::new())?;
+    Ok(())
+}
+
+/// Runs every statement of a script in order, stopping at the first failure.
+///
+/// @param engine - the database
+/// @param script - the statements, in order
+fn run_script(
+    engine: &mut ImportedDatabase,
+    script: &[&str],
+) -> Result<(), inillucent_base::DbError> {
+    for statement in script {
+        if statement.is_empty() {
+            continue;
+        }
+        exec(engine, statement)?;
+    }
+    Ok(())
+}
+
+/// Sets the journal mode and durability level a campaign runs under.
+///
+/// Fallible on purpose: unlike the retired engine, which took the mode as a
+/// constructor option, this one applies it as `PRAGMA` statements after
+/// opening (see the module comment) - and a campaign's `open()` is called with
+/// a failure already armed, so the switch itself can land on the armed call.
+/// That is a legitimate cut point of "reopen and get back to work", not a
+/// harness error, so it is propagated like any other statement failure rather
+/// than unwrapped - `open()` folds it into the same `Err` its caller already
+/// treats as "this attempt never got to run the workload".
+///
+/// @param engine - the database
+/// @param mode - `delete`, `truncate` or `persist`
+/// @param synchronous - `full` or another `PRAGMA synchronous` spelling
+fn set_journal(
+    engine: &mut ImportedDatabase,
+    mode: &str,
+    synchronous: &str,
+) -> Result<(), inillucent_base::DbError> {
+    exec(engine, &format!("PRAGMA journal_mode = {mode}"))?;
+    exec(engine, &format!("PRAGMA synchronous = {synchronous}"))?;
+    Ok(())
+}
+
+/// One journal configuration a campaign runs under.
+#[derive(Clone, Copy)]
+struct Journal {
+    mode: &'static str,
+    synchronous: &'static str,
+}
+
+impl Journal {
+    /// The configuration `JournalOptions::default()` used to mean: DELETE mode,
+    /// FULL synchronous.
+    const DEFAULT: Journal = Journal {
+        mode: "delete",
+        synchronous: "full",
+    };
+
+    /// No supplementary rollback journal at all - the write-ahead log is the
+    /// only durability mechanism in force.
+    ///
+    /// **The no-steal campaigns need this, and `DEFAULT` would tell them
+    /// nothing.** Every non-`off` mode, `wal` included, still takes a `delete`
+    /// rollback journal beside the log (`journal_for` in
+    /// `inillucent-engine/src/lib.rs`), which journals a pre-image before *any*
+    /// page writeback, a checkpoint's or an ordinary eviction's, and
+    /// `replay_hot_journal` puts every such page back on the next open
+    /// regardless of what the log's own recovery would have done. That
+    /// already undoes an evicted, uncommitted page with no help from no-steal
+    /// at all - measured directly: [`a_transaction_the_evictor_writes_back_never_survives_uncommitted`]
+    /// passed under `DEFAULT` whether or not `Pool::holds_uncommitted` was
+    /// armed. `off` removes that safety net, so what is left protecting an
+    /// uncommitted row is exactly the mechanism this file's no-steal campaigns
+    /// are about.
+    const NO_ROLLBACK_JOURNAL: Journal = Journal {
+        mode: "off",
+        synchronous: "full",
+    };
+}
+
+/// Returns the page size and page count the recovered database's own meta
+/// page reports.
+///
+/// Re-pointed from the SQLite file header (bytes 16-17 for the page size,
+/// 28-31 for the page count) onto the new engine's own format, which is not
+/// SQLite's: `inillucent-pool`'s `meta` module keeps two candidate meta
+/// pages, `META_PAGE` (page 0) and `SHADOW_PAGE` (page 1), and a reader
+/// believes whichever has a valid checksum and the higher generation -
+/// `Meta::choose` is that rule, and this reads by the same one rather than
+/// assuming page 0 is current. That matters here specifically: a checkpoint
+/// writes the *other* page first (see `meta.rs`'s module comment), so which
+/// page is current alternates every checkpoint, and a header reader that
+/// always trusted page 0 would report a stale page count on every other
+/// checkpoint - not a defect in the engine, but a wrong question from the
+/// test.
 fn header_shape(bytes: &[u8]) -> Option<(u64, u64)> {
-    let raw = u64::from(u16::from_be_bytes([*bytes.get(16)?, *bytes.get(17)?]));
-    // The one page size the header's two bytes cannot hold is written as one.
-    let page_size = if raw == 1 { 65_536 } else { raw };
-    let count = u64::from(u32::from_be_bytes([
-        *bytes.get(28)?,
-        *bytes.get(29)?,
-        *bytes.get(30)?,
-        *bytes.get(31)?,
-    ]));
-    Some((page_size, count))
+    let primary = bytes.get(..PAGE_SIZE)?;
+    let shadow = bytes.get(PAGE_SIZE..PAGE_SIZE.saturating_mul(2))?;
+    let meta = inillucent_pool::meta::Meta::choose(primary, shadow).ok()?;
+    Some((u64::from(meta.page_size), meta.page_count))
 }
 
 /// A recovered database is exactly as long as its header says it is.
@@ -76,31 +199,17 @@ fn header_shape(bytes: &[u8]) -> Option<(u64, u64)> {
 /// The workload grows the file and the crash is armed at every cut point in
 /// turn, so this does not depend on guessing which call leaves the file long -
 /// it asserts the invariant at all of them.
-///
-/// It is worth being exact about what this does and does not pin. Mutation
-/// testing reported `finish_recovery`'s `if database.file_size()? > wanted` as
-/// a surviving mutant, and this test does **not** kill it: with the truncation
-/// disabled the invariant still holds at all thirty-one reopenable cut points,
-/// because none of them leaves a file longer than its header claims. The
-/// branch is not reachable under this crash model - the media the simulator
-/// leaves behind never carries the extension - so no test at this level can
-/// kill that mutant, and it is an equivalent mutant in practice rather than a
-/// missing test.
-///
-/// The invariant is worth asserting on its own account, which is why it stays:
-/// a recovered database that is longer than its own page count is a database
-/// carrying pages nothing will ever reclaim.
 #[test]
 fn a_recovered_database_is_no_longer_than_its_header_says() {
-    let journal = JournalOptions::default();
+    let journal = Journal::DEFAULT;
     let seed = 90_210;
-    let reach = attempt_with(journal, seed, u64::MAX, Failure::Crash, GROWING_WORKLOAD).reached;
+    let reach = attempt_growing(journal, seed, u64::MAX).reached;
     assert!(reach > 0, "the workload has to reach some injectable calls");
 
     let mut checked = 0usize;
     let mut longest = 0u64;
     for nth in 1..=reach {
-        let run = attempt_with(journal, seed, nth, Failure::Crash, GROWING_WORKLOAD);
+        let run = attempt_growing(journal, seed, nth);
         let recovered_vfs = Arc::new(SimVfs::recovered(
             SimConfig {
                 seed,
@@ -109,13 +218,19 @@ fn a_recovered_database_is_no_longer_than_its_header_says() {
             },
             &run.snapshot,
         ));
-        // Opening runs recovery; the connection is dropped before the file is
+        // Opening runs recovery; the handle is dropped before the file is
         // measured so nothing of ours is still holding pages open.
-        let opened = try_connect(Arc::clone(&recovered_vfs) as Arc<dyn Vfs>, journal).is_ok();
+        let opened = ImportedDatabase::open_on(
+            Arc::clone(&recovered_vfs) as Arc<dyn Vfs>,
+            path(),
+            PAGE_SIZE,
+            FRAMES,
+        )
+        .is_ok();
         if !opened {
             continue;
         }
-        let Some(bytes) = recovered_vfs.visible_bytes(&path()) else {
+        let Some(bytes) = recovered_vfs.visible_bytes(&db_path()) else {
             continue;
         };
         let Some((page_size, count)) = header_shape(&bytes) else {
@@ -142,6 +257,16 @@ fn a_recovered_database_is_no_longer_than_its_header_says() {
     );
 }
 
+/// Returns the path every run uses.
+fn path() -> PathBuf {
+    PathBuf::from("app.db")
+}
+
+/// Returns `path()` the way the VFS layer names it.
+fn db_path() -> DbPath {
+    DbPath::new(path().to_string_lossy().as_ref())
+}
+
 /// Returns a simulator with the pessimistic device model.
 fn simulator(seed: u64) -> Arc<SimVfs> {
     Arc::new(SimVfs::new(SimConfig {
@@ -151,89 +276,88 @@ fn simulator(seed: u64) -> Arc<SimVfs> {
     }))
 }
 
-/// Returns the path every run uses.
-fn path() -> DbPath {
-    DbPath::from("/sim/app.db")
+/// Opens a database on one simulated file system, with the campaign's journal
+/// settings applied.
+fn open(vfs: Arc<dyn Vfs>, journal: Journal) -> Result<ImportedDatabase, inillucent_base::DbError> {
+    let mut engine = ImportedDatabase::open_on(vfs, path(), PAGE_SIZE, FRAMES)?;
+    set_journal(&mut engine, journal.mode, journal.synchronous)?;
+    Ok(engine)
 }
 
-/// Opens a connection on one simulated file system.
-fn connect(vfs: Arc<dyn Vfs>, journal: JournalOptions) -> Connection {
-    try_connect(vfs, journal).expect("the connection opens")
-}
-
-/// Opens a connection, reporting the failure rather than panicking.
+/// Creates a fresh database on one simulated file system, with the campaign's
+/// journal settings applied.
 ///
-/// A campaign arms its failure before the connection is opened, and opening is
-/// itself a cut point: recovery runs there, and a PERSIST journal from the
-/// previous transaction is deleted there. A harness that could not survive a
-/// failure during open would simply not test those.
-fn try_connect(
-    vfs: Arc<dyn Vfs>,
-    journal: JournalOptions,
-) -> Result<Connection, inillucent_base::DbError> {
-    let database = SessionDatabase::open_with(
-        path().as_path(),
-        vfs,
-        OpenOptions {
-            journal,
-            ..OpenOptions::default()
-        },
-    )?;
-    database.connect()
+/// Never called with a failure armed - `built()` and `expected_states()` both
+/// use it before any campaign failpoint is set - so the settings are expected
+/// to apply outright.
+fn create(vfs: Arc<dyn Vfs>, journal: Journal) -> ImportedDatabase {
+    let mut engine = ImportedDatabase::create_on(vfs, path(), PAGE_SIZE, FRAMES)
+        .expect("the database is created");
+    set_journal(&mut engine, journal.mode, journal.synchronous)
+        .expect("journal settings apply on a fresh, unarmed database");
+    engine
 }
 
 /// The rows a database holds, as text, in a stable order.
-fn contents(connection: &Connection) -> Vec<String> {
-    try_contents(connection).expect("the query runs")
+fn contents(engine: &mut ImportedDatabase) -> Vec<String> {
+    try_contents(engine).expect("the query runs")
 }
 
 /// Reads the rows, reporting a failure rather than panicking.
-fn try_contents(connection: &Connection) -> Result<Vec<String>, inillucent_base::DbError> {
-    let (mut statement, _) = inillucent_session::statement::Statement::prepare(
-        connection,
-        b"SELECT a, b, c FROM t ORDER BY a",
-    )?;
-    let mut rows = Vec::new();
-    while statement.step()? {
-        let row = statement.row();
-        rows.push(format!(
-            "{:?}|{:?}|{:?}",
-            row.first().and_then(Value::as_integer),
-            row.get(1)
-                .and_then(|value| value.as_text().map(|text| text.utf8_bytes().into_owned())),
-            row.get(2).and_then(Value::as_integer),
-        ));
+fn try_contents(engine: &mut ImportedDatabase) -> Result<Vec<String>, inillucent_base::DbError> {
+    let outcome = engine.execute_any("SELECT a, b, c FROM t ORDER BY a", &Params::new())?;
+    Ok(outcome
+        .rows
+        .iter()
+        .map(|row| {
+            format!(
+                "{:?}|{:?}|{:?}",
+                as_integer(row.first()),
+                as_text(row.get(1)),
+                as_integer(row.get(2)),
+            )
+        })
+        .collect())
+}
+
+/// Returns an integer datum as `Option<i64>`, matching the old `Value::as_integer`.
+fn as_integer(value: Option<&OwnedDatum>) -> Option<i64> {
+    match value {
+        Some(OwnedDatum::Int(value)) => Some(*value),
+        _ => None,
     }
-    Ok(rows)
+}
+
+/// Returns a text datum as `Option<String>`, matching the old `Value::as_text`.
+fn as_text(value: Option<&OwnedDatum>) -> Option<String> {
+    match value {
+        Some(OwnedDatum::Text(bytes)) => Some(String::from_utf8_lossy(bytes).into_owned()),
+        _ => None,
+    }
 }
 
 /// Runs the schema and the workload with no failure, returning both states.
-fn expected_states(journal: JournalOptions) -> (Vec<String>, Vec<String>) {
+fn expected_states(journal: Journal) -> (Vec<String>, Vec<String>) {
     let vfs = simulator(7);
     let before = {
-        let connection = connect(Arc::clone(&vfs) as Arc<dyn Vfs>, journal);
-        run(&connection, SCHEMA).expect("the schema builds");
-        contents(&connection)
+        let mut engine = create(Arc::clone(&vfs) as Arc<dyn Vfs>, journal);
+        run_script(&mut engine, &SCHEMA).expect("the schema builds");
+        contents(&mut engine)
     };
     let after = {
-        let connection = connect(Arc::clone(&vfs) as Arc<dyn Vfs>, journal);
-        run(&connection, WORKLOAD).expect("the workload commits");
-        contents(&connection)
+        let mut engine = open(Arc::clone(&vfs) as Arc<dyn Vfs>, journal).expect("it reopens");
+        run_script(&mut engine, &WORKLOAD).expect("the workload commits");
+        contents(&mut engine)
     };
     (before, after)
 }
 
-/// Runs a script, returning whether it succeeded.
-fn run(connection: &Connection, sql: &str) -> Result<(), inillucent_base::DbError> {
-    inillucent_session::statement::execute_batch(connection, sql.as_bytes())
-}
-
 /// Builds a database and returns the simulator holding it.
-fn built(journal: JournalOptions, seed: u64) -> Arc<SimVfs> {
+fn built(journal: Journal, seed: u64) -> Arc<SimVfs> {
     let vfs = simulator(seed);
-    let connection = connect(Arc::clone(&vfs) as Arc<dyn Vfs>, journal);
-    run(&connection, SCHEMA).expect("the schema builds");
-    drop(connection);
+    let mut engine = create(Arc::clone(&vfs) as Arc<dyn Vfs>, journal);
+    run_script(&mut engine, &SCHEMA).expect("the schema builds");
+    drop(engine);
     vfs
 }
 
@@ -255,24 +379,21 @@ struct Attempt {
 /// would therefore arm a call that had already happened, and the campaign
 /// would report a hundred cut points while causing no failures at all - which
 /// is what it did until the base was subtracted.
-fn attempt(journal: JournalOptions, seed: u64, nth: u64, failure: Failure) -> Attempt {
-    attempt_with(journal, seed, nth, failure, WORKLOAD)
+fn attempt(journal: Journal, seed: u64, nth: u64, failure: Failure) -> Attempt {
+    attempt_with(journal, seed, nth, failure, &WORKLOAD)
 }
 
-/// As [`attempt`], for a workload other than the standard one.
-fn attempt_with(
-    journal: JournalOptions,
-    seed: u64,
-    nth: u64,
-    failure: Failure,
-    workload: &str,
-) -> Attempt {
+/// As [`attempt`], for the growing workload, which crashes only inside the
+/// insert - the commit is armed separately once the insert itself is done.
+fn attempt_growing(journal: Journal, seed: u64, nth: u64) -> Attempt {
     let vfs = built(journal, seed);
     let base = vfs.failpoints().sites_reached();
     vfs.failpoints()
-        .fail_nth_call(base.saturating_add(nth), failure);
-    let committed = match try_connect(Arc::clone(&vfs) as Arc<dyn Vfs>, journal) {
-        Ok(connection) => run(&connection, workload).is_ok(),
+        .fail_nth_call(base.saturating_add(nth), Failure::Crash);
+    let committed = match open(Arc::clone(&vfs) as Arc<dyn Vfs>, journal) {
+        Ok(mut engine) => run_script(&mut engine, &GROWING_WORKLOAD)
+            .and_then(|()| exec(&mut engine, GROWING_COMMIT))
+            .is_ok(),
         Err(_) => false,
     };
     let reached = vfs.failpoints().sites_reached().saturating_sub(base);
@@ -281,6 +402,120 @@ fn attempt_with(
         snapshot: vfs.crash(),
         reached,
     }
+}
+
+/// As [`attempt`], for a workload other than the standard one.
+fn attempt_with(
+    journal: Journal,
+    seed: u64,
+    nth: u64,
+    failure: Failure,
+    workload: &[&str],
+) -> Attempt {
+    let vfs = built(journal, seed);
+    let base = vfs.failpoints().sites_reached();
+    vfs.failpoints()
+        .fail_nth_call(base.saturating_add(nth), failure);
+    let committed = match open(Arc::clone(&vfs) as Arc<dyn Vfs>, journal) {
+        Ok(mut engine) => run_script(&mut engine, workload).is_ok(),
+        Err(_) => false,
+    };
+    let reached = vfs.failpoints().sites_reached().saturating_sub(base);
+    Attempt {
+        committed,
+        snapshot: vfs.crash(),
+        reached,
+    }
+}
+
+/// Runs the workload to an acknowledged commit, then fails the `n`th call of
+/// the checkpoint that follows it.
+///
+/// **The commit is never the thing that fails here**, which is what makes this
+/// campaign's assertion the strong one. The failure is armed after the
+/// transaction has been acknowledged, so the only correct answer at every cut
+/// point is the committed state - not "the old database or the new one", which
+/// is all that can be asked of a crash inside the commit itself.
+///
+/// @param journal - the journal mode and durability level
+/// @param seed - the media model's seed
+/// @param nth - which call of the checkpoint to fail
+/// @param failure - what to do to it
+fn attempt_checkpoint(journal: Journal, seed: u64, nth: u64, failure: Failure) -> Attempt {
+    let vfs = built(journal, seed);
+    let committed = match open(Arc::clone(&vfs) as Arc<dyn Vfs>, journal) {
+        Ok(mut engine) => {
+            let wrote = run_script(&mut engine, &WORKLOAD).is_ok();
+            // Armed only now, so nothing above this line can fail: every cut
+            // point this campaign covers is inside the checkpoint.
+            let base = vfs.failpoints().sites_reached();
+            vfs.failpoints()
+                .fail_nth_call(base.saturating_add(nth), failure);
+            let _ = exec(&mut engine, "PRAGMA wal_checkpoint");
+            let reached = vfs.failpoints().sites_reached().saturating_sub(base);
+            return Attempt {
+                committed: wrote,
+                snapshot: vfs.crash(),
+                reached,
+            };
+        }
+        Err(_) => false,
+    };
+    Attempt {
+        committed,
+        snapshot: vfs.crash(),
+        reached: 0,
+    }
+}
+
+/// Runs a campaign over the cut points of a checkpoint.
+///
+/// Every run's transaction committed before the failure was armed, so the only
+/// state recovery may produce is the committed one. A recovery that answers
+/// the *old* database is a lost acknowledged commit and fails here, where the
+/// commit campaigns have to accept it.
+///
+/// @param journal - the journal mode and durability level
+/// @param failure - what to do to the armed call
+/// @param limit - how many cut points to try before giving up
+fn checkpointing_campaign(journal: Journal, failure: Failure, limit: u64) -> String {
+    let (before, after) = expected_states(journal);
+    assert_ne!(before, after, "the workload has to change something");
+    let mut report = String::new();
+    let mut cut_points = 0u64;
+    for nth in 1..=limit {
+        let outcome = attempt_checkpoint(journal, 5_100 + nth, nth, failure);
+        assert!(
+            outcome.committed,
+            "call {nth}: the transaction is committed before anything is armed"
+        );
+        if outcome.reached < nth {
+            report.push_str(&format!(
+                "{nth}	unarmed	new
+"
+            ));
+            break;
+        }
+        cut_points = cut_points.saturating_add(1);
+        let recovery = recovered(journal, &outcome.snapshot, 7_400 + nth);
+        assert_eq!(
+            recovery,
+            Recovery::Rows(after.clone()),
+            "call {nth} of the checkpoint: the commit was acknowledged and then lost"
+        );
+        report.push_str(&format!(
+            "{nth}	checkpoint	new
+"
+        ));
+    }
+    assert!(
+        cut_points >= 10,
+        "a campaign that covers {cut_points} cut points is not a campaign"
+    );
+    format!(
+        "cut points: {cut_points}, every one recovered to the committed state
+{report}"
+    )
 }
 
 /// What reopening a crashed database produced.
@@ -293,7 +528,7 @@ enum Recovery {
 }
 
 /// Reopens what a crash left behind and reports the rows it holds.
-fn recovered(journal: JournalOptions, snapshot: &CrashSnapshot, seed: u64) -> Recovery {
+fn recovered(journal: Journal, snapshot: &CrashSnapshot, seed: u64) -> Recovery {
     let vfs = Arc::new(SimVfs::recovered(
         SimConfig {
             seed,
@@ -302,8 +537,8 @@ fn recovered(journal: JournalOptions, snapshot: &CrashSnapshot, seed: u64) -> Re
         },
         snapshot,
     ));
-    match try_connect(Arc::clone(&vfs) as Arc<dyn Vfs>, journal)
-        .and_then(|connection| try_contents(&connection))
+    match open(Arc::clone(&vfs) as Arc<dyn Vfs>, journal)
+        .and_then(|mut engine| try_contents(&mut engine))
     {
         Ok(rows) => Recovery::Rows(rows),
         Err(failure) => Recovery::Corrupt(format!("{failure}")),
@@ -318,12 +553,7 @@ fn recovered(journal: JournalOptions, snapshot: &CrashSnapshot, seed: u64) -> Re
 /// bytes: no durability scheme can undo a write that never said it failed, and
 /// the guarantee that remains is that the damage is *detected* rather than
 /// served as rows.
-fn campaign(
-    journal: JournalOptions,
-    failure: Failure,
-    limit: u64,
-    corruption_allowed: bool,
-) -> String {
+fn campaign(journal: Journal, failure: Failure, limit: u64, corruption_allowed: bool) -> String {
     let (before, after) = expected_states(journal);
     assert_ne!(before, after, "the workload has to change something");
     let mut report = String::new();
@@ -348,10 +578,7 @@ fn campaign(
                 Recovery::Rows(after.clone()),
                 "a commit that was acknowledged and then power-cut was lost"
             );
-            report.push_str(&format!(
-                "{nth}	acknowledged	new
-"
-            ));
+            report.push_str(&format!("{nth}\tacknowledged\tnew\n"));
             committed_runs = committed_runs.saturating_add(1);
             break;
         }
@@ -433,9 +660,9 @@ fn record(name: &str, body: &str) {
 /// database or the new one, and an acknowledged commit is never lost.
 #[test]
 fn power_loss_at_every_cut_point_of_a_full_commit() {
-    let journal = JournalOptions {
-        mode: JournalMode::Delete,
-        synchronous: Synchronous::Full,
+    let journal = Journal {
+        mode: "delete",
+        synchronous: "full",
     };
     let report = campaign(journal, Failure::Crash, 220, false);
     record("delete-full-crash.txt", &report);
@@ -445,9 +672,9 @@ fn power_loss_at_every_cut_point_of_a_full_commit() {
 /// deletion - and the same guarantee.
 #[test]
 fn power_loss_at_every_cut_point_of_a_truncate_commit() {
-    let journal = JournalOptions {
-        mode: JournalMode::Truncate,
-        synchronous: Synchronous::Full,
+    let journal = Journal {
+        mode: "truncate",
+        synchronous: "full",
     };
     let report = campaign(journal, Failure::Crash, 220, false);
     record("truncate-full-crash.txt", &report);
@@ -457,12 +684,67 @@ fn power_loss_at_every_cut_point_of_a_truncate_commit() {
 /// stop being hot.
 #[test]
 fn power_loss_at_every_cut_point_of_a_persist_commit() {
-    let journal = JournalOptions {
-        mode: JournalMode::Persist,
-        synchronous: Synchronous::Full,
+    let journal = Journal {
+        mode: "persist",
+        synchronous: "full",
     };
     let report = campaign(journal, Failure::Crash, 220, false);
     record("persist-full-crash.txt", &report);
+}
+
+/// An acknowledged commit survives a power loss at every cut point of the
+/// checkpoint that follows it, in each of the three rollback modes.
+///
+/// **`DELETE` mode's campaigns never touched the rollback journal until this
+/// existed, which is why three defects in it survived every run of them.** The
+/// journal only holds pre-images while a *checkpoint* is moving pages out of
+/// the log and into the data file, and [`WORKLOAD`] on its own commits into
+/// the log and stops - so a crash at every one of its cut points crashes in
+/// the log and never once in the journal.
+///
+/// `TRUNCATE` and `PERSIST` were covered by accident. `PRAGMA journal_mode =
+/// truncate` is a real change from the connection's default and runs two
+/// checkpoints on its way in, so those campaigns crashed inside a checkpoint
+/// without anybody intending it, and that is where all three defects were
+/// found. `PRAGMA journal_mode = delete` matches the default, returns without
+/// doing anything, and left the *default* journal mode the least exercised of
+/// the three.
+///
+/// The assertion here is stronger than the commit campaigns'. Those crash
+/// inside the commit and can only ask for the old database or the new one;
+/// this arms its failure after the transaction has been acknowledged, so the
+/// committed state is the only answer allowed at any cut point. See
+/// `crates/inillucent-pool/src/journal.rs` for what it was hiding.
+#[test]
+fn power_loss_at_every_cut_point_of_a_checkpoint() {
+    for mode in ["delete", "truncate", "persist"] {
+        let journal = Journal {
+            mode,
+            synchronous: "full",
+        };
+        let report = checkpointing_campaign(journal, Failure::Crash, 220);
+        record(&format!("{mode}-full-checkpoint-crash.txt"), &report);
+    }
+}
+
+/// An I/O error and a full disk at every cut point of a checkpoint leave a
+/// recoverable database.
+///
+/// The two failures a checkpoint can be told about, against the same cut
+/// points [`power_loss_at_every_cut_point_of_a_checkpoint`] crashes at. A
+/// reported failure has to leave the database readable, which is a stronger
+/// requirement than the power loss's: the engine was told, so it had the
+/// chance to put things back.
+#[test]
+fn a_reported_failure_at_every_cut_point_of_a_checkpoint_is_recoverable() {
+    for failure in [Failure::IoError, Failure::DiskFull] {
+        let report = checkpointing_campaign(Journal::DEFAULT, failure, 160);
+        let name = match failure {
+            Failure::IoError => "delete-full-checkpoint-io-error.txt",
+            _ => "delete-full-checkpoint-disk-full.txt",
+        };
+        record(name, &report);
+    }
 }
 
 /// A short write is either recovered or reported, never served as rows.
@@ -477,7 +759,7 @@ fn power_loss_at_every_cut_point_of_a_persist_commit() {
 /// plausible-looking rows that are neither.
 #[test]
 fn a_short_write_at_every_cut_point_is_recoverable() {
-    let journal = JournalOptions::default();
+    let journal = Journal::DEFAULT;
     let report = campaign(journal, Failure::ShortWrite, 160, true);
     record("delete-full-short-write.txt", &report);
 }
@@ -485,7 +767,7 @@ fn a_short_write_at_every_cut_point_is_recoverable() {
 /// A full disk at every cut point leaves a recoverable database.
 #[test]
 fn a_full_disk_at_every_cut_point_is_recoverable() {
-    let journal = JournalOptions::default();
+    let journal = Journal::DEFAULT;
     let report = campaign(journal, Failure::DiskFull, 160, false);
     record("delete-full-disk-full.txt", &report);
 }
@@ -493,7 +775,7 @@ fn a_full_disk_at_every_cut_point_is_recoverable() {
 /// An I/O error at every cut point leaves a recoverable database.
 #[test]
 fn an_io_error_at_every_cut_point_is_recoverable() {
-    let journal = JournalOptions::default();
+    let journal = Journal::DEFAULT;
     let report = campaign(journal, Failure::IoError, 160, false);
     record("delete-full-io-error.txt", &report);
 }
@@ -502,7 +784,7 @@ fn an_io_error_at_every_cut_point_is_recoverable() {
 /// the same result, or the complete old database.
 #[test]
 fn a_crash_during_recovery_is_idempotent() {
-    let journal = JournalOptions::default();
+    let journal = Journal::DEFAULT;
     let (before, after) = expected_states(journal);
     let mut report = String::new();
     let mut covered = 0u64;
@@ -522,15 +804,7 @@ fn a_crash_during_recovery_is_idempotent() {
             vfs.failpoints().fail_nth_call(second, Failure::Crash);
             // The recovery may fail or may be cut short; either way what it
             // leaves has to be recoverable by the next attempt.
-            let _ = SessionDatabase::open_with(
-                path().as_path(),
-                Arc::clone(&vfs) as Arc<dyn Vfs>,
-                OpenOptions {
-                    journal,
-                    ..OpenOptions::default()
-                },
-            )
-            .and_then(|database| database.connect());
+            let _ = open(Arc::clone(&vfs) as Arc<dyn Vfs>, journal);
             let interrupted = vfs.crash();
             let recovery = recovered(journal, &interrupted, 60_000 + second);
             let Recovery::Rows(rows) = &recovery else {
@@ -560,20 +834,20 @@ fn a_crash_during_recovery_is_idempotent() {
 /// rest of the transaction intact.
 #[test]
 fn a_failed_statement_undoes_only_itself() {
-    let journal = JournalOptions::default();
+    let journal = Journal::DEFAULT;
     let vfs = built(journal, 33);
-    let connection = connect(Arc::clone(&vfs) as Arc<dyn Vfs>, journal);
-    run(&connection, "BEGIN").expect("begins");
-    run(&connection, "INSERT INTO t VALUES(10, 'ten', 100)").expect("inserts");
+    let mut engine = open(Arc::clone(&vfs) as Arc<dyn Vfs>, journal).expect("it reopens");
+    exec(&mut engine, "BEGIN").expect("begins");
+    exec(&mut engine, "INSERT INTO t VALUES(10, 'ten', 100)").expect("inserts");
     // The second row of this statement collides with the row the first
     // statement wrote, so ABORT undoes the whole statement - both rows.
-    let failed = run(
-        &connection,
+    let failed = exec(
+        &mut engine,
         "INSERT INTO t VALUES(11, 'eleven', 110), (10, 'again', 120)",
     );
     assert!(failed.is_err(), "the duplicate key must be refused");
-    run(&connection, "COMMIT").expect("commits");
-    let rows = contents(&connection);
+    exec(&mut engine, "COMMIT").expect("commits");
+    let rows = contents(&mut engine);
     assert!(
         rows.iter().any(|row| row.contains("10")),
         "the first statement's row survived: {rows:?}"
@@ -582,4 +856,224 @@ fn a_failed_statement_undoes_only_itself() {
         !rows.iter().any(|row| row.contains("eleven")),
         "the failed statement's earlier row was undone: {rows:?}"
     );
+}
+
+/// The single row [`an_open_transactions_row_never_survives_a_checkpoint`]
+/// inserts without a `COMMIT` - a transaction a checkpoint must never let
+/// reach the file.
+const UNCOMMITTED_INSERT: &str = "INSERT INTO t VALUES(99, 'ninety-nine', 990)";
+
+/// As [`attempt_checkpoint`], for a transaction that is never committed:
+/// `BEGIN`, one insert, then `PRAGMA wal_checkpoint` with the failure armed at
+/// the `n`th call of the checkpoint - and every call from there on is the
+/// checkpoint's, because nothing before it may fail either. Unlike
+/// `attempt_checkpoint`, what this is checked against afterwards is the
+/// schema-only state, because there is no commit for the checkpoint to be
+/// allowed to make durable.
+///
+/// @param journal - the journal mode and durability level
+/// @param seed - the media model's seed
+/// @param nth - which call of the checkpoint to fail
+fn attempt_uncommitted_checkpoint(journal: Journal, seed: u64, nth: u64) -> Attempt {
+    let vfs = built(journal, seed);
+    let committed = match open(Arc::clone(&vfs) as Arc<dyn Vfs>, journal) {
+        Ok(mut engine) => {
+            let wrote = exec(&mut engine, "BEGIN")
+                .and_then(|()| exec(&mut engine, UNCOMMITTED_INSERT))
+                .is_ok();
+            // Armed only now, exactly as `attempt_checkpoint` does: every cut
+            // point this covers is inside the checkpoint, not the insert.
+            let base = vfs.failpoints().sites_reached();
+            vfs.failpoints()
+                .fail_nth_call(base.saturating_add(nth), Failure::Crash);
+            let _ = exec(&mut engine, "PRAGMA wal_checkpoint");
+            let reached = vfs.failpoints().sites_reached().saturating_sub(base);
+            return Attempt {
+                committed: wrote,
+                snapshot: vfs.crash(),
+                reached,
+            };
+        }
+        Err(_) => false,
+    };
+    Attempt {
+        committed,
+        snapshot: vfs.crash(),
+        reached: 0,
+    }
+}
+
+/// An open transaction's row must never survive a checkpoint - whether the
+/// checkpoint runs to completion with nothing crashing it, or is interrupted
+/// at any point along the way.
+///
+/// `BEGIN; INSERT INTO t VALUES(99, ...); PRAGMA wal_checkpoint` never
+/// commits, so every recovery in this campaign has to answer the schema-only
+/// state, not [`WORKLOAD`]'s. Before the fix, `holds_uncommitted` never held
+/// anything back - nothing ever moved `uncommitted_lsn` off `u64::MAX` in the
+/// shipping engine - so the checkpoint wrote row 99's page straight into the
+/// file and `retire_segments_below(durable)` discarded the very log segment
+/// holding the insert's own record. Recovery then found the row sitting in
+/// the table itself, with nothing left in the log to say it had never
+/// committed.
+#[test]
+fn an_open_transactions_row_never_survives_a_checkpoint() {
+    let journal = Journal::NO_ROLLBACK_JOURNAL;
+    let schema_only = {
+        let vfs = simulator(11_211);
+        let mut engine = create(Arc::clone(&vfs) as Arc<dyn Vfs>, journal);
+        run_script(&mut engine, &SCHEMA).expect("the schema builds");
+        contents(&mut engine)
+    };
+    let mut cut_points = 0u64;
+    for nth in 1..=30u64 {
+        let outcome = attempt_uncommitted_checkpoint(journal, 6_600 + nth, nth);
+        assert!(
+            outcome.committed,
+            "call {nth}: the insert has to succeed before the checkpoint is armed"
+        );
+        cut_points = cut_points.saturating_add(1);
+        let recovery = recovered(journal, &outcome.snapshot, 8_800 + nth);
+        assert_eq!(
+            recovery,
+            Recovery::Rows(schema_only.clone()),
+            "call {nth} of an uncommitted checkpoint: row 99 survived a transaction \
+             that was never committed"
+        );
+        if outcome.reached < nth {
+            break;
+        }
+    }
+    assert!(cut_points > 0, "no cut point of the checkpoint ran");
+}
+
+/// How many frames the pool holds for
+/// [`a_transaction_the_evictor_writes_back_never_survives_uncommitted`] -
+/// deliberately far fewer than the file's usual [`FRAMES`], so an ordinary,
+/// uninterrupted transaction dirties more pages than the pool can keep
+/// resident and the *evictor* - not a checkpoint - is what reaches
+/// `Pool::writeback`.
+const SMALL_FRAMES: usize = 64;
+
+/// A transaction wide and long enough to dirty more pages than
+/// [`SMALL_FRAMES`] holds, entirely on its own - no `COMMIT` follows it in
+/// this file.
+const DIRTIES_MANY_PAGES: &str = "INSERT INTO t SELECT 2000 + n, hex(zeroblob(200)), n \
+       FROM (WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM c WHERE n < 300) \
+             SELECT n FROM c)";
+
+/// As [`built`], with a pool of [`SMALL_FRAMES`] frames rather than [`FRAMES`].
+fn built_small(journal: Journal, seed: u64) -> Arc<SimVfs> {
+    let vfs = simulator(seed);
+    let mut engine = ImportedDatabase::create_on(
+        Arc::clone(&vfs) as Arc<dyn Vfs>,
+        path(),
+        PAGE_SIZE,
+        SMALL_FRAMES,
+    )
+    .expect("the database is created");
+    set_journal(&mut engine, journal.mode, journal.synchronous)
+        .expect("journal settings apply on a fresh, unarmed database");
+    run_script(&mut engine, &SCHEMA).expect("the schema builds");
+    drop(engine);
+    vfs
+}
+
+/// Runs `BEGIN` and [`DIRTIES_MANY_PAGES`] on a [`SMALL_FRAMES`] pool, with the
+/// failure armed at the `n`th call from the transaction's own start - so the
+/// crash can land on an ordinary eviction as readily as on the last row
+/// inserted, and as readily on nothing at all, if the insert outruns it.
+///
+/// @param journal - the journal mode and durability level
+/// @param seed - the media model's seed
+/// @param nth - which call after the transaction begins to fail
+fn attempt_evicted_uncommitted(journal: Journal, seed: u64, nth: u64) -> Attempt {
+    let vfs = built_small(journal, seed);
+    let committed = match ImportedDatabase::open_on(
+        Arc::clone(&vfs) as Arc<dyn Vfs>,
+        path(),
+        PAGE_SIZE,
+        SMALL_FRAMES,
+    ) {
+        Ok(mut engine) => {
+            let ready = set_journal(&mut engine, journal.mode, journal.synchronous).is_ok();
+            let base = vfs.failpoints().sites_reached();
+            vfs.failpoints()
+                .fail_nth_call(base.saturating_add(nth), Failure::Crash);
+            let wrote = ready
+                && exec(&mut engine, "BEGIN")
+                    .and_then(|()| exec(&mut engine, DIRTIES_MANY_PAGES))
+                    .is_ok();
+            // The pool has only [`SMALL_FRAMES`] frames, so most of
+            // `DIRTIES_MANY_PAGES`' pages are already written back by
+            // ordinary eviction pressure before this line ever runs - this
+            // checkpoint is what makes the rest of them durable too, the same
+            // way a real process keeps writing after a big insert. Its result
+            // is ignored: a crash may interrupt it as readily as the insert,
+            // and item 3's refusal is itself part of what this campaign
+            // covers.
+            let _ = exec(&mut engine, "PRAGMA wal_checkpoint");
+            let reached = vfs.failpoints().sites_reached().saturating_sub(base);
+            return Attempt {
+                committed: wrote,
+                snapshot: vfs.crash(),
+                reached,
+            };
+        }
+        Err(_) => false,
+    };
+    Attempt {
+        committed,
+        snapshot: vfs.crash(),
+        reached: 0,
+    }
+}
+
+/// A row the evictor - not a checkpoint - has already written back for an
+/// open transaction must not survive when that transaction crashes before
+/// `COMMIT`.
+///
+/// A pool of [`SMALL_FRAMES`] frames cannot hold every page
+/// [`DIRTIES_MANY_PAGES`] dirties, so `Pool::fetch`'s ordinary eviction reaches
+/// `writeback` for some of them long before any checkpoint runs - the second
+/// way no-steal was missing from the shipping engine, distinct from
+/// [`an_open_transactions_row_never_survives_a_checkpoint`]'s checkpoint path.
+/// The transaction never commits, so recovery must answer the schema-only
+/// state regardless of how far the insert got before the crash - including
+/// not at all, when the insert finishes and nothing has crashed it.
+#[test]
+fn a_transaction_the_evictor_writes_back_never_survives_uncommitted() {
+    let journal = Journal::NO_ROLLBACK_JOURNAL;
+    let schema_only = {
+        let vfs = simulator(33_433);
+        let mut engine = ImportedDatabase::create_on(
+            Arc::clone(&vfs) as Arc<dyn Vfs>,
+            path(),
+            PAGE_SIZE,
+            SMALL_FRAMES,
+        )
+        .expect("the database is created");
+        set_journal(&mut engine, journal.mode, journal.synchronous)
+            .expect("journal settings apply on a fresh, unarmed database");
+        run_script(&mut engine, &SCHEMA).expect("the schema builds");
+        contents(&mut engine)
+    };
+    let reach = attempt_evicted_uncommitted(journal, 44_499, u64::MAX).reached;
+    assert!(reach > 0, "the workload has to reach some injectable calls");
+    let mut cut_points = 0u64;
+    for nth in 1..=reach {
+        let outcome = attempt_evicted_uncommitted(journal, 44_500 + nth, nth);
+        cut_points = cut_points.saturating_add(1);
+        let recovery = recovered(journal, &outcome.snapshot, 55_600 + nth);
+        assert_eq!(
+            recovery,
+            Recovery::Rows(schema_only.clone()),
+            "call {nth}: a row the evictor wrote back for an open transaction survived, \
+             though the transaction never committed"
+        );
+        if outcome.reached < nth {
+            break;
+        }
+    }
+    assert!(cut_points > 0, "no cut point of the eviction ran");
 }
