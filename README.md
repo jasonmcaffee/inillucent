@@ -18,7 +18,7 @@ tables, a full text index and a vector index, and all three commit and roll back
 |---|---|---|
 | **330% faster than SQLite 3.53.4** | the same ten workload families at 100,000 rows | [Performance](docs/performance.md) |
 | **70% less processor time** | 390 ms against SQLite's 1,320 for the same plan | [Performance](docs/performance.md) |
-| **391 of 416 SQL cases byte for byte, 12 refused** | every case run through both engines and compared byte by byte; all twelve refusals are window functions | [SQL support](docs/sql.md) |
+| **403 of 416 SQL cases byte for byte, none refused** | every case run through both engines and compared byte by byte. Of the thirteen that differ, six are vector search features SQLite has no equivalent for | [SQL support](docs/sql.md) |
 | **Better than pgvector on 15 of 17 graded comparisons, worse on none** | both engines reading identical vectors | [Retrieval quality](docs/retrieval-quality.md) |
 | **14% more memory than SQLite** | 42.4 MiB against 37.2. The one measurement SQLite still wins | [Performance](docs/performance.md#memory) |
 
@@ -191,13 +191,15 @@ engine. [The driver](drivers/README.md) is the C ABI underneath, for anybody wri
 triggers, foreign keys with all five referential actions, `ATTACH`, partial and expression indexes,
 `RETURNING`, `ON CONFLICT DO UPDATE`, 190 built in function names, 67 pragmas. 416 cases were run
 through this engine and through a pinned `sqlite3` 3.53.4 over a fresh database each, and every byte
-of both streams compared: **391 produce SQLite's exact bytes, 12 are refused and 7 answer
-differently**. Every one of the twelve refusals is a window function: `OVER (...)`, `PARTITION BY`,
-the frame clauses, and the eleven functions that need them. Nothing else in the probe is refused.
+of both streams compared: **403 produce SQLite's exact bytes, none are refused and 7 answer
+differently**. Window functions were the last twelve to close: `OVER (...)`, `PARTITION BY`, the
+`ROWS`, `RANGE` and `GROUPS` frame clauses, every `EXCLUDE` bound and all eleven window-only
+functions now match the pinned SQLite exactly.
 
-Those numbers went *down* during task-1911 and nothing got worse. They were 403 same and 0 refused,
-and they had been measured through `inillucent-shell` while that shell still ran the engine this
-project has since retired. Nobody had re-run them against the engine that ships. →
+**This figure has read 403 before, so you may remember a different number for it.** It was first
+measured at 403 through a shell that still ran an engine this project has since retired. Re-measured against the engine that ships, it read 391, because twelve window function
+cases were reaching a pipeline builder that refused them. The window path is connected now, and the
+probe reads 403 again against the shipping engine. →
 [SQL support](docs/sql.md)
 
 **Vector search in the same file.** A `VECTOR(N)` column, `vector_distance_cos`, `vector_distance_l2`
