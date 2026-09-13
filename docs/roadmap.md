@@ -146,7 +146,8 @@ finding them by bisection would close it. The delta log belongs to `inillucent-s
 called by it.
 
 The scan-and-decode is real and is in `crates/inillucent-tree/src/leaf.rs`. `locate()` walks each
-leaf's **unsorted delta area**, which holds up to `DELTA_LIMIT` 32 entries with a typed decode per column, on
+leaf's **unsorted delta area**, which holds up to `DELTA_LIMIT` 32 entries with a typed decode per
+column, on
 every insert, and `main_table` carries two secondary indexes, so a batch pays it three times a row.
 Closing it means sorting or indexing that area, which is a change to the on-disk leaf format and
 therefore to recovery, and it wants its own ticket rather than a pass inside somebody else's.
@@ -176,7 +177,8 @@ rather than an integer naming the `%_data` row it lived in. This item predicted 
 2.9 ms of the 10.97, which is 26%.
 
 It was worth nothing measurable. Measured as a genuine A/B, with the same fixture and command and the
-change alternated in and out of the tree with a release rebuild each time, at two round counts, the paired
+change alternated in and out of the tree with a release rebuild each time, at two round counts, the
+paired
 ratio read 0.50x/0.56x before and 0.55x/0.53x after. The second write really did disappear, and the
 doclist bytes went with it, out of a rowid-keyed `%_data` row and into a `WITHOUT ROWID` row keyed by
 `(segid, term)`, where rewriting costs about what the extra row saved. **The row count was never what
@@ -199,7 +201,8 @@ term row, a manifest at `%_data` row `-1` whose *absence* identifies a pre-segme
 automerge fold. It was correct, it was tested, and old files still read.
 
 **It made `extension.fts.build` no faster and roughly halved `extension.fts.query`**, which took the
-whole `extension` family under the performance contract's 1.00x floor, which is the bar that fails a release
+whole `extension` family under the performance contract's 1.00x floor, which is the bar that fails a
+release
 outright, on the argument that an engine which is fast on average and slow at one thing is not a
 faster engine.
 
@@ -242,7 +245,8 @@ once instead of twice. All 36 were rewritten before the crates came out, so ever
 against the replacement first. Several were **differential** tests that ran the old engine beside the
 new one and compared; each of those took one of:
 
-- **re-pointed at the pinned SQLite oracle**, which was the majority, once `src/differential.rs` itself was
+- **re-pointed at the pinned SQLite oracle**, which was the majority, once `src/differential.rs`
+  itself was
   moved onto `inillucent_engine::connect` (its `start_inillucent`/`observe`/`compare` now drive the new
   engine, leaked to a `'static` `Connection` so every existing call site kept its shape);
 - **re-pointed at the new engine alone**, asserting the value the old engine used to agree about:
@@ -265,14 +269,16 @@ rather than deleted** once it was clear their subject was never "the old engine"
 whichever engine ships". `scorecard.rs` and `prepareperf.rs` are the release performance gate and the
 `open.prepare` benchmark this document's own item 2 numbers come from, and deleting them would have
 made the suite look healthier while measuring less. `searchgate.rs` lost its second arm the same way
-`new_engine_search.rs` did, because there is no old store to compare against. It is now an absolute report rather
+`new_engine_search.rs` did, because there is no old store to compare against. It is now an absolute
+report rather
 than a two-store gate, which is a real change to what it claims and is written down in its own doc
 comment rather than hidden.
 
 **`inillucent-storage` and `inillucent-transaction` stay**, and the exception is larger than "minus
 its reader" suggests. `inillucent-engine` and `inillucent-migrate` both depend on
 `inillucent-sqlite-reader`, which depends on both of them and on `inillucent-catalog`, which depends
-on `inillucent-storage` in turn, because `analyze.rs`, `ddl.rs` and `load.rs` all read through its `Pager`
+on `inillucent-storage` in turn, because `analyze.rs`, `ddl.rs` and `load.rs` all read through its
+`Pager`
 and `BTreeCursor`. Reading a SQLite file in order to migrate away from it is what keeps 18,764 lines
 of the old engine alive, and that is a feature rather than a leftover. `policy.rs`'s
 `no_new_crate_reaches_into_the_retired_engine` ratchet now watches only these two crates;
@@ -365,7 +371,8 @@ the catalog root's own repair pass does not generalize to. Not investigated past
 Eight items came off this list, and the numbering above is what is left. Each is named here so a
 reader who remembers the old numbers can find what happened to them.
 
-- **A vector index answering zero rows instead of the rows it holds.** This is the wrong answer this engine
+- **A vector index answering zero rows instead of the rows it holds.** This is the wrong answer this
+  engine
   is built not to have. Two faults, both a write that is never committed: `create_vector_index`
   returned without the `seal()` every other directive ends with, and `ImportedDatabase::write` reads
   `next_txn` and moves it on at once, so `current_txn()` answered the *following* number for the rest
@@ -438,8 +445,9 @@ reader who remembers the old numbers can find what happened to them.
   **The journal had no checksums, so recovery wrote torn bytes over a good database.** At the failing
   cut point the database file was intact. Page 3 stored the checksum `b59f5196` and computed
   `b59f5196`. The corruption the test reported was manufactured by recovery itself, out of a journal
-  whose seventeen sectors the crash model had left Torn, Garbage and Dropped. Nothing in the file format could tell a replay that a pre-image was not
-  the bytes that had been written. Every record now carries a CRC over the transaction's nonce, the
+  whose seventeen sectors the crash model had left Torn, Garbage and Dropped. Nothing in the file
+  format could tell a replay that a pre-image was not the bytes that had been written. Every record
+  now carries a CRC over the transaction's nonce, the
   page id and the image; the header carries one over itself; and `replay_hot_journal` stops at the
   first record that fails its check. Stopping there restores everything that is owed: a record can
   only be unverifiable if it was written after the last sync, and a page is only overwritten after
@@ -450,7 +458,8 @@ reader who remembers the old numbers can find what happened to them.
   **The two meta pages were the only pages a checkpoint overwrote without a pre-image.** With the
   first two fixed, the campaigns reached cut point 47 and came back with no tables at all. The
   journal had correctly rolled the data pages back to before the checkpoint, and the meta page still
-  read `generation 5, checkpoint_lsn 17160`, which is a checkpoint that had not finished. Redo believed it,
+  read `generation 5, checkpoint_lsn 17160`, which is a checkpoint that had not finished. Redo
+  believed it,
   started above it, and skipped the records that would have re-applied what the journal had just
   undone; the catalog's own root was one of the rolled-back pages. The shadow meta page does not
   cover this and was never going to: `checkpoint` writes the *same* image to both slots, so the
