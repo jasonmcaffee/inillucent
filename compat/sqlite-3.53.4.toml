@@ -1659,8 +1659,18 @@ id = "ext.fts5.queries"
 source = "https://sqlite.org/fts5.html"
 profile = "default"
 phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
+# The tokenizers this build has are `unicode61` (with `remove_diacritics`,
+# `tokenchars` and `separators`), `ascii`, and `porter` over either. `trigram`
+# is not one of them, and as of task-1932 a name this build has not got is
+# refused by name rather than read as `unicode61`. That substitution was a wrong
+# answer rather than a graceful fallback: the tokenizer decides what `MATCH`
+# means, so `tokenize='trigram'` - a substring search in SQLite - became a
+# whole-word search here, with the table created, the query run and no error
+# anywhere. `a_tokenizer_this_build_has_not_got_is_refused_rather_than_substituted`
+# takes SQLite's own answer to the same statements first, so what is recorded as
+# the difference is measured rather than assumed.
 status = "pass"
-tests = ["inillucent-compat::the_shadow_tables_are_the_documented_ones", "inillucent-compat::the_content_table_holds_the_rows", "inillucent-compat::a_term_finds_its_rows", "inillucent-compat::a_phrase_requires_the_words_together", "inillucent-compat::the_operators_combine_matches", "inillucent-compat::a_prefix_matches_every_term_that_starts_with_it", "inillucent-compat::a_column_filter_restricts_the_match", "inillucent-compat::near_requires_the_terms_close_together", "inillucent-compat::the_index_follows_the_rows", "inillucent-compat::a_scan_and_a_rowid_lookup_need_no_match", "inillucent-compat::an_unindexed_column_is_stored_but_not_matched", "inillucent-compat::the_tokenizer_folds_case_and_splits_on_punctuation", "inillucent-compat::the_special_commands_are_accepted", "inillucent-compat::a_rebuild_restores_every_answer", "inillucent-compat::an_unknown_command_is_refused", "inillucent-compat::the_settings_are_written_to_the_config_table"]
+tests = ["inillucent-compat::a_tokenizer_this_build_has_not_got_is_refused_rather_than_substituted", "inillucent-compat::a_tokenizer_this_build_has_not_got_is_refused", "inillucent-compat::the_shadow_tables_are_the_documented_ones", "inillucent-compat::the_content_table_holds_the_rows", "inillucent-compat::a_term_finds_its_rows", "inillucent-compat::a_phrase_requires_the_words_together", "inillucent-compat::the_operators_combine_matches", "inillucent-compat::a_prefix_matches_every_term_that_starts_with_it", "inillucent-compat::a_column_filter_restricts_the_match", "inillucent-compat::near_requires_the_terms_close_together", "inillucent-compat::the_index_follows_the_rows", "inillucent-compat::a_scan_and_a_rowid_lookup_need_no_match", "inillucent-compat::an_unindexed_column_is_stored_but_not_matched", "inillucent-compat::the_tokenizer_folds_case_and_splits_on_punctuation", "inillucent-compat::the_special_commands_are_accepted", "inillucent-compat::a_rebuild_restores_every_answer", "inillucent-compat::an_unknown_command_is_refused", "inillucent-compat::the_settings_are_written_to_the_config_table"]
 
 [[capability]]
 id = "ext.fts5.ranking"

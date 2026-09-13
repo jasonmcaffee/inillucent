@@ -75,7 +75,8 @@ fn header(w: &mut impl Write, kind: u8) -> Result<()> {
 /// this build can open" without caring which section it happens to be looking at.
 fn check_header_version(r: &mut impl Read) -> Result<()> {
     let mut magic = [0u8; 8];
-    r.read_exact(&mut magic).context("reading the file header")?;
+    r.read_exact(&mut magic)
+        .context("reading the file header")?;
     if !is_known_magic(&magic) {
         anyhow::bail!("not an inillucent index file");
     }
@@ -92,7 +93,8 @@ fn check_header_version(r: &mut impl Read) -> Result<()> {
 
 fn check_header(r: &mut impl Read, kind: u8) -> Result<()> {
     let mut magic = [0u8; 8];
-    r.read_exact(&mut magic).context("reading the file header")?;
+    r.read_exact(&mut magic)
+        .context("reading the file header")?;
     if !is_known_magic(&magic) {
         anyhow::bail!("not an inillucent index file");
     }
@@ -251,9 +253,15 @@ impl SavedFusion {
     fn to_fusion(&self) -> Result<Fusion> {
         Ok(match self.method.as_str() {
             "rrf" => Fusion::ReciprocalRank { k: self.rrf_k },
-            "minmax" => Fusion::NormalizedScore { vector_weight: self.vector_weight },
-            "convex" => Fusion::Convex { vector_weight: self.vector_weight },
-            "tmm" => Fusion::TheoreticalMinMax { vector_weight: self.vector_weight },
+            "minmax" => Fusion::NormalizedScore {
+                vector_weight: self.vector_weight,
+            },
+            "convex" => Fusion::Convex {
+                vector_weight: self.vector_weight,
+            },
+            "tmm" => Fusion::TheoreticalMinMax {
+                vector_weight: self.vector_weight,
+            },
             other => anyhow::bail!("the saved index names an unknown fusion method {other}"),
         })
     }
@@ -286,7 +294,6 @@ impl From<&SavedAdaptive> for AdaptiveWeights {
         }
     }
 }
-
 
 impl From<&IndexConfig> for SavedConfig {
     fn from(cfg: &IndexConfig) -> Self {
@@ -596,17 +603,23 @@ pub fn is_readable(dir: &Path) -> bool {
         return false;
     };
     let g = generation_dir(dir, generation);
-    ["store.bin", "vectors.bin", "config.bin", "graph.bin", "lexical.bin"]
-        .iter()
-        .all(|name| {
-            File::open(g.join(name))
-                .ok()
-                .map(|f| {
-                    let mut r = BufReader::new(f);
-                    check_header_version(&mut r).is_ok()
-                })
-                .unwrap_or(false)
-        })
+    [
+        "store.bin",
+        "vectors.bin",
+        "config.bin",
+        "graph.bin",
+        "lexical.bin",
+    ]
+    .iter()
+    .all(|name| {
+        File::open(g.join(name))
+            .ok()
+            .map(|f| {
+                let mut r = BufReader::new(f);
+                check_header_version(&mut r).is_ok()
+            })
+            .unwrap_or(false)
+    })
 }
 
 /// Reads every file of one generation directory into an index.
@@ -644,7 +657,11 @@ fn load_generation(dir: &Path, resident_vectors: Option<bool>) -> Result<Index> 
         r.read_exact(&mut buf4)?;
         let n = u32::from_le_bytes(buf4) as usize;
         if resident_vectors.unwrap_or(saved.resident_vectors) {
-            VectorSet::from_raw(dims, config.metric, crate::binio::read_pod_vec::<f32>(&mut r, dims * n)?)
+            VectorSet::from_raw(
+                dims,
+                config.metric,
+                crate::binio::read_pod_vec::<f32>(&mut r, dims * n)?,
+            )
         } else {
             // The header is eight magic bytes, one kind byte, then the two counts.
             let offset = VECTOR_HEADER_BYTES;
@@ -730,10 +747,17 @@ pub fn read_index(r: &mut impl Read) -> Result<Index> {
         let dims = u32::from_le_bytes(buf4) as usize;
         cursor.read_exact(&mut buf4)?;
         let count = u32::from_le_bytes(buf4) as usize;
+        // Both numbers come out of the file, so their product is one an
+        // attacker chooses too: `u32::MAX * u32::MAX` is within a factor of two
+        // of `usize::MAX` on a 64-bit target, and a wrapped product would ask
+        // for a small buffer and then be read into as if it were a large one.
+        let wanted = dims
+            .checked_mul(count)
+            .ok_or_else(|| anyhow::anyhow!("a vector section claims {count} vectors of {dims}"))?;
         VectorSet::from_raw(
             dims,
             config.metric,
-            crate::binio::read_pod_vec::<f32>(&mut cursor, dims * count)?,
+            crate::binio::read_pod_vec::<f32>(&mut cursor, wanted)?,
         )
     };
     let params = saved.hnsw_params();
@@ -752,21 +776,39 @@ fn section(w: &mut impl Write, bytes: &[u8]) -> Result<()> {
 
 /// Reads one length-prefixed section.
 ///
-/// The length is checked against a ceiling before it is used to allocate,
-/// because these bytes may have come out of a database file somebody else could
-/// write to, and a corrupt length is the cheapest way to turn a read into an
-/// out-of-memory abort.
+/// The bytes may have come out of a database file somebody else could write to,
+/// so the length is a number an attacker chooses.
+///
+/// **The ceiling below is not what makes this safe, and it used to be all there
+/// was (task-1932, H4).** It was `1 << 40`, and a claimed length anywhere under
+/// a terabyte went straight into `vec![0u8; length as usize]` before
+/// `read_exact` found out whether the file had the bytes. An allocation that
+/// large does not return an error: it goes through `handle_alloc_error`, which
+/// aborts the process. One corrupt byte in a `.rdb` segment row - reached on an
+/// ordinary `SELECT`, through `inillucent_search`'s `load_segment_bytes` - took
+/// the whole process down instead of returning `inillucent_search: unreadable
+/// segment`. The doc comment here named exactly that failure as the one it
+/// existed to prevent.
+///
+/// `binio::read_records` is what prevents it now: the buffer grows as the bytes
+/// arrive, so a length the source cannot satisfy costs one megabyte and then
+/// fails with `UnexpectedEof`. The ceiling stays as an early refusal that names
+/// the number, and comes down to 64 GiB - a section is one generation's store,
+/// vectors, graph or lexical index, and this reads the whole of it into memory,
+/// so a section larger than that could not be used even if it were real.
 fn read_section(r: &mut impl Read) -> Result<Vec<u8>> {
     let mut length = [0u8; 8];
     r.read_exact(&mut length)
         .context("reading a section length")?;
     let length = u64::from_le_bytes(length);
-    const CEILING: u64 = 1 << 40;
+    const CEILING: u64 = 1 << 36;
     if length > CEILING {
-        anyhow::bail!("index section claims {length} bytes, which is not a length this build reads");
+        anyhow::bail!(
+            "index section claims {length} bytes, which is not a length this build reads"
+        );
     }
-    let mut bytes = vec![0u8; length as usize];
-    r.read_exact(&mut bytes).context("reading a section")?;
+    let bytes =
+        crate::binio::read_pod_vec::<u8>(r, length as usize).context("reading a section")?;
     Ok(bytes)
 }
 
@@ -1014,7 +1056,11 @@ pub fn write_segment_delta(
 /// @param w - where the part goes
 /// @param tag - which part this is
 /// @param body - writes the part's payload into a fresh buffer
-fn write_part(w: &mut impl Write, tag: u8, body: impl FnOnce(&mut Vec<u8>) -> Result<()>) -> Result<()> {
+fn write_part(
+    w: &mut impl Write,
+    tag: u8,
+    body: impl FnOnce(&mut Vec<u8>) -> Result<()>,
+) -> Result<()> {
     let mut buf = Vec::new();
     body(&mut buf)?;
     w.write_all(&[tag])?;
@@ -1143,7 +1189,13 @@ pub fn parse_segment_delta(bytes: &[u8]) -> Result<ParsedDelta> {
             other => anyhow::bail!("a segment delta holds an unrecognised part {other}"),
         }
     }
-    Ok(ParsedDelta { base, batches, graph, lexical, sealed })
+    Ok(ParsedDelta {
+        base,
+        batches,
+        graph,
+        lexical,
+        sealed,
+    })
 }
 
 /// Replays one delta's own recorded content onto an already resolved base
@@ -1208,7 +1260,11 @@ fn take_delta_batch(cursor: &mut &[u8]) -> Result<DeltaBatch> {
 /// Reads one `PART_GRAPH` payload back.
 fn take_graph_recording(cursor: &mut &[u8]) -> Result<GraphRecording> {
     let raw_entry = take_u32(cursor)?;
-    let entry = if raw_entry == u32::MAX { None } else { Some(raw_entry) };
+    let entry = if raw_entry == u32::MAX {
+        None
+    } else {
+        Some(raw_entry)
+    };
     let layers_len = take_u64(cursor)?;
     if layers_len > MAX_PART_LIST {
         anyhow::bail!("a segment delta claims an implausible layer count of {layers_len}");
@@ -1236,7 +1292,12 @@ fn take_graph_recording(cursor: &mut &[u8]) -> Result<GraphRecording> {
         bytemuck::cast_slice_mut::<u32, u8>(&mut neighbours).copy_from_slice(neighbour_bytes);
         touched.push((layer, node, neighbours));
     }
-    Ok(GraphRecording { entry, layers_len, node_top_tail, touched })
+    Ok(GraphRecording {
+        entry,
+        layers_len,
+        node_top_tail,
+        touched,
+    })
 }
 
 /// Reads one `PART_LEXICAL` payload back.
@@ -1268,7 +1329,14 @@ fn take_lexical_delta(cursor: &mut &[u8]) -> Result<crate::bm25::LexicalDelta> {
         let chunk = take_u32(cursor)?;
         let positions_at = take_u32(cursor)?;
         let term_frequency = take_u32(cursor)?;
-        postings.push((term, crate::bm25::Posting { chunk, positions_at, term_frequency }));
+        postings.push((
+            term,
+            crate::bm25::Posting {
+                chunk,
+                positions_at,
+                term_frequency,
+            },
+        ));
     }
     Ok(crate::bm25::LexicalDelta {
         range: start..end,
@@ -1428,8 +1496,88 @@ mod tests {
     use crate::filter::Filter;
     use crate::store::ChunkInput;
 
+    /// H4 (task-1920): a section length the file does not have is an error,
+    /// not an abort.
+    ///
+    /// **What this used to do.** `read_section` checked the claimed length
+    /// against a 1 TiB ceiling and then ran `vec![0u8; length as usize]` before
+    /// `read_exact` found out whether the bytes were there. An allocation of a
+    /// few gigabytes does not return an error - it goes through
+    /// `handle_alloc_error`, which aborts the process - so one corrupt byte in
+    /// a `.rdb` segment row, reached on an ordinary `SELECT` through
+    /// `inillucent_search`'s `load_segment_bytes`, took the whole process down
+    /// instead of returning `inillucent_search: unreadable segment`.
+    ///
+    /// The lengths below are the interesting three: a claim just under the old
+    /// ceiling, a claim over the new one, and `u64::MAX`. Each is followed by
+    /// four real bytes, so what the source can actually supply is four orders
+    /// of magnitude short of what it claims.
+    ///
+    /// A test that aborts the process is not a test that fails - the harness
+    /// reports the whole binary as crashed and says nothing about which case -
+    /// which is why the assertion is on the `Err` rather than on a message.
+    #[test]
+    fn a_section_claiming_more_bytes_than_the_source_has_is_refused() {
+        for claimed in [
+            2u64 * 1024 * 1024 * 1024,
+            (1u64 << 40) - 1,
+            1u64 << 36,
+            u64::MAX,
+        ] {
+            let mut bytes: Vec<u8> = Vec::new();
+            header(&mut bytes, KIND_STREAM).expect("the header writes");
+            bytes.extend_from_slice(&claimed.to_le_bytes());
+            bytes.extend_from_slice(b"abcd");
+            let read = read_index(&mut bytes.as_slice());
+            assert!(
+                read.is_err(),
+                "a section claiming {claimed} bytes over a four-byte source was accepted"
+            );
+        }
+    }
+
+    /// H4 (task-1920): the same for the counts inside a section.
+    ///
+    /// `read_pod_vec`, `read_u32_vec`, `read_str` and `read_text` all sized a
+    /// buffer from a count they had just read and allocated it before asking
+    /// whether the records were there - the same shape as `read_section`, one
+    /// layer in. The vectors section is the one that matters most: its `dims`
+    /// and `count` are two `u32`s out of the file, and their product is what is
+    /// allocated, so `4294967295 * 4294967295` records of four bytes each is
+    /// both an absurd allocation and a multiplication that wraps.
+    #[test]
+    fn a_record_count_larger_than_the_source_is_refused() {
+        for (dims, count) in [
+            (1_000_000u32, 1_000_000u32),
+            (u32::MAX, u32::MAX),
+            (16, 500_000_000),
+        ] {
+            let mut section_bytes: Vec<u8> = Vec::new();
+            section_bytes.extend_from_slice(&dims.to_le_bytes());
+            section_bytes.extend_from_slice(&count.to_le_bytes());
+            section_bytes.extend_from_slice(b"abcd");
+            let read = crate::binio::read_pod_vec::<f32>(
+                &mut section_bytes.get(8..).unwrap_or_default(),
+                (dims as usize).saturating_mul(count as usize),
+            );
+            assert!(
+                read.is_err(),
+                "{dims} x {count} records over a four-byte source was accepted"
+            );
+        }
+        // And a string length, which the store reads per chunk.
+        let mut bytes: Vec<u8> = Vec::new();
+        bytes.extend_from_slice(&u32::MAX.to_le_bytes());
+        bytes.extend_from_slice(b"abcd");
+        assert!(crate::binio::read_str(&mut bytes.as_slice()).is_err());
+    }
+
     fn small_index() -> Index {
-        let mut index = Index::new(IndexConfig { dims: 16, quantized: true, ..Default::default() });
+        let mut index = Index::new(IndexConfig {
+            dims: 16,
+            quantized: true,
+            ..Default::default()
+        });
         let chunks: Vec<ChunkInput> = (0..200)
             .map(|i| ChunkInput {
                 source: if i % 3 == 0 { "slack" } else { "confluence" }.into(),
@@ -1452,7 +1600,9 @@ mod tests {
             .collect();
         let vectors: Vec<Vec<f32>> = (0..200)
             .map(|i| {
-                let mut v: Vec<f32> = (0..16).map(|d| ((i * 16 + d) as f32 * 0.07).sin()).collect();
+                let mut v: Vec<f32> = (0..16)
+                    .map(|d| ((i * 16 + d) as f32 * 0.07).sin())
+                    .collect();
                 normalize(&mut v);
                 v
             })
@@ -1482,7 +1632,11 @@ mod tests {
             })
             .collect();
         let vectors: Vec<Vec<f32>> = (0..40)
-            .map(|i| (0..16).map(|d| ((i * 16 + d) as f32 * 0.07).sin() * 3.0).collect())
+            .map(|i| {
+                (0..16)
+                    .map(|d| ((i * 16 + d) as f32 * 0.07).sin() * 3.0)
+                    .collect()
+            })
             .collect();
         index.add(chunks, &vectors);
         index.commit();
@@ -1491,7 +1645,10 @@ mod tests {
 
     fn temp_dir(name: &str) -> PathBuf {
         let mut p = std::env::temp_dir();
-        p.push(format!("inillucent-persist-test-{name}-{}", std::process::id()));
+        p.push(format!(
+            "inillucent-persist-test-{name}-{}",
+            std::process::id()
+        ));
         let _ = fs::remove_dir_all(&p);
         p
     }
@@ -1522,8 +1679,16 @@ mod tests {
             .collect();
         assert_eq!(a, b, "the graph did not survive the round trip");
 
-        let la: Vec<u32> = original.lexical_search("offer eligibility", &f_orig, 10).iter().map(|h| h.chunk).collect();
-        let lb: Vec<u32> = loaded.lexical_search("offer eligibility", &f_load, 10).iter().map(|h| h.chunk).collect();
+        let la: Vec<u32> = original
+            .lexical_search("offer eligibility", &f_orig, 10)
+            .iter()
+            .map(|h| h.chunk)
+            .collect();
+        let lb: Vec<u32> = loaded
+            .lexical_search("offer eligibility", &f_load, 10)
+            .iter()
+            .map(|h| h.chunk)
+            .collect();
         assert_eq!(la, lb, "the lexical index did not survive the round trip");
 
         fs::remove_dir_all(&dir).ok();
@@ -1538,9 +1703,18 @@ mod tests {
 
         for filter in [
             Filter::source("slack"),
-            Filter { labels: Some(vec!["design".into()]), ..Default::default() },
-            Filter { author: Some("Ada".into()), ..Default::default() },
-            Filter { updated_after: Some(1100), ..Default::default() },
+            Filter {
+                labels: Some(vec!["design".into()]),
+                ..Default::default()
+            },
+            Filter {
+                author: Some("Ada".into()),
+                ..Default::default()
+            },
+            Filter {
+                updated_after: Some(1100),
+                ..Default::default()
+            },
         ] {
             let a = original.compile(&filter).pass_count();
             let b = loaded.compile(&filter).pass_count();
@@ -1555,10 +1729,23 @@ mod tests {
         let original = small_index();
         save(&original, &dir).unwrap();
         let loaded = load(&dir).unwrap();
-        let deleted_before = original.store().documents.iter().filter(|d| d.deleted).count();
-        let deleted_after = loaded.store().documents.iter().filter(|d| d.deleted).count();
+        let deleted_before = original
+            .store()
+            .documents
+            .iter()
+            .filter(|d| d.deleted)
+            .count();
+        let deleted_after = loaded
+            .store()
+            .documents
+            .iter()
+            .filter(|d| d.deleted)
+            .count();
         assert_eq!(deleted_before, deleted_after);
-        assert!(deleted_after > 0, "the fixture should contain a deleted document");
+        assert!(
+            deleted_after > 0,
+            "the fixture should contain a deleted document"
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -1602,7 +1789,9 @@ mod tests {
     fn every_ranking_setting_survives_the_round_trip() {
         let dir = temp_dir("ranking-config");
         let mut original = small_index();
-        original.set_fusion(Fusion::TheoreticalMinMax { vector_weight: 0.62 });
+        original.set_fusion(Fusion::TheoreticalMinMax {
+            vector_weight: 0.62,
+        });
         original.set_lexical_coverage(2.25);
         original.set_lexical_proximity(0.4);
         original.set_lexical_prefix(true);
@@ -1653,7 +1842,9 @@ mod tests {
     fn a_non_default_index_answers_identically_after_reopening() {
         let dir = temp_dir("ranking-answers");
         let mut original = small_index();
-        original.set_fusion(Fusion::TheoreticalMinMax { vector_weight: 0.62 });
+        original.set_fusion(Fusion::TheoreticalMinMax {
+            vector_weight: 0.62,
+        });
         original.set_lexical_coverage(2.25);
         original.set_lexical_proximity(0.4);
         original.set_lexical_tier(true);
@@ -1680,7 +1871,6 @@ mod tests {
         fs::remove_dir_all(&dir).ok();
     }
 
-
     #[test]
     fn a_save_publishes_a_new_generation_rather_than_overwriting_the_old_one() {
         let dir = temp_dir("generations");
@@ -1690,7 +1880,10 @@ mod tests {
         save(&index, &dir).unwrap();
         let second = read_current(&dir).unwrap();
 
-        assert!(second > first, "the pointer did not move: {first} then {second}");
+        assert!(
+            second > first,
+            "the pointer did not move: {first} then {second}"
+        );
         assert!(
             generation_dir(&dir, first).join("store.bin").exists(),
             "the superseded generation was removed while a reader could still hold it"
@@ -1735,12 +1928,18 @@ mod tests {
         fs::write(dir.join("current.tmp"), format!("g{:012}", live + 1)).unwrap();
         fs::rename(dir.join("current.tmp"), dir.join("current")).unwrap();
         assert!(!vanished.exists());
-        assert!(load(&dir).is_err(), "a pointer to nothing has nothing to fall back to");
+        assert!(
+            load(&dir).is_err(),
+            "a pointer to nothing has nothing to fall back to"
+        );
 
         // With the pointer naming a generation that is there, the read succeeds.
         fs::write(dir.join("current.tmp"), format!("g{live:012}")).unwrap();
         fs::rename(dir.join("current.tmp"), dir.join("current")).unwrap();
-        assert_eq!(load(&dir).unwrap().store().n_chunks(), index.store().n_chunks());
+        assert_eq!(
+            load(&dir).unwrap().store().n_chunks(),
+            index.store().n_chunks()
+        );
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -1811,8 +2010,15 @@ mod tests {
             let right = loaded.lexical_search(query, &b, 20);
             assert_eq!(left.len(), right.len(), "{query} returned different counts");
             for (l, r) in left.iter().zip(right.iter()) {
-                assert_eq!(l.chunk, r.chunk, "{query} ranked differently after reloading");
-                assert_eq!(l.score.to_bits(), r.score.to_bits(), "{query} scored differently");
+                assert_eq!(
+                    l.chunk, r.chunk,
+                    "{query} ranked differently after reloading"
+                );
+                assert_eq!(
+                    l.score.to_bits(),
+                    r.score.to_bits(),
+                    "{query} scored differently"
+                );
                 assert_eq!(l.matched_terms, r.matched_terms);
             }
         }
@@ -1855,21 +2061,28 @@ mod tests {
         let mut loaded = load(&dir).unwrap();
 
         assert_eq!(loaded.store().live_chunks, original.store().live_chunks);
-        assert_eq!(loaded.store().deleted_chunks, original.store().deleted_chunks);
+        assert_eq!(
+            loaded.store().deleted_chunks,
+            original.store().deleted_chunks
+        );
         assert!(loaded.store().flag_bit("has_attachment").is_some());
-        assert_eq!(loaded.store().chunk_external_id(0), original.store().chunk_external_id(0));
+        assert_eq!(
+            loaded.store().chunk_external_id(0),
+            original.store().chunk_external_id(0)
+        );
         assert!(loaded.store().attribute_dictionary("participant").is_some());
 
         // The filters that read those columns must behave identically.
-        let with_attachment =
-            loaded.compile(&Filter::default().with_flag("has_attachment", true));
+        let with_attachment = loaded.compile(&Filter::default().with_flag("has_attachment", true));
         assert_eq!(with_attachment.pass_count(), 1);
-        let by_participant = loaded.compile(
-            &Filter::default()
-                .with_attribute(crate::filter::AttributeFilter::containing("participant", "jason@")),
-        );
+        let by_participant = loaded.compile(&Filter::default().with_attribute(
+            crate::filter::AttributeFilter::containing("participant", "jason@"),
+        ));
         assert_eq!(by_participant.pass_count(), 1);
-        let before = loaded.compile(&Filter { updated_before: Some(4242), ..Default::default() });
+        let before = loaded.compile(&Filter {
+            updated_before: Some(4242),
+            ..Default::default()
+        });
         assert!(before.pass_count() > 0);
 
         // And the document lookup rebuilds over live documents only, so a
@@ -1983,7 +2196,10 @@ mod tests {
         rewrite_config_json(&generation, |value| {
             if let Some(object) = value.as_object_mut() {
                 let removed = object.remove("metric");
-                assert!(removed.is_some(), "the fixture must have written a metric to remove");
+                assert!(
+                    removed.is_some(),
+                    "the fixture must have written a metric to remove"
+                );
             }
         });
 
@@ -1992,7 +2208,9 @@ mod tests {
         // And it still answers a real query, not just an equal config.
         let query = original.vectors().copy_of(11);
         let filter = loaded.compile(&Filter::default());
-        assert!(!loaded.vector_search(&query, &filter, 5, Some(64)).is_empty());
+        assert!(!loaded
+            .vector_search(&query, &filter, 5, Some(64))
+            .is_empty());
         fs::remove_dir_all(&dir).ok();
     }
 
@@ -2085,7 +2303,9 @@ mod tests {
                     labels: vec!["fresh".into()],
                     ..Default::default()
                 };
-                let mut v: Vec<f32> = (0..16).map(|d| ((i * 16 + d) as f32 * 0.05).cos()).collect();
+                let mut v: Vec<f32> = (0..16)
+                    .map(|d| ((i * 16 + d) as f32 * 0.05).cos())
+                    .collect();
                 normalize(&mut v);
                 (chunk, v)
             })
@@ -2100,7 +2320,11 @@ mod tests {
     /// @param index - the index being folded into
     /// @param puts - the chunks and vectors to replace or add
     /// @param tombstoned - the `(source, external id)` pairs to bare-tombstone
-    fn fold_batch(index: &mut Index, puts: &[(ChunkInput, Vec<f32>)], tombstoned: &[(String, String)]) {
+    fn fold_batch(
+        index: &mut Index,
+        puts: &[(ChunkInput, Vec<f32>)],
+        tombstoned: &[(String, String)],
+    ) {
         for (chunk, vector) in puts {
             index.replace_document(
                 &chunk.source,
@@ -2154,8 +2378,14 @@ mod tests {
             touched: accumulator.drain_graph_recording(),
         };
         let lexical = accumulator.drain_lexical_recording();
-        assert!(!graph.touched.is_empty(), "the fixture's batch must touch the graph");
-        assert!(lexical.is_some(), "the fixture's batch must touch the lexical index");
+        assert!(
+            !graph.touched.is_empty(),
+            "the fixture's batch must touch the graph"
+        );
+        assert!(
+            lexical.is_some(),
+            "the fixture's batch must touch the lexical index"
+        );
 
         // Written in pieces: a delta referencing the base by an id, carrying
         // only the recorded content, read back through the same chain a
@@ -2164,10 +2394,16 @@ mod tests {
         write_segment_delta(
             &mut delta_bytes,
             Some(1),
-            &[DeltaBatch { puts: puts.clone(), tombstoned: tombstoned.clone() }],
+            &[DeltaBatch {
+                puts: puts.clone(),
+                tombstoned: tombstoned.clone(),
+            }],
             &graph,
             lexical.as_ref(),
-            Some((accumulator.store().n_chunks() as u64, accumulator.store().n_documents() as u64)),
+            Some((
+                accumulator.store().n_chunks() as u64,
+                accumulator.store().n_documents() as u64,
+            )),
         )
         .unwrap();
         let parsed = parse_segment_delta(&delta_bytes).unwrap();
@@ -2205,7 +2441,10 @@ mod tests {
         .unwrap();
         let parsed = parse_segment_delta(&bytes).unwrap();
         assert_eq!(parsed.base, Some(1));
-        assert!(parsed.sealed.is_none(), "an unfinished checkpoint must not report a seal");
+        assert!(
+            parsed.sealed.is_none(),
+            "an unfinished checkpoint must not report a seal"
+        );
     }
 
     /// The final checkpoint of a merge carries a seal, and its counts survive
@@ -2214,7 +2453,15 @@ mod tests {
     #[test]
     fn a_sealed_delta_reports_its_seal_counts() {
         let mut bytes = Vec::new();
-        write_segment_delta(&mut bytes, None, &[], &GraphRecording::default(), None, Some((42, 7))).unwrap();
+        write_segment_delta(
+            &mut bytes,
+            None,
+            &[],
+            &GraphRecording::default(),
+            None,
+            Some((42, 7)),
+        )
+        .unwrap();
         let parsed = parse_segment_delta(&bytes).unwrap();
         assert_eq!(parsed.base, None);
         assert_eq!(parsed.sealed, Some((42, 7)));
@@ -2231,7 +2478,15 @@ mod tests {
         assert!(!is_segment_delta(&stream_bytes));
 
         let mut delta_bytes = Vec::new();
-        write_segment_delta(&mut delta_bytes, Some(1), &[], &GraphRecording::default(), None, None).unwrap();
+        write_segment_delta(
+            &mut delta_bytes,
+            Some(1),
+            &[],
+            &GraphRecording::default(),
+            None,
+            None,
+        )
+        .unwrap();
         assert!(is_segment_delta(&delta_bytes));
     }
 
@@ -2256,6 +2511,9 @@ mod tests {
             Ok(_) => panic!("a truncated delta must not parse"),
             Err(error) => error,
         };
-        assert!(format!("{error:#}").contains("ended before it should have"), "{error:#}");
+        assert!(
+            format!("{error:#}").contains("ended before it should have"),
+            "{error:#}"
+        );
     }
 }

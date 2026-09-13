@@ -991,10 +991,21 @@ fn holds_subquery(select: &BoundSelect) -> bool {
             .iter()
             .flatten()
             .any(expression_holds_subquery)
-        || select
-            .aggregates
-            .iter()
-            .any(|aggregate| aggregate.arguments.iter().any(expression_holds_subquery))
+        // **The aggregate's `FILTER` and its inner `ORDER BY` are walked here
+        // too as of task-1932 (M6).** This flag is the cheap question
+        // `subquery::fold` asks before it walks anything, so a statement it
+        // answers `false` for never folds - and a subquery in an aggregate's
+        // `FILTER` was therefore left in an unfilled slot, which `translate`
+        // reports as `unsupported("a correlated subquery used as a value")`.
+        // The windows below already had all four of theirs.
+        || select.aggregates.iter().any(|aggregate| {
+            aggregate.arguments.iter().any(expression_holds_subquery)
+                || aggregate.filter.iter().any(expression_holds_subquery)
+                || aggregate
+                    .order_by
+                    .iter()
+                    .any(|term| expression_holds_subquery(&term.expr))
+        })
         || select.windows.iter().any(|window| {
             window.arguments.iter().any(expression_holds_subquery)
                 || window.filter.iter().any(expression_holds_subquery)

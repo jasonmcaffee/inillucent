@@ -353,6 +353,44 @@ fn gather_select(select: &BoundSelect, into: &mut Vec<(usize, SubqueryKind, bool
             gather_expression(constraint, into);
         }
     }
+    // **The aggregates and the windows, which this walk did not have
+    // (task-1932, M6).** `select.aggregates` is a list of its own, beside
+    // `select.columns` rather than inside it, so a subquery written as an
+    // aggregate's argument was never seen here. It was therefore never
+    // recognised as a correlated block, its slot was never filled, and
+    // `translate` reported the empty slot as `unsupported("a correlated
+    // subquery used as a value")` - a true statement about the slot and a false
+    // one about the query. `SELECT team, SUM((SELECT b.amount FROM b WHERE
+    // b.team = a.team)) FROM a GROUP BY team` was refused outright.
+    //
+    // The `FILTER` and the inner `ORDER BY` are walked for the same reason
+    // `bind::gather_columns` walks them: they read the row, so a subquery in
+    // one of them is correlated in exactly the way an argument's is.
+    for aggregate in &select.aggregates {
+        for argument in &aggregate.arguments {
+            gather_expression(argument, into);
+        }
+        if let Some(filter) = &aggregate.filter {
+            gather_expression(filter, into);
+        }
+        for term in &aggregate.order_by {
+            gather_expression(&term.expr, into);
+        }
+    }
+    for window in &select.windows {
+        for argument in &window.arguments {
+            gather_expression(argument, into);
+        }
+        if let Some(filter) = &window.filter {
+            gather_expression(filter, into);
+        }
+        for term in &window.partition_by {
+            gather_expression(term, into);
+        }
+        for term in &window.order_by {
+            gather_expression(&term.expr, into);
+        }
+    }
 }
 
 /// Collects every correlated block one expression holds.

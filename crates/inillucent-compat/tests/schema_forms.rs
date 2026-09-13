@@ -1224,3 +1224,253 @@ fn vacuum_into_writes_a_copy_sqlite_reads() {
         Ok(vec!["int:2".to_string()])
     );
 }
+
+/// H3 (task-1920): an `ALTER TABLE ADD COLUMN` on an empty table does not
+/// evaluate the new column's `DEFAULT`, and so cannot half-apply.
+///
+/// **What used to happen.** `alter_table` rewrites every catalog row that names
+/// the table, rebuilds the connection's schema from those rows, and then
+/// rebuilds the tree. The tree rebuild is where a `DEFAULT` was evaluated - by
+/// running `SELECT <the default text>` through the ordinary execute path - and
+/// it ran whether or not there were rows to fill. So `ALTER TABLE t ADD COLUMN
+/// b INTEGER DEFAULT (no_such_function())` failed three writes after the
+/// catalog already said the column was there. Nothing undid those writes:
+/// outside an explicit transaction `rewrite` recorded no before-image, and
+/// `execute_ddl` had no rollback wrapper the way `write` has `abandon`.
+/// `next_txn` had not moved either, because `seal` was never reached, so the
+/// half-written rows were committed by whatever the next successful statement
+/// committed. `PRAGMA table_info(t)` then listed a column the tree had no slot
+/// for, on disk, across a reopen.
+///
+/// **An empty table is the only way to reach it, and that is why it is the
+/// first `ALTER` a user runs.** `AddedColumnRisk::refusal` refuses a default
+/// that is not a literal, and `alter_table` applies that refusal only when
+/// `table_has_a_row` - so a populated table is turned away up front with
+/// SQLite's own "Cannot add a column with non-constant default", and an empty
+/// one walks past the guard into the rewrite.
+///
+/// **The fix is to match the reference rather than to refuse earlier.** SQLite
+/// accepts this `ALTER`, records `DEFAULT (no_such_function())` in the schema
+/// text, and reports `unknown function` at the first `INSERT` that needs the
+/// value - which is what every assertion below is graded against, the reference
+/// answering first so the expectations are its own.
+#[test]
+fn an_alter_adding_a_column_to_an_empty_table_matches_the_oracle() {
+    let Some(program) = oracle_path() else {
+        eprintln!("the pinned SQLite oracle is not built; skipping");
+        return;
+    };
+    // The reference's answers, taken first so that what is asserted below is
+    // SQLite's behaviour rather than this engine's opinion of it.
+    let reference = scratch("alter-empty-default-oracle");
+    let mut driver = Driver::start("sqlite", &program).expect("the oracle starts");
+    driver.send(&Op::Hello).expect("the oracle greets");
+    driver
+        .send(&Op::Open(reference.display().to_string()))
+        .expect("the oracle opens");
+    for statement in [
+        "CREATE TABLE t (a INTEGER PRIMARY KEY, name TEXT)",
+        "ALTER TABLE t ADD COLUMN b INTEGER DEFAULT (no_such_function())",
+    ] {
+        let observation = driver
+            .send(&Op::Exec(statement.to_string()))
+            .expect("the oracle answers");
+        assert!(
+            observation.ok,
+            "SQLite refused {statement}: {}",
+            observation.message
+        );
+    }
+    let oracle_columns: Vec<String> = driver
+        .send(&Op::Query("PRAGMA table_info(t)".to_string()))
+        .expect("the oracle answers")
+        .rows
+        .iter()
+        .filter_map(|row| row.get(1))
+        .map(render_tagged)
+        .collect();
+    assert_eq!(
+        oracle_columns,
+        vec![
+            "text:a".to_string(),
+            "text:name".to_string(),
+            "text:b".to_string()
+        ]
+    );
+    let oracle_insert = driver
+        .send(&Op::Exec(
+            "INSERT INTO t (a, name) VALUES (1, 'ada')".to_string(),
+        ))
+        .expect("the oracle answers");
+    assert!(
+        !oracle_insert.ok,
+        "SQLite ran an INSERT whose default calls a function it does not have"
+    );
+    let oracle_explicit = driver
+        .send(&Op::Exec(
+            "INSERT INTO t (a, name, b) VALUES (2, 'bob', 5)".to_string(),
+        ))
+        .expect("the oracle answers");
+    assert!(
+        oracle_explicit.ok,
+        "SQLite refused an INSERT that supplies the column: {}",
+        oracle_explicit.message
+    );
+
+    let path = scratch("alter-empty-default");
+    let database = Database::open(&path).expect("the database opens");
+    let connection = database.connect().expect("the connection opens");
+    run_all(
+        &connection,
+        &[
+            "CREATE TABLE t (a INTEGER PRIMARY KEY, name TEXT)",
+            "CREATE INDEX t_name ON t (name)",
+            "CREATE VIEW t_view AS SELECT a, name FROM t",
+            "ALTER TABLE t ADD COLUMN b INTEGER DEFAULT (no_such_function())",
+        ],
+    );
+    let columns: Vec<String> = run(&connection, "PRAGMA table_info(t)")
+        .expect("table_info answers")
+        .iter()
+        .filter_map(|row| row.split('|').nth(1).map(str::to_string))
+        .collect();
+    assert_eq!(
+        columns, oracle_columns,
+        "the columns disagree with the reference's after the same ALTER"
+    );
+    // The catalog and the tree agree, which is the half that used to be wrong:
+    // a read of the new column answers NULL for a row rather than failing, and
+    // a write against the shape the catalog claims lands.
+    assert!(
+        run(&connection, "INSERT INTO t (a, name) VALUES (1, 'ada')").is_err(),
+        "an INSERT that needs the default must report the function, as SQLite does"
+    );
+    run_all(
+        &connection,
+        &["INSERT INTO t (a, name, b) VALUES (2, 'bob', 5)"],
+    );
+    assert_eq!(
+        run(&connection, "SELECT a, name, b FROM t ORDER BY a"),
+        Ok(vec!["int:2|text:bob|int:5".to_string()])
+    );
+    assert_eq!(
+        run(&connection, "SELECT a FROM t WHERE name = 'bob'"),
+        Ok(vec!["int:2".to_string()])
+    );
+    assert!(database.check().is_ok());
+
+    drop(connection);
+    drop(database);
+    let reopened = Database::open(&path).expect("the database reopens");
+    let connection = reopened.connect().expect("the reopened database connects");
+    assert_eq!(
+        run(&connection, "SELECT a, name, b FROM t ORDER BY a"),
+        Ok(vec!["int:2|text:bob|int:5".to_string()])
+    );
+    assert!(reopened.check().is_ok());
+}
+
+/// H3 (task-1920): a `REINDEX` that fails on a later index leaves the earlier
+/// ones as they were.
+///
+/// **`REINDEX` is the same shape as `ALTER` and the same fix covers it.** It
+/// walks every target index, rebuilds each one's tree, rewrites each one's
+/// catalog row with the new root page, and seals once at the end. A failure on
+/// the third index used to leave the first two rewritten and uncommitted, for
+/// the next successful statement to commit.
+///
+/// The failure is arranged the way an application would actually meet it: the
+/// third index is partial, its predicate calls a function the application
+/// registered, and the connection running the `REINDEX` no longer has it. That
+/// is a real state - a function one connection registered and another did not -
+/// and reaching it needs no fault injection.
+#[test]
+fn a_reindex_that_fails_partway_changes_nothing() {
+    let path = scratch("reindex-failed");
+    let database = Database::open(&path).expect("the database opens");
+    let connection = database.connect().expect("the connection opens");
+    connection
+        .create_scalar_function(
+            "keeps",
+            1,
+            inillucent_ext::registry::FunctionFlags::external(),
+            std::sync::Arc::new(|arguments: &[Value<'static>]| {
+                let value = arguments
+                    .first()
+                    .and_then(Value::as_integer)
+                    .unwrap_or_default();
+                Ok(Value::Integer(i64::from(value % 2 == 0)))
+            }),
+        )
+        .expect("the function registers");
+    run_all(
+        &connection,
+        &[
+            "CREATE TABLE t (a INTEGER PRIMARY KEY, b TEXT, c INTEGER)",
+            "INSERT INTO t VALUES (1, 'one', 10)",
+            "INSERT INTO t VALUES (2, 'two', 20)",
+            "INSERT INTO t VALUES (3, 'three', 30)",
+            "CREATE INDEX i_b ON t (b)",
+            "CREATE INDEX i_c ON t (c)",
+            "CREATE INDEX i_partial ON t (c) WHERE keeps(a)",
+        ],
+    );
+    let schema = run(
+        &connection,
+        "SELECT type, name, tbl_name, rootpage, sql FROM sqlite_schema ORDER BY name",
+    )
+    .expect("the schema reads");
+
+    // Without the function the partial index's predicate cannot be bound, so
+    // its rebuild fails - after `i_b` and `i_c` have been rebuilt and had their
+    // catalog rows rewritten with new root pages.
+    assert!(
+        connection.remove_function("keeps", 1),
+        "the function was registered and is removed"
+    );
+    assert!(
+        run(&connection, "REINDEX").is_err(),
+        "a REINDEX whose predicate cannot be bound must fail, not report success"
+    );
+
+    assert_eq!(
+        run(
+            &connection,
+            "SELECT type, name, tbl_name, rootpage, sql FROM sqlite_schema ORDER BY name"
+        ),
+        Ok(schema.clone()),
+        "a catalog row was rewritten by the part of the REINDEX that succeeded"
+    );
+    // The indexes still answer, which is what a rewritten row naming a tree
+    // that was then rolled back would break.
+    assert_eq!(
+        run(&connection, "SELECT a FROM t WHERE b = 'two'"),
+        Ok(vec!["int:2".to_string()])
+    );
+    assert_eq!(
+        run(&connection, "SELECT a FROM t WHERE c = 30"),
+        Ok(vec!["int:3".to_string()])
+    );
+    assert!(
+        database.check().is_ok(),
+        "every index still agrees with the table it is on"
+    );
+
+    drop(connection);
+    drop(database);
+    let reopened = Database::open(&path).expect("the database reopens");
+    let connection = reopened.connect().expect("the reopened database connects");
+    assert_eq!(
+        run(
+            &connection,
+            "SELECT type, name, tbl_name, rootpage, sql FROM sqlite_schema ORDER BY name"
+        ),
+        Ok(schema),
+        "the failed REINDEX became permanent across a reopen"
+    );
+    assert_eq!(
+        run(&connection, "SELECT a FROM t WHERE c = 20"),
+        Ok(vec!["int:2".to_string()])
+    );
+    assert!(reopened.check().is_ok());
+}

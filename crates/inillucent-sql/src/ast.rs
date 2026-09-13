@@ -1213,8 +1213,38 @@ pub enum TransactionBehaviour {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Ast {
     names: Vec<Name>,
+    /// Where a folded name already is, so `intern` is a lookup rather than a
+    /// scan.
+    ///
+    /// **`intern` was a linear scan of every name interned so far, so N
+    /// distinct identifiers cost N-squared comparisons (task-1932, H8).** The
+    /// `SqlLength` default is 1 GiB, so a statement naming two hundred thousand
+    /// distinct columns is well inside what the parser accepts and was
+    /// quadratic to parse. The key is the whole of what the scan compared -
+    /// the folded text, the quote form, and the written spelling - so an entry
+    /// found here is an entry the scan would have found.
+    interned: std::collections::HashMap<(Vec<u8>, QuoteForm, Vec<u8>), u32>,
     exprs: Vec<Expr>,
     expr_spans: Vec<Span>,
+    /// How deep each expression's own subtree is, one entry per node.
+    ///
+    /// **`Limit::ExprDepth` was declared in `compat/limits.toml` and enforced
+    /// nowhere (task-1932, H8).** The parser charges `Limit::ParserDepth` in
+    /// `enter`/`leave`, which counts recursion, and the two are different
+    /// measurements: a flat chain `a1 = 1 AND a2 = 2 AND ...` enters and leaves
+    /// `parse_expr_bp` once per term, so the recursion counter never
+    /// accumulates, while the tree grows one level per term with nothing
+    /// counting it. SQLite refuses at depth 1000. A tree that deep is accepted
+    /// here and then walked recursively by the binder, the planner and the
+    /// executor, each of which overflows the stack at some depth nobody
+    /// measured.
+    ///
+    /// A node's depth is one more than the deepest of its children, and a child
+    /// is always already in the arena when its parent is added, so this is one
+    /// pass over the child ids at `add_expr` rather than a walk.
+    expr_depths: Vec<u32>,
+    /// The deepest expression tree in the arena.
+    max_expr_depth: u32,
     selects: Vec<Select>,
     cores: Vec<SelectCore>,
     from_terms: Vec<FromTerm>,
@@ -1242,8 +1272,11 @@ impl Ast {
     /// be a live id in the next one's arena.
     pub fn clear(&mut self) {
         self.names.clear();
+        self.interned.clear();
         self.exprs.clear();
         self.expr_spans.clear();
+        self.expr_depths.clear();
+        self.max_expr_depth = 0;
         self.selects.clear();
         self.cores.clear();
         self.from_terms.clear();
@@ -1261,25 +1294,59 @@ impl Ast {
 
     /// Interns an identifier, returning the id of an equal existing entry when
     /// there is one.
+    ///
+    /// **A map rather than a scan (task-1932, H8).** This walked every name
+    /// interned so far and compared three fields against each, so a statement
+    /// naming N distinct identifiers cost N-squared comparisons - and the
+    /// `SqlLength` default is 1 GiB, which leaves room for hundreds of
+    /// thousands of them. The key is exactly what the scan compared, so the
+    /// answer is the same one and only the cost changed.
+    ///
+    /// The count is charged against `Limit::Column` for the same reason the
+    /// depth is charged below: a bound that exists in `compat/limits.toml` and
+    /// is enforced nowhere is not a bound. It is generous - a name is a column,
+    /// a table, an alias, a function or a collation, so one statement
+    /// legitimately interns more names than any one table has columns - and it
+    /// is a ceiling on an arena that has to fit in memory rather than a
+    /// statement about the schema.
     pub fn intern(&mut self, text: Vec<u8>, quote: QuoteForm, span: Span) -> NameId {
         let folded: Vec<u8> = text.iter().map(|byte| byte.to_ascii_lowercase()).collect();
-        if let Some(index) = self
-            .names
-            .iter()
-            .position(|name| name.folded == folded && name.quote == quote && name.text == text)
-        {
-            return NameId(index as u32);
+        let key = (folded, quote, text);
+        if let Some(index) = self.interned.get(&key) {
+            return NameId(*index);
         }
+        let (folded, quote, text) = key.clone();
         self.bytes = self
             .bytes
             .saturating_add(text.len().saturating_add(folded.len()).saturating_add(32));
+        let index = self.names.len() as u32;
         self.names.push(Name {
             text,
             folded,
             quote,
             span,
         });
-        NameId(self.names.len().saturating_sub(1) as u32)
+        self.interned.insert(key, index);
+        NameId(index)
+    }
+
+    /// Returns how many distinct identifiers have been interned.
+    pub fn name_count(&self) -> usize {
+        self.names.len()
+    }
+
+    /// Returns the depth of the deepest expression tree in the arena.
+    ///
+    /// What `Limit::ExprDepth` is charged against. See `expr_depths`.
+    pub fn max_expr_depth(&self) -> u32 {
+        self.max_expr_depth
+    }
+
+    /// Returns how deep one expression's own subtree is.
+    ///
+    /// @param id - the node
+    pub fn expr_depth(&self, id: ExprId) -> u32 {
+        self.expr_depths.get(id.0 as usize).copied().unwrap_or(0)
     }
 
     /// Returns an interned name.
@@ -1302,9 +1369,92 @@ impl Ast {
         self.bytes = self
             .bytes
             .saturating_add(core::mem::size_of::<Expr>().saturating_add(8));
+        let depth = self.depth_of(&expr);
+        self.max_expr_depth = self.max_expr_depth.max(depth);
         self.exprs.push(expr);
         self.expr_spans.push(span);
+        self.expr_depths.push(depth);
         ExprId(self.exprs.len().saturating_sub(1) as u32)
+    }
+
+    /// Returns how deep a node about to be added is.
+    ///
+    /// One more than the deepest of its children. Every child is already in the
+    /// arena - the parser builds bottom up - so this reads their recorded
+    /// depths rather than walking them, which is what keeps `add_expr` the
+    /// constant-time push it was.
+    ///
+    /// A subquery's depth is one: the `SELECT` it names has an expression arena
+    /// of its own and its own `max_expr_depth`, and charging the outer tree for
+    /// the inner one would refuse a shallow expression that happens to contain
+    /// a deep query rather than the deep query itself.
+    ///
+    /// @param expr - the node
+    fn depth_of(&self, expr: &Expr) -> u32 {
+        let deepest = |ids: &[ExprId]| -> u32 {
+            ids.iter().map(|id| self.expr_depth(*id)).max().unwrap_or(0)
+        };
+        let children = match expr {
+            Expr::Literal(_)
+            | Expr::Parameter { .. }
+            | Expr::Column { .. }
+            | Expr::Star { .. }
+            | Expr::Exists { .. }
+            | Expr::Subquery(_)
+            | Expr::Raise { .. } => 0,
+            Expr::Unary { operand, .. }
+            | Expr::Collate { operand, .. }
+            | Expr::Cast { operand, .. }
+            | Expr::IsNull { operand, .. } => self.expr_depth(*operand),
+            Expr::Binary { left, right, .. } | Expr::Is { left, right, .. } => {
+                self.expr_depth(*left).max(self.expr_depth(*right))
+            }
+            Expr::Pattern {
+                operand,
+                pattern,
+                escape,
+                ..
+            } => self
+                .expr_depth(*operand)
+                .max(self.expr_depth(*pattern))
+                .max(escape.map(|id| self.expr_depth(id)).unwrap_or(0)),
+            Expr::Between {
+                operand, low, high, ..
+            } => self
+                .expr_depth(*operand)
+                .max(self.expr_depth(*low))
+                .max(self.expr_depth(*high)),
+            Expr::In { operand, rhs, .. } => {
+                let right = match rhs {
+                    InRhs::List(ids) => deepest(ids),
+                    InRhs::Select(_) => 0,
+                    InRhs::Table { arguments, .. } => {
+                        arguments.as_deref().map(deepest).unwrap_or(0)
+                    }
+                };
+                self.expr_depth(*operand).max(right)
+            }
+            Expr::Case {
+                operand,
+                branches,
+                otherwise,
+            } => {
+                let mut deep = operand.map(|id| self.expr_depth(id)).unwrap_or(0);
+                for (when, then) in branches {
+                    deep = deep.max(self.expr_depth(*when)).max(self.expr_depth(*then));
+                }
+                deep.max(otherwise.map(|id| self.expr_depth(id)).unwrap_or(0))
+            }
+            Expr::Function {
+                arguments, filter, ..
+            } => arguments
+                .as_deref()
+                .map(deepest)
+                .unwrap_or(0)
+                .max(filter.map(|id| self.expr_depth(id)).unwrap_or(0)),
+            Expr::RowValue(ids) => deepest(ids),
+        };
+        children.saturating_add(1)
     }
 
     /// Returns an expression node.

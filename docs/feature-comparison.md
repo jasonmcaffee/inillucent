@@ -18,18 +18,18 @@ them.
 | **Faster than pgvector** | **175% faster unfiltered, 6,262% faster filtered** | retrieval p50 0.8954 ms against 2.459, and 0.6631 ms against 42.182 with a `source =` predicate, against the *better* of the two pgvector configurations. In production, on Nikaya's 598,560-chunk mailbox, semantic p50 went 33.7 ms warm to **4.41 ms** - **664% faster**, and recall@100 0.899 to **1.000** |
 | **Less CPU** | **70% less CPU** | 390 ms of processor against SQLite's 1,320, same plan, one child process each. Ratio 0.30x against a 0.40x bar, which it meets on all four runs |
 | **Less RAM** | **it is not less. It is 15% MORE** | 42.6 MiB peak resident against SQLite's 37.2, on the same 128 MiB budget. It was **102% more** before review 6 and **43% more** before review 7, and the bar asks for **5% less** - so this is the one headline that is still a loss |
-| **Same features as SQLite** | **94.0% byte for byte, 95.4% working, 12 refused** | 391 of 416 probed cases produce SQLite's exact bytes. 6 of the other 25 are vector features SQLite does not have; **12 are window functions, which this engine refuses**; 7 answer differently. [Why it is not 100%](#why-it-is-not-100) says what each is and which can ever be closed |
+| **Same features as SQLite** | **96.9% byte for byte, 98.3% of what SQLite answers, none refused** | 403 of 416 probed cases produce SQLite's exact bytes. 6 of the other 13 are vector features SQLite does not have, and 7 answer differently. [Why it is not 100%](#why-it-is-not-100) says what each is and which can ever be closed |
 
-**The numbers above went down in task-1911, and nothing got worse.** They were **403 of 416 byte for
-byte with 0 refused**, and they had been measured through `inillucent-shell` while that shell still
-ran the engine this project retired. `inillucent` re-exports `inillucent-engine` now, so the shell
-under the probe is a different program than the one those figures describe, and nobody had re-run it.
-
-Re-run from scratch against the engine that ships: **391 same, 12 refused, 7 answering differently,
-6 features SQLite does not have.** Every one of the 12 refusals is a window function — `win.rank`,
-`win.dist`, `win.lag`, `win.value`, `win.partition`, the four frame cases, `win.filter`, `win.named`,
-and `select.orderby.window`. `sql.select.window` and `functions.window` are `status = "missing"` in
-`compat/sqlite-3.53.4.toml` to match.
+**This figure has read 403 twice, with a dip to 391 between.** It was first measured at **403 of 416
+with 0 refused** through `inillucent-shell` while that shell still ran an engine this project
+retired. `inillucent` re-exports `inillucent-engine` now, so the shell under the probe became a
+different program, and re-running it from scratch against the engine that ships gave **391 same, 12
+refused**. All twelve were window functions, and the cause was narrow: the compiled-statement path
+bailed out on compound selects and had no matching check for windows, so a windowed statement reached
+a pipeline builder that refused it, while a correct window implementation sat behind a path only a
+test called. Reconnecting the two restored every case. The probe now reads **403 same, 0 refused, 7
+answering differently, 6 features SQLite does not have**, and `sql.select.window` and
+`functions.window` are `pass` in `compat/sqlite-3.53.4.toml` to match.
 
 So the sentence this table used to carry — *"there is no case SQLite answers that this engine
 refuses"* — was true of a program that is no longer what you install. It is written out here rather
@@ -111,9 +111,9 @@ structural difference. Zero cases are accepted here that SQLite rejects.
 | **1** | **the two pinned SQLite artifacts disagreeing with each other.** `.limit` reports `trigger_depth 1000`; the downloaded `sqlite3.exe` says 100 because it was built with `SQLITE_MAX_TRIGGER_DEPTH=100`, and the locally built oracle says 1000. Twelve of its thirteen lines agree | **No.** Whichever value is printed, one of the two references disagrees with it |
 | **3** | **numbers that describe SQLite's own C structures**: `EXPLAIN`'s bytecode program, `.vfslist`'s `szOsFile`, `.stats`' lookaside counters. Each prints the same report in the same shape over the facts *this* engine has | **No.** Printing SQLite's bytes would be a statement about a library that is not linked into this program - a fabrication, not compatibility |
 
-So: **391 of 416 agree byte for byte (94.0%)**, **12 are refused (2.9%) and all twelve are window
-functions**, and **7 answer differently (1.7%)**. Excluding the six vector cases that have no SQLite
-answer to compare against, 391 of the remaining 410 agree byte for byte - **95.4%**. **None of the
+So: **403 of 416 agree byte for byte (96.9%)**, **none are refused**, and **7 answer differently
+(1.7%)**. Excluding the six vector cases that have no SQLite answer to compare against, 403 of the
+remaining 410 agree byte for byte - **98.3%**. **None of the
 seven that differ can be closed by any value** - three because they describe SQLite's own internals,
 one because the two reference artifacts contradict each other, and three at a measured cost to the
 performance bars.
@@ -927,7 +927,7 @@ each of those does it.
 | FTS5 external content table | yes | **yes** |
 | FTS5 contentless table | yes | **yes** |
 | FTS5 'optimize' and 'rebuild' commands | yes | **yes** |
-| FTS5 tokenizer options | yes | **yes** |
+| FTS5 tokenizer options | yes | **partly** - `unicode61` with `remove_diacritics`, `tokenchars` and `separators`, `ascii`, and `porter` over either. `trigram` is not implemented, and a name this build has not got is now refused by name rather than read as `unicode61`: the tokenizer decides what `MATCH` means, so substituting one turned `tokenize='trigram'`'s substring search into a whole-word search with no error anywhere |
 | fts5vocab | yes | **yes** |
 | FTS3/FTS4 | yes | **yes** |
 

@@ -861,7 +861,7 @@ mod tests {
 
     /// Parses a query with the default tokenizer and two columns.
     fn parse(text: &str) -> Query {
-        let tokenizer = Tokenizer::named(&[]);
+        let tokenizer = Tokenizer::named(&[]).expect("a known tokenizer");
         Query::parse(
             text.as_bytes(),
             &tokenizer,
@@ -908,7 +908,7 @@ mod tests {
     /// A column nobody declared is a query error.
     #[test]
     fn an_unknown_column_is_refused() {
-        let tokenizer = Tokenizer::named(&[]);
+        let tokenizer = Tokenizer::named(&[]).expect("a known tokenizer");
         assert!(Query::parse(b"nope:cat", &tokenizer, &[b"title".to_vec()]).is_err());
     }
 

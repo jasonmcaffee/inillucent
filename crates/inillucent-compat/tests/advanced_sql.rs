@@ -329,6 +329,84 @@ fn ctes_match_the_oracle() {
     ]);
 }
 
+/// An aggregate's `FILTER (WHERE ...)` under a `GROUP BY` that streams.
+///
+/// **A wrong answer this ticket found rather than one the review named.** The
+/// M6 test below refused to pass until it was fixed, and it has nothing to do
+/// with subqueries: `StreamAggregate::push` has two paths, and only one of them
+/// applied `FILTER`. The dense path - one bare integer key column over a dense
+/// batch - folds each run through `fold_run`, which checks `spec.filter`. The
+/// general path, which is what a text or multi-column group key takes, pushed
+/// the argument straight into the accumulator and never looked at the filter at
+/// all. So `SELECT team, count(*) FILTER (WHERE score > 0) FROM a GROUP BY
+/// team` counted every row of every group, while the same statement grouped by
+/// an integer column answered correctly.
+///
+/// That is why it went unnoticed: the two group-key types take different paths
+/// and only one of them was wrong. Both are graded here, over the same
+/// predicate, against the same oracle.
+#[test]
+fn an_aggregate_filter_under_a_group_by_matches_the_oracle() {
+    grade(
+        "aggregate-filter",
+        &[
+            // A text group key: the general path, which ignored the filter.
+            "SELECT team, count(*) FILTER (WHERE score > 0) FROM a GROUP BY team ORDER BY team",
+            "SELECT team, sum(id) FILTER (WHERE score > 0) FROM a GROUP BY team ORDER BY team",
+            "SELECT team, count(*) FILTER (WHERE 0) FROM a GROUP BY team ORDER BY team",
+            "SELECT team, count(*) FILTER (WHERE 1) FROM a GROUP BY team ORDER BY team",
+            "SELECT team, count(*) FILTER (WHERE name IS NULL) FROM a GROUP BY team ORDER BY team",
+            "SELECT team, group_concat(name, '-') FILTER (WHERE id > 1) FROM a GROUP BY team ORDER BY team",
+            "SELECT team, min(id) FILTER (WHERE id > 2), max(id) FILTER (WHERE id > 2) FROM a GROUP BY team ORDER BY team",
+            // Two calls, one filtered and one not, so a fix that filtered
+            // everything would fail here.
+            "SELECT team, count(*), count(*) FILTER (WHERE score > 0) FROM a GROUP BY team ORDER BY team",
+            // An integer group key: the dense path, which was already right.
+            "SELECT id, count(*) FILTER (WHERE score > 0) FROM a GROUP BY id ORDER BY id",
+            "SELECT id, sum(id) FILTER (WHERE id > 2) FROM a GROUP BY id ORDER BY id",
+            // Grouped by an expression, which is neither.
+            "SELECT id % 2, count(*) FILTER (WHERE score > 0) FROM a GROUP BY id % 2 ORDER BY 1",
+            // And an inner ORDER BY, which the general path also skipped.
+            "SELECT team, group_concat(name, '-' ORDER BY id DESC) FROM a GROUP BY team ORDER BY team",
+        ],
+    );
+}
+
+/// A correlated subquery inside an aggregate's argument, its `FILTER` and its
+/// inner `ORDER BY`.
+///
+/// **What was wrong.** `correlate::gather_select` walked the columns, the
+/// filter, the having, the group by, the order by and the join constraints,
+/// and never `select.aggregates` - which is a list of its own, beside
+/// `select.columns` rather than inside it. A subquery written as an
+/// aggregate's argument was therefore never recognised as a correlated block,
+/// its slot was never filled, and `translate` reported the empty slot as
+/// `unsupported("a correlated subquery used as a value")` - a true statement
+/// about the slot and a false one about the query. The whole shape was refused
+/// with exit code 3.
+#[test]
+fn a_correlated_subquery_in_an_aggregate_argument_matches_the_oracle() {
+    grade(
+        "aggregate-subquery",
+        &[
+            "SELECT team, SUM((SELECT count(*) FROM b WHERE b.team = a.team)) FROM a GROUP BY team ORDER BY team",
+            "SELECT team, max((SELECT b.rank FROM b WHERE b.team = a.team)) FROM a GROUP BY team ORDER BY team",
+            "SELECT count((SELECT b.rank FROM b WHERE b.team = a.team)) FROM a",
+            "SELECT team, group_concat((SELECT b.region FROM b WHERE b.team = a.team), '-') FROM a GROUP BY team ORDER BY team",
+            "SELECT team, count(*) FILTER (WHERE (SELECT count(*) FROM b WHERE b.team = a.team) > 0) FROM a GROUP BY team ORDER BY team",
+            "SELECT team, sum(id + (SELECT count(*) FROM b WHERE b.team = a.team)) FROM a GROUP BY team ORDER BY team",
+            // An uncorrelated subquery in the same places, which folds rather
+            // than correlating and went through a different path.
+            "SELECT team, SUM((SELECT count(*) FROM b)) FROM a GROUP BY team ORDER BY team",
+            "SELECT sum(id) FILTER (WHERE id > (SELECT min(id) FROM b)) FROM a",
+            // And in a window function's argument, partition and order, which
+            // the same walk was missing.
+            "SELECT name, sum((SELECT count(*) FROM b WHERE b.team = a.team)) OVER (ORDER BY id) FROM a ORDER BY id",
+            "SELECT name, count(*) OVER (PARTITION BY (SELECT count(*) FROM b WHERE b.team = a.team)) FROM a ORDER BY id",
+        ],
+    );
+}
+
 /// An arithmetic overflow in a seek key, a range bound and a projection.
 ///
 /// **What this catches.** `constant::fold` - the folder that turns
