@@ -54,6 +54,12 @@ const SCHEMA: &[&str] = &[
     "INSERT INTO c VALUES (2, 'two')",
     "INSERT INTO c VALUES (NULL, 'null')",
     "INSERT INTO c VALUES (3, NULL)",
+    // The two rowids an integer overflow can fold onto, so a seek key that
+    // wrapped would find a row rather than nothing (task-1932, H7).
+    "CREATE TABLE edge (id INTEGER PRIMARY KEY, tag TEXT)",
+    "INSERT INTO edge VALUES (-9223372036854775808, 'floor')",
+    "INSERT INTO edge VALUES (9223372036854775807, 'ceiling')",
+    "INSERT INTO edge VALUES (1, 'one')",
     "CREATE VIEW blue AS SELECT id, name, score FROM a WHERE team = 'blue'",
     "CREATE VIEW ranked (who, place) AS SELECT a.name, b.rank FROM a JOIN b ON a.team = b.team",
 ];
@@ -323,17 +329,105 @@ fn ctes_match_the_oracle() {
     ]);
 }
 
-// `windows_match_the_oracle` was retired here. It graded 41 statements -
-// every frame unit, every bound, every `EXCLUDE`, and the eleven functions
-// that only exist in a window - against the old engine, which had them all.
-// The shipping engine's physical pass refuses every `OVER (...)` statement
-// outright: "the new engine's physical pass does not handle a window
-// function reaching the pipeline builder yet" (`DbError` primary code 21,
-// unsupported). A genuinely missing capability, not a test that needs
-// rewriting: recorded as `sql.select.window` and `functions.window`, both
-// `status = "missing"`, in `compat/sqlite-3.53.4.toml`, and in
-// `docs/feature-comparison.md`'s "Window functions" section.
+/// An arithmetic overflow in a seek key, a range bound and a projection.
+///
+/// **What this catches.** `constant::fold` - the folder that turns
+/// `WHERE id = <constant expression>` into the key a scan seeks to - had its
+/// own arithmetic, built on `wrapping_add` and its siblings, while the row
+/// evaluator promotes an integer overflow to a double the way SQLite does.
+/// `WHERE id = 9223372036854775807 + 1` therefore folded to `i64::MIN`, and
+/// the fixture above has a row there: the query returned `floor` where SQLite
+/// returns nothing. An empty table would have hidden it, because an empty
+/// result is the right answer by accident. The same three statements graded
+/// through a projection instead of a seek key exercise the evaluator's own
+/// path, so a later change that fixes one and not the other fails here.
+#[test]
+fn integer_overflow_in_a_seek_key_matches_the_oracle() {
+    grade(
+        "overflow",
+        &[
+            "SELECT tag FROM edge WHERE id = 9223372036854775807 + 1",
+            "SELECT tag FROM edge WHERE id = -9223372036854775807 - 2",
+            "SELECT tag FROM edge WHERE id = 9223372036854775807 * 2",
+            "SELECT tag FROM edge WHERE id > 9223372036854775807 + 1 ORDER BY id",
+            "SELECT tag FROM edge WHERE id < -9223372036854775807 - 2 ORDER BY id",
+            "SELECT tag FROM edge WHERE id = 1 + 0 ORDER BY id",
+            "SELECT 9223372036854775807 + 1, typeof(9223372036854775807 + 1)",
+            "SELECT -9223372036854775807 - 2, typeof(-9223372036854775807 - 2)",
+            "SELECT 9223372036854775807 * 2, typeof(9223372036854775807 * 2)",
+            "SELECT 'abc' + 1, typeof('abc' + 1), '4' + 1, typeof('4' + 1)",
+            "SELECT tag FROM edge WHERE id = 'abc' + 1",
+            "SELECT tag FROM edge WHERE id = '1' + 0",
+            "SELECT tag FROM edge WHERE id = NULL + 1",
+        ],
+    );
+}
 
+/// Window functions: every frame unit, every bound, every `EXCLUDE`, and the
+/// eleven functions that only exist in a window.
+///
+/// **This test was retired and is back (task-1932, H1).** It was removed on
+/// the evidence that "the shipping engine's physical pass refuses every
+/// `OVER (...)` statement outright", and `sql.select.window` and
+/// `functions.window` were moved to `missing` in `compat/sqlite-3.53.4.toml`
+/// on that reading. The capability was not missing. `run_windowed` answered
+/// all forty-one of these statements the whole time; what refused them was
+/// `compiled::try_compile`, which bailed out on `plan.compounds` and not on
+/// `plan.select.windows`, so every application entry point - which all go
+/// through the cached path - hit `refuse_unhandled` instead of the evaluator.
+/// One `Ok(None)` in `try_compile` reconnects the two, and the grading below
+/// is what says the evaluator is right rather than merely reachable.
+/// Window functions: every frame unit, every bound, every `EXCLUDE`, and the
+/// eleven functions that only exist in a window.
+#[test]
+fn windows_match_the_oracle() {
+    grade(
+        "windows",
+        &[
+            "SELECT name, row_number() OVER () FROM a ORDER BY id",
+            "SELECT name, row_number() OVER (ORDER BY score) FROM a ORDER BY id",
+            "SELECT name, rank() OVER (ORDER BY team) FROM a ORDER BY id",
+            "SELECT name, dense_rank() OVER (ORDER BY team) FROM a ORDER BY id",
+            "SELECT name, percent_rank() OVER (ORDER BY team) FROM a ORDER BY id",
+            "SELECT name, cume_dist() OVER (ORDER BY team) FROM a ORDER BY id",
+            "SELECT name, ntile(3) OVER (ORDER BY id) FROM a ORDER BY id",
+            "SELECT name, ntile(2) OVER (PARTITION BY team ORDER BY id) FROM a ORDER BY id",
+            "SELECT name, lag(name) OVER (ORDER BY id) FROM a ORDER BY id",
+            "SELECT name, lag(name, 2) OVER (ORDER BY id) FROM a ORDER BY id",
+            "SELECT name, lag(name, 2, 'none') OVER (ORDER BY id) FROM a ORDER BY id",
+            "SELECT name, lead(name) OVER (ORDER BY id) FROM a ORDER BY id",
+            "SELECT name, lead(name, 3, 'none') OVER (ORDER BY id) FROM a ORDER BY id",
+            "SELECT name, first_value(name) OVER (ORDER BY id) FROM a ORDER BY id",
+            "SELECT name, last_value(name) OVER (ORDER BY id) FROM a ORDER BY id",
+            "SELECT name, nth_value(name, 2) OVER (ORDER BY id) FROM a ORDER BY id",
+            "SELECT name, count(*) OVER () FROM a ORDER BY id",
+            "SELECT name, count(*) OVER (PARTITION BY team) FROM a ORDER BY id",
+            "SELECT name, sum(id) OVER (ORDER BY id) FROM a ORDER BY id",
+            "SELECT name, sum(id) OVER (ORDER BY id ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM a ORDER BY id",
+            "SELECT name, sum(id) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) FROM a ORDER BY id",
+            "SELECT name, sum(id) OVER (ORDER BY id ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) FROM a ORDER BY id",
+            "SELECT name, sum(id) OVER (ORDER BY id ROWS 2 PRECEDING) FROM a ORDER BY id",
+            "SELECT name, avg(score) OVER (PARTITION BY team ORDER BY id) FROM a ORDER BY id",
+            "SELECT name, min(id) OVER (ORDER BY team), max(id) OVER (ORDER BY team) FROM a ORDER BY id",
+            "SELECT name, group_concat(name, '-') OVER (ORDER BY id) FROM a ORDER BY id",
+            "SELECT name, count(*) OVER (ORDER BY team RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM a ORDER BY id",
+            "SELECT name, count(*) OVER (ORDER BY team GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM a ORDER BY id",
+            "SELECT name, count(*) OVER (ORDER BY team RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW EXCLUDE CURRENT ROW) FROM a ORDER BY id",
+            "SELECT name, count(*) OVER (ORDER BY team RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING EXCLUDE GROUP) FROM a ORDER BY id",
+            "SELECT name, count(*) OVER (ORDER BY team RANGE BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING EXCLUDE TIES) FROM a ORDER BY id",
+            "SELECT name, count(*) FILTER (WHERE score > 0) OVER (PARTITION BY team) FROM a ORDER BY id",
+            "SELECT name, sum(id) FILTER (WHERE id > 2) OVER () FROM a ORDER BY id",
+            "SELECT name, row_number() OVER w FROM a WINDOW w AS (ORDER BY id) ORDER BY id",
+            "SELECT name, row_number() OVER (w ORDER BY id DESC) FROM a WINDOW w AS (PARTITION BY team) ORDER BY id",
+            "SELECT name, row_number() OVER (PARTITION BY team ORDER BY id), count(*) OVER (PARTITION BY score) FROM a ORDER BY id",
+            "SELECT id + row_number() OVER (ORDER BY id) FROM a ORDER BY id",
+            "SELECT name FROM a WHERE id > 1 ORDER BY row_number() OVER (ORDER BY id DESC)",
+            "SELECT team, count(*), row_number() OVER (ORDER BY team) FROM a GROUP BY team ORDER BY team",
+            "SELECT name, sum(id) OVER (ORDER BY id) FROM a ORDER BY id LIMIT 2 OFFSET 1",
+            "SELECT DISTINCT count(*) OVER (PARTITION BY team) FROM a ORDER BY 1",
+        ],
+    );
+}
 /// The math built-ins, over a value matrix that includes the awkward cases:
 /// a domain error, a non-numeric argument, the integer/real boundary, and the
 /// two functions whose meaning changes with their argument count.

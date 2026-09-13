@@ -52,6 +52,7 @@
 
 pub mod datum;
 pub mod key;
+pub mod keyenc;
 pub mod leaf;
 pub mod mutate;
 pub mod page;

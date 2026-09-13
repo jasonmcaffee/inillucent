@@ -152,6 +152,8 @@ impl<'p> Datum<'p> {
             (Datum::Null, Datum::Null) => Ordering::Equal,
             (Datum::Int(a), Datum::Int(b)) => a.cmp(b),
             (Datum::Text(a), Datum::Text(b)) | (Datum::Blob(a), Datum::Blob(b)) => a.cmp(b),
+            (Datum::Int(a), Datum::Real(b)) => compare_int_real(*a, *b),
+            (Datum::Real(a), Datum::Int(b)) => compare_int_real(*b, *a).reverse(),
             _ => match (self.as_f64(), other.as_f64()) {
                 (Some(a), Some(b)) => a.partial_cmp(&b).unwrap_or(Ordering::Equal),
                 _ => Ordering::Equal,
@@ -350,6 +352,58 @@ impl OwnedDatum {
 
 /// Copies a borrowed row into owned storage.
 ///
+/// Compares an integer and a double exactly, the way SQLite's
+/// `sqlite3IntFloatCompare` does.
+///
+/// **`a as f64` is not a comparison, it is a lossy conversion, and this is
+/// where that mattered (task-1932, H7).** Every integer above 2^53 has
+/// several near neighbours that share its double, so widening both sides made
+/// `9223372036854775807` compare equal to `9223372036854775808.0`. A seek key
+/// that overflowed to that double therefore found the row at `i64::MAX` and
+/// returned it, where SQLite returns nothing - and the same widening would
+/// equate any two large rowids whose doubles collide.
+///
+/// The rule here is SQLite's own, in its no-long-double form: a double outside
+/// the `i64` range settles the comparison by itself, and inside the range the
+/// double is truncated towards zero to an integer, the two integers are
+/// compared, and the truncated part breaks a tie. Nothing is widened.
+///
+/// @param left - the integer operand
+/// @param right - the double operand
+pub fn compare_int_real(left: i64, right: f64) -> Ordering {
+    if right.is_nan() {
+        // SQLite sorts NaN with NULL, below every number, so an integer is
+        // greater than one. `Datum::compare` never reaches this with a NaN
+        // from the tree - a NaN is not storable - but a comparison against a
+        // computed one does.
+        return Ordering::Greater;
+    }
+    // `-9223372036854775808.0` is exactly `i64::MIN`, so the bound below it is
+    // strict; `9223372036854775808.0` is one past `i64::MAX`, so the bound
+    // above it is not.
+    if right < -9_223_372_036_854_775_808.0 {
+        return Ordering::Greater;
+    }
+    if right >= 9_223_372_036_854_775_808.0 {
+        return Ordering::Less;
+    }
+    let truncated = right as i64;
+    match left.cmp(&truncated) {
+        Ordering::Equal => {}
+        other => return other,
+    }
+    // Equal down to the integer part, so the fraction decides. `truncated as
+    // f64` is exact here: it is a value the double already held.
+    let whole = truncated as f64;
+    if whole < right {
+        Ordering::Less
+    } else if whole > right {
+        Ordering::Greater
+    } else {
+        Ordering::Equal
+    }
+}
+
 /// @param row - the row to copy
 pub fn own_row(row: &[Datum<'_>]) -> Vec<OwnedDatum> {
     row.iter().map(OwnedDatum::from_datum).collect()

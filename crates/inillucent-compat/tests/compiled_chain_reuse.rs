@@ -1014,3 +1014,69 @@ fn a_left_join_with_a_residual_condition_still_answers_correctly() {
         "after DELETE on the inner table",
     );
 }
+
+/// H1 (task-1920): a window function reaches `run_windowed` through the
+/// cached path, not a refusal.
+///
+/// **Why this is in this file and not in the SQL suites.** The defect was not
+/// that window functions were unimplemented - `run_windowed` is about a
+/// thousand lines and it works. It was that `compiled::try_compile` checked
+/// `plan.compounds` and not `plan.select.windows`, so a windowed statement
+/// reached `build_upper`'s `refuse_unhandled` and `run_cached_query`
+/// propagated that refusal with `?`, while `run_with` - the fresh path this
+/// file compares against, which nothing but a test calls - dispatched the
+/// same statement to `run_windowed` and answered it. That is exactly the
+/// cached-versus-fresh divergence this file exists to catch, and
+/// `assert_cache_agrees_with_fresh` fails on the parent commit with
+/// "unsupported: a window function reaching the pipeline builder" from the
+/// cached call while the fresh call answers.
+#[test]
+fn a_windowed_select_answers_through_the_cached_path_too() {
+    let mut database = ImportedDatabase::create(scratch("windowed-cached"), PAGE_SIZE, FRAMES)
+        .expect("a fresh database is created");
+    exec(
+        &mut database,
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, grp TEXT NOT NULL, amount INTEGER NOT NULL)",
+    );
+    for (id, grp, amount) in [
+        (1, "a", 10),
+        (2, "a", 20),
+        (3, "b", 5),
+        (4, "b", 50),
+        (5, "b", 7),
+    ] {
+        exec(
+            &mut database,
+            &format!("INSERT INTO t (id, grp, amount) VALUES ({id}, '{grp}', {amount})"),
+        );
+    }
+    let params = Params::new();
+    for select in [
+        "SELECT id, row_number() OVER (ORDER BY id) FROM t",
+        "SELECT grp, amount, sum(amount) OVER (PARTITION BY grp ORDER BY id) FROM t ORDER BY id",
+        "SELECT id, rank() OVER (ORDER BY amount DESC) FROM t ORDER BY id",
+        "SELECT id, lag(amount) OVER (ORDER BY id), lead(amount) OVER (ORDER BY id) FROM t",
+    ] {
+        assert_cache_agrees_with_fresh(&mut database, select, &params, "windowed, first execution");
+        // The second reading is the one a reused chain would get wrong: the
+        // `Slot` is decided on the first call and every later call takes the
+        // decision it recorded.
+        assert_cache_agrees_with_fresh(
+            &mut database,
+            select,
+            &params,
+            "windowed, reusing the slot",
+        );
+    }
+
+    exec(
+        &mut database,
+        "INSERT INTO t (id, grp, amount) VALUES (6, 'a', 3)",
+    );
+    for select in [
+        "SELECT id, row_number() OVER (ORDER BY id) FROM t",
+        "SELECT grp, amount, sum(amount) OVER (PARTITION BY grp ORDER BY id) FROM t ORDER BY id",
+    ] {
+        assert_cache_agrees_with_fresh(&mut database, select, &params, "windowed, after INSERT");
+    }
+}

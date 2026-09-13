@@ -399,7 +399,7 @@ refused.** They are collected in
 | Bare column with an aggregate | yes | **yes** |
 | DISTINCT over several columns | yes | **yes** |
 | DISTINCT with an ORDER BY on a column not selected | yes | **yes** |
-| ORDER BY a window function | yes | no - window functions are not implemented, see [Window functions](#window-functions---0-of-11) |
+| ORDER BY a window function | yes | **yes** |
 | HAVING referring to a select alias | yes | **yes** |
 | count(DISTINCT) with two arguments | yes | **yes** |
 
@@ -456,27 +456,35 @@ A `USING` or `NATURAL` join *coalesces* the named column, and the right-hand cop
 | WITH on INSERT | yes | **yes** |
 | WITH on UPDATE and DELETE | yes | **yes** |
 
-### Window functions - 0 of 11
+### Window functions - 11 of 11
 
-**Not implemented.** This section previously claimed all eleven agreed, which was measured against
-the engine task-1911 retired. The engine that ships today refuses every `OVER (...)` statement outright
-- "the new engine's physical pass does not handle a window function reaching the pipeline builder
-yet" - so every row below is a refusal, not a byte-for-byte answer. Tracked as `sql.select.window` and
-`functions.window` in `compat/sqlite-3.53.4.toml`, both `status = "missing"`.
+This section said "0 of 11, not implemented" between task-1911 and task-1932. That was wrong, and the
+way it was wrong is worth recording. The evaluator - `run_windowed` in `inillucent-exec`, about a
+thousand lines - answered every form the whole time. The refusal came from one layer above it:
+`compiled::try_compile` bailed out on `plan.compounds` and had no matching check for
+`plan.select.windows`, so a windowed statement reached `build_upper`, which refused it, and
+`run_cached_query` propagated that refusal instead of falling back to the fresh path the way a
+compound does. Every entry point an application uses goes through that cached path, so the working
+evaluator was reachable only from `run_with`, which nothing but a test calls.
+
+Each row below is graded against SQLite 3.53.4 by `windows_match_the_oracle` in
+`crates/inillucent-compat/tests/advanced_sql.rs`: forty-one statements, compared row for row in
+order with storage classes included. Tracked as `sql.select.window` and `functions.window` in
+`compat/sqlite-3.53.4.toml`, both `status = "pass"`.
 
 | feature | SQLite 3.53.4 | inillucent |
 |---|---|---|
-| row_number, rank, dense_rank | yes | no |
-| ntile, cume_dist, percent_rank | yes | no |
-| lag and lead | yes | no |
-| first_value, last_value, nth_value | yes | no |
-| PARTITION BY | yes | no |
-| ROWS frame | yes | no |
-| RANGE frame | yes | no |
-| GROUPS frame | yes | no |
-| EXCLUDE clauses | yes | no |
-| Aggregate with FILTER over a window | yes | no |
-| Named WINDOW clause reused | yes | no |
+| row_number, rank, dense_rank | yes | **yes** |
+| ntile, cume_dist, percent_rank | yes | **yes** |
+| lag and lead | yes | **yes** |
+| first_value, last_value, nth_value | yes | **yes** |
+| PARTITION BY | yes | **yes** |
+| ROWS frame | yes | **yes** |
+| RANGE frame | yes | **yes** |
+| GROUPS frame | yes | **yes** |
+| EXCLUDE clauses | yes | **yes** |
+| Aggregate with FILTER over a window | yes | **yes** |
+| Named WINDOW clause reused | yes | **yes** |
 
 ### INSERT, UPDATE, DELETE - 24 of 24
 
@@ -936,7 +944,7 @@ and `matchinfo(t, format)`, over the tokenizer, dictionary and doclists FTS5 alr
 
 | feature | SQLite 3.53.4 | inillucent |
 |---|---|---|
-| CREATE VIRTUAL TABLE ... rtree and a window query | yes | no - the window function half is not implemented, see [Window functions](#window-functions---0-of-11) |
+| CREATE VIRTUAL TABLE ... rtree and a window query | yes | **yes** |
 | rtree_i32 | yes | **yes** |
 | An R-Tree with an auxiliary column | yes | **yes** |
 
@@ -1862,10 +1870,9 @@ node tools/feature-probe/registers.js
 It diffs the four registers and the two `.help` outputs, calls every one of the 218 function names
 SQLite lists in both shells, and then calls the context-scoped ones properly, because a bare call
 reports the wrong thing in *both* engines: `bm25`, `highlight` and `snippet` over a real FTS5 index
-answer correctly there. Window functions are the exception - a bare call now answers the same
-`misuse of window function` message SQLite gives, but calling one properly inside `OVER (...)` is
-refused rather than answered, because the engine's physical pass does not implement window functions
-at all. Its transcripts land in `_agent_output/feature-probe/registers/`.
+answer correctly there. Window functions are the exception in the other direction - a bare call
+answers the same `misuse of window function` message SQLite gives, and calling one properly inside
+`OVER (...)` answers what SQLite answers. Its transcripts land in `_agent_output/feature-probe/registers/`.
 
 The three rules that keep it meaningful are in the file's own header: **the enumeration comes from
 SQLite, never from us**; **every name is called, not just listed**, because a register can

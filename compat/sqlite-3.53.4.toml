@@ -1192,19 +1192,27 @@ id = "sql.select.window"
 source = "https://sqlite.org/windowfunctions.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
-# Was "pass", against `windows_match_the_oracle` in `advanced_sql.rs` (41
-# statements), `ordered_statements_match_the_oracle` in `ordering.rs` and the
-# `select.window` case in `semantics.rs` - all graded against the old engine.
-# The shipping engine refuses every one of them: "the new engine's physical
-# pass does not handle a window function reaching the pipeline builder yet"
-# (`DbError` primary code 21, unsupported). Confirmed by
-# `semantics::every_probed_construct_answers_as_the_table_says`, which prints
-# an agreed/disagreed count over 208 constructs and found exactly this one
-# newly disagreeing. A genuinely missing capability, not a test that needs
-# rewriting; see `docs/feature-comparison.md`'s "Window functions" section,
-# corrected in the same change.
-status = "missing"
-tests = []
+# Moved to "missing" on the reading that "the shipping engine refuses every
+# one of them", and back to "pass" in task-1932. The capability was never
+# missing. `run_windowed` in `inillucent-exec` answers all forty-one forms
+# `windows_match_the_oracle` grades - every frame unit, every bound, every
+# `EXCLUDE` - and `run_any_prepared` dispatches to it. What refused them was
+# `compiled::try_compile`, which bailed out on `plan.compounds` and not on
+# `plan.select.windows`, so a windowed statement reached `build_upper`'s
+# `refuse_unhandled` and `run_cached_query` propagated that with `?` rather
+# than falling back the way a compound does. Every application entry point
+# goes through that cached path, which is why the evaluator looked absent.
+# One `Ok(None)` in `try_compile` reconnects them, and all forty-one
+# statements now match SQLite 3.53.4 exactly, in order, with storage classes
+# compared. `compiled_chain_reuse::a_windowed_select_answers_through_the_cached_path_too`
+# is what stops the cached and fresh paths drifting apart again.
+status = "pass"
+tests = [
+  "inillucent-compat::windows_match_the_oracle",
+  "inillucent-compat::ordered_statements_match_the_oracle",
+  "inillucent-compat::a_windowed_select_answers_through_the_cached_path_too",
+  "inillucent-compat::every_probed_construct_answers_as_the_table_says",
+]
 
 [[capability]]
 id = "sql.upsert"
@@ -1545,14 +1553,14 @@ id = "functions.window"
 source = "https://sqlite.org/windowfunctions.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
-# Was "pass", against the same `windows_match_the_oracle` this ticket retired
-# for `sql.select.window` above - the eleven window-only functions
-# (row_number, rank, dense_rank, percent_rank, cume_dist, ntile, lag, lead,
-# first_value, last_value, nth_value) all live behind the same `OVER (...)`
-# clause the physical pass refuses. A genuinely missing capability, not a
-# test that needs rewriting.
-status = "missing"
-tests = []
+# Back to "pass" in task-1932 for the same reason as `sql.select.window`
+# above: the eleven window-only functions (row_number, rank, dense_rank,
+# percent_rank, cume_dist, ntile, lag, lead, first_value, last_value,
+# nth_value) live behind the `OVER (...)` clause that `compiled::try_compile`
+# refused, not behind a gap in the evaluator. Each of the eleven has at least
+# one statement in `windows_match_the_oracle`, graded against the oracle.
+status = "pass"
+tests = ["inillucent-compat::windows_match_the_oracle"]
 
 [[capability]]
 id = "pragma.schema"

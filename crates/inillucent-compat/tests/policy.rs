@@ -762,6 +762,14 @@ fn no_module_grows_past_the_size_it_is_recorded_at() {
     /// into `crates/inillucent-engine/src/recovery.rs`, which is a coherent
     /// unit - opening one file and replaying its log into it - rather than a
     /// slice taken to make a number fit. Nothing in them changed in the move.
+    // `paged.rs` came down from 3,685 to 3,570 in task-1932, because H7's
+    // guard - a rowid is looked up by an integer or not at all - had to go
+    // somewhere and the ratchet asks for an extraction rather than a raised
+    // number. `KeyEncoding` and its four encode methods moved whole into
+    // `crates/inillucent-tree/src/keyenc.rs`: one question, how a key tuple
+    // becomes the bytes a tree is ordered by, rather than a slice taken to
+    // make a number fit. Nothing in them changed in the move, and `paged.rs`
+    // re-exports the type so no caller's path moved either.
     // Four rows for `inillucent-vm/src/{compile,compile_dml,machine}.rs` and
     // `inillucent-session/src/connection.rs` came off this list along with the
     // crates that held them: a ceiling on a file that is not in the workspace
@@ -774,7 +782,7 @@ fn no_module_grows_past_the_size_it_is_recorded_at() {
         ("crates/inillucent-exec/src/physical.rs", 6_663),
         ("crates/inillucent-sql/src/bind.rs", 5_315),
         ("crates/inillucent-tree/src/leaf.rs", 5_175),
-        ("crates/inillucent-tree/src/paged.rs", 3_685),
+        ("crates/inillucent-tree/src/paged.rs", 3_570),
         ("crates/inillucent-exec/src/dml.rs", 3_122),
         ("crates/inillucent-ext/src/vtab/fts5/mod.rs", 2_935),
         ("crates/inillucent-engine/src/ddl.rs", 2_837),

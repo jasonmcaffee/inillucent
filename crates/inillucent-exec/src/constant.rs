@@ -21,7 +21,7 @@ use inillucent_tree::datum::OwnedDatum;
 use inillucent_value::affinity::Affinity;
 
 use crate::batch::Batch;
-use crate::expr::{compile, ArithOp, Expr};
+use crate::expr::{compile, Expr};
 use crate::physical::{translate_scan, Params, Space, TreeCatalog};
 
 /// Returns the value an expression that reads no column folds to.
@@ -185,26 +185,26 @@ fn fold(expr: &Expr) -> Option<OwnedDatum> {
                 .cloned()
                 .unwrap_or(OwnedDatum::Null),
         ),
+        // **This was a third implementation of SQL arithmetic and it
+        // disagreed with the other two (task-1932, H7).** It wrapped on
+        // integer overflow - `WHERE id = 9223372036854775807 + 1` folded the
+        // seek key to `i64::MIN`, so the query returned whatever sits at that
+        // rowid and an empty result everywhere else, correct only by accident
+        // - while `expr::integer_arith` promotes an overflow to a double the
+        // way SQLite does. It also sent a text or blob operand straight to
+        // `as_f64`, so `WHERE id = 'abc' + 1` folded to the real `1.0` where
+        // the row evaluator makes the integer `1`, and it had no NaN rule, so
+        // `1e999 - 1e999` folded to a NaN that no comparison orders instead of
+        // to NULL. `expr::generic_arith` is the one implementation the row
+        // evaluator's specialised and generic nodes both route through, for
+        // exactly the reason its own comment gives: so the two cannot drift.
+        // Folding a seek key is the third caller, and it belongs there too.
         Expr::Arith(op, left, right) => {
             let left = fold(left)?;
             let right = fold(right)?;
-            let (a, b) = (left.borrow(), right.borrow());
-            match (a.as_int(), b.as_int()) {
-                (Some(a), Some(b)) => Some(OwnedDatum::Int(match op {
-                    ArithOp::Add => a.wrapping_add(b),
-                    ArithOp::Subtract => a.wrapping_sub(b),
-                    ArithOp::Multiply => a.wrapping_mul(b),
-                })),
-                _ => {
-                    let a = a.as_f64()?;
-                    let b = b.as_f64()?;
-                    Some(OwnedDatum::Real(match op {
-                        ArithOp::Add => a + b,
-                        ArithOp::Subtract => a - b,
-                        ArithOp::Multiply => a * b,
-                    }))
-                }
-            }
+            crate::expr::generic_arith(*op, &left.borrow(), &right.borrow())
+                .ok()
+                .map(|computed| computed.into_owned())
         }
         // A unary operator over a constant, which is what a negative literal
         // is: `WHERE id = -3` and `LIMIT -1` both bind as a negation of a
@@ -226,5 +226,113 @@ fn fold(expr: &Expr) -> Option<OwnedDatum> {
             Some(crate::scalar::from_value(answer))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::expr::ArithOp;
+
+    /// Builds `Expr::Arith(op, Literal(left), Literal(right))`.
+    ///
+    /// @param op - the operator
+    /// @param left - the left literal
+    /// @param right - the right literal
+    fn arith(op: ArithOp, left: OwnedDatum, right: OwnedDatum) -> Expr {
+        Expr::Arith(
+            op,
+            Box::new(Expr::Literal(left)),
+            Box::new(Expr::Literal(right)),
+        )
+    }
+
+    /// H7 (task-1920): folding a seek key answers what the row evaluator
+    /// answers, for every case where the two used to disagree.
+    ///
+    /// **What the disagreement cost.** `fold` had its own arithmetic, with
+    /// `wrapping_add` and siblings. `WHERE id = 9223372036854775807 + 1`
+    /// therefore folded the seek key to `i64::MIN`, and the scan looked for a
+    /// row at that rowid: it returned the wrong row if one was there, and an
+    /// empty result - correct by accident - if one was not. SQLite, and
+    /// `expr::integer_arith`, promote the overflow to a double instead, which
+    /// no rowid equals. The other two cases are the same class of drift: a
+    /// text operand went straight to `as_f64` rather than through SQLite's
+    /// numeric-prefix rule, and an infinite result stayed a NaN rather than
+    /// becoming NULL. Every one of these now routes through
+    /// `expr::generic_arith`, which is the single implementation the row
+    /// evaluator's specialised and generic nodes already shared.
+    #[test]
+    fn folding_a_constant_answers_what_the_row_evaluator_answers() {
+        // The overflow this finding is named for.
+        assert_eq!(
+            fold(&arith(
+                ArithOp::Add,
+                OwnedDatum::Int(i64::MAX),
+                OwnedDatum::Int(1)
+            )),
+            Some(OwnedDatum::Real(9_223_372_036_854_775_808.0)),
+            "i64::MAX + 1 folds to a real, not to i64::MIN"
+        );
+        assert_eq!(
+            fold(&arith(
+                ArithOp::Subtract,
+                OwnedDatum::Int(i64::MIN),
+                OwnedDatum::Int(1)
+            )),
+            Some(OwnedDatum::Real(-9_223_372_036_854_775_808.0 - 1.0)),
+            "i64::MIN - 1 folds to a real, not to i64::MAX"
+        );
+        assert_eq!(
+            fold(&arith(
+                ArithOp::Multiply,
+                OwnedDatum::Int(i64::MAX),
+                OwnedDatum::Int(2)
+            )),
+            Some(OwnedDatum::Real(i64::MAX as f64 * 2.0)),
+            "i64::MAX * 2 folds to a real, not to -2"
+        );
+
+        // No overflow: still an integer, so the seek key is still a seek key.
+        assert_eq!(
+            fold(&arith(ArithOp::Add, OwnedDatum::Int(2), OwnedDatum::Int(3))),
+            Some(OwnedDatum::Int(5))
+        );
+
+        // A text operand follows SQLite's numeric-prefix rule, which makes an
+        // integer out of integral text. This folded to `Real(1.0)`.
+        assert_eq!(
+            fold(&arith(
+                ArithOp::Add,
+                OwnedDatum::Text(b"abc".to_vec()),
+                OwnedDatum::Int(1)
+            )),
+            Some(OwnedDatum::Int(1))
+        );
+        assert_eq!(
+            fold(&arith(
+                ArithOp::Add,
+                OwnedDatum::Text(b"4".to_vec()),
+                OwnedDatum::Int(1)
+            )),
+            Some(OwnedDatum::Int(5))
+        );
+
+        // NULL propagates rather than being read as a zero.
+        assert_eq!(
+            fold(&arith(ArithOp::Add, OwnedDatum::Null, OwnedDatum::Int(1))),
+            Some(OwnedDatum::Null)
+        );
+
+        // SQLite has no NaN: an infinity minus itself is NULL, and this
+        // folded to a NaN that no comparison orders.
+        assert_eq!(
+            fold(&arith(
+                ArithOp::Subtract,
+                OwnedDatum::Real(f64::INFINITY),
+                OwnedDatum::Real(f64::INFINITY)
+            )),
+            Some(OwnedDatum::Null)
+        );
     }
 }

@@ -134,10 +134,14 @@ const STATEMENTS: &[&str] = &[
     "SELECT k FROM t UNION ALL SELECT k FROM t ORDER BY k DESC",
     "SELECT t.id, side.tag FROM t JOIN side ON side.owner = t.id ORDER BY t.id DESC",
     "SELECT t.id, side.tag FROM t LEFT JOIN side ON side.owner = t.id ORDER BY t.id DESC",
-    // A window-function statement lived here and was retired: the shipping
-    // engine refuses every `OVER (...)` clause outright (`sql.select.window`,
-    // `status = "missing"` in `compat/sqlite-3.53.4.toml`), so it cannot ask
-    // the ordering question this file is about.
+    // A window reorders the rows after the walk, so the outer `ORDER BY`
+    // still has to be answered by a sort. This statement was retired on the
+    // reading that "the shipping engine refuses every `OVER (...)` clause
+    // outright"; what refused it was `compiled::try_compile` failing to bail
+    // out on `plan.select.windows` the way `prepare_any` does (task-1932, H1),
+    // and the evaluator behind it answers all forty-one forms
+    // `windows_match_the_oracle` grades.
+    "SELECT id, row_number() OVER (ORDER BY k, id) FROM t ORDER BY id",
     "SELECT id FROM (SELECT id FROM t ORDER BY id DESC) ORDER BY id",
     // An empty range, and one whose bounds cross.
     "SELECT id FROM t WHERE id BETWEEN 6 AND 2 ORDER BY id DESC",

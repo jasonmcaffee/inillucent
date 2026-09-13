@@ -703,15 +703,20 @@ SELECT x.id, y.id FROM t x JOIN t y ON y.a = x.a AND y.id > x.id ORDER BY x.id;"
         script: "WITH RECURSIVE c(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM c WHERE n < 5) SELECT sum(n) FROM c;",
         expect: Agrees,
     },
-    // `select.window` was retired here: it checked `row_number() OVER (ORDER
-    // BY a)`, and expected `Agrees` against the old engine. The shipping
-    // engine refuses every window function outright - "the new engine's
-    // physical pass does not handle a window function reaching the pipeline
-    // builder yet" - which `every_probed_construct_answers_as_the_table_says`
-    // caught as this case newly disagreeing (207 of 208). Recorded as
-    // `sql.select.window` / `functions.window`, both `status = "missing"`, in
-    // `compat/sqlite-3.53.4.toml`, and in `docs/feature-comparison.md`'s
-    // "Window functions" section.
+    // `select.window` was retired here and is back (task-1932, H1). It was
+    // removed because the shipping engine refused every window function -
+    // but the refusal came from `compiled::try_compile`, which checked
+    // `plan.compounds` and not `plan.select.windows`, so the cached path that
+    // every application entry point uses never reached the evaluator that
+    // answers them. One `Ok(None)` reconnects the two.
+    Case {
+        name: "select.window",
+        kind: "read",
+        script: "CREATE TABLE t(a INTEGER);
+INSERT INTO t VALUES (3),(1),(2);
+SELECT a, row_number() OVER (ORDER BY a) FROM t ORDER BY a;",
+        expect: Agrees,
+    },
     Case {
         name: "select.distinct",
         kind: "read",
