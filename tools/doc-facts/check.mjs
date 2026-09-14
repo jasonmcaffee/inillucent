@@ -381,8 +381,17 @@ function readmeCallsTheRepositoryPrivate() {
   return { label, problems };
 }
 
-/** The prerequisites `--strict` is allowed to report as absent on a machine with no server on it. */
-const OPTIONAL_PREREQUISITES = ['postgres', 'mysql'];
+/**
+ * What `--strict` is allowed to report as absent on a developer's machine.
+ *
+ * Each is matched against the whole reason the runner printed, because the runner prints two shapes:
+ * `needs postgres` for the name of a thing, and a whole sentence for a reason that is about this
+ * machine - `set INILLUCENT_NETWORK_TESTS to run this`. Both are read; see `missingPrerequisites`.
+ *
+ * `docs/repository.md` names the same three, and a fourth name here without a line there is the
+ * drift this list exists to stop.
+ */
+const OPTIONAL_PREREQUISITES = ['postgres', 'mysql', 'INILLUCENT_NETWORK_TESTS'];
 
 /**
  * Runs the test runner, for the test and target counts.
@@ -402,6 +411,32 @@ const OPTIONAL_PREREQUISITES = ['postgres', 'mysql'];
  * `live_mysql` have no server to run against, and `docs/repository.md` documents that. That one
  * outcome is accepted, and only when the suites it names are on the list above.
  */
+/**
+ * Returns the suites the runner listed as having run without a prerequisite.
+ *
+ * **Both shapes the runner prints.** It puts `needs ` in front of the name of a thing and leaves a
+ * whole sentence alone, because "needs this platform would not make a directory link" is not
+ * English. Reading only the first shape made this file report that it could not read a row, which
+ * says nothing about the run.
+ *
+ * Only the block the runner introduces is read, so the `slowest:` list below it - which is also
+ * indented, also two columns - cannot be mistaken for a skip.
+ *
+ * @param text - everything the runner printed
+ * @returns one `{suite, needs}` per listed row, `needs` being the reason as printed
+ */
+function declaredRows(text) {
+  const start = /^\d+ suite\(s\) ran without a prerequisite[^\n]*\n/m.exec(text);
+  if (!start) return [];
+  const after = text.slice(start.index + start[0].length);
+  const block = after.split(/\n\s*\n/, 1)[0] ?? '';
+  return block
+    .split('\n')
+    .map((line) => /^\s+(\S+)\s\s+(.+?)\s*$/.exec(line))
+    .filter(Boolean)
+    .map((row) => ({ suite: row[1], needs: row[2].replace(/^needs /, '') }));
+}
+
 /**
  * Decides what one `inillucent-testrun --strict` outcome means.
  *
@@ -441,7 +476,7 @@ export function judgeTestRun(outcome) {
     undetermined: Number(match[4]),
     status: outcome.status,
     declaredWithoutPrerequisite: declared ? Number(declared[1]) : 0,
-    missingPrerequisites: [...outcome.text.matchAll(/^\s+(\S+)\s+needs (\S+)$/gm)].map((row) => ({ suite: row[1], needs: row[2] })),
+    missingPrerequisites: declaredRows(outcome.text),
   };
 
   const problems = [];
@@ -451,7 +486,9 @@ export function judgeTestRun(outcome) {
     problems.push(`it said ${result.declaredWithoutPrerequisite} suite(s) had no prerequisite and this could read ${result.missingPrerequisites.length} of them`);
   }
   if (outcome.status !== 0) {
-    const unexplained = result.missingPrerequisites.filter((row) => !OPTIONAL_PREREQUISITES.includes(row.needs));
+    const unexplained = result.missingPrerequisites.filter(
+      (row) => !OPTIONAL_PREREQUISITES.some((allowed) => row.needs.includes(allowed)),
+    );
     if (result.missingPrerequisites.length === 0) {
       problems.push(`it exited ${outcome.status} and named no missing prerequisite to explain it`);
     } else if (unexplained.length > 0) {
@@ -484,11 +521,12 @@ function selfTest() {
     '149 target(s), 2646 test(s), 0 failed, 0 undetermined',
     'wall 300.9s; the same work run one at a time is 3163.8s of processor time (10.5x)',
     '',
-    '2 suite(s) ran without a prerequisite and evidenced nothing:',
+    '3 suite(s) ran without a prerequisite and evidenced nothing:',
+    '  inillucent-remote::lib                       set INILLUCENT_NETWORK_TESTS to run this',
     '  inillucent-remote::live_postgres             needs postgres',
     '  inillucent-remote::live_mysql                needs mysql',
     '',
-    'not ok - every test passed, and 2 suite(s) evidenced nothing',
+    'not ok - every test passed, and 3 suite(s) evidenced nothing',
   ].join('\n');
 
   const cases = [
@@ -497,10 +535,10 @@ function selfTest() {
     { name: 'it was cut off', outcome: { built: true, text: passing, status: null, timedOut: true }, wantError: true },
     { name: 'a test failed', outcome: { built: true, text: passing.replace('0 failed', '1 failed'), status: 1, timedOut: false }, wantError: true },
     { name: 'a test was undetermined', outcome: { built: true, text: passing.replace('0 undetermined', '3 undetermined'), status: 1, timedOut: false }, wantError: true },
-    { name: 'it exited nonzero for no stated reason', outcome: { built: true, text: passing.replace(/\n2 suite\(s\)[\s\S]*$/, ''), status: 1, timedOut: false }, wantError: true },
+    { name: 'it exited nonzero for no stated reason', outcome: { built: true, text: passing.replace(/\n3 suite\(s\)[\s\S]*$/, ''), status: 1, timedOut: false }, wantError: true },
     { name: 'it exited nonzero for a prerequisite that is not optional', outcome: { built: true, text: passing.replace('needs postgres', 'needs a GPU'), status: 1, timedOut: false }, wantError: true },
-    { name: 'every test passed, and only postgres and mysql were absent', outcome: { built: true, text: passing, status: 1, timedOut: false }, wantError: false },
-    { name: 'every test passed, and nothing was absent', outcome: { built: true, text: passing.replace(/\n2 suite\(s\)[\s\S]*$/, ''), status: 0, timedOut: false }, wantError: false },
+    { name: 'every test passed, and only the documented three were absent', outcome: { built: true, text: passing, status: 1, timedOut: false }, wantError: false },
+    { name: 'every test passed, and nothing was absent', outcome: { built: true, text: passing.replace(/\n3 suite\(s\)[\s\S]*$/, ''), status: 0, timedOut: false }, wantError: false },
   ];
 
   let wrong = 0;

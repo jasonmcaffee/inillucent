@@ -195,8 +195,8 @@ pub trait TreeCatalog {
     /// it sees a row.
     ///
     /// So the rows go *down* the chain in batches and the answer that comes back
-    /// is [`Flow`]: `Flow::Stop` means the pipeline has what it needs, and the
-    /// module's loop abandons the cursor - the same way `scan.rs` abandons a
+    /// is [`crate::ops::Flow`]: `Flow::Stop` means the pipeline has what it needs,
+    /// and the module's loop abandons the cursor - the same way `scan.rs` abandons a
     /// b-tree scan.
     ///
     /// `Ok(false)` means the caller has no virtual tables at all, which is what

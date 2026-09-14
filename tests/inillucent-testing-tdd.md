@@ -125,26 +125,31 @@ the two numbers and what was expected of them.
 
 ## 2. The shape of the suite
 
-**149 test targets, 2,645 tests, in nine tiers.** A target is one binary
+**169 test targets, 2,789 tests, in nine tiers.** A target is one binary
 `cargo test` builds; a tier is a band you can ask for by name. Every target is
 in exactly one tier, so the tiers partition the suite rather than overlapping
 it. (Was 129 targets, 2,336 tests when this document was written; task-1911's
 re-point of 36 files onto the shipping engine, its free-map durability fix
 and its other roadmap work added 20 targets and 309 tests, mostly to `engine`,
 `differential`, `unit` and `durability` — counted fresh against
-`tests/selection.toml` and a full run rather than carried forward by hand.)
+`tests/selection.toml` and a full run rather than carried forward by hand.
+Then the two code reviews: task-1932 and task-1946 took it to 169 and
+2,789, task-1946 adding the suites for `ANALYZE` on an open connection,
+`VACUUM` on a file system that is not the disk, trigger depth against the
+oracle, and the rollback journal's ordering, and deleting 1,284 lines that
+nothing called.)
 
 | tier | targets | tests | what it is for |
 |---|---:|---:|---|
 | `smoke` | 1 | 8 | the ten-second answer: a real file opened, written, reopened, read |
-| `unit` | 26 | 1,230 | every crate's own `#[cfg(test)]` modules |
-| `engine` | 44 | 299 | SQL and storage behaviour over real database files |
-| `differential` | 29 | 292 | graded against the pinned SQLite 3.53.4 |
-| `durability` | 20 | 158 | crashes, injected faults, corruption and concurrency |
-| `e2e` | 15 | 94 | the public surfaces an application binds to, end to end |
+| `unit` | 26 | 1,242 | every crate's own `#[cfg(test)]` modules |
+| `engine` | 53 | 330 | SQL and storage behaviour over real database files |
+| `differential` | 30 | 309 | graded against the pinned SQLite 3.53.4 |
+| `durability` | 23 | 176 | crashes, injected faults, corruption and concurrency |
+| `e2e` | 21 | 130 | the public surfaces an application binds to, end to end |
 | `perf` | 1 | 6 | the cost guards — **runs alone**, see §5 |
-| `retrieval` | 6 | 506 | the embedding and retrieval engine, and its graded harness |
-| `tooling` | 7 | 49 | the checks that keep the repository's own rules true |
+| `retrieval` | 6 | 519 | the embedding and retrieval engine, and its graded harness |
+| `tooling` | 8 | 69 | the checks that keep the repository's own rules true |
 
 The map that assigns them is `tests/selection.toml`, and it is data rather than
 code so that a person can read the whole arrangement in one file.

@@ -2132,8 +2132,16 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 65] = [
         232,
     ),
     // 229 before task-1946 H4 made `search_branches` fallible and the six
-    // probes it is asked through became one helper.
-    ("crates/inillucent-migrate/src/verify.rs", "retrieval", 213),
+    // probes it is asked through became one helper. The row moved from
+    // `retrieval` to `retrieval_checks` in the same ticket and is the same body:
+    // `inillucent-migrate` denies `clippy::expect_used`, so a refused probe has
+    // to travel out as a value, and `retrieval` is now the four lines that turn
+    // that value into a failed check for a caller that wants a `Vec<Check>`.
+    (
+        "crates/inillucent-migrate/src/verify.rs",
+        "retrieval_checks",
+        213,
+    ),
     ("crates/inillucent-storage/src/mutate.rs", "balance", 224),
     ("crates/inillucent-compat/src/bin/analytical.rs", "run", 223),
     ("crates/inillucent-engine/src/lib.rs", "write", 219),
