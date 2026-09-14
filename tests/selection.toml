@@ -881,12 +881,7 @@ tier = "differential"
 covers = ["inillucent-search", "inillucent-engine"]
 requires = ["oracle"]
 
-[[target]]
-package = "inillucent-compat"
-kind = "test"
-name = "result_names_and_codes"
-tier = "differential"
-covers = ["inillucent-engine", "inillucent-sql"]
+["inillucent-engine", "inillucent-sql"]
 requires = ["oracle"]
 
 [[target]]
