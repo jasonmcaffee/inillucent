@@ -92,9 +92,9 @@ sha256 = "ebf2bfe7c63a69fa70f864f026fa02d5548bab9d99db7abb35a73685f44de6cb"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/scenarios.rs"
-ticket = "strict lint remediation"
-reason = "The strict lint set became a required check, and these are the findings it had in the retrieval engine. Every edit is local: bounds-checked division, a NaN comparison kept and explained, an identity map removed, a test module moved below the items it follows. No retrieval behaviour changes, and no file was reformatted - these two crates have never been formatted and doing it would move 35 files for no reason connected to a lint."
-sha256 = "2a16c2f9eb913dd41efb0b7ab212338900ce416d652b07d21dea52e218efbaef"
+ticket = "task-1932"
+reason = "M4: Index::add answers a Result, so the scenario builder takes it"
+sha256 = "934cab4d43861d4120cdd67255fc37501f1bfdf210c0d99ac32253dcc404cbaf"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/synth.rs"
@@ -123,8 +123,8 @@ sha256 = "7ba311eed102be8d6abb5afaeb1f8ebda37ddf493fed90f3822433d84a5c52c0"
 [[amendment]]
 path = "crates/inillucent-core/src/bm25.rs"
 ticket = "task-1932"
-reason = "H9: inillucent-core joins GOVERNED. The four panic lints and deny(missing_docs) are now on the crate, every module states its invariant, 167 doc comments were written and every indexing, slicing, unwrap and expect site the lints report is rewritten."
-sha256 = "73979a6f4daf14e69162b8ffb1d73f286d6ea53c5e8d2f32ab9c0a3dbdf567dd"
+reason = "M4: the 33rd flag name is an error rather than an abort, so add_chunks and the four Index methods over it answer a Result"
+sha256 = "a489f36745aac5bdcf9160277e1d7fd3b13161aeda88d628caf265d0e9d96f3e"
 
 [[amendment]]
 path = "crates/inillucent-core/src/distance.rs"
@@ -147,26 +147,26 @@ sha256 = "926aac0e7a3b05f21106de0fd197e7bf974f01afeea70489ca989650a2584268"
 [[amendment]]
 path = "crates/inillucent-core/src/filter.rs"
 ticket = "task-1932"
-reason = "H9: inillucent-core joins GOVERNED. The four panic lints and deny(missing_docs) are now on the crate, every module states its invariant, 167 doc comments were written and every indexing, slicing, unwrap and expect site the lints report is rewritten."
-sha256 = "ebc03fa6021757518f75a054a2da2f7e2d3eed573de5cd34900f768c65b65d54"
+reason = "M4: the 33rd flag name is an error rather than an abort, so add_chunks and the four Index methods over it answer a Result"
+sha256 = "4182ddd2da345204712e76afd00077e777825676aa04d99225ce55fbc798345c"
 
 [[amendment]]
 path = "crates/inillucent-core/src/flat.rs"
 ticket = "task-1932"
-reason = "H9: inillucent-core joins GOVERNED. The four panic lints and deny(missing_docs) are now on the crate, every module states its invariant, 167 doc comments were written and every indexing, slicing, unwrap and expect site the lints report is rewritten."
-sha256 = "d810fc3c331f916f171ce7edd7f3f7989156cdb31f819203b740b892f3343a1c"
+reason = "M4: the 33rd flag name is an error rather than an abort, so add_chunks and the four Index methods over it answer a Result"
+sha256 = "ef2b935a4f7ec6a35b8755f758e11eb863dc37fb28f7abeda781f3b9154c2e0d"
 
 [[amendment]]
 path = "crates/inillucent-core/src/hnsw.rs"
 ticket = "task-1932"
-reason = "H9: inillucent-core joins GOVERNED. The four panic lints and deny(missing_docs) are now on the crate, every module states its invariant, 167 doc comments were written and every indexing, slicing, unwrap and expect site the lints report is rewritten."
-sha256 = "a4d99646ff64db703b75d41c8cbc1402c5ffd1d49bbeb4bfb0997af8d72c2161"
+reason = "M4: the two graph invariants nothing asserted - reachability from the entry point and the degree cap, both on the sequential build"
+sha256 = "6335c21267c0abd0cfa847ddedc493604a07c056d61f1b287037e25f5bf3ace1"
 
 [[amendment]]
 path = "crates/inillucent-core/src/index.rs"
 ticket = "task-1932"
-reason = "H9: inillucent-core joins GOVERNED. The four panic lints and deny(missing_docs) are now on the crate, every module states its invariant, 167 doc comments were written and every indexing, slicing, unwrap and expect site the lints report is rewritten."
-sha256 = "614568b7fd682911a0a71a50a99fc0bf62855416fc6265e271301c7daa03ff10"
+reason = "M4: the 33rd flag name is an error rather than an abort, so add_chunks and the four Index methods over it answer a Result"
+sha256 = "b9276d39007103d2112751851d515c72f93958ea4f444ba69f228f42066f1431"
 
 [[amendment]]
 path = "crates/inillucent-core/src/install.rs"
@@ -189,8 +189,8 @@ sha256 = "194dc2057506af2b35c24b0a846baad8ae6848c42f4761268e1eeb51e3c9bd02"
 [[amendment]]
 path = "crates/inillucent-core/src/persist.rs"
 ticket = "task-1932"
-reason = "H4 and H9: read_section reads in bounded steps rather than allocating from a length in the file, and the module states its invariant."
-sha256 = "d5e083f0201f99c0cea97eefa8c600d43eb34c8092f0c554be7dc3e151d6f67d"
+reason = "M4: the 33rd flag name is an error rather than an abort, so add_chunks and the four Index methods over it answer a Result"
+sha256 = "860ed58dc97626166635b72532b5e261b68cd3e057e13beb327a3f01baa3e1cb"
 
 [[amendment]]
 path = "crates/inillucent-core/src/quantize.rs"
@@ -201,8 +201,8 @@ sha256 = "517f350546cefd93b6bb6990af0a7ee1cd1e8a488ac6caac5369a8ae7379ae04"
 [[amendment]]
 path = "crates/inillucent-core/src/rank.rs"
 ticket = "task-1932"
-reason = "H9: inillucent-core joins GOVERNED. The four panic lints and deny(missing_docs) are now on the crate, every module states its invariant, 167 doc comments were written and every indexing, slicing, unwrap and expect site the lints report is rewritten."
-sha256 = "b38cdc74333611b5ad6d08630b5a9d6421ba0278366b5d464f1612eee72e8bbf"
+reason = "M4: the 33rd flag name is an error rather than an abort, so add_chunks and the four Index methods over it answer a Result"
+sha256 = "022f1fe51faf8019de7517920c0d00798c2121dd873b2f9a18f7b8dbec44e7c4"
 
 [[amendment]]
 path = "crates/inillucent-core/src/residency.rs"
@@ -213,8 +213,8 @@ sha256 = "81026d0f20007ef65eb5c690e89098b95a0b978ebade7999ab95a2c8ccbc957c"
 [[amendment]]
 path = "crates/inillucent-core/src/store.rs"
 ticket = "task-1932"
-reason = "H9: inillucent-core joins GOVERNED. The four panic lints and deny(missing_docs) are now on the crate, every module states its invariant, 167 doc comments were written and every indexing, slicing, unwrap and expect site the lints report is rewritten."
-sha256 = "ce6c9509c733b83ca3cec323033732a7b9788cb1b650fcfd082f8c847c64d807"
+reason = "M4: the 33rd flag name is refused rather than asserted, and add_chunks answers a Result"
+sha256 = "0c73f9605df5734483f95bfdc567a284680ae0def7b3d7844bdb56bd48e6a3d8"
 
 [[amendment]]
 path = "crates/inillucent-core/src/tokenize.rs"

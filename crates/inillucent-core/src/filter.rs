@@ -599,7 +599,8 @@ mod tests {
             mk("slack", "s1", "Ada", "u1", 3000, vec![], false),
             mk("jira", "j1", "Cy", "u3", 4000, vec!["design", "ops"], false),
             mk("slack", "s2", "Bob", "u2", 5000, vec![], true),
-        ]);
+        ])
+        .expect("the chunks are added");
         s
     }
 
@@ -830,7 +831,8 @@ mod tests {
                 vec!["nobody@example.com"],
                 vec![],
             ),
-        ]);
+        ])
+        .expect("the chunks are added");
         s
     }
 

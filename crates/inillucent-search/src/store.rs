@@ -1041,6 +1041,25 @@ pub fn vector_of(value: &Value<'static>, dims: usize) -> DbResult<Vec<f32>> {
             vector.len()
         )));
     }
+    // **A NaN is refused here, at the one place a vector enters the index
+    // (task-1932, M4).** `hnsw.rs` orders candidates with
+    // `partial_cmp(..).unwrap_or(Equal)`, which makes a NaN distance compare
+    // equal to everything - and "equal to everything" is not a total order, so
+    // the `BinaryHeap` the search walks is no longer a heap. What comes out is
+    // not a wrong score but an arbitrary set of neighbours, and every later
+    // query on the same graph is affected rather than the row that carried the
+    // NaN. An infinity is the same argument one step less severe: it orders,
+    // and it makes every distance through that node infinite.
+    //
+    // Refused with the same shape as the width check, because a caller that
+    // handles one handles the other.
+    if let Some(at) = vector.iter().position(|component| !component.is_finite()) {
+        return Err(failure(format!(
+            "inillucent_search: component {at} of this vector is {}, and a vector's \
+             components have to be finite numbers",
+            vector.get(at).copied().unwrap_or(f32::NAN)
+        )));
+    }
     Ok(vector)
 }
 
@@ -1073,6 +1092,37 @@ mod tests {
         let value = encode_vector(&[1.0, 2.0]).expect("encoded");
         assert!(vector_of(&value, 2).is_ok());
         assert!(vector_of(&value, 3).is_err());
+    }
+
+    /// A vector holding a NaN or an infinity is refused.
+    ///
+    /// **The one that matters is the NaN (task-1932, M4).** `hnsw.rs` orders
+    /// candidates with `partial_cmp(..).unwrap_or(Equal)`, so a NaN distance
+    /// compares equal to everything - and "equal to everything" is not a total
+    /// order, so the `BinaryHeap` the search walks stops being a heap. What
+    /// comes out is not a wrong score for the row that carried the NaN; it is
+    /// an arbitrary set of neighbours for every query after it.
+    ///
+    /// Both signs of infinity are refused for the smaller reason: they order,
+    /// and they make every distance through that node infinite.
+    #[test]
+    fn a_vector_holding_a_non_finite_component_is_refused() {
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+            let value = encode_vector(&[1.0, bad, 3.0]).expect("encoded");
+            let refused = vector_of(&value, 3)
+                .err()
+                .unwrap_or_else(|| panic!("{bad} was accepted as a vector component"));
+            assert!(
+                refused.message().contains("finite")
+                    || refused.detail().is_some_and(|said| said.contains("finite")),
+                "{bad} was refused for another reason: {}",
+                refused.message()
+            );
+        }
+        // And an ordinary vector of the same width still passes, so the check
+        // is on the component rather than on the shape.
+        let good = encode_vector(&[1.0, 2.0, 3.0]).expect("encoded");
+        assert!(vector_of(&good, 3).is_ok());
     }
 
     /// Two different row versions get different digests.

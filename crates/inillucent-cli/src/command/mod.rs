@@ -304,6 +304,12 @@ pub struct Context {
     /// million rows still stops. A row ceiling alone would let that run to the
     /// end and then report zero rows.
     limits: inillucent_engine::base::budget::Limits,
+    /// Whether arming a budget clears the cancellation flag first.
+    ///
+    /// True everywhere but the MCP server, which reads its input on a second
+    /// thread and therefore owns the ordering itself; see
+    /// `budget::arm_as_it_stands` (task-1932, H11).
+    preserve_cancel: std::cell::Cell<bool>,
     /// The flag that stops whatever this session is running.
     ///
     /// **One per session, not one per call (task-1932, H11).** `run` used to
@@ -362,6 +368,7 @@ impl Context {
             limit: 200,
             max_rows: None,
             limits: inillucent_engine::base::budget::Limits::unbounded(),
+            preserve_cancel: std::cell::Cell::new(false),
             cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             null: String::new(),
         })
@@ -396,6 +403,14 @@ impl Context {
     /// than applied to the one that has not started.
     pub fn cancel_flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
         std::sync::Arc::clone(&self.cancel)
+    }
+
+    /// Says that this surface clears the cancellation flag itself.
+    ///
+    /// Only `inillucent-mcp` does, because it is the only one that reads its
+    /// input on a second thread. See `budget::arm_as_it_stands`.
+    pub fn preserve_cancellation(&self) {
+        self.preserve_cancel.set(true);
     }
 
     /// Returns the shell commands drive.
@@ -502,6 +517,7 @@ impl Context {
             limit: 200,
             max_rows: None,
             limits: inillucent_engine::base::budget::Limits::unbounded(),
+            preserve_cancel: std::cell::Cell::new(false),
             cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             null: String::new(),
         }
@@ -627,7 +643,10 @@ pub fn run(
     // through.** Arming it inside each verb would be arming it in nineteen
     // places and forgetting it in the twentieth; arming it in the engine would
     // put a server's policy inside a library an application also links.
-    let armed = inillucent_engine::base::budget::arm(context.limits.clone(), context.cancel_flag());
+    let armed = match context.preserve_cancel.get() {
+        true => inillucent_driver::arm_as_it_stands(context.limits.clone(), context.cancel_flag()),
+        false => inillucent_driver::arm(context.limits.clone(), context.cancel_flag()),
+    };
     let outcome = (command.run)(context, arguments);
     drop(armed);
     let mut produced = outcome?;
@@ -762,6 +781,7 @@ mod tests {
             limit: 200,
             max_rows: None,
             limits: inillucent_engine::base::budget::Limits::unbounded(),
+            preserve_cancel: std::cell::Cell::new(false),
             cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             null: String::new(),
         };
@@ -808,6 +828,7 @@ mod tests {
             limit: 200,
             max_rows: None,
             limits: inillucent_engine::base::budget::Limits::unbounded(),
+            preserve_cancel: std::cell::Cell::new(false),
             cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             null: String::new(),
         };

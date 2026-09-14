@@ -345,6 +345,38 @@ fn amendments(out: &Path) -> Result<Vec<Amendment>, String> {
     Ok(found)
 }
 
+/// Returns the capture's digests, by path.
+///
+/// The capture is this tool's own output, so its shape is known: one object per
+/// file with a `"path"` and a `"sha256"`. Read by scanning for the pair rather
+/// than with a JSON parser, for the same reason the rest of this binary does -
+/// `docs/invariants/layering.toml` approves `serde_json` for two crates and
+/// this is not one of them.
+///
+/// @param recorded - the capture file's text
+fn recorded_digests(recorded: &str) -> std::collections::BTreeMap<&str, &str> {
+    let mut pinned = std::collections::BTreeMap::new();
+    let mut rest = recorded;
+    while let Some(at) = rest.find("\"path\": \"") {
+        let after = rest.split_at(at.saturating_add(9)).1;
+        let Some(end) = after.find('"') else {
+            break;
+        };
+        let (path, remainder) = after.split_at(end);
+        let Some(hash_at) = remainder.find("\"sha256\": \"") else {
+            break;
+        };
+        let value = remainder.split_at(hash_at.saturating_add(11)).1;
+        let Some(hash_end) = value.find('"') else {
+            break;
+        };
+        let (sha256, tail) = value.split_at(hash_end);
+        pinned.insert(path, sha256);
+        rest = tail;
+    }
+    pinned
+}
+
 /// Re-checks a capture against the working tree.
 ///
 /// A file may differ from the capture only when an amendment names it *and*
@@ -357,11 +389,17 @@ fn verify(root: &Path, out: &Path) -> Result<String, String> {
         .map_err(|error| format!("cannot read {}: {error}", path.display()))?;
     let declared = amendments(out)?;
     let current = digests(root)?;
+    // **Per path, because a hash that appears *somewhere* is not the same
+    // question (task-1932, M4).** This used to ask whether the file's digest
+    // was anywhere in the recorded JSON, so two pinned files that swapped
+    // contents both verified clean: each one's new hash was still in the
+    // capture, under the other one's name. That is precisely the change a
+    // baseline exists to catch.
+    let pinned = recorded_digests(&recorded);
     let mut changed = Vec::new();
     let mut amended = 0usize;
     for file in &current {
-        let needle = format!("\"sha256\": \"{}\"", file.sha256);
-        if recorded.contains(&needle) {
+        if pinned.get(file.path.as_str()) == Some(&file.sha256.as_str()) {
             continue;
         }
         match declared

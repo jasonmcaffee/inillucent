@@ -1217,11 +1217,11 @@ pub fn parse_segment_delta(bytes: &[u8]) -> Result<ParsedDelta> {
 /// for why redoing either on every chain resolution is not an option.
 /// @param base - the index this delta continues, already committed
 /// @param delta - one delta's own parsed content
-pub fn apply_segment_delta(mut base: Index, delta: &ParsedDelta) -> Index {
+pub fn apply_segment_delta(mut base: Index, delta: &ParsedDelta) -> Result<Index> {
     for batch in &delta.batches {
         for (chunk, vector) in &batch.puts {
             base.tombstone(&chunk.source, &chunk.external_doc_id);
-            base.append_store_and_vectors(vec![chunk.clone()], std::slice::from_ref(vector));
+            base.append_store_and_vectors(vec![chunk.clone()], std::slice::from_ref(vector))?;
         }
         for (source, id) in &batch.tombstoned {
             base.tombstone(source, id);
@@ -1236,7 +1236,7 @@ pub fn apply_segment_delta(mut base: Index, delta: &ParsedDelta) -> Index {
     if let Some(lexical) = &delta.lexical {
         base.apply_lexical_recording(lexical);
     }
-    base
+    Ok(base)
 }
 
 /// Reads one `PART_BATCH` payload back.
@@ -1614,7 +1614,7 @@ mod tests {
                 v
             })
             .collect();
-        index.add(chunks, &vectors);
+        index.add(chunks, &vectors).expect("the chunks are added");
         index.commit();
         index
     }
@@ -1645,7 +1645,7 @@ mod tests {
                     .collect()
             })
             .collect();
-        index.add(chunks, &vectors);
+        index.add(chunks, &vectors).expect("the chunks are added");
         index.commit();
         index
     }
@@ -2038,30 +2038,32 @@ mod tests {
     fn the_new_store_columns_survive_the_round_trip() {
         let dir = temp_dir("columns");
         let mut original = small_index();
-        original.append(
-            vec![ChunkInput {
-                source: "email".into(),
-                external_doc_id: "mail-1".into(),
-                chunk_index: 0,
-                content: "a message from terri".into(),
-                title: "subject".into(),
-                url: "u".into(),
-                author: Some("Terri Shaw".into()),
-                author_id: Some("terri@example.org".into()),
-                updated_at: Some(4242),
-                attributes: vec![(
-                    "participant".to_string(),
-                    vec!["terri@example.org".into(), "jason@example.com".into()],
-                )],
-                flags: vec!["has_attachment".into()],
-                ..Default::default()
-            }],
-            &[{
-                let mut v = vec![0.25f32; 16];
-                normalize(&mut v);
-                v
-            }],
-        );
+        original
+            .append(
+                vec![ChunkInput {
+                    source: "email".into(),
+                    external_doc_id: "mail-1".into(),
+                    chunk_index: 0,
+                    content: "a message from terri".into(),
+                    title: "subject".into(),
+                    url: "u".into(),
+                    author: Some("Terri Shaw".into()),
+                    author_id: Some("terri@example.org".into()),
+                    updated_at: Some(4242),
+                    attributes: vec![(
+                        "participant".to_string(),
+                        vec!["terri@example.org".into(), "jason@example.com".into()],
+                    )],
+                    flags: vec!["has_attachment".into()],
+                    ..Default::default()
+                }],
+                &[{
+                    let mut v = vec![0.25f32; 16];
+                    normalize(&mut v);
+                    v
+                }],
+            )
+            .expect("the chunks are added");
         original.tombstone("slack", "d3");
 
         save(&original, &dir).unwrap();
@@ -2108,21 +2110,23 @@ mod tests {
         let mut loaded = load(&dir).unwrap();
 
         let before = loaded.store().n_chunks();
-        let stats = loaded.append(
-            vec![ChunkInput {
-                source: "slack".into(),
-                external_doc_id: "fresh".into(),
-                content: "a chunk about tirzepatide".into(),
-                title: "fresh".into(),
-                url: "u".into(),
-                ..Default::default()
-            }],
-            &[{
-                let mut v = vec![0.5f32; 16];
-                normalize(&mut v);
-                v
-            }],
-        );
+        let stats = loaded
+            .append(
+                vec![ChunkInput {
+                    source: "slack".into(),
+                    external_doc_id: "fresh".into(),
+                    content: "a chunk about tirzepatide".into(),
+                    title: "fresh".into(),
+                    url: "u".into(),
+                    ..Default::default()
+                }],
+                &[{
+                    let mut v = vec![0.5f32; 16];
+                    normalize(&mut v);
+                    v
+                }],
+            )
+            .expect("the append runs");
         assert!(stats.committed);
         assert_eq!(loaded.store().n_chunks(), before + 1);
         let f = loaded.compile(&Filter::default());
@@ -2333,12 +2337,14 @@ mod tests {
         tombstoned: &[(String, String)],
     ) {
         for (chunk, vector) in puts {
-            index.replace_document(
-                &chunk.source,
-                &chunk.external_doc_id,
-                vec![chunk.clone()],
-                std::slice::from_ref(vector),
-            );
+            index
+                .replace_document(
+                    &chunk.source,
+                    &chunk.external_doc_id,
+                    vec![chunk.clone()],
+                    std::slice::from_ref(vector),
+                )
+                .expect("the chunks are added");
         }
         for (source, id) in tombstoned {
             index.tombstone(source, id);
@@ -2419,7 +2425,7 @@ mod tests {
         assert_eq!(parsed.batches[0].puts.len(), puts.len());
         assert_eq!(parsed.batches[0].tombstoned, tombstoned);
         let resolved_base = read_index(&mut base_bytes.as_slice()).unwrap();
-        let pieces = apply_segment_delta(resolved_base, &parsed);
+        let pieces = apply_segment_delta(resolved_base, &parsed).expect("the delta applies");
         let mut pieces_bytes = Vec::new();
         write_index(&pieces, &mut pieces_bytes).unwrap();
 

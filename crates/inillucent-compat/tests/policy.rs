@@ -903,7 +903,12 @@ fn no_module_grows_past_the_size_it_is_recorded_at() {
         // (`Cached`) and its ceiling moved to `plans.rs`, which is the module
         // whose header explains when a plan is reused - the two halves of one
         // idea were ninety lines apart in a file of nearly eight thousand.
-        ("crates/inillucent-engine/src/lib.rs", 7792),
+        // Lowered again in task-1932, this time by moving the savepoint
+        // boundary - `savepoint`, `rollback_to` and `release` - to `marks.rs`.
+        // All three changed in this ticket, because a virtual table module now
+        // hears about a savepoint and a release where before it heard about
+        // neither, so the seam was where the work already was.
+        ("crates/inillucent-engine/src/lib.rs", 7753),
         // Lowered from 6,663 in task-1932. The window pass - `run_windowed` and
         // the seven helpers only it calls - moved whole to
         // `crates/inillucent-exec/src/windowpass.rs`, which is 575 lines this
@@ -1097,7 +1102,7 @@ fn no_shell_file_reaches_past_the_driver_more_than_it_is_recorded_at() {
         // move decides what the driver's surface has to become.
         ("crates/inillucent-cli/src/shell.rs", 10),
         // The command table's context and its budget arming.
-        ("crates/inillucent-cli/src/command/mod.rs", 9),
+        ("crates/inillucent-cli/src/command/mod.rs", 8),
         // The dot commands, which reach the engine for `.dbinfo`, `.stats` and
         // the serialisation verbs.
         ("crates/inillucent-cli/src/commands.rs", 7),

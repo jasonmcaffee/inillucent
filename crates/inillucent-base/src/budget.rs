@@ -195,6 +195,24 @@ pub fn arm(limits: Limits, cancel: Arc<AtomicBool>) -> Guard {
     // that has finished, not to this one. Clearing it here is what makes the
     // flag safe to reuse across calls on one connection.
     cancel.store(false, Ordering::Relaxed);
+    arm_as_it_stands(limits, cancel)
+}
+
+/// Arms a budget without clearing the cancellation flag first.
+///
+/// **For a caller that has already decided this request is cancelled
+/// (task-1932, H11).** The clear in [`arm`] is right for a surface that arms
+/// once per call and cannot know what arrived in between; it is wrong for one
+/// that reads its input on a second thread, because there is a window between
+/// taking a request off the queue and arming it, and a cancellation that lands
+/// inside that window is wiped by the clear. `inillucent-mcp` clears the flag
+/// and publishes which request is running under one lock, so by the time this
+/// is called the flag means "this request was cancelled" and clearing it would
+/// throw that away.
+///
+/// @param limits - what the request may spend
+/// @param cancel - the flag another thread sets to stop it
+pub fn arm_as_it_stands(limits: Limits, cancel: Arc<AtomicBool>) -> Guard {
     let spending = Spending {
         // `checked_add` because the crate denies wrapping arithmetic and an
         // `Instant` plus a caller's `Duration` is a caller's number. A window

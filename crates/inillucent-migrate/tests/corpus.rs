@@ -254,7 +254,7 @@ fn build_source(directory: &Path) -> (Index, usize) {
         dims: DIMS,
         ..IndexConfig::default()
     });
-    index.add(inputs, &vectors);
+    index.add(inputs, &vectors).expect("the chunks are added");
     index.commit();
     inillucent_core::persist::save(&index, directory).expect("the legacy index saves");
     (index, chunks)

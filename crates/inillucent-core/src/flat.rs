@@ -322,7 +322,7 @@ mod tests {
                 deleted: false,
             });
         }
-        store.add_chunks(inputs);
+        store.add_chunks(inputs).expect("the chunks are added");
         for i in 0..n {
             let v: Vec<f32> = (0..8).map(|d| ((i * 8 + d) as f32 * 0.31).sin()).collect();
             vs.push(&v);
@@ -507,7 +507,7 @@ mod tests {
                 deleted: false,
             });
         }
-        store.add_chunks(inputs);
+        store.add_chunks(inputs).expect("the chunks are added");
         for _ in 0..10 {
             vs.push(&[1.0, 0.0, 0.0, 0.0]);
         }
@@ -653,20 +653,22 @@ mod tests {
         let dims = 4usize;
         let mut resident = VectorSet::with_metric(dims, Metric::L2);
         let mut store = Store::default();
-        store.add_chunks(vec![
-            ChunkInput {
-                source: "s".into(),
-                external_doc_id: "0".into(),
-                content: "0".into(),
-                ..Default::default()
-            },
-            ChunkInput {
-                source: "s".into(),
-                external_doc_id: "1".into(),
-                content: "1".into(),
-                ..Default::default()
-            },
-        ]);
+        store
+            .add_chunks(vec![
+                ChunkInput {
+                    source: "s".into(),
+                    external_doc_id: "0".into(),
+                    content: "0".into(),
+                    ..Default::default()
+                },
+                ChunkInput {
+                    source: "s".into(),
+                    external_doc_id: "1".into(),
+                    content: "1".into(),
+                    ..Default::default()
+                },
+            ])
+            .expect("the chunks are added");
         // Aligned with the query but twice as far; close to the query but
         // slightly off axis. Cosine prefers chunk 0, L2 prefers chunk 1.
         resident.push(&[2.0, 0.0, 0.0, 0.0]);

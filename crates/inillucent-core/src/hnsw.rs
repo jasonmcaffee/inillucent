@@ -1672,7 +1672,7 @@ mod tests {
                 deleted: false,
             });
         }
-        store.add_chunks(inputs);
+        store.add_chunks(inputs).expect("the chunks are added");
 
         let n_clusters = 24;
         let centres: Vec<Vec<f32>> = (0..n_clusters)
@@ -2058,6 +2058,122 @@ mod tests {
                 "the node's own choice {chosen} is missing: {list:?}"
             );
         }
+    }
+
+    /// Every node is reachable from the entry point after a sequential build.
+    ///
+    /// **Nothing asserted this (task-1932, M4).** The existing cases measure
+    /// recall and the degree cap on the *parallel* build, and recall is an
+    /// average: a graph with a hundred nodes cut off from the entry point still
+    /// answers ninety-something percent of queries and looks healthy. A node
+    /// nothing links to is invisible to every search there will ever be, and it
+    /// is invisible without being wrong about anything.
+    ///
+    /// Walked at layer zero, which is the layer that holds every node. The
+    /// higher layers are a routing structure over a subset by construction.
+    #[test]
+    fn every_node_is_reachable_from_the_entry_point_after_a_sequential_build() {
+        let (vectors, _) = fixture(2000, 16);
+        let params = HnswParams {
+            build_threads: 1,
+            exhaustive_below: 0,
+            ..Default::default()
+        };
+        let mut graph = Hnsw::new(params);
+        graph.build(&vectors);
+
+        let entry = graph.entry.expect("a built graph has an entry point");
+        let base = graph
+            .layers
+            .first()
+            .expect("a built graph has a layer zero");
+        let total = base.len();
+        assert!(total >= 2000, "the fixture built {total} nodes");
+
+        // A breadth-first walk from the entry point, following edges in both
+        // directions: an adjacency list is one node's choice of neighbours, and
+        // "reachable" for a search means reachable through the edges that
+        // exist, whichever end recorded them.
+        let mut backwards: Vec<Vec<u32>> = vec![Vec::new(); total];
+        for (node, list) in base.iter().enumerate() {
+            for neighbour in list {
+                if let Some(held) = backwards.get_mut(*neighbour as usize) {
+                    held.push(node as u32);
+                }
+            }
+        }
+
+        let mut seen = vec![false; total];
+        let mut queue = std::collections::VecDeque::new();
+        if let Some(slot) = seen.get_mut(entry as usize) {
+            *slot = true;
+        }
+        queue.push_back(entry);
+        while let Some(node) = queue.pop_front() {
+            let forward = base.get(node as usize).map(Vec::as_slice).unwrap_or(&[]);
+            let backward = backwards
+                .get(node as usize)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            for neighbour in forward.iter().chain(backward.iter()) {
+                let Some(slot) = seen.get_mut(*neighbour as usize) else {
+                    continue;
+                };
+                if *slot {
+                    continue;
+                }
+                *slot = true;
+                queue.push_back(*neighbour);
+            }
+        }
+
+        let unreachable: Vec<usize> = seen
+            .iter()
+            .enumerate()
+            .filter(|(_, found)| !**found)
+            .map(|(node, _)| node)
+            .collect();
+        assert!(
+            unreachable.is_empty(),
+            "{} of {total} nodes cannot be reached from entry point {entry}: {:?}",
+            unreachable.len(),
+            unreachable.iter().take(10).collect::<Vec<&usize>>()
+        );
+    }
+
+    /// The sequential build respects the degree cap too.
+    ///
+    /// The parallel build has had this case since the pruning was made thread
+    /// safe; the sequential one never did, and it is the path every small
+    /// corpus and every test fixture takes. A list past its cap is memory
+    /// nobody asked for on every node, and the pruning that should have
+    /// happened is the pruning that keeps the graph navigable.
+    #[test]
+    fn a_sequential_build_respects_the_degree_cap() {
+        let (vectors, _) = fixture(2000, 16);
+        let params = HnswParams {
+            build_threads: 1,
+            exhaustive_below: 0,
+            ..Default::default()
+        };
+        let mut graph = Hnsw::new(params);
+        graph.build(&vectors);
+        let mut checked = 0usize;
+        for (layer, lists) in graph.layers.iter().enumerate() {
+            let cap = graph.max_degree(layer);
+            for (node, list) in lists.iter().enumerate() {
+                assert!(
+                    list.len() <= cap,
+                    "node {node} at layer {layer} has {} edges and the cap is {cap}",
+                    list.len()
+                );
+                checked = checked.saturating_add(1);
+            }
+        }
+        assert!(
+            checked >= 2000,
+            "only {checked} adjacency lists were checked, so the build produced almost nothing"
+        );
     }
 
     /// No adjacency list may exceed its degree cap, however many threads pruned it.

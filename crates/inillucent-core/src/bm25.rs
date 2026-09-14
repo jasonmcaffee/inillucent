@@ -1046,7 +1046,7 @@ mod tests {
                 deleted: false,
             })
             .collect();
-        s.add_chunks(inputs);
+        s.add_chunks(inputs).expect("the chunks are added");
         s
     }
 
@@ -1221,18 +1221,20 @@ mod tests {
     #[test]
     fn a_heading_term_can_be_weighted_above_the_same_term_in_a_body() {
         let mut store = Store::default();
-        store.add_chunks(vec![
-            headed(
-                "d1",
-                "Terri Shaw tax return",
-                "please find the attached document",
-            ),
-            headed(
-                "d2",
-                "meeting notes",
-                "we discussed the Terri Shaw tax return at length",
-            ),
-        ]);
+        store
+            .add_chunks(vec![
+                headed(
+                    "d1",
+                    "Terri Shaw tax return",
+                    "please find the attached document",
+                ),
+                headed(
+                    "d2",
+                    "meeting notes",
+                    "we discussed the Terri Shaw tax return at length",
+                ),
+            ])
+            .expect("the chunks are added");
 
         let tokenizer = Tokenizer::default();
         let index = Bm25Index::build(&store, &tokenizer);
@@ -1278,11 +1280,13 @@ mod tests {
     #[test]
     fn the_heading_boost_is_off_by_default_and_changes_nothing() {
         let mut store = Store::default();
-        store.add_chunks(vec![headed(
-            "d1",
-            "Terri Shaw tax return",
-            "the body mentions Terri Shaw again",
-        )]);
+        store
+            .add_chunks(vec![headed(
+                "d1",
+                "Terri Shaw tax return",
+                "the body mentions Terri Shaw again",
+            )])
+            .expect("the chunks are added");
         let tokenizer = Tokenizer::default();
         let index = Bm25Index::build(&store, &tokenizer);
         let filter = CompiledFilter::compile(&Filter::default(), &store);

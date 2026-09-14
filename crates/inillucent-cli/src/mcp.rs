@@ -251,16 +251,27 @@ pub fn serve<R: BufRead + Send + 'static>(
     // The reader thread. It owns the input for the life of the server, sends
     // each line here, and stops when the input ends or the main thread is gone.
     let cancel = context.cancel_flag();
-    // **The ids a cancellation named, for the requests that have not started
-    // yet.** Setting the flag alone loses the race a client is most likely to
-    // run into: a call followed immediately by its cancellation arrives as two
-    // lines in one write, and `budget::arm` clears the flag when the call
-    // starts - so a cancellation that overtook its request would be discarded
-    // as belonging to the previous one. An id recorded here is checked before
-    // the request runs, which is the one place the two orderings are the same.
-    let cancelled: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let noted = std::sync::Arc::clone(&cancelled);
+    // This server clears the flag itself, at the boundary below, so `arm` must
+    // not clear it again - see `budget::arm_as_it_stands`.
+    context.preserve_cancellation();
+    // **What is running, and what has been cancelled, under one lock
+    // (task-1932, H11).** A call and its cancellation arrive as two lines in
+    // one write, and the two threads can interleave in either order:
+    //
+    // - the cancellation is read *before* the main thread takes the call off
+    //   the queue, in which case `running` is not yet its id and the id is
+    //   recorded - the main thread finds it and answers cancelled without
+    //   running anything;
+    // - the cancellation is read *after*, in which case `running` is its id and
+    //   the flag is set - the main thread has already cleared the flag and
+    //   armed the budget, so the statement stops at its next batch.
+    //
+    // Both decisions are made holding this lock, which is what makes the pair
+    // exhaustive. Before it the second case lost about one run in three: the
+    // id check had already passed and `budget::arm`'s clear wiped the flag.
+    let state: std::sync::Arc<std::sync::Mutex<Cancellation>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Cancellation::default()));
+    let noted = std::sync::Arc::clone(&state);
     let (lines, arriving) = std::sync::mpsc::channel::<Arrival>();
     std::thread::spawn(move || {
         let mut line = String::new();
@@ -270,9 +281,12 @@ pub fn serve<R: BufRead + Send + 'static>(
                 Ok(0) => Arrival::Ended,
                 Ok(_) => {
                     if let Some(id) = cancellation_target(&line) {
-                        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
                         if let Ok(mut held) = noted.lock() {
-                            held.push(id);
+                            if held.running.as_deref() == Some(id.as_str()) {
+                                cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                            } else {
+                                held.cancelled.push(id);
+                            }
                         }
                     }
                     Arrival::Line(line.clone())
@@ -318,14 +332,24 @@ pub fn serve<R: BufRead + Send + 'static>(
         }
         // A request whose cancellation arrived first is answered as cancelled
         // rather than run. The id is taken out of the list, so a client that
-        // reuses an id is not cancelled twice by one notification.
-        if let Some(id) = already_cancelled(&line, &cancelled) {
-            let answer = error_response(id, -32800, "this request was cancelled.");
-            writeln!(output, "{answer}").map_err(|error| error.to_string())?;
-            output.flush().map_err(|error| error.to_string())?;
-            continue;
+        // reuses an id is not cancelled twice by one notification; and the flag
+        // is cleared and `running` published in the same critical section, so
+        // the reader thread's next decision is made against this request rather
+        // than the one before it.
+        match claim(&line, &state, &context) {
+            Claim::Cancelled(id) => {
+                let answer = error_response(id, -32800, "this request was cancelled.");
+                writeln!(output, "{answer}").map_err(|error| error.to_string())?;
+                output.flush().map_err(|error| error.to_string())?;
+                continue;
+            }
+            Claim::Running => {}
         }
-        if let Some(answer) = handle_with_session(&mut context, &mut session, &line) {
+        let answered = handle_with_session(&mut context, &mut session, &line);
+        if let Ok(mut held) = state.lock() {
+            held.running = None;
+        }
+        if let Some(answer) = answered {
             let answer = enforce_response_budget(answer);
             writeln!(output, "{answer}").map_err(|error| error.to_string())?;
             output.flush().map_err(|error| error.to_string())?;
@@ -395,24 +419,55 @@ fn id_text(id: &Json) -> String {
     }
 }
 
-/// Returns a request's id when a cancellation for it has already arrived,
-/// taking the id off the list.
+/// What the two threads agree about, under one lock.
+#[derive(Default)]
+struct Cancellation {
+    /// The id of the request the main thread is answering, if any.
+    running: Option<String>,
+    /// The ids of requests a cancellation named before they started.
+    cancelled: Vec<String>,
+}
+
+/// What claiming a request decided.
+enum Claim {
+    /// A cancellation for it had already arrived; this is its id.
+    Cancelled(Json),
+    /// It is now the running request.
+    Running,
+}
+
+/// Takes a request as the running one, or reports that it was cancelled first.
+///
+/// **The one critical section (task-1932, H11).** Clearing the flag, checking
+/// the recorded ids and publishing `running` all happen here, so the reader
+/// thread's next decision is made against this request. Splitting them is the
+/// window a cancellation used to be lost in.
 ///
 /// @param line - the request line as it arrived
-/// @param cancelled - the ids cancellations have named
-fn already_cancelled(line: &str, cancelled: &std::sync::Mutex<Vec<String>>) -> Option<Json> {
-    let Ok(mut held) = cancelled.lock() else {
-        return None;
+/// @param state - what the two threads agree about
+/// @param context - the session whose cancellation flag is being cleared
+fn claim(line: &str, state: &std::sync::Mutex<Cancellation>, context: &Context) -> Claim {
+    let Ok(request) = json::parse(line) else {
+        return Claim::Running;
     };
-    if held.is_empty() {
-        return None;
-    }
-    let request = json::parse(line).ok()?;
-    let id = request.get("id")?;
+    let Some(id) = request.get("id") else {
+        // A notification has no id, so nothing can cancel it and nothing has
+        // to be published about it.
+        return Claim::Running;
+    };
     let text = id_text(id);
-    let at = held.iter().position(|named| *named == text)?;
-    held.remove(at);
-    Some(id.clone())
+    let Ok(mut held) = state.lock() else {
+        return Claim::Running;
+    };
+    if let Some(at) = held.cancelled.iter().position(|named| *named == text) {
+        held.cancelled.remove(at);
+        return Claim::Cancelled(id.clone());
+    }
+    context
+        .cancel_flag()
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    held.running = Some(text);
+    Claim::Running
 }
 
 /// A request line that ran past [`MAX_REQUEST_BYTES`].

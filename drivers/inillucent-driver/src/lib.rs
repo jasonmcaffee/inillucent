@@ -85,6 +85,18 @@ pub use value::{Column, Value, ValueKind};
 pub use inillucent_engine::base::budget::Limits as StatementLimits;
 pub use inillucent_engine::DEFAULT_STATEMENT_CACHE;
 
+/// Arming a statement budget, for a front end that runs statements itself.
+///
+/// The shell and the MCP server both arm one per call rather than going through
+/// [`Connection::query`], because they drive the engine's own statement surface
+/// for the dot commands and the pragmas. Re-exported so they do not have to
+/// name `inillucent_engine` to do it (task-1932, M1).
+///
+/// `arm` clears the cancellation flag first, which is right for a caller that
+/// arms once per call; `arm_as_it_stands` does not, which is what a caller that
+/// reads its input on a second thread needs. See `budget::arm_as_it_stands`.
+pub use inillucent_engine::base::budget::{arm, arm_as_it_stands, Guard as BudgetGuard};
+
 /// The driver's own version, and the engine's beneath it.
 pub const VERSION: &str = concat!(
     "inillucent-driver ",

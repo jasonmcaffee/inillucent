@@ -329,6 +329,20 @@ impl MysqlSource {
     /// Opens the one snapshot every read happens inside.
     fn open_snapshot(&mut self) -> DbResult<()> {
         self.execute("SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ")?;
+        // **The session's zone is pinned, so a `TIMESTAMP` does not depend on
+        // where the migration was run from (task-1932, M10).** MySQL stores a
+        // `TIMESTAMP` in UTC and renders it in the *session's* `time_zone`,
+        // which defaults to the server's - so the same table migrated from a
+        // laptop in Denver and from a server in UTC carried two different
+        // strings for one instant. The destination's text then depended on who
+        // ran the tool, and `RowDigest` hashes the carried bytes, so a resumed
+        // migration that copied correctly failed its own verification.
+        //
+        // `+00:00` rather than `UTC`, because the named zones need the
+        // `mysql.time_zone` tables loaded and an offset never does. The
+        // PostgreSQL client pins the same three renderings in its startup
+        // packet; see `postgres::start_up`.
+        self.execute("SET SESSION time_zone = '+00:00'")?;
         // `WITH CONSISTENT SNAPSHOT` is InnoDB's, and it is what makes the read
         // as of one instant rather than as of whenever each table was reached.
         // A server whose tables are MyISAM answers it and ignores it, which is

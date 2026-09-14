@@ -130,7 +130,7 @@ pub fn build_selected(
     let keys: Vec<String> = selected.iter().map(|&i| corpus_key(corpus, i)).collect();
 
     let start = Instant::now();
-    index.add(chunks, &vectors);
+    index.add(chunks, &vectors).expect("the chunks are added");
     let stats = index.commit();
     let elapsed = start.elapsed().as_secs_f64();
 

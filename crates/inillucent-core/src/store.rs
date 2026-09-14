@@ -515,7 +515,7 @@ impl Store {
     /// taken from the first chunk seen for that document, matching the current
     /// stack where these columns live on the document row and every chunk of a
     /// document shares them.
-    pub fn add_chunks(&mut self, inputs: Vec<ChunkInput>) -> Vec<u32> {
+    pub fn add_chunks(&mut self, inputs: Vec<ChunkInput>) -> anyhow::Result<Vec<u32>> {
         self.ensure_doc_lookup();
 
         let mut ids = Vec::with_capacity(inputs.len());
@@ -526,7 +526,7 @@ impl Store {
             let doc = match self.doc_lookup.get(&key) {
                 Some(d) => *d,
                 None => {
-                    let d = self.push_document(source, &input);
+                    let d = self.push_document(source, &input)?;
                     // A document that arrives already tombstoned never enters the
                     // lookup, for the same reason one that is tombstoned later
                     // leaves it: nothing may attach live chunks to a dead row.
@@ -587,13 +587,13 @@ impl Store {
                 .push(input.external_chunk_id.clone().unwrap_or_default());
             ids.push(chunk_id);
         }
-        ids
+        Ok(ids)
     }
 
     /// Interns one new document's attributes and appends its row.
     /// @param source - the already interned source id
     /// @param input - the first chunk seen for this document
-    fn push_document(&mut self, source: u32, input: &ChunkInput) -> u32 {
+    fn push_document(&mut self, source: u32, input: &ChunkInput) -> anyhow::Result<u32> {
         let label_start = self.label_arena.len() as u32;
         for l in &input.labels {
             let id = self.labels.intern(l);
@@ -620,7 +620,18 @@ impl Store {
         let mut flags = 0u32;
         for name in &input.flags {
             let bit = self.flag_names.intern(name);
-            assert!(bit < 32, "a store supports at most 32 named flags");
+            // **An error, not an abort (task-1932, M4).** A flag is one bit of
+            // a `u32`, so the thirty-third distinct *name* in a corpus has
+            // nowhere to go - and this asserted, which ends the host process. A
+            // library a server links cannot make that decision: the caller has
+            // an error path and the assertion took it away. Thirty-three
+            // distinct flag names is an ordinary corpus, not an attack.
+            if bit >= 32 {
+                anyhow::bail!(
+                    "a store holds at most 32 distinct flag names, and '{name}' is the {}th",
+                    bit.saturating_add(1)
+                );
+            }
             flags |= 1u32 << bit;
         }
 
@@ -647,11 +658,81 @@ impl Store {
             url: input.url.clone(),
             external_id: input.external_doc_id.clone(),
         });
-        d
+        Ok(d)
     }
 }
 
-/// One chunk's fixed-width on-disk record.
+#[cfg(test)]
+mod flag_tests {
+    use super::*;
+
+    /// Returns a chunk carrying one set of flag names.
+    ///
+    /// @param flags - the names to put on it
+    fn flagged(flags: Vec<String>) -> ChunkInput {
+        ChunkInput {
+            source: "slack".into(),
+            external_doc_id: "one".into(),
+            chunk_index: 0,
+            heading_path: Vec::new(),
+            content: "a chunk".into(),
+            title: "t".into(),
+            url: "u".into(),
+            space_key: None,
+            author: None,
+            author_id: None,
+            updated_at: None,
+            external_chunk_id: None,
+            labels: Vec::new(),
+            attributes: Vec::new(),
+            flags,
+            deleted: false,
+        }
+    }
+
+    /// The thirty-third distinct flag name is an error, not an abort.
+    ///
+    /// **It used to end the host process (task-1932, M4).** A flag is one bit
+    /// of a `u32`, and the thirty-third distinct *name* in a corpus has nowhere
+    /// to go - which `push_document` answered with `assert!`. A library a
+    /// server links cannot decide to stop the process: the caller has an error
+    /// path and the assertion took it away. Thirty-three distinct flag names is
+    /// an ordinary corpus.
+    #[test]
+    fn the_thirty_third_flag_name_is_an_error_rather_than_an_abort() {
+        let mut store = Store::default();
+        // Thirty-two fit, one document each so every name is distinct.
+        for nth in 0..32 {
+            let mut chunk = flagged(vec![format!("flag{nth}")]);
+            chunk.external_doc_id = format!("doc{nth}");
+            store
+                .add_chunks(vec![chunk])
+                .unwrap_or_else(|why| panic!("flag {nth} was refused: {why}"));
+        }
+
+        let mut chunk = flagged(vec!["flag32".to_string()]);
+        chunk.external_doc_id = "doc32".into();
+        let refused = store
+            .add_chunks(vec![chunk])
+            .expect_err("the 33rd distinct flag name is refused");
+        let said = refused.to_string();
+        assert!(
+            said.contains("32 distinct flag names") && said.contains("flag32"),
+            "the refusal says neither the limit nor the name: {said}"
+        );
+
+        // And a name already interned still works, because the limit is on
+        // distinct names rather than on documents.
+        let mut chunk = flagged(vec!["flag0".to_string()]);
+        chunk.external_doc_id = "doc33".into();
+        assert!(
+            store.add_chunks(vec![chunk]).is_ok(),
+            "a flag name that was already interned was refused"
+        );
+    }
+}
+
+/// One chunk's fixed-width on-disk record./// One chunk's fixed-width on-disk record.
 ///
 /// Declared as a plain-old-data struct so 598,560 of them are one 19 MB write and
 /// one 19 MB read rather than six million field-at-a-time calls.
@@ -926,7 +1007,8 @@ mod tests {
             input("confluence", "d1", 0, "first chunk"),
             input("confluence", "d1", 1, "second chunk"),
             input("slack", "d2", 0, "third chunk"),
-        ]);
+        ])
+        .expect("the chunks are added");
         assert_eq!(s.n_chunks(), 3);
         assert_eq!(s.n_documents(), 2);
         assert_eq!(s.chunks[0].doc, s.chunks[1].doc);
@@ -939,7 +1021,8 @@ mod tests {
         s.add_chunks(vec![
             input("confluence", "d1", 0, "alpha"),
             input("confluence", "d1", 1, "beta gamma"),
-        ]);
+        ])
+        .expect("the chunks are added");
         assert_eq!(s.content(0), "alpha");
         assert_eq!(s.content(1), "beta gamma");
     }
@@ -950,7 +1033,8 @@ mod tests {
         s.add_chunks(vec![
             input("confluence", "1234", 0, "a"),
             input("jira", "1234", 0, "b"),
-        ]);
+        ])
+        .expect("the chunks are added");
         assert_eq!(s.n_documents(), 2);
     }
 
@@ -962,7 +1046,8 @@ mod tests {
             input("slack", "b", 0, "y"),
             input("confluence", "a", 1, "z"),
             input("slack", "c", 0, "w"),
-        ]);
+        ])
+        .expect("the chunks are added");
         let confluence = s.sources.get("confluence").unwrap();
         let slack = s.sources.get("slack").unwrap();
         assert_eq!(s.chunks_of_source(confluence), &[0, 2]);
@@ -978,7 +1063,8 @@ mod tests {
         let mut s = Store::default();
         let mut gone = input("slack", "gone", 0, "x");
         gone.deleted = true;
-        s.add_chunks(vec![input("slack", "here", 0, "y"), gone]);
+        s.add_chunks(vec![input("slack", "here", 0, "y"), gone])
+            .expect("the chunks are added");
         let slack = s.sources.get("slack").unwrap();
         assert_eq!(s.chunks_of_source(slack), &[0, 1]);
         assert_eq!(s.live_chunks_for_source(slack), 1);
@@ -994,7 +1080,8 @@ mod tests {
             input("confluence", "a", 1, "y"),
             input("slack", "b", 0, "z"),
             deleted,
-        ]);
+        ])
+        .expect("the chunks are added");
         let confluence = s.sources.get("confluence").unwrap();
         let slack = s.sources.get("slack").unwrap();
         assert_eq!(s.live_chunks_for_source(confluence), 2);
@@ -1026,7 +1113,8 @@ mod tests {
         first.external_chunk_id = Some("chunk-a".into());
         let mut second = input("email", "d1", 1, "two");
         second.external_chunk_id = Some("chunk-b".into());
-        s.add_chunks(vec![first, second]);
+        s.add_chunks(vec![first, second])
+            .expect("the chunks are added");
 
         assert_eq!(s.chunk_external_id(0), "chunk-a");
         assert_eq!(s.chunk_external_id(1), "chunk-b");
@@ -1038,7 +1126,8 @@ mod tests {
     #[test]
     fn a_corpus_with_no_chunk_identifiers_reports_an_empty_one() {
         let mut s = Store::default();
-        s.add_chunks(vec![input("email", "d1", 0, "one")]);
+        s.add_chunks(vec![input("email", "d1", 0, "one")])
+            .expect("the chunks are added");
         assert_eq!(s.chunk_external_id(0), "");
         assert_eq!(s.chunk_external_id(99), "");
     }
@@ -1048,7 +1137,7 @@ mod tests {
         let mut s = Store::default();
         let mut c = input("confluence", "d1", 0, "x");
         c.heading_path = vec!["A".into(), "B".into(), "C".into()];
-        s.add_chunks(vec![c]);
+        s.add_chunks(vec![c]).expect("the chunks are added");
         assert_eq!(s.heading_path(0), vec!["A", "B", "C"]);
     }
 }

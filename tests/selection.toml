@@ -585,6 +585,13 @@ covers = ["inillucent-engine", "inillucent-search"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
+name = "vtab_lifecycle"
+tier = "engine"
+covers = ["inillucent-engine", "inillucent-ext"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
 name = "vtab"
 tier = "engine"
 covers = ["inillucent-engine", "inillucent-ext"]
@@ -1000,6 +1007,13 @@ kind = "test"
 name = "free_map_checkpoint_crash"
 tier = "durability"
 covers = ["inillucent-engine", "inillucent-txn", "inillucent-pool"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "search_recall"
+tier = "engine"
+covers = ["inillucent-search", "inillucent-core", "inillucent-engine"]
 
 [[target]]
 package = "inillucent-compat"

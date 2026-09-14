@@ -700,7 +700,7 @@ mod tests {
                 });
             }
         }
-        s.add_chunks(inputs);
+        s.add_chunks(inputs).expect("the chunks are added");
         s
     }
 

@@ -388,26 +388,102 @@ pub fn chunk_of(id: i64, row: &Row) -> ChunkInput {
     }
 }
 
-/// Returns the embedding one row contributes, padded or replaced as needed.
+/// Returns the embedding one row contributes.
 ///
 /// A row with no vector in a table that has a vector branch is a legitimate
 /// state - a document whose embedding has not been computed yet - and it gets
 /// the zero vector, which is orthogonal to nothing and therefore never a near
 /// neighbour of anything. That is the honest answer: it is in the corpus
 /// lexically and invisible to the vector branch until it is embedded.
-pub fn embedding_of(row: &Row, dims: usize) -> Vec<f32> {
+///
+/// **Every other width is a refusal (task-1932, M4).** This used to zero-pad a
+/// short vector and truncate a long one, so a three wide row in an eight wide
+/// index became a vector with five zeros on the end - which has a distance to
+/// every query, is never obviously wrong, and is not the row's embedding. The
+/// engine already had one answer to a width mismatch: `store::vector_of`
+/// refuses it. Two answers to one question is worse than either, because the
+/// one that refuses is the one a caller has written code for.
+///
+/// @param row - the row being folded into a segment
+/// @param dims - the index's width
+pub fn embedding_of(row: &Row, dims: usize) -> DbResult<Vec<f32>> {
     let width = dims.max(1);
-    if row.vector.len() == width {
-        return row.vector.clone();
+    if row.vector.is_empty() {
+        return Ok(vec![0.0f32; width]);
     }
-    let mut padded = vec![0.0f32; width];
-    for (slot, value) in padded.iter_mut().zip(row.vector.iter()) {
-        *slot = *value;
+    if row.vector.len() != width {
+        return Err(failure(format!(
+            "inillucent_search: this index has {width} dimensions, and a row's vector has {}",
+            row.vector.len()
+        )));
     }
-    padded
+    Ok(row.vector.clone())
 }
 
-/// Builds a whole index from every row a search table holds, in one pass.
+#[cfg(test)]
+mod width_tests {
+    use super::*;
+
+    /// A row whose vector is the wrong width is refused rather than reshaped.
+    ///
+    /// **There were two answers to one question (task-1932, M4).**
+    /// `store::vector_of` refuses a width mismatch and this zero-padded a short
+    /// vector and truncated a long one - so a three wide row in an eight wide
+    /// index became a vector with five zeros on the end, which has a distance
+    /// to every query and is not the row's embedding. Two answers is worse than
+    /// either, because the one that refuses is the one a caller wrote code for.
+    #[test]
+    fn a_row_whose_vector_is_the_wrong_width_is_refused() {
+        let narrow = Row {
+            columns: vec!["body".to_string()],
+            vector: vec![1.0, 2.0, 3.0],
+        };
+        let refused = embedding_of(&narrow, 8)
+            .expect_err("a three wide vector in an eight wide index is refused");
+        let said = refused
+            .detail()
+            .map(str::to_string)
+            .unwrap_or_else(|| refused.message().to_string());
+        assert!(
+            said.contains('8') && said.contains('3'),
+            "the refusal names neither width: {said}"
+        );
+
+        // A long one is refused the same way, where it used to be truncated.
+        let wide = Row {
+            columns: vec!["body".to_string()],
+            vector: vec![1.0; 16],
+        };
+        assert!(
+            embedding_of(&wide, 8).is_err(),
+            "a sixteen wide vector in an eight wide index was truncated"
+        );
+
+        // The right width passes through unchanged.
+        let exact = Row {
+            columns: vec!["body".to_string()],
+            vector: vec![0.5; 8],
+        };
+        assert_eq!(
+            embedding_of(&exact, 8).expect("the right width passes"),
+            vec![0.5f32; 8]
+        );
+
+        // And a row with no vector at all is still the zero vector, which is
+        // the legitimate state this function was written for: a document whose
+        // embedding has not been computed yet.
+        let empty = Row {
+            columns: vec!["body".to_string()],
+            vector: Vec::new(),
+        };
+        assert_eq!(
+            embedding_of(&empty, 8).expect("an empty vector is the zero vector"),
+            vec![0.0f32; 8]
+        );
+    }
+}
+
+/// Builds a whole index from every row a search table holds, in one pass./// Builds a whole index from every row a search table holds, in one pass.
 ///
 /// This is what the `compact` and `rebuild` commands both do. It is deliberately
 /// not the incremental path: a graph grown one insert at a time is not the graph
@@ -433,13 +509,15 @@ pub fn build_from_rows(
     let mut vectors: Vec<Vec<f32>> = Vec::new();
     store.scan_rows(context, |id, row| {
         chunks.push(chunk_of(id, &row));
-        vectors.push(embedding_of(&row, dims));
+        vectors.push(embedding_of(&row, dims)?);
         Ok(true)
     })?;
     let rows = chunks.len();
     let mut index = Index::new(configuration(options));
     if !chunks.is_empty() {
-        index.add(chunks, &vectors);
+        index
+            .add(chunks, &vectors)
+            .map_err(|why| failure(why.to_string()))?;
     }
     index.commit();
     Ok((index, rows))
@@ -491,7 +569,7 @@ pub fn build_segment_from_batch(
             Op::Put => match store.read_row(context, id)? {
                 Some(row) => {
                     chunks.push(chunk_of(id, &row));
-                    vectors.push(embedding_of(&row, dims));
+                    vectors.push(embedding_of(&row, dims)?);
                 }
                 // The log says the row was written and it is not there - the
                 // row store is authoritative, so this is read as a delete,
@@ -503,7 +581,9 @@ pub fn build_segment_from_batch(
     let inserted = chunks.len();
     let mut index = Index::new(configuration(options));
     if !chunks.is_empty() {
-        index.add(chunks, &vectors);
+        index
+            .add(chunks, &vectors)
+            .map_err(|why| failure(why.to_string()))?;
     }
     index.commit();
     tombstoned.sort_unstable();
@@ -564,12 +644,14 @@ pub fn fold_segment_recording(
     let mut inserted = 0usize;
     let mut recorded = RecordedBatch::default();
     for (id, chunk, vector) in live_documents_of(segment) {
-        let stats = accumulator.replace_document(
-            SOURCE,
-            &id.to_string(),
-            vec![chunk.clone()],
-            std::slice::from_ref(&vector),
-        );
+        let stats = accumulator
+            .replace_document(
+                SOURCE,
+                &id.to_string(),
+                vec![chunk.clone()],
+                std::slice::from_ref(&vector),
+            )
+            .map_err(|why| failure(why.to_string()))?;
         inserted = inserted.saturating_add(stats.chunks_added);
         recorded.puts.push((chunk, vector));
     }
@@ -808,7 +890,8 @@ fn load_segment_bytes(
             index
         }
     };
-    let index = inillucent_core::persist::apply_segment_delta(base, &parsed);
+    let index = inillucent_core::persist::apply_segment_delta(base, &parsed)
+        .map_err(|why| failure(why.to_string()))?;
     if let Some((chunks, documents)) = parsed.sealed {
         let actual_chunks = index.store().n_chunks() as u64;
         let actual_documents = index.store().n_documents() as u64;
@@ -1019,9 +1102,10 @@ fn apply(
                     continue;
                 };
                 let chunk = chunk_of(entry.id, &row);
-                let vector = embedding_of(&row, dims);
-                let stats =
-                    index.replace_document(SOURCE, &entry.id.to_string(), vec![chunk], &[vector]);
+                let vector = embedding_of(&row, dims)?;
+                let stats = index
+                    .replace_document(SOURCE, &entry.id.to_string(), vec![chunk], &[vector])
+                    .map_err(|why| failure(why.to_string()))?;
                 inserted = inserted.saturating_add(stats.chunks_added);
             }
         }
@@ -1196,7 +1280,10 @@ mod tests {
             columns: vec!["text".to_string()],
             vector: Vec::new(),
         };
-        assert_eq!(embedding_of(&row, 4), vec![0.0, 0.0, 0.0, 0.0]);
+        assert_eq!(
+            embedding_of(&row, 4).expect("an empty vector is the zero vector"),
+            vec![0.0, 0.0, 0.0, 0.0]
+        );
     }
 
     /// Recall is a monotone control on breadth, and one asks for the exact path.
