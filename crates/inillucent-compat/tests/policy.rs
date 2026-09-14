@@ -584,6 +584,379 @@ fn no_new_crate_reaches_into_the_retired_engine() {
     );
 }
 
+/// How long each module is allowed to be.
+///
+/// **Hoisted out of the test that reads it (task-1932).** The argument for
+/// every number below is three hundred lines, which made
+/// `no_module_grows_past_the_size_it_is_recorded_at` the longest function in
+/// this file - reported by `no_function_grows_past_the_length_it_is_recorded_at`,
+/// the ratchet the same ticket added. The argument is worth keeping and the
+/// function is not the place for it, so it sits here beside
+/// `FUNCTION_CEILINGS`.
+/// Every module over 2,500 lines, with the ceiling it is held to.
+///
+/// `ImportedDatabase::import_into` - 493 lines that did seven things - was
+/// moved into `inillucent-engine/src/import.rs` as seven named phases,
+/// which is what took `lib.rs` from 8,415 to its number here.
+///
+/// The seek-union feature (`AccessPath::RowidSeekUnion` and
+/// `IndexSeekUnion`, turning an `IN` list and a keyset page's disjunction
+/// into seeks instead of a scan) touches four of these. `plan.rs`'s own
+/// growth was cut from 652 lines to 275 by moving the union-construction
+/// functions into `crates/inillucent-sql/src/plan/seek_union.rs`; the
+/// rest - the enum variants themselves, and the `describe`/cost/ordering
+/// match arms that must stay beside the rest of `AccessPath` - has
+/// nowhere else to go. `physical.rs`, `compile.rs` and `compile_dml.rs`
+/// each need one new executor arm per engine and are raised as measured,
+/// with no further extraction attempted this pass.
+///
+/// `physical.rs` is raised by one more line for task-1900. Making a
+/// registered function reachable from `ORDER BY` - which is what a semantic
+/// search *is*, `ORDER BY vector_distance_cos(v, embed('...')) LIMIT k` -
+/// meant handing the catalog to the space a statement's stages are viewed
+/// through, at the three call sites that already hold one. That is three
+/// added lines and two saved on a field comment whose claim had stopped
+/// being true. The extraction the message asks for is available and is not
+/// small: `literal_value` and `rowid_seek_key` would move cleanly, and they
+/// are named by path from twelve call sites in `inillucent-engine`, so it is
+/// a cross-crate rename in a file this ticket otherwise has no business in.
+/// task-1886 needed one counter and one accessor on `ImportedDatabase` -
+/// how many statements a connection has compiled, which is what the plan
+/// cache guard in `crates/inillucent/tests/budget.rs` asserts on now that it
+/// no longer asserts on a stopwatch. `lib.rs` was two lines under its
+/// ceiling, so there was no version of that addition this test would take.
+///
+/// The extraction it asked for was available and was one idea: the plan
+/// cache. `plan_key`, `cacheable`, `compiled`, `cached_plan_count` and the
+/// new `compiled_statement_count` are all about *whether* to compile, and
+/// they moved to `crates/inillucent-engine/src/plans.rs`; `compile`, which
+/// is about *how*, stayed with the parser and binder plumbing it is written
+/// in terms of. `lib.rs` went from 8,128 to 8,068, and its number here is
+/// left where it is rather than followed down to 8,070 - a ceiling two lines
+/// above the file is what sent somebody here in the first place, and this
+/// test's own slack rule allows 200.
+/// task-1907 is the second one, and it is the extraction this test's own
+/// message named. `physical.rs` needed a catalog on the fold that produces a
+/// vector index's probe vector - without one, adding an
+/// `inillucent_hnsw` index to a column made the documented semantic search
+/// refuse - and the doc comment explaining why is longer than the change.
+/// `literal_value`, `constant_value`, `fold` and the evaluation behind them
+/// are one idea, *what is constant and what is it worth*, and they moved to
+/// `crates/inillucent-exec/src/constant.rs`. 6,742 back to 6,563. `physical`
+/// re-exports `literal_value`, so the twelve call sites in
+/// `inillucent-engine` that name it by path did not move.
+/// **The `fts5/mod.rs` number went back up, and that is the record following
+/// the work rather than the other way round.** It came down to 2,899 when the
+/// segment layer was extracted to `fts5/segment.rs`; task-1911 then measured
+/// the segment format, found it cost roughly half of `extension.fts.query`
+/// for no build-side gain, and reverted it. The extraction went with the
+/// feature that needed it, so the ceiling returns to what it was before
+/// either existed. A number that stayed at 2,899 with nothing left to
+/// extract would refuse the next ordinary addition for a reason that had
+/// stopped being true.
+///
+/// task-1911's second extraction is `crates/inillucent-ext/src/vtab/fts5`.
+/// Merging the dictionary row and the doclist row into one - `%_idx` now
+/// carries the doclist where it used to carry an integer naming a `%_data`
+/// row - touches every reader of both, and `mod.rs` was 80 lines under its
+/// ceiling before it started. The doclist's encoding and decoding is one
+/// idea and moved to `fts5/doclist.rs`, which took `mod.rs` to 2,933 and is
+/// recorded here at that rather than at the 3,135 it was allowed.
+///
+/// task-1911 is the third. Fixing the vector index that answered zero rows
+/// after a reopen needed a transaction number on the connection, a `seal`,
+/// and a flush - a few lines each, in two files that were both at their
+/// ceiling. What moved is one idea, *the engine's half of a vector index a
+/// module owns*: `follow_vector_indexes`, `nearest_rowids`, `probe_module`
+/// and `refresh_vector_indexes` out of `lib.rs`, and `create_vector_index`
+/// out of `ddl.rs`, into `crates/inillucent-engine/src/vectors.rs`. They
+/// name each other and nothing else names them but the write path and the
+/// planner's one question. `lib.rs` 8,128 to 7,876 and `ddl.rs` 2,975 to
+/// 2,806, both recorded here at their new sizes.
+///
+/// Closing roadmap items 13 and 15 is the fourth. Both needed a catalog
+/// parameter threaded onto `RowSpace::compile` and the write-path callers
+/// that reach it, so a registered function stopped refusing by name in a
+/// `VALUES` row, an `UPDATE` assignment and a `RETURNING` clause - three
+/// or four lines each, at a dozen call sites, in a file that was 34 lines
+/// from its ceiling before any of them landed. What moved is one idea,
+/// *what one `INSERT`'s row looks like before any row exists to write*:
+/// `InsertPlan` and the two structs and two enums it alone uses, out of
+/// `dml.rs` into `crates/inillucent-exec/src/insert_plan.rs`. It is named
+/// from exactly the three functions in `dml.rs` that compile or drive it,
+/// and nothing else needs to see inside it. `dml.rs` 3,274 to 3,060,
+/// recorded here at its new size.
+///
+/// `lib.rs` also moves, by thirteen lines, and nothing there extracts.
+/// `WriteView` - the write path's own view of the trees, which is what
+/// `WriteTarget::catalog` hands `RowSpace::compile` - answered `None` for
+/// every registered function, because `TreeCatalog::user_scalar` defaults
+/// to that and nothing had ever overridden it on this type. The catalog
+/// parameter item 13 threads through was therefore reaching a catalog
+/// that could never resolve anything, which is the second half of why a
+/// `VALUES` row calling a registered scalar kept refusing after the first
+/// half was fixed. `WriteView` needed a reference to the registry and the
+/// two methods that read it - thirteen lines with their comments trimmed
+/// to one line each, which is as far as trimming goes without losing the
+/// argument. There is no second copy of this logic anywhere in the file to
+/// fold into it, so the number moves instead.
+///
+/// Roadmap item 3, Stage 1 - a `Cached::Select` chain reused across
+/// executions rather than rebuilt every time - is the next two moves.
+/// `physical.rs` needed `build_chain` split into the part that borrows the
+/// catalog and the part that does not, plus `Compiled`, `Slot` and
+/// `try_compile` to hold the borrow-free half with no lifetime at all.
+/// Everything actually new - `Compiled`, `Slot`, `try_compile` - is one
+/// idea, *a compiled chain kept with no lifetime*, and moved whole into
+/// `crates/inillucent-exec/src/compiled.rs`, re-exported from `physical` so
+/// no existing `physical::Slot` reference had to move with it. What did
+/// not move is `build_upper`: it is 99% the body `build_chain` already had,
+/// entangled with a dozen of this file's own translation and aggregate
+/// helpers, and splitting *that* out as well is a second, larger
+/// extraction this pass did not attempt. 6,973 down to 6,756, still short
+/// of the 6,691 this row was at, and raised to match rather than chasing
+/// the rest of the split for a number this test's own slack already
+/// tolerates. `lib.rs`'s matching half - `execute_select_cached`, deciding
+/// whether to build or reuse - moved to `plans.rs`, which already answers
+/// exactly this question for the outer, per-text cache; 7,973 down to
+/// 7,902, nine over 7,893, raised the same way and for the same reason.
+///
+/// Stage 3 is the same shape again, on the write path this time:
+/// `Cached::Update`, `Delete`, `Insert`'s `SELECT` source, `VirtualUpdate`
+/// and `VirtualDelete` each held their own `(Box<PhysicalPlan>,
+/// Box<Prepared>)` pair with no slot, so `keys_of` rebuilt the keys query
+/// on every execution the way `Cached::Select` used to. `CachedQuery` is
+/// the one struct all five now carry, and the dispatch itself -
+/// `execute_select_cached`'s try-the-slot, build-once, reuse-after body -
+/// generalised into `plans.rs`'s `run_cached_query`, which
+/// `execute_select_cached` now calls too rather than duplicating. `lib.rs`
+/// 7,902 to 7,920, eighteen over; there is no second copy of `CachedQuery`
+/// or `keys_of` to fold into, so the number moves again.
+///
+/// task-1911's delta-area work on `inillucent-tree/src/leaf.rs` and its
+/// FTS5 segment-format work on `inillucent-ext/src/vtab/fts5/mod.rs` are
+/// the next two, both extractions this test's own message asked for
+/// rather than a raised number.
+///
+/// `leaf.rs`: `locate` used to ask [`LeafRef::delta_value`] once per key
+/// column, redecoding a delta row from its first byte every time, and
+/// moved to walking the row's cursor forward once instead - which is what
+/// `delta_column_at`, `delta_key_matches` and `delta_row_values` are. The
+/// delta area is one idea, *rows a write staged since the page was last
+/// packed*, and it moved whole into `crates/inillucent-tree/src/leaf/delta.rs`:
+/// the directory (`delta_count`, `delta_start`), one row's bytes
+/// (`delta_row`), and every reader that walks a row once it has them.
+/// `locate`, `live` and `live_source` stay behind, because each reads the
+/// sorted region and the delta area together and moving them would have
+/// meant picking one of the two an arbitrary home. That left four
+/// functions the sorted-region code still calls - `validate_delta` from
+/// `parse`, `any_delta_extent_unchecked` from `integrity`,
+/// `delta_row_values` from `live` and `live_source`, `delta_key_matches`
+/// from `locate` - which is the `pub(super)` this extraction cost; every
+/// other moved item was already `pub`, since a method's visibility does
+/// not depend on which file its `impl` block sits in, only a free
+/// function's does. 5,446 down to 5,175.
+///
+/// `fts5/mod.rs`: the merged dictionary-and-doclist row from `mod.rs`'s
+/// own earlier paragraph grew a manifest of which segments are live, and
+/// `SegmentMeta` plus everything that reads or writes one -
+/// `get_segment_meta`, `put_segment_meta`, `automerge_threshold`,
+/// `tombstone_key`, `resolve_term`, `terms_with_prefix`,
+/// `merge_live_segments` - is one idea, *the segment layer*, and moved to
+/// `fts5/segment.rs` beside `doclist.rs`. `resolve_doclist` and the
+/// `TermValue` it decodes moved with it: both exist only to serve
+/// `resolve_term`'s per-segment read and calling them from nowhere else
+/// would have left a private pair in `mod.rs` with nothing left to use
+/// them. `resolve_term` and `terms_with_prefix` are named by path from
+/// `expr.rs` and `vocab.rs` as `super::resolve_term` and
+/// `super::terms_with_prefix`; `mod.rs` re-exports both, along with
+/// everything else it still calls unqualified, so neither call site
+/// changed. 3,287 down to 2,899.
+///
+/// task-1911's fourth extraction is `lib.rs` again, from two unrelated
+/// pieces of work landing together: a fix to `total_changes()`, which read
+/// `changed_ever` - one counter shared by every session a database ever
+/// hands out - and so reported a fresh connection every row a *different*
+/// connection had already written, and the write path's `CachedQuery`
+/// generalising `Cached::Select`'s compiled-chain slot onto
+/// `Update`/`Delete`/`VirtualUpdate`/`VirtualDelete`/`Insert`. Both are one
+/// idea each and neither is `lib.rs`'s to keep: the session baseline moved
+/// to `crates/inillucent-engine/src/session_changes.rs`, a new module,
+/// because nothing else in the crate reaches for it; `CachedQuery` moved
+/// to `plans.rs` beside `run_cached_query`, the method its slot exists to
+/// be read by. 8,015 down to 7,969.
+///
+/// A later pass in the same ticket raised three rows without an
+/// extraction to match, and is recorded rather than chased further: each
+/// fix is a handful of lines scattered through logic already local to the
+/// file, not a second copy of anything or a self-contained idea with
+/// somewhere else to live. `lib.rs` 7,969 to 8,030: a module's own write
+/// (`insert_into_module`, `VirtualUpdate`, `VirtualDelete`) never called
+/// `record_changes`, so `changes()`/`total_changes()` stayed at zero after
+/// one; `RELEASE` of a savepoint stack's own implicit transaction never
+/// checked whether it had emptied the stack, so `autocommit()` stayed
+/// false after the equivalent of a `COMMIT`; and `VACUUM` swaps the whole
+/// `ImportedDatabase` for a freshly opened one, which was quietly zeroing
+/// `changes()`/`total_changes()`/`last_insert_rowid()` along with every
+/// other cell a fresh connection starts at zero. `ddl.rs` 2,810 to 2,821:
+/// the `RELEASE` fix's own dispatch, and one error miscoded `SQLITE_ERROR`
+/// as `SQLITE_MISUSE`. `dml.rs` 3,060 to 3,084: a sibling of `count_row`
+/// for a view's `INSTEAD OF` trigger, which must never count as the
+/// *outer* statement's own write - only the trigger body's nested write
+/// does, and that path already counted correctly.
+///
+/// A third pass, same ticket, is `dml.rs` again: 3,084 to 3,122, for the
+/// `Stored` enum that tells `write_one`'s caller a genuine insert from an
+/// `ON CONFLICT ... DO UPDATE` resolved onto a row already there.
+/// `last_insert_rowid()` moves only for the first - SQLite's rule, and one
+/// this file answered wrong by feeding both into the same
+/// `Changes::last_rowid` - and the enum is the seam the fix needed:
+/// `write_one`'s three return points now say which happened rather than
+/// handing back a bare row. Small, and not a second copy of anything to
+/// fold into.
+///
+/// `lib.rs` 8,030 to 8,041, for the free-map checkpoint defect: eleven
+/// lines threaded into `ImportedDatabase::checkpoint` so it logs and
+/// stamps the free map's own pages, the same way `inillucent-txn`'s
+/// `Engine::checkpoint` now does, before installing them, and so that
+/// `set_log_position` reads the durable point from *after* that logging
+/// rather than before it - see
+/// `inillucent_txn::engine::log_free_map_pages`. The idea the extraction
+/// would be *about* already moved, whole, into that shared function; what
+/// is left in this file is the handful of lines that call it and keep this
+/// harness's own durability order, which has nowhere else to live.
+///
+/// `ddl.rs` 2,821 to 2,837, for a defect the same ticket found alongside
+/// the free-map one: `refresh_statistics` logged a stale catalog row's
+/// rewrite under `current_txn()`, which outside a batch or a running
+/// statement is a transaction number nobody ever commits unless
+/// `ImportedDatabase::seal` is called - and nothing called it from a
+/// checkpoint, so the rewrite sat in the log forever uncommitted and
+/// unreplayable. The fix is `refresh_statistics` calling `self.seal()`
+/// after its own writes, which is a doc comment and six lines; there is no
+/// second copy of this logic anywhere in the file to fold into.
+/// `physical.rs` 6,756 down to 6,663, the same way. `reads_a_column` gained
+/// the `used.rowid` case it was missing - a join keyed on a rowid alias
+/// read no outer column as far as it was concerned, so a value that only
+/// exists per outer row was folded once as a statement-wide constant - and
+/// the comment recording why is worth more than the eight lines it costs.
+/// `run_recursive`, `distinct_rows` and `MAX_RECURSIVE_PASSES` moved whole
+/// into `crates/inillucent-exec/src/recursive.rs`, which is one job with
+/// one caller, rather than eight lines taken from somewhere to make a
+/// number fit.
+///
+/// `lib.rs` 7,910 down to 7,863, again by moving rather than trimming.
+/// `attach_statistics`, `statistics_rows` and `apply_statistics` went into
+/// `analyze.rs`, which is where the writing half of `ANALYZE` already lives
+/// and which was already calling two of them through `super::`. What pushed
+/// `lib.rs` over was `journal_for`, and that stays: it is the one place
+/// that decides a connection in `wal` still needs a rollback journal to
+/// make a checkpoint undoable, and it belongs beside the two callers that
+/// install one.
+///
+/// `lib.rs` 8,041 down to 7,910, and this one came *down*. The durability
+/// work of task-1911 pushed it to 8,152, and the answer to that is the one
+/// this list has always asked for: `OpenedFile`, `open_file`,
+/// `read_checkpointed_catalog` and `resume_above_every_stamp` moved whole
+/// into `crates/inillucent-engine/src/recovery.rs`, which is a coherent
+/// unit - opening one file and replaying its log into it - rather than a
+/// slice taken to make a number fit. Nothing in them changed in the move.
+// **Three rows went up in task-1932 and one came down.** `lib.rs` and
+// `ddl.rs` take the three `#![deny]` lines each was missing and the
+// paragraph saying why nothing had noticed - `policy.rs` matched on the
+// lint's name, which is in the `cfg_attr(test, allow(...))` block, so a
+// crate could satisfy the check while allowing all four. `ddl.rs` takes
+// H3's undo floor, which is the paragraph explaining why a directive is
+// several writes and why nothing put the earlier ones back; `plan.rs`
+// takes M6's walk of an aggregate's `FILTER` and inner `ORDER BY`. Both
+// are arguments rather than code - the code in each is a handful of lines
+// - and the ratchet's own rule is that an argument a later reader needs is
+// not what to cut to make a number fit. `paged.rs` paid for its own
+// addition with an extraction, below.
+// `paged.rs` came down from 3,685 to 3,570 in task-1932, because H7's
+// guard - a rowid is looked up by an integer or not at all - had to go
+// somewhere and the ratchet asks for an extraction rather than a raised
+// number. `KeyEncoding` and its four encode methods moved whole into
+// `crates/inillucent-tree/src/keyenc.rs`: one question, how a key tuple
+// becomes the bytes a tree is ordered by, rather than a slice taken to
+// make a number fit. Nothing in them changed in the move, and `paged.rs`
+// re-exports the type so no caller's path moved either.
+// Four rows for `inillucent-vm/src/{compile,compile_dml,machine}.rs` and
+// `inillucent-session/src/connection.rs` came off this list along with the
+// crates that held them: a ceiling on a file that is not in the workspace
+// any more is not a ratchet, it is a row nobody can act on, and the test
+// below already fails loudly with "is not there any more; remove its row"
+// for exactly this reason - removing them here is answering that failure
+// before it happens rather than after.
+const CEILINGS: [(&str, usize); 10] = [
+    // Lowered from 7,875 in task-1932. The plan cache's value type
+    // (`Cached`) and its ceiling moved to `plans.rs`, which is the module
+    // whose header explains when a plan is reused - the two halves of one
+    // idea were ninety lines apart in a file of nearly eight thousand.
+    // Lowered again in task-1932, this time by moving the savepoint
+    // boundary - `savepoint`, `rollback_to` and `release` - to `marks.rs`.
+    // All three changed in this ticket, because a virtual table module now
+    // hears about a savepoint and a release where before it heard about
+    // neither, so the seam was where the work already was.
+    // Lowered again to 7,428 in task-1932. `LearningRows`, `shape_of`,
+    // `identifier_of` and `decode_row` - the applier that decides what a
+    // log record means - moved whole into `recovery.rs`, which is where
+    // the half that decides *which* records to replay already lives. They
+    // were seven hundred lines apart in a file of nearly eight thousand.
+    ("crates/inillucent-engine/src/lib.rs", 7428),
+    // Lowered from 6,663 in task-1932. The window pass - `run_windowed` and
+    // the seven helpers only it calls - moved whole to
+    // `crates/inillucent-exec/src/windowpass.rs`, which is 575 lines this
+    // file no longer holds. It is reached from one line of
+    // `run_any_prepared` and nothing else here called any of it, so the
+    // seam was already there.
+    //
+    // Lowered again to 5,709, for M7's union fix. The nine functions that
+    // turn a plan's constraints into the keys and spans a cursor is
+    // positioned with - `nested_key`, `point_key`, the two union key
+    // builders, `range_union_bounds`, `span_bounds`, `index_affinity`,
+    // `bound_value` and `with_affinity`, along with `SpanBounds` - moved
+    // whole to `crates/inillucent-exec/src/physical/keys.rs`. They are one
+    // question, which is what bytes a cursor is asked to find, and the
+    // three places that position a cursor already reached for them
+    // together. Nothing in them changed in the move, and `physical.rs`
+    // re-exports `nested_key` and `SpanBounds` so no caller's path moved.
+    //
+    // 5,709 became 5,732 when the function ratchet below asked for the
+    // union's own decision to come out of `plan_stages` - which was 375
+    // lines and is now 353 - and `probes_one_entry_each` carries the
+    // argument that used to sit inside it. The file is 931 lines shorter
+    // than this ticket found it either way.
+    ("crates/inillucent-exec/src/physical.rs", 5_732),
+    // Lowered from 5,315 in task-1913, which added ninety-nine lines to
+    // this file and put it exactly over. The ratchet asks for an
+    // extraction, so the ten items that answer "what does this name in a
+    // `WITH` stand for" are `bind/cte.rs`: the two CTE types, `push_ctes`,
+    // `pop_ctes`, `find_cte`, `bind_recursive_cte`, `push_recursive_self`
+    // and the three that read whether a definition names itself. Nothing
+    // moved changed in the move.
+    ("crates/inillucent-sql/src/bind.rs", 5_111),
+    ("crates/inillucent-tree/src/leaf.rs", 5_175),
+    ("crates/inillucent-tree/src/paged.rs", 3_570),
+    ("crates/inillucent-exec/src/dml.rs", 3_122),
+    ("crates/inillucent-ext/src/vtab/fts5/mod.rs", 2_935),
+    ("crates/inillucent-engine/src/ddl.rs", 2_920),
+    // Lowered from 2,925 in task-1932. M7 added three functions for the
+    // anchored `LIKE` and `GLOB` range and a walk of an equality prefix
+    // ahead of an `IN` list, and the ratchet asks for an extraction rather
+    // than a raised number, so two went out. `pattern_range`,
+    // `anchored_prefix` and `next_prefix` are `plan/pattern.rs`: what
+    // range an anchored pattern selects, and the pairing rule that decides
+    // whether a range may be used at all. `comparison_collation`,
+    // `collation_of`, `comparison_against_column`,
+    // `comparison_against_rowid` and `mirror` are `plan/terms.rs`: reading
+    // one `WHERE` term as a comparison against one column, which
+    // `plan/pattern.rs` and `plan/seek_union.rs` were already reaching
+    // back into `plan.rs` for.
+    ("crates/inillucent-sql/src/plan.rs", 2_851),
+    ("crates/inillucent-bench/src/synth.rs", 2_600),
+];
+
 /// No module grows past the size it is recorded at, and the record only comes
 /// down.
 ///
@@ -603,359 +976,6 @@ fn no_new_crate_reaches_into_the_retired_engine() {
 /// rather than the other way round.
 #[test]
 fn no_module_grows_past_the_size_it_is_recorded_at() {
-    /// Every module over 2,500 lines, with the ceiling it is held to.
-    ///
-    /// `ImportedDatabase::import_into` - 493 lines that did seven things - was
-    /// moved into `inillucent-engine/src/import.rs` as seven named phases,
-    /// which is what took `lib.rs` from 8,415 to its number here.
-    ///
-    /// The seek-union feature (`AccessPath::RowidSeekUnion` and
-    /// `IndexSeekUnion`, turning an `IN` list and a keyset page's disjunction
-    /// into seeks instead of a scan) touches four of these. `plan.rs`'s own
-    /// growth was cut from 652 lines to 275 by moving the union-construction
-    /// functions into `crates/inillucent-sql/src/plan/seek_union.rs`; the
-    /// rest - the enum variants themselves, and the `describe`/cost/ordering
-    /// match arms that must stay beside the rest of `AccessPath` - has
-    /// nowhere else to go. `physical.rs`, `compile.rs` and `compile_dml.rs`
-    /// each need one new executor arm per engine and are raised as measured,
-    /// with no further extraction attempted this pass.
-    ///
-    /// `physical.rs` is raised by one more line for task-1900. Making a
-    /// registered function reachable from `ORDER BY` - which is what a semantic
-    /// search *is*, `ORDER BY vector_distance_cos(v, embed('...')) LIMIT k` -
-    /// meant handing the catalog to the space a statement's stages are viewed
-    /// through, at the three call sites that already hold one. That is three
-    /// added lines and two saved on a field comment whose claim had stopped
-    /// being true. The extraction the message asks for is available and is not
-    /// small: `literal_value` and `rowid_seek_key` would move cleanly, and they
-    /// are named by path from twelve call sites in `inillucent-engine`, so it is
-    /// a cross-crate rename in a file this ticket otherwise has no business in.
-    /// task-1886 needed one counter and one accessor on `ImportedDatabase` -
-    /// how many statements a connection has compiled, which is what the plan
-    /// cache guard in `crates/inillucent/tests/budget.rs` asserts on now that it
-    /// no longer asserts on a stopwatch. `lib.rs` was two lines under its
-    /// ceiling, so there was no version of that addition this test would take.
-    ///
-    /// The extraction it asked for was available and was one idea: the plan
-    /// cache. `plan_key`, `cacheable`, `compiled`, `cached_plan_count` and the
-    /// new `compiled_statement_count` are all about *whether* to compile, and
-    /// they moved to `crates/inillucent-engine/src/plans.rs`; `compile`, which
-    /// is about *how*, stayed with the parser and binder plumbing it is written
-    /// in terms of. `lib.rs` went from 8,128 to 8,068, and its number here is
-    /// left where it is rather than followed down to 8,070 - a ceiling two lines
-    /// above the file is what sent somebody here in the first place, and this
-    /// test's own slack rule allows 200.
-    /// task-1907 is the second one, and it is the extraction this test's own
-    /// message named. `physical.rs` needed a catalog on the fold that produces a
-    /// vector index's probe vector - without one, adding an
-    /// `inillucent_hnsw` index to a column made the documented semantic search
-    /// refuse - and the doc comment explaining why is longer than the change.
-    /// `literal_value`, `constant_value`, `fold` and the evaluation behind them
-    /// are one idea, *what is constant and what is it worth*, and they moved to
-    /// `crates/inillucent-exec/src/constant.rs`. 6,742 back to 6,563. `physical`
-    /// re-exports `literal_value`, so the twelve call sites in
-    /// `inillucent-engine` that name it by path did not move.
-    /// **The `fts5/mod.rs` number went back up, and that is the record following
-    /// the work rather than the other way round.** It came down to 2,899 when the
-    /// segment layer was extracted to `fts5/segment.rs`; task-1911 then measured
-    /// the segment format, found it cost roughly half of `extension.fts.query`
-    /// for no build-side gain, and reverted it. The extraction went with the
-    /// feature that needed it, so the ceiling returns to what it was before
-    /// either existed. A number that stayed at 2,899 with nothing left to
-    /// extract would refuse the next ordinary addition for a reason that had
-    /// stopped being true.
-    ///
-    /// task-1911's second extraction is `crates/inillucent-ext/src/vtab/fts5`.
-    /// Merging the dictionary row and the doclist row into one - `%_idx` now
-    /// carries the doclist where it used to carry an integer naming a `%_data`
-    /// row - touches every reader of both, and `mod.rs` was 80 lines under its
-    /// ceiling before it started. The doclist's encoding and decoding is one
-    /// idea and moved to `fts5/doclist.rs`, which took `mod.rs` to 2,933 and is
-    /// recorded here at that rather than at the 3,135 it was allowed.
-    ///
-    /// task-1911 is the third. Fixing the vector index that answered zero rows
-    /// after a reopen needed a transaction number on the connection, a `seal`,
-    /// and a flush - a few lines each, in two files that were both at their
-    /// ceiling. What moved is one idea, *the engine's half of a vector index a
-    /// module owns*: `follow_vector_indexes`, `nearest_rowids`, `probe_module`
-    /// and `refresh_vector_indexes` out of `lib.rs`, and `create_vector_index`
-    /// out of `ddl.rs`, into `crates/inillucent-engine/src/vectors.rs`. They
-    /// name each other and nothing else names them but the write path and the
-    /// planner's one question. `lib.rs` 8,128 to 7,876 and `ddl.rs` 2,975 to
-    /// 2,806, both recorded here at their new sizes.
-    ///
-    /// Closing roadmap items 13 and 15 is the fourth. Both needed a catalog
-    /// parameter threaded onto `RowSpace::compile` and the write-path callers
-    /// that reach it, so a registered function stopped refusing by name in a
-    /// `VALUES` row, an `UPDATE` assignment and a `RETURNING` clause - three
-    /// or four lines each, at a dozen call sites, in a file that was 34 lines
-    /// from its ceiling before any of them landed. What moved is one idea,
-    /// *what one `INSERT`'s row looks like before any row exists to write*:
-    /// `InsertPlan` and the two structs and two enums it alone uses, out of
-    /// `dml.rs` into `crates/inillucent-exec/src/insert_plan.rs`. It is named
-    /// from exactly the three functions in `dml.rs` that compile or drive it,
-    /// and nothing else needs to see inside it. `dml.rs` 3,274 to 3,060,
-    /// recorded here at its new size.
-    ///
-    /// `lib.rs` also moves, by thirteen lines, and nothing there extracts.
-    /// `WriteView` - the write path's own view of the trees, which is what
-    /// `WriteTarget::catalog` hands `RowSpace::compile` - answered `None` for
-    /// every registered function, because `TreeCatalog::user_scalar` defaults
-    /// to that and nothing had ever overridden it on this type. The catalog
-    /// parameter item 13 threads through was therefore reaching a catalog
-    /// that could never resolve anything, which is the second half of why a
-    /// `VALUES` row calling a registered scalar kept refusing after the first
-    /// half was fixed. `WriteView` needed a reference to the registry and the
-    /// two methods that read it - thirteen lines with their comments trimmed
-    /// to one line each, which is as far as trimming goes without losing the
-    /// argument. There is no second copy of this logic anywhere in the file to
-    /// fold into it, so the number moves instead.
-    ///
-    /// Roadmap item 3, Stage 1 - a `Cached::Select` chain reused across
-    /// executions rather than rebuilt every time - is the next two moves.
-    /// `physical.rs` needed `build_chain` split into the part that borrows the
-    /// catalog and the part that does not, plus `Compiled`, `Slot` and
-    /// `try_compile` to hold the borrow-free half with no lifetime at all.
-    /// Everything actually new - `Compiled`, `Slot`, `try_compile` - is one
-    /// idea, *a compiled chain kept with no lifetime*, and moved whole into
-    /// `crates/inillucent-exec/src/compiled.rs`, re-exported from `physical` so
-    /// no existing `physical::Slot` reference had to move with it. What did
-    /// not move is `build_upper`: it is 99% the body `build_chain` already had,
-    /// entangled with a dozen of this file's own translation and aggregate
-    /// helpers, and splitting *that* out as well is a second, larger
-    /// extraction this pass did not attempt. 6,973 down to 6,756, still short
-    /// of the 6,691 this row was at, and raised to match rather than chasing
-    /// the rest of the split for a number this test's own slack already
-    /// tolerates. `lib.rs`'s matching half - `execute_select_cached`, deciding
-    /// whether to build or reuse - moved to `plans.rs`, which already answers
-    /// exactly this question for the outer, per-text cache; 7,973 down to
-    /// 7,902, nine over 7,893, raised the same way and for the same reason.
-    ///
-    /// Stage 3 is the same shape again, on the write path this time:
-    /// `Cached::Update`, `Delete`, `Insert`'s `SELECT` source, `VirtualUpdate`
-    /// and `VirtualDelete` each held their own `(Box<PhysicalPlan>,
-    /// Box<Prepared>)` pair with no slot, so `keys_of` rebuilt the keys query
-    /// on every execution the way `Cached::Select` used to. `CachedQuery` is
-    /// the one struct all five now carry, and the dispatch itself -
-    /// `execute_select_cached`'s try-the-slot, build-once, reuse-after body -
-    /// generalised into `plans.rs`'s `run_cached_query`, which
-    /// `execute_select_cached` now calls too rather than duplicating. `lib.rs`
-    /// 7,902 to 7,920, eighteen over; there is no second copy of `CachedQuery`
-    /// or `keys_of` to fold into, so the number moves again.
-    ///
-    /// task-1911's delta-area work on `inillucent-tree/src/leaf.rs` and its
-    /// FTS5 segment-format work on `inillucent-ext/src/vtab/fts5/mod.rs` are
-    /// the next two, both extractions this test's own message asked for
-    /// rather than a raised number.
-    ///
-    /// `leaf.rs`: `locate` used to ask [`LeafRef::delta_value`] once per key
-    /// column, redecoding a delta row from its first byte every time, and
-    /// moved to walking the row's cursor forward once instead - which is what
-    /// `delta_column_at`, `delta_key_matches` and `delta_row_values` are. The
-    /// delta area is one idea, *rows a write staged since the page was last
-    /// packed*, and it moved whole into `crates/inillucent-tree/src/leaf/delta.rs`:
-    /// the directory (`delta_count`, `delta_start`), one row's bytes
-    /// (`delta_row`), and every reader that walks a row once it has them.
-    /// `locate`, `live` and `live_source` stay behind, because each reads the
-    /// sorted region and the delta area together and moving them would have
-    /// meant picking one of the two an arbitrary home. That left four
-    /// functions the sorted-region code still calls - `validate_delta` from
-    /// `parse`, `any_delta_extent_unchecked` from `integrity`,
-    /// `delta_row_values` from `live` and `live_source`, `delta_key_matches`
-    /// from `locate` - which is the `pub(super)` this extraction cost; every
-    /// other moved item was already `pub`, since a method's visibility does
-    /// not depend on which file its `impl` block sits in, only a free
-    /// function's does. 5,446 down to 5,175.
-    ///
-    /// `fts5/mod.rs`: the merged dictionary-and-doclist row from `mod.rs`'s
-    /// own earlier paragraph grew a manifest of which segments are live, and
-    /// `SegmentMeta` plus everything that reads or writes one -
-    /// `get_segment_meta`, `put_segment_meta`, `automerge_threshold`,
-    /// `tombstone_key`, `resolve_term`, `terms_with_prefix`,
-    /// `merge_live_segments` - is one idea, *the segment layer*, and moved to
-    /// `fts5/segment.rs` beside `doclist.rs`. `resolve_doclist` and the
-    /// `TermValue` it decodes moved with it: both exist only to serve
-    /// `resolve_term`'s per-segment read and calling them from nowhere else
-    /// would have left a private pair in `mod.rs` with nothing left to use
-    /// them. `resolve_term` and `terms_with_prefix` are named by path from
-    /// `expr.rs` and `vocab.rs` as `super::resolve_term` and
-    /// `super::terms_with_prefix`; `mod.rs` re-exports both, along with
-    /// everything else it still calls unqualified, so neither call site
-    /// changed. 3,287 down to 2,899.
-    ///
-    /// task-1911's fourth extraction is `lib.rs` again, from two unrelated
-    /// pieces of work landing together: a fix to `total_changes()`, which read
-    /// `changed_ever` - one counter shared by every session a database ever
-    /// hands out - and so reported a fresh connection every row a *different*
-    /// connection had already written, and the write path's `CachedQuery`
-    /// generalising `Cached::Select`'s compiled-chain slot onto
-    /// `Update`/`Delete`/`VirtualUpdate`/`VirtualDelete`/`Insert`. Both are one
-    /// idea each and neither is `lib.rs`'s to keep: the session baseline moved
-    /// to `crates/inillucent-engine/src/session_changes.rs`, a new module,
-    /// because nothing else in the crate reaches for it; `CachedQuery` moved
-    /// to `plans.rs` beside `run_cached_query`, the method its slot exists to
-    /// be read by. 8,015 down to 7,969.
-    ///
-    /// A later pass in the same ticket raised three rows without an
-    /// extraction to match, and is recorded rather than chased further: each
-    /// fix is a handful of lines scattered through logic already local to the
-    /// file, not a second copy of anything or a self-contained idea with
-    /// somewhere else to live. `lib.rs` 7,969 to 8,030: a module's own write
-    /// (`insert_into_module`, `VirtualUpdate`, `VirtualDelete`) never called
-    /// `record_changes`, so `changes()`/`total_changes()` stayed at zero after
-    /// one; `RELEASE` of a savepoint stack's own implicit transaction never
-    /// checked whether it had emptied the stack, so `autocommit()` stayed
-    /// false after the equivalent of a `COMMIT`; and `VACUUM` swaps the whole
-    /// `ImportedDatabase` for a freshly opened one, which was quietly zeroing
-    /// `changes()`/`total_changes()`/`last_insert_rowid()` along with every
-    /// other cell a fresh connection starts at zero. `ddl.rs` 2,810 to 2,821:
-    /// the `RELEASE` fix's own dispatch, and one error miscoded `SQLITE_ERROR`
-    /// as `SQLITE_MISUSE`. `dml.rs` 3,060 to 3,084: a sibling of `count_row`
-    /// for a view's `INSTEAD OF` trigger, which must never count as the
-    /// *outer* statement's own write - only the trigger body's nested write
-    /// does, and that path already counted correctly.
-    ///
-    /// A third pass, same ticket, is `dml.rs` again: 3,084 to 3,122, for the
-    /// `Stored` enum that tells `write_one`'s caller a genuine insert from an
-    /// `ON CONFLICT ... DO UPDATE` resolved onto a row already there.
-    /// `last_insert_rowid()` moves only for the first - SQLite's rule, and one
-    /// this file answered wrong by feeding both into the same
-    /// `Changes::last_rowid` - and the enum is the seam the fix needed:
-    /// `write_one`'s three return points now say which happened rather than
-    /// handing back a bare row. Small, and not a second copy of anything to
-    /// fold into.
-    ///
-    /// `lib.rs` 8,030 to 8,041, for the free-map checkpoint defect: eleven
-    /// lines threaded into `ImportedDatabase::checkpoint` so it logs and
-    /// stamps the free map's own pages, the same way `inillucent-txn`'s
-    /// `Engine::checkpoint` now does, before installing them, and so that
-    /// `set_log_position` reads the durable point from *after* that logging
-    /// rather than before it - see
-    /// `inillucent_txn::engine::log_free_map_pages`. The idea the extraction
-    /// would be *about* already moved, whole, into that shared function; what
-    /// is left in this file is the handful of lines that call it and keep this
-    /// harness's own durability order, which has nowhere else to live.
-    ///
-    /// `ddl.rs` 2,821 to 2,837, for a defect the same ticket found alongside
-    /// the free-map one: `refresh_statistics` logged a stale catalog row's
-    /// rewrite under `current_txn()`, which outside a batch or a running
-    /// statement is a transaction number nobody ever commits unless
-    /// `ImportedDatabase::seal` is called - and nothing called it from a
-    /// checkpoint, so the rewrite sat in the log forever uncommitted and
-    /// unreplayable. The fix is `refresh_statistics` calling `self.seal()`
-    /// after its own writes, which is a doc comment and six lines; there is no
-    /// second copy of this logic anywhere in the file to fold into.
-    /// `physical.rs` 6,756 down to 6,663, the same way. `reads_a_column` gained
-    /// the `used.rowid` case it was missing - a join keyed on a rowid alias
-    /// read no outer column as far as it was concerned, so a value that only
-    /// exists per outer row was folded once as a statement-wide constant - and
-    /// the comment recording why is worth more than the eight lines it costs.
-    /// `run_recursive`, `distinct_rows` and `MAX_RECURSIVE_PASSES` moved whole
-    /// into `crates/inillucent-exec/src/recursive.rs`, which is one job with
-    /// one caller, rather than eight lines taken from somewhere to make a
-    /// number fit.
-    ///
-    /// `lib.rs` 7,910 down to 7,863, again by moving rather than trimming.
-    /// `attach_statistics`, `statistics_rows` and `apply_statistics` went into
-    /// `analyze.rs`, which is where the writing half of `ANALYZE` already lives
-    /// and which was already calling two of them through `super::`. What pushed
-    /// `lib.rs` over was `journal_for`, and that stays: it is the one place
-    /// that decides a connection in `wal` still needs a rollback journal to
-    /// make a checkpoint undoable, and it belongs beside the two callers that
-    /// install one.
-    ///
-    /// `lib.rs` 8,041 down to 7,910, and this one came *down*. The durability
-    /// work of task-1911 pushed it to 8,152, and the answer to that is the one
-    /// this list has always asked for: `OpenedFile`, `open_file`,
-    /// `read_checkpointed_catalog` and `resume_above_every_stamp` moved whole
-    /// into `crates/inillucent-engine/src/recovery.rs`, which is a coherent
-    /// unit - opening one file and replaying its log into it - rather than a
-    /// slice taken to make a number fit. Nothing in them changed in the move.
-    // **Three rows went up in task-1932 and one came down.** `lib.rs` and
-    // `ddl.rs` take the three `#![deny]` lines each was missing and the
-    // paragraph saying why nothing had noticed - `policy.rs` matched on the
-    // lint's name, which is in the `cfg_attr(test, allow(...))` block, so a
-    // crate could satisfy the check while allowing all four. `ddl.rs` takes
-    // H3's undo floor, which is the paragraph explaining why a directive is
-    // several writes and why nothing put the earlier ones back; `plan.rs`
-    // takes M6's walk of an aggregate's `FILTER` and inner `ORDER BY`. Both
-    // are arguments rather than code - the code in each is a handful of lines
-    // - and the ratchet's own rule is that an argument a later reader needs is
-    // not what to cut to make a number fit. `paged.rs` paid for its own
-    // addition with an extraction, below.
-    // `paged.rs` came down from 3,685 to 3,570 in task-1932, because H7's
-    // guard - a rowid is looked up by an integer or not at all - had to go
-    // somewhere and the ratchet asks for an extraction rather than a raised
-    // number. `KeyEncoding` and its four encode methods moved whole into
-    // `crates/inillucent-tree/src/keyenc.rs`: one question, how a key tuple
-    // becomes the bytes a tree is ordered by, rather than a slice taken to
-    // make a number fit. Nothing in them changed in the move, and `paged.rs`
-    // re-exports the type so no caller's path moved either.
-    // Four rows for `inillucent-vm/src/{compile,compile_dml,machine}.rs` and
-    // `inillucent-session/src/connection.rs` came off this list along with the
-    // crates that held them: a ceiling on a file that is not in the workspace
-    // any more is not a ratchet, it is a row nobody can act on, and the test
-    // below already fails loudly with "is not there any more; remove its row"
-    // for exactly this reason - removing them here is answering that failure
-    // before it happens rather than after.
-    const CEILINGS: [(&str, usize); 10] = [
-        // Lowered from 7,875 in task-1932. The plan cache's value type
-        // (`Cached`) and its ceiling moved to `plans.rs`, which is the module
-        // whose header explains when a plan is reused - the two halves of one
-        // idea were ninety lines apart in a file of nearly eight thousand.
-        // Lowered again in task-1932, this time by moving the savepoint
-        // boundary - `savepoint`, `rollback_to` and `release` - to `marks.rs`.
-        // All three changed in this ticket, because a virtual table module now
-        // hears about a savepoint and a release where before it heard about
-        // neither, so the seam was where the work already was.
-        ("crates/inillucent-engine/src/lib.rs", 7753),
-        // Lowered from 6,663 in task-1932. The window pass - `run_windowed` and
-        // the seven helpers only it calls - moved whole to
-        // `crates/inillucent-exec/src/windowpass.rs`, which is 575 lines this
-        // file no longer holds. It is reached from one line of
-        // `run_any_prepared` and nothing else here called any of it, so the
-        // seam was already there.
-        //
-        // Lowered again to 5,709, for M7's union fix. The nine functions that
-        // turn a plan's constraints into the keys and spans a cursor is
-        // positioned with - `nested_key`, `point_key`, the two union key
-        // builders, `range_union_bounds`, `span_bounds`, `index_affinity`,
-        // `bound_value` and `with_affinity`, along with `SpanBounds` - moved
-        // whole to `crates/inillucent-exec/src/physical/keys.rs`. They are one
-        // question, which is what bytes a cursor is asked to find, and the
-        // three places that position a cursor already reached for them
-        // together. Nothing in them changed in the move, and `physical.rs`
-        // re-exports `nested_key` and `SpanBounds` so no caller's path moved.
-        ("crates/inillucent-exec/src/physical.rs", 5_709),
-        // Lowered from 5,315 in task-1913, which added ninety-nine lines to
-        // this file and put it exactly over. The ratchet asks for an
-        // extraction, so the ten items that answer "what does this name in a
-        // `WITH` stand for" are `bind/cte.rs`: the two CTE types, `push_ctes`,
-        // `pop_ctes`, `find_cte`, `bind_recursive_cte`, `push_recursive_self`
-        // and the three that read whether a definition names itself. Nothing
-        // moved changed in the move.
-        ("crates/inillucent-sql/src/bind.rs", 5_111),
-        ("crates/inillucent-tree/src/leaf.rs", 5_175),
-        ("crates/inillucent-tree/src/paged.rs", 3_570),
-        ("crates/inillucent-exec/src/dml.rs", 3_122),
-        ("crates/inillucent-ext/src/vtab/fts5/mod.rs", 2_935),
-        ("crates/inillucent-engine/src/ddl.rs", 2_920),
-        // Lowered from 2,925 in task-1932. M7 added three functions for the
-        // anchored `LIKE` and `GLOB` range and a walk of an equality prefix
-        // ahead of an `IN` list, and the ratchet asks for an extraction rather
-        // than a raised number, so two went out. `pattern_range`,
-        // `anchored_prefix` and `next_prefix` are `plan/pattern.rs`: what
-        // range an anchored pattern selects, and the pairing rule that decides
-        // whether a range may be used at all. `comparison_collation`,
-        // `collation_of`, `comparison_against_column`,
-        // `comparison_against_rowid` and `mirror` are `plan/terms.rs`: reading
-        // one `WHERE` term as a comparison against one column, which
-        // `plan/pattern.rs` and `plan/seek_union.rs` were already reaching
-        // back into `plan.rs` for.
-        ("crates/inillucent-sql/src/plan.rs", 2_851),
-        ("crates/inillucent-bench/src/synth.rs", 2_600),
-    ];
-
     let root = workspace_root();
     let mut over: Vec<String> = Vec::new();
     let mut shrunk: Vec<String> = Vec::new();
@@ -1499,4 +1519,304 @@ fn every_fuzz_target_is_in_the_scheduled_workflow() {
         missing.is_empty(),
         "the fuzz workflow schedules targets that fuzz/Cargo.toml does not declare: {missing:?}"
     );
+}
+
+/// How long each function over 150 lines is allowed to be.
+///
+/// **The function ratchet, beside the module one (task-1932, TDD section 7).**
+/// The review counted twenty functions over 150 lines and recommended exactly
+/// this: record each at its current length, so new code cannot add to the list
+/// and a fix that touches one of them leaves it no longer than it found it. A
+/// module ceiling alone does not do that - a file can stay the same size while
+/// one function inside it absorbs every change, which is how a five hundred
+/// line function is arrived at.
+///
+/// Measured the way `function_lengths` measures: from the line that opens the
+/// function to the first line that is exactly its indentation and a closing
+/// brace. That is a lexical rule rather than a parse, and it is the same rule
+/// for every entry, which is what a ratchet needs.
+const FUNCTION_CEILINGS: [(&str, &str, usize); 65] = [
+    ("crates/inillucent-bench/src/gradeembed.rs", "run", 531),
+    ("crates/inillucent-exec/src/physical.rs", "translate", 494),
+    ("crates/inillucent-bench/src/main.rs", "main", 488),
+    ("crates/inillucent-compat/src/perf.rs", "plan_for", 450),
+    ("crates/inillucent-bench/src/scenarios.rs", "grade", 445),
+    (
+        "crates/inillucent-compat/tests/policy.rs",
+        "no_module_grows_past_the_size_it_is_recorded_at",
+        393,
+    ),
+    ("crates/inillucent-compat/src/bin/fullgate.rs", "run", 389),
+    ("crates/inillucent-exec/src/physical.rs", "build_upper", 383),
+    ("crates/inillucent-compat/src/bin/readgate.rs", "run", 370),
+    ("crates/inillucent-exec/src/join.rs", "push", 362),
+    ("crates/inillucent-exec/src/physical.rs", "plan_stages", 353),
+    ("crates/inillucent-engine/src/lib.rs", "load_schema", 329),
+    ("crates/inillucent-compat/src/bin/writegate.rs", "run", 318),
+    (
+        "crates/inillucent-engine/src/vtab.rs",
+        "rows_of_module",
+        313,
+    ),
+    ("crates/inillucent-sql/src/bind.rs", "bind_expr", 303),
+    ("crates/inillucent-engine/src/ddl.rs", "run_directive", 273),
+    ("crates/inillucent-tree/src/paged.rs", "skip_scan", 249),
+    ("crates/inillucent-sql/src/bind.rs", "bind_call_with", 248),
+    ("crates/inillucent-bench/src/synth.rs", "build_source", 243),
+    ("crates/inillucent-exec/src/expr.rs", "compile", 242),
+    (
+        "crates/inillucent-tree/src/leaf.rs",
+        "encode_rows_with",
+        239,
+    ),
+    ("crates/inillucent-bench/src/report.rs", "render", 238),
+    (
+        "crates/inillucent-compat/src/bin/readperf.rs",
+        "measure",
+        232,
+    ),
+    ("crates/inillucent-migrate/src/verify.rs", "retrieval", 229),
+    ("crates/inillucent-storage/src/mutate.rs", "balance", 224),
+    ("crates/inillucent-compat/src/bin/analytical.rs", "run", 223),
+    ("crates/inillucent-engine/src/lib.rs", "write", 219),
+    (
+        "crates/inillucent-compat/src/bin/storageprofile.rs",
+        "run",
+        218,
+    ),
+    ("crates/inillucent-exec/src/dml.rs", "update_at_cached", 215),
+    ("crates/inillucent-bench/src/synth.rs", "check", 214),
+    ("crates/inillucent-model/tests/campaign.rs", "segment", 213),
+    ("crates/inillucent-engine/src/lib.rs", "import_into", 210),
+    ("crates/inillucent-tree/src/write.rs", "write_row", 206),
+    ("crates/inillucent-exec/src/dml.rs", "insert_at", 205),
+    ("crates/inillucent-engine/src/ddl.rs", "create_index", 192),
+    (
+        "crates/inillucent-compat/src/fixtures.rs",
+        "malformed_fixtures",
+        192,
+    ),
+    ("crates/inillucent-remote/src/migrate.rs", "run", 191),
+    ("crates/inillucent-sql/src/plan.rs", "plan_select_with", 189),
+    ("crates/inillucent-migrate/src/lib.rs", "migrate", 189),
+    (
+        "crates/inillucent-compat/src/bin/writeperf.rs",
+        "measure_scale",
+        183,
+    ),
+    ("crates/inillucent-storage/src/check.rs", "check_tree", 182),
+    (
+        "crates/inillucent-core/src/embed_onnx.rs",
+        "run_encodings",
+        182,
+    ),
+    ("crates/inillucent-compat/src/bin/release.rs", "run", 176),
+    ("crates/inillucent-engine/src/recovery.rs", "open_file", 173),
+    (
+        "crates/inillucent-compat/src/fixtures.rs",
+        "valid_fixtures",
+        173,
+    ),
+    (
+        "crates/inillucent-tree/src/paged.rs",
+        "bulk_build_rows",
+        167,
+    ),
+    ("crates/inillucent-core/src/bm25.rs", "search", 167),
+    ("crates/inillucent-tree/src/write.rs", "make_room", 166),
+    (
+        "crates/inillucent-sql/src/bind.rs",
+        "bind_column_reference",
+        165,
+    ),
+    (
+        "crates/inillucent-engine/src/import.rs",
+        "carry_tables",
+        165,
+    ),
+    ("crates/inillucent-sql/src/plan.rs", "index_candidate", 164),
+    ("crates/inillucent-compat/src/bin/testrun.rs", "report", 164),
+    ("crates/inillucent-compat/src/bin/planperf.rs", "run", 163),
+    ("crates/inillucent-bench/src/synth.rs", "build", 163),
+    (
+        "crates/inillucent-engine/src/vtab.rs",
+        "create_virtual_table",
+        161,
+    ),
+    ("crates/inillucent-tree/src/write.rs", "merge_if_small", 157),
+    ("crates/inillucent-scalar/src/builtin.rs", "call_with", 157),
+    (
+        "crates/inillucent-sql/src/plan/seek_union.rs",
+        "in_list_union_path",
+        154,
+    ),
+    (
+        "crates/inillucent-remote/src/tls/windows.rs",
+        "handshake",
+        154,
+    ),
+    ("crates/inillucent-engine/src/lib.rs", "apply_compiled", 154),
+    (
+        "crates/inillucent-compat/src/bin/probeprofile.rs",
+        "probe_stages",
+        154,
+    ),
+    (
+        "crates/inillucent-engine/src/vectors.rs",
+        "create_vector_index",
+        153,
+    ),
+    ("crates/inillucent-core/src/filter.rs", "compile", 153),
+    (
+        "crates/inillucent-remote/src/tls/windows.rs",
+        "verify_against",
+        151,
+    ),
+    (
+        "crates/inillucent-compat/src/bin/fullgate.rs",
+        "report_costs",
+        151,
+    ),
+];
+
+/// The length past which a function that is not already recorded fails.
+///
+/// The same number the review counted at, so the recorded list is exactly what
+/// was over 150 lines when the ratchet was written.
+const LONGEST_NEW_FUNCTION: usize = 150;
+
+/// Returns the length of every function in one file, longest wins per name.
+///
+/// A name that appears twice in a file - the same method on two types, or a
+/// trait method implemented several times - is recorded once, at its longest,
+/// because the ratchet is about the function that is too long rather than about
+/// which impl block it sits in.
+///
+/// @param text - the file's contents
+fn function_lengths(text: &str) -> std::collections::BTreeMap<String, usize> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut found: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for (at, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        let indent = line.len().saturating_sub(trimmed.len());
+        let Some(name) = opens_a_function(trimmed) else {
+            continue;
+        };
+        let closing = format!("{}}}", " ".repeat(indent));
+        for (offset, later) in lines.iter().enumerate().skip(at.saturating_add(1)) {
+            if *later == closing {
+                let length = offset.saturating_sub(at).saturating_add(1);
+                let held = found.entry(name).or_insert(0);
+                *held = (*held).max(length);
+                break;
+            }
+        }
+    }
+    found
+}
+
+/// Returns the name a line declares, when the line opens a function.
+///
+/// Keywords are stripped in the order Rust writes them. Anything else - a `fn`
+/// inside a string, a function pointer type - answers `None`, because the name
+/// has to be followed by a parameter list or a generic list for this to be a
+/// declaration.
+///
+/// @param trimmed - the line with its leading spaces removed
+fn opens_a_function(trimmed: &str) -> Option<String> {
+    let mut rest = trimmed;
+    for keyword in [
+        "pub(crate) ",
+        "pub(super) ",
+        "pub(self) ",
+        "pub ",
+        "default ",
+        "const ",
+        "async ",
+        "unsafe ",
+    ] {
+        while let Some(shorter) = rest.strip_prefix(keyword) {
+            rest = shorter;
+        }
+    }
+    if let Some(shorter) = rest.strip_prefix("extern \"") {
+        rest = shorter
+            .split_once('"')
+            .map(|(_, after)| after.trim_start())?;
+    }
+    let rest = rest.strip_prefix("fn ")?;
+    let name: String = rest
+        .chars()
+        .take_while(|letter| letter.is_alphanumeric() || *letter == '_')
+        .collect();
+    let after = rest.get(name.len()..)?;
+    (!name.is_empty() && (after.starts_with('(') || after.starts_with('<'))).then_some(name)
+}
+
+/// No function grows past the length it is recorded at, and no new one joins
+/// the list.
+#[test]
+fn no_function_grows_past_the_length_it_is_recorded_at() {
+    let root = workspace_root();
+    let mut measured: std::collections::BTreeMap<(String, String), usize> =
+        std::collections::BTreeMap::new();
+    // `crates/` and `drivers/` are the workspace's own sources. Walking the
+    // root instead also walks `target/`, which holds a copy of several crates
+    // under `target/package/` and the retired `inillucent-vm` among them - so
+    // the ratchet reported functions nobody can edit, and took five minutes.
+    let mut sources = rust_files(&root.join("crates"));
+    sources.extend(rust_files(&root.join("drivers")));
+    for path in sources {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let named = relative(&root, &path);
+        for (name, length) in function_lengths(&text) {
+            measured.insert((named.clone(), name), length);
+        }
+    }
+
+    let mut over: Vec<String> = Vec::new();
+    let mut joined: Vec<String> = Vec::new();
+    for ((path, name), length) in &measured {
+        let recorded = FUNCTION_CEILINGS
+            .iter()
+            .find(|(held, called, _)| held == path && called == name)
+            .map(|(_, _, ceiling)| *ceiling);
+        match recorded {
+            Some(ceiling) if *length > ceiling => {
+                over.push(format!(
+                    "{path}::{name}: {length} lines, past its {ceiling}"
+                ));
+            }
+            Some(_) => {}
+            None if *length > LONGEST_NEW_FUNCTION => {
+                joined.push(format!("{path}::{name}: {length} lines"));
+            }
+            None => {}
+        }
+    }
+    let gone: Vec<String> = FUNCTION_CEILINGS
+        .iter()
+        .filter(|(path, name, _)| {
+            !measured.contains_key(&((*path).to_string(), (*name).to_string()))
+        })
+        .map(|(path, name, _)| format!("{path}::{name} is not there any more; remove its row"))
+        .collect();
+
+    assert!(
+        over.is_empty(),
+        "these functions grew past the length they are recorded at:\n{}\n\
+         Split one out rather than raising the number - a function reaches five hundred lines \
+         because every individual addition to it was reasonable.",
+        over.join("\n")
+    );
+    assert!(
+        joined.is_empty(),
+        "these functions are over {LONGEST_NEW_FUNCTION} lines and are not on the recorded \
+         list:\n{}\n\
+         The list is what already exists, not a budget: write the new one shorter.",
+        joined.join("\n")
+    );
+    assert!(gone.is_empty(), "{}", gone.join("\n"));
 }
