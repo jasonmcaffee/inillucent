@@ -72,14 +72,24 @@ if [ -n "$tap" ]; then
   printf '%s\n' "$formula" > "$tap/Formula/inillucent.rb"
   echo
   echo "wrote $tap/Formula/inillucent.rb"
-  echo "Then, in the tap:  git add Formula/inillucent.rb && git commit -m \"inillucent $version\" && git push"
 else
   printf '%s\n' "$formula"
 fi
 
+# The push instruction is printed only when the formula is complete.
+#
+# It used to print before the warning below, so a run with a missing archive
+# ended with a loud "Then, in the tap: git add ... && git push" and the reason
+# not to do that underneath it. The file on disk still carries
+# REPLACE_WITH_THE_UNIVERSAL_DARWIN_SHA256, which Homebrew rejects at install
+# time on somebody else's machine.
 if [ "$missing" -eq 1 ]; then
   echo
   echo "One or more archives were missing, so the formula still has placeholders in it." >&2
-  echo "Build them on their own platforms and run this again before pushing the tap." >&2
+  echo "Do not push it. Build them on their own platforms and run this again." >&2
   exit 1
+fi
+
+if [ -n "$tap" ]; then
+  echo "Then, in the tap:  git add Formula/inillucent.rb && git commit -m \"inillucent $version\" && git push"
 fi

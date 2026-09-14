@@ -7,6 +7,8 @@ packaging/
   release.ps1  release.sh      build the archive every installer is made from
   install.ps1  install.sh      install it, on Windows / on macOS and Linux
   cargo-publish.ps1            publish the workspace to crates.io
+  sign-sums.ps1                the minisign signature over SHA256SUMS
+  mirror-github.ps1            build the public mirror's commit for a release
   windows/README.md            why there is no MSI, and what one would take
   macos/                       the .pkg: build, sign, notarise, and what each costs
   homebrew/                    the formula, and a script that fills its checksums
@@ -92,9 +94,17 @@ site. The MacBook builds, signs and notarises macOS, because Apple's linker,
 ```powershell
 # --- on the Windows box -------------------------------------------------
 pwsh tools/cross/fetch-toolchain.ps1        # once: zig, cargo-zigbuild, rcodesign, nfpm, minisign
-pwsh packaging/release-all.ps1              # Windows and both Linux architectures
+pwsh packaging/release-all.ps1              # Windows, both Linux architectures, and the macOS builds
 pwsh packaging/linux/package-linux.ps1      # the .deb and the .rpm, signed
 ```
+
+`release-all.ps1` builds the two Apple targets as well and archives neither,
+because an archive of unsigned Mach-O is not something anybody should be able to
+pick up by accident. The five targets it needs are named in
+`rust-toolchain.toml`, which is what installs them; the two Apple ones were
+missing from that list until task-1951, so on a machine holding only the pinned
+toolchain the default run stopped at its macOS step with
+`error[E0463]: can't find crate for std`.
 
 ```sh
 # --- on the MacBook -----------------------------------------------------
@@ -108,7 +118,7 @@ that one is never a version to pass here.
 ```powershell
 # --- back on the Windows box --------------------------------------------
 pwsh packaging/fetch-macos-artifacts.ps1 -Version 0.1.2   # collect and verify what the Mac made
-pwsh packaging/sign-sums.ps1                              # minisign over SHA256SUMS
+pwsh packaging/sign-sums.ps1                              # minisign over SHA256SUMS; needs packaging/inillucent.pub
 bash tools/release-verify-linux.sh --version 0.1.2        # from WSL
 pwsh packaging/publish-site.ps1 -Version 0.1.2 -Stage     # on the site, not yet linked
 ```
@@ -129,12 +139,20 @@ The order is the point. A download link that points at an artifact nobody has
 run is worse than no link, so the artifacts are staged where the verifier can
 reach them before anything on the site mentions them.
 
-**The distribution point is inillucent.com, not GitHub.** The repository is
+**The distribution point is inillucent.com.** Both GitHub repositories are
 private, and a private repository's release assets are private too: an
-unauthenticated request for one answers 404. GitHub is used for exactly one
-thing here, which is carrying the macOS artifacts from the MacBook to the
-Windows box, and `packaging/fetch-macos-artifacts.ps1 -FromDirectory` skips even
-that when the two machines are on the same network.
+unauthenticated request for one answers 404, which was checked with no credential
+of any kind in task-1951. So GitHub carries nothing a user downloads. It is used
+for one thing, carrying the macOS artifacts from the MacBook to the Windows box,
+and `packaging/fetch-macos-artifacts.ps1 -FromDirectory` skips even that when the
+two machines are on the same network.
+
+One route does not survive that: `go install` resolves through
+`proxy.golang.org`, which clones the repository with no credential and gets a
+404, so the Go package cannot be installed by anybody. `node tools/check-public-urls.mjs`
+reports every link in the shipped packages that a signed-out reader cannot open,
+and `packaging/mirror-github.ps1` builds the public mirror commit for a release.
+`PUBLISHING.md` has the decision that goes with them.
 
 ## The two rules every installer here follows
 

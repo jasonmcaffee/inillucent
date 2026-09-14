@@ -296,6 +296,20 @@ function Update-Sha256Sums {
         without that workaround reports a correct download as unpublished.
         `PUBLISHING.md` records this as fixed in `release.ps1`; it was not fixed
         here, which is the copy every archive's checksum actually comes from.
+
+        **provenance.json goes in too (task-1951).** It did not, and the effect
+        was silent: `release.ps1` and `release.sh` both write the archives and
+        then append the provenance's hash, and every caller of this function
+        rewrote the file over the archives alone and dropped that line. So
+        running `packaging/release-all.ps1` or `packaging/linux/package-linux.ps1`
+        after a release turned a four line SHA256SUMS into a three line one, and
+        `packaging/publish-site.ps1` copies this file to the site verbatim. The
+        site's own comment says provenance.json is published because SHA256SUMS
+        names it; without the line, the provenance is served with nothing
+        stating its hash, and a downloader who verified the archive has not
+        verified the claims about it. Measured on 2026-09-14: `release-all.ps1
+        -Targets macos` rewrote a file that matched the published one into one
+        that did not.
     #>
     param([string] $Dist)
     $sums = Join-Path $Dist 'SHA256SUMS'
@@ -305,6 +319,13 @@ function Update-Sha256Sums {
             Sort-Object Name | ForEach-Object {
                 $lines += "$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
             }
+    }
+    # Last, and by name rather than by pattern, because the release scripts
+    # append it last and a downloader comparing two copies of this file should
+    # not see the lines in a different order.
+    $provenance = Join-Path $Dist 'provenance.json'
+    if (Test-Path -LiteralPath $provenance) {
+        $lines += "$((Get-FileHash -LiteralPath $provenance -Algorithm SHA256).Hash.ToLower())  provenance.json"
     }
     # The text is assembled and written whole, because there is no switch on
     # Set-Content that changes the line ending it uses.

@@ -29,6 +29,11 @@
     The environment variable holding the secret key's passphrase. Default
     INILLUCENT_MINISIGN_PASSPHRASE.
 
+.PARAMETER AllowUnverifiedKey
+    Sign without checking the result against a public key. Only for creating the
+    project's key pair for the first time, when there is no published key to
+    check against yet.
+
 .EXAMPLE
     pwsh packaging/sign-sums.ps1
 #>
@@ -36,7 +41,8 @@
 param(
     [string] $PublicKey,
     [string] $SecretKey = $env:INILLUCENT_MINISIGN_KEY,
-    [string] $PassphraseEnv = 'INILLUCENT_MINISIGN_PASSPHRASE'
+    [string] $PassphraseEnv = 'INILLUCENT_MINISIGN_PASSPHRASE',
+    [switch] $AllowUnverifiedKey
 )
 
 $ErrorActionPreference = 'Stop'
@@ -47,6 +53,23 @@ if (-not (Test-Path -LiteralPath $minisign)) {
     throw 'minisign is missing. Run: pwsh tools/cross/fetch-toolchain.ps1'
 }
 if (-not $PublicKey) { $PublicKey = Join-Path $PSScriptRoot 'inillucent.pub' }
+
+# The public key is required, not optional.
+#
+# The check below - does this signature verify against the key readers will
+# check it with - used to sit inside `if (Test-Path $PublicKey)`, and
+# packaging/inillucent.pub has never existed. So the script signed with whatever
+# secret key it was handed, printed `signed`, exited 0, and had verified
+# nothing. Every guard in this directory is a refusal with a named override
+# rather than a silent skip, and this one is now the same.
+if (-not (Test-Path -LiteralPath $PublicKey) -and -not $AllowUnverifiedKey) {
+    throw "$PublicKey does not exist, so a signature made here cannot be checked " +
+          "against the key a reader would use. Create the pair once with:`n" +
+          "  tools/cross/bin/minisign.exe -G -p packaging/inillucent.pub -s <somewhere outside this repository>/inillucent.key`n" +
+          'then commit inillucent.pub and keep the secret key off this machine. ' +
+          'Pass -AllowUnverifiedKey to sign without that check.'
+}
+
 if (-not $SecretKey) {
     throw 'no secret key. Set INILLUCENT_MINISIGN_KEY to the minisign key file, or pass -SecretKey.'
 }
@@ -72,8 +95,12 @@ if ($LASTEXITCODE -ne 0) { throw "minisign failed with $LASTEXITCODE" }
 
 if (Test-Path -LiteralPath $PublicKey) {
     & $minisign -V -p $PublicKey -m $sums
-    if ($LASTEXITCODE -ne 0) { throw 'the signature does not verify against packaging/inillucent.pub' }
+    if ($LASTEXITCODE -ne 0) { throw "the signature does not verify against $PublicKey" }
+    $verified = "verified against $PublicKey"
+} else {
+    $verified = 'NOT verified - there is no public key, and -AllowUnverifiedKey was passed'
 }
 
 Write-Host ''
 Write-Host "signed  $signature"
+Write-Host "        $verified"
