@@ -4,10 +4,11 @@ Everything in this repository is built, tested and verified up to the upload.
 This file is the last mile: what each registry needs, in what order, and which
 credential is missing.
 
-**One of the six is published: Go**, and the GitHub release is current at v0.1.1. It needed no account and no token, only a
-git tag, so it was tagged. The other five stop at a credential that belongs to a
-person, or at one decision that is not a script's to make - and they are not all
-in the same state behind that credential, so the table below says which.
+**One of the six is published: Go**, and the GitHub release is at v0.1.1 while
+inillucent.com serves 0.1.2. It needed no account and no token, only a git tag,
+so it was tagged. The other five stop at a credential that belongs to a person,
+or at one decision that is not a script's to make - and they are not all in the
+same state behind that credential, so the table below says which.
 
 Two readiness states, and they are not the same thing:
 
@@ -21,9 +22,50 @@ Two readiness states, and they are not the same thing:
 
 ## Where it stands, at a glance
 
-Updated 2026-09-11, at **0.1.1**. **Both one-line installers work**, verified by
-running them as written against the live site: Windows, and Ubuntu 24.04. A Linux
-archive is published beside the Windows one.
+Updated 2026-09-14, at **0.1.2**. **Both one-line installers work**, verified by
+running them as written against the live site: Windows, and Ubuntu 24.04. Three
+archives are published - Windows, Linux x86-64 and Linux aarch64.
+
+**What 0.1.2 is for.** `inillucent setup-embeddings all` downloads 620 MB of ONNX
+Runtime and weights, and every archive up to 0.1.1 was built without
+`--features inillucent-cli/embed`, so the program that downloaded them answered
+`no such function: embed`. task-1900 put the flag in the release scripts;
+0.1.1 was cut before that, so cutting 0.1.2 was the whole of the fix. The
+published Windows and Linux archives both answer
+`SELECT length(embed('hello'))` with `3072`, the Linux one after
+`setup-embeddings all` on a machine that had never run it.
+
+**Cutting it found three defects in the release gate, and none of them is
+reachable by building the workspace** (task-1934):
+
+- **Five checks spoke a handshake `inillucent-mcp` no longer accepts.** It
+  enforces the MCP lifecycle now - `initialize` needs `protocolVersion`,
+  `capabilities` and `clientInfo`, and every other method answers -32002 until
+  `notifications/initialized` arrives. `packaging/release.ps1`'s smoke test
+  **refused to build the archive at all**; `packaging/release.sh`,
+  `tools/release-verify-linux.sh` L5, `packaging/macos/verify-macos.sh` A5 and
+  the Homebrew formula's `test do` block all failed the same way.
+  `tools/doc-facts/check.mjs` already sent the whole handshake, which is how the
+  five were spotted.
+- **Two of those read the answer through `grep -q`**, which stops at its first
+  match and closes the pipe; the server's next write then fails, it exits
+  non-zero, and `set -o pipefail` reported a pipeline that had answered
+  correctly as failed. Both read into a variable now.
+- **No release had ever carried an ARM Linux archive**, because
+  `rust-toolchain.toml` named only the two x86-64 targets and cargo answered
+  `can't find crate for 'core'`. zig supplies the linker and the glibc floor;
+  the standard library for the target still has to be installed.
+  `rust-toolchain.toml` names it now.
+
+A fourth is not about the gate: **a clean checkout on this machine turns every
+shell script into CRLF**, because `core.autocrlf` is true and the repository
+carried no `.gitattributes`. `packaging/publish-site.ps1` publishes
+`packaging/install.sh` and `packaging/macos/verify-macos.sh` out of the
+checkout, and `sh` on a CRLF script dies on its first line.
+`packaging/install.sh` escaped by accident - it carries a literal carriage
+return inside a `tr -d` argument, and git leaves such a file alone - so the one
+script whose CRLF would have been noticed at once is the one that was never
+converted. `.gitattributes` pins `*.sh` to LF.
 
 **0.1.0 was withdrawn, not patched.** Its archives carried `README.md`,
 `docs/getting-started.md` and `agent-skills/inillucent-quickstart/SKILL.md` from
@@ -37,10 +79,13 @@ nothing to say so. The 0.1.0 archives are removed from the site and answer 404.
 
 | route | readiness | what it is waiting on |
 |---|---|---|
-| **inillucent.com, Windows** | **live** - `irm .../install.ps1 \| iex` installs and runs | nothing |
-| **inillucent.com, Linux** | **live** - `curl -fsSL .../install.sh \| sh` installs and runs | nothing |
+| **inillucent.com, Windows** | **live at 0.1.2** - `irm .../install.ps1 \| iex` installs and runs | nothing |
+| **inillucent.com, Linux x86-64** | **live at 0.1.2** - `curl -fsSL .../install.sh \| sh` installs and runs | nothing |
+| **inillucent.com, Linux aarch64** | **published at 0.1.2**, and **never run** - there is no ARM machine here. `tools/release-verify-linux.sh` reads its glibc floor, its shared libraries and its modes out of the archive and passes; L4 and L5 skip themselves | a machine that can run it |
 | **inillucent.com, macOS** | work remains - no archive | a Mac: `packaging/macos/release-macos.sh --version <v> --upload`, which builds both architectures, `lipo`s them, signs, notarises and uploads |
-| **GitHub release** | **done** - `v0.1.1` with both archives, `SHA256SUMS` and `provenance.json` | nothing |
+| **SHA256SUMS signature** | not signed, at 0.1.1 or 0.1.2 | the minisign secret key. `packaging/sign-sums.ps1` reads it from `INILLUCENT_MINISIGN_KEY`, and `packaging/inillucent.pub` does not exist either |
+| **the .deb and the .rpm** | not built, at 0.1.1 or 0.1.2 | an OpenPGP key. `packaging/linux/package-linux.ps1` signs by default because `apt` and `dnf` will not install an unsigned package from outside a distribution's own repository |
+| **GitHub release** | `v0.1.1`, and **not cut for 0.1.2** | a decision about `brl`. Its `main` is a separate history - ten commits this repository does not have, and 325 it does not have - so a `v0.1.2` tag there would name code that is not in it |
 | **Go** | **published** - tag `packages/go/v0.1.2` | nothing, except that a private repository limits who can install it |
 | **npm** | **token is the only step** - three tarballs packed, installed and run | **the signup page answers 403 to every client** - see below |
 | **PyPI** | **token is the only step** - wheel installed into a clean venv and run | an account; the form carries an hCaptcha and uploads need 2FA |
@@ -226,8 +271,12 @@ from source, installed and run, C ABI linked - with **no waivers**. The script
 refuses to build an untagged archive at all, so the tag came first rather than
 being passed over with `-AllowUntagged`.
 
-**Still needed**: the three non-Windows archives, built on their own machines
-with `packaging/release.sh --target <triple>` and added to the same release.
+**Still needed**: a macOS archive, which needs a Mac, and a decision about what
+to do with `Black-Rainbow-Labs/Inillucent` - the release above is on a `main`
+that is a separate history from the one releases are now cut from, so the tag a
+0.1.2 release would hang on does not exist there. The two Linux archives the old
+wording asked for are built on the Windows box now, by
+`packaging/release-all.ps1` through cargo-zigbuild.
 
 **The repository is still private**, so the release and its assets are reachable
 only by somebody with access, and the `curl`-to-shell installers in the release

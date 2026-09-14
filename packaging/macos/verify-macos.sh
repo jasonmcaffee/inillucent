@@ -118,16 +118,25 @@ fi
 # The whole lifecycle: the server refuses `tools/list` with -32002 until
 # `initialize` and `notifications/initialized` have both arrived, and refuses an
 # `initialize` that carries no `protocolVersion`.
-if printf '%s\n%s\n%s\n' \
+#
+# Read into a variable rather than piped into `grep -q`. `grep -q` stops at its
+# first match and closes the pipe, the server's next write fails and it exits
+# non-zero, and `set -o pipefail` then reports the pipeline as failed however
+# well the server answered.
+listed="$(printf '%s\n%s\n%s\n' \
      '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"verify-macos","version":"1"}}}' \
      '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
      '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
-   | "$bin/inillucent-mcp" --db "$db" 2>/dev/null | grep -q '"tools"'; then
-  echo "  ok    A5 inillucent-mcp listed its tools"
-else
-  echo "  FAIL  A5 inillucent-mcp did not list its tools"
-  failures=$((failures + 1))
-fi
+   | "$bin/inillucent-mcp" --db "$db" 2>/dev/null || true)"
+case "$listed" in
+  *'"tools"'*)
+    echo "  ok    A5 inillucent-mcp listed its tools"
+    ;;
+  *)
+    echo "  FAIL  A5 inillucent-mcp did not list its tools"
+    failures=$((failures + 1))
+    ;;
+esac
 
 # A6: the x86-64 half, under Rosetta. On an Apple silicon Mac this is the only
 # test of that slice, and it is the one that catches a bad Intel build.

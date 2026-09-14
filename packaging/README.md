@@ -101,8 +101,9 @@ pwsh packaging/linux/package-linux.ps1      # the .deb and the .rpm, signed
 ./packaging/macos/release-macos.sh --version 0.1.2 --upload
 ```
 
-`0.1.2` throughout this section is the version being cut. The published release is **0.1.1**, and
-**0.1.0 was withdrawn** — `PUBLISHING.md` says why — so neither number is a version to pass here.
+`0.1.2` throughout this section is an example, and it is the version that was published on
+2026-09-14. Pass the version being cut. **0.1.0 was withdrawn** — `PUBLISHING.md` says why — so
+that one is never a version to pass here.
 
 ```powershell
 # --- back on the Windows box --------------------------------------------

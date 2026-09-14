@@ -115,15 +115,20 @@ for triple in x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
     # The whole lifecycle: the server refuses `tools/list` with -32002 until
     # `initialize` and `notifications/initialized` have both arrived, and
     # refuses an `initialize` that carries no `protocolVersion`.
-    if printf '%s\n%s\n%s\n' \
+    #
+    # Read into a variable rather than piped into `grep -q`. `grep -q` stops at
+    # its first match and closes the pipe, the server's next write fails and it
+    # exits non-zero, and `set -o pipefail` then reports the pipeline as failed
+    # however well the server answered.
+    listed="$(printf '%s\n%s\n%s\n' \
         '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"release-verify","version":"1"}}}' \
         '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
         '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
-      | "$bin/inillucent-mcp" --db "$db" 2>/dev/null | grep -q '"tools"'; then
-      pass "L5 inillucent-mcp listed its tools"
-    else
-      fail "L5 inillucent-mcp did not list its tools"
-    fi
+      | "$bin/inillucent-mcp" --db "$db" 2>/dev/null)"
+    case "$listed" in
+      *'"tools"'*) pass "L5 inillucent-mcp listed its tools" ;;
+      *) fail "L5 inillucent-mcp did not list its tools" ;;
+    esac
   else
     echo "  skip  L4/L5 this machine is $(uname -m), not $(echo "$triple" | cut -d- -f1)"
   fi
