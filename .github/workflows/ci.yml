@@ -52,7 +52,7 @@ jobs:
         # first build is the release.
         os: [windows-latest, ubuntu-latest, macos-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # `rust-toolchain.toml` decides the version, the components and the
       # targets. This step exists to make rustup read it before the cache key
@@ -103,7 +103,7 @@ jobs:
       # usually only readable from the artefact.
       - name: keep what the suites produced
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: output-${{ matrix.os }}
           path: _agent_output/
@@ -130,7 +130,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
         with:
           key: evidence-ubuntu
@@ -161,7 +161,7 @@ jobs:
       - name: the compatibility report this evidence supports
         run: cargo run -p inillucent-compat --bin inillucent-manifest -- report
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: linux-evidence
@@ -186,7 +186,7 @@ jobs:
         # `packaging/macos/verify-macos.sh` on the machine that cuts a release.
         os: [windows-latest, ubuntu-latest]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
         with:
           key: package-${{ matrix.os }}
@@ -226,7 +226,7 @@ jobs:
       matrix:
         package: [go, npm, php, python]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: Swatinem/rust-cache@v2
         with:
           key: wrapper-${{ matrix.package }}
