@@ -285,6 +285,16 @@ impl Journal {
         &self.path
     }
 
+    /// Returns the mode the journal was opened in.
+    ///
+    /// The pool asks so that it can tell a journal whose pre-images reach the
+    /// disk from one whose do not: an eviction may write a page an open
+    /// transaction has changed only when a crash could put that page back, and
+    /// `memory` cannot. See `Pool::can_undo_a_steal`.
+    pub fn mode(&self) -> JournalMode {
+        self.mode
+    }
+
     /// Saves one page's image as it was before the transaction touched it.
     ///
     /// Called from the one place a page is written, so a page cannot reach the
