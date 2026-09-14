@@ -125,10 +125,11 @@ inillucent --db examples/rag-agent/greek-philosophy.rdb query \
 No corpus to download, nothing to index, no embedding server. It is the shortest answer to "show me
 this doing retrieval".
 
-**`embed(TEXT)` needs a binary built with the embedding feature, and the published 0.1.1 archives are
-not.** Run the query above against one and it answers `no such function: embed`, with the 620 MB
-already downloaded. `packaging/release-all.ps1` passes `--features inillucent-cli/embed`, so the next
-release carries it; until that release is cut, build the command line from a checkout:
+**`embed(TEXT)` needs a binary built with the embedding feature, and the published 0.1.2 archives
+carry it.** `packaging/release-all.ps1` passes `--features inillucent-cli/embed`. The 0.1.1 archives
+were built without it, and answer `no such function: embed` with the 620 MB already downloaded, so a
+copy installed before 0.1.2 has to be replaced. `inillucent --version` says which one is installed. A
+checkout builds the command line with the feature as well:
 
 ```sh
 cargo build --release -p inillucent-cli --features inillucent-cli/embed
