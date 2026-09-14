@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+# Never published. The embedding model harness: it exists to drive a model in a
+# test and a benchmark, and an application reaches embeddings through
+# `inillucent-core` rather than through this.
+publish = false
 repository.workspace = true
 description = "An executable model of the engine's transactional semantics, and the traces that drive it"
 
