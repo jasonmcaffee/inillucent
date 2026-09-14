@@ -1,4 +1,4 @@
-cut points: 99, acknowledged commits: 1, detected damage: 0
+cut points: 117, acknowledged commits: 1, detected damage: 0
 1	failed	old
 2	failed	old
 3	failed	old
@@ -98,4 +98,22 @@ cut points: 99, acknowledged commits: 1, detected damage: 0
 97	failed	old
 98	failed	old
 99	failed	old
-100	acknowledged	new
+100	failed	old
+101	failed	old
+102	failed	old
+103	failed	old
+104	failed	old
+105	failed	old
+106	failed	old
+107	failed	old
+108	failed	old
+109	failed	old
+110	failed	old
+111	failed	old
+112	failed	old
+113	failed	old
+114	failed	old
+115	failed	old
+116	failed	old
+117	failed	old
+118	acknowledged	new

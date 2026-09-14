@@ -1,4 +1,4 @@
-# 65 cuts: 21 old, 44 new, 0 damaged and detected
+# 77 cuts: 22 old, 55 new, 0 damaged and detected
 cut	state	committed
 1	old	false
 2	old	false
@@ -21,7 +21,7 @@ cut	state	committed
 19	old	false
 20	old	false
 21	old	false
-22	new	false
+22	old	false
 23	new	false
 24	new	false
 25	new	false
@@ -59,9 +59,21 @@ cut	state	committed
 57	new	false
 58	new	false
 59	new	false
-60	new	true
-61	new	true
-62	new	true
-63	new	true
-64	new	true
-65	new	true
+60	new	false
+61	new	false
+62	new	false
+63	new	false
+64	new	false
+65	new	false
+66	new	false
+67	new	false
+68	new	false
+69	new	false
+70	new	false
+71	new	false
+72	new	true
+73	new	true
+74	new	true
+75	new	true
+76	new	true
+77	new	true

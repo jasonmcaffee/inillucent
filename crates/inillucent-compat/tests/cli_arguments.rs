@@ -48,22 +48,36 @@ fn area(name: &str) -> PathBuf {
 
 /// Returns one of the command surface's binaries, building them first.
 ///
+/// **`None` is announced as a skip rather than returned quietly (task-1913).**
+/// Every case in this file opened with `let Some(program) = binary(...) else {
+/// return; };`, so a build that did not produce the binary made eight tests
+/// pass without running anything - green under `--strict`, which exists to
+/// turn exactly that into a failure. Announcing here rather than at each call
+/// site means the next case added to this file cannot forget it. It is the
+/// marker `differential::skipping` writes that `testrun` classifies, and the
+/// same one `mcp_cancel.rs` and `budgets.rs` already used.
+///
 /// @param name - the binary's name, without the platform's suffix
 fn binary(name: &str) -> Option<PathBuf> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let status = Command::new(cargo)
+    let built = Command::new(cargo)
         .current_dir(workspace_root())
         .args(["build", "-p", "inillucent-cli"])
-        .status()
-        .ok()?;
-    if !status.success() {
-        return None;
+        .status();
+    let found = match built {
+        Ok(status) if status.success() => {
+            let mut directory = std::env::current_exe().unwrap_or_default();
+            directory.pop();
+            directory.pop();
+            let path = directory.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+            path.is_file().then_some(path)
+        }
+        _ => None,
+    };
+    if found.is_none() {
+        inillucent_compat::differential::skipping(&format!("{name} did not build"));
     }
-    let mut directory = std::env::current_exe().unwrap_or_default();
-    directory.pop();
-    directory.pop();
-    let path = directory.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-    path.is_file().then_some(path)
+    found
 }
 
 /// Runs a binary in a directory of its own and reports what it left there.
