@@ -915,14 +915,44 @@ fn no_module_grows_past_the_size_it_is_recorded_at() {
         // file no longer holds. It is reached from one line of
         // `run_any_prepared` and nothing else here called any of it, so the
         // seam was already there.
-        ("crates/inillucent-exec/src/physical.rs", 6_102),
-        ("crates/inillucent-sql/src/bind.rs", 5_315),
+        //
+        // Lowered again to 5,709, for M7's union fix. The nine functions that
+        // turn a plan's constraints into the keys and spans a cursor is
+        // positioned with - `nested_key`, `point_key`, the two union key
+        // builders, `range_union_bounds`, `span_bounds`, `index_affinity`,
+        // `bound_value` and `with_affinity`, along with `SpanBounds` - moved
+        // whole to `crates/inillucent-exec/src/physical/keys.rs`. They are one
+        // question, which is what bytes a cursor is asked to find, and the
+        // three places that position a cursor already reached for them
+        // together. Nothing in them changed in the move, and `physical.rs`
+        // re-exports `nested_key` and `SpanBounds` so no caller's path moved.
+        ("crates/inillucent-exec/src/physical.rs", 5_709),
+        // Lowered from 5,315 in task-1913, which added ninety-nine lines to
+        // this file and put it exactly over. The ratchet asks for an
+        // extraction, so the ten items that answer "what does this name in a
+        // `WITH` stand for" are `bind/cte.rs`: the two CTE types, `push_ctes`,
+        // `pop_ctes`, `find_cte`, `bind_recursive_cte`, `push_recursive_self`
+        // and the three that read whether a definition names itself. Nothing
+        // moved changed in the move.
+        ("crates/inillucent-sql/src/bind.rs", 5_111),
         ("crates/inillucent-tree/src/leaf.rs", 5_175),
         ("crates/inillucent-tree/src/paged.rs", 3_570),
         ("crates/inillucent-exec/src/dml.rs", 3_122),
         ("crates/inillucent-ext/src/vtab/fts5/mod.rs", 2_935),
         ("crates/inillucent-engine/src/ddl.rs", 2_920),
-        ("crates/inillucent-sql/src/plan.rs", 2_925),
+        // Lowered from 2,925 in task-1932. M7 added three functions for the
+        // anchored `LIKE` and `GLOB` range and a walk of an equality prefix
+        // ahead of an `IN` list, and the ratchet asks for an extraction rather
+        // than a raised number, so two went out. `pattern_range`,
+        // `anchored_prefix` and `next_prefix` are `plan/pattern.rs`: what
+        // range an anchored pattern selects, and the pairing rule that decides
+        // whether a range may be used at all. `comparison_collation`,
+        // `collation_of`, `comparison_against_column`,
+        // `comparison_against_rowid` and `mirror` are `plan/terms.rs`: reading
+        // one `WHERE` term as a comparison against one column, which
+        // `plan/pattern.rs` and `plan/seek_union.rs` were already reaching
+        // back into `plan.rs` for.
+        ("crates/inillucent-sql/src/plan.rs", 2_851),
         ("crates/inillucent-bench/src/synth.rs", 2_600),
     ];
 
@@ -1028,6 +1058,230 @@ fn every_skip_site_carries_the_one_marker() {
          `tests/inillucent-testing-tdd.md` §9 asks for it.",
         wrong.join("\n")
     );
+}
+
+/// Every early return in a test says why, one way or another.
+///
+/// **The companion to the check above, and the one that would have found this
+/// class rather than waiting for somebody to run the suite without a build
+/// (task-1913).** `every_skip_site_carries_the_one_marker` reads the *message*
+/// a skip prints and demands the marker. It cannot see a skip that prints
+/// nothing at all, and eighteen of them were sitting in `cli_arguments.rs` and
+/// `confinement.rs` written as
+///
+/// ```ignore
+/// let Some(program) = binary("inillucent") else { return; };
+/// ```
+///
+/// A build that did not produce the binary made all eighteen report success
+/// having asserted nothing - including the ten that check a confined server
+/// cannot be talked into opening a file outside its root. `--strict` could not
+/// see them either, because there was no message for its classifier to read.
+/// task-1944 found the same shape behind a missing fixture, where a data-loss
+/// bug sat behind two durability tests that had been skipping rather than
+/// passing.
+///
+/// The rule: a `let ... else { return; }` in a `#[test]` function announces,
+/// and it may do so in any of the three ways this workspace already uses -
+/// `differential::skipping` in the else-block, an `eprintln!` ending in the
+/// `; skipping` marker, or an announcement inside the helper the `let` calls.
+/// A `panic!` or an `assert!` counts too: a test that fails is not a test that
+/// silently passed.
+#[test]
+fn every_early_return_in_a_test_says_why() {
+    let root = workspace_root();
+    let mut silent: Vec<String> = Vec::new();
+    let mut found = 0usize;
+    for file in rust_sources(&root) {
+        if !file.components().any(|part| part.as_os_str() == "tests") {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        let lines: Vec<&str> = text.lines().collect();
+        let helpers = announcing_helpers(&lines);
+        for at in test_function_lines(&lines) {
+            let Some(line) = lines.get(at) else {
+                continue;
+            };
+            if !line.trim_end().ends_with("else {") {
+                continue;
+            }
+            let block = lines
+                .get(at..at.saturating_add(8))
+                .unwrap_or_default()
+                .join("\n");
+            let block = match block.find("};") {
+                Some(end) => block.get(..end).unwrap_or(&block).to_string(),
+                None => block,
+            };
+            if !block.lines().any(|line| line.trim() == "return;") {
+                continue;
+            }
+            found = found.saturating_add(1);
+            if announces(&block) {
+                continue;
+            }
+            // The helper the `let` called may announce instead, which is how
+            // `cli_arguments.rs` and `confinement.rs` do it: one place to get
+            // right rather than one per case. Only the `let` line is read -
+            // taking the comment above it as well let a helper *named* in
+            // prose stand in for one that was called.
+            let call = line.split("//").next().unwrap_or("");
+            if helpers
+                .iter()
+                .any(|name| call.contains(&format!("{name}(")))
+            {
+                continue;
+            }
+            silent.push(format!(
+                "{}:{}: {}",
+                file.strip_prefix(&root).unwrap_or(&file).display(),
+                at.saturating_add(1),
+                line.trim()
+            ));
+        }
+    }
+    assert!(
+        found > 10,
+        "found {found} early returns in tests, which means this is looking in the wrong place \
+         rather than that no test has one"
+    );
+    assert!(
+        silent.is_empty(),
+        "these tests return early without saying why, so a missing prerequisite makes them \
+         report success having run nothing:\n{}\n\
+         Announce it with `differential::skipping`, which `--strict` turns into a failure, or \
+         from the helper the `let` calls.",
+        silent.join("\n")
+    );
+}
+
+/// Reports whether a block announces that it did not run.
+///
+/// **Comments do not count.** The doc comment above `binary()` in
+/// `cli_arguments.rs` explains why the helper announces, so a check that read
+/// the text would go on passing after somebody deleted the call it describes -
+/// which is the check grading its own documentation rather than the code.
+///
+/// @param block - the source to read
+fn announces(block: &str) -> bool {
+    announces_by_saying_so(block)
+        || code_of(block).any(|code| code.contains("panic!") || code.contains("assert!"))
+}
+
+/// Reports whether source says, in one of this workspace's three spellings,
+/// that the work did not run.
+///
+/// @param block - the source to read
+fn announces_by_saying_so(block: &str) -> bool {
+    code_of(block).any(|code| {
+        code.contains("skipping(") || code.contains("announce_skip") || code.contains("; skipping")
+    })
+}
+
+/// Returns each line of some source with its trailing comment removed.
+///
+/// @param block - the source to read
+fn code_of(block: &str) -> impl Iterator<Item = &str> {
+    block
+        .lines()
+        .map(|line| line.split("//").next().unwrap_or(""))
+}
+
+/// Returns the names of the functions in a file that announce a skip.
+///
+/// The body ends where its braces balance, so a function that does not
+/// announce cannot borrow the announcement of the one written after it.
+///
+/// @param lines - the file's lines
+fn announcing_helpers(lines: &[&str]) -> Vec<String> {
+    let mut names = Vec::new();
+    for (at, line) in lines.iter().enumerate() {
+        let Some(name) = function_name(line) else {
+            continue;
+        };
+        let mut depth = 0i32;
+        let mut opened = false;
+        let mut body: Vec<&str> = Vec::new();
+        for cursor in at..lines.len() {
+            let Some(source) = lines.get(cursor) else {
+                break;
+            };
+            depth = depth
+                .saturating_add(source.matches('{').count() as i32)
+                .saturating_sub(source.matches('}').count() as i32);
+            if source.contains('{') {
+                opened = true;
+            }
+            body.push(source);
+            if opened && depth <= 0 {
+                break;
+            }
+        }
+        // An `assert!` or a `panic!` is not an announcement when it is inside
+        // a helper: nearly every helper in these files asserts something, and
+        // accepting that made every `let ... else` whose right-hand side named
+        // one look announced. In an `else` block it does count, because a case
+        // that fails is not a case that silently passed.
+        if announces_by_saying_so(&body.join("\n")) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// Returns the name a `fn` line declares.
+///
+/// @param line - the source line
+fn function_name(line: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    let rest = trimmed
+        .strip_prefix("fn ")
+        .or_else(|| trimmed.strip_prefix("pub fn "))
+        .or_else(|| trimmed.strip_prefix("pub(crate) fn "))
+        .or_else(|| trimmed.strip_prefix("pub(super) fn "))?;
+    let name: String = rest
+        .chars()
+        .take_while(|letter| letter.is_alphanumeric() || *letter == '_')
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
+
+/// Returns the line numbers that lie inside a `#[test]` function.
+///
+/// @param lines - the file's lines
+fn test_function_lines(lines: &[&str]) -> Vec<usize> {
+    let mut inside = Vec::new();
+    let mut at = 0usize;
+    while at < lines.len() {
+        if lines.get(at).is_none_or(|line| line.trim() != "#[test]") {
+            at = at.saturating_add(1);
+            continue;
+        }
+        let mut depth = 0i32;
+        let mut opened = false;
+        let mut cursor = at;
+        while cursor < lines.len() {
+            let Some(line) = lines.get(cursor) else {
+                break;
+            };
+            depth = depth
+                .saturating_add(line.matches('{').count() as i32)
+                .saturating_sub(line.matches('}').count() as i32);
+            if line.contains('{') {
+                opened = true;
+            }
+            inside.push(cursor);
+            if opened && depth <= 0 {
+                break;
+            }
+            cursor = cursor.saturating_add(1);
+        }
+        at = cursor.saturating_add(1);
+    }
+    inside
 }
 
 /// Returns the text between the first pair of quotes after a marker.

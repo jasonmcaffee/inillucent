@@ -20,6 +20,11 @@ use crate::bind::{BoundExpr, BoundSelect, BoundSource, ColumnUse, SourceRows};
 use crate::catalog_view::{IndexInfo, TableInfo};
 use crate::cost;
 
+mod pattern;
+mod terms;
+use terms::{
+    collation_of, comparison_against_column, comparison_against_rowid, comparison_collation,
+};
 mod seek_union;
 
 /// A comparison an access path can enforce.
@@ -2527,6 +2532,17 @@ fn index_candidate(
                 {
                     continue;
                 }
+                // An anchored pattern is a range; see `plan::pattern`, which
+                // also says why the term is left as a residual (task-1932, M7).
+                if let Some((low_bound, high_bound)) =
+                    pattern::pattern_range(id, column, term, collation, key_column.descending)
+                {
+                    if low.is_none() && high.is_none() {
+                        low = low_bound;
+                        high = high_bound;
+                    }
+                    continue;
+                }
                 let Some((op, value)) = comparison_against_column(id, column, term) else {
                     continue;
                 };
@@ -2774,84 +2790,6 @@ fn find_expr_equality(
     None
 }
 
-/// Returns the collation a comparison uses, or BINARY.
-fn comparison_collation(term: &BoundExpr) -> Collation {
-    match term {
-        BoundExpr::Compare { collation, .. } => *collation,
-        _ => Collation::Binary,
-    }
-}
-
-/// Returns the collation a folded name spells.
-fn collation_of(name: &[u8]) -> Collation {
-    Collation::from_name(core::str::from_utf8(name).unwrap_or("BINARY"))
-        .unwrap_or(Collation::Binary)
-}
-
-/// Returns the operator and the other side when a term compares one column of
-/// one source against something else.
-fn comparison_against_column(
-    position: usize,
-    column: u16,
-    term: &BoundExpr,
-) -> Option<(BinaryOp, BoundExpr)> {
-    let BoundExpr::Compare {
-        op, left, right, ..
-    } = term
-    else {
-        return None;
-    };
-    if let BoundExpr::Column {
-        source,
-        column: candidate,
-        ..
-    } = left.as_ref()
-    {
-        if *source == position && *candidate == column {
-            return Some((*op, right.as_ref().clone()));
-        }
-    }
-    if let BoundExpr::Column {
-        source,
-        column: candidate,
-        ..
-    } = right.as_ref()
-    {
-        if *source == position && *candidate == column {
-            return Some((mirror(*op), left.as_ref().clone()));
-        }
-    }
-    None
-}
-
-/// Returns the operator and the other side when a term compares a rowid.
-fn comparison_against_rowid(position: usize, term: &BoundExpr) -> Option<(BinaryOp, BoundExpr)> {
-    let BoundExpr::Compare {
-        op, left, right, ..
-    } = term
-    else {
-        return None;
-    };
-    if matches!(left.as_ref(), BoundExpr::Rowid { source } if *source == position) {
-        return Some((*op, right.as_ref().clone()));
-    }
-    if matches!(right.as_ref(), BoundExpr::Rowid { source } if *source == position) {
-        return Some((mirror(*op), left.as_ref().clone()));
-    }
-    None
-}
-
-/// Returns the operator that means the same thing with its operands swapped.
-fn mirror(op: BinaryOp) -> BinaryOp {
-    match op {
-        BinaryOp::Less => BinaryOp::Greater,
-        BinaryOp::LessEqual => BinaryOp::GreaterEqual,
-        BinaryOp::Greater => BinaryOp::Less,
-        BinaryOp::GreaterEqual => BinaryOp::LessEqual,
-        other => other,
-    }
-}
-
 /// Returns whether a value can be computed before entering a loop level.
 ///
 /// A seek key may only read terms *outside* the loop it drives. Reading the
@@ -2909,13 +2847,5 @@ mod tests {
         // A term the block does not own belongs to an enclosing block, whose
         // cursor is already positioned, so it is available at every level.
         assert!(is_available(0, &[7usize], &outer));
-    }
-
-    /// Mirroring a comparison keeps its meaning when the operands swap.
-    #[test]
-    fn mirroring_preserves_meaning() {
-        assert_eq!(mirror(BinaryOp::Less), BinaryOp::Greater);
-        assert_eq!(mirror(BinaryOp::GreaterEqual), BinaryOp::LessEqual);
-        assert_eq!(mirror(BinaryOp::Equal), BinaryOp::Equal);
     }
 }

@@ -477,10 +477,20 @@ impl Sink for HashJoin<'_> {
                 has_null |= value.is_null();
                 key::encode_into(&value.get(), scratch);
             }
-            let matches: Vec<u32> = if has_null {
-                Vec::new()
+            // **Copied once per probe row, including when it matched
+            // nothing (task-1932, M7).** `probe` answers a borrowed slice and
+            // this cloned it so the loop below could hold it across the
+            // `&mut self` a push needs. Reading the length first means a row
+            // that matches nothing - the common case on a selective join -
+            // allocates nothing at all.
+            let found = if has_null {
+                &[][..]
             } else {
-                table.probe(scratch).to_vec()
+                table.probe(scratch)
+            };
+            let matches: Vec<u32> = match found.is_empty() {
+                true => Vec::new(),
+                false => found.to_vec(),
             };
             match kind {
                 JoinKind::Semi => {
@@ -1046,6 +1056,11 @@ pub struct NestedLoopJoin<'s> {
     /// product.
     condition: Option<Box<dyn Eval>>,
     downstream: Box<dyn Sink + 's>,
+    /// The concatenated row the condition is tested over, reused.
+    ///
+    /// One buffer rather than one allocation per candidate pair; see the note
+    /// in `push` (task-1932, M7).
+    scratch: Vec<OwnedDatum>,
 }
 
 impl<'s> NestedLoopJoin<'s> {
@@ -1072,6 +1087,7 @@ impl<'s> NestedLoopJoin<'s> {
             outer_width: 0,
             condition,
             downstream,
+            scratch: Vec::new(),
         }
     }
 }
@@ -1094,9 +1110,17 @@ impl Sink for NestedLoopJoin<'_> {
             let outer = materialise(batch, nth, width)?;
             let mut matched = 0usize;
             for (position, inner) in self.inner.iter().enumerate() {
-                let mut joined = outer.clone();
-                joined.extend(inner.iter().cloned());
-                if !keeps(self.condition.as_deref(), &joined)? {
+                // **The condition is tested over a reused buffer and only a
+                // surviving pair is cloned (task-1932, M7).** This used to
+                // build the joined row for *every* inner row, test it, and drop
+                // it - one allocation and a copy of both sides per candidate
+                // pair, which on a cross join is one per row of the product.
+                // `TopN::push` already had this shape; this is the same idea in
+                // the place it costs most.
+                self.scratch.clear();
+                self.scratch.extend(outer.iter().cloned());
+                self.scratch.extend(inner.iter().cloned());
+                if !keeps(self.condition.as_deref(), &self.scratch)? {
                     continue;
                 }
                 matched = matched.saturating_add(1);
@@ -1105,7 +1129,7 @@ impl Sink for NestedLoopJoin<'_> {
                 }
                 match self.kind {
                     JoinKind::Inner | JoinKind::Left | JoinKind::Right | JoinKind::Full => {
-                        produced.push(joined)
+                        produced.push(self.scratch.clone())
                     }
                     JoinKind::Semi | JoinKind::Anti => break,
                 }
