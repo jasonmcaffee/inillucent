@@ -408,9 +408,18 @@ function Invoke-Smoke {
 
         # 3. The MCP server initializes and answers a tool call, which is the
         #    surface an agent is handed and the one nothing downstream tests.
+        #
+        # **The whole lifecycle, because the server enforces it.** `initialize`
+        # needs `protocolVersion`, `capabilities` and `clientInfo`, and every
+        # other method is refused with -32002 until `notifications/initialized`
+        # has arrived. This check sent `params:{}` and went straight to
+        # `tools/list`, which the server answered with two errors, so the
+        # release refused to build at all.
         $mcp = Join-Path $bin "inillucent-mcp$exe"
         $requests = @(
-            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}',
+            ('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18",' +
+             '"capabilities":{},"clientInfo":{"name":"release-smoke","version":"1"}}}'),
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
             '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}',
             ('{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"inillucent_query","arguments":{"db":"' +
              $database.Replace('\', '/') + '","sql":"SELECT count(*) FROM t"}}}')

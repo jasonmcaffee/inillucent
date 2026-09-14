@@ -89,10 +89,16 @@ class Inillucent < Formula
 
     # And the MCP server answers a real request on standard input, because that
     # is the half of this package a `--version` check cannot reach at all.
-    listed = pipe_output(
-      "#{bin}/inillucent-mcp --db #{testpath}/probe.rdb",
-      %({"jsonrpc":"2.0","id":1,"method":"tools/list"}\n)
-    )
+    # The whole lifecycle: the server refuses tools/list until initialize and
+    # notifications/initialized have both arrived, and refuses an initialize
+    # that carries no protocolVersion.
+    handshake = [
+      %({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18",) +
+        %("capabilities":{},"clientInfo":{"name":"brew-test","version":"1"}}}),
+      %({"jsonrpc":"2.0","method":"notifications/initialized"}),
+      %({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})
+    ].join("\n")
+    listed = pipe_output("#{bin}/inillucent-mcp --db #{testpath}/probe.rdb", "#{handshake}\n")
     assert_match "inillucent_query", listed
   end
 end
