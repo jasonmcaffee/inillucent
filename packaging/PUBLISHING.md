@@ -42,7 +42,7 @@ published Windows and Linux archives both answer
 | **inillucent.com, macOS** | **no archive, at 0.1.1 or 0.1.2** - and it cannot be produced on this machine or in CI. See [the macOS archive](#the-macos-archive-the-one-thing-that-needs-a-different-machine) | **a Mac, an Apple Developer Program membership, two Developer ID certificates and a stored `notarytool` profile.** Then one command on it: `./packaging/macos/release-macos.sh --version 0.1.2 --upload` |
 | **SHA256SUMS signature** | not signed, at 0.1.1 or 0.1.2. The signing path itself is verified: run with a throwaway key it signs, the signature verifies, and a different public key is rejected on the key id | **a minisign key pair**, created once. `packaging/sign-sums.ps1` reads the secret key from `INILLUCENT_MINISIGN_KEY`, and `packaging/inillucent.pub` has to exist before it will sign at all |
 | **the .deb and the .rpm** | **not published, and the packaging is verified** - both were built from the published 0.1.2 Linux archive, the `.deb` was extracted in WSL and the program it carries wrote, reopened and read a database, and the `.rpm` header lists the same nine paths with the same modes | an OpenPGP key. `packaging/linux/package-linux.ps1` signs by default because `apt` and `dnf` will not install an unsigned package from outside a distribution's own repository. `gpg` is on the box with an empty keyring |
-| **GitHub release** | `v0.1.1`, **not cut for 0.1.2**, and **invisible to everybody** - the repository is private, so every release asset on it answers 404 to a signed-out reader | the decision to make `Black-Rainbow-Labs/Inillucent` public. The commit and tag for 0.1.2 are built and checked already: `pwsh packaging/mirror-github.ps1 -Version 0.1.2`. See [the mirror section](#the-github-mirror-what-it-holds-what-being-private-costs-and-what-to-do) |
+| **GitHub release** | **cut for 0.1.2** on 2026-09-14, on the `v0.1.2` tag whose tree is the released tree, with all five assets. Every one was downloaded back off the release and hashed: all five match the published `SHA256SUMS` and `dist/` byte for byte. **Still invisible to everybody**, because the repository is private | the decision to make `Black-Rainbow-Labs/Inillucent` public. See [the mirror section](#the-github-mirror-what-it-holds-what-being-private-costs-and-what-to-do) |
 | **Go** | **tagged, and not installable by anybody** - `packages/go/v0.1.2` is pushed, but `proxy.golang.org` answers 404 for the module because it cannot clone a private repository | the repository being public. `go install` was verified on this machine, where git holds a credential, which is why it looked published |
 | **npm** | **token is the only step** - three tarballs packed, installed and run | an account token |
 | **PyPI** | **token is the only step** - wheel installed into a clean venv and run | an account with 2FA, and a token minted from it |
@@ -164,6 +164,19 @@ None of these is reachable by reading the scripts. Each came from running one.
   only when the formula is complete now.
 - **`rust-toolchain.toml` named three targets out of five**, so `release-all.ps1` stopped at its
   macOS step with `can't find crate for std`. The macOS section above has it.
+- **`fetch-macos-artifacts.ps1` reported success having checked nothing, and published what it
+  refused.** It is the gate between the MacBook's artifacts and the site, and on a machine without
+  `rcodesign` the committed version printed a warning, said *"every check passed"*, exited 0, and
+  wrote the artifacts into `dist/SHA256SUMS`. Run against three text files reading
+  `this is not a Mach-O`, that is exactly what it did. Four faults in one script:
+  a missing `rcodesign` was a warning rather than a refusal, so the only check standing between an
+  unsigned Mach-O and the site could be absent; `Update-Sha256Sums` ran **before** the failure gate,
+  so a run ending with *"these artifacts must not be published"* had already listed them as
+  published; an empty `SHA256SUMS-macos` verified nothing and reported no failure, which is what a
+  `shasum` missing from the Mac's PATH produces; and `tar --force-local` is GNU tar only, so the
+  step died on Windows' own bsdtar with a usage dump. All four are fixed, the refusal has
+  `-AllowUnverifiedSignatures` as its named override, and the committed and fixed scripts were run
+  side by side in isolated trees to show the difference.
 - **The `.deb` and the `.rpm` were recorded as not built and are one command away.** Both were built
   from the published 0.1.2 Linux archive with the shipped template and the `nfpm` already in
   `tools/cross/bin`. The `.deb` was extracted in WSL and the program it carries created a database,
@@ -278,9 +291,10 @@ On the MacBook, with the repository checked out at the `v0.1.2` tag:
 
 It builds both architectures, joins them, signs them, writes the `.tar.gz` and the `.zip`, builds and
 signs the `.pkg`, notarises both, staples the ticket, runs the result, and uploads the four files.
-`--upload` puts them on the GitHub release; without it the script prints the four paths and
-`packaging/fetch-macos-artifacts.ps1 -FromDirectory` takes them from a folder instead, which is the
-route to use while the repository is private.
+`--upload` puts them on the `v0.1.2` release, **which exists now** with the tag naming the released
+tree; before 2026-09-14 it did not, and `gh release create` would have made one from the mirror's
+default branch, which held 0.1.1's tree. Without `--upload` the script prints the four paths and
+`packaging/fetch-macos-artifacts.ps1 -FromDirectory` takes them from a folder instead.
 
 Then, back on the Windows box:
 
@@ -288,6 +302,10 @@ Then, back on the Windows box:
 pwsh packaging/fetch-macos-artifacts.ps1 -Version 0.1.2     # or -FromDirectory <path>
 pwsh packaging/publish-site.ps1 -Version 0.1.2 -Stage
 ```
+
+`fetch-macos-artifacts.ps1` refuses rather than warns when it cannot read the signatures, and it
+writes nothing into `dist/SHA256SUMS` unless every check passed. That was not true until task-1951;
+what it did instead is in [what running the rest of the packaging found](#what-running-the-rest-of-the-packaging-found-task-1951).
 
 and on any Mac, against the bytes the site is then serving:
 
@@ -424,20 +442,41 @@ tree. The result is a pure function of the tree, the parent, the message and the
 running it twice gives the same commit hash and anybody holding both repositories can recompute it.
 For 0.1.2 that commit is `703de98`, tree `4419e10`, and `git diff 703de98 v0.1.2` is empty.
 
+The tag it pushes is **annotated**, because the two already on the mirror are and because an
+annotated tag is the only kind that records who made it and when. `git tag` can only write
+`refs/tags/<name>`, and this repository already has a local `v<version>` naming a commit in the
+development history, so the tag object is written with `git mktag` and put under a ref this script
+owns.
+
 `-Verify` reads the mirror as it stands and reports one row per release tag:
 
 ```
   v0.1.0     same tree
   v0.1.1     same tree
+  v0.1.2     same tree
 
-  v0.1.2     released here, not on the mirror
+every release tag on the mirror holds the released tree
 ```
 
-Then, and only when the decision is made: **Settings → General → Change repository visibility →
-Public** on `Black-Rainbow-Labs/Inillucent`, and cut the GitHub release against the `v0.1.2` tag with
-the four files from `dist/`. After that, `node tools/check-public-urls.mjs` goes green and belongs in
-`tools/validate.*` as a network-gated check. It is deliberately not there now, because a check that
-is red from the day it lands is a check somebody deletes.
+### What was done on 2026-09-14, and what was not
+
+The 0.1.2 commit and tag are **pushed**, and the v0.1.2 release is **cut**, with all five assets.
+None of that is a visibility decision: the repository was private before and is private after, so it
+published nothing to anybody. What it does is make the mirror's record true and give the macOS
+upload something to attach to - `release-macos.sh --upload` runs `gh release create "v$version"`
+when the release is absent, and with no `v0.1.2` tag on the remote that would have created one from
+the default branch, which held 0.1.1's tree.
+
+Every asset was downloaded back off the release and hashed: all five match the published
+`SHA256SUMS`, and all five are byte-identical to `dist/` and to what inillucent.com serves. The
+release page, the release API and an asset download all still answer **404** to a signed-out reader,
+which was checked with no credential.
+
+**What was not done, because it is the decision and not a command:** making the repository public.
+That is **Settings → General → Change repository visibility → Public** on
+`Black-Rainbow-Labs/Inillucent`. After it, `node tools/check-public-urls.mjs` goes green and belongs
+in `tools/validate.*` as a network-gated check. It is deliberately not there now, because a check
+that is red from the day it lands is a check somebody deletes.
 
 ### One thing to settle before making it public
 

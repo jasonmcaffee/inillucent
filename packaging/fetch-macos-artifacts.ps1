@@ -35,6 +35,12 @@
 .PARAMETER Repository
     owner/name of the GitHub repository holding the release.
 
+.PARAMETER AllowUnverifiedSignatures
+    Accept the artifacts without reading their signatures, for a machine that
+    does not have rcodesign. The signature check is the only thing standing
+    between an unsigned Mach-O and the site, so this is a deliberate act rather
+    than a warning that scrolls past.
+
 .EXAMPLE
     pwsh packaging/fetch-macos-artifacts.ps1 -Version 0.1.1
     pwsh packaging/fetch-macos-artifacts.ps1 -Version 0.1.1 -FromDirectory D:\from-macbook
@@ -44,7 +50,8 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $Version,
     [string] $FromDirectory,
-    [string] $Repository = 'Black-Rainbow-Labs/Inillucent'
+    [string] $Repository = 'Black-Rainbow-Labs/Inillucent',
+    [switch] $AllowUnverifiedSignatures
 )
 
 $ErrorActionPreference = 'Stop'
@@ -102,9 +109,11 @@ Write-Host ''
 Write-Host 'verifying checksums'
 $sumsFile = Join-Path $dist 'SHA256SUMS-macos'
 $failures = 0
+$checked = @()
 foreach ($line in Get-Content -Path $sumsFile) {
     if ($line -notmatch '^([0-9a-fA-F]{64})\s+(.+)$') { continue }
     $claimed = $Matches[1].ToLower()
+    $checked += $Matches[2].Trim()
     $file = Join-Path $dist $Matches[2].Trim()
     if (-not (Test-Path -LiteralPath $file)) {
         Write-Host "  FAIL  $($Matches[2]) is listed but was not delivered"
@@ -120,6 +129,20 @@ foreach ($line in Get-Content -Path $sumsFile) {
     }
 }
 
+# An artifact the checksum file does not mention has not been checked, and a
+# loop over an empty file reports nothing and reports no failure either. The
+# Mac writes SHA256SUMS-macos by appending three `shasum` lines to a file it has
+# just truncated, so a shasum that is not on its PATH leaves an empty file, this
+# loop runs zero times, and three unverified artifacts go on to be published
+# with every check reported as passed. A check that cannot fail is worse than no
+# check.
+foreach ($artifact in @("$name.tar.gz", "$name.zip", "inillucent-$Version.pkg")) {
+    if ($checked -notcontains $artifact) {
+        Write-Host "  FAIL  $artifact is not named in SHA256SUMS-macos, so nothing checked it"
+        $failures++
+    }
+}
+
 # --- the signature, read out of the binaries themselves ---------------------
 
 $rcodesign = Join-Path $root 'tools/cross/bin/rcodesign.exe'
@@ -129,7 +152,18 @@ if (Test-Path -LiteralPath $rcodesign) {
     $unpacked = Join-Path $dist '_macos-check'
     if (Test-Path -LiteralPath $unpacked) { Remove-Item -LiteralPath $unpacked -Recurse -Force -Confirm:$false }
     New-Item -ItemType Directory -Force -Path $unpacked | Out-Null
-    & tar --force-local --directory $unpacked -xzf (Join-Path $dist "$name.tar.gz")
+
+    # Two different tars answer to `tar` on Windows and they disagree about this
+    # one option. GNU tar, which Git for Windows puts on PATH, reads the leading
+    # `C:` of an absolute path as `host:path` and needs --force-local to be told
+    # otherwise. bsdtar, which Windows itself ships as System32\tar.exe, needs no
+    # such thing and rejects the option outright with a usage dump - so which of
+    # the two is found first decided whether this step worked. Asked rather than
+    # assumed.
+    $tarArguments = @('--directory', $unpacked, '-xzf', (Join-Path $dist "$name.tar.gz"))
+    & tar --force-local --version *> $null
+    if ($LASTEXITCODE -eq 0) { $tarArguments = @('--force-local') + $tarArguments }
+    & tar @tarArguments
     if ($LASTEXITCODE -ne 0) { throw 'the tarball could not be unpacked' }
 
     foreach ($program in @('inillucent', 'inillucent-shell', 'inillucent-mcp', 'inillucent-migrate')) {
@@ -157,15 +191,29 @@ if (Test-Path -LiteralPath $rcodesign) {
         }
     }
     Remove-Item -LiteralPath $unpacked -Recurse -Force -Confirm:$false
+} elseif ($AllowUnverifiedSignatures) {
+    Write-Warning 'rcodesign is missing, so the signatures were NOT checked. -AllowUnverifiedSignatures was passed.'
 } else {
-    Write-Warning 'rcodesign is missing, so the signatures were not checked. Run: pwsh tools/cross/fetch-toolchain.ps1'
+    # A warning and a pass is the same outcome as a pass, and this is the only
+    # check standing between an unsigned or self-signed Mach-O and the site.
+    throw 'rcodesign is missing, so the signatures cannot be checked. ' +
+          'Run: pwsh tools/cross/fetch-toolchain.ps1, or pass -AllowUnverifiedSignatures.'
 }
-
-$sums = Update-Sha256Sums -Dist $dist
 
 Write-Host ''
 if ($failures -gt 0) {
     throw "$failures check(s) failed. These artifacts must not be published."
 }
+
+# The checksums go in only after the gate above.
+#
+# This used to run before it, so a run that ended with "these artifacts must not
+# be published" had already written their hashes into dist/SHA256SUMS - which is
+# the file packaging/publish-site.ps1 copies to the site to say what a release
+# contains. An artifact rejected here for being unsigned, self-signed, built
+# without the hardened runtime, untimestamped or not universal was listed as
+# published anyway, by the same run that refused it.
+$sums = Update-Sha256Sums -Dist $dist
+
 Write-Host "the macOS artifacts are in $dist and every check passed"
 Write-Host "sums $sums"
