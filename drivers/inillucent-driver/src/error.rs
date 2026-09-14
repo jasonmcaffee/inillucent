@@ -62,7 +62,13 @@ pub enum Status {
     Full = 10,
     /// A value or a result is past a hard limit.
     TooBig = 11,
-    /// A rule of this driver's own contract was broken by the caller.
+    /// A rule of this driver's own contract was broken by the caller, or this
+    /// machine is missing a component the call needs.
+    ///
+    /// The second reading is what `embed(TEXT)` answers on a machine that has
+    /// never run `inillucent setup-embeddings`: the statement is valid, the
+    /// engine built the function, and the weights are not there yet. The
+    /// message names the command that installs them.
     InvalidState = 12,
     /// A defect. The only status that means "report this".
     Internal = 13,
@@ -144,25 +150,36 @@ impl Error {
     /// Classifies an engine error.
     ///
     /// The order of the arms is the whole of the classification and it matters:
-    /// the marked refusal is asked about first, because a construct the engine
-    /// has not implemented is reported as a misuse and would otherwise be
-    /// classified as a syntax error - which is the exact confusion this driver
-    /// exists to end.
+    /// the two marked refusals are asked about first, because both are reported
+    /// as a misuse and would otherwise be classified as a syntax error - which
+    /// is the exact confusion this driver exists to end.
+    ///
+    /// **They are two markers and not one because they are two different
+    /// answers.** `unsupported` means this engine never built the construct, so
+    /// the caller writes different SQL; `requirement` means it did build it and
+    /// this machine has not got what it needs, so the caller installs something
+    /// and the same SQL then works. `SELECT length(embed('hello'))` on a
+    /// machine that has never run `inillucent setup-embeddings` is the second,
+    /// and reporting it as `unsupported` would print "not built yet" at a
+    /// person whose fix is one command.
     ///
     /// @param error - the engine's error
     /// @param diagnostics - whether the caller asked for internal detail
     pub fn from_engine(error: &DbError, diagnostics: bool) -> Error {
-        let status = match (error.unsupported(), error.code()) {
-            (Some(_), _) => Status::Unsupported,
-            (None, PrimaryCode::Constraint) => Status::Constraint,
-            (None, PrimaryCode::ReadOnly) => Status::ReadOnly,
-            (None, PrimaryCode::Busy) | (None, PrimaryCode::Locked) => Status::Busy,
-            (None, PrimaryCode::Interrupt) => Status::Interrupted,
-            (None, PrimaryCode::Corrupt) | (None, PrimaryCode::NotADb) => Status::Corrupt,
-            (None, PrimaryCode::IoErr) | (None, PrimaryCode::CantOpen) => Status::Io,
-            (None, PrimaryCode::Full) => Status::Full,
-            (None, PrimaryCode::TooBig) => Status::TooBig,
-            (None, PrimaryCode::Internal) => Status::Internal,
+        let status = match (error.unsupported(), error.requirement(), error.code()) {
+            (Some(_), _, _) => Status::Unsupported,
+            (None, Some(_), _) => Status::InvalidState,
+            (None, None, PrimaryCode::Constraint) => Status::Constraint,
+            (None, None, PrimaryCode::ReadOnly) => Status::ReadOnly,
+            (None, None, PrimaryCode::Busy) | (None, None, PrimaryCode::Locked) => Status::Busy,
+            (None, None, PrimaryCode::Interrupt) => Status::Interrupted,
+            (None, None, PrimaryCode::Corrupt) | (None, None, PrimaryCode::NotADb) => {
+                Status::Corrupt
+            }
+            (None, None, PrimaryCode::IoErr) | (None, None, PrimaryCode::CantOpen) => Status::Io,
+            (None, None, PrimaryCode::Full) => Status::Full,
+            (None, None, PrimaryCode::TooBig) => Status::TooBig,
+            (None, None, PrimaryCode::Internal) => Status::Internal,
             // A missing object and a malformed statement are both reported by
             // the binder as a misuse, and SQLite's wording for the first is
             // stable and deliberate: `inillucent-sql`'s `no_such_table` exists
@@ -170,8 +187,8 @@ impl Error {
             // against a message, it is recorded in the TDD as such, and the
             // moment `NotFound` has to be exact the mechanism that carries
             // `unsupported` carries this too, in one line.
-            (None, _) if error.message().starts_with("no such ") => Status::NotFound,
-            (None, _) => Status::Syntax,
+            (None, None, _) if error.message().starts_with("no such ") => Status::NotFound,
+            (None, None, _) => Status::Syntax,
         };
         Error {
             status,
@@ -228,6 +245,36 @@ mod tests {
         let error = Error::from_engine(&engine, false);
         assert_eq!(error.status, Status::Syntax);
         assert_eq!(error.feature, None);
+    }
+
+    /// A component this machine has not got is its own status, and it is not
+    /// the one for a construct the engine never built.
+    ///
+    /// The two markers sit next to each other and the wrong one would print
+    /// "not built yet" at a person whose whole fix is `inillucent
+    /// setup-embeddings`.
+    #[test]
+    fn a_missing_component_is_invalid_state_and_keeps_its_own_sentence() {
+        let said = "embed: no embedding model is installed. Run `inillucent setup-embeddings`";
+        let engine = inillucent_engine::base::error::unmet_requirement("an embedding model", said);
+        let error = Error::from_engine(&engine, false);
+        assert_eq!(error.status, Status::InvalidState);
+        assert_eq!(error.message, said);
+        assert_eq!(error.feature, None, "it is built, it is not installed");
+    }
+
+    /// A construct the engine never built still wins when an error somehow
+    /// carries both marks, because "write different SQL" is the stronger claim.
+    #[test]
+    fn an_unimplemented_construct_outranks_a_missing_component() {
+        let engine = DbError::primary(PrimaryCode::Misuse)
+            .with_message("the physical pass does not handle an outer join yet")
+            .with_unsupported("an outer join")
+            .with_requirement("an embedding model");
+        assert_eq!(
+            Error::from_engine(&engine, false).status,
+            Status::Unsupported
+        );
     }
 
     /// A missing object is neither of those two.

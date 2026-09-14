@@ -45,6 +45,12 @@ not carry.
 Its own register holds **190** names: those 172, plus 18 vector functions SQLite has no equivalent
 for. `inillucent functions` prints 213 rows because it prints one row per name and argument count.
 
+It also names what the connection itself has registered - anything an application defined through
+`create_scalar_function` or `create_aggregate_function`, and `embed(TEXT)` in a build carrying the
+`embed` feature, where the count is 214. Those rows carry `builtin = 0`. Until task-1952 the register
+read the static built-in list alone, so `embed` answered `SELECT length(embed('hello'))` with 3072
+and `inillucent functions embed` printed nothing.
+
 ```sh
 inillucent functions --output json --limit 0
 node tools/feature-probe/registers.js    # both registers, compared name by name

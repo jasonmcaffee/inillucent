@@ -24,6 +24,15 @@
 //! `INILLUCENT_ONNX_DIR` stays as the override for a machine that keeps its
 //! weights somewhere the installer would never have put them.
 //!
+//! ## Where the refusals are
+//!
+//! In `crate::embed_refusal`, which is not behind the `embed` feature. They are
+//! sentences and a marker, nothing about them needs ONNX, and behind the gate
+//! they were in a module no default build compiles - so the test asserting the
+//! no-model refusal names `inillucent setup-embeddings` was never in a test
+//! binary, and the refusal shipped saying "bad parameter or other API misuse"
+//! instead. That module's comment has the whole of it.
+//!
 //! ## When the model is in memory
 //!
 //! Whatever [`Residency::configured`] says, which is
@@ -42,8 +51,7 @@ use inillucent_core::model::ModelManifest;
 use inillucent_core::residency::{ManagedEmbedder, Residency};
 use inillucent_value::Value;
 
-/// The model this function embeds with.
-const MODEL: &str = install::DEFAULT_MODEL;
+use crate::embed_refusal::{model_would_not_run, no_model, MODEL};
 
 /// The managed embedder, and whether building one was even possible.
 ///
@@ -73,19 +81,6 @@ fn build() -> Option<ManagedEmbedder> {
     ))
 }
 
-/// The refusal a machine with no model installed gets.
-///
-/// It names the command that fixes it rather than the variable that would work
-/// around it, because a person reading this has almost always never installed
-/// the model and the command is one line.
-fn no_model() -> error::DbError {
-    error::misuse(format!(
-        "embed: no embedding model is installed. Run `inillucent setup-embeddings` to download \
-         {MODEL} and the ONNX Runtime it needs, or set {} to a directory that already holds them",
-        install::MODEL_DIR_VAR
-    ))
-}
-
 /// Returns one text's embedding as the bytes a `VECTOR(n)` column holds.
 ///
 /// Little-endian 32-bit floats, which is the layout every vector in this engine
@@ -109,9 +104,9 @@ fn embed(arguments: &[Value<'static>]) -> DbResult<Value<'static>> {
     };
     let vectors = embedder
         .embed_prefixed(&[text])
-        .map_err(|reason| error::misuse(format!("embed: {reason:#}")))?;
+        .map_err(|reason| model_would_not_run(&format!("{reason:#}")))?;
     let Some(vector) = vectors.first() else {
-        return Err(error::misuse("embed: the model returned no vector"));
+        return Err(error::refusal("embed: the model returned no vector"));
     };
     let mut bytes = Vec::with_capacity(vector.len().saturating_mul(4));
     for value in vector {
@@ -170,15 +165,19 @@ mod tests {
         assert!(registry.function(b"EMBED", 1).is_some());
     }
 
-    /// The refusal names the command that installs the model.
+    /// The refusal a machine with no model installed gets is the one
+    /// `embed_refusal` builds, and it is what this function returns.
     ///
-    /// A person reading it has almost always never run the installer, and a
-    /// message that named only an environment variable would send them to
-    /// download five files by hand instead.
+    /// The sentence and its marker are asserted in `embed_refusal`'s own tests,
+    /// which a default build runs. This one is about the wiring: that the
+    /// no-model branch here reaches them at all. It only runs in a build with
+    /// the `embed` feature, which is the reason the sentences live over there -
+    /// see that module's comment.
     #[test]
-    fn the_refusal_names_the_command_that_fixes_it() {
+    fn the_no_model_branch_returns_the_refusal_that_names_the_installer() {
         let message = format!("{}", no_model());
         assert!(message.contains("inillucent setup-embeddings"), "{message}");
         assert!(message.contains(MODEL), "{message}");
+        assert_eq!(no_model().requirement(), Some("an embedding model"));
     }
 }

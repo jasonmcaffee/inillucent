@@ -1070,11 +1070,24 @@ pub struct FunctionEntry {
     pub flags: i64,
 }
 
+/// The bit `function_list` sets for a function a schema may safely call.
+///
+/// Named rather than written twice because `inillucent-engine`'s
+/// `function_list` reports the connection's registered functions beside these
+/// built-ins, and it has to describe them in the same column with the same
+/// meaning. A registered function that promised `innocuous` and was reported
+/// with a bit nothing else uses would be a register that under-describes, which
+/// is the defect this whole list was extended to fix.
+pub const INNOCUOUS_FLAG: i64 = 2048;
+
+/// The bit `function_list` sets for a function that answers the same twice.
+pub const DETERMINISTIC_FLAG: i64 = 524288;
+
 /// The flags every built-in carries: innocuous and deterministic.
-const BUILTIN_FLAGS: i64 = 2048 | 524288;
+const BUILTIN_FLAGS: i64 = INNOCUOUS_FLAG | DETERMINISTIC_FLAG;
 
 /// The flags a built-in that is not deterministic carries.
-const VOLATILE_FLAGS: i64 = 2048;
+const VOLATILE_FLAGS: i64 = INNOCUOUS_FLAG;
 
 /// Returns every built-in this build has, in the order `function_list` reports.
 ///
