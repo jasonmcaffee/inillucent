@@ -1,4 +1,4 @@
-cut points: 22, acknowledged commits: 1, detected damage: 0
+cut points: 23, acknowledged commits: 1, detected damage: 0
 1	failed	old
 2	failed	old
 3	failed	old
@@ -21,4 +21,5 @@ cut points: 22, acknowledged commits: 1, detected damage: 0
 20	failed	old
 21	failed	old
 22	failed	old
-23	acknowledged	new
+23	failed	old
+24	acknowledged	new

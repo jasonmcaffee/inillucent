@@ -254,6 +254,7 @@ fn the_command_line_has_no_row_ceiling() {
         return;
     };
     let Some(database) = database("unbounded.rdb", 20) else {
+        inillucent_compat::differential::skipping("budgets: the command line did not build");
         return;
     };
     let named = database.to_string_lossy().into_owned();
