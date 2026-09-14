@@ -317,8 +317,12 @@ smoke() {
   #    name is what a person's first use looks like, so it is the case worth
   #    checking.
   local answered
-  answered="$(cd "$scratch" && printf '%s\n%s\n%s\n' \
-    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  # The whole lifecycle, because the server enforces it: `initialize` needs
+  # `protocolVersion`, `capabilities` and `clientInfo`, and every other method
+  # is refused with -32002 until `notifications/initialized` has arrived.
+  answered="$(cd "$scratch" && printf '%s\n%s\n%s\n%s\n' \
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"release-smoke","version":"1"}}}' \
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
     '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
     '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"inillucent_query","arguments":{"db":"smoke.rdb","sql":"SELECT count(*) FROM t"}}}' \
     | ./inillucent/bin/inillucent-mcp)"

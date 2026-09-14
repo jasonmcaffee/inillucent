@@ -1,0 +1,15 @@
+# Shell scripts are LF, wherever they are checked out.
+#
+# `core.autocrlf` is true on the Windows machine releases are cut on, and with no
+# rule here a clean checkout rewrites every `.sh` this repository stores with LF
+# into CRLF. `packaging/publish-site.ps1` then publishes `packaging/install.sh`
+# and `packaging/macos/verify-macos.sh` out of that checkout, and `sh` on a CRLF
+# script fails on its first line: task-1934 ran `tools/release-verify-linux.sh`
+# from a fresh worktree and got `$'\r': command not found`, then
+# `set: pipefail: invalid option name`, then a syntax error.
+#
+# `packaging/install.sh` escaped by accident. It contains a literal carriage
+# return inside a `tr -d` argument, and git leaves a file that already carries
+# one alone, so the one script whose CRLF would have been noticed immediately is
+# the one that was never converted. Seventeen others were.
+*.sh text eol=lf
