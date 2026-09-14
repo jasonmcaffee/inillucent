@@ -335,6 +335,16 @@ pub struct Plan {
     /// enough. See `ConnectionUrl::transport`, which is where the pair is
     /// resolved and where a loopback address is exempted from both.
     pub insecure_plaintext: bool,
+    /// What this migration may spend, when the caller sets a ceiling.
+    ///
+    /// **`None` means "whatever is already armed", which is the right default
+    /// and not the same as unbounded (task-1932, H11).** A migration started
+    /// from `inillucent migrate` runs inside the budget `command::run` armed,
+    /// so the deadline an MCP server set applies to it without anybody passing
+    /// it here. This field is for the other direction: a caller with no budget
+    /// of its own - the standalone `inillucent-migrate` binary, a test - that
+    /// wants one for this migration alone.
+    pub limits: Option<inillucent_base::budget::Limits>,
 }
 
 impl Plan {
@@ -349,6 +359,7 @@ impl Plan {
             batch: DEFAULT_BATCH,
             write_report: true,
             insecure_plaintext: false,
+            limits: None,
         }
     }
 
@@ -407,6 +418,15 @@ pub fn migrate(plan: &Plan) -> DbResult<Report> {
 /// @param plan - what to migrate and where to put it
 /// @param source - a connected server
 pub fn run(plan: &Plan, source: &mut dyn RemoteSource) -> DbResult<Report> {
+    // A ceiling the caller asked for, armed for the length of this migration
+    // and dropped afterwards, so an ambient budget is restored rather than
+    // replaced. With no ceiling the caller's own budget stays in force.
+    let _armed = plan.limits.clone().map(|limits| {
+        inillucent_base::budget::arm(
+            limits,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        )
+    });
     if plan.destination.exists() {
         return Err(misuse(format!(
             "{} already exists; a migration publishes by renaming and never overwrites",
@@ -692,6 +712,16 @@ fn copy_table(
         in_batch = in_batch.saturating_add(1);
         if in_batch >= batch {
             connection.execute_batch("COMMIT")?;
+            // **The request's budget is read once per batch, and it is the only
+            // thing that can stop this (task-1932, H11).** A migration runs
+            // outside the executor, so none of the engine's own checks are
+            // reached: the sixty second deadline an MCP server arms never
+            // fired, a cancellation had nothing to land on, and a copy of a
+            // large table held the server for hours with the client unable to
+            // do anything about it. Per batch rather than per row because the
+            // commit beside it is already the expensive thing on this path, and
+            // a batch is the unit the caller chose.
+            inillucent_base::budget::check()?;
             connection.execute_batch("BEGIN")?;
             in_batch = 0;
         }

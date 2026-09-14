@@ -649,17 +649,23 @@ may_depend_on = ["inillucent-core", "inillucent-base"]
 [[external]]
 name = "libc"
 category = "os-boundary"
-allowed_in = ["inillucent-vfs", "inillucent-compat", "inillucent-remote"]
+allowed_in = ["inillucent-vfs", "inillucent-compat", "inillucent-remote", "inillucent-cli"]
 
 # `inillucent-remote` is added to both rows, for TLS and nothing else:
 # SChannel through SSPI on Windows, the system OpenSSL through `dlopen` on Unix.
 # The argument is in `docs/dependency-policy.md` under "TLS, and why it is not a
 # crate either" - in short, the alternatives were a large production dependency
 # with its own cryptographic backend, or writing a TLS stack here.
+# `inillucent-cli` is on both rows for one call each, added in task-1932
+# (H11): `SetConsoleCtrlHandler` on Windows and `signal` on Unix, so that
+# Ctrl+C sets the cancellation flag the executor already polls instead of
+# ending the process. The standard library has no way to be told about it,
+# and `crates/inillucent-cli/src/interrupt.rs` is the whole of what either
+# is used for - one handler that stores `true` in an `AtomicBool`.
 [[external]]
 name = "windows-sys"
 category = "os-boundary"
-allowed_in = ["inillucent-vfs", "inillucent-compat", "inillucent-remote"]
+allowed_in = ["inillucent-vfs", "inillucent-compat", "inillucent-remote", "inillucent-cli"]
 
 [[external]]
 name = "anyhow"

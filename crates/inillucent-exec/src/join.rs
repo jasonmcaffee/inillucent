@@ -130,6 +130,11 @@ impl RowStore {
     ///
     /// @param batch - the batch to absorb
     pub fn absorb(&mut self, batch: &Batch<'_>) -> DbResult<()> {
+        // **Every pipeline breaker that buffers a batch comes through here**,
+        // which is why the charge is here rather than in each of them: the
+        // window operator's partition buffer, the automatic index's inner side
+        // and the sort's input are all this one copy (task-1932, H6).
+        inillucent_base::budget::materialise(crate::ops::batch_bytes(batch))?;
         let width = batch.columns.len();
         self.rows.reserve(batch.live());
         for nth in 0..batch.live() {
@@ -373,6 +378,12 @@ impl<'s> HashJoin<'s> {
     ///
     /// @param batch - a batch from the build side
     pub fn build(&mut self, batch: &Batch<'_>) -> DbResult<()> {
+        // **The build side is charged here (task-1932, H6).** It is the whole
+        // of one input held in memory before a single output row exists, and
+        // before this the request budget saw none of it: a join whose build
+        // side is the large table and whose answer is one row spent one row's
+        // worth of a 256 MiB cap.
+        inillucent_base::budget::materialise(crate::ops::batch_bytes(batch))?;
         let width = batch.columns.len();
         for nth in 0..batch.live() {
             let mut row = Vec::with_capacity(width);
@@ -437,6 +448,14 @@ impl<'s> HashJoin<'s> {
 
 impl Sink for HashJoin<'_> {
     fn push(&mut self, batch: &Batch<'_>) -> DbResult<Flow> {
+        // **Every batch, because the scan leaves are not enough (task-1932,
+        // H11).** A join reads its probe side once and then does work
+        // proportional to the matches, so a cross join over a small table
+        // checks a few hundred times at the start and then runs for as long as
+        // the product takes with nothing reading the cancellation flag. One
+        // atomic load per batch is what makes a cancel reach the statement it
+        // is about rather than the one after it.
+        inillucent_base::budget::check()?;
         let HashJoin {
             kind,
             probe_width,
@@ -599,6 +618,14 @@ impl<'t> IndexNestedLoopJoin<'t> {
 
 impl Sink for IndexNestedLoopJoin<'_> {
     fn push(&mut self, batch: &Batch<'_>) -> DbResult<Flow> {
+        // **Every batch, because the scan leaves are not enough (task-1932,
+        // H11).** A join reads its probe side once and then does work
+        // proportional to the matches, so a cross join over a small table
+        // checks a few hundred times at the start and then runs for as long as
+        // the product takes with nothing reading the cancellation flag. One
+        // atomic load per batch is what makes a cancel reach the statement it
+        // is about rather than the one after it.
+        inillucent_base::budget::check()?;
         // Split the borrow so the closures below can hold the downstream sink
         // mutably while still reading the tree and the projection.
         let IndexNestedLoopJoin {
@@ -1051,6 +1078,14 @@ impl<'s> NestedLoopJoin<'s> {
 
 impl Sink for NestedLoopJoin<'_> {
     fn push(&mut self, batch: &Batch<'_>) -> DbResult<Flow> {
+        // **Every batch, because the scan leaves are not enough (task-1932,
+        // H11).** A join reads its probe side once and then does work
+        // proportional to the matches, so a cross join over a small table
+        // checks a few hundred times at the start and then runs for as long as
+        // the product takes with nothing reading the cancellation flag. One
+        // atomic load per batch is what makes a cancel reach the statement it
+        // is about rather than the one after it.
+        inillucent_base::budget::check()?;
         let width = batch.columns.len();
         self.outer_width = width;
         let inner_width = self.inner.first().map(Vec::len).unwrap_or(0);

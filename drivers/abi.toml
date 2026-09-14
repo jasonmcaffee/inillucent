@@ -65,10 +65,13 @@ since = "1.0.0"
 name = "inillucent_cancel"
 stability = "provisional"
 since = "1.0.0"
-note = "Returns UNSUPPORTED today: the engine runs a statement whole rather than a
-row at a time, so there is no point at which a cancel flag could be read. It is
-here so a binding can wire it once and have it begin working the day the
-capability flips, which is also why it is the one provisional symbol."
+note = "Sets a flag another thread can raise while a statement runs, and returns OK.
+The executor reads it at every leaf of a scan and every batch a result collects,
+so a long scan, a large result and a slow join all stop with `interrupted` and
+leave the connection usable. What it does not interrupt is one operator part-way
+through one indivisible piece of work - a sort of what it has already read
+finishes - which is why `inillucent_supports(\"cancel\")` answers `partial`
+rather than `yes`. Draw a Stop button; do not promise it is instant."
 
 [[symbol]]
 name = "inillucent_capability"

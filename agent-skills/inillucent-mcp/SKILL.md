@@ -72,7 +72,8 @@ the difference you wanted.
 - **`limit` caps the rows returned, not the count.** The result's `total` is the real number and
   `more` says whether anything was cut.
 - The result is the same JSON object every surface produces: `ok`, `columns` with observed storage
-  classes, `rows`, `total`, `more`, `elapsedMs`, and on a failure `status` plus `message`.
+  classes, `rows`, `row_count`, `total`, `more`, `changes`, `last_insert_rowid`, `elapsed_ms`, `text`,
+  and on a failure `status` plus `message`.
 
 ## The order that avoids wasted calls
 

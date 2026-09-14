@@ -103,6 +103,16 @@ stage lint 'the strict lint set, which the pinned compiler fixes' \
 stage oracle 'the sixty-nine differential suites have nothing to compare against without it' \
     sh "$root/tools/sqlite-reference.sh"
 
+# Two durability tests could not run without this, and nobody knew
+# (task-1932, H10). `new_engine_log_lead.rs` builds an index through a 64-frame
+# pool - the condition the defect it guards needed - and reads a 17 MB fixture
+# that is not checked in. Until the skip marker landed its message matched none
+# of the phrases --strict looked for, so the suite reported green having
+# asserted nothing on every machine that had not built the file by hand. Eight
+# seconds buys two durability tests that actually run.
+stage fixtures 'the log-lead durability tests read a fixture that is not checked in' \
+    sh "$root/tools/build-gate-fixtures.sh" "$root/_agent_output/fixtures"
+
 stage contracts 'dependencies, layering, the command table and the test map' \
     cargo test --manifest-path "$root/Cargo.toml" -p inillucent-compat \
     --test policy --test selection --test command_parity --test harness

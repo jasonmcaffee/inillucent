@@ -101,7 +101,14 @@ const UNSAFE_CRATES: [&str; 1] = ["inillucent-driver-capi"];
 /// about what the engine is made of, and a baseline tool that never ships is
 /// not part of it - but a file with `unsafe` in it should still have to say
 /// why, in writing, in a list somebody reads.
-const UNSAFE_ALLOWED: [&str; 13] = [
+// The one file in the shell that says `unsafe`, added in task-1932 (H11).
+// Ctrl+C has no representation in the standard library, so being told about
+// it is `SetConsoleCtrlHandler` on Windows and `signal` on Unix, and both
+// are FFI. Each call installs a handler and reads nothing back; each handler
+// stores `true` into an already-allocated `AtomicBool` and returns, which is
+// the whole of what a handler is allowed to do.
+const UNSAFE_ALLOWED: [&str; 14] = [
+    "crates/inillucent-cli/src/interrupt.rs",
     // The allocator's own concurrency suite, added in task-1932 (H9). It
     // allocates on one thread and frees on another through `GlobalAlloc`, which
     // is an unsafe trait - the boundary is what the suite exists to cross, and
@@ -892,8 +899,18 @@ fn no_module_grows_past_the_size_it_is_recorded_at() {
     // for exactly this reason - removing them here is answering that failure
     // before it happens rather than after.
     const CEILINGS: [(&str, usize); 10] = [
-        ("crates/inillucent-engine/src/lib.rs", 7_875),
-        ("crates/inillucent-exec/src/physical.rs", 6_663),
+        // Lowered from 7,875 in task-1932. The plan cache's value type
+        // (`Cached`) and its ceiling moved to `plans.rs`, which is the module
+        // whose header explains when a plan is reused - the two halves of one
+        // idea were ninety lines apart in a file of nearly eight thousand.
+        ("crates/inillucent-engine/src/lib.rs", 7792),
+        // Lowered from 6,663 in task-1932. The window pass - `run_windowed` and
+        // the seven helpers only it calls - moved whole to
+        // `crates/inillucent-exec/src/windowpass.rs`, which is 575 lines this
+        // file no longer holds. It is reached from one line of
+        // `run_any_prepared` and nothing else here called any of it, so the
+        // seam was already there.
+        ("crates/inillucent-exec/src/physical.rs", 6_102),
         ("crates/inillucent-sql/src/bind.rs", 5_315),
         ("crates/inillucent-tree/src/leaf.rs", 5_175),
         ("crates/inillucent-tree/src/paged.rs", 3_570),
@@ -1044,4 +1061,119 @@ fn rust_sources(root: &std::path::Path) -> Vec<std::path::PathBuf> {
         }
     }
     found
+}
+
+/// The shell may reach past the driver only where it is recorded, and the
+/// numbers only go down.
+///
+/// **The driver's README calls it "the one surface every language binding
+/// reaches the engine through", and the shell was not using it (task-1932,
+/// M1).** Eight files under `crates/inillucent-cli/src` named
+/// `inillucent_engine` directly, which makes the driver one of two surfaces
+/// rather than the one - and a difference between them is a difference every
+/// binding inherits while the shell, the program most people meet first, does
+/// not.
+///
+/// This is a ratchet rather than a ban, because moving the shell onto the
+/// driver is not one change. `Shell` opens sessions, registers virtual table
+/// modules, installs an authorizer, reads pool statistics and drives `ATTACH` -
+/// several of which the driver does not offer, and each one is a decision about
+/// what the driver's surface should be rather than a mechanical substitution.
+/// What a ratchet buys is that the number cannot go up while that is decided:
+/// a new file reaching past the driver fails here, and a file that moves has
+/// its row deleted.
+///
+/// The count is of *lines* naming the crate rather than of files, so a file
+/// that moves half of its uses still shows progress.
+#[test]
+fn no_shell_file_reaches_past_the_driver_more_than_it_is_recorded_at() {
+    // Every file under `crates/inillucent-cli/src` that names
+    // `inillucent_engine`, and how many lines of it do. Measured at
+    // task-1932; a row at zero is a file that has moved and whose row should
+    // be deleted.
+    const REACHES: [(&str, usize); 8] = [
+        // The shell itself: sessions, virtual table modules, the authorizer,
+        // pool statistics, `ATTACH`. The largest of the eight and the one whose
+        // move decides what the driver's surface has to become.
+        ("crates/inillucent-cli/src/shell.rs", 10),
+        // The command table's context and its budget arming.
+        ("crates/inillucent-cli/src/command/mod.rs", 9),
+        // The dot commands, which reach the engine for `.dbinfo`, `.stats` and
+        // the serialisation verbs.
+        ("crates/inillucent-cli/src/commands.rs", 7),
+        // The VFS, for `inillucent diagnose`. Reached through the engine's own
+        // re-export rather than through engine internals, so this one is a
+        // dependency question rather than a surface question.
+        ("crates/inillucent-cli/src/diagnose.rs", 2),
+        // `migrate` and `batch`, which drive a transaction.
+        ("crates/inillucent-cli/src/command/verbs.rs", 2),
+        // One function signature taking an engine connection, which follows
+        // `shell.rs`.
+        ("crates/inillucent-cli/src/import.rs", 1),
+        // A sentence in a module comment naming `inillucent_engine::pragma`.
+        // Not a dependency; it is counted because the check reads lines rather
+        // than imports, and a comment that stops being true is worth the row.
+        ("crates/inillucent-cli/src/dbconfig.rs", 1),
+        // The MCP server. Down from one to zero in task-1932: the budget types
+        // it needed are re-exported by the driver now.
+        ("crates/inillucent-cli/src/mcp.rs", 0),
+    ];
+
+    let root = workspace_root();
+    let mut over: Vec<String> = Vec::new();
+    let mut gone: Vec<String> = Vec::new();
+    for (relative, recorded) in REACHES {
+        let path = root.join(relative);
+        let Ok(source) = std::fs::read_to_string(&path) else {
+            gone.push(format!("{relative} is not there any more; remove its row"));
+            continue;
+        };
+        let reaching = source
+            .lines()
+            .filter(|line| line.contains("inillucent_engine"))
+            .count();
+        if reaching > recorded {
+            over.push(format!(
+                "{relative}: {reaching} lines name `inillucent_engine`, past its {recorded}"
+            ));
+        }
+    }
+
+    // And no file outside the list may name it at all.
+    let mut unlisted: Vec<String> = Vec::new();
+    for path in rust_files(&root.join("crates/inillucent-cli/src")) {
+        let relative = path
+            .strip_prefix(&root)
+            .unwrap_or(&path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if REACHES.iter().any(|(named, _)| *named == relative) {
+            continue;
+        }
+        let Ok(source) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        if source.contains("inillucent_engine") {
+            unlisted.push(relative);
+        }
+    }
+
+    assert!(
+        gone.is_empty(),
+        "the ratchet names files that are not there:\n{}",
+        gone.join("\n")
+    );
+    assert!(
+        over.is_empty(),
+        "these shell files reach past the driver more than they are recorded at:\n{}\n\
+         Reach the engine through `inillucent_driver`. If the driver does not offer what \
+         the file needs, the driver gains it - that is what makes its README true.",
+        over.join("\n")
+    );
+    assert!(
+        unlisted.is_empty(),
+        "these shell files name `inillucent_engine` and are not in the ratchet:\n{}\n\
+         A new file reaching past the driver is the thing this check exists to stop.",
+        unlisted.join("\n")
+    );
 }

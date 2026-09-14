@@ -698,3 +698,83 @@ fn the_parser_performs_no_io() {
     // whole register parses without one being constructed.
     assert!(register.example_count() > 100);
 }
+
+/// A literal past the length limit is refused without being copied first.
+///
+/// **The check ran after the copy (task-1932, M8).** `string_text` and
+/// `blob_bytes` allocate the decoded value and `charge_literal` then measured
+/// what had already been allocated, so a two gigabyte literal in a statement
+/// handed to a served connection was copied first and refused second - which is
+/// the one case a length limit exists to prevent.
+///
+/// The bound is now read off the token's span before anything is decoded. Both
+/// forms it computes are sound: a blob's decoded length is exactly half its
+/// hexadecimal digits, and a quoted string's is at least half of what is
+/// between the quotes, because the shortest thing one character can decode from
+/// is a doubled quote.
+#[test]
+fn a_literal_past_the_length_limit_is_refused() {
+    let mut limits = Limits::default();
+    limits.set(Limit::Length, 64);
+
+    let long = "x".repeat(10_000);
+    let sql = format!("SELECT '{long}'");
+    let failure = match parser::parse_next_statement(sql.as_bytes(), 0, &limits) {
+        Err(failure) => failure,
+        Ok(_) => panic!("a 10,000 character literal must be refused at a Length of 64"),
+    };
+    assert!(
+        failure.message().contains("too big"),
+        "the refusal must name the size: {}",
+        failure.message()
+    );
+
+    let blob = format!("SELECT x'{}'", "ab".repeat(10_000));
+    assert!(
+        parser::parse_next_statement(blob.as_bytes(), 0, &limits).is_err(),
+        "a 10,000 byte blob must be refused at a Length of 64"
+    );
+}
+
+/// A literal inside the limit is still accepted, at every length the span bound
+/// could get wrong.
+///
+/// **The half a lower bound can break.** Refusing on the span rather than on
+/// the decoded length is only correct while the bound is a true lower bound: a
+/// literal of sixty four doubled quotes is a hundred and thirty bytes of span
+/// and sixty four characters decoded, which is exactly at the limit and has to
+/// be accepted. A bound that was not a lower bound would refuse a statement
+/// SQLite answers, which is worse than the defect it replaced.
+#[test]
+fn a_literal_inside_the_length_limit_is_still_accepted() {
+    let mut limits = Limits::default();
+    limits.set(Limit::Length, 64);
+
+    for length in [0usize, 1, 32, 63, 64] {
+        let text = "a".repeat(length);
+        let sql = format!("SELECT '{text}'");
+        assert!(
+            parser::parse_next_statement(sql.as_bytes(), 0, &limits).is_ok(),
+            "a {length} character literal was refused at a Length of 64"
+        );
+    }
+
+    let doubled = "''".repeat(64);
+    let sql = format!("SELECT '{doubled}'");
+    assert!(
+        parser::parse_next_statement(sql.as_bytes(), 0, &limits).is_ok(),
+        "a literal of 64 quote characters was refused at a Length of 64, so the span bound is \
+         not a lower bound"
+    );
+
+    let inside = format!("SELECT x'{}'", "ff".repeat(64));
+    assert!(
+        parser::parse_next_statement(inside.as_bytes(), 0, &limits).is_ok(),
+        "a 64 byte blob was refused at a Length of 64"
+    );
+    let outside = format!("SELECT x'{}'", "ff".repeat(65));
+    assert!(
+        parser::parse_next_statement(outside.as_bytes(), 0, &limits).is_err(),
+        "a 65 byte blob was accepted at a Length of 64"
+    );
+}

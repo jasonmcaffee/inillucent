@@ -1082,6 +1082,11 @@ fn migrate_remote(
         ));
     }
     let mut plan = inillucent_remote::Plan::new(url, &to);
+    // The surface's own ceiling. `command::run` has already armed it on this
+    // thread, so this is belt and braces rather than the only bound - but a
+    // migration is the one verb long enough that being explicit about which
+    // budget it is under is worth the line.
+    plan.limits = Some(context.limits());
     if let Some(batch) = arguments.integer("batch") {
         plan.batch = (batch.max(1)) as u64;
     }

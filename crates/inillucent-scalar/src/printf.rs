@@ -75,6 +75,20 @@ struct Spec {
     space: bool,
     zero: bool,
     alternate: bool,
+    /// The `,` flag: group the digits in threes.
+    ///
+    /// **Measured, not assumed.** It applies to `d`, `i`, `u` and `f` and to
+    /// nothing else - `%,x`, `%,o`, `%,e` and `%,g` are all ungrouped in the
+    /// pinned 3.53.4 - and for `%d` it is applied after the zero padding
+    /// rather than before, so `printf('%0,12d', 1234567)` is
+    /// `000,001,234,567`, which is fifteen characters in a field of twelve.
+    group: bool,
+    /// The `!` flag: count the width and the precision in characters.
+    ///
+    /// Only for the text conversions. `printf('%5s', '日本語')` answers the
+    /// three characters unpadded, because they are nine bytes and nine is past
+    /// five; `printf('%!5s', ...)` pads them to five characters.
+    characters: bool,
     width: usize,
     width_from_argument: bool,
     precision: Option<usize>,
@@ -90,6 +104,8 @@ fn parse_spec(template: &[u8], start: usize) -> Option<(Spec, usize)> {
         space: false,
         zero: false,
         alternate: false,
+        group: false,
+        characters: false,
         width: 0,
         width_from_argument: false,
         precision: None,
@@ -104,7 +120,8 @@ fn parse_spec(template: &[u8], start: usize) -> Option<(Spec, usize)> {
             Some(b' ') => spec.space = true,
             Some(b'0') => spec.zero = true,
             Some(b'#') => spec.alternate = true,
-            Some(b',') | Some(b'!') => {}
+            Some(b',') => spec.group = true,
+            Some(b'!') => spec.characters = true,
             _ => break,
         }
         index = index.saturating_add(1);
@@ -179,7 +196,18 @@ fn render(spec: &Spec, argument: Option<&Value<'static>>, encoding: TextEncoding
         b's' | b'z' => {
             let mut text = text_of(argument, encoding);
             if let Some(precision) = spec.precision {
-                text.truncate(precision);
+                // **`!` counts characters, and without it the count is bytes
+                // (task-1932, M8).** `printf('%.3s', 'éab')` is `éa` - three
+                // bytes - and `printf('%!.3s', 'éab')` is `éab`. Truncating on
+                // a byte index that is not a character boundary would split a
+                // character in half, so the byte path cuts at the last boundary
+                // at or before the count, which is what the reference's own
+                // UTF-8 aware truncation does.
+                let cut = match spec.characters {
+                    true => char_boundary_after(&text, precision),
+                    false => char_boundary_at_or_before(&text, precision),
+                };
+                text.truncate(cut);
             }
             text
         }
@@ -217,15 +245,54 @@ fn integer(spec: &Spec, value: i64) -> Vec<u8> {
             digits.insert(0, b'0');
         }
     }
-    let mut out = Vec::new();
-    if negative {
-        out.push(b'-');
+    let sign = if negative {
+        Some(b'-')
     } else if spec.plus {
-        out.push(b'+');
+        Some(b'+')
     } else if spec.space {
-        out.push(b' ');
+        Some(b' ')
+    } else {
+        None
+    };
+    // **The zero padding happens here rather than in `pad` when the digits are
+    // grouped, and the order is what the reference does (task-1932, M8).**
+    // `printf('%0,12d', 1234567)` is `000,001,234,567`: the digits are filled
+    // to the field width first and the separators are inserted afterwards, so
+    // the answer is fifteen characters wide. Doing it the other way round -
+    // group, then pad to twelve - gives `0001,234,567`, which is what this
+    // answered before and is not what SQLite answers.
+    if spec.group && spec.zero && !spec.left {
+        let room = spec.width.saturating_sub(usize::from(sign.is_some()));
+        while digits.len() < room {
+            digits.insert(0, b'0');
+        }
+    }
+    if spec.group {
+        digits = grouped(&digits);
+    }
+    let mut out = Vec::new();
+    if let Some(sign) = sign {
+        out.push(sign);
     }
     out.extend_from_slice(&digits);
+    out
+}
+
+/// Returns a run of digits with a comma between every group of three.
+///
+/// Counted from the right, so a leading zero is grouped like any other digit:
+/// the reference answers `00,001,234` for `printf('%,.8d', 1234)`.
+///
+/// @param digits - the digits, without a sign
+fn grouped(digits: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(digits.len().saturating_add(digits.len() / 3));
+    for (at, digit) in digits.iter().enumerate() {
+        let left = digits.len().saturating_sub(at);
+        if at > 0 && left % 3 == 0 {
+            out.push(b',');
+        }
+        out.push(*digit);
+    }
     out
 }
 
@@ -268,6 +335,8 @@ pub fn general(value: f64) -> String {
         space: false,
         zero: false,
         alternate: false,
+        group: false,
+        characters: false,
         width: 0,
         width_from_argument: false,
         precision: None,
@@ -323,6 +392,26 @@ fn real(spec: &Spec, argument: Option<&Value<'static>>) -> Vec<u8> {
         }
     }
     out.extend_from_slice(body.as_bytes());
+    // **`%f` groups before the padding and `%d` groups after it.** Measured:
+    // `printf('%0,14.2f', 1234.5)` is `0000001,234.50`, fourteen characters,
+    // where the integer rule would have given `00,000,001,234.50`. Only the
+    // fixed conversion groups at all - `%,e` and `%,g` are ungrouped.
+    if spec.group && spec.conversion == b'f' {
+        let text = out;
+        let point = text
+            .iter()
+            .position(|byte| *byte == b'.')
+            .unwrap_or(text.len());
+        let lead = text
+            .iter()
+            .position(u8::is_ascii_digit)
+            .unwrap_or(text.len());
+        let mut regrouped = Vec::with_capacity(text.len());
+        regrouped.extend_from_slice(text.get(..lead).unwrap_or(&[]));
+        regrouped.extend_from_slice(&grouped(text.get(lead..point).unwrap_or(&[])));
+        regrouped.extend_from_slice(text.get(point..).unwrap_or(&[]));
+        return regrouped;
+    }
     out
 }
 
@@ -468,13 +557,57 @@ fn quoted(argument: Option<&Value<'static>>, encoding: TextEncoding, wrap: bool)
     out
 }
 
+/// Returns the byte index of the end of the `count`th character.
+///
+/// @param text - the rendered text
+/// @param count - how many characters to keep
+fn char_boundary_after(text: &[u8], count: usize) -> usize {
+    let mut seen = 0usize;
+    for (at, byte) in text.iter().enumerate() {
+        // A continuation byte is `10xxxxxx` and starts no character.
+        if byte & 0xC0 != 0x80 {
+            if seen == count {
+                return at;
+            }
+            seen = seen.saturating_add(1);
+        }
+    }
+    text.len()
+}
+
+/// Returns the largest character boundary at or before a byte index.
+///
+/// @param text - the rendered text
+/// @param at - the byte index the precision names
+fn char_boundary_at_or_before(text: &[u8], at: usize) -> usize {
+    let mut cut = at.min(text.len());
+    while cut > 0 && text.get(cut).is_some_and(|byte| byte & 0xC0 == 0x80) {
+        cut = cut.saturating_sub(1);
+    }
+    cut
+}
+
+/// Returns how many characters a rendered conversion occupies.
+///
+/// @param body - the rendered conversion
+fn character_count(body: &[u8]) -> usize {
+    body.iter().filter(|byte| *byte & 0xC0 != 0x80).count()
+}
+
 /// Pads a rendered conversion to the width the specification asks for.
 fn pad(out: &mut Vec<u8>, body: &[u8], spec: &Spec) {
-    if body.len() >= spec.width {
+    // **`!` makes the field width a count of characters (task-1932, M8).**
+    // `printf('%5s', '日本語')` is the three characters unpadded, because they
+    // are nine bytes; `printf('%!5s', ...)` pads them to five characters.
+    let measured = match spec.characters {
+        true => character_count(body),
+        false => body.len(),
+    };
+    if measured >= spec.width {
         out.extend_from_slice(body);
         return;
     }
-    let fill = spec.width.saturating_sub(body.len());
+    let fill = spec.width.saturating_sub(measured);
     if spec.left {
         out.extend_from_slice(body);
         out.extend(core::iter::repeat_n(b' ', fill));

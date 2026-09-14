@@ -385,6 +385,10 @@ fn main() {
             std::process::exit(1);
         }
     };
+    // Ctrl+C ends the statement, not the shell (task-1932, H11). A second
+    // press still ends the process: the operating system's default handler is
+    // back once ours has fired.
+    inillucent_cli::interrupt::stop_on_ctrl_c(shell.cancel_flag());
     if invocation.version {
         dot::run(&mut shell, ".version");
         return;

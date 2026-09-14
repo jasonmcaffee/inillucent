@@ -71,9 +71,9 @@ fn main() -> ExitCode {
     // program has goes to standard error, because a stray line on standard
     // output is a JSON-RPC frame the client cannot parse, and the failure it
     // reports is "the server is broken" rather than whatever was printed.
-    let mut input = std::io::stdin().lock();
+    let input = std::io::BufReader::new(std::io::stdin());
     let mut output = std::io::stdout();
-    match mcp::serve(settings, &mut input, &mut output) {
+    match mcp::serve(settings, input, &mut output) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("inillucent-mcp: {message}");

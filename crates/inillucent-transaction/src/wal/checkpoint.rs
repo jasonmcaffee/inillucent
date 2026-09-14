@@ -373,6 +373,116 @@ mod tests {
         assert_eq!(image, vec![0x11; 512]);
     }
 
+    /// A FULL checkpoint that a reader held back says so, and leaves the log
+    /// where it was.
+    ///
+    /// **Nothing drove `CheckpointMode::Full` before this (task-1932, M9).**
+    /// `compat/sqlite-3.53.4.toml`'s `wal.checkpoint.full` row claimed `pass`
+    /// against `every_checkpoint_mode_does_what_it_says` and
+    /// `a_full_checkpoint_reports_a_reader_it_cannot_wait_out`, both of which
+    /// went with the old engine in task-1911, so the row cited two tests that
+    /// did not exist and the only thing left touching FULL was the comparison
+    /// that orders the four mode values. The two facts that separate FULL from
+    /// PASSIVE are here: a short copy is reported as `busy`, which is the
+    /// `SQLITE_BUSY` an application waits on, and the log is not restarted.
+    #[test]
+    fn a_full_checkpoint_reports_a_reader_it_could_not_wait_out() {
+        let vfs: Arc<dyn Vfs> = Arc::new(MemoryVfs::new());
+        let (mut writer, database) = open(&vfs, "/full.db", 3);
+        commit(&mut writer, 2, 0x11, 3);
+
+        let mut reader = Wal::open(
+            Arc::clone(&vfs),
+            &DbPath::new(std::path::PathBuf::from("/full.db")),
+            database.as_ref(),
+            PageSize::new(512).unwrap(),
+            WalOptions::default(),
+        )
+        .unwrap();
+        reader.begin_read().unwrap();
+        let pinned = reader.frame_for(2).unwrap().unwrap();
+
+        commit(&mut writer, 2, 0x22, 3);
+        let frames_before = writer.frame_count();
+        let outcome = writer
+            .checkpoint(CheckpointMode::Full, database.as_ref(), None)
+            .unwrap();
+        assert!(
+            outcome.checkpointed_frames < outcome.log_frames,
+            "the reader did not hold anything back, so this proves nothing \
+             about what FULL reports"
+        );
+        assert!(
+            outcome.busy,
+            "a FULL checkpoint that copied {} of {} frames reported success, \
+             which tells an application its log was emptied when it was not",
+            outcome.checkpointed_frames, outcome.log_frames
+        );
+        assert!(!outcome.restarted, "FULL restarted the log");
+        assert!(!outcome.truncated, "FULL shortened the log file");
+        assert_eq!(writer.frame_count(), frames_before);
+
+        let mut image = vec![0u8; 512];
+        reader.read_frame(pinned, &mut image).unwrap();
+        assert_eq!(image, vec![0x11; 512]);
+    }
+
+    /// A RESTART checkpoint sends the next writer back to frame one and leaves
+    /// the log file its own length.
+    ///
+    /// **Nothing drove `CheckpointMode::Restart` before this (task-1932, M9).**
+    /// It is the one mode between FULL and TRUNCATE, and the pair of facts
+    /// that place it there are both asserted: it restarts the log, which FULL
+    /// does not, and it does not shorten the file, which TRUNCATE does. A
+    /// RESTART that truncated would be TRUNCATE under another name, and the
+    /// difference is what an application chooses between when it wants the
+    /// next writer to reuse the space without paying for the file operation.
+    #[test]
+    fn a_restarting_checkpoint_rewinds_the_log_without_shortening_the_file() {
+        let vfs: Arc<dyn Vfs> = Arc::new(MemoryVfs::new());
+        let (mut wal, database) = open(&vfs, "/restart.db", 3);
+        commit(&mut wal, 2, 0x33, 3);
+        commit(&mut wal, 3, 0x44, 3);
+        let size_before = vfs
+            .open(
+                &DbPath::new(std::path::PathBuf::from("/restart.db-wal")),
+                OpenOptions::of_kind(inillucent_vfs::FileKind::Wal),
+            )
+            .unwrap()
+            .file_size()
+            .unwrap();
+        assert!(size_before > 0, "the log is empty before the checkpoint");
+
+        let outcome = wal
+            .checkpoint(CheckpointMode::Restart, database.as_ref(), None)
+            .unwrap();
+        assert!(!outcome.busy);
+        assert!(outcome.restarted, "the log was not restarted");
+        assert!(!outcome.truncated, "RESTART shortened the log file");
+
+        let size_after = vfs
+            .open(
+                &DbPath::new(std::path::PathBuf::from("/restart.db-wal")),
+                OpenOptions::of_kind(inillucent_vfs::FileKind::Wal),
+            )
+            .unwrap()
+            .file_size()
+            .unwrap();
+        assert_eq!(
+            size_after, size_before,
+            "RESTART is the mode that does not pay for the file operation"
+        );
+
+        commit(&mut wal, 2, 0x55, 3);
+        assert_eq!(wal.frame_count(), 1, "the log did not restart at frame one");
+        let mut image = vec![0u8; 512];
+        wal.begin_read().unwrap();
+        let frame = wal.frame_for(2).unwrap().unwrap();
+        wal.read_frame(frame, &mut image).unwrap();
+        assert_eq!(image, vec![0x55; 512]);
+        wal.end_read().unwrap();
+    }
+
     /// A truncating checkpoint empties the log file and starts the next
     /// transaction at its first frame again.
     #[test]

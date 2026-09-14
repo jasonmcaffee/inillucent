@@ -57,6 +57,15 @@ pub const CONNECTIONS: usize = 5;
 /// One shell session: the databases it can reach, and every setting a dot
 /// command can change.
 pub struct Shell {
+    /// The flag that stops the statement this shell is running.
+    ///
+    /// **The shell does not go through `command::run`, so it arms its own
+    /// budget (task-1932, H11).** Every statement a person types runs inside
+    /// this, and `interrupt::stop_on_ctrl_c` is what a front end registers it
+    /// with - so Ctrl+C ends the query rather than the program, and a second
+    /// press still ends the program because the operating system's default
+    /// handler comes back once ours has fired.
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The databases `.connection` switches between; slot 0 is the one the
     /// shell was started on.
     connections: Vec<Option<Opened>>,
@@ -268,6 +277,7 @@ impl Shell {
             *first = Some(Shell::open_one(path)?);
         }
         Ok(Shell {
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             connections,
             active: 0,
             layout: Layout::default(),
@@ -558,6 +568,14 @@ impl Shell {
         }
     }
 
+    /// Returns a handle to the flag that stops the running statement.
+    ///
+    /// A front end registers it with `interrupt::stop_on_ctrl_c`; a program
+    /// embedding the shell can set it from any thread.
+    pub fn cancel_flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::clone(&self.cancel)
+    }
+
     /// Runs one complete statement and prints whatever it produced.
     pub fn run(&mut self, sql: &str) {
         if self.readonly && self.writes(sql) {
@@ -572,7 +590,15 @@ impl Shell {
         if self.explain_plan {
             self.print_plan(sql);
         }
+        // Armed for this statement and dropped after it, so a Ctrl+C that
+        // arrives between two statements belongs to the one that finished and
+        // is cleared rather than applied to the one that has not started.
+        let armed = inillucent_engine::base::budget::arm(
+            inillucent_engine::base::budget::Limits::unbounded(),
+            std::sync::Arc::clone(&self.cancel),
+        );
         let outcome = self.collect(sql);
+        drop(armed);
         // `.auth on` prints what the binder asked about, before the rows the
         // statement produced - which is the order the reference prints them in.
         if self.auth {

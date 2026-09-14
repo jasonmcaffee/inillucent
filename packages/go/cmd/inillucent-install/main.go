@@ -42,29 +42,72 @@ const repository = "Black-Rainbow-Labs/Inillucent"
 // and install.ps1 and install.sh both read from here.
 const downloads = "https://inillucent.com/downloads"
 
+// The release this wrapper was built and tested against.
+//
+// **Pinned, and newest is a flag (task-1932, H12).** With no version given this
+// used to fetch `downloads/VERSION` and install whatever was newest, which
+// makes `go install ...@v0.1.1` install something other than 0.1.1 and makes
+// two machines running the same command on different days get different
+// programs. A wrapper that cannot say which native version it goes with cannot
+// be depended on by anything.
+//
+// `-version latest` still asks the server, for somebody who wants the newest on
+// purpose.
+const nativeVersion = "0.1.1"
+
 // programs are the four the release ships.
 var programs = []string{"inillucent", "inillucent-shell", "inillucent-mcp", "inillucent-migrate"}
 
-// target returns the Rust target triple this machine's releases are built for,
+// target returns the Rust target triple this machine's releases are built for.
+func target() (string, error) {
+	return targetFor(runtime.GOOS, runtime.GOARCH)
+}
+
+// targetFor returns the Rust target triple a platform's releases are built for,
 // and says so plainly when there is not one rather than downloading something
 // that will not run.
-func target() (string, error) {
-	switch runtime.GOOS + "/" + runtime.GOARCH {
+//
+// It takes the platform rather than reading it so that every row can be checked
+// from one machine. The row that was wrong - macOS - could not be checked from
+// the machine the release is cut on, which is how it stayed wrong.
+func targetFor(goos string, goarch string) (string, error) {
+	switch goos + "/" + goarch {
 	case "windows/amd64":
 		return "x86_64-pc-windows-msvc", nil
+	// **One universal archive covers both Apple architectures.** The release
+	// builds the two Apple targets and `lipo`s them together; nothing named
+	// `aarch64-apple-darwin` or `x86_64-apple-darwin` is ever published, so
+	// asking for either was asking for a file that has never existed and the
+	// installer answered "no build for your platform" on every Mac
+	// (task-1932, H12). `packaging/install.sh` has always had this right.
 	case "darwin/arm64":
-		return "aarch64-apple-darwin", nil
+		return "universal-apple-darwin", nil
 	case "darwin/amd64":
-		return "x86_64-apple-darwin", nil
+		return "universal-apple-darwin", nil
 	case "linux/amd64":
 		return "x86_64-unknown-linux-gnu", nil
+	case "linux/arm64":
+		return "aarch64-unknown-linux-gnu", nil
 	default:
 		return "", fmt.Errorf(
 			"there is no inillucent release for %s/%s yet.\n"+
 				"  Build it from source instead:  cargo install inillucent-cli\n"+
 				"  Or open an issue: https://github.com/%s/issues",
-			runtime.GOOS, runtime.GOARCH, repository)
+			goos, goarch, repository)
 	}
+}
+
+// archiveName returns the file a release publishes for one version and target.
+//
+// The one place the name is built, so a test can assert it against the name
+// `packaging/macos/release-macos.sh` writes without running an install. goos
+// decides the container format and nothing else.
+func archiveName(version string, triple string, goos string) string {
+	extension := ".tar.gz"
+	if goos == "windows" {
+		extension = ".zip"
+	}
+	return fmt.Sprintf("inillucent-%s-%s%s", version, triple, extension)
 }
 
 // latest asks GitHub which release is newest.
@@ -252,7 +295,11 @@ func destination() string {
 }
 
 func main() {
-	version := flag.String("version", "", "the release to install; the latest by default")
+	version := flag.String(
+		"version",
+		nativeVersion,
+		"the release to install; `latest` asks the server for the newest",
+	)
 	into := flag.String("dir", "", "where to put the programs; GOBIN by default")
 	flag.Parse()
 
@@ -261,7 +308,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
-	if *version == "" {
+	if *version == "latest" || *version == "" {
 		found, err := latest()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "could not work out the latest release: %v\n", err)
@@ -278,11 +325,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	extension := ".tar.gz"
-	if runtime.GOOS == "windows" {
-		extension = ".zip"
-	}
-	name := fmt.Sprintf("inillucent-%s-%s%s", *version, triple, extension)
+	name := archiveName(*version, triple, runtime.GOOS)
 
 	// SHA256SUMS lists every archive the release published, and it is needed to
 	// verify the download anyway - so it is fetched first and used to answer

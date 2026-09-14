@@ -23,6 +23,7 @@ const PACKAGES = {
   'darwin-arm64': '@inillucent/cli-darwin-arm64',
   'darwin-x64': '@inillucent/cli-darwin-x64',
   'linux-x64': '@inillucent/cli-linux-x64',
+  'linux-arm64': '@inillucent/cli-linux-arm64',
 };
 
 /** The four programs the release ships, and what each one is for. */

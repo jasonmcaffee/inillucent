@@ -63,6 +63,7 @@ pub mod setop;
 pub mod subquery;
 pub mod trigger;
 pub mod window;
+pub mod windowpass;
 
 pub use aggregate::{Accumulator, AggregateKind};
 pub use batch::{Batch, Vector, BATCH_ROWS};

@@ -52,20 +52,24 @@ const REPOSITORY = 'Black-Rainbow-Labs/Inillucent';
 const PROGRAMS = ['inillucent', 'inillucent-shell', 'inillucent-mcp', 'inillucent-migrate'];
 
 /**
- * Returns the Rust target triple this machine's releases are built for.
+ * Where the archives live.
+ *
+ * The same host `packaging/install.sh` and the Go installer read from. This
+ * used to fetch from a GitHub release's download URL, and the repository is
+ * private - so are its release assets, and every fetch answered 404 for
+ * everybody who was not signed in (task-1932, H12).
  */
-function inillucent_target(): string
-{
-    if (DIRECTORY_SEPARATOR === '\\') {
-        return 'x86_64-pc-windows-msvc';
-    }
-    $machine = strtolower(php_uname('m'));
-    $arm = str_contains($machine, 'arm') || str_contains($machine, 'aarch64');
-    if (PHP_OS_FAMILY === 'Darwin') {
-        return $arm ? 'aarch64-apple-darwin' : 'x86_64-apple-darwin';
-    }
-    return $arm ? 'aarch64-unknown-linux-gnu' : 'x86_64-unknown-linux-gnu';
-}
+const DOWNLOADS = 'https://inillucent.com/downloads';
+
+/**
+ * The release this wrapper was built and tested against.
+ *
+ * Pinned, with `latest` as the argument that asks the server for the newest.
+ * Installing whatever is newest by default makes the same command install two
+ * different programs on two days, and makes the package's own version say
+ * nothing about what it puts on the machine.
+ */
+const NATIVE_VERSION = '0.1.1';
 
 /**
  * Fetches a URL, refusing anything that is not a 200.
@@ -86,23 +90,24 @@ function inillucent_fetch(string $url): string
     return $body;
 }
 
-$version = $argv[1] ?? null;
-if ($version === null) {
-    $release = json_decode(
-        inillucent_fetch('https://api.github.com/repos/' . REPOSITORY . '/releases/latest'),
-        true
-    );
-    $version = ltrim((string) ($release['tag_name'] ?? ''), 'v');
+$version = $argv[1] ?? NATIVE_VERSION;
+if ($version === 'latest') {
+    // VERSION, beside the archives: one file on the same host as everything
+    // else, so there is no second service to be reachable and no API that can
+    // answer differently.
+    $version = ltrim(trim(inillucent_fetch(DOWNLOADS . '/VERSION')), 'v');
     if ($version === '') {
         fwrite(STDERR, "could not work out the latest release; pass one as an argument.\n");
         exit(1);
     }
 }
 
-$triple = inillucent_target();
+// The platform table lives in `Inillucent\Target` so that it can be checked
+// without running an install; see `packages/php/tests/target.php`.
+$triple = \Inillucent\Target::current();
 $windows = DIRECTORY_SEPARATOR === '\\';
-$name = sprintf('inillucent-%s-%s%s', $version, $triple, $windows ? '.zip' : '.tar.gz');
-$base = sprintf('https://github.com/%s/releases/download/v%s', REPOSITORY, $version);
+$name = \Inillucent\Target::archiveName($version, $triple, $windows);
+$base = DOWNLOADS;
 
 echo "downloading inillucent $version for $triple\n";
 $archive = inillucent_fetch("$base/$name");

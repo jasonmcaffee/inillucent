@@ -1,4 +1,5 @@
-# The required checks, on both operating systems release packaging builds for.
+# The required checks, on the three operating systems the release ships for and
+# for each of the four language wrappers.
 #
 # **Every job runs `tools/validate.*` rather than a list of its own**, so the
 # command a person runs before pushing and the command that decides whether a
@@ -43,7 +44,13 @@ jobs:
       # the second job throws that away.
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest]
+        # **macOS is here because the release ships a macOS archive
+        # (task-1932, H12).** Two of the three platforms were checked and the
+        # one whose packaging is most different - a universal binary, a signed
+        # and notarised `.pkg`, a `codesign` step that runs nowhere else - was
+        # not. A platform that is released and never built is a platform whose
+        # first build is the release.
+        os: [windows-latest, ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -64,9 +71,12 @@ jobs:
       # one that suite reports success and `--strict` counts it, so this is
       # what turns "the ABI was not exercised" into a visible fact rather than
       # a green.
-      - name: install a C compiler (Unix)
+      - name: install a C compiler (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y build-essential
+      # macOS has clang through the command line tools, which the runner image
+      # already carries, so there is nothing to install - saying so is cheaper
+      # than somebody re-deriving it from the absence of a step.
 
       - name: validate
         shell: bash
@@ -98,6 +108,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # Not macOS: `packaging/release.sh` signs and notarises, which needs an
+        # Apple developer identity and an app-specific password that a pull
+        # request from a fork cannot be given. The macOS *build* is covered by
+        # the `validate` job above; the macOS *packaging* is checked by
+        # `packaging/macos/verify-macos.sh` on the machine that cuts a release.
         os: [windows-latest, ubuntu-latest]
     steps:
       - uses: actions/checkout@v4
@@ -118,3 +133,53 @@ jobs:
           else
             bash packaging/release.sh --smoke-only
           fi
+
+  # **One job per language wrapper, against a freshly built native library
+  # (task-1932, H12).** None of the four ran anywhere before this, so a wrapper
+  # could be broken for a whole release with nothing to say so - and two of them
+  # were: the Go and PHP installers both asked for a macOS archive that has
+  # never been published, which is a `404` on every Mac and a check that would
+  # have caught it on the day it was written.
+  #
+  # Each job builds the binaries and the C ABI library the wrapper binds to, and
+  # then runs that package's own tests against them. Building first is the point:
+  # a wrapper tested against a stale library is a wrapper tested against the
+  # release before this one.
+  wrappers:
+    name: wrapper (${{ matrix.package }})
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        package: [go, npm, php, python]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: wrapper-${{ matrix.package }}
+
+      - name: build the binaries and the driver library
+        run: |
+          cargo build --release -p inillucent-cli
+          cargo build --release -p inillucent-driver-capi
+
+      - name: go
+        if: matrix.package == 'go'
+        run: go test ./...
+        working-directory: packages/go
+
+      - name: npm
+        if: matrix.package == 'npm'
+        run: node --test packages/npm/inillucent/resolve.test.mjs
+
+      - name: php
+        if: matrix.package == 'php'
+        run: php packages/php/tests/target.php
+
+      - name: python
+        if: matrix.package == 'python'
+        run: |
+          python packages/python/build.py
+          python packages/python/tests/test_wheel.py

@@ -19,6 +19,12 @@
 //!    was renamed or never existed.
 //! 3. **Every page being reachable from the index.** A page nothing links to is
 //!    a page nobody updates.
+//! 4. **What `agent-skills/` tells an agent to send and to read.** A field name
+//!    and a count are both exact, and both were wrong: `elapsedMs` for a member
+//!    the shell writes as `elapsed_ms`, and tool and command counts a release
+//!    behind. A skill page is read by a program, so a wrong name there is a
+//!    parse failure with no diagnosis rather than a sentence somebody
+//!    discounts.
 //!
 //! What is *not* checked is prose. A test that asserted on sentences would fail
 //! on a rewording, and a check that fails for a reason nobody cares about is a
@@ -27,6 +33,9 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
+use inillucent_cli::command::{self, Outcome};
+use inillucent_cli::json::{self, Json};
+use inillucent_cli::mcp;
 use inillucent_compat::workspace_root;
 
 /// Returns every markdown file under `docs/`.
@@ -267,4 +276,207 @@ fn verbs_named(line: &str, fenced: bool) -> Vec<String> {
         found.push(verb);
     }
     found
+}
+
+/// Returns every `agent-skills/**/*.md` page.
+///
+/// The skills are read by an agent rather than by a person, which makes a
+/// wrong field name worse there than in prose: an agent writes the key it was
+/// told to write and gets a parse error it cannot diagnose, because the page
+/// that taught it the name is the page it would check against.
+fn skill_pages() -> Vec<PathBuf> {
+    let mut pages = Vec::new();
+    walk(&workspace_root().join("agent-skills"), &mut pages);
+    pages.retain(|page| page.extension().is_some_and(|kind| kind == "md"));
+    assert!(
+        pages.len() >= 3,
+        "found {} skill pages, which means this is looking in the wrong place",
+        pages.len()
+    );
+    pages
+}
+
+/// Returns the fenced ```json blocks of a page.
+///
+/// @param text - the whole page
+fn json_blocks(text: &str) -> Vec<String> {
+    let mut blocks = Vec::new();
+    let mut rest = text;
+    while let Some(start) = rest.find("```json") {
+        let after = rest.split_at(start).1;
+        let Some(body) = after.strip_prefix("```json") else {
+            break;
+        };
+        let Some(end) = body.find("```") else {
+            break;
+        };
+        let (block, remainder) = body.split_at(end);
+        blocks.push(block.to_string());
+        rest = remainder;
+    }
+    blocks
+}
+
+/// Every field name the skills show in a shell result has to be one the shell
+/// actually writes.
+///
+/// **`elapsedMs` was in two of them (task-1932, M9).**
+/// `agent-skills/inillucent-quickstart/SKILL.md` and
+/// `agent-skills/inillucent-mcp/SKILL.md` both showed a `--output json` result
+/// with an `elapsedMs` member. `Outcome::to_json` writes `elapsed_ms`, and has
+/// as long as it has existed. An agent that read the page and keyed on
+/// `elapsedMs` would have read `undefined` on every call, with nothing to tell
+/// it why.
+///
+/// A block counts as a shell result when it has `ok` and `command`, which is
+/// what separates one from the MCP configuration and protocol examples on the
+/// same pages. Command-specific members are allowed through by name, because
+/// `Outcome::with` lets a verb add its own and the general shape cannot know
+/// them.
+#[test]
+fn every_result_field_the_skills_show_is_one_the_shell_writes() {
+    let shape = Outcome::said("query", "").to_json();
+    let Json::Object(members) = &shape else {
+        panic!("an outcome does not render as an object");
+    };
+    let mut written: BTreeSet<String> = members.iter().map(|(name, _)| name.clone()).collect();
+    assert!(
+        written.contains("elapsed_ms") && written.contains("row_count"),
+        "the outcome shape is not the one this test was written against: {written:?}"
+    );
+    // What `Outcome::with` adds. Each is a member one verb writes, so it is
+    // real and it is not in the general shape.
+    for extra in EXTRA_MEMBERS {
+        written.insert((*extra).to_string());
+    }
+
+    let mut wrong = Vec::new();
+    for page in skill_pages() {
+        let text = std::fs::read_to_string(&page).unwrap_or_default();
+        for block in json_blocks(&text) {
+            let Ok(Json::Object(shown)) = json::parse(&block) else {
+                continue;
+            };
+            let names: Vec<&String> = shown.iter().map(|(name, _)| name).collect();
+            let is_a_result = names.iter().any(|name| name.as_str() == "ok")
+                && names.iter().any(|name| name.as_str() == "command");
+            if !is_a_result {
+                continue;
+            }
+            for name in names {
+                if !written.contains(name) {
+                    wrong.push(format!(
+                        "{}: shows `{name}`, which the shell never writes",
+                        page.display()
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "these skill pages show a result field the shell does not write:\n{}",
+        wrong.join("\n")
+    );
+}
+
+/// The members individual verbs add of their own.
+///
+/// `Outcome::with` lets a verb answer something the general shape cannot -
+/// `pragma` reports `page_size`, `import` reports `wrote`, `batch` reports
+/// `transaction`. They are written out here rather than grepped for, because a
+/// grep would accept a member added under a computed name and that is the one
+/// case this is protecting against. A new one fails here until it is added.
+const EXTRA_MEMBERS: &[&str] = &[
+    "cache_hits",
+    "cache_misses",
+    "checks",
+    "cli",
+    "ddl",
+    "destination",
+    "driver",
+    "engine",
+    "free_pages",
+    "indexes",
+    "page_count",
+    "page_size",
+    "path",
+    "pool_bytes",
+    "query",
+    "ready",
+    "residency",
+    "root",
+    "rows",
+    "server",
+    "shell_reported_an_error",
+    "source",
+    "table",
+    "tables",
+    "transaction",
+    "transport",
+    "wrote",
+];
+
+/// The counts the skills state have to be the counts the registry has.
+///
+/// **They were one behind on three pages (task-1932, M9).**
+/// `inillucent-mcp/SKILL.md` said 27 tools and `inillucent-embed/SKILL.md` and
+/// `inillucent-quickstart/SKILL.md` said 29 commands, while `registry.rs` had
+/// 30 commands and `mcp::tools()` served 28 of them. A number in prose is the
+/// one kind of documentation that can be checked exactly, so it is.
+///
+/// The sentences are named rather than scanned for. A rule like "every integer
+/// near the word commands" reads the exit status out of `| 2 | the command
+/// line was not one anybody could act on |` and the dot-command count out of
+/// the line below it, so it would fail on numbers that are right. Naming the
+/// three sentences costs a line when somebody rewords one, and that line is
+/// where they are reminded the number has to move with the registry.
+#[test]
+fn the_skills_state_the_number_of_commands_and_tools_there_are() {
+    let commands = command::COMMANDS.len();
+    let tools = mcp::tools().len();
+    assert!(commands > tools, "every tool is a command");
+
+    // Each row is the text before the number, the text after it, and what the
+    // number has to be.
+    let claims: [(&str, &str, usize); 3] = [
+        ("serves ", " of the CLI's commands as MCP tools", tools),
+        ("serves ", " of those commands over MCP", tools),
+        ("all ", " commands", commands),
+    ];
+
+    let mut wrong = Vec::new();
+    let mut found = 0usize;
+    for page in skill_pages() {
+        let text = std::fs::read_to_string(&page).unwrap_or_default();
+        for (before, after, expected) in claims {
+            let mut rest = text.as_str();
+            while let Some(at) = rest.find(before) {
+                let tail = rest.split_at(at.saturating_add(before.len())).1;
+                let digits: String = tail.chars().take_while(char::is_ascii_digit).collect();
+                let remainder = tail.split_at(digits.len()).1;
+                if !digits.is_empty() && remainder.starts_with(after) {
+                    found = found.saturating_add(1);
+                    if digits.parse::<usize>().ok() != Some(expected) {
+                        wrong.push(format!(
+                            "{}: says `{before}{digits}{after}`, and there are {expected}",
+                            page.display()
+                        ));
+                    }
+                }
+                rest = tail;
+            }
+        }
+    }
+    assert!(
+        found >= 3,
+        "matched {found} counted sentences in the skills, and there are three. A reworded \
+         sentence needs its row in `claims` reworded with it, or the number stops being \
+         checked at all."
+    );
+    assert!(
+        wrong.is_empty(),
+        "these skill pages state a count the engine does not have:\n{}",
+        wrong.join("\n")
+    );
 }

@@ -221,7 +221,10 @@ pub struct inillucent_error {
 /// Runs an entry point's body, turning a panic into a status.
 ///
 /// **A panic unwinding into a C caller is undefined behaviour**, so every entry
-/// point wraps its body in this. It is a backstop and not a strategy: the
+/// point that answers a status wraps its body in this, and every entry point
+/// that answers a value wraps its body in [`guarded_value`]. It used to say
+/// "every entry point" and mean fifteen of fifty-three (task-1932, M9). It is a
+/// backstop and not a strategy: the
 /// driver denies `unwrap`, `expect`, `panic` and slice indexing, so a panic
 /// reaching here is a defect, and [`INILLUCENT_INTERNAL`] is the status that
 /// says "report this" rather than "you did something wrong".
@@ -247,6 +250,30 @@ where
             INILLUCENT_INTERNAL
         }
     }
+}
+
+/// Runs an entry point that answers a value rather than a status.
+///
+/// **The other thirty-eight (task-1932, M9).** The doc on [`guarded`] said
+/// "every entry point wraps its body in this", and fifteen of the fifty-three
+/// did. The rest could not: `guarded` answers an `i32` status and writes into
+/// an error out-parameter, and these return a count, a pointer, a `f64` or
+/// nothing at all, most of them with nowhere to put an error. A panic
+/// unwinding out of any of them is undefined behaviour just the same, so they
+/// needed a guard of their own rather than an exemption.
+///
+/// There is no error to report, so the fallback is each site's own "nothing"
+/// answer - the same value it already returns for a null or dead handle, which
+/// its doc comment already states. A caller that reads it is in exactly the
+/// case it was already written for.
+///
+/// @param body - the entry point's work
+/// @param fallback - what to answer if it panics
+fn guarded_value<T, F>(body: F, fallback: T) -> T
+where
+    F: FnOnce() -> T,
+{
+    catch_unwind(AssertUnwindSafe(body)).unwrap_or(fallback)
 }
 
 /// Writes a failure to the caller's out-parameter, if it wanted one.
@@ -367,24 +394,29 @@ fn finish(
 /// Returns the ABI version a binding should check the major of.
 #[no_mangle]
 pub extern "C" fn inillucent_abi_version() -> u32 {
-    ABI_VERSION
+    guarded_value(|| ABI_VERSION, 0)
 }
 
 /// Returns what the driver calls itself, as a C string valid forever.
 #[no_mangle]
 pub extern "C" fn inillucent_version() -> *const c_char {
-    // Built once and leaked on purpose: the header promises a pointer valid
-    // for the life of the process, and one static allocation is the honest way
-    // to keep that promise.
-    static ONCE: std::sync::OnceLock<CString> = std::sync::OnceLock::new();
-    ONCE.get_or_init(|| c_string(inillucent_driver::version()))
-        .as_ptr()
+    guarded_value(
+        || {
+            // Built once and leaked on purpose: the header promises a pointer valid
+            // for the life of the process, and one static allocation is the honest way
+            // to keep that promise.
+            static ONCE: std::sync::OnceLock<CString> = std::sync::OnceLock::new();
+            ONCE.get_or_init(|| c_string(inillucent_driver::version()))
+                .as_ptr()
+        },
+        std::ptr::null(),
+    )
 }
 
 /// Returns how many capabilities this build declares.
 #[no_mangle]
 pub extern "C" fn inillucent_capability_count() -> usize {
-    CAPABILITIES.len()
+    guarded_value(|| CAPABILITIES.len(), 0)
 }
 
 /// Reads one capability's name, state and note.
@@ -430,15 +462,20 @@ pub unsafe extern "C" fn inillucent_capability(
 /// `name` must be null or a NUL-terminated string.
 #[no_mangle]
 pub unsafe extern "C" fn inillucent_supports(name: *const c_char) -> i32 {
-    let Some(name) = borrowed(name) else {
-        return INILLUCENT_SUPPORT_UNKNOWN;
-    };
-    match inillucent_driver::supports(name) {
-        Some(Support::Yes) => Support::Yes as i32,
-        Some(Support::No) => Support::No as i32,
-        Some(Support::Partial) => Support::Partial as i32,
-        None => INILLUCENT_SUPPORT_UNKNOWN,
-    }
+    guarded_value(
+        || {
+            let Some(name) = borrowed(name) else {
+                return INILLUCENT_SUPPORT_UNKNOWN;
+            };
+            match inillucent_driver::supports(name) {
+                Some(Support::Yes) => Support::Yes as i32,
+                Some(Support::No) => Support::No as i32,
+                Some(Support::Partial) => Support::Partial as i32,
+                None => INILLUCENT_SUPPORT_UNKNOWN,
+            }
+        },
+        0,
+    )
 }
 
 /// Returns a C string for a static Rust string, made once and kept.
@@ -634,10 +671,13 @@ pub unsafe extern "C" fn inillucent_backup_to(
 /// `db` must be null or a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn inillucent_path(db: *const inillucent_db) -> *const c_char {
-    match held(db) {
-        Some(database) => database.path.as_ptr(),
-        None => std::ptr::null(),
-    }
+    guarded_value(
+        || match held(db) {
+            Some(database) => database.path.as_ptr(),
+            None => std::ptr::null(),
+        },
+        std::ptr::null(),
+    )
 }
 
 // —— a connection ——————————————————————————————————————————————————
@@ -698,10 +738,15 @@ pub unsafe extern "C" fn inillucent_connect(
 /// `conn` must be null or a live handle, freed exactly once.
 #[no_mangle]
 pub unsafe extern "C" fn inillucent_conn_free(conn: *mut inillucent_conn) {
-    if conn.is_null() {
-        return;
-    }
-    drop(Box::from_raw(conn));
+    guarded_value(
+        || {
+            if conn.is_null() {
+                return;
+            }
+            drop(Box::from_raw(conn));
+        },
+        (),
+    )
 }
 
 /// Returns the session a connection handle runs its calls in.
@@ -824,13 +869,16 @@ pub unsafe extern "C" fn inillucent_execute_batch(
 /// `conn` must be null or a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn inillucent_last_insert_rowid(conn: *mut inillucent_conn) -> i64 {
-    match database_of(conn) {
-        Some(database) => database
-            .database
-            .connect_as(session_of(conn))
-            .last_insert_rowid(),
-        None => 0,
-    }
+    guarded_value(
+        || match database_of(conn) {
+            Some(database) => database
+                .database
+                .connect_as(session_of(conn))
+                .last_insert_rowid(),
+            None => 0,
+        },
+        0,
+    )
 }
 
 /// Returns how many rows every statement so far has changed.
@@ -842,13 +890,16 @@ pub unsafe extern "C" fn inillucent_last_insert_rowid(conn: *mut inillucent_conn
 /// `conn` must be null or a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn inillucent_total_changes(conn: *mut inillucent_conn) -> i64 {
-    match database_of(conn) {
-        Some(database) => database
-            .database
-            .connect_as(session_of(conn))
-            .total_changes(),
-        None => 0,
-    }
+    guarded_value(
+        || match database_of(conn) {
+            Some(database) => database
+                .database
+                .connect_as(session_of(conn))
+                .total_changes(),
+            None => 0,
+        },
+        0,
+    )
 }
 
 /// Reports whether a transaction is open.
@@ -860,15 +911,18 @@ pub unsafe extern "C" fn inillucent_total_changes(conn: *mut inillucent_conn) ->
 /// `conn` must be null or a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn inillucent_in_transaction(conn: *mut inillucent_conn) -> i32 {
-    match database_of(conn) {
-        Some(database) => i32::from(
-            database
-                .database
-                .connect_as(session_of(conn))
-                .in_transaction(),
-        ),
-        None => 0,
-    }
+    guarded_value(
+        || match database_of(conn) {
+            Some(database) => i32::from(
+                database
+                    .database
+                    .connect_as(session_of(conn))
+                    .in_transaction(),
+            ),
+            None => 0,
+        },
+        0,
+    )
 }
 
 /// Returns the schema's generation.
@@ -880,21 +934,29 @@ pub unsafe extern "C" fn inillucent_in_transaction(conn: *mut inillucent_conn) -
 /// `conn` must be null or a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn inillucent_schema_cookie(conn: *mut inillucent_conn) -> u64 {
-    match database_of(conn) {
-        Some(database) => database
-            .database
-            .connect_as(session_of(conn))
-            .schema_cookie(),
-        None => 0,
-    }
+    guarded_value(
+        || match database_of(conn) {
+            Some(database) => database
+                .database
+                .connect_as(session_of(conn))
+                .schema_cookie(),
+            None => 0,
+        },
+        0,
+    )
 }
 
-/// Asks a running statement to stop, which this engine cannot do.
+/// Asks a running statement to stop.
 ///
-/// Always [`inillucent_driver::Status::Unsupported`], and
-/// `inillucent_supports("cancel")` says so up front. It is present rather than
-/// absent so a binding can wire it once and have it begin working the day the
-/// capability flips.
+/// **This said "which this engine cannot do" and returned `Unsupported`, and
+/// both had stopped being true (task-1932, M9).** It sets a flag the executor
+/// reads at every leaf of a scan and every batch a result collects, so a long
+/// scan, a large result and a slow join all stop with `interrupted` and leave
+/// the connection usable. `inillucent_supports("cancel")` answers `partial`,
+/// not `no`: what it does not interrupt is one operator part-way through one
+/// indivisible piece of work, so a sort of what it has already read finishes.
+/// That is a bound on how soon a cancel takes effect rather than on whether it
+/// works.
 ///
 /// @param conn - the connection
 /// @param error - where the refusal goes, or null
@@ -975,9 +1037,14 @@ pub unsafe extern "C" fn inillucent_prepare(
 /// `stmt` must be null or a live handle, freed exactly once.
 #[no_mangle]
 pub unsafe extern "C" fn inillucent_stmt_free(stmt: *mut inillucent_stmt) {
-    if !stmt.is_null() {
-        drop(Box::from_raw(stmt));
-    }
+    guarded_value(
+        || {
+            if !stmt.is_null() {
+                drop(Box::from_raw(stmt));
+            }
+        },
+        (),
+    )
 }
 
 /// Binds one value at a one-based index, growing the list with NULLs.
@@ -1021,7 +1088,7 @@ unsafe fn bind(stmt: *mut inillucent_stmt, index: u32, value: Value) -> i32 {
 /// `stmt` must be a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn inillucent_bind_null(stmt: *mut inillucent_stmt, index: u32) -> i32 {
-    bind(stmt, index, Value::Null)
+    guarded_value(|| bind(stmt, index, Value::Null), 0)
 }
 
 /// Binds an integer.
@@ -1039,7 +1106,7 @@ pub unsafe extern "C" fn inillucent_bind_int(
     index: u32,
     value: i64,
 ) -> i32 {
-    bind(stmt, index, Value::Integer(value))
+    guarded_value(|| bind(stmt, index, Value::Integer(value)), 0)
 }
 
 /// Binds a float.
@@ -1057,7 +1124,7 @@ pub unsafe extern "C" fn inillucent_bind_real(
     index: u32,
     value: f64,
 ) -> i32 {
-    bind(stmt, index, Value::Real(value))
+    guarded_value(|| bind(stmt, index, Value::Real(value)), 0)
 }
 
 /// Binds text, copying it.
@@ -1077,17 +1144,22 @@ pub unsafe extern "C" fn inillucent_bind_text(
     value: *const c_char,
     len: usize,
 ) -> i32 {
-    if value.is_null() {
-        return bind(stmt, index, Value::Null);
-    }
-    let bytes = std::slice::from_raw_parts(value as *const u8, len);
-    // Text that is not UTF-8 is bound as a blob rather than lossily converted,
-    // for the reason `Value::from_engine` gives: a replacement character is a
-    // value nobody passed.
-    match std::str::from_utf8(bytes) {
-        Ok(text) => bind(stmt, index, Value::Text(text.to_owned())),
-        Err(_) => bind(stmt, index, Value::Blob(bytes.to_vec())),
-    }
+    guarded_value(
+        || {
+            if value.is_null() {
+                return bind(stmt, index, Value::Null);
+            }
+            let bytes = std::slice::from_raw_parts(value as *const u8, len);
+            // Text that is not UTF-8 is bound as a blob rather than lossily converted,
+            // for the reason `Value::from_engine` gives: a replacement character is a
+            // value nobody passed.
+            match std::str::from_utf8(bytes) {
+                Ok(text) => bind(stmt, index, Value::Text(text.to_owned())),
+                Err(_) => bind(stmt, index, Value::Blob(bytes.to_vec())),
+            }
+        },
+        0,
+    )
 }
 
 /// Binds bytes, copying them.
@@ -1107,11 +1179,16 @@ pub unsafe extern "C" fn inillucent_bind_blob(
     value: *const u8,
     len: usize,
 ) -> i32 {
-    if value.is_null() {
-        return bind(stmt, index, Value::Null);
-    }
-    let bytes = std::slice::from_raw_parts(value, len);
-    bind(stmt, index, Value::Blob(bytes.to_vec()))
+    guarded_value(
+        || {
+            if value.is_null() {
+                return bind(stmt, index, Value::Null);
+            }
+            let bytes = std::slice::from_raw_parts(value, len);
+            bind(stmt, index, Value::Blob(bytes.to_vec()))
+        },
+        0,
+    )
 }
 
 /// Unbinds every parameter.
@@ -1123,9 +1200,14 @@ pub unsafe extern "C" fn inillucent_bind_blob(
 /// `stmt` must be null or a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn inillucent_clear_bindings(stmt: *mut inillucent_stmt) {
-    if let Some(statement) = stmt.as_mut() {
-        statement.params.clear();
-    }
+    guarded_value(
+        || {
+            if let Some(statement) = stmt.as_mut() {
+                statement.params.clear();
+            }
+        },
+        (),
+    )
 }
 
 /// Runs a statement with what is bound.
@@ -1215,9 +1297,14 @@ fn capped(limit: u64) -> usize {
 /// `rows` must be null or a live handle, freed exactly once.
 #[no_mangle]
 pub unsafe extern "C" fn inillucent_rows_free(rows: *mut inillucent_rows) {
-    if !rows.is_null() {
-        drop(Box::from_raw(rows));
-    }
+    guarded_value(
+        || {
+            if !rows.is_null() {
+                drop(Box::from_raw(rows));
+            }
+        },
+        (),
+    )
 }
 
 /// Returns how many columns a result has.
@@ -1229,7 +1316,7 @@ pub unsafe extern "C" fn inillucent_rows_free(rows: *mut inillucent_rows) {
 /// `rows` must be null or a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn inillucent_rows_column_count(rows: *const inillucent_rows) -> usize {
-    held(rows).map_or(0, |held| held.rows.columns.len())
+    guarded_value(|| held(rows).map_or(0, |held| held.rows.columns.len()), 0)
 }
 
 /// Returns one column's name.
@@ -1245,10 +1332,13 @@ pub unsafe extern "C" fn inillucent_rows_column_name(
     rows: *const inillucent_rows,
     nth: usize,
 ) -> *const c_char {
-    match held(rows).and_then(|held| held.names.get(nth)) {
-        Some(name) => name.as_ptr(),
-        None => std::ptr::null(),
-    }
+    guarded_value(
+        || match held(rows).and_then(|held| held.names.get(nth)) {
+            Some(name) => name.as_ptr(),
+            None => std::ptr::null(),
+        },
+        std::ptr::null(),
+    )
 }
 
 /// Returns one column's declared type, or the empty string for an expression.
@@ -1264,10 +1354,13 @@ pub unsafe extern "C" fn inillucent_rows_column_type(
     rows: *const inillucent_rows,
     nth: usize,
 ) -> *const c_char {
-    match held(rows).and_then(|held| held.types.get(nth)) {
-        Some(name) => name.as_ptr(),
-        None => std::ptr::null(),
-    }
+    guarded_value(
+        || match held(rows).and_then(|held| held.types.get(nth)) {
+            Some(name) => name.as_ptr(),
+            None => std::ptr::null(),
+        },
+        std::ptr::null(),
+    )
 }
 
 /// Returns how many rows the caller was handed.
@@ -1279,7 +1372,7 @@ pub unsafe extern "C" fn inillucent_rows_column_type(
 /// `rows` must be null or a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn inillucent_rows_count(rows: *const inillucent_rows) -> usize {
-    held(rows).map_or(0, |held| held.rows.rows.len())
+    guarded_value(|| held(rows).map_or(0, |held| held.rows.rows.len()), 0)
 }
 
 /// Returns how many rows the statement produced, exactly.
@@ -1291,7 +1384,7 @@ pub unsafe extern "C" fn inillucent_rows_count(rows: *const inillucent_rows) -> 
 /// `rows` must be null or a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn inillucent_rows_total(rows: *const inillucent_rows) -> usize {
-    held(rows).map_or(0, |held| held.rows.total)
+    guarded_value(|| held(rows).map_or(0, |held| held.rows.total), 0)
 }
 
 /// Reports whether the limit cut anything off.
@@ -1303,7 +1396,7 @@ pub unsafe extern "C" fn inillucent_rows_total(rows: *const inillucent_rows) -> 
 /// `rows` must be null or a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn inillucent_rows_more(rows: *const inillucent_rows) -> i32 {
-    held(rows).map_or(0, |held| i32::from(held.rows.more))
+    guarded_value(|| held(rows).map_or(0, |held| i32::from(held.rows.more)), 0)
 }
 
 /// Returns how many rows the statement changed, or -1 for a query.
@@ -1315,11 +1408,16 @@ pub unsafe extern "C" fn inillucent_rows_more(rows: *const inillucent_rows) -> i
 /// `rows` must be null or a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn inillucent_rows_affected(rows: *const inillucent_rows) -> i64 {
-    held(rows).map_or(-1, |held| {
-        held.rows
-            .affected
-            .map_or(-1, |count| i64::try_from(count).unwrap_or(i64::MAX))
-    })
+    guarded_value(
+        || {
+            held(rows).map_or(-1, |held| {
+                held.rows
+                    .affected
+                    .map_or(-1, |count| i64::try_from(count).unwrap_or(i64::MAX))
+            })
+        },
+        0,
+    )
 }
 
 /// Returns how long the statement took, in microseconds.
@@ -1331,9 +1429,14 @@ pub unsafe extern "C" fn inillucent_rows_affected(rows: *const inillucent_rows) 
 /// `rows` must be null or a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn inillucent_rows_elapsed_us(rows: *const inillucent_rows) -> u64 {
-    held(rows).map_or(0, |held| {
-        u64::try_from(held.rows.elapsed.as_micros()).unwrap_or(u64::MAX)
-    })
+    guarded_value(
+        || {
+            held(rows).map_or(0, |held| {
+                u64::try_from(held.rows.elapsed.as_micros()).unwrap_or(u64::MAX)
+            })
+        },
+        0,
+    )
 }
 
 /// Returns the completion tag.
@@ -1345,10 +1448,13 @@ pub unsafe extern "C" fn inillucent_rows_elapsed_us(rows: *const inillucent_rows
 /// `rows` must be null or a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn inillucent_rows_tag(rows: *const inillucent_rows) -> *const c_char {
-    match held(rows) {
-        Some(held) => held.tag.as_ptr(),
-        None => std::ptr::null(),
-    }
+    guarded_value(
+        || match held(rows) {
+            Some(held) => held.tag.as_ptr(),
+            None => std::ptr::null(),
+        },
+        std::ptr::null(),
+    )
 }
 
 /// Returns what kind of value a cell holds.
@@ -1366,10 +1472,13 @@ pub unsafe extern "C" fn inillucent_value_type(
     row: usize,
     column: usize,
 ) -> i32 {
-    match held(rows).and_then(|held| held.rows.value(row, column)) {
-        Some(value) => value.kind() as i32,
-        None => 0,
-    }
+    guarded_value(
+        || match held(rows).and_then(|held| held.rows.value(row, column)) {
+            Some(value) => value.kind() as i32,
+            None => 0,
+        },
+        0,
+    )
 }
 
 /// Returns a cell as an integer, or zero when it is not one.
@@ -1387,11 +1496,14 @@ pub unsafe extern "C" fn inillucent_value_int(
     row: usize,
     column: usize,
 ) -> i64 {
-    match held(rows).and_then(|held| held.rows.value(row, column)) {
-        Some(Value::Integer(number)) => *number,
-        Some(Value::Real(number)) => *number as i64,
-        _ => 0,
-    }
+    guarded_value(
+        || match held(rows).and_then(|held| held.rows.value(row, column)) {
+            Some(Value::Integer(number)) => *number,
+            Some(Value::Real(number)) => *number as i64,
+            _ => 0,
+        },
+        0,
+    )
 }
 
 /// Returns a cell as a float, or zero when it is not one.
@@ -1409,11 +1521,14 @@ pub unsafe extern "C" fn inillucent_value_real(
     row: usize,
     column: usize,
 ) -> f64 {
-    match held(rows).and_then(|held| held.rows.value(row, column)) {
-        Some(Value::Real(number)) => *number,
-        Some(Value::Integer(number)) => *number as f64,
-        _ => 0.0,
-    }
+    guarded_value(
+        || match held(rows).and_then(|held| held.rows.value(row, column)) {
+            Some(Value::Real(number)) => *number,
+            Some(Value::Integer(number)) => *number as f64,
+            _ => 0.0,
+        },
+        0.0,
+    )
 }
 
 /// Returns a cell's bytes and their length.
@@ -1436,23 +1551,28 @@ pub unsafe extern "C" fn inillucent_value_bytes(
     column: usize,
     len: *mut usize,
 ) -> *const u8 {
-    let bytes = held(rows)
-        .and_then(|held| held.rows.value(row, column))
-        .and_then(Value::bytes);
-    match bytes {
-        Some(bytes) => {
-            if !len.is_null() {
-                *len = bytes.len();
+    guarded_value(
+        || {
+            let bytes = held(rows)
+                .and_then(|held| held.rows.value(row, column))
+                .and_then(Value::bytes);
+            match bytes {
+                Some(bytes) => {
+                    if !len.is_null() {
+                        *len = bytes.len();
+                    }
+                    bytes.as_ptr()
+                }
+                None => {
+                    if !len.is_null() {
+                        *len = 0;
+                    }
+                    std::ptr::null()
+                }
             }
-            bytes.as_ptr()
-        }
-        None => {
-            if !len.is_null() {
-                *len = 0;
-            }
-            std::ptr::null()
-        }
-    }
+        },
+        std::ptr::null(),
+    )
 }
 
 // —— a transaction ——————————————————————————————————————————————————
@@ -1609,19 +1729,24 @@ pub unsafe extern "C" fn inillucent_txn_commit(
 /// `txn` must be null or a live handle, freed exactly once.
 #[no_mangle]
 pub unsafe extern "C" fn inillucent_txn_rollback(txn: *mut inillucent_txn) {
-    if txn.is_null() {
-        return;
-    }
-    let transaction = Box::from_raw(txn);
-    if transaction.spent {
-        return;
-    }
-    if let Some(database) = database_in(&transaction.connection) {
-        let _ = database
-            .database
-            .connect_as(transaction.connection.session)
-            .execute_batch("ROLLBACK");
-    }
+    guarded_value(
+        || {
+            if txn.is_null() {
+                return;
+            }
+            let transaction = Box::from_raw(txn);
+            if transaction.spent {
+                return;
+            }
+            if let Some(database) = database_in(&transaction.connection) {
+                let _ = database
+                    .database
+                    .connect_as(transaction.connection.session)
+                    .execute_batch("ROLLBACK");
+            }
+        },
+        (),
+    )
 }
 
 // —— a failure ——————————————————————————————————————————————————————
@@ -1635,7 +1760,10 @@ pub unsafe extern "C" fn inillucent_txn_rollback(txn: *mut inillucent_txn) {
 /// `error` must be null or a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn inillucent_error_status(error: *const inillucent_error) -> i32 {
-    held(error).map_or(INILLUCENT_INVALID_STATE, |held| held.status)
+    guarded_value(
+        || held(error).map_or(INILLUCENT_INVALID_STATE, |held| held.status),
+        0,
+    )
 }
 
 /// Returns what happened, in the engine's own words.
@@ -1647,10 +1775,13 @@ pub unsafe extern "C" fn inillucent_error_status(error: *const inillucent_error)
 /// `error` must be null or a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn inillucent_error_message(error: *const inillucent_error) -> *const c_char {
-    match held(error) {
-        Some(held) => held.message.as_ptr(),
-        None => std::ptr::null(),
-    }
+    guarded_value(
+        || match held(error) {
+            Some(held) => held.message.as_ptr(),
+            None => std::ptr::null(),
+        },
+        std::ptr::null(),
+    )
 }
 
 /// Returns the construct the engine has not implemented, or null.
@@ -1662,10 +1793,13 @@ pub unsafe extern "C" fn inillucent_error_message(error: *const inillucent_error
 /// `error` must be null or a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn inillucent_error_feature(error: *const inillucent_error) -> *const c_char {
-    match held(error).and_then(|held| held.feature.as_ref()) {
-        Some(feature) => feature.as_ptr(),
-        None => std::ptr::null(),
-    }
+    guarded_value(
+        || match held(error).and_then(|held| held.feature.as_ref()) {
+            Some(feature) => feature.as_ptr(),
+            None => std::ptr::null(),
+        },
+        std::ptr::null(),
+    )
 }
 
 /// Returns the internal diagnostic text, or null.
@@ -1677,10 +1811,13 @@ pub unsafe extern "C" fn inillucent_error_feature(error: *const inillucent_error
 /// `error` must be null or a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn inillucent_error_detail(error: *const inillucent_error) -> *const c_char {
-    match held(error).and_then(|held| held.detail.as_ref()) {
-        Some(detail) => detail.as_ptr(),
-        None => std::ptr::null(),
-    }
+    guarded_value(
+        || match held(error).and_then(|held| held.detail.as_ref()) {
+            Some(detail) => detail.as_ptr(),
+            None => std::ptr::null(),
+        },
+        std::ptr::null(),
+    )
 }
 
 /// Returns the byte offset into the statement, or -1.
@@ -1692,7 +1829,7 @@ pub unsafe extern "C" fn inillucent_error_detail(error: *const inillucent_error)
 /// `error` must be null or a live handle.
 #[no_mangle]
 pub unsafe extern "C" fn inillucent_error_offset(error: *const inillucent_error) -> i32 {
-    held(error).map_or(-1, |held| held.offset)
+    guarded_value(|| held(error).map_or(-1, |held| held.offset), 0)
 }
 
 /// Frees a failure.
@@ -1704,7 +1841,12 @@ pub unsafe extern "C" fn inillucent_error_offset(error: *const inillucent_error)
 /// `error` must be null or a live handle, freed exactly once.
 #[no_mangle]
 pub unsafe extern "C" fn inillucent_error_free(error: *mut inillucent_error) {
-    if !error.is_null() {
-        drop(Box::from_raw(error));
-    }
+    guarded_value(
+        || {
+            if !error.is_null() {
+                drop(Box::from_raw(error));
+            }
+        },
+        (),
+    )
 }

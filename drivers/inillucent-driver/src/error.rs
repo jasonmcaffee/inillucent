@@ -37,6 +37,7 @@ use inillucent_engine::{DbError, PrimaryCode};
 /// status is added, because an addition takes the next number.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
+#[non_exhaustive]
 pub enum Status {
     /// The engine has not implemented the construct. [`Error::feature`] names
     /// it.

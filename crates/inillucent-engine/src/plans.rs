@@ -36,9 +36,149 @@ use inillucent_exec::physical::{self, Params};
 use inillucent_sql::plan::{Levers, PhysicalPlan};
 use inillucent_tree::datum::OwnedDatum;
 
-use crate::{Cached, ImportedDatabase, Outcome};
+use crate::{ImportedDatabase, Outcome};
+
+/// How many compiled statements one session holds before the cache is emptied.
+///
+/// **A thousand, and the number is a ceiling rather than a working set.** An
+/// application re-issues a handful of statements; a query builder or a reporting
+/// tool issues generated SQL and never repeats a string, and before this ticket
+/// each one of those was compiled once and kept for the life of the process
+/// (task-1932, M1). A thousand is far past the first case and far short of
+/// unbounded.
+pub const DEFAULT_STATEMENT_CACHE: usize = 1_000;
+
+/// One statement, compiled as far as it can be before its parameters arrive.
+///
+/// A `SELECT` is a plan and the structural choice over it. A write is the bound
+/// statement plus, for an `UPDATE` or a `DELETE`, the plan that finds the rows
+/// it will change - which is an ordinary query and is prepared like one, so
+/// `WHERE id = ?1` reaches the same point probe on the second execution as on
+/// the first.
+pub(crate) enum Cached {
+    /// Text that carries no statement at all.
+    ///
+    /// A `-- comment` after the last `;`, an empty string, whitespace. Running
+    /// it produces no rows and changes nothing, which is what SQLite does with
+    /// the same text.
+    Nothing,
+    /// A statement the session carries out itself, held as its own text.
+    ///
+    /// Re-bound on every execution, because binding a `DROP TABLE` resolves
+    /// whether the table is there and the answer changes when it runs.
+    Ddl(String),
+    /// `EXPLAIN QUERY PLAN`, rendered when the statement was compiled.
+    ///
+    /// The lines describe the plan and the plan depends on the schema, so this
+    /// is cached and invalidated exactly like the query it describes - which is
+    /// the point of holding it here rather than rendering it per execution.
+    QueryPlan(Vec<String>),
+    /// A plain `EXPLAIN`, rendered when the statement was compiled.
+    ///
+    /// One entry per step: the opcode's name, its first two operands, its
+    /// argument, and the comment. See `program_of` for what those mean here.
+    Program(Vec<(String, i64, i64, String, String)>),
+    /// An insert into a virtual table, which the module applies.
+    VirtualInsert(Box<inillucent_sql::dml::BoundInsert>),
+    /// A delete from a virtual table, with the query that finds its rowids.
+    ///
+    /// A module owns its storage, so the only handle on one of its rows is the
+    /// rowid it answers with: the plan asks which rowids match and the module
+    /// is told about each. That is what SQLite does, and the reason `xUpdate`
+    /// takes a rowid rather than a predicate.
+    VirtualDelete(Box<inillucent_sql::dml::BoundDelete>, CachedQuery),
+    /// An update of a virtual table, with the query that finds its rowids.
+    ///
+    /// The same shape as [`Cached::VirtualDelete`] and for the same reason: a
+    /// module owns its storage, so the only handle on one of its rows is the
+    /// rowid it answers with.
+    VirtualUpdate(Box<inillucent_sql::dml::BoundUpdate>, CachedQuery),
+    /// A query, with a slot for a compiled chain reused across executions.
+    ///
+    /// The slot is a `RefCell` beside the plan, the same reason
+    /// `dml::UpdateCache` sits inside `Cached::Update`: `cached` here is a
+    /// shared `&Rc<Cached>`, and interior mutability is what lets one
+    /// execution build the chain and a later one, through the same `Rc`,
+    /// find it already there.
+    Select(
+        Box<PhysicalPlan>,
+        Box<physical::Prepared>,
+        std::cell::RefCell<physical::Slot>,
+    ),
+    /// An insert, with the query for its `SELECT` source when it has one.
+    ///
+    /// The flag says whether a `VALUES` list holds a subquery. It is decided
+    /// once, here, because the alternative is walking the value expressions on
+    /// every execution of every insert - and `BoundExpr::children` allocates a
+    /// vector per node, which is the cost this project already measured on the
+    /// read path at about 0.07 us per execution.
+    Insert(
+        Box<inillucent_sql::dml::BoundInsert>,
+        Option<CachedQuery>,
+        bool,
+    ),
+    /// An update, with the query that finds the rows it changes.
+    ///
+    /// The flag says whether an assignment holds a subquery, for the reason
+    /// above.
+    Update(
+        Box<inillucent_sql::dml::BoundUpdate>,
+        CachedQuery,
+        bool,
+        /// Everything the statement builds before it looks at a row, kept
+        /// between executions. See `dml::UpdateSetup`: it was more than half of
+        /// what `txn.large` cost, and none of it depends on the row.
+        crate::dml::UpdateCache,
+    ),
+    /// A delete, with the query that finds the rows it removes.
+    Delete(Box<inillucent_sql::dml::BoundDelete>, CachedQuery),
+}
 
 impl ImportedDatabase {
+    /// Returns how many compiled statements this database is holding.
+    ///
+    /// **Nothing could ask before this (task-1932, M1).** A cache with no
+    /// accessor and no bound is a cache nobody can say anything about: the
+    /// question "is this connection holding a plan per generated statement" had
+    /// no answer that did not involve a debugger.
+    ///
+    /// Counted across every session, because the cache is keyed by session and
+    /// a caller asking how much it is holding means all of it.
+    pub fn cached_statements(&self) -> usize {
+        self.statements
+            .borrow()
+            .values()
+            .map(HashMap::len)
+            .fold(0usize, usize::saturating_add)
+    }
+
+    /// Returns the ceiling one session's cache is emptied at.
+    pub fn statement_cache_limit(&self) -> usize {
+        self.statement_cache_limit.get()
+    }
+
+    /// Sets the ceiling one session's cache is emptied at.
+    ///
+    /// Zero means every statement is compiled fresh, which is what a caller
+    /// diagnosing a plan wants and what nothing else should ask for.
+    ///
+    /// @param most - how many compiled statements one session may hold
+    pub fn set_statement_cache_limit(&self, most: usize) {
+        self.statement_cache_limit.set(most);
+        if most == 0 {
+            self.statements.borrow_mut().clear();
+        }
+    }
+
+    /// Forgets every compiled statement.
+    ///
+    /// The same thing a schema change does, said out loud. A caller that has
+    /// just issued a hundred thousand generated statements and wants the memory
+    /// back has no other way to ask for it.
+    pub fn clear_statement_cache(&self) {
+        self.statements.borrow_mut().clear();
+    }
+
     /// Returns the key a compiled statement is held under.
     ///
     /// The lever mask and the session, packed. Two connections' plans are kept
@@ -125,11 +265,31 @@ impl ImportedDatabase {
         }
         drop(held);
         let compiled = std::rc::Rc::new(self.compile(sql)?);
-        self.statements
-            .borrow_mut()
-            .entry(key)
-            .or_default()
-            .insert(sql.to_string(), std::rc::Rc::clone(&compiled));
+        // **The cache has a ceiling (task-1932, M1).** It used to be cleared
+        // only by a schema change or a function registration, and keyed by the
+        // statement's text - so a long-lived connection issuing generated SQL,
+        // which is what an application with a query builder or a reporting tool
+        // issues, grew one compiled plan per distinct string for the life of the
+        // process. Nothing measured it and nothing bounded it.
+        //
+        // Emptying the whole session's entries rather than evicting the least
+        // recently used one, because the cost of getting it wrong is a
+        // recompile and the cost of tracking recency is a write on every *hit* -
+        // which is the one path this cache exists to keep free. A ceiling of a
+        // thousand statements is far past what an application re-issues and far
+        // short of what an unbounded cache reaches.
+        //
+        // A ceiling of zero caches nothing at all, which is what a caller
+        // diagnosing a plan asks for: every statement is compiled fresh.
+        let ceiling = self.statement_cache_limit.get();
+        if ceiling > 0 {
+            let mut held = self.statements.borrow_mut();
+            let under = held.entry(key).or_default();
+            if under.len() >= ceiling {
+                under.clear();
+            }
+            under.insert(sql.to_string(), std::rc::Rc::clone(&compiled));
+        }
         Ok(compiled)
     }
 

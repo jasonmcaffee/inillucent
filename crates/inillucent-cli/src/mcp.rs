@@ -212,12 +212,25 @@ pub fn schema_of(command: &Command) -> Json {
 
 /// Reads requests from a reader and writes answers to a writer until it ends.
 ///
+/// **The reading happens on a second thread (task-1932, H11).** A server that
+/// reads, answers, and only then reads again cannot see a message that arrives
+/// *while* it is answering - which is every message worth acting on
+/// immediately, and `notifications/cancelled` is the one the protocol defines
+/// for it. A `tools/call` running a scan of a large table held this server for
+/// its whole sixty second deadline and the client's cancellation sat unread in
+/// the pipe behind it.
+///
+/// The reader thread does two things: it sets this session's cancellation flag
+/// the moment it sees a cancellation notification, and it hands every line to
+/// the main thread. Nothing else is interpreted there - the protocol lives in
+/// `handle_with_session`, and a second reader of it would be a second server.
+///
 /// @param settings - what the server was started with
-/// @param input - where requests arrive
+/// @param input - where requests arrive, owned so it can be read from a thread
 /// @param output - where answers go
-pub fn serve(
+pub fn serve<R: BufRead + Send + 'static>(
     settings: Settings,
-    input: &mut impl BufRead,
+    mut input: R,
     output: &mut impl Write,
 ) -> Result<(), String> {
     let mut context = Context::open(&settings.database, settings.readonly, settings.root.clone())
@@ -231,16 +244,56 @@ pub fn serve(
     // million rows still stops. The two are different questions and both need
     // an answer.
     context.set_limits(
-        inillucent_engine::base::budget::Limits::served().with_time(Some(settings.max_time)),
+        inillucent_driver::StatementLimits::served().with_time(Some(settings.max_time)),
     );
     let mut session = Session::default();
+
+    // The reader thread. It owns the input for the life of the server, sends
+    // each line here, and stops when the input ends or the main thread is gone.
+    let cancel = context.cancel_flag();
+    // **The ids a cancellation named, for the requests that have not started
+    // yet.** Setting the flag alone loses the race a client is most likely to
+    // run into: a call followed immediately by its cancellation arrives as two
+    // lines in one write, and `budget::arm` clears the flag when the call
+    // starts - so a cancellation that overtook its request would be discarded
+    // as belonging to the previous one. An id recorded here is checked before
+    // the request runs, which is the one place the two orderings are the same.
+    let cancelled: std::sync::Arc<std::sync::Mutex<Vec<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let noted = std::sync::Arc::clone(&cancelled);
+    let (lines, arriving) = std::sync::mpsc::channel::<Arrival>();
+    std::thread::spawn(move || {
+        let mut line = String::new();
+        loop {
+            line.clear();
+            let arrival = match read_request(&mut input, &mut line) {
+                Ok(0) => Arrival::Ended,
+                Ok(_) => {
+                    if let Some(id) = cancellation_target(&line) {
+                        cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+                        if let Ok(mut held) = noted.lock() {
+                            held.push(id);
+                        }
+                    }
+                    Arrival::Line(line.clone())
+                }
+                Err(TooLong) => Arrival::TooLong,
+            };
+            let ended = matches!(arrival, Arrival::Ended | Arrival::TooLong);
+            if lines.send(arrival).is_err() || ended {
+                return;
+            }
+        }
+    });
+
     let mut line = String::new();
     loop {
         line.clear();
-        match read_request(input, &mut line) {
-            Ok(0) => return Ok(()),
-            Ok(_) => {}
-            Err(TooLong) => {
+        match arriving.recv() {
+            // The reader ended, or went away with it.
+            Ok(Arrival::Ended) | Err(_) => return Ok(()),
+            Ok(Arrival::Line(arrived)) => line.push_str(&arrived),
+            Ok(Arrival::TooLong) => {
                 // The connection is not recoverable: the rest of an over-long
                 // line is still in the stream and would be read as the next
                 // request. Saying so and stopping is the honest end.
@@ -261,6 +314,15 @@ pub fn serve(
             }
         }
         if line.trim().is_empty() {
+            continue;
+        }
+        // A request whose cancellation arrived first is answered as cancelled
+        // rather than run. The id is taken out of the list, so a client that
+        // reuses an id is not cancelled twice by one notification.
+        if let Some(id) = already_cancelled(&line, &cancelled) {
+            let answer = error_response(id, -32800, "this request was cancelled.");
+            writeln!(output, "{answer}").map_err(|error| error.to_string())?;
+            output.flush().map_err(|error| error.to_string())?;
             continue;
         }
         if let Some(answer) = handle_with_session(&mut context, &mut session, &line) {
@@ -288,6 +350,69 @@ fn enforce_response_budget(answer: String) -> String {
             answer.len()
         ),
     )
+}
+
+/// What the reader thread found.
+enum Arrival {
+    /// One request line, whole.
+    Line(String),
+    /// The input ended.
+    Ended,
+    /// A line ran past [`MAX_REQUEST_BYTES`].
+    TooLong,
+}
+
+/// Returns the request id a cancellation notification names.
+///
+/// `Some("")` for a cancellation with no `requestId`, which is not a shape the
+/// protocol defines but is one a hand-written client sends: the flag is still
+/// set for it, and no future request matches an empty id.
+///
+/// @param line - the request line as it arrived
+fn cancellation_target(line: &str) -> Option<String> {
+    let request = json::parse(line).ok()?;
+    if request.get("method").and_then(Json::text) != Some("notifications/cancelled") {
+        return None;
+    }
+    Some(
+        request
+            .get("params")
+            .and_then(|params| params.get("requestId"))
+            .map(id_text)
+            .unwrap_or_default(),
+    )
+}
+
+/// Returns a request id as the text two ids are compared by.
+///
+/// @param id - the id, as it arrived
+fn id_text(id: &Json) -> String {
+    match id {
+        Json::Text(text) => text.clone(),
+        Json::Int(number) => number.to_string(),
+        Json::Real(number) => number.to_string(),
+        other => format!("{other:?}"),
+    }
+}
+
+/// Returns a request's id when a cancellation for it has already arrived,
+/// taking the id off the list.
+///
+/// @param line - the request line as it arrived
+/// @param cancelled - the ids cancellations have named
+fn already_cancelled(line: &str, cancelled: &std::sync::Mutex<Vec<String>>) -> Option<Json> {
+    let Ok(mut held) = cancelled.lock() else {
+        return None;
+    };
+    if held.is_empty() {
+        return None;
+    }
+    let request = json::parse(line).ok()?;
+    let id = request.get("id")?;
+    let text = id_text(id);
+    let at = held.iter().position(|named| *named == text)?;
+    held.remove(at);
+    Some(id.clone())
 }
 
 /// A request line that ran past [`MAX_REQUEST_BYTES`].

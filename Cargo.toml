@@ -153,6 +153,9 @@ windows-sys = { version = "0.59", features = [
     "Win32_Security_Credentials",
     "Win32_Networking_WinSock",
     "Win32_System_Threading",
+    # `SetConsoleCtrlHandler`, so Ctrl+C stops a statement rather than the
+    # process (task-1932, H11).
+    "Win32_System_Console",
     # `GetProcessMemoryInfo`, for the gate's memory accounting (task-1838).
     "Win32_System_ProcessStatus",
 ] }

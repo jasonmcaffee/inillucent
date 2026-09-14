@@ -289,3 +289,110 @@ fn every_differential_target_declares_what_it_needs() {
         bare.join("\n  ")
     );
 }
+
+/// A change to the transaction crate has to select the segment suites.
+///
+/// **It did not (task-1932, M11).** `segmented_generations`,
+/// `segment_merge_bound` and `segment_delta_chain` declared
+/// `covers = ["inillucent-search"]` and nothing else, and all three drive a
+/// real database through `inillucent_engine::connect::Database` - the pool, the
+/// tree, the log and the transaction crate, none of which the list named.
+///
+/// The review that found this said a change to `leaf.rs` selected none of the
+/// three. That part is not true today and is worth writing down so nobody
+/// re-derives it: `inillucent-search` depends on `inillucent-ext`, which
+/// depends on `inillucent-catalog`, which depends on `inillucent-tree` and
+/// `inillucent-pool` - so a tree change already reached all three suites
+/// through the closure, and so did a pool change and a log change.
+/// `inillucent-txn` is the one nothing carried: no crate between it and
+/// `inillucent-search` exists, so a change to the transaction crate ran none of
+/// the three suites that hold a segment's contents to what one exhaustive scan
+/// answers. That is the case asserted here, and it is the case that fails if
+/// `covers` is narrowed back.
+#[test]
+fn a_change_to_the_transaction_crate_selects_the_segment_suites() {
+    let map = map();
+    let members = members();
+    let manifests =
+        layering::read_members(&workspace_root(), &members).expect("the manifests parse");
+    let graph = selection::dependents(&manifests);
+
+    let changed = selection::seeds_of(
+        &map,
+        &members,
+        &manifests,
+        &["crates/inillucent-txn/src/lib.rs".to_string()],
+    );
+    let selected: BTreeSet<String> = selection::select(&map, &changed, &graph)
+        .iter()
+        .map(|row| format!("{}::{}", row.target.package, row.target.name))
+        .collect();
+
+    for suite in [
+        "inillucent-compat::segmented_generations",
+        "inillucent-compat::segment_merge_bound",
+        "inillucent-compat::segment_delta_chain",
+    ] {
+        assert!(
+            selected.contains(suite),
+            "a change to `crates/inillucent-txn/src/lib.rs` did not select `{suite}`, which \
+             drives a database through that crate and is one of the three suites that catch \
+             a half merged segment"
+        );
+    }
+}
+
+/// Every row in the timing ledger has to name a target that exists.
+///
+/// **`inillucent-compat::capi` was in it, and its suite was deleted in
+/// `cb1dba5` (task-1932, M11).** The ledger is what the runner packs its
+/// parallel schedule from, so a row for a target nothing can run is a number
+/// that is read on every run and can never be used - and, worse, it reads as
+/// evidence that the suite is still being measured.
+///
+/// The ledger is parsed here rather than through the runner's own reader,
+/// because the runner is behind the `testrun` feature and this suite is not.
+/// Two `[[timing]]` keys is a small enough grammar to read directly.
+#[test]
+fn every_timing_row_names_a_live_target() {
+    let text = std::fs::read_to_string(workspace_root().join("tests/timings.toml"))
+        .expect("the timing ledger is in the repository");
+    let live: BTreeSet<String> = map()
+        .rows
+        .iter()
+        .map(|row| format!("{}::{}", row.target.package, row.target.name))
+        .collect();
+
+    let mut named = 0usize;
+    let mut dead = Vec::new();
+    for line in text.lines() {
+        let Some(rest) = line.trim().strip_prefix("target = \"") else {
+            continue;
+        };
+        let Some(target) = rest.strip_suffix('"') else {
+            continue;
+        };
+        named = named.saturating_add(1);
+        // A lib harness is written `package` with no `::`, and the map names it
+        // with the package's own name as the target name.
+        let known = live.contains(target)
+            || live.contains(&format!("{target}::{target}"))
+            || map()
+                .rows
+                .iter()
+                .any(|row| row.target.kind == Kind::Lib && row.target.package == target);
+        if !known {
+            dead.push(target.to_string());
+        }
+    }
+    assert!(
+        named > 50,
+        "read {named} timing rows, which means this is parsing the wrong thing"
+    );
+    assert!(
+        dead.is_empty(),
+        "these rows in tests/timings.toml name a target that tests/selection.toml does not \
+         declare, so the runner reads a number it can never use:\n{}",
+        dead.join("\n")
+    );
+}

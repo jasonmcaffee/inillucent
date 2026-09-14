@@ -85,7 +85,7 @@ inillucent --db app.rdb query "SELECT * FROM note" --output json
   "rows": [[1, "first note", "2026-01-02"]],
   "total": 1,
   "more": false,
-  "elapsedMs": 0.4
+  "elapsed_ms": 0.4
 }
 ```
 
