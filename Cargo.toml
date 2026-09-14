@@ -190,4 +190,4 @@ windows-sys = { version = "0.59", features = [
 # registered through onnxruntime.dll at run time like everything else under
 # load-dynamic, so a machine without CUDA still builds and runs on the CPU.
 ort = { version = "2.0.0-rc.10", default-features = false, features = ["ndarray", "std", "load-dynamic", "cuda"] }
-tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+tokenizers = { version = "0.23", default-features = false, features = ["onig"] }
