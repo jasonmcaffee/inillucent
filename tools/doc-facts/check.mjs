@@ -362,30 +362,71 @@ function versionPins() {
 
 /* --------------------------------------- what the README says about the repository */
 
+/** Matches a sentence that calls this repository private, and not "a private key" or "private field". */
+const CALLS_THE_REPOSITORY_PRIVATE =
+  /\bprivate\b[^.\n]{0,40}\b(repository|repo|source|project)\b|\b(repository|repo|source|project)\b[^.\n]{0,40}\bprivate\b/i;
+
 /**
- * Reports whether `README.md` describes this repository as private.
+ * Reports every sentence in the shipped documents that calls this repository private while
+ * `packaging/PUBLISHING.md` no longer does.
  *
- * **A sentence that is true today and false on the day the repository is
- * published is a sentence nobody will remember to delete.** The README told a Go
- * user to set `GOPRIVATE` "because the repository is private and Go's public
- * checksum database cannot read it", which becomes a wrong instruction the
- * moment the repository is public - and the person it misleads is the first
- * stranger who tries to install it (task-1946, M6).
+ * **A sentence that is true today and false on the day the repository is published is a sentence
+ * nobody will remember to delete.** The README told a Go user to set `GOPRIVATE` "because the
+ * repository is private and Go's public checksum database cannot read it", which becomes a wrong
+ * instruction the moment the repository is public, and the person it misleads is the first stranger
+ * who tries to install it (task-1946, M6).
  *
- * The word is allowed where it is not about this repository: "a private
- * corpus", "a private key", "private field". Only a sentence that puts it next
- * to the repository, the source or the project fails.
+ * That was answered by banning the word from `README.md` outright, and the ban had a cost nobody
+ * measured. With the sentence gone, the README said the Go module was published, and it is not:
+ * `go install` resolves through `proxy.golang.org`, the proxy clones with no credential, and a
+ * private repository answers `404 ... fatal: could not read Username`. A reader was handed a command
+ * that cannot work, which is the failure 0.1.0 was withdrawn for (task-1951).
+ *
+ * So the rule is agreement rather than absence. `packaging/PUBLISHING.md` holds the fact, because it
+ * is the file whose job is recording where each route stands. While it says the repository is
+ * private, the documents inside the archive may say so too. The moment somebody makes the repository
+ * public and updates that file, this check lists every other line still saying it, by file and line
+ * number, so the deletion is reported rather than remembered.
  */
-function readmeCallsTheRepositoryPrivate() {
-  const label = 'README.md does not call the repository private';
-  const text = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
-  const lines = text.split('\n');
-  const about = /\bprivate\b[^.\n]{0,40}\b(repository|repo|source|project)\b|\b(repository|repo|source|project)\b[^.\n]{0,40}\bprivate\b/i;
-  const problems = [];
-  lines.forEach((line, index) => {
-    if (about.test(line)) problems.push(`README.md:${index + 1}: ${line.trim()}`);
-  });
-  return { label, problems };
+function privateRepositorySentencesAgree() {
+  const label = 'the shipped documents and PUBLISHING.md agree about the repository being private';
+  const source = 'packaging/PUBLISHING.md';
+
+  /**
+   * Every line of one tracked file that calls this repository private.
+   *
+   * Each line is tested joined to the one after it, because these documents are hard wrapped at
+   * about a hundred characters and the sentence this looks for straddles the wrap often enough to
+   * matter. Tested one line at a time, "cannot clone a private" and "repository" sit on either side
+   * of a newline and the match is missed - which happened to a sentence written in task-1951 itself,
+   * in the same change that wrote this check.
+   *
+   * @param file - the repository-relative path to read
+   */
+  const hits = (file) => {
+    const lines = fs.readFileSync(path.join(ROOT, file), 'utf8').split('\n');
+    const found = [];
+    lines.forEach((line, index) => {
+      const match = CALLS_THE_REPOSITORY_PRIVATE.exec(`${line} ${lines[index + 1] ?? ''}`);
+      // Only when the sentence starts on this line. A match that starts past the end of it belongs
+      // to the next line and is reported there, so a sentence spanning two lines is one row rather
+      // than two, and a blank line is never reported for what follows it.
+      if (match && match.index < line.length) found.push(`${file}:${index + 1}: ${line.trim()}`);
+    });
+    return found;
+  };
+
+  // Everything a reader gets inside the release archive. PUBLISHING.md is not in the archive; it is
+  // the record the archive's claims are checked against.
+  const shipped = ['README.md', 'docs/getting-started.md', 'agent-skills/inillucent-quickstart/SKILL.md'];
+
+  if (hits(source).length > 0) return { label, problems: [] };
+  return {
+    label,
+    problems: shipped
+      .flatMap(hits)
+      .map((claim) => `${claim}  --  ${source} no longer calls the repository private, so this is stale`),
+  };
 }
 
 /**
@@ -653,7 +694,7 @@ const chapters = await bookChapters();
 
 // Two assertions that are not counts: what a public repository must not carry, and
 // whether every packaged copy of the release version agrees with the workspace.
-const assertions = [privateReferences(), versionPins(), readmeCallsTheRepositoryPrivate()];
+const assertions = [privateReferences(), versionPins(), privateRepositorySentencesAgree()];
 
 const checks = [
   assertWritten('command line verbs', verbs, /\b(\d+)\s+(?:command line )?(?:verbs|commands)\b(?!\s+(?:over MCP|served|an agent|as MCP))/i, /(?:dot|reference's)\s+$/),

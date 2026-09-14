@@ -19,15 +19,19 @@ irm https://inillucent.com/downloads/install.ps1 | iex
 curl -fsSL https://inillucent.com/downloads/install.sh | sh
 ```
 
-Or from Go, which is published:
+Or from Go, which is tagged and **not installable yet**:
 
 ```sh
 go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent-install@latest
 inillucent-install
 ```
 
-It needs `GOPRIVATE=github.com/Black-Rainbow-Labs/*`, because the repository is private and Go's
-public checksum database cannot read it.
+The repository is private, so `proxy.golang.org` cannot clone it and answers
+`404 ... fatal: could not read Username`. Setting `GOPRIVATE=github.com/Black-Rainbow-Labs/*` moves
+the clone from the proxy to your own git, which changes who has to hold the credential rather than
+removing the need for one: it works for somebody with read access to the repository and for nobody
+else. The module and its three tags are correct, and the command starts working for everybody the
+day the repository is public. `packaging/PUBLISHING.md` has that decision.
 
 The other five package managers are not published yet. This is what each will be, and
 `packaging/PUBLISHING.md` says what each is waiting on:

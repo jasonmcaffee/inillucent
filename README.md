@@ -48,22 +48,32 @@ home directory and neither needs administrator rights.
 Verified on 2026-09-11 by running each command as written: Windows installs and
 runs, and so does Ubuntu 24.04. **macOS has no prebuilt archive yet**, so the
 second command works on Linux today and reports that there is no release for
-Darwin; building it needs a Mac. Until then, macOS builds from source:
+Darwin; building it needs a Mac.
 
-```sh
-git clone https://github.com/Black-Rainbow-Labs/Inillucent
-cargo build --release -p inillucent-cli
-```
+Building from source needs the repository, and **the repository is private**, so
+there is no macOS route today. `git clone https://github.com/Black-Rainbow-Labs/Inillucent`
+answers 404 to everybody who is not the owner.
 
-### From Go
+### From Go - not installable yet
 
 ```sh
 go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent-install@latest
 inillucent-install
 ```
 
-`go install` builds a small program that downloads the release for your machine,
-checks its SHA-256 and puts the four programs in `GOBIN`.
+That is the command, and it does not work yet. `go install` resolves a module
+through `proxy.golang.org`, which clones the repository with no credential, and
+the repository is private:
+
+```
+404  not found: module github.com/Black-Rainbow-Labs/Inillucent/packages/go:
+     git ls-remote ... fatal: could not read Username
+```
+
+The module and its tags are correct and the command starts working the day the
+repository is public. What it does then: `go install` builds a small program that
+downloads the release for your machine, checks its SHA-256 and puts the four
+programs in `GOBIN`.
 
 ### The other five package managers are not published yet
 
@@ -160,7 +170,9 @@ What exists today, and is installed by every route in [Install](#install):
   [The driver](drivers/README.md) documents it.
 - **A reference Python binding** at `drivers/bindings/python/inillucent.py`, which the `pip` package
   ships as its in process driver.
-- **The Go module** at `packages/go`, which is published.
+- **The Go module** at `packages/go`. Its tags are pushed, and `go install`
+  cannot reach it while the repository is private - see
+  [From Go](#from-go---not-installable-yet).
 
 ```ts
 import { connect } from 'inillucent-client';

@@ -63,7 +63,10 @@ pointer round trip and a `catch_unwind` per call would buy nothing.
 
 ## Everything else
 
-`packages/` ships the binaries and, for Python, an in-process driver:
+`packages/` ships the binaries and, for Python, an in-process driver. **None of
+these four is published yet**; they are what the packages will be called, and
+`packaging/PUBLISHING.md` says what each is waiting on. Install with the one-line
+installer from inillucent.com meanwhile.
 
 ```sh
 pip install inillucent          # the wheel carries the binaries and the driver

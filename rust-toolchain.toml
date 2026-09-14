@@ -32,9 +32,27 @@ components = ["rustfmt", "clippy"]
 # asks cargo-zigbuild for it by default and cargo answered "can't find crate for
 # `core`". zig supplies the linker and the glibc floor; the standard library for
 # the target still has to be installed, and this is what installs it.
+#
+# The two Apple triples were missing for the same reason and were not noticed at
+# the same time (task-1951). `release-all.ps1 -Targets all` builds them, and on a
+# machine with the pinned toolchain and nothing else cargo answers
+#
+#     error[E0463]: can't find crate for `std`
+#     note: the `aarch64-apple-darwin` target may not be installed
+#
+# so the default release run stops at its macOS step. The binaries under
+# `target/aarch64-apple-darwin/release` are from 2026-09-12 and were built before
+# the pin, which is why the absence was invisible: the output was there and
+# nothing rebuilt it.
+#
+# These two are built and never archived here - signing and notarising are Apple's
+# own tools and run on a Mac - but building them on this machine is what says the
+# workspace still compiles for macOS between releases.
 targets = [
     "x86_64-pc-windows-msvc",
     "x86_64-unknown-linux-gnu",
     "aarch64-unknown-linux-gnu",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
 ]
 profile = "minimal"

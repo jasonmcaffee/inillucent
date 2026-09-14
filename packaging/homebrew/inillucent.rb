@@ -13,6 +13,13 @@
 # repository holding only this file, so the source can stay private while the
 # formula is fetchable.
 #
+# The `head` block below is the exception, and it does not work today. It clones
+# the repository, which is private, so `brew install --HEAD` gets the same 404
+# the release URLs were moved off GitHub to avoid. `brew install` is unaffected.
+# It starts working the day the repository is public; `PUBLISHING.md` has that
+# decision, and `node tools/check-public-urls.mjs` reports this URL among the
+# others that a signed-out reader cannot open.
+#
 # To publish it: create the repository `Black-Rainbow-Labs/homebrew-inillucent` on
 # GitHub, put this file in `Formula/inillucent.rb`, and fill in the sha256
 # values from the release's own SHA256SUMS. `packaging/homebrew/update.sh` does
