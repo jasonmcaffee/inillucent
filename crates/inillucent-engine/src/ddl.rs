@@ -622,6 +622,9 @@ impl ImportedDatabase {
         self.catalog = catalog;
         self.forget_compiled_statements();
         self.catalog_generation = self.catalog_generation.saturating_add(1);
+        // Last, after the catalog a module would read is the new one; see
+        // `vtab::schema_changed_modules` (task-1932, M2).
+        self.schema_changed_modules();
     }
 
     /// Returns one `TableInfo` per eponymous module the registry holds.

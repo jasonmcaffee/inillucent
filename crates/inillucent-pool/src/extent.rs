@@ -308,7 +308,7 @@ pub mod shared {
             .get_mut(start..floor)
             .ok_or_else(|| corrupt("a shared extent payload runs past its page"))?
             .copy_from_slice(value);
-        let entry = at::DIRECTORY.saturating_add(count as usize * ENTRY);
+        let entry = at::DIRECTORY.saturating_add((count as usize).saturating_mul(ENTRY));
         page::write_u32(image, entry, u32::try_from(start).unwrap_or(0))?;
         page::write_u32(
             image,
@@ -335,7 +335,7 @@ pub mod shared {
                 "a reference names slot {slot} of a shared page that holds {count}"
             )));
         }
-        let entry = at::DIRECTORY.saturating_add(slot as usize * ENTRY);
+        let entry = at::DIRECTORY.saturating_add((slot as usize).saturating_mul(ENTRY));
         let start = page::read_u32(image, entry)? as usize;
         let length = page::read_u32(image, entry.saturating_add(4))? as usize;
         if start == 0 && length == 0 {
@@ -367,7 +367,7 @@ pub mod shared {
                 "a free names slot {slot} of a shared page that holds {count}"
             )));
         }
-        let entry = at::DIRECTORY.saturating_add(slot as usize * ENTRY);
+        let entry = at::DIRECTORY.saturating_add((slot as usize).saturating_mul(ENTRY));
         let length = page::read_u32(image, entry.saturating_add(4))?;
         let start = page::read_u32(image, entry)?;
         if start == 0 && length == 0 {

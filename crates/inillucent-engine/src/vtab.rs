@@ -671,6 +671,27 @@ impl ShadowStore for WriteStore<'_> {
     }
 }
 
+/// One point in a transaction a module is told about.
+///
+/// **Five of them, and before task-1932 the engine told a module about two.**
+/// `begin` fired at `CREATE VIRTUAL TABLE` and nowhere else, and `savepoint`
+/// and `release` were never called at all - so a module could not buffer a
+/// transaction, could not mark a point inside one, and could not be told that a
+/// point it had marked was no longer needed. The trait has had all five since
+/// the old engine.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Moment {
+    /// A write transaction that reaches a module has started.
+    Begin,
+    /// The transaction was abandoned.
+    Rollback,
+    /// The transaction was rolled back to a savepoint, and stays open.
+    RollbackTo(i32),
+    /// A savepoint was opened at this level.
+    Savepoint(i32),
+    /// The savepoints above this level were released.
+    Release(i32),
+}
 impl ImportedDatabase {
     /// Creates a virtual table, its shadow tables, and its catalog rows.
     ///
@@ -1627,6 +1648,15 @@ impl ImportedDatabase {
     /// @param name - the table's name
     /// @param change - what to do
     pub(super) fn change_module(&mut self, name: &[u8], change: &Change) -> DbResult<Option<i64>> {
+        // **The first write to any module opens the transaction on all of them
+        // (task-1932, M2).** Before the flag existed there was no moment at
+        // which a module could start buffering, because the engine's only
+        // `begin` was at `CREATE VIRTUAL TABLE`. Told before the table is taken
+        // out of the map, so the module being written hears it too.
+        if !self.modules_begun.get() {
+            self.modules_begun.set(true);
+            self.begin_modules()?;
+        }
         let key = name.to_ascii_lowercase();
         let mut connected = self
             .virtual_tables
@@ -2073,13 +2103,91 @@ impl ImportedDatabase {
     /// @param to_savepoint - the savepoint level, or nothing for the whole
     ///     transaction
     pub(super) fn rollback_modules(&mut self, to_savepoint: Option<i32>) -> DbResult<()> {
+        match to_savepoint {
+            Some(level) => self.tell_modules(Moment::RollbackTo(level)),
+            None => self.tell_modules(Moment::Rollback),
+        }
+    }
+
+    /// Tells every connected module that a write transaction has started.
+    ///
+    /// **Called once per transaction that reaches a module, and before this it
+    /// was called once per `CREATE VIRTUAL TABLE` (task-1932, M2).** The only
+    /// `begin` in the engine was at creation, so a module that wanted to buffer
+    /// a transaction's writes had no moment at which to start one - FTS5's own
+    /// `begin` gates on `self.creating` and does nothing afterwards, which is
+    /// what a module writes when the hook only ever fires at creation.
+    ///
+    /// Every connected module is told rather than only the one being written,
+    /// which is the same set `sync_modules` flushes at the commit. A module
+    /// that begins and is never written syncs nothing.
+    pub(super) fn begin_modules(&mut self) -> DbResult<()> {
+        self.tell_modules(Moment::Begin)
+    }
+
+    /// Tells every connected module that a savepoint was opened.
+    ///
+    /// @param level - how many savepoints were already open
+    pub(super) fn savepoint_modules(&mut self, level: i32) -> DbResult<()> {
+        self.tell_modules(Moment::Savepoint(level))
+    }
+
+    /// Tells every connected module that savepoints above a level were
+    /// released.
+    ///
+    /// @param level - the level being released down to
+    pub(super) fn release_modules(&mut self, level: i32) -> DbResult<()> {
+        self.tell_modules(Moment::Release(level))
+    }
+
+    /// Tells every connected module that the schema changed under it.
+    ///
+    /// Infallible, because it is called from `refresh_catalog`, which is called
+    /// from paths that have already committed to what they did. A module that
+    /// wanted to refuse a schema change would have had to refuse the statement
+    /// that made it.
+    pub(super) fn schema_changed_modules(&mut self) {
+        let names: Vec<Vec<u8>> = self.virtual_tables.keys().cloned().collect();
+        for name in names {
+            if let Some(connected) = self.virtual_tables.get_mut(&name) {
+                connected.table.schema_changed();
+            }
+        }
+    }
+
+    /// Tells every connected module that another process committed.
+    ///
+    /// Infallible for the same reason: the reload has already happened, and a
+    /// module's opinion about it cannot put the pages back.
+    pub(super) fn committed_elsewhere_modules(&mut self) {
+        let names: Vec<Vec<u8>> = self.virtual_tables.keys().cloned().collect();
+        for name in names {
+            if let Some(connected) = self.virtual_tables.get_mut(&name) {
+                connected.table.committed_elsewhere();
+            }
+        }
+    }
+
+    /// Tells every connected module about one moment.
+    ///
+    /// **One loop, because the set is always the same set.** A moment told to
+    /// some modules and not others is how `begin` came to fire at creation and
+    /// nowhere else: there was no loop, only a call beside the thing that
+    /// happened.
+    ///
+    /// A module that fails is not allowed to stop the others being told - a
+    /// transaction that is ending is ending either way - so the first failure
+    /// is remembered and returned once every module has heard.
+    ///
+    /// @param moment - what happened
+    fn tell_modules(&mut self, moment: Moment) -> DbResult<()> {
         let names: Vec<Vec<u8>> = self.virtual_tables.keys().cloned().collect();
         let mut first_failure: Option<inillucent_base::DbError> = None;
         for name in names {
             let Some(mut connected) = self.virtual_tables.remove(&name) else {
                 continue;
             };
-            let outcome = self.tell_one_module(&mut connected, to_savepoint);
+            let outcome = self.tell_one_module(&mut connected, moment);
             self.virtual_tables.insert(name, connected);
             if let Err(why) = outcome {
                 if first_failure.is_none() {
@@ -2102,11 +2210,7 @@ impl ImportedDatabase {
     /// @param connected - the module and the arguments it was connected with
     /// @param to_savepoint - the savepoint level, or nothing for the whole
     ///     transaction
-    fn tell_one_module(
-        &mut self,
-        connected: &mut Connected,
-        to_savepoint: Option<i32>,
-    ) -> DbResult<()> {
+    fn tell_one_module(&mut self, connected: &mut Connected, moment: Moment) -> DbResult<()> {
         let txn = self.current_txn();
         let at = self.ddl_schema;
         let session = self.session.get();
@@ -2139,9 +2243,12 @@ impl ImportedDatabase {
             limits: &self.limits,
             catalog: Some(&self.catalog),
         };
-        match to_savepoint {
-            Some(level) => connected.table.rollback_to(&mut context, level),
-            None => connected.table.rollback(&mut context),
+        match moment {
+            Moment::Begin => connected.table.begin(&mut context),
+            Moment::Rollback => connected.table.rollback(&mut context),
+            Moment::RollbackTo(level) => connected.table.rollback_to(&mut context, level),
+            Moment::Savepoint(level) => connected.table.savepoint(&mut context, level),
+            Moment::Release(level) => connected.table.release(&mut context, level),
         }
     }
 }

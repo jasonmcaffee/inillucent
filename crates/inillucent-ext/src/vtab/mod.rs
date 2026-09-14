@@ -247,6 +247,30 @@ pub trait VirtualTable: Send {
     fn collation(&self, _column: usize) -> Collation {
         Collation::Binary
     }
+
+    /// Tells the module that the schema changed under it.
+    ///
+    /// **A module that caches anything derived from the catalog needs this
+    /// (task-1932, M2).** An FTS5 table's configuration, its column count and
+    /// its tokenizer all come from the catalog, and a `DROP` or an `ALTER`
+    /// elsewhere in the same connection makes whatever the module worked out
+    /// from them stale. Without this there is no moment at which a module can
+    /// be told, so a module that cached anything would have to re-read the
+    /// catalog on every call - which is why none of them cache anything.
+    ///
+    /// The default does nothing, because most modules hold nothing derived.
+    fn schema_changed(&mut self) {}
+
+    /// Tells the module that another process committed since it last looked.
+    ///
+    /// **The other half of the same problem.** A module's own state is derived
+    /// from its shadow tables, and those are ordinary trees another connection
+    /// can have written. This is the moment the engine noticed that and
+    /// reloaded; a module holding a manifest, a segment list or a row count has
+    /// to drop it here or answer from a file that has moved.
+    ///
+    /// The default does nothing.
+    fn committed_elsewhere(&mut self) {}
 }
 
 /// A cursor over one virtual table.

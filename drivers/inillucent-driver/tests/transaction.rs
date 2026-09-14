@@ -51,7 +51,6 @@ fn opened(name: &str) -> Database {
     connection
         .execute_batch("CREATE TABLE note (id INTEGER PRIMARY KEY, body TEXT)")
         .expect("the table is created");
-    drop(connection);
     database
 }
 
@@ -217,7 +216,7 @@ fn a_second_transaction_on_one_connection_is_refused() {
     let database = opened("nested");
     let connection = database.connect();
     let _outer = connection.begin().expect("the first transaction opens");
-    let refused = connection.begin().err().expect("the second is refused");
+    let refused = connection.begin().expect_err("the second is refused");
     assert_eq!(refused.status, Status::InvalidState);
     assert!(
         refused.message.contains("already open"),
@@ -274,7 +273,7 @@ fn a_read_only_connection_refuses_a_transaction() {
     };
     let database = Database::open_with(&path, options).expect("the database reopens read only");
     let connection = database.connect();
-    let refused = connection.begin().err().expect("a transaction is refused");
+    let refused = connection.begin().expect_err("a transaction is refused");
     assert_eq!(refused.status, Status::ReadOnly);
 }
 
@@ -304,8 +303,7 @@ fn the_batch_form_still_rolls_back_on_a_refused_check() {
                 "the caller changed its mind.",
             ))
         })
-        .err()
-        .expect("the refused check fails the transaction");
+        .expect_err("the refused check fails the transaction");
     assert!(refused.message.contains("changed its mind"));
     assert_eq!(count(&database), 0, "a refused check left rows behind");
 

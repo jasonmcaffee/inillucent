@@ -599,13 +599,13 @@ impl Index {
         &mut self,
         chunks: Vec<ChunkInput>,
         embeddings: &[Vec<f32>],
-    ) -> std::ops::Range<u32> {
+    ) -> anyhow::Result<std::ops::Range<u32>> {
         let first = self.store.n_chunks() as u32;
-        self.store.add_chunks(chunks);
+        self.store.add_chunks(chunks)?;
         for e in embeddings {
             self.vectors.push(e);
         }
-        first..(self.store.n_chunks() as u32)
+        Ok(first..(self.store.n_chunks() as u32))
     }
 
     /// Applies a graph checkpoint's recorded content directly - growing the
@@ -652,13 +652,13 @@ impl Index {
     /// Add chunks together with their vectors. The two slices must correspond
     /// element for element, which is the one to one chunk to vector mapping the
     /// baseline also maintains.
-    pub fn add(&mut self, chunks: Vec<ChunkInput>, embeddings: &[Vec<f32>]) {
+    pub fn add(&mut self, chunks: Vec<ChunkInput>, embeddings: &[Vec<f32>]) -> anyhow::Result<()> {
         assert_eq!(
             chunks.len(),
             embeddings.len(),
             "each chunk needs exactly one vector"
         );
-        self.store.add_chunks(chunks);
+        self.store.add_chunks(chunks)?;
         for e in embeddings {
             self.vectors.push(e);
         }
@@ -666,6 +666,7 @@ impl Index {
         self.graph = None;
         self.lexical = None;
         self.quantized = None;
+        Ok(())
     }
 
     /// Add chunks to a committed index without rebuilding anything.
@@ -682,7 +683,11 @@ impl Index {
     /// append to.
     /// @param chunks - the new chunks, one vector each
     /// @param embeddings - their vectors, in the same order
-    pub fn append(&mut self, chunks: Vec<ChunkInput>, embeddings: &[Vec<f32>]) -> AppendStats {
+    pub fn append(
+        &mut self,
+        chunks: Vec<ChunkInput>,
+        embeddings: &[Vec<f32>],
+    ) -> anyhow::Result<AppendStats> {
         assert_eq!(
             chunks.len(),
             embeddings.len(),
@@ -691,18 +696,18 @@ impl Index {
         if self.graph.is_none() || self.lexical.is_none() {
             let documents_before = self.store.n_documents();
             let chunks_added = chunks.len();
-            self.add(chunks, embeddings);
-            return AppendStats {
+            self.add(chunks, embeddings)?;
+            return Ok(AppendStats {
                 chunks_added,
                 documents_added: self.store.n_documents() - documents_before,
                 new_terms: 0,
                 committed: false,
-            };
+            });
         }
 
         let first_chunk = self.store.n_chunks() as u32;
         let documents_before = self.store.n_documents();
-        self.store.add_chunks(chunks);
+        self.store.add_chunks(chunks)?;
         for e in embeddings {
             self.vectors.push(e);
         }
@@ -730,12 +735,12 @@ impl Index {
             codes.encode_from(&self.vectors, first_chunk as usize);
         }
 
-        AppendStats {
+        Ok(AppendStats {
             chunks_added: (last_chunk - first_chunk) as usize,
             documents_added: self.store.n_documents() - documents_before,
             new_terms,
             committed: true,
-        }
+        })
     }
 
     /// Marks one document unreachable, without rebuilding anything.
@@ -788,7 +793,7 @@ impl Index {
         external_doc_id: &str,
         chunks: Vec<ChunkInput>,
         embeddings: &[Vec<f32>],
-    ) -> AppendStats {
+    ) -> anyhow::Result<AppendStats> {
         self.tombstone(source, external_doc_id);
         self.append(chunks, embeddings)
     }
@@ -1400,7 +1405,7 @@ mod tests {
             normalize(&mut v);
             vectors.push(v);
         }
-        index.add(chunks, &vectors);
+        index.add(chunks, &vectors).expect("the chunks are added");
         index.commit();
         index
     }
@@ -1439,7 +1444,7 @@ mod tests {
                 v
             })
             .collect();
-        index.add(chunks, &vectors);
+        index.add(chunks, &vectors).expect("the chunks are added");
         let stats = index.commit();
         assert_eq!(stats.chunks, 100);
         assert_eq!(stats.documents, 100);
@@ -1597,31 +1602,33 @@ mod tests {
     fn adding_after_commit_requires_another_commit_and_still_answers() {
         let mut index = build(200, 16, IndexConfig::default());
         let before = index.store().n_chunks();
-        index.add(
-            vec![ChunkInput {
-                source: "slack".into(),
-                external_doc_id: "extra".into(),
-                chunk_index: 0,
-                heading_path: vec![],
-                content: "a brand new chunk about tirzepatide".into(),
-                title: "extra".into(),
-                url: "u".into(),
-                space_key: None,
-                author: None,
-                author_id: None,
-                updated_at: None,
-                external_chunk_id: None,
-                labels: vec![],
-                attributes: Vec::new(),
-                flags: Vec::new(),
-                deleted: false,
-            }],
-            &[{
-                let mut v = vec![0.5f32; 16];
-                normalize(&mut v);
-                v
-            }],
-        );
+        index
+            .add(
+                vec![ChunkInput {
+                    source: "slack".into(),
+                    external_doc_id: "extra".into(),
+                    chunk_index: 0,
+                    heading_path: vec![],
+                    content: "a brand new chunk about tirzepatide".into(),
+                    title: "extra".into(),
+                    url: "u".into(),
+                    space_key: None,
+                    author: None,
+                    author_id: None,
+                    updated_at: None,
+                    external_chunk_id: None,
+                    labels: vec![],
+                    attributes: Vec::new(),
+                    flags: Vec::new(),
+                    deleted: false,
+                }],
+                &[{
+                    let mut v = vec![0.5f32; 16];
+                    normalize(&mut v);
+                    v
+                }],
+            )
+            .expect("the chunks are added");
         index.commit();
         assert_eq!(index.store().n_chunks(), before + 1);
         let f = index.compile(&Filter::default());
@@ -1797,10 +1804,12 @@ mod tests {
     #[test]
     fn a_grouped_search_excludes_tombstoned_documents() {
         let mut index = build(400, 16, IndexConfig::default());
-        index.append(
-            vec![chunk("doomed", 0, "a chunk about tirzepatide dosing")],
-            &[vector(16, 3.0)],
-        );
+        index
+            .append(
+                vec![chunk("doomed", 0, "a chunk about tirzepatide dosing")],
+                &[vector(16, 3.0)],
+            )
+            .expect("the chunks are added");
         let v = vector(16, 3.0);
         let f = index.compile(&Filter::default());
         let before = index.hybrid_search_grouped("tirzepatide", &v, &f, GroupedParams::default());
@@ -1868,10 +1877,12 @@ mod tests {
         let mut index = build(2000, 32, IndexConfig::default());
         let before = index.store().n_chunks();
 
-        let stats = index.append(
-            vec![chunk("appended", 0, "a chunk about tirzepatide dosing")],
-            &[vector(32, 7.0)],
-        );
+        let stats = index
+            .append(
+                vec![chunk("appended", 0, "a chunk about tirzepatide dosing")],
+                &[vector(32, 7.0)],
+            )
+            .expect("the append runs");
         assert!(
             stats.committed,
             "the append should not have needed a commit"
@@ -1905,10 +1916,12 @@ mod tests {
             },
         );
         let v = vector(32, 11.0);
-        index.append(
-            vec![chunk("appended", 0, "vector reachable")],
-            std::slice::from_ref(&v),
-        );
+        index
+            .append(
+                vec![chunk("appended", 0, "vector reachable")],
+                std::slice::from_ref(&v),
+            )
+            .expect("the chunks are added");
 
         let f = index.compile(&Filter::default());
         let hits = index.vector_search(&v, &f, 5, Some(200));
@@ -1931,10 +1944,12 @@ mod tests {
             .map(|h| h.chunk)
             .collect();
 
-        index.append(
-            vec![chunk("appended", 0, "an unrelated chunk about tirzepatide")],
-            &[vector(32, 13.0)],
-        );
+        index
+            .append(
+                vec![chunk("appended", 0, "an unrelated chunk about tirzepatide")],
+                &[vector(32, 13.0)],
+            )
+            .expect("the chunks are added");
         let f = index.compile(&Filter::default());
         let after: Vec<u32> = index
             .lexical_search("offer eligibility rules", &f, 20)
@@ -1960,10 +1975,12 @@ mod tests {
             })
             .collect();
         let vectors: Vec<Vec<f32>> = (0..40).map(|i| vector(16, 100.0 + i as f32)).collect();
-        appended.append(extra.clone(), &vectors);
+        appended
+            .append(extra.clone(), &vectors)
+            .expect("the chunks are added");
 
         let mut rebuilt = build(500, 16, IndexConfig::default());
-        rebuilt.add(extra, &vectors);
+        rebuilt.add(extra, &vectors).expect("the chunks are added");
         rebuilt.commit();
 
         let a = appended.compile(&Filter::default());
@@ -1988,10 +2005,12 @@ mod tests {
     #[test]
     fn a_tombstoned_document_disappears_from_every_branch() {
         let mut index = build(400, 16, IndexConfig::default());
-        index.append(
-            vec![chunk("doomed", 0, "a chunk about tirzepatide dosing")],
-            &[vector(16, 3.0)],
-        );
+        index
+            .append(
+                vec![chunk("doomed", 0, "a chunk about tirzepatide dosing")],
+                &[vector(16, 3.0)],
+            )
+            .expect("the chunks are added");
         let f = index.compile(&Filter::default());
         assert_eq!(index.lexical_search("tirzepatide", &f, 5).len(), 1);
 
@@ -2017,10 +2036,12 @@ mod tests {
     #[test]
     fn tombstoning_corrects_the_counts_that_route_queries() {
         let mut index = build(400, 16, IndexConfig::default());
-        index.append(
-            vec![chunk("doomed", 0, "one"), chunk("doomed", 1, "two")],
-            &[vector(16, 3.0), vector(16, 4.0)],
-        );
+        index
+            .append(
+                vec![chunk("doomed", 0, "one"), chunk("doomed", 1, "two")],
+                &[vector(16, 3.0), vector(16, 4.0)],
+            )
+            .expect("the chunks are added");
         let live_before = index.store().live_chunks;
         let source = index.store().sources.get("slack").unwrap();
         let per_source_before = index.store().live_chunks_for_source(source);
@@ -2049,10 +2070,12 @@ mod tests {
     #[test]
     fn a_batch_tombstone_counts_only_what_it_actually_removed() {
         let mut index = build(100, 16, IndexConfig::default());
-        index.append(
-            vec![chunk("a", 0, "one"), chunk("b", 0, "two")],
-            &[vector(16, 1.0), vector(16, 2.0)],
-        );
+        index
+            .append(
+                vec![chunk("a", 0, "one"), chunk("b", 0, "two")],
+                &[vector(16, 1.0), vector(16, 2.0)],
+            )
+            .expect("the chunks are added");
         let removed = index.tombstone_many(&[
             ("slack".into(), "a".into()),
             ("slack".into(), "b".into()),
@@ -2068,17 +2091,21 @@ mod tests {
     #[test]
     fn replacing_a_document_leaves_the_old_chunks_unreachable() {
         let mut index = build(400, 16, IndexConfig::default());
-        index.append(
-            vec![chunk("edited", 0, "the original text mentions tirzepatide")],
-            &[vector(16, 5.0)],
-        );
+        index
+            .append(
+                vec![chunk("edited", 0, "the original text mentions tirzepatide")],
+                &[vector(16, 5.0)],
+            )
+            .expect("the chunks are added");
 
-        index.replace_document(
-            "slack",
-            "edited",
-            vec![chunk("edited", 0, "the revised text mentions semaglutide")],
-            &[vector(16, 6.0)],
-        );
+        index
+            .replace_document(
+                "slack",
+                "edited",
+                vec![chunk("edited", 0, "the revised text mentions semaglutide")],
+                &[vector(16, 6.0)],
+            )
+            .expect("the chunks are added");
 
         let f = index.compile(&Filter::default());
         assert!(
@@ -2091,23 +2118,27 @@ mod tests {
     #[test]
     fn replacing_a_document_keeps_the_live_count_right() {
         let mut index = build(400, 16, IndexConfig::default());
-        index.append(
-            vec![chunk("edited", 0, "one"), chunk("edited", 1, "two")],
-            &[vector(16, 5.0), vector(16, 6.0)],
-        );
+        index
+            .append(
+                vec![chunk("edited", 0, "one"), chunk("edited", 1, "two")],
+                &[vector(16, 5.0), vector(16, 6.0)],
+            )
+            .expect("the chunks are added");
         let live = index.store().live_chunks;
 
         // Two chunks out, three in.
-        index.replace_document(
-            "slack",
-            "edited",
-            vec![
-                chunk("edited", 0, "a"),
-                chunk("edited", 1, "b"),
-                chunk("edited", 2, "c"),
-            ],
-            &[vector(16, 7.0), vector(16, 8.0), vector(16, 9.0)],
-        );
+        index
+            .replace_document(
+                "slack",
+                "edited",
+                vec![
+                    chunk("edited", 0, "a"),
+                    chunk("edited", 1, "b"),
+                    chunk("edited", 2, "c"),
+                ],
+                &[vector(16, 7.0), vector(16, 8.0), vector(16, 9.0)],
+            )
+            .expect("the chunks are added");
 
         assert_eq!(index.store().live_chunks, live - 2 + 3);
         assert_eq!(
@@ -2130,7 +2161,9 @@ mod tests {
     fn the_deleted_ratio_tracks_what_compaction_would_reclaim() {
         let mut index = build(400, 16, IndexConfig::default());
         assert_eq!(index.deleted_ratio(), 0.0);
-        index.append(vec![chunk("doomed", 0, "x")], &[vector(16, 2.0)]);
+        index
+            .append(vec![chunk("doomed", 0, "x")], &[vector(16, 2.0)])
+            .expect("the chunks are added");
         index.tombstone("slack", "doomed");
         assert!(
             (index.deleted_ratio() - 1.0 / 401.0).abs() < 1e-6,
@@ -2145,10 +2178,12 @@ mod tests {
             dims: 16,
             ..Default::default()
         });
-        let stats = index.append(
-            vec![chunk("d", 0, "a chunk about tirzepatide")],
-            &[vector(16, 1.0)],
-        );
+        let stats = index
+            .append(
+                vec![chunk("d", 0, "a chunk about tirzepatide")],
+                &[vector(16, 1.0)],
+            )
+            .expect("the append runs");
         assert!(!stats.committed, "there was nothing to append to yet");
         index.commit();
         let f = index.compile(&Filter::default());
@@ -2186,7 +2221,9 @@ mod tests {
             let vectors: Vec<Vec<f32>> = (0..6)
                 .map(|i| vector(32, 500.0 + (day * 6 + i) as f32))
                 .collect();
-            appended.append(chunks.clone(), &vectors);
+            appended
+                .append(chunks.clone(), &vectors)
+                .expect("the chunks are added");
             every.extend(chunks);
             every_vector.extend(vectors);
         }
@@ -2202,7 +2239,9 @@ mod tests {
                 ..Default::default()
             },
         );
-        rebuilt.add(every, &every_vector);
+        rebuilt
+            .add(every, &every_vector)
+            .expect("the chunks are added");
         rebuilt.commit();
         assert_eq!(appended.store().n_chunks(), rebuilt.store().n_chunks());
 

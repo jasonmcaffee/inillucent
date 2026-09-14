@@ -94,6 +94,7 @@ mod entries;
 pub(crate) mod import;
 mod inspect;
 mod introspect;
+mod marks;
 pub mod multi;
 mod plans;
 use plans::Cached;
@@ -271,6 +272,13 @@ pub struct ImportedDatabase {
     statements: std::cell::RefCell<HashMap<u64, HashMap<String, std::rc::Rc<Cached>>>>,
     /// The plan cache's ceiling; see `plans.rs`, which holds and enforces it.
     statement_cache_limit: std::cell::Cell<usize>,
+    /// Whether the connected modules have been told this transaction started.
+    ///
+    /// `begin` fires once per write transaction that reaches a module, and this
+    /// is what makes "once" true: `change_module` reads it before the first
+    /// write and the commit and the rollback clear it. See
+    /// `vtab::begin_modules`.
+    modules_begun: std::cell::Cell<bool>,
     /// How many statements this connection has actually compiled.
     ///
     /// **The counter a plan-cache guard needs, and the reason it is a counter.**
@@ -1487,6 +1495,7 @@ impl ImportedDatabase {
             session_change_baseline: session_changes::SessionChanges::default(),
             statements: std::cell::RefCell::new(HashMap::new()),
             statement_cache_limit: std::cell::Cell::new(plans::DEFAULT_STATEMENT_CACHE),
+            modules_begun: std::cell::Cell::new(false),
             compiles: std::cell::Cell::new(0),
             batch: std::cell::Cell::new(None),
             undo: std::cell::RefCell::new(Vec::new()),
@@ -1786,6 +1795,7 @@ impl ImportedDatabase {
             session_change_baseline: session_changes::SessionChanges::default(),
             statements: std::cell::RefCell::new(HashMap::new()),
             statement_cache_limit: std::cell::Cell::new(plans::DEFAULT_STATEMENT_CACHE),
+            modules_begun: std::cell::Cell::new(false),
             compiles: std::cell::Cell::new(0),
             batch: std::cell::Cell::new(None),
             undo: std::cell::RefCell::new(Vec::new()),
@@ -2833,6 +2843,7 @@ impl ImportedDatabase {
         // **The modules are told, or the connection goes on answering out of a
         // transaction that did not happen.** See `rollback_modules`: the file
         // was always put back correctly, and the module's own buffer was not.
+        self.modules_begun.set(false);
         let told = self.rollback_modules(None);
         let undone = self.undo_to(None);
         self.marks.clear();
@@ -2874,63 +2885,6 @@ impl ImportedDatabase {
     /// round: the alternative is a module buffer the undo log cannot see.
     ///
     /// @param name - the savepoint's name
-    pub fn savepoint(&mut self, name: &[u8]) -> DbResult<()> {
-        self.sync_modules()?;
-        let held = self.undo.borrow().len();
-        self.marks.push((name.to_ascii_lowercase(), held));
-        Ok(())
-    }
-
-    /// Undoes back to a savepoint, keeping the transaction open.
-    ///
-    /// @param name - the savepoint's name
-    pub fn rollback_to(&mut self, name: &[u8]) -> DbResult<()> {
-        // **The level of the savepoint being returned to, not how deep the
-        // nesting currently is.** `SAVEPOINT a; SAVEPOINT b; ROLLBACK TO a`
-        // has two marks and a target level of zero, and a module told "two"
-        // would keep the state belonging to `b` - the savepoint that was just
-        // abandoned. A module numbers its own marks by what it was given, so
-        // the number has to mean the same thing to both sides.
-        //
-        // A name the transaction does not hold is left to `undo_to` to refuse,
-        // so that the error is the one it has always been.
-        let folded = name.to_ascii_lowercase();
-        let Some(position) = self.marks.iter().rposition(|(held, _)| *held == folded) else {
-            // **A name no savepoint holds changes nothing, modules included.**
-            // Defaulting the level to zero and telling the modules anyway made
-            // `ROLLBACK TO a_name_that_is_not_open` discard a buffered virtual
-            // table's pending writes and *then* report the error - a failed
-            // statement with a side effect, which is the one thing a failed
-            // statement may not have. `undo_to` refuses it below with the
-            // message it has always used.
-            self.undo_to(Some(name))?;
-            self.refresh_catalog();
-            return Ok(());
-        };
-        let level = i32::try_from(position).unwrap_or(i32::MAX);
-        let told = self.rollback_modules(Some(level));
-        let undone = self.undo_to(Some(name));
-        self.refresh_catalog();
-        undone?;
-        told?;
-        Ok(())
-    }
-
-    /// Forgets a savepoint without undoing anything.
-    ///
-    /// @param name - the savepoint's name
-    pub fn release(&mut self, name: &[u8]) -> DbResult<()> {
-        let folded = name.to_ascii_lowercase();
-        let Some(position) = self.marks.iter().rposition(|(held, _)| *held == folded) else {
-            return Err(refusal(format!(
-                "no such savepoint: {}",
-                String::from_utf8_lossy(name)
-            )));
-        };
-        self.marks.truncate(position);
-        Ok(())
-    }
-
     /// Commits the open transaction, if there is one.
     ///
     /// A no-op outside a transaction, so a caller can commit at a boundary
@@ -2952,6 +2906,7 @@ impl ImportedDatabase {
             self.defer_foreign_keys = false;
             self.forget_compiled_statements();
         }
+        self.modules_begun.set(false);
         // Nothing to abandon once it is committed, and holding the before-images
         // would hold every row a long transaction touched.
         self.undo.borrow_mut().clear();
@@ -4199,6 +4154,12 @@ impl ImportedDatabase {
         // the same reread `ATTACH` does.
         if reloaded && !inside {
             self.reload_catalog()?;
+            // **And the modules hear that somebody else committed
+            // (task-1932, M2).** A module's own state is derived from its
+            // shadow tables, which are ordinary trees another connection can
+            // have written; this is the one moment the engine knows that
+            // happened.
+            self.committed_elsewhere_modules();
         }
         Ok(())
     }

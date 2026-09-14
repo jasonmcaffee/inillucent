@@ -26,6 +26,7 @@ use inillucent_core::filter::Filter;
 use inillucent_core::index::{Branches, Index};
 use inillucent_core::rank::HitOrigin;
 use inillucent_core::store::ChunkInput;
+use inillucent_ext::vtab::failure;
 
 /// One question put to a retrieval index.
 #[derive(Clone, Debug, Default)]
@@ -104,7 +105,9 @@ pub trait RetrievalIndex {
 impl RetrievalIndex for Index {
     /// Forwards to the engine's own append.
     fn append(&mut self, chunks: Vec<ChunkInput>, embeddings: &[Vec<f32>]) -> DbResult<usize> {
-        Ok(Index::append(self, chunks, embeddings).chunks_added)
+        Ok(Index::append(self, chunks, embeddings)
+            .map_err(|why| failure(why.to_string()))?
+            .chunks_added)
     }
 
     /// Forwards to the engine's own tombstone.
@@ -120,7 +123,11 @@ impl RetrievalIndex for Index {
         chunks: Vec<ChunkInput>,
         embeddings: &[Vec<f32>],
     ) -> DbResult<usize> {
-        Ok(Index::replace_document(self, source, external_doc_id, chunks, embeddings).chunks_added)
+        Ok(
+            Index::replace_document(self, source, external_doc_id, chunks, embeddings)
+                .map_err(|why| failure(why.to_string()))?
+                .chunks_added,
+        )
     }
 
     /// Forwards to the engine's own commit.

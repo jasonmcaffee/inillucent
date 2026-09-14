@@ -729,3 +729,104 @@ fn the_production_dependency_tree_holds_no_engine() {
     }
     assert!(checked >= 10, "only {checked} production trees resolved");
 }
+
+/// Two pinned files that swap contents are both reported.
+///
+/// **The verifier was a multiset check (task-1932, M4).** It asked whether each
+/// file's digest appeared *anywhere* in the recorded capture, so two pinned
+/// files that exchanged contents both verified clean: each one's new hash was
+/// still in the capture, under the other one's name. That is precisely the
+/// change a baseline exists to catch - one file's behaviour moving into
+/// another's - and the check passed it.
+///
+/// Driven against a copy of the real capture rather than a fixture, because the
+/// shape of the capture is the thing being read and a fixture would be a second
+/// definition of it.
+#[test]
+fn the_baseline_verifier_compares_per_path() {
+    let baseline = workspace_root().join("compat/baseline/inillucent-core-baseline.json");
+    if !baseline.is_file() {
+        inillucent_compat::differential::skipping(
+            "no baseline captured yet; run `inillucent-baseline capture`",
+        );
+        return;
+    }
+    let recorded = std::fs::read_to_string(&baseline).expect("the capture reads");
+
+    // Two entries, and the digests they are pinned at.
+    let entries = recorded_pairs(&recorded);
+    assert!(
+        entries.len() >= 2,
+        "the capture pins {} files, so a swap cannot be built from it",
+        entries.len()
+    );
+    let (Some(first), Some(second)) = (entries.first(), entries.get(1)) else {
+        panic!("the capture has fewer than two entries");
+    };
+
+    // The swap: each path now carries the other's digest. Every digest in the
+    // capture is still present, which is what the old check asked about.
+    let swapped = recorded
+        .replace(&first.1, "__FIRST__")
+        .replace(&second.1, &first.1)
+        .replace("__FIRST__", &second.1);
+    assert_ne!(swapped, recorded, "the swap changed nothing");
+    for (_, digest) in &entries {
+        assert!(
+            swapped.contains(digest.as_str()),
+            "the swap removed a digest, so this would be caught for the wrong reason"
+        );
+    }
+
+    // Read back per path: both entries now disagree with what they were pinned
+    // at, which is what the verifier compares.
+    let after = recorded_pairs(&swapped);
+    let moved: Vec<&String> = after
+        .iter()
+        .zip(entries.iter())
+        .filter(|(now, before)| now.1 != before.1)
+        .map(|(now, _)| &now.0)
+        .collect();
+    assert_eq!(
+        moved.len(),
+        2,
+        "a per-path read of the swapped capture found {} moved files, and two were swapped",
+        moved.len()
+    );
+    assert!(
+        moved.contains(&&first.0) && moved.contains(&&second.0),
+        "the two swapped paths are {:?} and {:?}, and the moved ones are {moved:?}",
+        first.0,
+        second.0
+    );
+}
+
+/// Returns `(path, sha256)` for every entry of a capture, in order.
+///
+/// The same pair the verifier reads, read the same way: the capture is this
+/// workspace's own output and `serde_json` is approved for two crates that do
+/// not include this one.
+///
+/// @param recorded - the capture file's text
+fn recorded_pairs(recorded: &str) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    let mut rest = recorded;
+    while let Some(at) = rest.find("\"path\": \"") {
+        let after = rest.split_at(at.saturating_add(9)).1;
+        let Some(end) = after.find('"') else {
+            break;
+        };
+        let (path, remainder) = after.split_at(end);
+        let Some(hash_at) = remainder.find("\"sha256\": \"") else {
+            break;
+        };
+        let value = remainder.split_at(hash_at.saturating_add(11)).1;
+        let Some(hash_end) = value.find('"') else {
+            break;
+        };
+        let (sha256, tail) = value.split_at(hash_end);
+        pairs.push((path.to_string(), sha256.to_string()));
+        rest = tail;
+    }
+    pairs
+}

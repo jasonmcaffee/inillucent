@@ -131,7 +131,7 @@ fn build_source(directory: &Path, documents: usize, chunks_each: u32) -> Index {
         dims: DIMS,
         ..IndexConfig::default()
     });
-    index.add(inputs, &vectors);
+    index.add(inputs, &vectors).expect("the chunks are added");
     index.commit();
     inillucent_core::persist::save(&index, directory).expect("the legacy index saves");
     index
@@ -376,7 +376,7 @@ fn a_lexical_only_source_migrates() {
         })
         .collect();
     let vectors: Vec<Vec<f32>> = (0..12).map(|_| vec![1.0f32]).collect();
-    index.add(inputs, &vectors);
+    index.add(inputs, &vectors).expect("the chunks are added");
     index.commit();
     inillucent_core::persist::save(&index, &source_dir).expect("the legacy index saves");
 

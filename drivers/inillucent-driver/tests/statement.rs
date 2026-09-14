@@ -49,7 +49,6 @@ fn peopled(name: &str) -> Database {
              INSERT INTO people VALUES (1, 'Ada', 36), (2, 'Grace', 45), (3, 'Alan', 41)",
         )
         .expect("the table is created");
-    drop(connection);
     database
 }
 
@@ -144,8 +143,7 @@ fn a_name_the_statement_does_not_use_is_refused() {
             &[(":whom", Value::Integer(2))],
             10,
         )
-        .err()
-        .expect("an unknown name is refused");
+        .expect_err("an unknown name is refused");
     assert_eq!(refused.status, Status::InvalidState);
     assert!(
         refused.message.contains("whom") && refused.message.contains("who"),
@@ -165,8 +163,7 @@ fn a_parameter_with_no_value_is_refused() {
             &[(":least", Value::Integer(38))],
             10,
         )
-        .err()
-        .expect("a missing value is refused");
+        .expect_err("a missing value is refused");
     assert!(
         refused.message.contains("most"),
         "the refusal does not say which parameter is missing: {}",
@@ -289,8 +286,12 @@ fn the_default_ceiling_is_the_engines() {
         inillucent_engine::DEFAULT_STATEMENT_CACHE,
         "the driver's default and the engine's disagree"
     );
-    assert!(
-        inillucent_engine::DEFAULT_STATEMENT_CACHE > 0,
-        "a default of zero would turn the cache off for everybody"
+    // A default of zero would turn the cache off for everybody, so the
+    // constant's own value is asserted rather than a comparison the compiler
+    // can fold: `> 0` on a `const` is a constant the lint rightly refuses.
+    assert_eq!(
+        inillucent_engine::DEFAULT_STATEMENT_CACHE,
+        1_000,
+        "the default ceiling moved; the note on `OpenOptions::statement_cache` has to move          with it"
     );
 }

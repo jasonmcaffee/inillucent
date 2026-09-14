@@ -709,3 +709,54 @@ fn a_real_servers_scram_challenge_decodes() {
         "the combined nonce is the client's plus the server's: {nonce}"
     );
 }
+
+/// Both clients pin the session's rendering, so a carried value does not depend
+/// on where the migration was run from.
+///
+/// **The defect (task-1932, M10).** A MySQL `TIMESTAMP` is stored in UTC and
+/// rendered in the *session's* `time_zone`, which defaults to the server's, and
+/// this client never set one. The same table migrated from a laptop in Denver
+/// and from a server in UTC carried two different strings for one instant - so
+/// the destination's text depended on who ran the tool, and `RowDigest` hashes
+/// the carried bytes, so a resumed migration that copied correctly failed its
+/// own verification.
+///
+/// Asserted on the bytes the client writes rather than against two live servers
+/// in two zones, because that is the thing that makes the rendering
+/// independent: a value can only differ by zone if the session's zone was
+/// allowed to differ. The replay cases above already prove the whole exchange
+/// is byte for byte what a live server saw.
+#[test]
+fn both_clients_pin_the_session_rendering() {
+    // MySQL: read out of the recorded exchange, which is what a live server saw.
+    let mysql = transcript("mysql-native.transcript");
+    let sent = String::from_utf8_lossy(&mysql.client).into_owned();
+    assert!(
+        sent.contains("SET SESSION time_zone = '+00:00'"),
+        "the MySQL client does not pin the session's time zone, so a TIMESTAMP is rendered \
+         in whatever zone the server defaults to"
+    );
+    let zone_at = sent
+        .find("SET SESSION time_zone")
+        .expect("the statement is there");
+    let snapshot_at = sent
+        .find("START TRANSACTION")
+        .expect("the snapshot is opened");
+    assert!(
+        zone_at < snapshot_at,
+        "the time zone is set after the snapshot opens, so the first rows are read under the \
+         server's zone"
+    );
+
+    // PostgreSQL: the three renderings are in the startup packet, before a
+    // single row is read.
+    let postgres = transcript("postgres-trust.transcript");
+    let opened = String::from_utf8_lossy(&postgres.client).into_owned();
+    for pinned in ["timezone=UTC", "datestyle=ISO", "bytea_output=hex"] {
+        assert!(
+            opened.contains(pinned),
+            "the PostgreSQL startup packet does not carry `{pinned}`, so that rendering \
+             follows the server's locale"
+        );
+    }
+}
