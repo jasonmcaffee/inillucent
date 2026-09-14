@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+# Never published. The deterministic simulator: a VFS that injects faults and
+# replays crashes, which is a thing to test an engine with rather than to ship
+# beside one.
+publish = false
 repository.workspace = true
 description = "Deterministic simulator VFS, failure injection, crash modelling, and replay artifacts."
 

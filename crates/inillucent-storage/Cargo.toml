@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+# Never published. Retired with the old pager, and kept only so
+# `inillucent-sqlite-reader` can read a SQLite file. Nothing should `cargo add`
+# it, and reserving the name would say the opposite.
+publish = false
 repository.workspace = true
 description = "SQLite file codec, pager, page cache, B-trees, overflow chains, freelist, and vacuum."
 
