@@ -1169,3 +1169,57 @@ mod tests {
         assert_eq!(parsed.get("i").map(String::as_str), Some("4096"));
     }
 }
+
+/// The door the fuzz targets come in by.
+///
+/// **A named entry point rather than a public decoder.** See the note on
+/// `mysql::fuzzing`: the fuzz crate is outside the workspace and cannot reach a
+/// private item, and these two parsers read bytes a network peer controls, so
+/// they stay private and this answers for them.
+pub mod fuzzing {
+    /// Reads an untrusted row description message.
+    ///
+    /// @param body - the message's bytes
+    pub fn row_description(body: &[u8]) -> bool {
+        super::decode_row_description(body).is_ok()
+    }
+
+    /// Reads an untrusted data row message.
+    ///
+    /// @param body - the message's bytes
+    pub fn data_row(body: &[u8]) -> bool {
+        super::decode_data_row(body).is_ok()
+    }
+}
+
+#[cfg(test)]
+mod fuzz_seeded {
+    /// How many inputs the seeded sweep below reads.
+    const CASES: usize = 20_000;
+
+    /// Returns the next value of a deterministic generator.
+    ///
+    /// @param state - the generator's state, advanced in place
+    fn next(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    /// Neither message decoder panics on arbitrary bytes.
+    ///
+    /// The stable-toolchain twin of `fuzz/fuzz_targets/postgres.rs`.
+    #[test]
+    fn the_message_decoders_never_panic_on_arbitrary_bytes() {
+        let mut state = 0x1932_0002_u64;
+        let mut accepted = 0usize;
+        for _ in 0..CASES {
+            let length = (next(&mut state) % 96) as usize;
+            let bytes: Vec<u8> = (0..length).map(|_| next(&mut state) as u8).collect();
+            accepted += usize::from(super::fuzzing::row_description(&bytes));
+            accepted += usize::from(super::fuzzing::data_row(&bytes));
+        }
+        assert!(accepted <= CASES * 2);
+    }
+}

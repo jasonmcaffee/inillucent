@@ -26,6 +26,18 @@ pub(super) fn collation_of(name: &[u8]) -> Collation {
 
 /// Returns the operator and the other side when a term compares one column of
 /// one source against something else.
+///
+/// **A comparison against a NULL literal is not one (task-1932, found by
+/// `tlp_differential.rs`).** `d = NULL`, `a > NULL` and every other ordinary
+/// comparison against NULL is NULL for every row, so a `WHERE` keeps nothing -
+/// but read as a constraint on `d` it became a seek to the index's own NULL
+/// entries and answered every row whose `d` is NULL. On a six-hundred-row table
+/// `SELECT count(*) FROM t WHERE d = NULL` answered 85 where a scan applying
+/// the same predicate answers 0.
+///
+/// `IS NULL` is unaffected: it binds to `BoundExpr::IsNull` rather than to a
+/// comparison, so it never reaches here and still seeks the index's NULL
+/// entries, which is the right plan for it.
 pub(super) fn comparison_against_column(
     position: usize,
     column: u16,
@@ -37,6 +49,9 @@ pub(super) fn comparison_against_column(
     else {
         return None;
     };
+    if compares_with_null(left, right) {
+        return None;
+    }
     if let BoundExpr::Column {
         source,
         column: candidate,
@@ -61,6 +76,11 @@ pub(super) fn comparison_against_column(
 }
 
 /// Returns the operator and the other side when a term compares a rowid.
+///
+/// A NULL operand is refused here for the same reason as in
+/// [`comparison_against_column`]: `a > NULL` is NULL for every row, and read as
+/// a bound on the rowid it became a seek over the whole table - 600 rows where
+/// a scan applying the same predicate answers 0.
 pub(super) fn comparison_against_rowid(
     position: usize,
     term: &BoundExpr,
@@ -71,6 +91,9 @@ pub(super) fn comparison_against_rowid(
     else {
         return None;
     };
+    if compares_with_null(left, right) {
+        return None;
+    }
     if matches!(left.as_ref(), BoundExpr::Rowid { source } if *source == position) {
         return Some((*op, right.as_ref().clone()));
     }
@@ -89,6 +112,19 @@ fn mirror(op: BinaryOp) -> BinaryOp {
         BinaryOp::GreaterEqual => BinaryOp::LessEqual,
         other => other,
     }
+}
+
+/// Reports whether a comparison has a NULL literal on either side.
+///
+/// Only `BoundExpr::Compare` reaches here, and every operator it can carry is
+/// three-valued - `IS` and `IS NULL` are their own bound expressions and take a
+/// different path - so a NULL operand means the term answers NULL for every
+/// row and selects nothing. No seek may be built from it.
+///
+/// @param left - the comparison's left side
+/// @param right - its right side
+fn compares_with_null(left: &BoundExpr, right: &BoundExpr) -> bool {
+    matches!(left, BoundExpr::Null) || matches!(right, BoundExpr::Null)
 }
 
 #[cfg(test)]

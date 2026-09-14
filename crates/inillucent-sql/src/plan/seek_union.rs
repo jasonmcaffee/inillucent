@@ -182,6 +182,23 @@ pub(super) fn in_list_union_path(
         let mut branches = Vec::with_capacity(list.len());
         let mut seen: Vec<&BoundExpr> = Vec::with_capacity(list.len());
         for value in list {
+            // **A NULL in the list matches nothing, so it gets no branch
+            // (task-1932, found by `tlp_differential.rs`).** `b IN ('k1', NULL)`
+            // is true for `k1`, false for nothing, and NULL for every other
+            // value - so the rows a `WHERE` keeps are exactly the rows equal to
+            // a non-NULL member. A branch for the NULL sought the index's own
+            // NULL entries and answered every row where `b IS NULL`: on a
+            // six-hundred-row table `b IN ('k1', 'k2', 'k7', NULL)` counted 95
+            // where a scan applying the same predicate counts 41, and the
+            // fifty-four extra rows were the ones whose `b` is NULL.
+            //
+            // Dropping it is sound rather than a special case: the seek answers
+            // the rows the `IN` is *true* for, and three-valued logic only
+            // separates false from NULL somewhere this path is not used - the
+            // planner does not turn a negated `IN` into a union.
+            if matches!(value, BoundExpr::Null) {
+                continue;
+            }
             if seen.contains(&value) {
                 continue;
             }

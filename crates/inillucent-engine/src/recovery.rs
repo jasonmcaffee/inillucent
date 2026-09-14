@@ -196,9 +196,11 @@ pub(crate) fn open_file(
     // this pass's to fix, and `crates/inillucent-compat/tests/corruption.rs`
     // is what proves that stays true. Reached only on the error path, so an
     // ordinary open pays nothing extra: one read, one pass, exactly as before.
+    let mut repaired = false;
     let checkpointed = match read_checkpointed_catalog(&database) {
         Ok(checkpointed) => checkpointed,
         Err(_) => {
+            repaired = true;
             let mut repair =
                 inillucent_txn::redo::Applier::new(&mut database, LearningRows::new_tolerant(&[]));
             inillucent_wal::recover(vfs.as_ref(), db_path, start.clone(), &mut repair)?;
@@ -206,8 +208,31 @@ pub(crate) fn open_file(
         }
     };
     let (outcome, free_map) = {
-        let mut applier =
-            inillucent_txn::redo::Applier::new(&mut database, LearningRows::new(&checkpointed));
+        // **The second pass is tolerant exactly when the first one had to run
+        // (task-1932, found by `reindex_crash.rs`).** The catalog it is seeded
+        // with was read *after* the repair pass replayed the whole window, so
+        // it is the catalog as at the END of the log, while the records it is
+        // about to replay run from the start of it. A tree that was superseded
+        // inside that window - which is what `REINDEX` and `CREATE INDEX` do,
+        // every rebuild allocating a fresh tree - is therefore named by no row
+        // this pass will ever see, and refusing its records failed the open
+        // outright:
+        //
+        // ```text
+        // bad parameter or other API misuse: the log names tree 2147483649,
+        // which this recovery was not told the shape of
+        // ```
+        //
+        // A database that had survived a crash during a `REINDEX` would not
+        // open at all. Skipping those records is right rather than merely
+        // convenient: the tree they name has been dropped by the end of the
+        // window, so replaying them would write pages nothing will ever read.
+        // When the checkpointed catalog was readable this stays strict, which
+        // is every ordinary open.
+        let mut applier = inillucent_txn::redo::Applier::new(
+            &mut database,
+            LearningRows::new_with_tolerance(&checkpointed, repaired),
+        );
         let outcome = inillucent_wal::recover(vfs.as_ref(), db_path, start, &mut applier)?;
         (outcome, applier.free_map_changes().to_vec())
     };

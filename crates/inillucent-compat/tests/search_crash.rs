@@ -446,3 +446,85 @@ fn a_crash_during_compaction_leaves_the_index_it_started_from() {
         ),
     );
 }
+
+/// The schema a fresh build starts from: the search table, empty.
+///
+/// Empty rather than absent, so that the state before the transaction is a
+/// state the probes below can read. A campaign whose "before" is a table that
+/// does not exist has nothing to compare against.
+const FRESH_SCHEMA: &str =
+    "CREATE VIRTUAL TABLE docs USING inillucent_search(title, body, compact = 0);";
+
+/// A whole corpus and the index over it, in one transaction.
+///
+/// **The build, not an update.** Every campaign above cuts a transaction that
+/// changes an index that is already there; this one cuts the transaction that
+/// makes it. The two are different code - the incremental path appends a
+/// generation and the `rebuild` packs the whole corpus in one pass - and until
+/// task-1932 only the first was ever interrupted.
+const FRESH_WORKLOAD: &str = "BEGIN;
+     INSERT INTO docs(rowid, title, body) VALUES (1, 'Offer', 'who qualifies for the discount');
+     INSERT INTO docs(rowid, title, body) VALUES (2, 'Rules', 'the discount applies to accounts');
+     INSERT INTO docs(rowid, title, body) VALUES (3, 'Weather', 'rain and wind tomorrow');
+     INSERT INTO docs(rowid, title, body) VALUES (4, 'Trial', 'tirzepatide dosing schedule');
+     INSERT INTO docs(rowid, title, body) VALUES (5, 'Notes', 'the forecast is sunshine');
+     INSERT INTO docs(docs) VALUES ('rebuild');
+     COMMIT;";
+
+/// The statements after the build, so a cut can land past its commit.
+const FRESH_TAIL: &str = "SELECT count(*) FROM docs_content; PRAGMA wal_checkpoint;";
+
+/// What a fresh build is graded on: the rows and what each query ranks.
+const FRESH_PROBES: &[&str] = &[
+    "SELECT rowid, title, body FROM docs ORDER BY rowid",
+    "SELECT rowid FROM docs WHERE docs MATCH 'discount' AND k = 10 ORDER BY rowid",
+    "SELECT rowid FROM docs WHERE docs MATCH 'tirzepatide' AND k = 10 ORDER BY rowid",
+    "SELECT rowid FROM docs WHERE docs MATCH 'sunshine' AND k = 10 ORDER BY rowid",
+];
+
+/// Power loss during a fresh index build leaves no index and no rows.
+///
+/// The corpus and the `rebuild` that packs it are one transaction, so the two
+/// legitimate states are an empty search table and a fully built one. A cut
+/// that left the rows without the index, or the index without the rows, is the
+/// mixture this grades - and it is the one a fresh build can produce that an
+/// incremental update cannot, because a `rebuild` writes a whole generation
+/// and names it in the state rows afterwards.
+///
+/// It uses `crashcampaign::Campaign` rather than this file's own `campaign`
+/// because the shared one takes its schema, workload and probes as arguments
+/// and this arm needs different ones. The campaigns above predate it and are
+/// left where they are; each of them has an arm the shared harness does not
+/// model.
+#[test]
+fn a_fresh_index_build_cut_short_leaves_an_empty_table_or_a_built_one() {
+    let report = inillucent_compat::crashcampaign::Campaign {
+        name: "search-fresh-build-crash",
+        mode: "delete",
+        schema: FRESH_SCHEMA,
+        workload: FRESH_WORKLOAD,
+        tail: FRESH_TAIL,
+        probes: FRESH_PROBES,
+        failure: inillucent_sim::failpoint::Failure::Crash,
+        cuts: 4_000,
+    }
+    .run();
+    inillucent_compat::crashcampaign::record("search-fresh-build-crash", &report);
+}
+
+/// The same, through a write-ahead log.
+#[test]
+fn a_fresh_index_build_under_a_log_leaves_an_empty_table_or_a_built_one() {
+    let report = inillucent_compat::crashcampaign::Campaign {
+        name: "search-fresh-build-wal-crash",
+        mode: "wal",
+        schema: FRESH_SCHEMA,
+        workload: FRESH_WORKLOAD,
+        tail: FRESH_TAIL,
+        probes: FRESH_PROBES,
+        failure: inillucent_sim::failpoint::Failure::Crash,
+        cuts: 4_000,
+    }
+    .run();
+    inillucent_compat::crashcampaign::record("search-fresh-build-wal-crash", &report);
+}

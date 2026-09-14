@@ -884,6 +884,14 @@ requires = ["oracle"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
+name = "result_names_and_codes"
+tier = "differential"
+covers = ["inillucent-engine", "inillucent-sql"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
 name = "rtree"
 tier = "differential"
 covers = ["inillucent-engine", "inillucent-ext"]
@@ -1007,6 +1015,41 @@ kind = "test"
 name = "free_map_checkpoint_crash"
 tier = "durability"
 covers = ["inillucent-engine", "inillucent-txn", "inillucent-pool"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "overflow_crash"
+tier = "durability"
+covers = ["inillucent-engine", "inillucent-tree", "inillucent-txn", "inillucent-pool"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "reindex_crash"
+tier = "durability"
+covers = ["inillucent-engine", "inillucent-tree", "inillucent-txn"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "vacuum_crash"
+tier = "durability"
+covers = ["inillucent-engine", "inillucent-tree", "inillucent-pool"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "tlp_differential"
+tier = "differential"
+covers = ["inillucent-sql", "inillucent-exec", "inillucent-engine"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "prepared_schema"
+tier = "engine"
+covers = ["inillucent-engine", "inillucent-exec", "inillucent-sql"]
 
 [[target]]
 package = "inillucent-compat"

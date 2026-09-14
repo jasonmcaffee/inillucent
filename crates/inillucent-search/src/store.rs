@@ -1548,3 +1548,49 @@ mod tests {
         assert_eq!(decode_merge_states(&bytes).expect("decodes"), Vec::new());
     }
 }
+
+#[cfg(test)]
+mod fuzz_seeded {
+    /// How many inputs the seeded sweep below reads.
+    const CASES: usize = 20_000;
+
+    /// Returns the next value of a deterministic generator.
+    ///
+    /// @param state - the generator's state, advanced in place
+    fn next(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    /// None of the three index decoders panics on arbitrary bytes.
+    ///
+    /// **These read the index out of the database file**, so their input is
+    /// whatever is on disk - which includes a file somebody else could write
+    /// to, and a file a crash left half written. The stable-toolchain twin of
+    /// `fuzz/fuzz_targets/store.rs`.
+    #[test]
+    fn the_index_decoders_never_panic_on_arbitrary_bytes() {
+        let mut state = 0x1932_0004_u64;
+        let mut accepted = 0usize;
+        for _ in 0..CASES {
+            let length = (next(&mut state) % 128) as usize;
+            let bytes: Vec<u8> = (0..length).map(|_| next(&mut state) as u8).collect();
+            accepted += usize::from(super::decode_segments(&bytes).is_ok());
+            accepted += usize::from(super::decode_merge_state(&bytes).is_ok());
+            accepted += usize::from(super::decode_merge_states(&bytes).is_ok());
+            // `decode_vector` answers a vector rather than a result: it reads
+            // whatever whole floats the bytes hold and stops. What is asserted
+            // is that it cannot claim more than the bytes could carry.
+            let floats = super::decode_vector(&bytes);
+            assert!(
+                floats.len() <= bytes.len() / 4,
+                "decode_vector read {} floats out of {} bytes",
+                floats.len(),
+                bytes.len()
+            );
+        }
+        assert!(accepted <= CASES * 3);
+    }
+}

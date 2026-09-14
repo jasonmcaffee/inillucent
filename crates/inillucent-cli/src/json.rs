@@ -569,3 +569,50 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod fuzz_seeded {
+    /// How many inputs the seeded sweep below reads.
+    const CASES: usize = 20_000;
+
+    /// The characters the generator draws from.
+    ///
+    /// Weighted towards the ones a JSON parser branches on rather than uniform
+    /// bytes, because a sweep of uniform bytes almost never produces a string
+    /// that reaches past the first character and so exercises one branch.
+    const ALPHABET: &[u8] = b"{}[]\",:0123456789.-+eEtruefalsnl /\t\n\r\0\xff";
+
+    /// Returns the next value of a deterministic generator.
+    ///
+    /// @param state - the generator's state, advanced in place
+    fn next(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    /// The MCP request parser never panics on arbitrary text.
+    ///
+    /// **This is the parser every `tools/call` arrives through**, so its input
+    /// is whatever an agent host sends, and the stable-toolchain twin of
+    /// `fuzz/fuzz_targets/json.rs` is what keeps a regression in it failing a
+    /// pull request rather than a scheduled job nobody reads.
+    #[test]
+    fn the_request_parser_never_panics_on_arbitrary_text() {
+        let mut state = 0x1932_0003_u64;
+        let mut parsed = 0usize;
+        for _ in 0..CASES {
+            let length = (next(&mut state) % 64) as usize;
+            let bytes: Vec<u8> = (0..length)
+                .map(|_| {
+                    let at = (next(&mut state) as usize) % ALPHABET.len();
+                    ALPHABET.get(at).copied().unwrap_or(b'?')
+                })
+                .collect();
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            parsed += usize::from(super::parse(&text).is_ok());
+        }
+        assert!(parsed <= CASES);
+    }
+}
