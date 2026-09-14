@@ -1761,35 +1761,13 @@ fn plan_stages(
                 // walking each one and running them in the order they were
                 // built in - two different sources for what is, at the plan
                 // level, one shape.
-                //
-                // **A probe is only right when one entry per key is all there
-                // can be (task-1932).** A `PointProbe` finds the first entry
-                // with a key and stops, which is what a rowid and a unique
-                // index guarantee and what no other index does: on a
-                // non-unique one an equality is a *run* of entries, and
-                // probing it answered one row of it. `WHERE b IN (1, 2)`
-                // returned two rows where `WHERE b = 1` alone returns
-                // twenty-one. Every other equality branch goes to
-                // `RangeUnion`, which builds the branch as an `IndexSeek` and
-                // takes its span - the same path a plain equality already
-                // takes, so there is one definition of what an equality over
-                // an index means.
-                let bare = branches
-                    .iter()
-                    .all(|branch| branch.low.is_none() && branch.high.is_none());
-                let one_per_key = *index_root == *table_root
-                    || source
-                        .table
-                        .indexes
-                        .iter()
-                        .find(|held| held.name == *index_name)
-                        .is_some_and(|held| {
-                            held.unique
-                                && branches
-                                    .iter()
-                                    .all(|branch| branch.equalities.len() >= held.columns.len())
-                        });
-                let kind = if bare && one_per_key {
+                let kind = if probes_one_entry_each(
+                    &source.table,
+                    index_name,
+                    *index_root,
+                    *table_root,
+                    branches,
+                ) {
                     AccessKind::SeekUnion
                 } else {
                     AccessKind::RangeUnion
@@ -2007,6 +1985,51 @@ fn plan_stages(
 /// @param is_lookup - whether it is the table fetch behind an index seek
 /// @param offset - the next free column index, advanced
 #[allow(clippy::too_many_arguments)]
+/// Reports whether every branch of a seek union finds at most one entry.
+///
+/// **A point probe is only right when one entry per key is all there can be
+/// (task-1932).** `PointProbe` finds the first entry with a key and stops,
+/// which is what a rowid and a unique index guarantee and what no other index
+/// does: on a non-unique one an equality is a *run* of entries, and probing it
+/// answered one row of the run. `WHERE b IN (1, 2)` returned two rows where
+/// `WHERE b = 1` alone returns twenty-one, and the pinned 3.53.4 answers
+/// forty-two.
+///
+/// A branch that is not bare - one carrying a bound as well as its equalities -
+/// is a range whatever the index guarantees, so it is not one entry either.
+/// Everything this refuses goes to `RangeUnion`, which builds each branch as an
+/// `IndexSeek` and takes its span: the same path a plain equality already
+/// takes, so there is one definition of what an equality over an index means.
+///
+/// @param table - the table the union reads
+/// @param index_name - the index the union seeks in
+/// @param index_root - that index's tree
+/// @param table_root - the table's own tree, which is the rowid case
+/// @param branches - the union's branches
+fn probes_one_entry_each(
+    table: &TableInfo,
+    index_name: &[u8],
+    index_root: u32,
+    table_root: u32,
+    branches: &[inillucent_sql::plan::IndexSeekBranch],
+) -> bool {
+    let bare = branches
+        .iter()
+        .all(|branch| branch.low.is_none() && branch.high.is_none());
+    let one_per_key = index_root == table_root
+        || table
+            .indexes
+            .iter()
+            .find(|held| held.name == *index_name)
+            .is_some_and(|held| {
+                held.unique
+                    && branches
+                        .iter()
+                        .all(|branch| branch.equalities.len() >= held.columns.len())
+            });
+    bare && one_per_key
+}
+
 fn push_stage(
     stages: &mut Vec<PreparedStage>,
     catalog: &dyn TreeCatalog,

@@ -1037,11 +1037,18 @@ name = "vacuum_crash"
 tier = "durability"
 covers = ["inillucent-engine", "inillucent-tree", "inillucent-pool"]
 
+# **In the engine tier although its name says differential**, because it
+# compares this engine with itself: a predicate's three partitions against the
+# whole table, and the same predicate through an index against through a scan.
+# The differential tier's rule is that every suite in it declares the pinned
+# reference as a prerequisite, so that a run without the oracle built cannot
+# look like a pass - and a suite that never starts the oracle would be
+# declaring a prerequisite it does not have.
 [[target]]
 package = "inillucent-compat"
 kind = "test"
 name = "tlp_differential"
-tier = "differential"
+tier = "engine"
 covers = ["inillucent-sql", "inillucent-exec", "inillucent-engine"]
 
 [[target]]
