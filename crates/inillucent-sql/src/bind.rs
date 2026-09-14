@@ -12,6 +12,11 @@
 //! the same name. `rowid`, `_rowid_` and `oid` resolve only on a rowid table
 //! and only when no real column shadows them.
 
+mod cte;
+
+pub use cte::CteBinding;
+use cte::RecursiveTarget;
+
 use inillucent_value::{Affinity, Collation};
 
 use crate::ast::{
@@ -1292,40 +1297,6 @@ pub enum BoundStatement {
     Empty,
 }
 
-/// One common table expression visible to a block.
-///
-/// The definition is kept as an AST id rather than a bound block because two
-/// references to the same CTE are two independent scans: each gets its own
-/// FROM-term numbers and its own materialisation. Binding once and cloning
-/// would give both references the same source ids, and the second scan would
-/// then read the first one's cursors.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CteBinding {
-    /// The folded name a FROM term matches against.
-    pub folded: Vec<u8>,
-    /// The name as written, which the expansion is aliased to.
-    pub name: Vec<u8>,
-    /// The explicit column list, when the `WITH` wrote one.
-    pub columns: Vec<Vec<u8>>,
-    /// The query the name stands for.
-    pub select: SelectId,
-    /// Whether the `WITH` said `RECURSIVE`.
-    pub recursive: bool,
-}
-
-/// One recursive CTE whose definition is being bound.
-#[derive(Clone, Debug)]
-struct RecursiveTarget {
-    /// The CTE's folded name.
-    folded: Vec<u8>,
-    /// The statement-wide number of the FROM term that will hold its store.
-    id: usize,
-    /// The columns a reference to it exposes, taken from the seed arm.
-    table: TableInfo,
-    /// Whether any arm bound so far referred to it.
-    referenced: bool,
-}
-
 /// The per-block binder state saved while a nested block is bound.
 ///
 /// Aggregates, result aliases and the correlation list all belong to one query
@@ -1384,6 +1355,22 @@ pub struct Binder<'a> {
     /// before this existed: the depth guard tripped a hundred frames down, in a
     /// function large enough that a hundred frames overflowed the stack.
     recursing: Vec<RecursiveTarget>,
+    /// The CTEs being bound as ordinary subqueries right now, innermost last.
+    ///
+    /// **The guard against a cycle no recursion can carry (task-1913).** A CTE
+    /// that names itself somewhere the recursion cannot read it - in a
+    /// `WHERE (SELECT ... FROM c)`, or in a body with no compound arm to
+    /// separate a seed from a step - used to bind its own definition again, and
+    /// again, until the process ran out of stack and died. `inillucent` exited
+    /// 127 with `has overflowed its stack` on three one-line queries, which in
+    /// a library linked into an application is that application's crash.
+    /// SQLite answers `circular reference: c`, and so does this now.
+    ///
+    /// Held as the definition's own `SelectId` rather than its name, because an
+    /// inner `WITH` may bind the same name to a different query and that one is
+    /// not a cycle - `WITH c AS (WITH c AS (SELECT 7) SELECT * FROM c)` is an
+    /// ordinary query SQLite answers.
+    binding_ctes: Vec<ast::SelectId>,
     /// The enclosing FROM terms the block being bound has read.
     correlations: Vec<usize>,
     /// How deep the binder is inside nested query blocks.
@@ -1557,6 +1544,7 @@ impl<'a> Binder<'a> {
             allow_aggregates: false,
             ctes: Vec::new(),
             recursing: Vec::new(),
+            binding_ctes: Vec::new(),
             correlations: Vec::new(),
             depth: 0,
             subqueries: 0,
@@ -1821,44 +1809,6 @@ impl<'a> Binder<'a> {
         Ok(bound)
     }
 
-    /// Pushes the CTEs of a `WITH` prefix, returning whether it pushed any.
-    pub(crate) fn push_ctes(&mut self, with: &ast::With) -> Result<bool, ParseError> {
-        if with.ctes.is_empty() {
-            return Ok(false);
-        }
-        let mut bindings = Vec::with_capacity(with.ctes.len());
-        for cte in &with.ctes {
-            bindings.push(CteBinding {
-                folded: self.ast.folded(cte.name).to_vec(),
-                name: self.ast.text(cte.name).to_vec(),
-                columns: cte
-                    .columns
-                    .iter()
-                    .map(|name| self.ast.text(*name).to_vec())
-                    .collect(),
-                select: cte.select,
-                recursive: with.recursive,
-            });
-        }
-        self.ctes.push(bindings);
-        Ok(true)
-    }
-
-    /// Drops the innermost level of CTE bindings.
-    pub(crate) fn pop_ctes(&mut self) {
-        self.ctes.pop();
-    }
-
-    /// Returns the innermost CTE a folded name matches.
-    fn find_cte(&self, folded: &[u8]) -> Option<CteBinding> {
-        for level in self.ctes.iter().rev() {
-            if let Some(found) = level.iter().find(|cte| cte.folded == folded) {
-                return Some(found.clone());
-            }
-        }
-        None
-    }
-
     /// Opens a query block: a fresh scope, and fresh per-block state.
     fn enter_block(&mut self) -> BlockFrame {
         self.scopes.push(Vec::new());
@@ -2120,16 +2070,32 @@ impl<'a> Binder<'a> {
                     Some(alias) => self.ast.text(alias).to_vec(),
                     None => cte.name.clone(),
                 };
-                if cte.recursive {
-                    return self.bind_recursive_cte(&cte, alias, join, span);
+                // A definition already being bound cannot be bound again: that
+                // is a cycle, and following it does not end.
+                if self.binding_ctes.contains(&cte.select) {
+                    return Err(ParseError::new(
+                        ParseErrorKind::Unsupported("circular reference in a CTE"),
+                        span,
+                    ));
                 }
-                return self.bind_subquery_term(
-                    cte.select,
-                    Some(alias),
-                    cte.columns.clone(),
-                    join,
-                    span,
-                );
+                self.binding_ctes.push(cte.select);
+                // **`RECURSIVE` is a keyword SQLite does not require.** A CTE
+                // whose FROM names itself *is* the recursion, written or not,
+                // and reading the keyword as the only evidence sent this
+                // binder round the same definition until the stack ran out.
+                let outcome = if cte.recursive || self.select_names_itself(cte.select, &folded) {
+                    self.bind_recursive_cte(&cte, alias, join, span)
+                } else {
+                    self.bind_subquery_term(
+                        cte.select,
+                        Some(alias),
+                        cte.columns.clone(),
+                        join,
+                        span,
+                    )
+                };
+                self.binding_ctes.pop();
+                return outcome;
             }
         }
         let database_name = database.map(|id| self.ast.folded(id).to_vec());
@@ -2284,176 +2250,6 @@ impl<'a> Binder<'a> {
         nested.sources = vec![alone.clone()];
         nested.scopes = vec![vec![alone.id]];
         nested.bind_expr(expr).ok()
-    }
-
-    /// Registers a reference to the recursive CTE currently being bound.
-    fn push_recursive_self(
-        &mut self,
-        position: usize,
-        alias: Option<ast::NameId>,
-        join: JoinKind,
-    ) -> Result<(), ParseError> {
-        let Some(target) = self.recursing.get_mut(position) else {
-            return Err(unsupported("unknown recursive reference", Span::default()));
-        };
-        target.referenced = true;
-        let cte = target.id;
-        let table = target.table.clone();
-        let alias = match alias {
-            Some(alias) => self.ast.text(alias).to_vec(),
-            None => table.name.clone(),
-        };
-        let id = self.sources.len();
-        self.sources.push(BoundSource {
-            id,
-            rows: SourceRows::RecursiveSelf { cte },
-            table: std::rc::Rc::new(table),
-            alias,
-            join,
-            constraint: None,
-            suppressed: Vec::new(),
-            index_exprs: Vec::new(),
-        });
-        if let Some(scope) = self.scopes.last_mut() {
-            scope.push(id);
-        }
-        Ok(())
-    }
-
-    /// Binds a `WITH RECURSIVE` CTE reference.
-    ///
-    /// The seed arm is bound first, alone, because until it is bound nothing
-    /// knows what columns the CTE has - and the step arm cannot be bound until
-    /// a reference to the CTE has columns to resolve against. A CTE declared
-    /// `RECURSIVE` that turns out not to reference itself is an ordinary
-    /// compound, and is rebuilt as one rather than run through a queue that
-    /// would never be fed.
-    fn bind_recursive_cte(
-        &mut self,
-        cte: &CteBinding,
-        alias: Vec<u8>,
-        join: JoinKind,
-        span: Span,
-    ) -> Result<(), ParseError> {
-        let Some(select) = self.ast.select(cte.select) else {
-            return Err(unsupported("missing select", span));
-        };
-        if select.compounds.is_empty() {
-            return self.bind_subquery_term(
-                cte.select,
-                Some(alias),
-                cte.columns.clone(),
-                join,
-                span,
-            );
-        }
-        let arms: Vec<(CompoundOp, ast::SelectCoreId)> = select.compounds.clone();
-        let order_by = select.order_by.clone();
-        let limit = select.limit;
-        let offset = select.offset;
-        let first = select.first;
-        if !order_by.is_empty() || limit.is_some() || offset.is_some() {
-            return Err(ParseError::new(
-                ParseErrorKind::Unsupported(
-                    "ORDER BY and LIMIT are not allowed on a recursive CTE",
-                ),
-                span,
-            ));
-        }
-
-        let id = self.sources.len();
-        // The store's FROM-term number is reserved before anything is bound, so
-        // that a self-reference inside the step arm can name the store it will
-        // read without the two being bound in an impossible order.
-        self.sources.push(BoundSource {
-            id,
-            rows: SourceRows::Table,
-            table: std::rc::Rc::new(TableInfo::subquery(alias.clone(), 0, Vec::new())),
-            alias: alias.clone(),
-            join,
-            constraint: None,
-            suppressed: Vec::new(),
-            index_exprs: Vec::new(),
-        });
-
-        let seed = self.bind_isolated_arm(first)?;
-        let table = subquery_table(&alias, &cte.columns, &seed);
-        if !cte.columns.is_empty() && cte.columns.len() != seed.columns.len() {
-            return Err(ParseError::new(
-                ParseErrorKind::Unsupported("the named column list does not match the query"),
-                span,
-            ));
-        }
-        self.recursing.push(RecursiveTarget {
-            folded: cte.folded.clone(),
-            id,
-            table: table.clone(),
-            referenced: false,
-        });
-        let mut seeds = vec![(CompoundOp::UnionAll, seed)];
-        let mut steps = Vec::new();
-        let mut outcome = Ok(());
-        for (op, arm) in &arms {
-            if !matches!(op, CompoundOp::Union | CompoundOp::UnionAll) {
-                outcome = Err(ParseError::new(
-                    ParseErrorKind::Unsupported("recursive query does not use UNION or UNION ALL"),
-                    span,
-                ));
-                break;
-            }
-            if let Some(target) = self.recursing.last_mut() {
-                target.referenced = false;
-            }
-            let bound = match self.bind_isolated_arm(*arm) {
-                Ok(bound) => bound,
-                Err(reason) => {
-                    outcome = Err(reason);
-                    break;
-                }
-            };
-            let referenced = self
-                .recursing
-                .last()
-                .is_some_and(|target| target.referenced);
-            if referenced {
-                steps.push((*op, bound));
-            } else {
-                seeds.push((*op, bound));
-            }
-        }
-        self.recursing.pop();
-        outcome?;
-
-        let mut source = BoundSource {
-            id,
-            rows: SourceRows::Recursive(Box::new(RecursiveBody { seeds, steps })),
-            table: std::rc::Rc::new(table),
-            alias,
-            join,
-            constraint: None,
-            suppressed: Vec::new(),
-            index_exprs: Vec::new(),
-        };
-        if let SourceRows::Recursive(body) = &mut source.rows {
-            if body.steps.is_empty() {
-                // Declared recursive, never refers to itself: an ordinary
-                // compound wearing the keyword.
-                let mut arms = core::mem::take(&mut body.seeds);
-                if arms.is_empty() {
-                    return Err(unsupported("missing select core", span));
-                }
-                let mut head = arms.remove(0).1;
-                head.compounds = arms;
-                source.rows = SourceRows::Subquery(Box::new(head));
-            }
-        }
-        if let Some(slot) = self.sources.get_mut(id) {
-            *slot = source;
-        }
-        if let Some(scope) = self.scopes.last_mut() {
-            scope.push(id);
-        }
-        Ok(())
     }
 
     /// Binds one compound arm in a scope of its own.
@@ -4592,6 +4388,20 @@ impl<'a> Binder<'a> {
                 }
                 other => other,
             };
+            // **`DISTINCT` takes exactly one argument (task-1913).** SQLite
+            // answers `DISTINCT aggregates must have exactly one argument`,
+            // and this accepted `group_concat(DISTINCT s, ',')` and answered
+            // it - a statement the reference cannot read, which is the same
+            // class `refusals_match_the_oracle` exists to stop. There is
+            // nothing for the second argument to be distinct *by*: the
+            // de-duplication compares the first value alone, so the separator
+            // of whichever duplicate arrived first is the one that survives.
+            if distinct && bound.len() > 1 {
+                return Err(refused(
+                    "DISTINCT aggregates must have exactly one argument",
+                    span,
+                ));
+            }
             let candidate = BoundAggregate {
                 func,
                 external: None,

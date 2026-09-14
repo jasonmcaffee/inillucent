@@ -20,8 +20,10 @@ use crate::bind::{BoundExpr, BoundSelect, BoundSource, ColumnUse, SourceRows};
 use crate::catalog_view::{IndexInfo, TableInfo};
 use crate::cost;
 
+mod partial;
 mod pattern;
 mod terms;
+use partial::implies;
 use terms::{
     collation_of, comparison_against_column, comparison_against_rowid, comparison_collation,
 };
@@ -2645,31 +2647,6 @@ fn find_equality(
         return Some((index, value));
     }
     None
-}
-
-/// Reports whether a query's `WHERE` implies a partial index's predicate.
-///
-/// **SQLite's rule, and deliberately the crudest sound one**: the predicate
-/// appears, unchanged, as a conjunct of the statement's `WHERE`. So an index
-/// declared `WHERE b > 5` answers `WHERE b > 5 AND a = 1` and does not answer
-/// `WHERE b > 6`, even though the second implies the first. Proving the general
-/// implication is a theorem prover in the planner, and every case it got wrong
-/// would be a query silently missing exactly the rows the predicate excludes.
-///
-/// `false` when the index's own predicate could not be bound, which is what
-/// leaves an index the planner cannot reason about unchosen rather than chosen
-/// on a guess.
-///
-/// @param computed - the index's bound expressions, when it has them
-/// @param terms - the statement's `WHERE` conjuncts
-fn implies(computed: Option<&crate::dml::BoundIndexExprs>, terms: &[BoundExpr]) -> bool {
-    let Some(held) = computed else {
-        return false;
-    };
-    let Some(predicate) = held.predicate.as_ref() else {
-        return false;
-    };
-    terms.iter().any(|term| term == predicate)
 }
 
 /// Finds an equality against an expression the index computes.

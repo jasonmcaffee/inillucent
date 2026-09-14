@@ -78,10 +78,14 @@ connection.execute(
 let rows = connection.query("SELECT id, name FROM people", &[], 200)?;
 println!("{} of {}{}", rows.rows.len(), rows.total, if rows.more { "+" } else { "" });
 
+// `limit` is a count, not a sentinel: query(.., 0) hands back no rows at all,
+// beside a `total` reporting the true count. Ask for every row by name.
+let everything = connection.query_all("SELECT id, name FROM people", &[])?;
+
 // A refusal you can act on. One arm covers the whole class, because every
 // construct the engine has not built answers Unsupported rather than a syntax
 // error.
-match connection.query(statement, &[], 0) {
+match connection.query_all(statement, &[]) {
     Err(why) if why.status == Status::Unsupported => {
         println!("not yet: {}", why.feature.unwrap_or_default());
     }

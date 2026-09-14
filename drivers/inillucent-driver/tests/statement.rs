@@ -52,6 +52,56 @@ fn peopled(name: &str) -> Database {
     database
 }
 
+/// `query_all` hands back every row, and `query(.., 0)` hands back none.
+///
+/// **What `limit` means, written down as a test (task-1947, found by
+/// task-1913).** The first application built on this engine called
+/// `query(sql, params, 0)` because every other embedded database reads `0` as
+/// no limit, and got an empty `rows` beside a `total` reporting the true
+/// count and a status saying success. Five of its eight storage tests failed
+/// at once and the symptom was "the board is empty" rather than "the query is
+/// wrong".
+///
+/// `0` cannot be made to mean "all of them": `Connection::execute` passes it
+/// to run a statement for its effect, so the sentinel space is taken. What was
+/// missing was a call that says what it wants, and the consumer wrote one for
+/// itself - an `ALL_ROWS: usize = usize::MAX` constant with a comment
+/// explaining why it had to exist. Both halves are asserted here: the `0` that
+/// surprised somebody, so the surprise is recorded rather than rediscovered,
+/// and the `query_all` that answers it.
+#[test]
+fn query_all_returns_every_row_and_a_limit_of_zero_returns_none() {
+    let database = peopled("limits");
+    let connection = database.connect();
+
+    let none = connection
+        .query("SELECT id FROM people ORDER BY id", &[], 0)
+        .expect("the query runs");
+    assert!(
+        none.rows.is_empty(),
+        "a limit of 0 handed back {} row(s)",
+        none.rows.len()
+    );
+    assert_eq!(
+        none.total, 3,
+        "the count is the rows produced, not the rows handed back"
+    );
+
+    let some = connection
+        .query("SELECT id FROM people ORDER BY id", &[], 2)
+        .expect("the query runs");
+    assert_eq!(some.rows.len(), 2, "a limit of 2 hands back two rows");
+    assert_eq!(some.total, 3);
+    assert!(some.more, "a row was left behind");
+
+    let all = connection
+        .query_all("SELECT id FROM people ORDER BY id", &[])
+        .expect("the query runs");
+    assert_eq!(all.rows.len(), 3, "query_all hands back every row");
+    assert_eq!(all.total, 3);
+    assert!(!all.more, "nothing was left behind");
+}
+
 /// A named bind reaches the right column.
 ///
 /// **The case the defect was about**: two parameters of the same type, in an

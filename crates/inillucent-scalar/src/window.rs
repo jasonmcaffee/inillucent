@@ -285,13 +285,14 @@ pub fn offset_row(
 /// @param partition - the row's partition
 /// @param row - the row whose frame this is
 /// @param spec - the frame, with its offsets already resolved
-/// @param order_value - the row's single `ORDER BY` value, for a `RANGE` offset
+/// @param order_value - the row's single `ORDER BY` value, for a `RANGE` offset,
+///   and `None` when that value is NULL
 /// @param descending - whether that ordering term is descending
 pub fn frame(
     partition: &Partition,
     row: usize,
     spec: &FrameSpec,
-    order_value: impl Fn(usize) -> f64,
+    order_value: impl Fn(usize) -> Option<f64>,
     descending: bool,
 ) -> Vec<usize> {
     let (peer_start, peer_end) = partition.peers_of(row);
@@ -314,6 +315,18 @@ pub fn frame(
         descending,
     );
     let mut members = Vec::new();
+    // **A bound that falls off the partition empties the frame (task-1913).**
+    // `ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING` on the last row names rows
+    // that are not there, and the reference answers NULL for it. Clamping both
+    // ends into the partition instead turned that into a frame of one row -
+    // the row itself - so the last row of every such window read its own value
+    // where SQLite reads nothing, and the first row did the same for a frame
+    // written entirely in `PRECEDING`. `None` is the bound saying the frame
+    // begins after the partition ends, or ends before it begins; a bound that
+    // merely reaches past an edge still answers with that edge.
+    let (Some(low), Some(high)) = (low, high) else {
+        return members;
+    };
     if low > high || partition.is_empty() {
         return members;
     }
@@ -358,7 +371,8 @@ fn excluded(
 /// @param spec - the frame
 /// @param bound - which end is being resolved
 /// @param is_start - whether it is the start
-/// @param order_value - the ordering value of a row, for a `RANGE` offset
+/// @param order_value - the ordering value of a row, for a `RANGE` offset, and
+///   `None` when that value is NULL
 /// @param descending - whether the ordering term is descending
 #[allow(clippy::too_many_arguments)]
 fn bound_of(
@@ -367,12 +381,12 @@ fn bound_of(
     spec: &FrameSpec,
     bound: Bound,
     is_start: bool,
-    order_value: &impl Fn(usize) -> f64,
+    order_value: &impl Fn(usize) -> Option<f64>,
     descending: bool,
-) -> usize {
+) -> Option<usize> {
     let (peer_start, peer_end) = partition.peers_of(row);
     let last = partition.end.saturating_sub(1);
-    match bound {
+    Some(match bound {
         Bound::UnboundedPreceding => partition.start,
         Bound::UnboundedFollowing => last,
         Bound::CurrentRow => match spec.unit {
@@ -399,9 +413,18 @@ fn bound_of(
                 } else {
                     (row as i64).saturating_add(distance)
                 };
+                // The frame is empty when its *start* is past the last row or
+                // its *end* is before the first; a bound that overshoots the
+                // other way is the edge it overshot.
+                if is_start && target > last as i64 {
+                    return None;
+                }
+                if !is_start && target < partition.start as i64 {
+                    return None;
+                }
                 target.clamp(partition.start as i64, last as i64) as usize
             }
-            FrameUnit::Groups => group_bound(partition, row, distance, preceding, is_start),
+            FrameUnit::Groups => group_bound(partition, row, distance, preceding, is_start)?,
             FrameUnit::Range => range_bound(
                 partition,
                 row,
@@ -410,9 +433,9 @@ fn bound_of(
                 is_start,
                 order_value,
                 descending,
-            ),
+            )?,
         },
-    }
+    })
 }
 
 /// Returns the row a `GROUPS` offset resolves to.
@@ -428,7 +451,7 @@ fn group_bound(
     offset: i64,
     preceding: bool,
     is_start: bool,
-) -> usize {
+) -> Option<usize> {
     let here = dense_rank(partition, row);
     let wanted = if preceding {
         here.saturating_sub(offset)
@@ -446,18 +469,18 @@ fn group_bound(
         }
     }
     match answer {
-        Some(member) => member,
+        Some(member) => Some(member),
         // The wanted group is off one end of the partition. Which end decides
         // whether the frame runs to the edge or is empty.
-        None if preceding == is_start => {
-            if is_start {
-                partition.start
-            } else {
-                partition.end.saturating_sub(1)
-            }
-        }
-        None if is_start => partition.end,
-        None => partition.start,
+        None if preceding == is_start => Some(if is_start {
+            partition.start
+        } else {
+            partition.end.saturating_sub(1)
+        }),
+        // The frame begins after the partition ends, or ends before it begins.
+        // Both are empty, and answering with an edge made the second of them a
+        // frame of one row (task-1913).
+        None => None,
     }
 }
 
@@ -473,7 +496,7 @@ fn group_bound(
 /// @param offset - the distance in ordering values
 /// @param preceding - whether it counts backwards
 /// @param is_start - whether this is the frame's start
-/// @param order_value - the ordering value of a row
+/// @param order_value - the ordering value of a row, `None` when it is NULL
 /// @param descending - whether the ordering term is descending
 #[allow(clippy::too_many_arguments)]
 fn range_bound(
@@ -482,10 +505,25 @@ fn range_bound(
     offset: i64,
     preceding: bool,
     is_start: bool,
-    order_value: &impl Fn(usize) -> f64,
+    order_value: &impl Fn(usize) -> Option<f64>,
     descending: bool,
-) -> usize {
-    let here = order_value(row);
+) -> Option<usize> {
+    // **A NULL ordering value has no distance to anything, so an offset bound
+    // on such a row resolves to its peer group (task-1913).** NULLs sort
+    // together at one end, so the peer group is exactly the NULL rows, and
+    // `sum(n) OVER (ORDER BY n RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING)`
+    // therefore answers NULL on them rather than reaching into the numbers
+    // beside them. This engine read a NULL as `0.0`, which put every NULL row
+    // one unit away from zero and, worse, put the NULL rows *inside* the frame
+    // of every row whose value was near zero.
+    let (peer_start, peer_end) = partition.peers_of(row);
+    let Some(here) = order_value(row) else {
+        return Some(if is_start {
+            peer_start
+        } else {
+            peer_end.saturating_sub(1)
+        });
+    };
     let offset = offset as f64;
     let limit = if preceding != descending {
         here - offset
@@ -494,7 +532,13 @@ fn range_bound(
     };
     let mut answer = None;
     for member in partition.start..partition.end {
-        let value = order_value(member);
+        // A row whose ordering value is NULL is not within any distance of a
+        // row that has one, so it can never be the row an offset bound lands
+        // on. An `UNBOUNDED` bound still reaches it, which is why this is here
+        // rather than in `frame`.
+        let Some(value) = order_value(member) else {
+            continue;
+        };
         let inside = if is_start {
             if descending {
                 value <= limit
@@ -514,11 +558,9 @@ fn range_bound(
             break;
         }
     }
-    match answer {
-        Some(member) => member,
-        None if is_start => partition.end,
-        None => partition.start,
-    }
+    // No row is on the right side of the limit, so the frame begins after the
+    // partition ends or ends before it begins. Both are empty (task-1913).
+    answer
 }
 
 #[cfg(test)]
@@ -604,9 +646,18 @@ mod tests {
     fn a_rows_frame_clamps_at_the_partition_edges() {
         let partition = one(&[1, 2, 3, 4]);
         let spec = sliding();
-        assert_eq!(frame(&partition, 0, &spec, |_| 0.0, false), vec![0, 1]);
-        assert_eq!(frame(&partition, 2, &spec, |_| 0.0, false), vec![1, 2, 3]);
-        assert_eq!(frame(&partition, 3, &spec, |_| 0.0, false), vec![2, 3]);
+        assert_eq!(
+            frame(&partition, 0, &spec, |_| Some(0.0), false),
+            vec![0, 1]
+        );
+        assert_eq!(
+            frame(&partition, 2, &spec, |_| Some(0.0), false),
+            vec![1, 2, 3]
+        );
+        assert_eq!(
+            frame(&partition, 3, &spec, |_| Some(0.0), false),
+            vec![2, 3]
+        );
     }
 
     #[test]
@@ -619,9 +670,12 @@ mod tests {
             exclude: FrameExclude::NoOthers,
         };
         // Row 0 is a peer of row 1, so the default RANGE frame reaches it.
-        assert_eq!(frame(&partition, 0, &spec, |_| 0.0, false), vec![0, 1]);
+        assert_eq!(
+            frame(&partition, 0, &spec, |_| Some(0.0), false),
+            vec![0, 1]
+        );
         spec.unit = FrameUnit::Rows;
-        assert_eq!(frame(&partition, 0, &spec, |_| 0.0, false), vec![0]);
+        assert_eq!(frame(&partition, 0, &spec, |_| Some(0.0), false), vec![0]);
     }
 
     #[test]
@@ -633,13 +687,19 @@ mod tests {
             end: Bound::UnboundedFollowing,
             exclude: FrameExclude::Ties,
         };
-        assert_eq!(frame(&partition, 1, &spec, |_| 0.0, false), vec![1]);
+        assert_eq!(frame(&partition, 1, &spec, |_| Some(0.0), false), vec![1]);
         spec.exclude = FrameExclude::Group;
-        assert!(frame(&partition, 1, &spec, |_| 0.0, false).is_empty());
+        assert!(frame(&partition, 1, &spec, |_| Some(0.0), false).is_empty());
         spec.exclude = FrameExclude::CurrentRow;
-        assert_eq!(frame(&partition, 1, &spec, |_| 0.0, false), vec![0, 2]);
+        assert_eq!(
+            frame(&partition, 1, &spec, |_| Some(0.0), false),
+            vec![0, 2]
+        );
         spec.exclude = FrameExclude::NoOthers;
-        assert_eq!(frame(&partition, 1, &spec, |_| 0.0, false), vec![0, 1, 2]);
+        assert_eq!(
+            frame(&partition, 1, &spec, |_| Some(0.0), false),
+            vec![0, 1, 2]
+        );
     }
 
     #[test]
@@ -656,7 +716,10 @@ mod tests {
         };
         // Row 2's own group is {2}; one group back is {0,1}. Under ROWS the
         // same offset would have reached only row 1.
-        assert_eq!(frame(&partition, 2, &spec, |_| 0.0, false), vec![0, 1, 2]);
+        assert_eq!(
+            frame(&partition, 2, &spec, |_| Some(0.0), false),
+            vec![0, 1, 2]
+        );
     }
 
     #[test]
@@ -676,12 +739,158 @@ mod tests {
             exclude: FrameExclude::NoOthers,
         };
         assert_eq!(
-            frame(&partition, 1, &spec, |row| values[row], false),
+            frame(&partition, 1, &spec, |row| Some(values[row]), false),
             vec![0, 1]
         );
         assert_eq!(
-            frame(&partition, 2, &spec, |row| values[row], false),
+            frame(&partition, 2, &spec, |row| Some(values[row]), false),
             vec![2, 3]
+        );
+    }
+
+    /// A frame written entirely off one end of the partition is empty.
+    ///
+    /// **Clamping both ends into the partition made it a frame of one row
+    /// (task-1913).** `ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING` on the last
+    /// row names rows that are not there: its start clamped to the last row,
+    /// its end clamped to the last row, and the frame came out holding the row
+    /// itself - so `sum` answered the row's own value where the reference
+    /// answers NULL. The same at the other end for a frame written entirely in
+    /// `PRECEDING`, in all three units: `ROWS` was wrong at both edges,
+    /// `GROUPS` and `RANGE` at the start only, because their fallbacks already
+    /// emptied a frame that began past the end and not one that ended before
+    /// the beginning.
+    #[test]
+    fn a_frame_entirely_off_an_edge_is_empty() {
+        let partition = one(&[1, 2, 3]);
+        let value = |row: usize| Some([1.0f64, 2.0, 3.0][row]);
+        let following = FrameSpec {
+            unit: FrameUnit::Rows,
+            start: Bound::Offset {
+                distance: 1,
+                preceding: false,
+            },
+            end: Bound::Offset {
+                distance: 2,
+                preceding: false,
+            },
+            exclude: FrameExclude::NoOthers,
+        };
+        assert_eq!(frame(&partition, 0, &following, value, false), vec![1, 2]);
+        assert_eq!(frame(&partition, 1, &following, value, false), vec![2]);
+        assert!(
+            frame(&partition, 2, &following, value, false).is_empty(),
+            "the last row has no row after it"
+        );
+
+        let preceding = FrameSpec {
+            unit: FrameUnit::Rows,
+            start: Bound::Offset {
+                distance: 2,
+                preceding: true,
+            },
+            end: Bound::Offset {
+                distance: 1,
+                preceding: true,
+            },
+            exclude: FrameExclude::NoOthers,
+        };
+        assert!(
+            frame(&partition, 0, &preceding, value, false).is_empty(),
+            "the first row has no row before it"
+        );
+        assert_eq!(frame(&partition, 1, &preceding, value, false), vec![0]);
+        assert_eq!(frame(&partition, 2, &preceding, value, false), vec![0, 1]);
+
+        // The same two frames in the other two units.
+        for unit in [FrameUnit::Groups, FrameUnit::Range] {
+            let off_the_end = FrameSpec { unit, ..following };
+            let off_the_start = FrameSpec { unit, ..preceding };
+            assert!(
+                frame(&partition, 2, &off_the_end, value, false).is_empty(),
+                "{unit:?} kept a row in a frame that begins after the last one"
+            );
+            assert!(
+                frame(&partition, 0, &off_the_start, value, false).is_empty(),
+                "{unit:?} kept a row in a frame that ends before the first one"
+            );
+        }
+    }
+
+    /// A `RANGE` offset on a row whose ordering value is NULL is its peer
+    /// group, and no NULL row is ever inside a valued row's frame.
+    ///
+    /// **The two directions of one bug (task-1913).** A NULL read as `0.0` is
+    /// a distance from zero, so the NULL rows were drawn into the frame of
+    /// every row near zero and the numbers near zero were drawn into the NULL
+    /// rows' frames. Both are asserted, because fixing either one alone leaves
+    /// the other wrong.
+    #[test]
+    fn a_range_offset_gives_a_null_row_its_peer_group_and_nothing_else() {
+        // Ordered as SQLite orders them: the NULLs first, then the values.
+        let values = [None, None, Some(-4.0f64), Some(1.0), Some(2.0)];
+        let partition = one(&[0, 0, 1, 2, 3]);
+        let spec = FrameSpec {
+            unit: FrameUnit::Range,
+            start: Bound::Offset {
+                distance: 1,
+                preceding: true,
+            },
+            end: Bound::Offset {
+                distance: 1,
+                preceding: false,
+            },
+            exclude: FrameExclude::NoOthers,
+        };
+        // A NULL row sees the NULL rows.
+        assert_eq!(
+            frame(&partition, 0, &spec, |row| values[row], false),
+            vec![0, 1]
+        );
+        assert_eq!(
+            frame(&partition, 1, &spec, |row| values[row], false),
+            vec![0, 1]
+        );
+        // A valued row sees neither NULL row: 1 reaches 2 and stops short of
+        // -4, and before the fix it started at row 0.
+        assert_eq!(
+            frame(&partition, 3, &spec, |row| values[row], false),
+            vec![3, 4]
+        );
+        // -4 is alone: its own value, with nothing within one of it.
+        assert_eq!(
+            frame(&partition, 2, &spec, |row| values[row], false),
+            vec![2]
+        );
+    }
+
+    /// An `UNBOUNDED` bound still reaches a NULL row.
+    ///
+    /// The rule above is about *offset* bounds. `UNBOUNDED PRECEDING` means
+    /// the start of the partition whatever is there, and SQLite's answer for
+    /// the row after the NULLs includes them.
+    #[test]
+    fn an_unbounded_bound_still_reaches_a_null_row() {
+        let values = [None, None, Some(-4.0f64), Some(1.0), Some(2.0)];
+        let partition = one(&[0, 0, 1, 2, 3]);
+        let spec = FrameSpec {
+            unit: FrameUnit::Range,
+            start: Bound::UnboundedPreceding,
+            end: Bound::Offset {
+                distance: 1,
+                preceding: false,
+            },
+            exclude: FrameExclude::NoOthers,
+        };
+        assert_eq!(
+            frame(&partition, 2, &spec, |row| values[row], false),
+            vec![0, 1, 2]
+        );
+        // And the NULL row's own frame under the same spec is the NULL peers:
+        // the start is the partition's, the end is its peer group's.
+        assert_eq!(
+            frame(&partition, 0, &spec, |row| values[row], false),
+            vec![0, 1]
         );
     }
 
@@ -699,7 +908,7 @@ mod tests {
             exclude: FrameExclude::NoOthers,
         };
         assert_eq!(
-            frame(&partition, 0, &spec, |row| values[row], true),
+            frame(&partition, 0, &spec, |row| Some(values[row]), true),
             vec![0, 1]
         );
     }
@@ -739,7 +948,7 @@ mod tests {
             },
             exclude: FrameExclude::NoOthers,
         };
-        assert!(frame(&partition, 0, &spec, |_| 0.0, false).is_empty());
+        assert!(frame(&partition, 0, &spec, |_| Some(0.0), false).is_empty());
     }
 
     #[test]
@@ -756,7 +965,10 @@ mod tests {
         };
         // Nine groups back from the first is before the partition, so the
         // frame starts at its edge.
-        assert_eq!(frame(&partition, 1, &reaching, |_| 0.0, false), vec![0, 1]);
+        assert_eq!(
+            frame(&partition, 1, &reaching, |_| Some(0.0), false),
+            vec![0, 1]
+        );
         let emptying = FrameSpec {
             unit: FrameUnit::Groups,
             start: Bound::Offset {
@@ -766,7 +978,7 @@ mod tests {
             end: Bound::CurrentRow,
             exclude: FrameExclude::NoOthers,
         };
-        assert!(frame(&partition, 1, &emptying, |_| 0.0, false).is_empty());
+        assert!(frame(&partition, 1, &emptying, |_| Some(0.0), false).is_empty());
     }
 
     #[test]
@@ -782,6 +994,6 @@ mod tests {
             end: Bound::UnboundedFollowing,
             exclude: FrameExclude::NoOthers,
         };
-        assert!(frame(&partition, 0, &spec, |row| values[row], false).is_empty());
+        assert!(frame(&partition, 0, &spec, |row| Some(values[row]), false).is_empty());
     }
 }

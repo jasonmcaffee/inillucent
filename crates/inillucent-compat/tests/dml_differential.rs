@@ -281,6 +281,61 @@ fn upsert_matches_sqlite() {
     assert!(compared == 0 || compared == 14, "compared {compared} steps");
 }
 
+/// A `STORED` generated column is recomputed by every statement that rewrites
+/// the row, not only by the `INSERT` that created it.
+///
+/// **The value is on the disk, which is what makes this worse than a wrong
+/// answer (task-1913).** `UPDATE g SET a = 5` left `c GENERATED ALWAYS AS
+/// (a + 1) STORED` holding the 2 the insert computed, so the record itself was
+/// wrong: a later read of the same file read 2, and an index over `c` indexed
+/// 2. The `DO UPDATE` arm of an upsert had it too, because that also rewrites
+/// a row without naming the column. The `VIRTUAL` column beside it was always
+/// right - it has no slot and is computed when it is read - and it is here so
+/// that a fix which recomputed everything into the record would fail rather
+/// than pass.
+///
+/// The index is here for the same reason: a generated column that is indexed
+/// is the case where a stale value stops being merely wrong and starts
+/// answering the wrong rows.
+#[test]
+fn a_stored_generated_column_is_recomputed_by_every_write() {
+    let compared = compare(
+        "generated",
+        &[
+            Step::Exec(
+                "CREATE TABLE g (a INTEGER PRIMARY KEY, n INTEGER, \
+                 v INTEGER GENERATED ALWAYS AS (n * 2) VIRTUAL, \
+                 c INTEGER GENERATED ALWAYS AS (n + 1) STORED, \
+                 u TEXT GENERATED ALWAYS AS (upper(CAST(n AS TEXT))) STORED)",
+            ),
+            Step::Exec("CREATE INDEX g_c ON g (c)"),
+            Step::Exec("INSERT INTO g (a, n) VALUES (1, 1), (2, 2)"),
+            Step::Query("SELECT a, n, v, c, u FROM g ORDER BY a"),
+            Step::Exec("UPDATE g SET n = 5 WHERE a = 1"),
+            Step::Query("SELECT a, n, v, c, u FROM g ORDER BY a"),
+            Step::Query("SELECT a FROM g WHERE c = 6"),
+            Step::Query("SELECT a FROM g WHERE c = 2"),
+            Step::Exec("UPDATE g SET n = n + 1"),
+            Step::Query("SELECT a, n, c FROM g ORDER BY a"),
+            // The upsert arm rewrites a row too.
+            Step::Exec(
+                "INSERT INTO g (a, n) VALUES (1, 20) ON CONFLICT (a) DO UPDATE SET n = excluded.n",
+            ),
+            Step::Query("SELECT a, n, v, c, u FROM g ORDER BY a"),
+            Step::Query("SELECT a FROM g WHERE c = 21"),
+            // A write that does not touch the generating column leaves the
+            // generated one where it was.
+            Step::Exec("UPDATE g SET a = a + 10 WHERE a = 2"),
+            Step::Query("SELECT a, n, c FROM g ORDER BY a"),
+            // Writing a generated column directly is refused, on both engines.
+            Step::Query("UPDATE g SET c = 99 WHERE a = 1"),
+            Step::Query("INSERT INTO g (a, n, c) VALUES (7, 7, 7)"),
+            Step::Query("SELECT a, n, c FROM g ORDER BY a"),
+        ],
+    );
+    assert!(compared == 0 || compared == 18, "compared {compared} steps");
+}
+
 /// Row triggers: every event, both times, OLD and NEW, WHEN, and UPDATE OF.
 ///
 /// The counters are what make this worth running in lockstep rather than

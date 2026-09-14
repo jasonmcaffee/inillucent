@@ -475,13 +475,26 @@ impl<'a> Parser<'a> {
     /// `main.t` from a column reference; the dot has to be there *and* be
     /// followed by a name for the first word to be a qualifier.
     fn parse_qualified_name(&mut self) -> Result<(Option<NameId>, NameId), ParseError> {
-        let first = self.parse_name()?;
+        let (database, name, _) = self.parse_qualified_name_spanned()?;
+        Ok((database, name))
+    }
+
+    /// Parses `name` or `database.name` and returns where the last part was
+    /// written.
+    ///
+    /// The written span is the token's, for the reason
+    /// [`Parser::parse_name_spanned`] gives: interning deduplicates, so the
+    /// interned entry's span belongs to whichever occurrence was seen first.
+    fn parse_qualified_name_spanned(
+        &mut self,
+    ) -> Result<(Option<NameId>, NameId, Span), ParseError> {
+        let (first, written) = self.parse_name_spanned()?;
         if self.at(Punctuator::Dot)? && Parser::token_is_name(self.peek_at(1)?) {
             self.bump()?;
-            let second = self.parse_name()?;
-            return Ok((Some(first), second));
+            let (second, written) = self.parse_name_spanned()?;
+            return Ok((Some(first), second, written));
         }
-        Ok((None, first))
+        Ok((None, first, written))
     }
 
     /// Parses an optional `AS alias` or bare alias.

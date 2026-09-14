@@ -632,12 +632,15 @@ impl Parser<'_> {
             }
             Keyword::COLLATE if precedence::COLLATE >= minimum => {
                 self.bump()?;
-                let collation = self.parse_name()?;
-                let span = self.ast.expr_span(left).to(self
-                    .ast
-                    .name(collation)
-                    .map(|n| n.span)
-                    .unwrap_or_default());
+                // **The token's span, not the interned name's (task-1913).**
+                // Interning deduplicates, so the second `NOCASE` in
+                // `SELECT 'a' = 'A' COLLATE NOCASE, 'a' < 'B' COLLATE NOCASE`
+                // resolved to the entry the first one made and carried the
+                // first one's position. The second column then took its name
+                // from a slice that started inside it and ended inside the
+                // column before, and was called `NOCASE, 'a' < 'B'`.
+                let (collation, written) = self.parse_name_spanned()?;
+                let span = self.ast.expr_span(left).to(written);
                 Ok(Some(self.ast.add_expr(
                     Expr::Collate {
                         operand: left,
@@ -758,9 +761,75 @@ impl Parser<'_> {
         )))
     }
 
+    /// Builds `SELECT * FROM <table>` for the `IN table-name` form.
+    ///
+    /// The right of `IN` may be a bare table name or a table-valued function,
+    /// and SQLite reads either as the rows of a one-column select. Writing it
+    /// as that select rather than teaching the binder a second spelling means
+    /// the column-count rule, the NULL rule and the planning are the ones
+    /// `IN (SELECT ...)` already has.
+    ///
+    /// @param database - the schema qualifier, when one was written
+    /// @param table - the table or table-valued function
+    /// @param arguments - the function's arguments, when it is one
+    /// @param span - where the name was written
+    fn select_over_table(
+        &mut self,
+        database: Option<crate::ast::NameId>,
+        table: crate::ast::NameId,
+        arguments: Option<Vec<ExprId>>,
+        span: Span,
+    ) -> InRhs {
+        let term = self.ast.add_from_term(crate::ast::FromTerm {
+            source: crate::ast::FromSource::Table {
+                database,
+                name: table,
+                arguments,
+                indexed_by: crate::ast::IndexHint::None,
+            },
+            alias: None,
+            join: crate::ast::JoinKind::Comma,
+            natural: false,
+            constraint: crate::ast::JoinConstraint::None,
+            span,
+        });
+        let star = self.ast.add_expr(Expr::Star { table: None }, span);
+        let core = self.ast.add_core(crate::ast::SelectCore {
+            body: crate::ast::SelectBody::Select {
+                distinct: false,
+                all: false,
+                columns: vec![crate::ast::ResultColumn {
+                    expr: star,
+                    alias: None,
+                    alias_was_explicit: false,
+                    span,
+                }],
+                from: vec![term],
+                filter: None,
+                group_by: Vec::new(),
+                having: None,
+                windows: Vec::new(),
+            },
+            span,
+        });
+        InRhs::Select(self.ast.add_select(crate::ast::Select {
+            with: crate::ast::With {
+                recursive: false,
+                ctes: Vec::new(),
+            },
+            first: core,
+            compounds: Vec::new(),
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            span,
+        }))
+    }
+
     /// Parses `[NOT] IN (list | select | table)`.
     fn parse_in(&mut self, left: ExprId, negated: bool) -> Result<Option<ExprId>, ParseError> {
         self.expect_keyword(Keyword::IN)?;
+        let start = self.cursor();
         // Every arm below sets this before it is read; the table form sets it
         // twice, because the arguments move the end past the name.
         let mut end;
@@ -788,8 +857,10 @@ impl Parser<'_> {
                 InRhs::List(values)
             }
         } else {
-            let (database, table) = self.parse_qualified_name()?;
-            end = self.ast.name(table).map(|n| n.span).unwrap_or_default();
+            // The token's span, not the interned name's - see
+            // `parse_name_spanned` (task-1913).
+            let (database, table, written) = self.parse_qualified_name_spanned()?;
+            end = written;
             let arguments = if self.at(Punctuator::LeftParen)? {
                 self.bump()?;
                 let mut list = Vec::new();
@@ -806,11 +877,21 @@ impl Parser<'_> {
             } else {
                 None
             };
-            InRhs::Table {
+            // **`x IN t` is `x IN (SELECT * FROM t)`, and it is desugared here
+            // (task-1913).** SQLite's grammar allows a bare table name or a
+            // table-valued function on the right of `IN`, and the binder
+            // refused it as `IN over a table name` - a documented SQLite form
+            // this engine simply did not answer, and one not named as a gap in
+            // `docs/sql.md` or in the probe. Written as a select, every rule
+            // that already governs `IN (SELECT ...)` governs it: one column or
+            // a refusal, NULL on the right making the answer unknown, and the
+            // same plan.
+            self.select_over_table(
                 database,
                 table,
                 arguments,
-            }
+                Span::new(start, end.end as usize),
+            )
         };
         let span = self.ast.expr_span(left).to(end);
         Ok(Some(self.ast.add_expr(

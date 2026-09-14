@@ -905,6 +905,14 @@ requires = ["oracle"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
+name = "result_names_and_codes"
+tier = "differential"
+covers = ["inillucent-engine", "inillucent-sql"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
 name = "rtree"
 tier = "differential"
 covers = ["inillucent-engine", "inillucent-ext"]
@@ -1248,6 +1256,9 @@ package = "inillucent-core"
 kind = "lib"
 tier = "retrieval"
 requires = ["onnx"]
+# 27 of this crate's tests are behind `onnx`, which the default build does
+# not turn on - so they were in the source and in no binary (task-1913).
+features = ["inillucent-core/onnx"]
 
 [[target]]
 package = "inillucent-model"
@@ -1271,6 +1282,9 @@ tier = "retrieval"
 package = "inillucent-search"
 kind = "lib"
 tier = "retrieval"
+# 3 of this crate's tests are behind `embed`, which the default build does
+# not turn on - so they were in the source and in no binary (task-1913).
+features = ["inillucent-search/embed"]
 
 # --- tooling: the checks that keep the repository's own rules true
 

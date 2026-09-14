@@ -362,7 +362,7 @@ fn run(options: &Options) -> Result<bool, String> {
     }
 
     if !options.no_build {
-        build(&root)?;
+        build(&root, &selected)?;
     }
     let built = locate(&root, &selected)?;
     let ledger = read_ledger(&root.join("tests/timings.toml"));
@@ -555,7 +555,8 @@ fn changed_paths(root: &Path, revision: &str) -> Result<Vec<String>, String> {
 /// makes each of those in-test builds a no-op.
 ///
 /// @param root - the workspace root
-fn build(root: &Path) -> Result<(), String> {
+/// @param rows - the rows that were selected, for the features they name
+fn build(root: &Path, rows: &[&Row]) -> Result<(), String> {
     println!("building test targets");
     let status = Command::new(cargo())
         .current_dir(root)
@@ -588,7 +589,47 @@ fn build(root: &Path) -> Result<(), String> {
     if !status.success() {
         return Err("building the shell and the C ABI failed".to_string());
     }
+    // **A second pass for the targets whose tests are behind a feature
+    // (task-1913).** The build above is the default one, and a test behind a
+    // feature it does not turn on is in no binary at all - not skipped, not
+    // reported, simply absent, while its source reads as coverage.
+    // `inillucent-core` had twenty-seven such tests and `inillucent-search`
+    // three, and none of them had ever run.
+    let features = wanted_features(rows);
+    if !features.is_empty() {
+        println!("building the feature targets: {}", features.join(", "));
+        let status = Command::new(cargo())
+            .current_dir(root)
+            .args(["test", "--workspace", "--no-run", "--lib", "--tests"])
+            .arg("--features")
+            .arg(features.join(","))
+            .status()
+            .map_err(|error| format!("cannot run cargo: {error}"))?;
+        if !status.success() {
+            return Err(format!(
+                "building with the features {} failed",
+                features.join(", ")
+            ));
+        }
+    }
     Ok(())
+}
+
+/// Returns every feature the selected rows ask for, in one sorted list.
+///
+/// One list rather than one build per row: cargo unifies features across a
+/// workspace build anyway, so asking for them together is the same compilation
+/// and one pass instead of several.
+///
+/// @param rows - the rows that were selected
+fn wanted_features(rows: &[&Row]) -> Vec<String> {
+    let mut wanted: BTreeSet<String> = BTreeSet::new();
+    for row in rows {
+        for feature in &row.features {
+            wanted.insert(feature.clone());
+        }
+    }
+    wanted.into_iter().collect()
 }
 
 /// Returns the cargo to invoke.
@@ -605,16 +646,25 @@ fn cargo() -> String {
 /// @param root - the workspace root
 /// @param rows - the rows that were selected
 fn locate(root: &Path, rows: &[&Row]) -> Result<Vec<Built>, String> {
-    let output = Command::new(cargo())
-        .current_dir(root)
-        .args([
-            "test",
-            "--workspace",
-            "--no-run",
-            "--lib",
-            "--tests",
-            "--message-format=json",
-        ])
+    let mut command = Command::new(cargo());
+    command.current_dir(root).args([
+        "test",
+        "--workspace",
+        "--no-run",
+        "--lib",
+        "--tests",
+        "--message-format=json",
+    ]);
+    // **The same features the build used, or this finds the wrong binaries.**
+    // A different feature set is a different compilation with a different
+    // hash, so asking without them returns the default executables - which is
+    // how a run could build the feature tests and then not run them
+    // (task-1913).
+    let features = wanted_features(rows);
+    if !features.is_empty() {
+        command.arg("--features").arg(features.join(","));
+    }
+    let output = command
         .stderr(Stdio::inherit())
         .output()
         .map_err(|error| format!("cannot run cargo: {error}"))?;

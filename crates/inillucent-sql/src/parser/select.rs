@@ -463,8 +463,12 @@ impl Parser<'_> {
         use crate::ast::{FrameBound, FrameExclude, FrameUnit, Window};
         let start = self.cursor();
         if !self.at(Punctuator::LeftParen)? {
-            let base = self.parse_name()?;
-            let span = self.ast.name(base).map(|n| n.span).unwrap_or_default();
+            // **The token's span, not the interned name's (task-1913).**
+            // Interning deduplicates, so the second `w` in
+            // `SELECT first_value(n) OVER w, last_value(n) OVER w` carried the
+            // first one's position, and the second column took its name from a
+            // slice running backwards through the query: `w, last_value`.
+            let (base, span) = self.parse_name_spanned()?;
             let id = self.ast.add_window(Window {
                 base: Some(base),
                 partition_by: Vec::new(),

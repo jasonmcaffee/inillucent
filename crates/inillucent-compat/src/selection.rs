@@ -122,6 +122,21 @@ pub struct Row {
     pub covers: BTreeSet<String>,
     /// External prerequisites without which it evidences nothing.
     pub requires: Vec<String>,
+    /// The cargo features this target is built and run with.
+    ///
+    /// **A test behind a feature the build does not turn on is in no binary,
+    /// and it reads as coverage (task-1913).** `cargo test --workspace` builds
+    /// with default features, so `inillucent-core`'s twenty-seven `onnx` tests
+    /// and `inillucent-search`'s three `embed` tests were in the source, were
+    /// counted by nobody, and had never run. `inillucent-search`'s own
+    /// `lib.rs` already says why that is worse than a missing test - it pulled
+    /// `embed_refusal` out from behind the feature for exactly this reason -
+    /// and this is the field that lets the runner build the rest of them.
+    ///
+    /// Each entry is written the way cargo takes it in a workspace build:
+    /// `package/feature`. Empty for every target that needs none, which is all
+    /// but two of them.
+    pub features: Vec<String>,
 }
 
 /// One tier: a named reason to run a subset.
@@ -257,6 +272,11 @@ impl Map {
                 .and_then(Value::as_list)
                 .map(<[String]>::to_vec)
                 .unwrap_or_default();
+            let features = row
+                .get("features")
+                .and_then(Value::as_list)
+                .map(<[String]>::to_vec)
+                .unwrap_or_default();
             map.rows.push(Row {
                 target: Target {
                     package,
@@ -266,6 +286,7 @@ impl Map {
                 tier,
                 covers,
                 requires,
+                features,
             });
         }
         for row in document.array("path") {

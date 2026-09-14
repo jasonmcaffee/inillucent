@@ -189,7 +189,14 @@ impl Eval for ScalarCall {
         // NULL, so a ranking query cannot come back ordered by a distance
         // nobody took.
         if let Some(said) = builtin::refusal_for(self.func, &values) {
-            return Err(inillucent_base::error::refusal(said));
+            // **A function that refuses is `SQLITE_ERROR`, not `SQLITE_MISUSE`
+            // (task-1913).** Every refusal SQLite raises from inside a scalar
+            // goes through `sqlite3_result_error`, which sets code 1; 21 is
+            // what it answers for misusing the C API, which a caller writing
+            // SQL cannot do. Measured against the pinned 3.53.4: `SELECT
+            // abs(-9223372036854775808)` and `SELECT unistr('\x')` both come
+            // back as code 1.
+            return Err(inillucent_base::error::statement_refusal(said));
         }
         let answer = builtin::call_with(self.func, &values, self.collation, ENCODING, context);
         Ok(Computed::Owned(from_value(answer)))

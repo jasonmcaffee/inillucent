@@ -285,6 +285,23 @@ pub struct BoundUpdate {
     pub from: Vec<crate::bind::BoundSource>,
     /// The assignments, in table column order with duplicates already refused.
     pub assignments: Vec<BoundAssignment>,
+    /// The `STORED` generated columns, recomputed after the assignments.
+    ///
+    /// **A stored generated column is part of the row, so a row that is
+    /// rewritten rewrites it (task-1913).** It is never named in a `SET`, so
+    /// an `UPDATE` used to leave whatever was written when the row was
+    /// inserted: `c GENERATED ALWAYS AS (a + 1) STORED` still read 2 after
+    /// `UPDATE g SET a = 5`, where SQLite reads 6. The wrong value is on the
+    /// disk rather than in an answer, so a later read of the same file is
+    /// wrong too, and an index on the column indexes the stale value.
+    ///
+    /// A `VIRTUAL` column is not here: it has no slot in the record and is
+    /// computed when it is read, which is why only this half needed fixing.
+    ///
+    /// These are evaluated against the row *after* the assignments, which is
+    /// the one difference from [`BoundUpdate::assignments`] - those read the
+    /// before image so `SET a = b, b = a` swaps.
+    pub generated: Vec<BoundAssignment>,
     /// The `WHERE` clause.
     pub filter: Option<BoundExpr>,
     /// The statement's conflict algorithm, when it wrote one.
@@ -577,6 +594,15 @@ impl<'a> Binder<'a> {
                 let Some(position) = table.column_position(&folded) else {
                     return Err(no_such_column(self.ast.text(*name), Span::default()));
                 };
+                // **An assignment to a generated column is refused, not
+                // ignored (task-1913).** SQLite answers `cannot UPDATE
+                // generated column "c"`; this accepted the statement, reported
+                // it as a success, and wrote nothing the caller asked for -
+                // either the record took the value and the column stopped
+                // agreeing with its own expression, or the recompute above put
+                // it back and the assignment was silently dropped. `INSERT`
+                // already refused the same thing.
+                self.refuse_generated(&table, position, "UPDATE", Span::default())?;
                 if assignments
                     .iter()
                     .any(|existing: &BoundAssignment| existing.column == position)
@@ -600,6 +626,7 @@ impl<'a> Binder<'a> {
             Some(expr) => Some(self.bind_expr(expr)?),
             None => None,
         };
+        let generated = self.bind_stored_generated(&table)?;
         let checks = self.bind_checks(&table)?;
         let not_null_defaults = self.bind_not_null_defaults(&table)?;
         let index_exprs = self.bind_index_exprs(&table)?;
@@ -631,6 +658,7 @@ impl<'a> Binder<'a> {
             source,
             from: joined,
             assignments,
+            generated,
             filter,
             on_conflict: update.on_conflict,
             checks,
@@ -1159,11 +1187,18 @@ impl<'a> Binder<'a> {
     ///
     /// SQLite's message names the column, because the usual cause is a script
     /// that inserts every column of a table one of whose columns has since been
-    /// made generated.
+    /// made generated. It names the statement too - `INSERT` or `UPDATE` - and
+    /// so does this.
+    ///
+    /// @param table - the table being written
+    /// @param position - the column the statement named
+    /// @param verb - `INSERT into` or `UPDATE`, as SQLite writes it
+    /// @param span - where the name was written
     fn refuse_generated(
         &self,
         table: &TableInfo,
         position: u16,
+        verb: &str,
         span: Span,
     ) -> Result<(), ParseError> {
         let Some(column) = table.column(position) else {
@@ -1174,7 +1209,7 @@ impl<'a> Binder<'a> {
         }
         Err(refused(
             format!(
-                "cannot INSERT into generated column \"{}\"",
+                "cannot {verb} generated column \"{}\"",
                 String::from_utf8_lossy(&column.name)
             ),
             span,
@@ -1231,7 +1266,7 @@ impl<'a> Binder<'a> {
                 ));
             }
             if position != ROWID_TARGET {
-                self.refuse_generated(table, position, Span::default())?;
+                self.refuse_generated(&table, position, "INSERT into", Span::default())?;
             }
             targets.push(position);
         }
@@ -1335,6 +1370,37 @@ impl<'a> Binder<'a> {
             return Ok(Some(BoundExpr::Null));
         };
         Ok(Some(self.bind_schema_expr(&sql)?))
+    }
+
+    /// Binds every `STORED` generated column's expression.
+    ///
+    /// Returns them as assignments, because that is what they are on the write
+    /// path: a value the statement did not write and the row has to carry. See
+    /// [`BoundUpdate::generated`] for why an `UPDATE` needs them and a
+    /// `VIRTUAL` column does not.
+    ///
+    /// @param table - the table being written
+    fn bind_stored_generated(
+        &mut self,
+        table: &TableInfo,
+    ) -> Result<Vec<BoundAssignment>, ParseError> {
+        let mut generated = Vec::new();
+        for position in 0..table.columns.len() as u16 {
+            let Some(column) = table.column(position) else {
+                continue;
+            };
+            if !column.generated || !column.stored {
+                continue;
+            }
+            let Some(expr) = self.generated_expr(table, position)? else {
+                continue;
+            };
+            generated.push(BoundAssignment {
+                column: position,
+                value: expr,
+            });
+        }
+        Ok(generated)
     }
 
     /// Binds a column's `DEFAULT`, or NULL when it has none.
