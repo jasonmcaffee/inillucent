@@ -382,6 +382,10 @@ fn dispatch(command: &'static Command, invocation: &Invocation) -> ExitCode {
     };
     context.limit = invocation.limit;
     context.null = invocation.null.clone();
+    // Ctrl+C stops the command rather than the process, so a long `query` or a
+    // `migrate` can be given up on without losing what it has already reported
+    // (task-1932, H11).
+    inillucent_cli::interrupt::stop_on_ctrl_c(context.cancel_flag());
     match command::run(command, &mut context, &arguments) {
         Ok(produced) => {
             let shown = match invocation.json {
@@ -508,9 +512,9 @@ fn serve(invocation: &Invocation) -> ExitCode {
         limit: invocation.limit,
         ..mcp::Settings::default()
     };
-    let mut input = std::io::stdin().lock();
+    let input = std::io::BufReader::new(std::io::stdin());
     let mut output = std::io::stdout();
-    match mcp::serve(settings, &mut input, &mut output) {
+    match mcp::serve(settings, input, &mut output) {
         Ok(()) => ExitCode::SUCCESS,
         Err(message) => {
             eprintln!("inillucent-mcp: {message}");

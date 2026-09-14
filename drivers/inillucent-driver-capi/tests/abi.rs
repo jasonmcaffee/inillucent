@@ -162,6 +162,46 @@ fn promised(manifest: &str) -> BTreeMap<String, String> {
     out
 }
 
+/// Returns each symbol's `note`, when it has one.
+///
+/// Separate from [`promised`], which reads the stability: a note is prose and
+/// can run over several lines, so it is joined into one string rather than read
+/// line by line. It is what `no_note_calls_a_symbol_unsupported_that_the_capability_table_says_works`
+/// checks against the capability table (task-1932, M9).
+///
+/// @param manifest - the text of `drivers/abi.toml`
+fn noted(manifest: &str) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    let mut name: Option<String> = None;
+    let mut note: Option<String> = None;
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed == "[[symbol]]" {
+            name = None;
+            note = None;
+            continue;
+        }
+        if let Some(value) = trimmed.strip_prefix("name = ") {
+            name = Some(value.trim().trim_matches('"').to_string());
+            continue;
+        }
+        if let Some(value) = trimmed.strip_prefix("note = ") {
+            note = Some(value.trim().trim_start_matches('"').to_string());
+        } else if let Some(held) = note.as_mut() {
+            // A continuation line of the same note.
+            held.push(' ');
+            held.push_str(trimmed.trim_end_matches('"'));
+        }
+        if let (Some(held), Some(said)) = (name.clone(), note.clone()) {
+            out.insert(held, said);
+        }
+    }
+    out
+}
+
 /// Reads a file beside the crate, or beside the workspace.
 ///
 /// @param relative - the path from the crate root
@@ -351,4 +391,130 @@ fn assert_eq_il(header: i64, driver: i64, name: &str) {
 fn the_header_is_where_it_is_expected_to_be() {
     let path: &Path = &crate_root().join("include/inillucent_driver.h");
     assert!(path.is_file(), "{} is not there", path.display());
+}
+
+/// M9 (task-1920): a note that says UNSUPPORTED about a symbol the capability
+/// table says works is a contract a caller writes against and then finds
+/// untrue.
+///
+/// **`inillucent_cancel` was exactly that.** `abi.toml` said "Returns
+/// UNSUPPORTED today: the engine runs a statement whole rather than a row at a
+/// time, so there is no point at which a cancel flag could be read", and the C
+/// ABI's own doc comment said "which this engine cannot do". Both had been true
+/// and had stopped being true: `capability.rs` records `cancel` as `Partial`
+/// with a note describing where the flag is read, and the implementation
+/// returns `Ok`. A binding written against the manifest would have wired a Stop
+/// button it believed did not work.
+///
+/// The check is on the *pair*, not on the wording of either: a note that claims
+/// a symbol is unsupported while the capability table says otherwise is what
+/// fails, whichever of the two moved.
+#[test]
+fn no_note_calls_a_symbol_unsupported_that_the_capability_table_says_works() {
+    let notes = noted(&read("../abi.toml"));
+
+    // The capability names the driver declares, and how well each is supported.
+    let capabilities: Vec<(String, String)> = inillucent_driver::capability::CAPABILITIES
+        .iter()
+        .map(|held| (held.name.to_string(), format!("{:?}", held.support)))
+        .collect();
+    assert!(
+        !capabilities.is_empty(),
+        "the driver declares no capabilities at all, so this check is looking in \
+         the wrong place rather than finding nothing wrong"
+    );
+
+    let mut wrong: Vec<String> = Vec::new();
+    for (symbol, note) in &notes {
+        let said_unsupported = note.contains("UNSUPPORTED")
+            || note.contains("which this engine cannot do")
+            || note.contains("cannot be done");
+        if !said_unsupported {
+            continue;
+        }
+        // Which capability this symbol is about: the longest declared name the
+        // symbol's own name ends with, so `inillucent_cancel` matches `cancel`
+        // and nothing matches by accident on a two-letter prefix.
+        let about = capabilities
+            .iter()
+            .filter(|(name, _)| symbol.ends_with(name.as_str()))
+            .max_by_key(|(name, _)| name.len());
+        let Some((name, support)) = about else {
+            continue;
+        };
+        if support != "No" {
+            wrong.push(format!(
+                "{symbol}: the note says it is unsupported, and \
+                 `capability::supports(\"{name}\")` says {support}"
+            ));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "these notes in drivers/abi.toml disagree with the capability table:\n{}",
+        wrong.join("\n")
+    );
+}
+
+/// M9 (task-1920): every exported entry point catches a panic.
+///
+/// **The claim was in the code and was false by 38 of 53.**
+/// `guarded`'s doc said "a panic unwinding into a C caller is undefined
+/// behaviour, so every entry point wraps its body in this", and fifteen did.
+/// The rest could not: `guarded` answers an `i32` status and writes into an
+/// error out-parameter, and those return a count, a pointer, a `f64` or nothing
+/// at all, most with nowhere to put an error. `guarded_value` is the companion
+/// for those, and this is the check that keeps the sentence true.
+///
+/// It is a grep because the property is about *every* entry point, and a type
+/// cannot be put on "there is no other one". A new `extern "C" fn` that forgets
+/// the guard fails here on the day it is written.
+#[test]
+fn every_exported_entry_point_catches_a_panic() {
+    let source = read("src/lib.rs");
+    let lines: Vec<&str> = source.lines().collect();
+    let mut unguarded: Vec<String> = Vec::new();
+    let mut checked = 0usize;
+
+    for (at, line) in lines.iter().enumerate() {
+        if !line.starts_with("pub extern \"C\" fn ")
+            && !line.starts_with("pub unsafe extern \"C\" fn ")
+        {
+            continue;
+        }
+        let Some(name) = line
+            .split("fn ")
+            .nth(1)
+            .and_then(|rest| rest.split('(').next())
+        else {
+            continue;
+        };
+        checked += 1;
+        // The body runs from this line to the next line that is exactly `}`,
+        // which is the closing brace of a top-level item in a formatted file.
+        let end = lines
+            .iter()
+            .enumerate()
+            .skip(at)
+            .find(|(_, held)| **held == "}")
+            .map(|(index, _)| index)
+            .unwrap_or(lines.len());
+        let body = lines.get(at..end).unwrap_or_default().join("\n");
+        if !body.contains("guarded(") && !body.contains("guarded_value(") {
+            unguarded.push(format!("{}:{}: {name}", "lib.rs", at.saturating_add(1)));
+        }
+    }
+
+    assert!(
+        checked >= 40,
+        "the C ABI should export many entry points, found {checked} - which means \
+         this scan is matching nothing rather than finding nothing wrong"
+    );
+    assert!(
+        unguarded.is_empty(),
+        "these entry points let a panic unwind into a C caller, which is undefined \
+         behaviour:\n{}\nA function answering a status takes `guarded`; one \
+         answering a value takes `guarded_value`.",
+        unguarded.join("\n")
+    );
 }

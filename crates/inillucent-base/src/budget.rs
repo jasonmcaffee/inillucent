@@ -269,6 +269,51 @@ pub fn spend(rows: u64, bytes: u64) -> DbResult<()> {
     })
 }
 
+/// Counts bytes a statement had to hold on to, refusing when the byte budget
+/// runs out.
+///
+/// **The row count is deliberately not touched (task-1932, H6).** A request's
+/// row budget bounds what the caller is handed - `Limits::served()` says 10,000
+/// rows, and `Rows::total` has to keep meaning "rows in the answer" for that
+/// number to be worth anything. What a statement *materialises* on the way to
+/// that answer is a different quantity and is bounded by the byte budget:
+/// a hash join's build side, a group table, a `DISTINCT` set, a window's
+/// partition buffer and a recursive CTE's accumulated answer are all rows that
+/// occupy memory and never reach the caller.
+///
+/// Until this existed the only `spend` in the engine was `Collect::push`, the
+/// result sink. A join whose build side is a hundred million rows and whose
+/// output is one row was bounded by nothing at all: the 256 MiB cap counted the
+/// one row it handed back.
+///
+/// The cancellation and deadline checks are folded in because every caller
+/// wants both and one thread-local borrow is cheaper than two.
+///
+/// @param bytes - roughly how many bytes the statement is now holding
+pub fn materialise(bytes: u64) -> DbResult<()> {
+    ACTIVE.with(|held| {
+        let mut borrowed = held.borrow_mut();
+        let Some(spending) = borrowed.as_mut() else {
+            return Ok(());
+        };
+        if spending.cancel.load(Ordering::Relaxed) {
+            return Err(exceeded(Exceeded::Cancelled, 0, 0));
+        }
+        if let Some(deadline) = spending.deadline {
+            if Instant::now() >= deadline {
+                return Err(exceeded(Exceeded::Time, 0, 0));
+            }
+        }
+        spending.bytes = spending.bytes.saturating_add(bytes);
+        if let Some(most) = spending.limits.bytes {
+            if spending.bytes > most {
+                return Err(exceeded(Exceeded::Bytes, spending.bytes, most));
+            }
+        }
+        Ok(())
+    })
+}
+
 /// Returns what the armed request has spent so far, as `(rows, bytes)`.
 ///
 /// Zero when nothing is armed, which is the same answer a request that has

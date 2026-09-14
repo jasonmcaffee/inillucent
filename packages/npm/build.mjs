@@ -33,6 +33,11 @@ const PLATFORMS = [
   { npm: '@inillucent/cli-darwin-arm64', target: 'aarch64-apple-darwin', os: 'darwin', cpu: 'arm64', exe: '', library: 'libinillucent_driver_capi.dylib' },
   { npm: '@inillucent/cli-darwin-x64', target: 'x86_64-apple-darwin', os: 'darwin', cpu: 'x64', exe: '', library: 'libinillucent_driver_capi.dylib' },
   { npm: '@inillucent/cli-linux-x64', target: 'x86_64-unknown-linux-gnu', os: 'linux', cpu: 'x64', exe: '', library: 'libinillucent_driver_capi.so' },
+  // The release has built this target since packaging began and npm was
+  // the one wrapper that did not offer it, so `npm i inillucent` on a
+  // Graviton or an Ampere machine installed the shim and no binary
+  // (task-1932, H12).
+  { npm: '@inillucent/cli-linux-arm64', target: 'aarch64-unknown-linux-gnu', os: 'linux', cpu: 'arm64', exe: '', library: 'libinillucent_driver_capi.so' },
 ];
 
 const PROGRAMS = ['inillucent', 'inillucent-shell', 'inillucent-mcp', 'inillucent-migrate'];

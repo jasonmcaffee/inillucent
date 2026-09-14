@@ -150,6 +150,12 @@ impl Sink for SetKeys {
     fn push(&mut self, batch: &Batch<'_>) -> DbResult<Flow> {
         for nth in 0..batch.live() {
             let encoded = key_of(batch, nth, &self.collations)?;
+            // **The right branch of `EXCEPT` and `INTERSECT` is materialised
+            // whole before the left one is read (task-1932, H6).** Only a new
+            // key costs memory; a repeat increments a counter.
+            if !self.counts.contains_key(&encoded) {
+                inillucent_base::budget::materialise(encoded.len() as u64)?;
+            }
             *self.counts.entry(encoded).or_insert(0) += 1;
         }
         Ok(Flow::Continue)
@@ -231,8 +237,16 @@ impl Sink for SetOp {
         let mut kept: Vec<Vec<OwnedDatum>> = Vec::new();
         for nth in 0..batch.live() {
             let encoded = key_of(batch, nth, &self.collations)?;
+            // **The emitted-key set grows for the life of the statement
+            // (task-1932, H6).** `UNION`, `EXCEPT` and `INTERSECT` all keep one
+            // key per distinct row they have answered with, so a compound over
+            // two large branches holds both.
+            let remembered = self.seen.len();
             if !self.admits(&encoded) {
                 continue;
+            }
+            if self.seen.len() > remembered {
+                inillucent_base::budget::materialise(encoded.len() as u64)?;
             }
             let mut row = Vec::with_capacity(width);
             for column in 0..width {

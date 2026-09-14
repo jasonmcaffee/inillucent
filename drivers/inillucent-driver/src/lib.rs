@@ -76,6 +76,15 @@ pub use introspect::{Item, Kind, Table};
 pub use rows::Rows;
 pub use value::{Column, Value, ValueKind};
 
+/// What one statement may spend, and the default ceiling on the plan cache.
+///
+/// Re-exported so that a caller setting [`OpenOptions::limits`] or
+/// [`OpenOptions::statement_cache`] does not have to name `inillucent_engine`
+/// to build the value it is setting (task-1932, M1). The driver's README calls
+/// it the one surface, and a surface a caller has to reach past is not one.
+pub use inillucent_engine::base::budget::Limits as StatementLimits;
+pub use inillucent_engine::DEFAULT_STATEMENT_CACHE;
+
 /// The driver's own version, and the engine's beneath it.
 pub const VERSION: &str = concat!(
     "inillucent-driver ",
@@ -127,6 +136,19 @@ pub struct OpenOptions {
     /// bound, and `inillucent_base::budget::Limits::served` is what it asks
     /// for - which is what `inillucent-mcp` does.
     pub limits: Limits,
+    /// How many compiled statements one connection holds before its plan cache
+    /// is emptied.
+    ///
+    /// **Bounded, where it used to grow for the life of the process
+    /// (task-1932, M1).** The engine caches a compiled plan per statement text
+    /// and cleared it only on a schema change, so an application issuing
+    /// generated SQL - a query builder, a reporting tool, anything that puts a
+    /// literal in the statement - kept one plan per distinct string and nothing
+    /// measured it.
+    ///
+    /// Default `inillucent_engine::DEFAULT_STATEMENT_CACHE`, which is a
+    /// thousand. Zero compiles every statement fresh.
+    pub statement_cache: usize,
 }
 
 impl Default for OpenOptions {
@@ -138,6 +160,7 @@ impl Default for OpenOptions {
             cache_frames: 4_096,
             diagnostics: false,
             limits: Limits::unbounded(),
+            statement_cache: inillucent_engine::DEFAULT_STATEMENT_CACHE,
         }
     }
 }
@@ -198,6 +221,7 @@ impl Database {
         }
         let engine = EngineDatabase::open_with(&path, options.cache_frames)
             .map_err(|error| Error::from_engine(&error, options.diagnostics))?;
+        engine.set_statement_cache_limit(options.statement_cache);
         Ok(Database {
             engine,
             path,
@@ -218,6 +242,7 @@ impl Database {
         let options = OpenOptions::default();
         let engine = EngineDatabase::import_with(path.as_ref(), options.cache_frames)
             .map_err(|error| Error::from_engine(&error, options.diagnostics))?;
+        engine.set_statement_cache_limit(options.statement_cache);
         let path = engine.path().to_path_buf();
         Ok(Database {
             engine,
@@ -225,6 +250,31 @@ impl Database {
             options,
             cancel: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// Returns how many compiled statements this database is holding.
+    ///
+    /// **Nothing could ask before this (task-1932, M1).** The engine caches a
+    /// compiled plan per statement text and emptied it only on a schema change,
+    /// so the question "is this connection holding a plan per generated
+    /// statement" had no answer that did not involve a debugger.
+    pub fn cached_statements(&self) -> usize {
+        self.engine.cached_statements()
+    }
+
+    /// Returns the ceiling the plan cache is emptied at.
+    ///
+    /// [`OpenOptions::statement_cache`] sets it.
+    pub fn statement_cache_limit(&self) -> usize {
+        self.engine.statement_cache_limit()
+    }
+
+    /// Forgets every compiled statement.
+    ///
+    /// A caller that has just issued a hundred thousand generated statements
+    /// and wants the memory back has no other way to ask for it.
+    pub fn clear_statement_cache(&self) {
+        self.engine.clear_statement_cache();
     }
 
     /// Returns a connection to this database.
@@ -415,6 +465,96 @@ impl Connection<'_> {
         })
     }
 
+    /// Runs a statement whose parameters are named, and returns its rows.
+    ///
+    /// **The engine has been able to answer this since it had parameters, and
+    /// the driver could not ask (task-1932, M1).** `connect::parameter_names`
+    /// returns every `:name`, `@name` and `$name` in a statement with the index
+    /// it was assigned; the driver bound by position only, so an application
+    /// with a statement of nine named parameters had to count them itself and
+    /// keep the count right through every edit of the SQL. Getting it wrong is
+    /// silent: the values land in the wrong columns and the statement succeeds.
+    ///
+    /// A name the statement does not use is refused rather than ignored, and so
+    /// is a parameter the statement uses and the caller did not supply. Both are
+    /// the same mistake seen from the two ends, and both are cheaper to hear
+    /// about than to debug.
+    ///
+    /// @param sql - the statement
+    /// @param params - the values, by the name each appears under in the SQL
+    /// @param limit - how many rows to keep, or zero for every row
+    pub fn query_named(&self, sql: &str, params: &[(&str, Value)], limit: usize) -> Result<Rows> {
+        let positional = self.positions_for(sql, params)?;
+        self.query(sql, &positional, limit)
+    }
+
+    /// Runs a statement whose parameters are named, for its effect.
+    ///
+    /// @param sql - the statement
+    /// @param params - the values, by the name each appears under in the SQL
+    pub fn execute_named(&self, sql: &str, params: &[(&str, Value)]) -> Result<u64> {
+        Ok(self.query_named(sql, params, 0)?.affected.unwrap_or(0))
+    }
+
+    /// Returns the named values in the order the statement's markers are
+    /// numbered.
+    ///
+    /// The one place a name becomes an index, so the two entry points above
+    /// cannot disagree about what a missing name means.
+    ///
+    /// @param sql - the statement
+    /// @param params - the values, by name
+    fn positions_for(&self, sql: &str, params: &[(&str, Value)]) -> Result<Vec<Value>> {
+        let declared = self
+            .engine
+            .parameter_names(sql)
+            .map_err(|error| self.database.classify(&error))?;
+        let mut ordered: Vec<Option<Value>> = vec![None; declared.len()];
+        for (name, value) in params {
+            let wanted = name.trim_start_matches([':', '@', '$', '?']);
+            let found = declared.iter().find(|(declared_name, _)| {
+                String::from_utf8_lossy(declared_name).trim_start_matches([':', '@', '$']) == wanted
+            });
+            let Some((_, index)) = found else {
+                return Err(Error::said(
+                    Status::InvalidState,
+                    format!(
+                        "this statement has no parameter called '{name}'. It has: {}",
+                        named_list(&declared)
+                    ),
+                ));
+            };
+            let at = (*index as usize).saturating_sub(1);
+            match ordered.get_mut(at) {
+                Some(slot) => *slot = Some(value.clone()),
+                None => {
+                    return Err(Error::said(
+                        Status::InvalidState,
+                        format!("'{name}' is numbered {index}, past this statement's parameters."),
+                    ))
+                }
+            }
+        }
+        let mut positional = Vec::with_capacity(ordered.len());
+        for (at, slot) in ordered.into_iter().enumerate() {
+            match slot {
+                Some(value) => positional.push(value),
+                None => {
+                    let missing = declared
+                        .iter()
+                        .find(|(_, index)| *index as usize == at.saturating_add(1))
+                        .map(|(name, _)| String::from_utf8_lossy(name).into_owned())
+                        .unwrap_or_else(|| format!("?{}", at.saturating_add(1)));
+                    return Err(Error::said(
+                        Status::InvalidState,
+                        format!("this statement uses '{missing}' and no value was given for it."),
+                    ));
+                }
+            }
+        }
+        Ok(positional)
+    }
+
     /// Describes how a statement would be run.
     ///
     /// The operator chain, which is what `EXPLAIN QUERY PLAN` answers. There is
@@ -459,61 +599,56 @@ impl Connection<'_> {
                  too.",
             ));
         }
-        self.depth.set(1);
-        let outcome = self.transact(work, check);
-        self.depth.set(0);
-        outcome
+        let guard = self.begin()?;
+        let outcome = guard.run_all(work, check);
+        match outcome {
+            Ok(affected) => {
+                guard.commit()?;
+                Ok(affected)
+            }
+            Err(why) => Err(why),
+        }
     }
 
-    /// Runs the body of [`Connection::transaction`], so the depth is always put
-    /// back.
+    /// Opens a transaction this caller drives statement by statement.
     ///
-    /// @param work - the statements and their bound values
-    /// @param check - the postcondition
-    fn transact<F>(&self, work: &[(String, Vec<Value>)], check: F) -> Result<Vec<u64>>
-    where
-        F: Fn(&[u64]) -> Result<()>,
-    {
+    /// **The escape `transaction` could not give (task-1932, M1).** The batch
+    /// form takes every statement up front, which is the right shape for a row
+    /// editor and the wrong one for anything that has to look at what it just
+    /// wrote before deciding the next statement. The only way to do that was
+    /// `execute_batch("BEGIN")`, which the nesting guard cannot see - so two
+    /// callers doing it on one connection got one transaction and no warning,
+    /// and a caller that returned early left it open for the life of the
+    /// process.
+    ///
+    /// Dropping the returned value rolls back. That is the whole reason it is a
+    /// value rather than a pair of methods: an early return, a `?`, or a panic
+    /// leaves the database as it was rather than holding a write lock until the
+    /// connection closes.
+    pub fn begin(&self) -> Result<Transaction<'_>> {
+        if self.database.options.read_only {
+            return Err(Error::said(
+                Status::ReadOnly,
+                "this connection is read only, and a transaction is for statements that \
+                 change something.",
+            ));
+        }
+        if self.depth.get() > 0 {
+            return Err(Error::said(
+                Status::InvalidState,
+                "a transaction is already open on this connection; this driver does not nest \
+                 them, because committing the inner one would commit the outer one's work \
+                 too.",
+            ));
+        }
         self.engine
             .execute_batch("BEGIN")
             .map_err(|error| self.database.classify(&error))?;
-        let mut affected = Vec::with_capacity(work.len());
-        for (statement, values) in work {
-            match self.run(statement, values, 0) {
-                Ok(rows) => affected.push(rows.affected.unwrap_or(0)),
-                Err(why) => return Err(self.rolled_back(why)),
-            }
-        }
-        if let Err(why) = check(&affected) {
-            return Err(self.rolled_back(why));
-        }
-        self.engine
-            .execute_batch("COMMIT")
-            .map_err(|error| self.database.classify(&error))?;
-        Ok(affected)
-    }
-
-    /// Rolls the open transaction back and hands back the reason it is being
-    /// rolled back.
-    ///
-    /// A failure to roll back is not swallowed: it replaces the reason, because
-    /// a caller told only about the first failure would believe nothing was
-    /// written.
-    ///
-    /// @param why - what went wrong
-    fn rolled_back(&self, why: Error) -> Error {
-        match self.engine.execute_batch("ROLLBACK") {
-            Ok(()) => why,
-            Err(error) => {
-                let mut failed = self.database.classify(&error);
-                failed.message = format!(
-                    "{} - and the rollback after it failed: {}. The database may hold a \
-                     partial write.",
-                    why.message, failed.message
-                );
-                failed
-            }
-        }
+        self.depth.set(1);
+        Ok(Transaction {
+            connection: self,
+            settled: Cell::new(false),
+        })
     }
 
     /// Runs a statement with no read-only check, which the caller has done.
@@ -814,6 +949,157 @@ impl Connection<'_> {
     }
 }
 
+/// An open transaction, which rolls back unless it is committed.
+///
+/// **The rollback is in `Drop`, and that is the point (task-1932, M1).** A
+/// transaction driven statement by statement is driven by code with early
+/// returns in it, and every one of those is a path where somebody has to
+/// remember to roll back. Putting it in `Drop` means the only way to keep the
+/// work is to say so.
+///
+/// A `?` inside the block, a `return`, a panic: all three leave the database as
+/// it was. `commit()` is the one thing that does not.
+///
+/// ```no_run
+/// # use inillucent_driver::{Database, Value, Result};
+/// # fn main() -> Result<()> {
+/// let database = Database::open("app.rdb")?;
+/// let connection = database.connect();
+/// let transaction = connection.begin()?;
+/// transaction.execute("UPDATE account SET balance = balance - ?1 WHERE id = ?2", &[Value::Integer(50), Value::Integer(1)])?;
+/// let moved = transaction.query("SELECT balance FROM account WHERE id = ?1", &[Value::Integer(1)], 1)?;
+/// if moved.rows.first().and_then(|row| row.first()) == Some(&Value::Integer(0)) {
+///     // Dropped without a commit: nothing above is kept.
+///     return Ok(());
+/// }
+/// transaction.commit()?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug)]
+pub struct Transaction<'c> {
+    /// The connection it is open on.
+    connection: &'c Connection<'c>,
+    /// Whether `commit` or `rollback` has already run, so `Drop` does nothing.
+    settled: Cell<bool>,
+}
+
+impl Transaction<'_> {
+    /// Runs a statement inside the transaction and returns its rows.
+    ///
+    /// @param sql - the statement
+    /// @param params - the values bound to `?1`, `?2` and so on
+    /// @param limit - how many rows to keep, or zero for every row
+    pub fn query(&self, sql: &str, params: &[Value], limit: usize) -> Result<Rows> {
+        self.connection.run(sql, params, limit)
+    }
+
+    /// Runs a statement inside the transaction for its effect.
+    ///
+    /// @param sql - the statement
+    /// @param params - the values bound to `?1`, `?2` and so on
+    pub fn execute(&self, sql: &str, params: &[Value]) -> Result<u64> {
+        Ok(self.query(sql, params, 0)?.affected.unwrap_or(0))
+    }
+
+    /// Keeps everything this transaction wrote.
+    ///
+    /// Takes `self`, so a committed transaction cannot be used again and the
+    /// `Drop` below cannot roll back what was kept.
+    pub fn commit(self) -> Result<()> {
+        self.settled.set(true);
+        self.connection.depth.set(0);
+        self.connection
+            .engine
+            .execute_batch("COMMIT")
+            .map_err(|error| self.connection.database.classify(&error))
+    }
+
+    /// Discards everything this transaction wrote.
+    ///
+    /// The same thing dropping it does, said out loud. A caller that has
+    /// decided to abandon the work reads better for saying so, and the error a
+    /// failed rollback produces is reportable here and is not from `Drop`.
+    pub fn rollback(self) -> Result<()> {
+        self.settled.set(true);
+        self.connection.depth.set(0);
+        self.connection
+            .engine
+            .execute_batch("ROLLBACK")
+            .map_err(|error| self.connection.database.classify(&error))
+    }
+
+    /// Runs a list of statements, rolling back on the first failure or on a
+    /// refused postcondition.
+    ///
+    /// The body of [`Connection::transaction`], which is now this method with
+    /// the open and the commit around it.
+    ///
+    /// @param work - the statements and their bound values, in order
+    /// @param check - what must be true of the changed-row counts before commit
+    fn run_all<F>(&self, work: &[(String, Vec<Value>)], check: F) -> Result<Vec<u64>>
+    where
+        F: Fn(&[u64]) -> Result<()>,
+    {
+        let mut affected = Vec::with_capacity(work.len());
+        for (statement, values) in work {
+            match self.connection.run(statement, values, 0) {
+                Ok(rows) => affected.push(rows.affected.unwrap_or(0)),
+                Err(why) => return Err(self.rolled_back(why)),
+            }
+        }
+        if let Err(why) = check(&affected) {
+            return Err(self.rolled_back(why));
+        }
+        Ok(affected)
+    }
+
+    /// Rolls back and hands back the reason it is rolling back.
+    ///
+    /// A failure to roll back is not swallowed: it replaces the reason, because
+    /// a caller told only about the first failure would believe nothing was
+    /// written.
+    ///
+    /// @param why - what went wrong
+    fn rolled_back(&self, why: Error) -> Error {
+        self.settled.set(true);
+        self.connection.depth.set(0);
+        match self.connection.engine.execute_batch("ROLLBACK") {
+            Ok(()) => why,
+            Err(error) => {
+                let mut failed = self.connection.database.classify(&error);
+                failed.message = format!(
+                    "{} - and the rollback after it failed: {}. The database may hold a \
+                     partial write.",
+                    why.message, failed.message
+                );
+                failed
+            }
+        }
+    }
+}
+
+impl Drop for Transaction<'_> {
+    /// Rolls back an uncommitted transaction.
+    ///
+    /// **Silent, because a `Drop` has nowhere to report to.** The failure it
+    /// could hide is a rollback that did not happen, and the thing that would
+    /// have to happen for that is the engine refusing a `ROLLBACK` on a
+    /// transaction it opened. The connection is dropped or reused immediately
+    /// afterwards, and a reused one refuses the next `begin` because the depth
+    /// is put back only on the paths that succeeded.
+    ///
+    /// A caller who wants to know calls `rollback()` and reads the answer.
+    fn drop(&mut self) {
+        if self.settled.get() {
+            return;
+        }
+        self.settled.set(true);
+        let _ = self.connection.engine.execute_batch("ROLLBACK");
+        self.connection.depth.set(0);
+    }
+}
+
 /// A statement compiled once and run more than once.
 pub struct Statement<'c> {
     connection: &'c Connection<'c>,
@@ -850,6 +1136,20 @@ impl std::fmt::Debug for Statement<'_> {
             .field("sql", &self.sql)
             .finish()
     }
+}
+
+/// Renders the parameter names a statement declares, for a refusal.
+///
+/// @param declared - the names and their indices, as the engine answered
+fn named_list(declared: &[(Vec<u8>, u32)]) -> String {
+    if declared.is_empty() {
+        return "none".to_string();
+    }
+    declared
+        .iter()
+        .map(|(name, _)| String::from_utf8_lossy(name).into_owned())
+        .collect::<Vec<String>>()
+        .join(", ")
 }
 
 /// Binds every value in order, starting at `?1`.

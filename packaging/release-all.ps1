@@ -16,10 +16,13 @@
     18.10, RHEL 8 and Amazon Linux 2023. Building on this machine's WSL instead
     would produce a 2.39 floor, which refuses to start on Debian 12 or RHEL 9.
 
-    The two Apple targets are built but not archived here. They are joined into
-    universal binaries and signed by packaging/macos/sign-macos.ps1, because an
-    archive of unsigned Mach-O is not something anybody should be able to pick
-    up by accident.
+    The two Apple targets are built but not archived here. Joining them into
+    universal binaries, signing them and notarising them all happen on a Mac,
+    because codesign and notarytool are Apple's own tools and neither runs on
+    this machine: packaging/macos/release-macos.sh does the whole sequence and
+    packaging/macos/notarize.sh is the notarisation half on its own. An archive
+    of unsigned Mach-O is not something anybody should be able to pick up by
+    accident, which is why nothing here writes one.
 
 .PARAMETER Version
     Overrides the version taken from the workspace manifest.
@@ -158,7 +161,7 @@ if ($wantMacos) {
         }
         Write-Host "   built, unsigned: target/$target/release"
     }
-    Write-Host '   sign them with: pwsh packaging/macos/sign-macos.ps1'
+    Write-Host '   sign them on a Mac with: packaging/macos/release-macos.sh'
 }
 
 $sums = Update-Sha256Sums -Dist $dist

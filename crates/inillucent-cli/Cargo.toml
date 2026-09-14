@@ -53,6 +53,17 @@ inillucent-remote = { workspace = true }
 inillucent-value = { workspace = true }
 inillucent-tree = { workspace = true }
 
+# Ctrl+C, and nothing else. There is no way to be told about it in the standard
+# library, and both platforms offer exactly one call: `SetConsoleCtrlHandler`
+# and `signal`. `src/interrupt.rs` is the only file in this crate that says
+# `unsafe`, it is the only file that names either of these, and what it does
+# with them is install a handler that stores `true` in an `AtomicBool`.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }
+
+[target.'cfg(not(windows))'.dependencies]
+libc = { workspace = true }
+
 # The workspace's lint table; see the note beside it in the root manifest.
 [lints]
 workspace = true

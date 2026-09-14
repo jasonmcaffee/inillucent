@@ -713,6 +713,23 @@ impl Sink for HashAggregate {
                 );
                 values.push(value);
             }
+            // **The group table is charged as it grows (task-1932, H6).**
+            // A new key is memory the statement holds until it finishes, and
+            // the number of them is decided by the data rather than by the
+            // query - `GROUP BY` over a column with a hundred million distinct
+            // values builds a hundred million groups to answer with a hundred
+            // million rows. The input is deliberately not charged: a `GROUP BY`
+            // over a large table that answers in four rows is the shape this
+            // operator exists for.
+            let fresh = !self.groups.contains_key(&encoded);
+            if fresh {
+                let held = values
+                    .iter()
+                    .map(crate::expr::Computed::get)
+                    .map(|value| datum_bytes(&value))
+                    .sum::<u64>();
+                inillucent_base::budget::materialise(held.saturating_add(encoded.len() as u64))?;
+            }
             let entry = self.groups.entry(encoded.clone()).or_insert_with(|| {
                 (
                     values
@@ -1496,6 +1513,13 @@ impl Sink for Distinct {
                 row.push(OwnedDatum::from_datum(&value));
             }
             if self.seen.insert(encoded.clone()) {
+                // **Both halves are charged (task-1932, H6).** `DISTINCT` holds
+                // the key set *and* every surviving row until `finish`, so its
+                // memory is decided by how many rows are distinct - which is
+                // the input size whenever they all are.
+                inillucent_base::budget::materialise(
+                    owned_row_bytes(&row).saturating_add(encoded.len() as u64),
+                )?;
                 self.rows.push(row);
             }
         }
@@ -1598,7 +1622,7 @@ impl Sink for Limit {
 /// operator, and a budget nobody can compute is a budget nobody enforces.
 ///
 /// @param batch - the batch about to be handed on
-fn batch_bytes(batch: &Batch<'_>) -> u64 {
+pub(crate) fn batch_bytes(batch: &Batch<'_>) -> u64 {
     let mut total = 0u64;
     for nth in 0..batch.live() {
         for column in 0..batch.columns.len() {
@@ -1615,6 +1639,28 @@ fn batch_bytes(batch: &Batch<'_>) -> u64 {
         }
     }
     total
+}
+
+/// Returns roughly how many bytes one owned row holds.
+///
+/// The same accounting `batch_bytes` uses, so a row charged as a batch and the
+/// same row charged after it was materialised cost the same.
+///
+/// @param row - the row to measure
+pub(crate) fn owned_row_bytes(row: &[OwnedDatum]) -> u64 {
+    row.iter()
+        .map(|value| datum_bytes(&value.borrow()))
+        .fold(0u64, u64::saturating_add)
+}
+
+/// Returns roughly how many bytes one value holds.
+///
+/// @param value - the value to measure
+pub(crate) fn datum_bytes(value: &Datum<'_>) -> u64 {
+    match value {
+        Datum::Text(bytes) | Datum::Blob(bytes) => bytes.len() as u64,
+        _ => 8,
+    }
 }
 
 /// The one place a pipeline breaker turns owned rows back into batches. It

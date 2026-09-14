@@ -56,9 +56,6 @@ milliseconds = 42485
 target = "inillucent-compat::budgets"
 milliseconds = 366228
 
-[[timing]]
-target = "inillucent-compat::capi"
-milliseconds = 31087
 
 [[timing]]
 target = "inillucent-compat::catalog"

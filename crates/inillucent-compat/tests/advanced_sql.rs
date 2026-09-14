@@ -537,6 +537,70 @@ fn math_functions_match_the_oracle() {
     );
 }
 
+/// The two time zone modifiers differ from SQLite, and that is held in place.
+///
+/// **The one deliberate difference in the date and time table (task-1932, M8).**
+/// `datetime(x, 'localtime')` answers NULL here and `datetime(x, 'utc')`
+/// returns its argument unchanged; SQLite converts between the machine's zone
+/// and UTC for both. The reason is in `compat/sqlite-3.53.4.toml`'s
+/// `functions.date-time` row and in `docs/feature-comparison.md`: both of
+/// SQLite's answers depend on the operating system's time zone database and on
+/// the zone the process is running in, so the same query answers differently on
+/// two machines and differently again after a daylight saving change.
+///
+/// What this asserts is the deviation itself, in both directions: that this
+/// engine still does what it has decided to do, *and* that SQLite still does
+/// something else. A decision nobody checks becomes a defect the day somebody
+/// implements the modifier and forgets the note - and one that is checked only
+/// on this side would go on passing after SQLite changed its mind.
+#[test]
+fn the_time_zone_modifiers_are_a_deliberate_deviation() {
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("advanced-sql");
+    let _ = std::fs::create_dir_all(&directory);
+    let Some((mut driver, database)) = build(&directory, "timezone") else {
+        inillucent_compat::differential::skipping("the pinned SQLite oracle is not built");
+        return;
+    };
+    let handle = Database::import_with_busy_timeout(&database, std::time::Duration::from_secs(5))
+        .expect("the fixture opens");
+    let connection = handle.connect().expect("the connection opens");
+
+    // A fixed instant, so nothing here reads a clock.
+    const STAMP: &str = "2026-09-03 14:30:00";
+
+    let local = format!("SELECT datetime('{STAMP}', 'localtime') IS NULL");
+    let ours = inillucent_rows(&connection, &local).expect("the statement runs");
+    assert_eq!(
+        ours,
+        vec!["int:1".to_string()],
+        "`datetime(x, 'localtime')` no longer answers NULL. If that is deliberate, the note \
+         on `functions.date-time` in compat/sqlite-3.53.4.toml and the row in \
+         docs/feature-comparison.md have to move with it."
+    );
+    let theirs = driver
+        .send(&Op::Query(local.clone()))
+        .expect("the oracle answers");
+    let said = theirs
+        .rows
+        .first()
+        .and_then(|row| row.first())
+        .map(|value| format!("{value:?}"))
+        .unwrap_or_default();
+    assert!(
+        theirs.ok && !said.contains('1'),
+        "SQLite now answers NULL for `localtime` as well, so this is no longer a deviation: \
+         {said}"
+    );
+
+    let utc = format!("SELECT datetime('{STAMP}', 'utc')");
+    let ours = inillucent_rows(&connection, &utc).expect("the statement runs");
+    assert_eq!(
+        ours,
+        vec![format!("text:{STAMP}")],
+        "`datetime(x, 'utc')` is no longer a no-op"
+    );
+}
+
 /// The date and time built-ins.
 ///
 /// Nothing here names `'now'`: the two engines read the clock microseconds
@@ -604,6 +668,24 @@ fn core_functions_match_the_oracle() {
             "SELECT printf('%g', 1234.5), printf('%g', 0.00001234), printf('%G', 1e20)",
             "SELECT printf('%s|%s', 'ab', 'cd'), printf('%10s|', 'ab'), printf('%-10s|', 'ab')",
             "SELECT printf('%.2s', 'abcdef')",
+            // The `,` flag, which was parsed and thrown away before task-1932
+            // (M8). Grouping applies to `d`, `i`, `u` and `f` and to nothing
+            // else, and for the integer conversions it is applied after the
+            // zero padding - so `%0,12d` is fifteen characters wide in a field
+            // of twelve, and `%0,14.2f` is fourteen. Both orderings are here
+            // because getting them the same way round is the mistake.
+            "SELECT printf('%,d', 1234567), printf('%,d', -1234567), printf('%,d', 123)",
+            "SELECT printf('%,12d|', 1234567), printf('%-,12d|', 1234567), printf('%+,d', 1234567)",
+            "SELECT printf('%0,12d', 1234567), printf('%0,12d', -1234567), printf('%,.8d', 1234)",
+            "SELECT printf('%,x', 255), printf('%,o', 8), printf('%,e', 1234567.0), printf('%,g', 1234567.0)",
+            "SELECT printf('%,f', 1234567.5), printf('%,14.2f|', 1234.5), printf('%0,14.2f', 1234.5)",
+            // The `!` flag, which counts the width and the precision in
+            // characters rather than bytes. Every string here is multi-byte on
+            // purpose: with ASCII the two spellings agree and the case says
+            // nothing.
+            "SELECT printf('%10s|', 'café'), printf('%!10s|', 'café'), printf('%!-10s|', 'café')",
+            "SELECT printf('%5s|', '日本語'), printf('%!5s|', '日本語')",
+            "SELECT printf('%.3s', 'éab'), printf('%!.3s', 'éab'), printf('%!8.2s|', '日本語')",
             "SELECT printf('%c%c', 65, 66)",
             "SELECT printf('%q', 'it''s'), printf('%Q', 'it''s'), printf('%Q', NULL), printf('%q', NULL)",
             "SELECT printf('%w', 'a\"b')",

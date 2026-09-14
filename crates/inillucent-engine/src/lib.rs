@@ -96,6 +96,8 @@ mod inspect;
 mod introspect;
 pub mod multi;
 mod plans;
+use plans::Cached;
+pub use plans::DEFAULT_STATEMENT_CACHE;
 pub mod pragma;
 mod rebuild;
 mod recovery;
@@ -267,6 +269,8 @@ pub struct ImportedDatabase {
     /// Keyed by the statement text, which is what a caller re-issues. Behind an
     /// `Rc` so an entry can be held across the `&mut self` a write needs.
     statements: std::cell::RefCell<HashMap<u64, HashMap<String, std::rc::Rc<Cached>>>>,
+    /// The plan cache's ceiling; see `plans.rs`, which holds and enforces it.
+    statement_cache_limit: std::cell::Cell<usize>,
     /// How many statements this connection has actually compiled.
     ///
     /// **The counter a plan-cache guard needs, and the reason it is a counter.**
@@ -1482,6 +1486,7 @@ impl ImportedDatabase {
             changed_ever: std::cell::Cell::new(0),
             session_change_baseline: session_changes::SessionChanges::default(),
             statements: std::cell::RefCell::new(HashMap::new()),
+            statement_cache_limit: std::cell::Cell::new(plans::DEFAULT_STATEMENT_CACHE),
             compiles: std::cell::Cell::new(0),
             batch: std::cell::Cell::new(None),
             undo: std::cell::RefCell::new(Vec::new()),
@@ -1780,6 +1785,7 @@ impl ImportedDatabase {
             changed_ever: std::cell::Cell::new(0),
             session_change_baseline: session_changes::SessionChanges::default(),
             statements: std::cell::RefCell::new(HashMap::new()),
+            statement_cache_limit: std::cell::Cell::new(plans::DEFAULT_STATEMENT_CACHE),
             compiles: std::cell::Cell::new(0),
             batch: std::cell::Cell::new(None),
             undo: std::cell::RefCell::new(Vec::new()),
@@ -5470,92 +5476,6 @@ fn query_plan_rows(lines: &[String]) -> Outcome {
 /// could see it would be a caller that could be broken by a plan shape changing.
 pub struct Statement(std::rc::Rc<Cached>);
 
-/// One statement, compiled as far as it can be before its parameters arrive.
-///
-/// A `SELECT` is a plan and the structural choice over it. A write is the bound
-/// statement plus, for an `UPDATE` or a `DELETE`, the plan that finds the rows
-/// it will change - which is an ordinary query and is prepared like one, so
-/// `WHERE id = ?1` reaches the same point probe on the second execution as on
-/// the first.
-enum Cached {
-    /// Text that carries no statement at all.
-    ///
-    /// A `-- comment` after the last `;`, an empty string, whitespace. Running
-    /// it produces no rows and changes nothing, which is what SQLite does with
-    /// the same text.
-    Nothing,
-    /// A statement the session carries out itself, held as its own text.
-    ///
-    /// Re-bound on every execution, because binding a `DROP TABLE` resolves
-    /// whether the table is there and the answer changes when it runs.
-    Ddl(String),
-    /// `EXPLAIN QUERY PLAN`, rendered when the statement was compiled.
-    ///
-    /// The lines describe the plan and the plan depends on the schema, so this
-    /// is cached and invalidated exactly like the query it describes - which is
-    /// the point of holding it here rather than rendering it per execution.
-    QueryPlan(Vec<String>),
-    /// A plain `EXPLAIN`, rendered when the statement was compiled.
-    ///
-    /// One entry per step: the opcode's name, its first two operands, its
-    /// argument, and the comment. See `program_of` for what those mean here.
-    Program(Vec<(String, i64, i64, String, String)>),
-    /// An insert into a virtual table, which the module applies.
-    VirtualInsert(Box<inillucent_sql::dml::BoundInsert>),
-    /// A delete from a virtual table, with the query that finds its rowids.
-    ///
-    /// A module owns its storage, so the only handle on one of its rows is the
-    /// rowid it answers with: the plan asks which rowids match and the module
-    /// is told about each. That is what SQLite does, and the reason `xUpdate`
-    /// takes a rowid rather than a predicate.
-    VirtualDelete(Box<inillucent_sql::dml::BoundDelete>, CachedQuery),
-    /// An update of a virtual table, with the query that finds its rowids.
-    ///
-    /// The same shape as [`Cached::VirtualDelete`] and for the same reason: a
-    /// module owns its storage, so the only handle on one of its rows is the
-    /// rowid it answers with.
-    VirtualUpdate(Box<inillucent_sql::dml::BoundUpdate>, CachedQuery),
-    /// A query, with a slot for a compiled chain reused across executions.
-    ///
-    /// The slot is a `RefCell` beside the plan, the same reason
-    /// `dml::UpdateCache` sits inside `Cached::Update`: `cached` here is a
-    /// shared `&Rc<Cached>`, and interior mutability is what lets one
-    /// execution build the chain and a later one, through the same `Rc`,
-    /// find it already there.
-    Select(
-        Box<PhysicalPlan>,
-        Box<physical::Prepared>,
-        std::cell::RefCell<physical::Slot>,
-    ),
-    /// An insert, with the query for its `SELECT` source when it has one.
-    ///
-    /// The flag says whether a `VALUES` list holds a subquery. It is decided
-    /// once, here, because the alternative is walking the value expressions on
-    /// every execution of every insert - and `BoundExpr::children` allocates a
-    /// vector per node, which is the cost this project already measured on the
-    /// read path at about 0.07 us per execution.
-    Insert(
-        Box<inillucent_sql::dml::BoundInsert>,
-        Option<CachedQuery>,
-        bool,
-    ),
-    /// An update, with the query that finds the rows it changes.
-    ///
-    /// The flag says whether an assignment holds a subquery, for the reason
-    /// above.
-    Update(
-        Box<inillucent_sql::dml::BoundUpdate>,
-        CachedQuery,
-        bool,
-        /// Everything the statement builds before it looks at a row, kept
-        /// between executions. See `dml::UpdateSetup`: it was more than half of
-        /// what `txn.large` cost, and none of it depends on the row.
-        dml::UpdateCache,
-    ),
-    /// A delete, with the query that finds the rows it removes.
-    Delete(Box<inillucent_sql::dml::BoundDelete>, CachedQuery),
-}
-
 /// What running one statement produced.
 #[derive(Clone, Debug, Default)]
 pub struct Outcome {
@@ -6211,7 +6131,7 @@ fn target_path(fixture: &std::path::Path, page_size: usize, frames: usize) -> Pa
 /// @param wal - the log it should ask
 fn let_the_pool_ask_the_log(pool: &Pool, wal: &std::rc::Rc<Wal>) {
     let held = std::rc::Rc::clone(wal);
-    pool.on_log_behind(Box::new(move || {
+    pool.on_log_behind(std::rc::Rc::new(move || {
         held.sync()?;
         Ok(held.write_ahead_point())
     }));

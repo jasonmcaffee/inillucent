@@ -272,6 +272,31 @@ impl Database {
         self.engine.borrow_mut().register_module(module)
     }
 
+    /// Returns how many compiled statements this database is holding.
+    ///
+    /// See `ImportedDatabase::cached_statements`; this is the same count,
+    /// reachable from the connection surface an application actually holds.
+    pub fn cached_statements(&self) -> usize {
+        self.engine.borrow().cached_statements()
+    }
+
+    /// Returns the ceiling one session's plan cache is emptied at.
+    pub fn statement_cache_limit(&self) -> usize {
+        self.engine.borrow().statement_cache_limit()
+    }
+
+    /// Sets the ceiling one session's plan cache is emptied at.
+    ///
+    /// @param most - how many compiled statements one session may hold
+    pub fn set_statement_cache_limit(&self, most: usize) {
+        self.engine.borrow().set_statement_cache_limit(most);
+    }
+
+    /// Forgets every compiled statement.
+    pub fn clear_statement_cache(&self) {
+        self.engine.borrow().clear_statement_cache();
+    }
+
     /// Returns what the page cache has been asked to do.
     ///
     /// For `.stats`, which reports the work a statement caused rather than the

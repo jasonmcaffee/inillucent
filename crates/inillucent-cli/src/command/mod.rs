@@ -304,6 +304,16 @@ pub struct Context {
     /// million rows still stops. A row ceiling alone would let that run to the
     /// end and then report zero rows.
     limits: inillucent_engine::base::budget::Limits,
+    /// The flag that stops whatever this session is running.
+    ///
+    /// **One per session, not one per call (task-1932, H11).** `run` used to
+    /// arm the budget with a fresh `AtomicBool` it dropped on the way out, so
+    /// the flag the executor polled every batch was one nothing else in the
+    /// process had a handle to: `Connection::cancel` in the driver was correct
+    /// and unreachable, and an MCP `notifications/cancelled` had nothing to
+    /// set. Handing out a clone of this is what makes a cancel arriving from
+    /// another thread land on the statement that is running.
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// What to print where a value is null.
     pub null: String,
 }
@@ -352,6 +362,7 @@ impl Context {
             limit: 200,
             max_rows: None,
             limits: inillucent_engine::base::budget::Limits::unbounded(),
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             null: String::new(),
         })
     }
@@ -375,6 +386,16 @@ impl Context {
         })?;
         self.path = named;
         Ok(())
+    }
+
+    /// Returns a handle to this session's cancellation flag.
+    ///
+    /// Setting it stops the statement that is running, at the next batch. It is
+    /// cleared when the next command is armed, so a cancel that arrives between
+    /// two calls belongs to the one that has finished and is discarded rather
+    /// than applied to the one that has not started.
+    pub fn cancel_flag(&self) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        std::sync::Arc::clone(&self.cancel)
     }
 
     /// Returns the shell commands drive.
@@ -437,6 +458,15 @@ impl Context {
         self.limits = limits;
     }
 
+    /// Returns what one command on this surface may spend inside the engine.
+    ///
+    /// A verb that runs work outside the executor - a migration reads a remote
+    /// server and writes rows through a second connection - asks so that it can
+    /// put itself under the same ceiling rather than beside it.
+    pub fn limits(&self) -> inillucent_engine::base::budget::Limits {
+        self.limits.clone()
+    }
+
     /// Returns whether this surface was confined to a directory.
     ///
     /// **Confinement is about reach, not only about paths.** `--root` exists so
@@ -472,6 +502,7 @@ impl Context {
             limit: 200,
             max_rows: None,
             limits: inillucent_engine::base::budget::Limits::unbounded(),
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             null: String::new(),
         }
     }
@@ -596,10 +627,7 @@ pub fn run(
     // through.** Arming it inside each verb would be arming it in nineteen
     // places and forgetting it in the twentieth; arming it in the engine would
     // put a server's policy inside a library an application also links.
-    let armed = inillucent_engine::base::budget::arm(
-        context.limits.clone(),
-        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    );
+    let armed = inillucent_engine::base::budget::arm(context.limits.clone(), context.cancel_flag());
     let outcome = (command.run)(context, arguments);
     drop(armed);
     let mut produced = outcome?;
@@ -734,6 +762,7 @@ mod tests {
             limit: 200,
             max_rows: None,
             limits: inillucent_engine::base::budget::Limits::unbounded(),
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             null: String::new(),
         };
         assert!(context.confine("inner/app.rdb").is_ok());
@@ -779,6 +808,7 @@ mod tests {
             limit: 200,
             max_rows: None,
             limits: inillucent_engine::base::budget::Limits::unbounded(),
+            cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             null: String::new(),
         };
         let failure = context

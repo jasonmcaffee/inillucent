@@ -23,7 +23,14 @@
 //! the same reason - a third path to the same data is a third set of answers,
 //! and the difference is only ever found by somebody who trusted one of them.
 
-#![forbid(unsafe_code)]
+// **`deny` rather than `forbid`, for one file (task-1932, H11).**
+// `interrupt.rs` installs a console control handler so that Ctrl+C stops a
+// statement rather than the process, and there is no way to be told about
+// Ctrl+C in the standard library: both platforms offer one FFI call. Every
+// other file in this crate is still refused the word, `interrupt.rs` is
+// named in `policy.rs`'s `UNSAFE_ALLOWED`, and both of its `unsafe` blocks
+// carry their own SAFETY note.
+#![deny(unsafe_code)]
 #![deny(missing_docs)]
 #![deny(clippy::indexing_slicing)]
 #![deny(clippy::unwrap_used)]
@@ -48,6 +55,10 @@ pub mod dot;
 pub mod dump;
 pub mod help;
 pub mod import;
+// The one module allowed the word, and only for the two calls that install a
+// console control handler. See its own header.
+#[allow(unsafe_code)]
+pub mod interrupt;
 pub mod json;
 pub mod mcp;
 pub mod render;

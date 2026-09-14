@@ -72,6 +72,16 @@ impl Parser<'_> {
             }
             TokenKind::String => {
                 self.bump()?;
+                // **The bound is read off the token before the copy is made
+                // (task-1932, M8).** `string_text` allocates the decoded text
+                // and the check then ran on what it had already allocated, so a
+                // two gigabyte literal in a statement a server was handed was
+                // copied first and refused second. A quoted string decodes to
+                // at least half its span - every character would have to be a
+                // doubled quote to reach that - so a span whose half is past
+                // the limit cannot possibly decode to something inside it, and
+                // the exact check below still runs for everything else.
+                self.charge_literal(Parser::shortest_string(token.span), token.span)?;
                 let text = lexer::string_text(self.source(), token).into_owned();
                 self.charge_literal(text.len(), token.span)?;
                 Ok(self
@@ -80,6 +90,10 @@ impl Parser<'_> {
             }
             TokenKind::Blob => {
                 self.bump()?;
+                // A blob's decoded length is exact from its span: `x'....'` is
+                // two hexadecimal digits per byte, so this is not a lower bound
+                // but the answer, and nothing is allocated before it is known.
+                self.charge_literal(Parser::blob_length(token.span), token.span)?;
                 let bytes = lexer::blob_bytes(self.source(), token);
                 self.charge_literal(bytes.len(), token.span)?;
                 Ok(self
@@ -115,6 +129,30 @@ impl Parser<'_> {
             ));
         }
         Ok(())
+    }
+
+    /// Returns the shortest text a quoted string of this span can decode to.
+    ///
+    /// The span covers the two quotes and everything between them. Every `''`
+    /// inside decodes to one character, so the decoded text is at least half of
+    /// what is between the quotes, rounded up - a lower bound rather than an
+    /// estimate, which is what makes refusing on it correct rather than merely
+    /// likely to be right.
+    ///
+    /// @param span - the token's span
+    fn shortest_string(span: Span) -> usize {
+        let inside = (span.end.saturating_sub(span.start) as usize).saturating_sub(2);
+        inside.saturating_add(1) / 2
+    }
+
+    /// Returns exactly how many bytes a blob literal of this span decodes to.
+    ///
+    /// `x'....'` is `x`, a quote, two hexadecimal digits per byte, and a quote.
+    ///
+    /// @param span - the token's span
+    fn blob_length(span: Span) -> usize {
+        let inside = (span.end.saturating_sub(span.start) as usize).saturating_sub(3);
+        inside / 2
     }
 
     /// Parses a prefix operator and its operand.

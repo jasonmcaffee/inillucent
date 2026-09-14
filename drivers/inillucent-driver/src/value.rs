@@ -48,6 +48,7 @@ pub enum Value {
 /// renumbering the others.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(i32)]
+#[non_exhaustive]
 pub enum ValueKind {
     /// [`Value::Null`].
     Null = 0,

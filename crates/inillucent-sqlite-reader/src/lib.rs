@@ -19,9 +19,18 @@
 //!
 //! It is the read half of `inillucent-storage` with a narrow interface in front of
 //! it, which is exactly what the TDD's component triage says survives that
-//! crate's deletion. Until Phase 5 deletes the rest, this crate reuses
-//! `inillucent-storage`'s pager and b-tree cursor rather than duplicating them, so
-//! there is one page decoder in the workspace rather than two that can disagree.
+//! crate's deletion. This crate reuses `inillucent-storage`'s pager and b-tree
+//! cursor rather than duplicating them, so there is one page decoder in the
+//! workspace rather than two that can disagree.
+//!
+//! **This crate is not the only thing holding `inillucent-storage` up, and saying
+//! so here was wrong.** `inillucent-catalog` reaches for the same pager and the
+//! same cursor in `load.rs`, `ddl.rs`, `analyze.rs` and `rebuild.rs`, on the
+//! shipping read path rather than on an import path. Deleting
+//! `inillucent-storage` therefore means re-pointing `inillucent-catalog` too,
+//! which is task-1816 Phase 5's job and not this crate's. Anybody reading this
+//! header to find out what stands between the workspace and that deletion needs
+//! both names.
 //!
 //! ## What it does not do
 //!

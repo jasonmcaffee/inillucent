@@ -536,21 +536,21 @@ package = "inillucent-compat"
 kind = "test"
 name = "segmented_generations"
 tier = "engine"
-covers = ["inillucent-search"]
+covers = ["inillucent-search", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
 name = "segment_merge_bound"
 tier = "engine"
-covers = ["inillucent-search"]
+covers = ["inillucent-search", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
 
 [[target]]
 package = "inillucent-compat"
 kind = "test"
 name = "segment_delta_chain"
 tier = "engine"
-covers = ["inillucent-search"]
+covers = ["inillucent-search", "inillucent-tree", "inillucent-pool", "inillucent-wal", "inillucent-txn"]
 
 [[target]]
 package = "inillucent-compat"
@@ -656,6 +656,13 @@ requires = ["mysql"]
 # The migration procedure itself - stage, copy, verify, publish - driven by a
 # stub source rather than by a socket, so the failure paths a real server will
 # not produce on request are reachable.
+[[target]]
+package = "inillucent-remote"
+kind = "test"
+name = "budget"
+tier = "engine"
+covers = ["inillucent-remote"]
+
 [[target]]
 package = "inillucent-remote"
 kind = "test"
@@ -1080,6 +1087,20 @@ tier = "e2e"
 [[target]]
 package = "inillucent-driver"
 kind = "test"
+name = "transaction"
+tier = "e2e"
+covers = ["inillucent-driver"]
+
+[[target]]
+package = "inillucent-driver"
+kind = "test"
+name = "statement"
+tier = "e2e"
+covers = ["inillucent-driver"]
+
+[[target]]
+package = "inillucent-driver"
+kind = "test"
 name = "conformance"
 tier = "e2e"
 
@@ -1145,14 +1166,12 @@ package = "inillucent-model"
 kind = "test"
 name = "campaign"
 tier = "retrieval"
-requires = ["onnx"]
 
 [[target]]
 package = "inillucent-model"
 kind = "test"
 name = "minimal"
 tier = "retrieval"
-requires = ["onnx"]
 
 [[target]]
 package = "inillucent-search"
@@ -1251,6 +1270,20 @@ covers = ["inillucent-cli"]
 # `--root` against the file system rather than against path text.
 # It drives the two shipped front ends, because the defect it guards was not in
 # the check's arithmetic - it was in which file operations reached the check.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "budget"
+tier = "engine"
+covers = ["inillucent-exec", "inillucent-engine"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "mcp_cancel"
+tier = "e2e"
+covers = ["inillucent-cli"]
+
 [[target]]
 package = "inillucent-compat"
 kind = "test"

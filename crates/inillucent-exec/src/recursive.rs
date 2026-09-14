@@ -93,6 +93,14 @@ pub(crate) fn run_recursive(
         if fresh.is_empty() {
             return Ok(answer);
         }
+        // **The answer accumulates across passes (task-1932, H6).** A
+        // recursive CTE holds every row it has produced, and the pass count is
+        // bounded only by `MAX_RECURSIVE_PASSES` - a million - so a walk over a
+        // graph with a cycle the `UNION` does not close builds until memory
+        // runs out rather than until a budget says stop.
+        for row in &fresh {
+            inillucent_base::budget::materialise(crate::ops::owned_row_bytes(row))?;
+        }
         answer.extend(fresh.clone());
         if enough(&answer) {
             return Ok(answer);

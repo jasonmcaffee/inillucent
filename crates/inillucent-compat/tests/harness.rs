@@ -5,7 +5,8 @@
 //! against fixtures. A generator that only works on its own examples proves
 //! nothing about the manifest the release gate reads.
 
-use std::path::PathBuf;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 use inillucent_compat::hash::sha3_256_hex;
 use inillucent_compat::layering::{self, Contract};
@@ -13,6 +14,9 @@ use inillucent_compat::manifest::{Manifest, Reference, SourceRegister, Status};
 use inillucent_compat::report;
 use inillucent_compat::results::ResultSet;
 use inillucent_compat::workspace_root;
+use inillucent_vfs::conformance;
+use inillucent_vfs::memory::MemoryVfs;
+use inillucent_vfs::path::DbPath;
 
 /// Loads the shipped manifest.
 fn manifest() -> Manifest {
@@ -131,12 +135,25 @@ const IN_PROGRESS_ROWS: [&str; 3] = [
 /// so; this list exists only so a finished phase can still hold a row that
 /// will never be `pass`, without loosening the check for every other row in
 /// the same phase.
-const DELIBERATELY_MISSING: [&str; 5] = [
+///
+/// An eighth and a ninth joined in task-1932, and they are the same withdrawal
+/// rather than a new one: `storage.interop.cross-mutation` and
+/// `interop.cross-write` both asserted that SQLite and this engine could take
+/// turns writing one file. The rearchitecture onto a native storage format
+/// ended that - the shipping engine does not write SQLite's file format at all -
+/// and the eight suites that proved it went with the old engine in task-1911.
+/// Both rows went on claiming `pass` for months afterwards, against five and
+/// three deleted tests, which is what `every_test_the_manifest_cites_still_exists`
+/// now makes impossible. Reading a SQLite database is a different capability
+/// and is still covered, by `migrate_sqlite.rs`.
+const DELIBERATELY_MISSING: [&str; 7] = [
     "vm.bytecode.verifier",
     "vm.statement.interrupt",
     "txn.hooks",
     "txn.oom-injection",
     "txn.writer-contention",
+    "storage.interop.cross-mutation",
+    "interop.cross-write",
 ];
 
 /// Every row in a finished phase must claim `pass`, unless it is named in
@@ -189,6 +206,222 @@ fn the_shipped_report_is_reproducible() {
         first.rows.len(),
         manifest().capabilities.len(),
         "every capability must appear in the report"
+    );
+}
+
+/// Returns the capability rows of the checked-in scorecard, as
+/// `(id, claimed, evidenced)`.
+///
+/// The table is `| id | claimed | evidenced | platforms | tests |`, and the id
+/// is written between backticks.
+fn scorecard_rows(markdown: &str) -> Vec<(String, String, String)> {
+    let mut rows = Vec::new();
+    for line in markdown.lines() {
+        let Some(rest) = line.strip_prefix("| `") else {
+            continue;
+        };
+        let mut columns = rest.split(" | ");
+        let Some(identifier) = columns.next().and_then(|cell| cell.strip_suffix('`')) else {
+            continue;
+        };
+        let (Some(claimed), Some(evidenced)) = (columns.next(), columns.next()) else {
+            continue;
+        };
+        rows.push((
+            identifier.to_string(),
+            claimed.to_string(),
+            evidenced.to_string(),
+        ));
+    }
+    rows
+}
+
+/// The scorecard in the repository has to say, for every identifier, what the
+/// manifest says.
+///
+/// **It did not, for six of them (task-1932, M9).** `compat/compat-report.md`
+/// had `sql.select.window`, `functions.window`, `vm.bytecode.verifier`,
+/// `vm.statement.interrupt`, `txn.writer-contention` and `txn.hooks` as `pass`
+/// while `compat/sqlite-3.53.4.toml` had all six as `missing`. The scorecard is
+/// the artifact a reader reaches for, and it had been generated before those
+/// rows moved: nothing regenerated it and nothing noticed, because the only
+/// check on the report compared it against itself
+/// (`the_shipped_report_is_reproducible`, above, which two identical runs
+/// satisfy whatever the manifest says).
+///
+/// This is the check on the *pair*. It fails on a manifest row that moves
+/// without the scorecard being regenerated, and on a scorecard edited by hand.
+#[test]
+fn the_shipped_scorecard_says_what_the_manifest_says_for_every_id() {
+    let results = ResultSet::load_directory(&workspace_root().join("compat/results"))
+        .expect("the results directory reads");
+    let generated = report::generate(&manifest(), &sources(), &results);
+    let shipped = std::fs::read_to_string(workspace_root().join("compat/compat-report.md"))
+        .expect("the scorecard is in the repository")
+        .replace("\r\n", "\n");
+
+    let rows = scorecard_rows(&shipped);
+    assert_eq!(
+        rows.len(),
+        generated.rows.len(),
+        "the scorecard lists {} capabilities and the manifest declares {}",
+        rows.len(),
+        generated.rows.len()
+    );
+
+    let mut disagreements = Vec::new();
+    for (shipped_row, row) in rows.iter().zip(generated.rows.iter()) {
+        let (identifier, claimed, evidenced) = shipped_row;
+        if identifier != &row.id {
+            disagreements.push(format!(
+                "the scorecard has `{identifier}` where the manifest has `{}`",
+                row.id
+            ));
+            continue;
+        }
+        if claimed != row.claimed.as_str() {
+            disagreements.push(format!(
+                "{identifier}: the scorecard says the manifest claims `{claimed}`, and the \
+                 manifest claims `{}`",
+                row.claimed.as_str()
+            ));
+        }
+        if evidenced != row.evidenced.as_str() {
+            disagreements.push(format!(
+                "{identifier}: the scorecard says the evidence supports `{evidenced}`, and the \
+                 recorded results support `{}`",
+                row.evidenced.as_str()
+            ));
+        }
+    }
+    assert!(
+        disagreements.is_empty(),
+        "compat/compat-report.md disagrees with compat/sqlite-3.53.4.toml. Regenerate it with \
+         `cargo run -p inillucent-compat --bin inillucent-manifest -- report`.\n{}",
+        disagreements.join("\n")
+    );
+}
+
+/// Returns the name of every `#[test]` function in the workspace.
+///
+/// A grep rather than a registry, because the property is about *every* test
+/// and no type can be put on "there is no other one". Directories that hold
+/// build output or retired code are skipped: a manifest row citing a test that
+/// only exists in `_junk` is exactly the rot this is looking for.
+fn every_test_function(root: &Path) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    let mut pending = vec![root.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name().to_string_lossy().to_string();
+            if path.is_dir() {
+                if matches!(
+                    name.as_str(),
+                    "target" | "_junk" | ".git" | "_agent_output" | ".sqlite-ref" | "fuzz"
+                ) || name.starts_with("target-")
+                {
+                    continue;
+                }
+                pending.push(path);
+                continue;
+            }
+            if !name.ends_with(".rs") {
+                continue;
+            }
+            let Ok(source) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let mut marked = false;
+            for line in source.lines() {
+                let line = line.trim();
+                if line.starts_with("#[test]") {
+                    marked = true;
+                    continue;
+                }
+                if !marked {
+                    continue;
+                }
+                if line.starts_with("#[") {
+                    continue;
+                }
+                marked = false;
+                let after_fn = line
+                    .strip_prefix("fn ")
+                    .or_else(|| line.strip_prefix("async fn "));
+                if let Some(rest) = after_fn {
+                    if let Some(function) = rest.split('(').next() {
+                        names.insert(function.to_string());
+                    }
+                }
+            }
+        }
+    }
+    names
+}
+
+/// Every test the manifest cites has to exist.
+///
+/// **Twenty-four rows cited tests that had been deleted for months
+/// (task-1932, M9).** task-1911 deleted the old engine and, with it, the eight
+/// suites that read and wrote SQLite's own file format. Twenty of the rows
+/// naming those tests still claimed `pass`, and the report could not say so:
+/// `unsupported-release-claim` fires when a cited test has no *recorded result*,
+/// which is the same thing a platform that has not run yet looks like, so the
+/// two were indistinguishable in a report nobody could read as a failure.
+///
+/// A citation is the whole of what ties a claim to its evidence. One that names
+/// nothing is a claim with no evidence at all, so this is checked against the
+/// source rather than against the recorded results: a test that exists but has
+/// not run on some platform is a coverage gap, and a test that does not exist
+/// is a false claim.
+///
+/// A citation with no `::` in it is one of the VFS conformance cases, which
+/// carry identifiers of their own rather than being Rust test functions. Those
+/// are checked against the suite's own case list.
+#[test]
+fn every_test_the_manifest_cites_still_exists() {
+    let root = workspace_root();
+    let functions = every_test_function(&root);
+    assert!(
+        functions.len() > 2000,
+        "found only {} test functions in the workspace, which means this scan is matching \
+         nothing rather than finding nothing wrong",
+        functions.len()
+    );
+
+    let conformance_cases: BTreeSet<String> =
+        conformance::run(&MemoryVfs::new(), &DbPath::from("/conformance-case-names"))
+            .cases
+            .iter()
+            .map(|case| case.name.to_string())
+            .collect();
+    assert!(
+        conformance_cases.len() > 20,
+        "the VFS conformance suite reported {} cases",
+        conformance_cases.len()
+    );
+
+    let mut dead = Vec::new();
+    for capability in &manifest().capabilities {
+        for test in &capability.tests {
+            let known = match test.rsplit_once("::") {
+                Some((_, function)) => functions.contains(function),
+                None => conformance_cases.contains(test),
+            };
+            if !known {
+                dead.push(format!("{}: `{test}`", capability.id));
+            }
+        }
+    }
+    assert!(
+        dead.is_empty(),
+        "these manifest rows cite a test that no longer exists, so they claim their status \
+         against nothing:\n{}",
+        dead.join("\n")
     );
 }
 

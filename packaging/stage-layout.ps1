@@ -287,6 +287,15 @@ function Update-Sha256Sums {
 
     .PARAMETER Dist
         The dist directory.
+
+    .NOTES
+        **Written with LF, not CRLF (task-1932, H12).** `Set-Content` ends every
+        line the way Windows does, and every program that reads this file runs
+        somewhere else: `packaging/install.sh` had to add `tr -d '\r'` to stop
+        awk keeping the carriage return in the archive name, and a reader
+        without that workaround reports a correct download as unpublished.
+        `PUBLISHING.md` records this as fixed in `release.ps1`; it was not fixed
+        here, which is the copy every archive's checksum actually comes from.
     #>
     param([string] $Dist)
     $sums = Join-Path $Dist 'SHA256SUMS'
@@ -297,6 +306,10 @@ function Update-Sha256Sums {
                 $lines += "$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
             }
     }
-    Set-Content -Path $sums -Value $lines
+    # The text is assembled and written whole, because there is no switch on
+    # Set-Content that changes the line ending it uses.
+    $text = ($lines -join "`n")
+    if ($lines.Count -gt 0) { $text += "`n" }
+    [System.IO.File]::WriteAllText($sums, $text, (New-Object System.Text.UTF8Encoding($false)))
     return $sums
 }

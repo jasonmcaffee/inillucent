@@ -121,6 +121,17 @@ Invoke-Stage -Name 'oracle' -Because 'the sixty-nine differential suites have no
     & pwsh -NoProfile -File "$root/tools/sqlite-reference.ps1"
 }
 
+# **Two durability tests could not run without this, and nobody knew
+# (task-1932, H10).** `new_engine_log_lead.rs` builds an index through a
+# 64-frame pool, which is the condition the defect it guards needed, and it
+# reads a 17 MB fixture that is not checked in. Until the skip marker landed,
+# its message matched none of the phrases `--strict` looked for, so the suite
+# reported green having asserted nothing on every machine that had not built
+# the file by hand. Eight seconds buys two durability tests that actually run.
+Invoke-Stage -Name 'fixtures' -Because 'the log-lead durability tests read a fixture that is not checked in' -Body {
+    & bash "$root/tools/build-gate-fixtures.sh" "$root/_agent_output/fixtures"
+}
+
 # The four contracts `AGENTS.md` names, plus the selection map. Each of them
 # fails a build rather than producing a review comment, which is the point of
 # having them.
