@@ -1250,3 +1250,76 @@ mod tests {
         assert_eq!(carry(None, Kind::Blob), OwnedDatum::Null);
     }
 }
+
+/// The door the fuzz targets come in by.
+///
+/// **A named entry point rather than a public decoder.** The three functions
+/// below read bytes a network peer controls, and they are private because
+/// nothing outside this module has any business calling them. The fuzz crate
+/// lives outside the workspace - `cargo-fuzz` needs a nightly toolchain, which
+/// is why - so it cannot reach a private item, and widening the decoders
+/// themselves would put three parsers in this crate's public API to serve a
+/// test. These wrappers answer whether the decode succeeded and nothing else.
+pub mod fuzzing {
+    /// Reads an untrusted greeting packet.
+    ///
+    /// @param body - the packet's bytes
+    pub fn greeting(body: &[u8]) -> bool {
+        super::Greeting::decode(body).is_ok()
+    }
+
+    /// Reads an untrusted column definition packet.
+    ///
+    /// @param body - the packet's bytes
+    pub fn column(body: &[u8]) -> bool {
+        super::decode_column(body).is_ok()
+    }
+
+    /// Reads an untrusted row packet.
+    ///
+    /// @param body - the packet's bytes
+    /// @param columns - how many columns the row description promised
+    pub fn row(body: &[u8], columns: usize) -> bool {
+        super::decode_row(body, columns).is_ok()
+    }
+}
+
+#[cfg(test)]
+mod fuzz_seeded {
+    /// How many inputs the seeded sweep below reads.
+    const CASES: usize = 20_000;
+
+    /// Returns the next value of a deterministic generator.
+    ///
+    /// @param state - the generator's state, advanced in place
+    fn next(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    /// None of the three packet decoders panics on arbitrary bytes.
+    ///
+    /// **The stable-toolchain twin of `fuzz/fuzz_targets/mysql.rs`.** The fuzz
+    /// crate needs nightly, so nothing in CI ran it for the length of this
+    /// project; this runs the same decoders over a deterministic twenty
+    /// thousand inputs in the ordinary suite, which is what makes a regression
+    /// here fail a pull request rather than a scheduled job nobody reads.
+    #[test]
+    fn the_packet_decoders_never_panic_on_arbitrary_bytes() {
+        let mut state = 0x1932_0001_u64;
+        let mut accepted = 0usize;
+        for case in 0..CASES {
+            let length = (next(&mut state) % 96) as usize;
+            let bytes: Vec<u8> = (0..length).map(|_| next(&mut state) as u8).collect();
+            accepted += usize::from(super::fuzzing::greeting(&bytes));
+            accepted += usize::from(super::fuzzing::column(&bytes));
+            accepted += usize::from(super::fuzzing::row(&bytes, case % 8));
+        }
+        // Not an assertion about how many are valid - it is that the sweep ran
+        // and the decoders answered, rather than the loop being optimised into
+        // nothing by a future edit that drops the return value.
+        assert!(accepted <= CASES * 3);
+    }
+}

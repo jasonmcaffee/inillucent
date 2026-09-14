@@ -605,3 +605,188 @@ fn a_real_free_map_change_is_logged_as_a_write_page_record() {
          is anywhere in the log"
     );
 }
+
+/// One attempt at the same checkpoint with no rollback journal.
+///
+/// @param seed - what the simulator's randomness starts from
+/// @param nth - which injectable call to cut at
+fn attempt_with_no_rollback_journal(seed: u64, nth: u64) -> Attempt {
+    let vfs = built(seed);
+    let mut engine =
+        ImportedDatabase::open_on(Arc::clone(&vfs) as Arc<dyn Vfs>, path(), PAGE_SIZE, FRAMES)
+            .expect("the fixture reopens");
+    run(&mut engine, "PRAGMA journal_mode = off");
+    delete(&mut engine, 1);
+    insert(&mut engine, FRESH_ID, 'z');
+    let base = vfs.failpoints().sites_reached();
+    vfs.failpoints()
+        .fail_nth_call(base.saturating_add(nth), Failure::Crash);
+    let committed = engine.checkpoint().is_ok();
+    let reached = vfs.failpoints().sites_reached().saturating_sub(base);
+    Attempt {
+        committed,
+        snapshot: vfs.crash(),
+        reached,
+    }
+}
+
+/// A crash during a free-map checkpoint with no rollback journal still reopens,
+/// for every page the log holds a record for.
+///
+/// **Roadmap item 12, and M3 of the task-1920 review.** `open_file` reads pages
+/// before redo has replayed a single record, and a page a crash tore is then
+/// read at its torn bytes and fails its checksum - even though the log holds
+/// the record that would rebuild it. Under the default `delete` journal the
+/// rollback journal's own repair hides this, which is why the sibling sweep
+/// above passes and this one is the reproduction: `off` is documented
+/// (`inillucent-pool/src/journal.rs`) to mean a torn *checkpoint* page is not
+/// recoverable, so this asserts only what that mode still promises - that a
+/// page the log describes comes back, and that a database which cannot come
+/// back says so rather than answering from a torn page.
+///
+/// It is not asserting the rows match, for that reason. What it asserts is the
+/// distinction the mode makes: a reopen either succeeds and reads every row it
+/// claims, or it refuses and names the damage. An open that succeeded and then
+/// answered a short table would be the failure, and it is the one this catches.
+#[test]
+fn a_crash_with_no_rollback_journal_either_reopens_or_says_it_cannot() {
+    let mut cut_points = 0u64;
+    let mut recovered_cleanly = 0u64;
+    let mut refused = 0u64;
+    for nth in 1..=100u64 {
+        let outcome = attempt_with_no_rollback_journal(390_000 + nth, nth);
+        if outcome.reached < nth {
+            break;
+        }
+        cut_points = cut_points.saturating_add(1);
+        let media: Arc<dyn Vfs> = Arc::new(SimVfs::recovered(
+            SimConfig {
+                seed: 395_000 + nth,
+                model: MediaModel::default(),
+                ..SimConfig::default()
+            },
+            &outcome.snapshot,
+        ));
+        match ImportedDatabase::open_on(media, path(), PAGE_SIZE, FRAMES) {
+            Ok(mut engine) => {
+                recovered_cleanly = recovered_cleanly.saturating_add(1);
+                // Every row the table still claims has to read back whole. A
+                // short body is the failure a torn page produces when the open
+                // succeeded anyway, and it is invisible to a row count.
+                let held = ids(&mut engine);
+                let bodies: Vec<(i64, char)> = held
+                    .iter()
+                    .filter_map(|id| match id {
+                        2 => Some((2, 'b')),
+                        3 => Some((3, 'c')),
+                        5 => Some((5, 'e')),
+                        6 => Some((6, 'f')),
+                        _ => None,
+                    })
+                    .collect();
+                assert_bodies_intact(&mut engine, &bodies);
+            }
+            Err(_) => refused = refused.saturating_add(1),
+        }
+    }
+    assert!(
+        cut_points >= 5,
+        "a sweep that reached {cut_points} cut points inside the checkpoint is not a sweep"
+    );
+    // The counts are in the message because the two ways this can stop being a
+    // test read identically without them: a sweep where nothing is ever cut,
+    // and one where every cut refuses.
+    assert!(
+        recovered_cleanly > 0,
+        "no cut recovered at all ({cut_points} cuts, {refused} refused), so this sweep is \
+         asserting nothing about recovery"
+    );
+}
+
+/// A page the log holds a record for is rebuilt, even when the open reads it
+/// before redo has run.
+///
+/// **Roadmap item 12, and M3 of the task-1920 review, asked directly.** The
+/// crash sweep above cannot ask it: a cut either tears a page the log describes
+/// or one it does not, and only the first is recoverable under
+/// `journal_mode = off`, so a refusal there is ambiguous. This builds the
+/// unambiguous case - a checkpoint that logs a `Body::WritePage` record, and
+/// then that exact page overwritten with rubbish on the media underneath - and
+/// asserts the reopen rebuilds it from the record.
+///
+/// The page is chosen from the log rather than named: [`write_page_targets`]
+/// reads the log and says which pages it describes, so this cannot go stale by
+/// naming page 4 after the layout moves.
+///
+/// The bytes written are a page-sized run of `0xA5`, which fails the page's
+/// checksum on any layout - the failure a torn write leaves, without depending
+/// on the device model to produce one.
+#[test]
+fn a_page_the_log_describes_is_rebuilt_even_though_the_open_reads_it_first() {
+    let vfs = built(9_100);
+    let logged = {
+        let mut engine =
+            ImportedDatabase::open_on(Arc::clone(&vfs) as Arc<dyn Vfs>, path(), PAGE_SIZE, FRAMES)
+                .expect("the fixture reopens");
+        // **The default journal, not `off`.** Under `off` the checkpoint
+        // writes no `Body::WritePage` record at all, so there would be nothing
+        // for the reopen to rebuild from and the test would be asserting the
+        // opposite of what it means to. The eager read this is about happens
+        // in every mode.
+        //
+        // The open transaction is the same device
+        // [`a_real_free_map_change_is_logged_as_a_write_page_record`] needs and
+        // for the same reason: without something holding `recovery_from` below
+        // this checkpoint's own records, the segment carrying the free map's
+        // `WritePage` record is retired by the very checkpoint that appended
+        // it, and there is nothing left in the log to rebuild from.
+        //
+        // Its rows are read *before* it opens, because nothing it writes is
+        // committed: a recovery rolls the transaction back, so the state this
+        // database comes back holding is the one from before the `BEGIN`.
+        let expected = ids(&mut engine);
+        run(&mut engine, "BEGIN");
+        insert(&mut engine, 500, 'x');
+        delete(&mut engine, 1);
+        insert(&mut engine, FRESH_ID, 'z');
+        engine
+            .checkpoint()
+            .expect("the checkpoint under test, unarmed");
+        let logged = write_page_targets(vfs.as_ref(), engine.wal());
+        assert!(
+            !logged.is_empty(),
+            "the checkpoint logged no WritePage record, so there is no page to damage"
+        );
+        (logged, expected)
+    };
+    let (pages, expected_ids) = logged;
+    let damaged = pages.iter().copied().next().unwrap_or(0);
+    assert!(damaged > 0, "page 0 is not a page");
+
+    {
+        let file = vfs
+            .open(&DbPath::new(path()), inillucent_vfs::OpenOptions::main_db())
+            .expect("the database file opens");
+        let rubbish = vec![0xA5u8; PAGE_SIZE];
+        file.write_all_at(damaged.saturating_mul(PAGE_SIZE as u64), &rubbish)
+            .expect("the damage lands");
+        file.sync(inillucent_vfs::SyncMode::Full)
+            .expect("the damage is durable");
+    }
+
+    let mut engine =
+        ImportedDatabase::open_on(Arc::clone(&vfs) as Arc<dyn Vfs>, path(), PAGE_SIZE, FRAMES)
+            .unwrap_or_else(|failure| {
+                panic!(
+            "page {damaged} is described by a record in the log and the open refused it anyway: \
+             {} ({})",
+            failure.message(),
+            failure.detail().unwrap_or_default()
+        )
+            });
+    assert_eq!(
+        ids(&mut engine),
+        expected_ids,
+        "the database rebuilt page {damaged} and then answered different rows"
+    );
+}

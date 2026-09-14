@@ -3641,10 +3641,24 @@ impl ImportedDatabase {
     ///
     /// @param sql - the statement text
     pub fn prepare_statement(&self, sql: &str) -> DbResult<Statement> {
-        Ok(Statement(self.compiled(sql)?))
+        Ok(Statement {
+            cached: std::cell::RefCell::new(self.compiled(sql)?),
+            sql: sql.to_string(),
+            generation: std::cell::Cell::new(self.schema_generation()),
+        })
     }
 
     /// Runs a statement [`ImportedDatabase::prepare_statement`] compiled.
+    ///
+    /// **The plan is compiled again when the schema has moved under it
+    /// (task-1932).** A plan is built against a snapshot of the catalog, and a
+    /// statement held across a `CREATE TABLE`, a `DROP`, an `ALTER` or a
+    /// `REINDEX` is holding one that describes trees that are not there any
+    /// more. `Connection::step` has checked this since it existed; this
+    /// entry point, which the gates and the profiles run their statements
+    /// through, did not - so the two halves of the same public API disagreed
+    /// about whether an already-prepared statement follows a schema change.
+    /// SQLite's own `sqlite3_step` reprepares, and so does this.
     ///
     /// @param statement - the handle
     /// @param params - the values bound to `?1`, `?2`, ...
@@ -3653,8 +3667,21 @@ impl ImportedDatabase {
         statement: &Statement,
         params: &Params,
     ) -> DbResult<Outcome> {
-        let held = std::rc::Rc::clone(&statement.0);
+        let held = self.current_plan(statement)?;
         self.execute_compiled(&held, params)
+    }
+
+    /// Returns a statement's plan, compiling it again if the schema has moved.
+    ///
+    /// @param statement - the handle
+    fn current_plan(&self, statement: &Statement) -> DbResult<std::rc::Rc<Cached>> {
+        let generation = self.schema_generation();
+        if statement.generation.get() != generation {
+            let fresh = self.compiled(&statement.sql)?;
+            *statement.cached.borrow_mut() = fresh;
+            statement.generation.set(generation);
+        }
+        Ok(std::rc::Rc::clone(&statement.cached.borrow()))
     }
 
     /// Runs one statement and reports where its time went.
@@ -3677,7 +3704,7 @@ impl ImportedDatabase {
         statement: &Statement,
         params: &Params,
     ) -> DbResult<(u128, u128)> {
-        let cached = std::rc::Rc::clone(&statement.0);
+        let cached = self.current_plan(statement)?;
         let found = std::time::Instant::now();
         let rows = match &*cached {
             Cached::Nothing
@@ -5435,7 +5462,19 @@ fn query_plan_rows(lines: &[String]) -> Outcome {
 ///
 /// Opaque on purpose: what is inside is the engine's business, and a caller that
 /// could see it would be a caller that could be broken by a plan shape changing.
-pub struct Statement(std::rc::Rc<Cached>);
+pub struct Statement {
+    /// The compiled plan, replaced when the schema moves under it.
+    ///
+    /// A `RefCell` because [`ImportedDatabase::execute_statement`] takes the
+    /// statement by shared reference and every caller holds it across many
+    /// executions; the reprepare has to happen in place or the signature would
+    /// have to change under all of them.
+    cached: std::cell::RefCell<std::rc::Rc<Cached>>,
+    /// The statement's text, so it can be compiled again.
+    sql: String,
+    /// The schema generation `cached` was compiled against.
+    generation: std::cell::Cell<u64>,
+}
 
 /// What running one statement produced.
 #[derive(Clone, Debug, Default)]
@@ -6160,26 +6199,28 @@ struct LearningRows {
     /// Whether a record naming a tree this pass has no shape for is skipped
     /// rather than refused.
     ///
-    /// Set only for the repair pass `open_file` runs when the checkpointed
-    /// catalog itself could not be read - see the module-level note above
-    /// `open_file` on the catalog/redo circularity. That pass cannot yet know
-    /// the shape of a tree whose `CREATE TABLE` predates the redo window, so a
-    /// record naming one is not damage, it is a shape this pass was never
-    /// going to have; refusing it would fail an open a second, catalog-aware
-    /// pass is about to repair. What this pass exists to fix - the schema
-    /// tree's own pages - has no such gap: `TreeRows::new` always knows
-    /// `schema_layout()`, tolerant or not.
+    /// Set for the repair pass `open_file` runs when the checkpointed catalog
+    /// itself could not be read - see the module-level note above `open_file`
+    /// on the catalog/redo circularity - **and for the second pass that
+    /// follows one** (task-1932). That pass cannot yet know the shape of a
+    /// tree whose `CREATE TABLE` predates the redo window, so a record naming
+    /// one is not damage, it is a shape this pass was never going to have;
+    /// refusing it would fail an open a second, catalog-aware pass is about to
+    /// repair. What this pass exists to fix - the schema tree's own pages -
+    /// has no such gap: `TreeRows::new` always knows `schema_layout()`,
+    /// tolerant or not.
+    ///
+    /// The second pass needs it for the opposite reason: the catalog it is
+    /// seeded with was read after the repair pass replayed the whole window,
+    /// so it describes the END of the log while the records run from the start
+    /// of it, and a tree superseded inside the window - every `REINDEX` and
+    /// every `CREATE INDEX` allocates a fresh one - is named by no row it will
+    /// ever see. An ordinary open, where the checkpointed catalog read, stays
+    /// strict.
     tolerant: bool,
 }
 
 impl LearningRows {
-    /// Returns an applier that already knows the checkpointed catalog.
-    ///
-    /// @param checkpointed - the catalog as at the last checkpoint
-    fn new(checkpointed: &[SchemaEntry]) -> LearningRows {
-        LearningRows::new_with_tolerance(checkpointed, false)
-    }
-
     /// Returns an applier for the repair pass, told nothing but the schema
     /// tree's own fixed shape and asked to skip what it cannot yet decode.
     ///
@@ -6189,12 +6230,11 @@ impl LearningRows {
         LearningRows::new_with_tolerance(checkpointed, true)
     }
 
-    /// Shared constructor for [`LearningRows::new`] and
-    /// [`LearningRows::new_tolerant`].
+    /// Returns an applier that already knows a catalog, tolerant or not.
     ///
-    /// @param checkpointed - the catalog as at the last checkpoint
+    /// @param checkpointed - the catalog the pass starts from
     /// @param tolerant - whether an unknown tree is skipped rather than refused
-    fn new_with_tolerance(checkpointed: &[SchemaEntry], tolerant: bool) -> LearningRows {
+    pub(crate) fn new_with_tolerance(checkpointed: &[SchemaEntry], tolerant: bool) -> LearningRows {
         let mut learning = LearningRows {
             rows: TreeRows::new().with_tree(
                 inillucent_catalog::paged::SCHEMA_TREE_ID,
@@ -6340,19 +6380,48 @@ impl RowRedo for LearningRows {
 
 impl LearningRows {
     /// Turns "this pass was never told the shape of that tree" into success,
-    /// on the repair pass only and only for that one refusal.
+    /// for a tree the catalog does not name and on the repair pass.
+    ///
+    /// **A tree no catalog row names has been dropped, and its records are for
+    /// pages that belong to something else now (task-1932).** Every rebuild
+    /// allocates a fresh tree and moves the catalog row onto it - `REINDEX`
+    /// does, and so does `CREATE INDEX` - so a replay window that spans one
+    /// holds records naming a tree the catalog at the end of it has no row for.
+    /// Refusing those failed the open outright, which meant a database that had
+    /// survived a crash during a `REINDEX` **could not be opened at all**:
+    ///
+    /// ```text
+    /// bad parameter or other API misuse: the log names tree 2147483649,
+    /// which this recovery was not told the shape of
+    /// ```
+    ///
+    /// `reindex_crash.rs` found it, deterministically, at the fifty-fifth cut
+    /// of both journal modes.
+    ///
+    /// **What makes skipping right rather than merely convenient** is that the
+    /// log names a tree before it describes any of its pages: `create_index`
+    /// and `rebuild_index` both write the catalog row naming the new tree
+    /// before they fill it, in the same transaction and superseded by the row
+    /// at the end of the statement. So a record for a tree with no row is never
+    /// one whose row has not gone past yet - it is a tree that has been
+    /// dropped, and writing its pages back would overwrite whatever owns them
+    /// now.
     ///
     /// **Never for the schema tree.** Its shape is fixed
     /// (`with_tree(SCHEMA_TREE_ID, schema_layout(), 1)` in every constructor),
     /// so a refusal naming it is never this gap - it is a genuinely damaged
     /// catalog row, and has to be refused the way it always was. And never for
     /// any other failure a row's own redo can raise - a bad key, a page that is
-    /// not a leaf - which name a real defect this pass must not hide.
+    /// not a leaf - which name a real defect this pass must not hide. A tree
+    /// the catalog *does* name and whose shape could not be derived is still
+    /// refused, which is the gap `autoindex_reopen.rs` and `analyze_reopen.rs`
+    /// were written for.
     ///
     /// @param tree - the tree the record named
     /// @param result - what the delegated redo answered
     fn tolerate_unknown_tree(&self, tree: u64, result: DbResult<()>) -> DbResult<()> {
-        if !self.tolerant || tree == inillucent_catalog::paged::SCHEMA_TREE_ID {
+        let named = self.seen.iter().any(|entry| entry.tree_id == tree);
+        if (!self.tolerant && named) || tree == inillucent_catalog::paged::SCHEMA_TREE_ID {
             return result;
         }
         match result {

@@ -528,11 +528,24 @@ fn the_campaign_reaches_the_sites_it_claims_to() {
             let _ = database.pool().fetch(PageId(page));
         }
     }
-    let counts = vfs.failpoints().counts();
-    for site in [Site::Read, Site::Write, Site::Sync] {
-        assert!(
-            counts.get(&site).copied().unwrap_or(0) > 0,
-            "the campaign never reached {site:?}: {counts:?}"
-        );
+    // Asking the file for its shared memory is what reaches `Shm`. The pool
+    // never asks - the log's index is `inillucent-wal`'s, and this crate does
+    // not depend on it - so the campaign asks the VFS directly rather than
+    // claiming a site no caller here reaches.
+    {
+        let file = vfs.open(&path, OpenOptions::main_db()).expect("it opens");
+        let _ = file.shared_memory();
     }
+    // Deleting the file is what reaches `Delete`, and it is the last thing this
+    // does because nothing can be read afterwards.
+    let _ = vfs.delete(&path, true);
+    let counts = vfs.failpoints().counts();
+    let missed: Vec<Site> = Site::all()
+        .into_iter()
+        .filter(|site| counts.get(site).copied().unwrap_or(0) == 0)
+        .collect();
+    assert!(
+        missed.is_empty(),
+        "the campaign never reached {missed:?}: {counts:?}"
+    );
 }

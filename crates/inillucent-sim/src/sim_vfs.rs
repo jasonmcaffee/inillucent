@@ -568,6 +568,37 @@ impl VfsFile for SimFile {
                 ));
             }
         }
+        // **A write past the end of the file is where a buffer is allocated,
+        // and where `Site::Allocate` fires (task-1932).** The site was declared
+        // and never injected, so `fault_campaign.rs` could only assert that
+        // three of nine sites were reached. Growing a file is what free map
+        // growth does - `FreeMap::ensure` takes each new map page from the end
+        // of the file - so a failure here is the one a real allocator raises
+        // when the map cannot grow, reported as the read error `Site::Allocate`
+        // names.
+        let grows = offset.saturating_add(payload.len() as u64) > guard(&self.inode.image).len();
+        if grows {
+            if let Some(failure) = self.state.failpoint(Site::Allocate) {
+                if let Some(error) = failure.to_error(Site::Allocate) {
+                    self.state.trace.record(
+                        current_actor().0,
+                        "allocate",
+                        &self.path.display(),
+                        offset,
+                        input.len() as u64,
+                        "injected",
+                    );
+                    return Err(error);
+                }
+                if failure == Failure::Crash {
+                    self.state.powered_off.store(true, Ordering::SeqCst);
+                    return Err(VfsError::new(
+                        VfsOperation::Write.extended_code(),
+                        "the simulated machine lost power while the file grew",
+                    ));
+                }
+            }
+        }
         guard(&self.inode.image).write(self.state.config.model, offset, payload);
         let outcome = if payload.len() == input.len() {
             "ok"

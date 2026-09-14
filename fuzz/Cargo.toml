@@ -21,6 +21,12 @@ inillucent-vfs = { path = "../crates/inillucent-vfs" }
 inillucent-pool = { path = "../crates/inillucent-pool" }
 inillucent-tree = { path = "../crates/inillucent-tree" }
 inillucent-wal = { path = "../crates/inillucent-wal" }
+# The three crates whose decoders read bytes somebody else wrote: a network
+# peer's (mysql, postgres), an agent host's (the MCP request parser in
+# inillucent-cli), and the database file's (the search index).
+inillucent-remote = { path = "../crates/inillucent-remote" }
+inillucent-cli = { path = "../crates/inillucent-cli" }
+inillucent-search = { path = "../crates/inillucent-search" }
 
 [[bin]]
 name = "varint"
@@ -67,5 +73,29 @@ doc = false
 [[bin]]
 name = "wal_record"
 path = "fuzz_targets/wal_record.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "mysql"
+path = "fuzz_targets/mysql.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "postgres"
+path = "fuzz_targets/postgres.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "json"
+path = "fuzz_targets/json.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "store"
+path = "fuzz_targets/store.rs"
 test = false
 doc = false

@@ -25,6 +25,7 @@
 )]
 
 pub mod corpus;
+pub mod crashcampaign;
 pub mod differential;
 pub mod facade;
 pub mod fixtures;

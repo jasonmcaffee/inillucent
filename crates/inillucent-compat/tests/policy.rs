@@ -1436,3 +1436,67 @@ fn no_shell_file_reaches_past_the_driver_more_than_it_is_recorded_at() {
         unlisted.join("\n")
     );
 }
+
+/// Every fuzz target is in the scheduled workflow's matrix.
+///
+/// **A target nobody runs is a file, not a test (task-1932, M11).** `fuzz/`
+/// held twelve targets and no workflow mentioned it, so all twelve had run
+/// nowhere since they were written. `.github/workflows/fuzz.yml` runs them on a
+/// schedule, and its matrix is a hand-written list - which is exactly the kind
+/// of list that goes stale the first time somebody adds a target. This compares
+/// it against `fuzz/Cargo.toml`'s `[[bin]]` sections, in both directions: a
+/// target with no matrix entry would run nowhere again, and a matrix entry with
+/// no target would fail the job every night for a target that does not exist.
+#[test]
+fn every_fuzz_target_is_in_the_scheduled_workflow() {
+    let root = workspace_root();
+    let manifest = std::fs::read_to_string(root.join("fuzz/Cargo.toml"))
+        .expect("the fuzz manifest is readable");
+    let declared: Vec<String> = manifest
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_prefix("name = "))
+        .map(|name| name.trim().trim_matches('"').to_string())
+        // The package's own `name = "inillucent-fuzz"` is not a target.
+        .filter(|name| name != "inillucent-fuzz")
+        .collect();
+    assert!(
+        declared.len() >= 12,
+        "only {} fuzz targets were found in the manifest, so this test is not reading it right",
+        declared.len()
+    );
+
+    let workflow = std::fs::read_to_string(root.join(".github/workflows/fuzz.yml"))
+        .expect("the fuzz workflow is readable");
+    let scheduled: Vec<String> = workflow
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_prefix("- "))
+        .map(str::to_string)
+        // The matrix entries are bare words; every other `- ` line in the file
+        // is a step, a `uses:` or the cron entry, and each of those holds a
+        // character no target name can.
+        .filter(|entry| {
+            entry
+                .chars()
+                .all(|letter| letter.is_ascii_lowercase() || letter == '_')
+        })
+        .collect();
+
+    let unscheduled: Vec<&String> = declared
+        .iter()
+        .filter(|name| !scheduled.contains(name))
+        .collect();
+    assert!(
+        unscheduled.is_empty(),
+        "these fuzz targets are in fuzz/Cargo.toml and in no workflow, so nothing runs them:          {unscheduled:?}"
+    );
+    let missing: Vec<&String> = scheduled
+        .iter()
+        .filter(|name| !declared.contains(name))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "the fuzz workflow schedules targets that fuzz/Cargo.toml does not declare: {missing:?}"
+    );
+}

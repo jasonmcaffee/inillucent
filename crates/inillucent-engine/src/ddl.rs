@@ -1726,6 +1726,30 @@ impl ImportedDatabase {
         let source = entries.in_order(&order);
         let flatten = flattened.elapsed().as_nanos();
         let packed = std::time::Instant::now();
+        // **The catalog row names the new tree before the tree is filled
+        // (task-1932).** A recovery derives a tree's shape from the catalog
+        // rows it has replayed, and skips a record naming a tree no row names -
+        // which is right for a tree a rebuild has dropped and wrong for one
+        // whose row has not gone past yet. Writing the row first is what keeps
+        // those two apart: after this, every record describing a page of this
+        // tree follows a row that names it. The row below is superseded by the
+        // one at the end of this statement, in the same transaction and before
+        // anything can read either, so the only thing it changes is the order
+        // two records reach the log in. `rebuild_index` does the same, for the
+        // crash `reindex_crash.rs` found.
+        let rowid = self.next_catalog_rowid();
+        self.record(
+            root,
+            SchemaEntry {
+                kind: ObjectKind::Index,
+                name: name.to_vec(),
+                table: owner.name.clone(),
+                root: inillucent_pool::PageId(0),
+                sql: sql.clone(),
+                stats: Default::default(),
+                tree_id: 0,
+            },
+        )?;
         let page = self.build_tree_rows(root, columns, key_columns, layout, &source)?;
         let pack = packed.elapsed().as_nanos();
         // The tail is timed too, because it is not free and it is not the
@@ -1733,17 +1757,17 @@ impl ImportedDatabase {
         // catalog text, and refreshing the planner's view of it. `seal` is
         // timed after it and apart from it - see below.
         let tail = std::time::Instant::now();
-        self.record(
-            root,
+        let at = self.ddl_schema;
+        self.rewrite(
+            rowid,
             SchemaEntry {
                 kind: ObjectKind::Index,
                 name: name.to_vec(),
                 table: owner.name.clone(),
                 root: page,
                 sql,
-                stats: Default::default(),
-                // Filled by `record` from the identifier it is given.
-                tree_id: 0,
+                stats: self.tree_stats(root),
+                tree_id: self.local_of(at, root),
             },
         )?;
         // **A partial index is not a covering candidate.** The physical pass
@@ -2775,11 +2799,46 @@ impl ImportedDatabase {
         } else {
             flat.chunks_exact(key_columns).collect()
         };
+        let at = self.ddl_schema;
+        // **The catalog row names the new tree before the tree is filled
+        // (task-1932, found by `reindex_crash.rs`).** A recovery derives every
+        // tree's shape from the catalog rows it has replayed so far, and
+        // refuses a record naming a tree it has no shape for - which is the
+        // right refusal, because replaying into a guessed shape is how a file
+        // is corrupted quietly. `REINDEX` rebuilds an index into a *freshly
+        // allocated* tree, so until this row went past there was no row
+        // anywhere naming it: the checkpointed catalog still named the old
+        // root, and the row carrying the new one was written after every page
+        // of the new tree. A crash after the rebuild committed therefore left a
+        // database that **would not open at all**:
+        //
+        // ```text
+        // bad parameter or other API misuse: the log names tree 2147483649,
+        // which this recovery was not told the shape of
+        // ```
+        //
+        // The row below is superseded by the one at the end of this function,
+        // in the same transaction and before anything can read either, so the
+        // only thing it changes is that the log names the tree before it
+        // describes one of its pages. `root` is zero because the tree has no
+        // root page yet and the shape derivation reads the identifier rather
+        // than the page.
+        self.rewrite(
+            rowid,
+            SchemaEntry {
+                kind: ObjectKind::Index,
+                name: index.name.clone(),
+                table: owner.name.clone(),
+                root: inillucent_pool::PageId(0),
+                sql: sql.clone(),
+                stats: inillucent_catalog::paged::TreeStats::default(),
+                tree_id: self.local_of(at, root),
+            },
+        )?;
         let page = self.build_tree_from(root, columns, key_columns, layout, &rows)?;
         // The statistics and the identifier come off the tree that was just
         // built, exactly as `record` takes them, so the row cannot describe a
         // different tree from the one it names.
-        let at = self.ddl_schema;
         let entry = SchemaEntry {
             kind: ObjectKind::Index,
             name: index.name.clone(),
