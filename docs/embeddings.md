@@ -96,6 +96,37 @@ verified TLS, which `inillucent-remote` already reaches for the PostgreSQL and M
 zip and gzip reading is over the inflate that is already in `inillucent-base`.
 [The dependency policy](dependency-policy.md) carries the argument.
 
+### When the model is not installed
+
+Every new installation starts in this state, because the weights are a separate 620 MB download.
+`embed(TEXT)` refuses, by name, and names the command that fixes it:
+
+```sh
+inillucent --db notes.rdb query "SELECT length(embed('hello'))"
+Error [invalid_state]: embed: no embedding model is installed. Run `inillucent setup-embeddings` to
+download nomic-embed-text-v1.5 and the ONNX Runtime it needs, or set INILLUCENT_ONNX_DIR to a
+directory that already holds them
+```
+
+**The status is `invalid_state`, and it is neither of the two it could be mistaken for.** It is not
+`syntax`: the statement is valid SQL and rewording it will not help. It is not `unsupported` either,
+which is this engine's word for a construct it has never built and which exits 3 so a script can
+branch on "stop asking" - `embed(TEXT)` is built, and one command makes the same statement answer.
+`invalid_state` says the call cannot be answered in the state this machine is in.
+
+The status is read off a marker the refusal carries rather than off its wording, so improving the
+sentence cannot change what an application branches on. `DbError::requirement` is that marker and it
+sits beside `DbError::unsupported`, which carries the other answer.
+
+It printed `Error [syntax]: bad parameter or other API misuse` in the 0.1.2 archives. The sentence
+above was written and thrown away: it was built with `inillucent_base::error::misuse`, which puts
+what it is given into the diagnostic detail rather than into the message, and the detail does not
+leave the process unless the database was opened with diagnostics on. task-1952 has the whole of it.
+
+A model that is installed and will not load is a second refusal, naming the runtime:
+`inillucent setup-embeddings runtime` installs it on its own. What the runtime itself said stays in
+the diagnostic detail, because it names the file it could not open.
+
 ### Where `embed(TEXT)` can be called
 
 Everywhere an expression goes: a projection, a `WHERE` predicate, an `ORDER BY`, a `VALUES` row, an

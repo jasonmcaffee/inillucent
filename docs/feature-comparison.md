@@ -798,9 +798,12 @@ path serves `generate_series(1, t.a)` and any other table-valued function given 
 ### The function register
 
 `compat/api/builtins.toml` lists the function names this engine registers, and
-`inillucent_sql::function::every_function` is what `pragma_function_list` reports. Against the pinned
-**library** - the amalgamation, not the shell - there is no function SQLite answers that this engine
-does not. `current_date`, `current_time` and `current_timestamp` used to be the exception: they
+`inillucent_sql::function::every_function` is what `pragma_function_list` reports, beside whatever
+the connection has registered through `inillucent_ext`'s registry - an application's own functions,
+and `embed(TEXT)` in a build carrying the `embed` feature. The registry half arrived in task-1952,
+which found the same under-report one more time in the one place the built-in list could not reach.
+Against the pinned **library** - the amalgamation, not the shell - there is no function SQLite
+answers that this engine does not. `current_date`, `current_time` and `current_timestamp` used to be the exception: they
 worked as keywords but were not named in the register, which is the kind of under-reporting that
 review 6 went after. They are named now. `load_extension` *is* registered and refuses in the platform's own
 words, because this build has no dynamic loader and a function that quietly answered NULL would be a

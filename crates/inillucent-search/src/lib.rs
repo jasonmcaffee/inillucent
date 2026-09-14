@@ -63,6 +63,10 @@
 pub mod adapter;
 #[cfg(feature = "embed")]
 pub mod embed;
+// Not behind the feature, and deliberately: these are the sentences `embed`
+// refuses with, and a module a default build does not compile is a module whose
+// tests a default build does not run. See its own comment for what that cost.
+pub mod embed_refusal;
 pub mod merge;
 pub mod module;
 pub mod options;

@@ -216,6 +216,25 @@ struct ErrorContext {
     /// It changes no code and no message: an error carrying it reports the same
     /// `SQLITE_MISUSE` and the same text it always did.
     unsupported: Option<String>,
+    /// What this installation has not got, when that is why it refused.
+    ///
+    /// **The same mechanism as `unsupported`, for the other reason a call that
+    /// is written correctly cannot be answered.** `unsupported` means the
+    /// engine never built the construct, and nothing done on this machine will
+    /// change that. This field means the engine built it and the machine is
+    /// missing something the caller can go and install - the embedding model
+    /// `embed(TEXT)` runs, and the ONNX Runtime under it.
+    ///
+    /// The two are kept apart because the answer a caller needs is different:
+    /// one says stop asking, the other says run this command. Before this
+    /// field, a refusal of the second kind left the engine as a bare
+    /// `SQLITE_MISUSE` and reached `inillucent-driver` as the status `syntax`,
+    /// so `SELECT length(embed('hello'))` on a machine that had never run
+    /// `inillucent setup-embeddings` told a person their SQL was malformed.
+    ///
+    /// Like `unsupported` it is safe to show a caller: it names a component,
+    /// never a path and never a bound value.
+    requirement: Option<String>,
     /// How much of what has been written this failure undoes, when a conflict
     /// algorithm said.
     ///
@@ -262,6 +281,7 @@ impl PartialEq for DbError {
             && self.database() == other.database()
             && self.detail() == other.detail()
             && self.unsupported() == other.unsupported()
+            && self.requirement() == other.requirement()
     }
 }
 
@@ -310,6 +330,18 @@ impl DbError {
     /// @param what - the construct, in the words the refusal already uses
     pub fn with_unsupported(mut self, what: impl Into<String>) -> DbError {
         self.context_mut().unsupported = Some(what.into());
+        self
+    }
+
+    /// Records that this refusal is about something this installation has not
+    /// got, which the caller can install.
+    ///
+    /// Safe to show a caller, and meant to be: it names a component, such as
+    /// "an embedding model", and never a path or a bound value.
+    ///
+    /// @param what - the missing component, in the words the refusal already uses
+    pub fn with_requirement(mut self, what: impl Into<String>) -> DbError {
+        self.context_mut().requirement = Some(what.into());
         self
     }
 
@@ -426,6 +458,17 @@ impl DbError {
         self.context
             .as_ref()
             .and_then(|context| context.unsupported.as_deref())
+    }
+
+    /// Returns what this installation is missing, when that is why it refused.
+    ///
+    /// `None` for every other failure, including a construct the engine has
+    /// never built - that is [`DbError::unsupported`], and it is a different
+    /// answer to give a caller.
+    pub fn requirement(&self) -> Option<&str> {
+        self.context
+            .as_ref()
+            .and_then(|context| context.requirement.as_deref())
     }
 
     /// Returns the SQL byte offset, if the error has one.
@@ -561,6 +604,32 @@ pub fn statement_refusal(said: impl Into<String>) -> DbError {
         .with_detail(said)
 }
 
+/// Builds a refusal about a component this installation has not got, which the
+/// caller can install.
+///
+/// **The third member of the family, and the one `embed(TEXT)` needed.**
+/// [`misuse`] hides its sentence in the detail, [`refusal`] shows it, and both
+/// reach a driver as the status `syntax` - which is the right reading of a
+/// statement that is wrong and the wrong reading of a statement that is fine on
+/// a machine that is not ready. This one shows the sentence *and* marks why,
+/// so `inillucent-driver` answers `invalid_state` instead.
+///
+/// `what` is the component, in the words the sentence already uses, and `said`
+/// is the sentence. Both are shown to the caller, so both must stay free of
+/// paths and bound values exactly as [`DbError::with_message`] requires. A
+/// sentence that has to name the directory it looked in puts that in
+/// `with_detail`.
+///
+/// @param what - the missing component, such as "an embedding model"
+/// @param said - the sentence, naming what installs it
+pub fn unmet_requirement(what: impl Into<String>, said: impl Into<String>) -> DbError {
+    let said = said.into();
+    DbError::primary(PrimaryCode::Misuse)
+        .with_message(said.clone())
+        .with_detail(said)
+        .with_requirement(what)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -624,6 +693,54 @@ mod tests {
         assert!(!rendered.contains("secret"), "{rendered}");
         assert!(rendered.contains("at SQL byte 12"), "{rendered}");
         assert_eq!(error.detail(), Some("C:/secret/path/app.db"));
+    }
+
+    /// The three `SQLITE_MISUSE` builders differ in exactly one thing - whether
+    /// the sentence they are given is the one a caller reads - and that is the
+    /// difference `embed(TEXT)` was on the wrong side of.
+    ///
+    /// `misuse` is the one that hides it, and the test says so rather than
+    /// leaving a reader to infer it from the doc comment: a caller reading
+    /// `message()` gets the primary code's manifest text and has to open the
+    /// diagnostic detail to find out anything at all.
+    #[test]
+    fn only_two_of_the_three_misuse_builders_show_their_sentence() {
+        let said = "embed: no embedding model is installed";
+        assert_eq!(misuse(said).message(), PrimaryCode::Misuse.message());
+        assert_eq!(misuse(said).detail(), Some(said));
+        assert_eq!(refusal(said).message(), said);
+        assert_eq!(
+            unmet_requirement("an embedding model", said).message(),
+            said
+        );
+    }
+
+    /// A refusal about a missing component says which component, and says it
+    /// through a field rather than through its wording.
+    ///
+    /// The marker is what `inillucent-driver` reads to answer `invalid_state`
+    /// instead of `syntax`. Deriving it from the sentence instead would work
+    /// until somebody improved the sentence, which is the argument the
+    /// `unsupported` marker beside it was added on.
+    #[test]
+    fn a_missing_component_is_named_by_a_marker_and_is_not_an_unimplemented_one() {
+        let error = unmet_requirement(
+            "an embedding model",
+            "embed: no embedding model is installed. Run `inillucent setup-embeddings`",
+        );
+        assert_eq!(error.requirement(), Some("an embedding model"));
+        assert_eq!(
+            error.unsupported(),
+            None,
+            "it is built, it is not installed"
+        );
+        assert_eq!(error.code(), PrimaryCode::Misuse);
+        assert!(error.to_string().contains("setup-embeddings"), "{error}");
+        assert_eq!(
+            refusal("no such table: peple").requirement(),
+            None,
+            "an ordinary statement refusal is missing nothing"
+        );
     }
 
     /// The recovery contract is what callers branch on, so spot-check the rows

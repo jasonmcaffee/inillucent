@@ -60,6 +60,8 @@
 //!   `docs/feature-comparison.md` measures what is left in this column, which is
 //!   now nothing on SQLite's own list.
 
+use std::collections::BTreeMap;
+
 use inillucent_base::error::refusal;
 use inillucent_base::{DbError, DbResult, PrimaryCode};
 use inillucent_sql::declare::{argument_boolean, argument_integer, argument_text};
@@ -222,7 +224,7 @@ impl ImportedDatabase {
                 names.dedup();
                 list_of("name", &names)
             }
-            b"function_list" => pragma_function_list(),
+            b"function_list" => pragma_function_list(&self.registry),
             b"compile_options" => list_of("compile_options", COMPILE_OPTIONS),
             b"database_list" => Outcome {
                 rows: self.database_list(),
@@ -1706,26 +1708,72 @@ pub(crate) const SQLITE_PRAGMAS: &[&str] = &[
 /// `sqlite_compileoption_used` answer from the same one.
 pub(crate) const COMPILE_OPTIONS: &[&str] = inillucent_base::COMPILE_OPTIONS;
 
-/// Lists the functions this engine answers, in SQLite's own columns.
+/// Lists the functions this connection answers, in SQLite's own columns.
 ///
-/// Read straight out of `inillucent_sql::function::every_function`, which is
+/// The built-ins come from `inillucent_sql::function::every_function`, which is
 /// the same list the obligations report and the old engine's `function_list`
-/// read - so a function that exists is reported by every route or by none.
+/// read - so a built-in that exists is reported by every route or by none.
 /// `enc` is `utf8` because that is the only text encoding here.
-fn pragma_function_list() -> Outcome {
-    let rows = inillucent_sql::function::every_function()
-        .into_iter()
-        .map(|entry| {
-            vec![
-                OwnedDatum::Text(entry.name.as_bytes().to_vec()),
-                OwnedDatum::Int(1),
-                OwnedDatum::Text(entry.kind.as_bytes().to_vec()),
-                OwnedDatum::Text(b"utf8".to_vec()),
-                OwnedDatum::Int(entry.arity),
-                OwnedDatum::Int(entry.flags),
-            ]
-        })
-        .collect();
+///
+/// **And then what this connection has registered, which is the half that was
+/// missing.** `PRAGMA function_list` read only the static list, so every
+/// function reached through `inillucent_ext`'s registry answered when it was
+/// called and was never named: `create_scalar_function` and
+/// `create_aggregate_function` are the surface an application defines its own
+/// through, and `embed(TEXT)` is one this repository ships. On a 0.1.2 binary
+/// with the `embed` feature, `SELECT length(embed('hello'))` returned 3072 and
+/// `inillucent functions embed` listed nothing.
+///
+/// That is the exact shape this register was audited for once already, and
+/// `crates/inillucent-compat/tests/registers.rs` says why it is worse than an
+/// error: *"a register that under-reports answers every call correctly - it
+/// just does not admit that it can"*. `PRAGMA module_list` two arms above has
+/// merged the registry's modules in all along; this is the same merge for
+/// functions.
+///
+/// A registration that shadows a built-in - same name, same arity - **replaces**
+/// its row rather than adding a second one, because the registration is what a
+/// call will actually reach, and its flags are the ones that describe it. It
+/// keeps the built-in's place in the listing so the order does not move.
+///
+/// @param registry - what this connection reaches functions through
+fn pragma_function_list(registry: &inillucent_ext::registry::Registry) -> Outcome {
+    let mut rows: Vec<Vec<OwnedDatum>> = Vec::new();
+    let mut placed: BTreeMap<(String, i64), usize> = BTreeMap::new();
+    for entry in inillucent_sql::function::every_function() {
+        placed.insert((entry.name.to_ascii_lowercase(), entry.arity), rows.len());
+        rows.push(function_row(
+            entry.name,
+            true,
+            entry.kind,
+            entry.arity,
+            entry.flags,
+        ));
+    }
+    for held in registry.functions() {
+        let name = held.name.to_ascii_lowercase();
+        let arity = i64::from(held.arity);
+        let kind = match held.is_aggregate() {
+            true => "a",
+            false => "s",
+        };
+        let row = function_row(&name, false, kind, arity, registered_flags(held.flags));
+        // Every index in `placed` was `rows.len()` when it was recorded and
+        // nothing shortens `rows`, so the lookup always finds its row. The
+        // crate denies `indexing_slicing`, and a `get_mut` that says so costs
+        // nothing here.
+        match placed.get(&(name.clone(), arity)).copied() {
+            Some(at) => {
+                if let Some(built_in) = rows.get_mut(at) {
+                    *built_in = row;
+                }
+            }
+            None => {
+                placed.insert((name, arity), rows.len());
+                rows.push(row);
+            }
+        }
+    }
     Outcome {
         rows,
         names: vec![
@@ -1738,6 +1786,43 @@ fn pragma_function_list() -> Outcome {
         ],
         changes: Default::default(),
     }
+}
+
+/// Builds one `PRAGMA function_list` row.
+///
+/// @param name - the name SQL calls it by
+/// @param builtin - whether it is one of the engine's own
+/// @param kind - `s` for a scalar, `a` for an aggregate, `w` for a window
+/// @param arity - how many arguments, or -1 for any number
+/// @param flags - the flag word the C surface reports
+fn function_row(name: &str, builtin: bool, kind: &str, arity: i64, flags: i64) -> Vec<OwnedDatum> {
+    vec![
+        OwnedDatum::Text(name.as_bytes().to_vec()),
+        OwnedDatum::Int(i64::from(builtin)),
+        OwnedDatum::Text(kind.as_bytes().to_vec()),
+        OwnedDatum::Text(b"utf8".to_vec()),
+        OwnedDatum::Int(arity),
+        OwnedDatum::Int(flags),
+    ]
+}
+
+/// Returns the flag word `function_list` reports for a registered function.
+///
+/// The same two bits a built-in is described with, so one column means one
+/// thing. `direct_only` has no bit in this column and is not reported: it is
+/// the default for anything registered from outside, and what it governs is
+/// whether a *schema* may name the function rather than what the function is.
+///
+/// @param flags - what the registration promised about itself
+fn registered_flags(flags: inillucent_ext::registry::FunctionFlags) -> i64 {
+    let mut word = 0;
+    if flags.innocuous {
+        word |= inillucent_sql::function::INNOCUOUS_FLAG;
+    }
+    if flags.deterministic {
+        word |= inillucent_sql::function::DETERMINISTIC_FLAG;
+    }
+    word
 }
 
 /// Returns the name `index_xinfo` reports a key's collation by.

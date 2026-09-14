@@ -51,9 +51,19 @@ const AREA: &str = "registers";
 /// sqlar surfaces this build compiles in, FTS3/4's auxiliary functions, the
 /// percentile family, and `regexp`/`unknown`/`sqlite_offset`, which the pinned
 /// build does not compile.
+///
+/// `embed` is here for a reason none of the others share: it is registered
+/// through `inillucent_ext`'s registry rather than compiled into the built-in
+/// list, and only in a build carrying `inillucent-search`'s `embed` feature. It
+/// was invisible to this suite until task-1952 taught `PRAGMA function_list` to
+/// report the registry, which is exactly the under-report this file exists to
+/// catch. Naming it here costs nothing in a default build, where no connection
+/// has it, and keeps a feature-carrying build green rather than red for a name
+/// that is meant to be there.
 const OURS_ONLY_FUNCTIONS: &[&str] = &[
     "binary_quantize",
     "cosine_distance",
+    "embed",
     "geopoly_area",
     "geopoly_bbox",
     "geopoly_blob",

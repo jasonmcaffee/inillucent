@@ -58,10 +58,21 @@ reaching for it:
 - **The published 0.1.2 archives carry it**, because `packaging/release-all.ps1` passes
   `--features inillucent-cli/embed`. The 0.1.1 archives do not, and a build from a checkout needs
   that flag as well, because the feature is off by default. A build without it says
-  `no such function: embed`; a build with it but no model installed refuses by name and tells you the
-  command that installs one, rather than returning a NULL or a vector of zeroes. A vector whose
-  provenance is unknown is worse than no vector: it goes into an index, and every neighbour it is
-  ever compared against is wrong.
+  `no such function: embed`, with the status `not_found`. A build with it and no model installed
+  refuses by name, with the status `invalid_state` and the command that installs one, rather than
+  returning a NULL or a vector of zeroes:
+
+  ```
+  Error [invalid_state]: embed: no embedding model is installed. Run `inillucent setup-embeddings`
+  to download nomic-embed-text-v1.5 and the ONNX Runtime it needs, or set INILLUCENT_ONNX_DIR to a
+  directory that already holds them
+  ```
+
+  A vector whose provenance is unknown is worse than no vector: it goes into an index, and every
+  neighbour it is ever compared against is wrong.
+
+  The 0.1.2 archives printed `Error [syntax]: bad parameter or other API misuse` for that case, which
+  named neither the function nor the fix. task-1952 is the repair.
 - **Nothing has to be exported after the install.** The engine finds the runtime and the weights
   where the command put them. `ORT_DYLIB_PATH` and `INILLUCENT_ONNX_DIR` still override.
 - **A registered function reaches the write path.** `INSERT ... VALUES`, `UPDATE ... SET` and
