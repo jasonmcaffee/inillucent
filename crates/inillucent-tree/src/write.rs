@@ -500,7 +500,7 @@ impl PagedTree {
         let leaf = LeafRef::parse(&guard)?
             .with_collations(self.collations())
             .with_directions(self.directions());
-        let located = leaf.locate(&key, self.key_columns())?;
+        let located = leaf.locate(key, self.key_columns())?;
         // One row's out-of-line values, and only when the caller wants
         // the row it is replacing. Locating reads key columns, which are
         // never out of line, so this comes after.
@@ -1071,7 +1071,7 @@ impl PagedTree {
 
     /// Compacts a leaf, or splits it when its live rows no longer fit one page.
     ///
-    /// **The action half.** [`Tree::choose_fit`] reads the page and answers which
+    /// **The action half.** `choose_fit` reads the page and answers which
     /// of the three this is; this drops the guard and does it. They were one
     /// function of 166 lines until task-1946's M12.
     ///

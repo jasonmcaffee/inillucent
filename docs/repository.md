@@ -95,16 +95,18 @@ mistaken for a green run.
 If you do use `cargo test --workspace`, pass `--no-fail-fast`. Without it the run stops at the first
 failing binary, and has reported about a quarter of the suite.
 
-**No test fails today.** `inillucent-testrun --strict` on a quiet box reports 149 targets, 2,646
-tests, 0 failed and 0 undetermined in 301 seconds. It still prints `not ok`, because `live_postgres`
-and `live_mysql` evidenced nothing and neither server is configured on this machine — which is the
-condition `--strict` exists to report. This page used to say seventeen tests failed; task-1869 had
+**No test fails today.** `inillucent-testrun --strict` on a quiet box reports 169 targets, 2,789
+tests, 0 failed and 0 undetermined in 756 seconds. It still prints `not ok`, because three suites
+evidenced nothing: `inillucent-remote::live_postgres` and `inillucent-remote::live_mysql` have no
+server configured on this machine, and `inillucent-remote::lib` runs only when
+`INILLUCENT_NETWORK_TESTS` is set, because it opens sockets. That is the condition `--strict` exists
+to report, and `tools/doc-facts/check.mjs` accepts those three and no others. This page used to say seventeen tests failed; task-1869 had
 already removed the cause and nobody re-ran it, which is recorded in
 [the roadmap](roadmap.md#what-task-1911-closed).
 
 ## What the tests cover
 
-2,646 tests across 149 test targets in the workspace, in these classes:
+2,789 tests across 169 test targets in the workspace, in these classes:
 
 - **A differential harness** that runs the same SQL through the pinned SQLite 3.53.4 and compares
   transcripts. 208 of those cases are `semantics.rs`, and 416 are the wider feature probe.
