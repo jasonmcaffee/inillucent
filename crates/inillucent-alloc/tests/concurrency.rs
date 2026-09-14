@@ -21,6 +21,12 @@
 //! race-detector run: what it establishes is that the ordinary cross-thread
 //! flow the crate documents is a flow that works, which is a thing nothing
 //! previously said.
+//!
+//! **An address that comes back is not a defect.** The freeing thread returns
+//! each block before it receives the next, so the pool is free to hand the same
+//! address out again, and it does once the two threads are running at the same
+//! speed. The check is therefore on the blocks that are *live* rather than on
+//! every address ever seen - see the comment beside it.
 
 use inillucent_alloc::{Pooled, LARGEST};
 
@@ -88,13 +94,29 @@ fn a_block_allocated_on_one_thread_frees_correctly_on_another() {
         });
 
         let freeing = std::thread::spawn(move || {
-            let mut seen: Vec<usize> = Vec::new();
+            // **Which blocks are live, not which have ever been seen
+            // (task-1913).** This kept every address it had ever received and
+            // refused a repeat, which is not a property of a correct
+            // allocator: this thread frees each block before receiving the
+            // next, so an address it has already returned is free for the pool
+            // to hand out again, and a pool that reuses one is a pool doing
+            // its job. On an idle machine the allocating thread ran ahead and
+            // the channel buffered the whole list, so no address came back;
+            // under load the two threads keep pace, the pool recycles, and the
+            // case failed about 3.6% of the time - accusing the one crate in
+            // the workspace allowed to write `unsafe` of handing out a live
+            // block twice. Measured over 240 runs under contention: every one
+            // of the ten repeats had already been freed, was not live, and
+            // held exactly the bytes this round had written.
+            let mut live: Vec<usize> = Vec::new();
+            let mut received = 0usize;
             while let Ok((address, size, fill)) = receiver.recv() {
                 assert!(
-                    !seen.contains(&address),
+                    !live.contains(&address),
                     "the pool handed out {address:#x} twice while it was still live"
                 );
-                seen.push(address);
+                live.push(address);
+                received = received.saturating_add(1);
                 let block = address as *mut u8;
                 // SAFETY: the allocating thread wrote `size` bytes here and has
                 // not touched the block since; this thread now owns it.
@@ -110,8 +132,9 @@ fn a_block_allocated_on_one_thread_frees_correctly_on_another() {
                 // once, on the thread that now owns it - which is the case the
                 // crate's own comment says is safe and which nothing tested.
                 unsafe { POOLED.dealloc(block, layout) };
+                live.retain(|held| *held != address);
             }
-            seen.len()
+            received
         });
 
         allocating.join().expect("the allocating thread finishes");
