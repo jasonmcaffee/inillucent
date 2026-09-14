@@ -637,8 +637,12 @@ pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
         format!("{}{}", git_commit, if git_dirty { " (working tree dirty)" } else { "" }),
     );
     provenance.insert("command".into(), runs::command_line());
-    provenance.insert("corpus cache".into(), options.cache_path.display().to_string());
-    provenance.insert("embedding model".into(), format!("{model_dir}/{model_file}"));
+    runs::note_inputs(
+        &mut provenance,
+        &options.cache_path,
+        &model_dir,
+        &model_file,
+    );
     // Beside the path, what the path was taken to mean. A directory says where
     // the weights were; only this says which prefixes, pooling, width and token
     // bound produced the vectors, and those are what another run has to match.
@@ -679,11 +683,7 @@ pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
         Some(w) => {
             let records = w.written();
             let dir = w.finish(&manifest)?;
-            provenance.insert(
-                "per-query records".into(),
-                format!("{} lines in {}", records, dir.join("per-query.jsonl").display()),
-            );
-            provenance.insert("run manifest".into(), dir.join("manifest.json").display().to_string());
+            runs::note_run_files(&mut provenance, records, &dir);
         }
         None => {
             provenance.insert("per-query records".into(), "**not written**".into());

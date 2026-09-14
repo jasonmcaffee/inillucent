@@ -536,6 +536,16 @@ fn the_campaign_reaches_the_sites_it_claims_to() {
         let file = vfs.open(&path, OpenOptions::main_db()).expect("it opens");
         let _ = file.shared_memory();
     }
+    // Renaming the file is what reaches `Rename`. This crate never renames -
+    // `VACUUM` is the engine's, and the pool has no concept of one - so the
+    // campaign asks the VFS directly rather than claiming a site no caller here
+    // reaches, the same way it does for `Shm` above. It is renamed back, because
+    // the delete below has to find it.
+    {
+        let moved = DbPath::new("sites-renamed.rdb");
+        let _ = vfs.rename(&path, &moved);
+        let _ = vfs.rename(&moved, &path);
+    }
     // Deleting the file is what reaches `Delete`, and it is the last thing this
     // does because nothing can be read afterwards.
     let _ = vfs.delete(&path, true);

@@ -2,6 +2,7 @@
 name = "inillucent-model"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "An executable model of the engine's transactional semantics, and the traces that drive it"

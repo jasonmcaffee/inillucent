@@ -78,6 +78,16 @@ jobs:
       # already carries, so there is nothing to install - saying so is cheaper
       # than somebody re-deriving it from the absence of a step.
 
+      # `cargo-deny` is installed here rather than left to the validate script's
+      # own fallback, so the three operating systems in this matrix build it
+      # against the action's cache instead of from source on every run. The
+      # script still installs it when it is absent, which is what makes a
+      # developer's machine run the same gate CI does (task-1946, M8).
+      - name: install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
       - name: validate
         shell: bash
         run: |
@@ -98,6 +108,67 @@ jobs:
           name: output-${{ matrix.os }}
           path: _agent_output/
           if-no-files-found: ignore
+          retention-days: 7
+
+  # **The Linux evidence, recorded by CI because it was never recorded anywhere
+  # else (task-1946, M5).** `compat/compat-report.md` shipped fourteen rows
+  # saying a capability the manifest calls `pass` has no passing result on
+  # linux-x86_64, and the reason was that `compat/results/linux-x86_64.jsonl`
+  # only ever came from somebody's WSL install. Thirteen of the fourteen were
+  # the oracle-graded suites, which skip without `INILLUCENT_SQLITE_ORACLE` and
+  # therefore recorded nothing.
+  #
+  # This job builds the oracle, runs the recorder, and uploads what it wrote.
+  # It does not push: a workflow that commits to `main` needs write permission
+  # on every pull request from a fork. The diff is the artefact, and
+  # `check the recorded evidence is current` below says in the log when the
+  # checked-in file no longer matches what the run produced, so the maintainer
+  # knows to download it rather than finding out at the next release.
+  evidence:
+    name: linux evidence
+    needs: validate
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: evidence-ubuntu
+
+      - name: install a C compiler
+        run: sudo apt-get update && sudo apt-get install -y build-essential
+
+      # `bash`, not `sh`: the script is `#!/usr/bin/env bash` and uses
+      # `set -o pipefail`, which dash answers with `Illegal option -o pipefail`.
+      - name: build the SQLite oracle
+        run: bash tools/sqlite-reference.sh
+
+      - name: record the evidence
+        run: |
+          export INILLUCENT_SQLITE_ORACLE="$PWD/.sqlite-ref/3.53.4/sqlite-oracle"
+          cargo run -p inillucent-compat --bin inillucent-evidence
+
+      - name: check the recorded evidence is current
+        if: always()
+        run: |
+          if git diff --quiet -- compat/results/linux-x86_64.jsonl; then
+            echo "compat/results/linux-x86_64.jsonl is what this run recorded"
+          else
+            echo "::warning::compat/results/linux-x86_64.jsonl is stale - download the linux-evidence artefact and commit it"
+            git --no-pager diff --stat -- compat/results/linux-x86_64.jsonl
+          fi
+
+      - name: the compatibility report this evidence supports
+        run: cargo run -p inillucent-compat --bin inillucent-manifest -- report
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-evidence
+          path: |
+            compat/results/linux-x86_64.jsonl
+            compat/compat-report.md
+            compat/compat-report.json
           retention-days: 7
 
   packages:

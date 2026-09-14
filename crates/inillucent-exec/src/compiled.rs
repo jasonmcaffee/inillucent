@@ -192,8 +192,8 @@ fn try_join_recipe(
 ///
 /// So `Compiled` takes the catalog as an argument to [`Compiled::run`]
 /// instead of a field: nothing here borrows it between executions. What it
-/// keeps is [`crate::physical::build_upper`]'s output - the part of the
-/// chain proved to hold no such borrow - plus a [`JoinRecipe`] per inner
+/// keeps is `crate::physical::build_upper`'s output - the part of the
+/// chain proved to hold no such borrow - plus a `JoinRecipe` per inner
 /// stage and enough to rebuild the source fresh every call, the same way
 /// `Statement::run` does. `catalog.tree(root)` and `catalog.pool_for(root)`
 /// are asked again, for every level, on every [`Compiled::run`], so a write,
@@ -203,7 +203,7 @@ fn try_join_recipe(
 /// **Every inner stage must be an index nested loop join.** A statement with
 /// a correlated block, a materialised join, or a lateral module anywhere in
 /// it is never turned into a `Compiled` at all - see [`try_compile`] - so
-/// `joins` holds one [`JoinRecipe`] per inner stage, always, whenever a
+/// `joins` holds one `JoinRecipe` per inner stage, always, whenever a
 /// `Compiled` exists for a multi-stage plan.
 pub struct Compiled {
     /// The structural choices `prepare` made; owned, because nothing here may
@@ -348,7 +348,7 @@ impl Compiled {
 ///   catalog for the chain's own life, which a lifetime-free `Compiled`
 ///   cannot hold, and there is no way to build one that omits it and still
 ///   answers the query.
-/// - **an inner stage that is not an index nested loop join.** [`try_join_recipe`]
+/// - **an inner stage that is not an index nested loop join.** `try_join_recipe`
 ///   decides this the same way `build_nested` does, and is checked before
 ///   `build_upper` too - a lateral module, a materialised or outer join, a
 ///   table scan `PRAGMA automatic_index` would key are all refused, because

@@ -157,6 +157,30 @@ impl ImportedDatabase {
         self.statement_cache_limit.get()
     }
 
+    /// Returns what one run-time limit is set to on this connection.
+    ///
+    /// @param limit - which limit
+    pub fn limit(&self, limit: inillucent_base::limits::Limit) -> i64 {
+        self.limits.get(limit)
+    }
+
+    /// Sets one run-time limit, and returns what it was before.
+    ///
+    /// **The register was unreachable until task-1946's H3.** `limits` was set
+    /// to `Limits::default()` when a connection opened and never touched again,
+    /// so `.limit trigger_depth 10` printed 1000 and changed nothing, and the
+    /// binder's own trigger cap could only ever be the default. The clamping is
+    /// `Limits::set`'s: a request above the manifest's `hard_max` is clamped to
+    /// it and one below `minimum` is refused, which is how `sqlite3_limit`
+    /// behaves.
+    ///
+    /// @param limit - which limit
+    /// @param requested - the value asked for
+    /// @returns the value that was in force before this call
+    pub fn set_limit(&mut self, limit: inillucent_base::limits::Limit, requested: i64) -> i64 {
+        self.limits.set(limit, requested)
+    }
+
     /// Sets the ceiling one session's cache is emptied at.
     ///
     /// Zero means every statement is compiled fresh, which is what a caller

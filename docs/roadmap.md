@@ -366,6 +366,39 @@ already answers `Ok(None)` for a page it cannot read, precisely so redo can rebu
 failing on it, which means the failing read here is happening somewhere earlier than redo, on a path
 the catalog root's own repair pass does not generalize to. Not investigated past this.
 
+## 13. Five command line files still reach past the driver
+
+`drivers/README.md` says the driver is the one surface an application reaches the engine through,
+and for an application that is true: the C ABI, the four language wrappers and every published
+package go through it. The command line does not. Five files under `crates/inillucent-cli/src`
+import `inillucent_engine` directly, and
+`crates/inillucent-compat/tests/policy.rs`'s `no_shell_file_reaches_past_the_driver_more_than_it_is_recorded_at`
+records how many lines of each do, so the number can only come down.
+
+Where they are, and what each still needs (task-1946, M11):
+
+| file | lines | what it reaches for |
+|---|---|---|
+| `shell.rs` | 10 | sessions, virtual table modules, the authorizer, pool statistics, `ATTACH` |
+| `command/mod.rs` | 8 | the command table's context and its budget arming |
+| `commands.rs` | 7 | `.dbinfo`, `.stats` and the serialisation verbs |
+| `command/verbs.rs` | 2 | `migrate` and `batch`, which drive a transaction |
+| `import.rs` | 1 | one function signature taking an engine connection, which follows `shell.rs` |
+
+`mcp.rs` came off this list in task-1932, when the budget types it needed were re-exported by the
+driver. `diagnose.rs` and `dbconfig.rs` came off it in task-1946: the first was reaching for the VFS
+through the engine's own re-export, which the driver re-exports now, and the second was never
+reaching at all - its single hit was a sentence in a module comment naming the crate by path, counted
+because the check reads lines rather than imports.
+
+**The rest is `shell.rs`.** The other four are small, and three of them follow it: the shell is
+where the session, the authorizer and the attached databases live, and moving it is what decides
+what the driver's surface has to become.
+
+The claim in `drivers/README.md` is not false today, because it is about what an *application*
+reaches; it becomes false the day somebody reads it as being about this repository. Until the count
+is zero, this item is what says so.
+
 ## What task-1911 closed
 
 Eight items came off this list, and the numbering above is what is left. Each is named here so a

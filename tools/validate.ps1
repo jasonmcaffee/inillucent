@@ -105,6 +105,38 @@ Invoke-Stage -Name 'lint' -Because 'the strict lint set, which the pinned compil
     cargo clippy --manifest-path "$root/Cargo.toml" --workspace --all-targets --all-features --locked -- -D warnings
 }
 
+# **What a declared dependency drags in behind it, and under what licence.**
+# `policy.rs` checks the edges a manifest names; nothing looked at the resolved
+# graph, so a crate with a published advisory or a licence this repository cannot
+# ship passed every check the workspace had (task-1946, M8). `deny.toml` at the
+# root says what is allowed and why.
+#
+# `cargo-deny` is installed when it is absent rather than skipped: a stage that
+# quietly does nothing on the machine that has not got the tool is a stage that
+# reports green having checked nothing, which is the failure
+# `tests/inillucent-testing-tdd.md` rule 1.5 names.
+Invoke-Stage -Name 'dependencies' -Because 'advisories, licences and the resolved graph, which the manifest checks cannot see' -Body {
+    & cargo deny --version *> $null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host '    installing cargo-deny'
+        cargo install cargo-deny --locked
+    }
+    cargo deny --manifest-path "$root/Cargo.toml" check
+}
+
+# **A broken intra-doc link is a build failure here rather than a hole in the
+# published documentation.** `cargo doc` warns about a `[`Type`]` that resolves
+# to nothing; nothing turned that warning into an error, so the first place it
+# would have been noticed is a docs.rs page nobody was watching.
+Invoke-Stage -Name 'docs' -Because 'a link that resolves to nothing is a defect, not a warning' -Body {
+    $env:RUSTDOCFLAGS = '-D warnings'
+    try {
+        cargo doc --manifest-path "$root/Cargo.toml" --workspace --no-deps --all-features
+    } finally {
+        Remove-Item Env:RUSTDOCFLAGS -ErrorAction SilentlyContinue
+    }
+}
+
 # **Built before anything grades against it (task-1932, H10).** Sixty-nine
 # differential tests across ten files compare this engine with SQLite 3.53.4,
 # and each of them skips when the oracle is absent. `--strict` at the end of
@@ -137,6 +169,20 @@ Invoke-Stage -Name 'fixtures' -Because 'the log-lead durability tests read a fix
 # having them.
 Invoke-Stage -Name 'contracts' -Because 'dependencies, layering, the command table and the test map' -Body {
     cargo test --manifest-path "$root/Cargo.toml" -p inillucent-compat --test policy --test selection --test command_parity --test harness
+}
+
+# **A published compatibility report may not carry its own unresolved Problems
+# table (task-1946, M5).** `compat/compat-report.md` shipped fourteen rows saying
+# a capability the manifest calls `pass` has no passing result recorded on
+# linux-x86_64. `inillucent-manifest report` has always exited non-zero when it
+# finds one; nothing ever ran it, so the table grew instead.
+#
+# It regenerates the report from `compat/results` as it goes, so a run whose
+# recorded results have moved leaves the checked-in report agreeing with them.
+# That is also what makes the stage fail a checkout whose report is stale: the
+# `harness.report.reproducible` suite compares the two.
+Invoke-Stage -Name 'compat' -Because 'the published compatibility report states no unresolved problem' -Body {
+    cargo run --manifest-path "$root/Cargo.toml" -p inillucent-compat --bin inillucent-manifest -- report
 }
 
 # **The exit code is checked between the two statements (task-1932, H12).**

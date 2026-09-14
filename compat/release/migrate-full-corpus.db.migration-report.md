@@ -1,9 +1,9 @@
 # Migration report
 
-- source: `C:/jason/dev/inillucent/_agent_output/migrate/full/index`
+- source: `_agent_output/migrate/full/index`
 - source generation: `g000000000001`
-- staging destination: `C:/jason/dev/inillucent/_agent_output/measurements/migrate/full\corpus.db.migrating`
-- published to: `C:/jason/dev/inillucent/_agent_output/measurements/migrate/full/corpus.db`
+- staging destination: `_agent_output/measurements/migrate/full\corpus.db.migrating`
+- published to: `_agent_output/measurements/migrate/full/corpus.db`
 - target commit sequence: `1`
 
 ## Source sections

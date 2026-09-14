@@ -284,51 +284,6 @@ fn next_in_chain(pager: &mut Pager, page: PageId) -> DbResult<Option<PageId>> {
     Ok(Some(PageId::from_persisted(raw)?))
 }
 
-/// Copies a range of a payload out.
-pub fn read_range(
-    pager: &mut Pager,
-    place: &PayloadPlace,
-    start: u64,
-    output: &mut [u8],
-) -> DbResult<()> {
-    let spans = locate(pager, place, start, output.len() as u64)?;
-    let mut written = 0usize;
-    for span in spans {
-        let pin = pager.get_page(span.page)?;
-        let source = bytes::window(pin.bytes(), span.offset, span.len)?.to_vec();
-        drop(pin);
-        let target = bytes::window_mut(output, written, span.len)?;
-        target.copy_from_slice(&source);
-        written = written.saturating_add(span.len);
-    }
-    Ok(())
-}
-
-/// Writes a range of a payload in place.
-///
-/// The length of the value cannot change - a blob handle writes over bytes
-/// that are already there - so nothing about the record moves and the pages
-/// the range lives on are the only ones touched.
-pub fn write_range(
-    pager: &mut Pager,
-    place: &PayloadPlace,
-    start: u64,
-    input: &[u8],
-) -> DbResult<()> {
-    let spans = locate(pager, place, start, input.len() as u64)?;
-    let mut read = 0usize;
-    for span in spans {
-        let source = bytes::window(input, read, span.len)?.to_vec();
-        pager.edit_page(span.page, |raw| {
-            let target = bytes::window_mut(raw, span.offset, span.len)?;
-            target.copy_from_slice(&source);
-            Ok(())
-        })?;
-        read = read.saturating_add(span.len);
-    }
-    Ok(())
-}
-
 /// Counts the pages an overflow chain occupies, validating it as it goes.
 ///
 /// The integrity check needs the page numbers rather than the bytes, and

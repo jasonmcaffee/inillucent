@@ -265,7 +265,7 @@ maintenance workers, JIT off per pgvector's own guidance — because a compariso
 that was not given what it needs proves nothing.
 
 ```sh
-pg_ctl -D J:/inillucent-embeddings/pgdata -l J:/inillucent-embeddings/logs/pg.log start
+pg_ctl -D <the cluster's data directory> -l <its log file> start
 ```
 
 It holds `inillucent_synth` (185,078 chunks, 1.7 GB with its indexes) and `inillucent_synth_small` (18,685),

@@ -106,18 +106,6 @@ impl<'p> LeafRef<'p> {
         Err(unreachable_branch("an inclusive range ran to its end"))
     }
 
-    /// Reports whether any delta row holds an out-of-line value.
-    ///
-    /// The cheap half of the question `read_extents` asks: a leaf whose flag is
-    /// set may have spilled only in its sorted region, and walking the delta
-    /// area is a page walk this saves when it can.
-    pub fn any_delta_extent(&self) -> DbResult<bool> {
-        if !self.has_extents() {
-            return Ok(false);
-        }
-        self.any_delta_extent_unchecked()
-    }
-
     /// The same, without believing the flag.
     ///
     /// For [`crate::mutate::LeafMut::remove_delta`], which is deciding what the
@@ -231,7 +219,7 @@ impl<'p> LeafRef<'p> {
     /// it, so a caller after one column pays for the columns ahead of it and
     /// nothing else. A caller after several - `locate` used to be one, calling
     /// this once per key column - pays for that skip again on every call; see
-    /// [`LeafRef::delta_key_matches`] and [`LeafRef::delta_row_values`] for the
+    /// `LeafRef::delta_key_matches` and `LeafRef::delta_row_values` for the
     /// left-to-right walk that avoids it.
     ///
     /// @param index - the row's position in the delta area

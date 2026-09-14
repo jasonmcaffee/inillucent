@@ -128,11 +128,6 @@ impl PrimaryCode {
     pub fn message(self) -> &'static str {
         self.row().message
     }
-
-    /// Reports whether a result code means the operation succeeded.
-    pub fn is_success(self) -> bool {
-        matches!(self, PrimaryCode::Ok | PrimaryCode::Row | PrimaryCode::Done)
-    }
 }
 
 /// The name of an attached database, used to attribute an error to one file.

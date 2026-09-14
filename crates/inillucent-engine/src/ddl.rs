@@ -24,7 +24,7 @@
 //! A catalog row's `rootpage` is the page the tree is rooted at **in this
 //! file**. The `trees` and `layouts` maps are keyed by something else: an
 //! identifier, which for an imported table is the fixture's SQLite root page and
-//! for a created one is a number counted up from [`super::FIRST_CREATED_ROOT`].
+//! for a created one is a number counted up from `super::FIRST_CREATED_ROOT`.
 //! They are different because the physical root is not known until the tree has
 //! been built, and the identifier has to be chosen before it - a tree is stamped
 //! with its identifier on every page it packs.

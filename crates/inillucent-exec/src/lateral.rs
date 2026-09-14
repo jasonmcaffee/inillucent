@@ -30,9 +30,9 @@ use inillucent_base::{error::misuse, DbResult};
 use inillucent_sql::bind::ColumnUse;
 use inillucent_sql::catalog_view::TableInfo;
 use inillucent_sql::plan::AccessPath;
-use inillucent_tree::datum::{Datum, OwnedDatum};
+use inillucent_tree::datum::OwnedDatum;
 
-use crate::batch::{Batch, Vector};
+use crate::batch::Batch;
 use crate::expr::Eval;
 use crate::ops::{emit_rows, Flow, Sink};
 use crate::physical::{Params, TreeCatalog};
@@ -145,32 +145,4 @@ impl Sink for LateralModule<'_> {
     fn reset(&mut self) -> DbResult<()> {
         self.downstream.reset()
     }
-}
-
-/// Returns a batch over borrowed rows, for a caller that has owned ones.
-///
-/// The same shape `emit_rows` builds, exposed because the lateral join needs to
-/// hand one row at a time to an expression rather than push a whole batch.
-///
-/// @param rows - the rows
-/// @param held - a buffer the batch's columns borrow from
-pub fn batch_over<'r>(rows: &'r [Vec<OwnedDatum>], held: &'r mut Vec<Vec<Datum<'r>>>) -> Batch<'r> {
-    let width = rows.first().map(Vec::len).unwrap_or(0);
-    held.clear();
-    for column in 0..width {
-        held.push(
-            rows.iter()
-                .map(|row| {
-                    row.get(column)
-                        .map(OwnedDatum::borrow)
-                        .unwrap_or(Datum::Null)
-                })
-                .collect(),
-        );
-    }
-    let columns: Vec<Vector<'r>> = held
-        .iter()
-        .map(|values| Vector::Values(values.as_slice()))
-        .collect();
-    Batch::new(rows.len(), columns)
 }

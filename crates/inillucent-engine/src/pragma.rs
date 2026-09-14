@@ -41,7 +41,7 @@
 //! `PRAGMA user_version` had gone nowhere.
 //!
 //! So the rule is now: **a name on SQLite's list either answers or refuses.**
-//! [`SQLITE_PRAGMAS`] is that list, and anything on it this engine has no
+//! `SQLITE_PRAGMAS` is that list, and anything on it this engine has no
 //! answer for is refused by name. A pragma on *nobody's* list -
 //! `PRAGMA nonesuch` - is still silent, because that is what SQLite does with
 //! one and the parity is the point.
@@ -214,7 +214,7 @@ impl ImportedDatabase {
             b"index_xinfo" => self.pragma_index_info(argument, true)?,
             b"table_list" => self.pragma_table_list(argument)?,
             b"collation_list" => self.pragma_collation_list(),
-            b"pragma_list" => list_of("name", SQLITE_PRAGMAS),
+            b"pragma_list" => list_of("name", &listed_pragmas()),
             b"module_list" => {
                 let mut names = self.registry.module_names();
                 names.extend(ENGINE_MODULES.iter().map(|name| (*name).to_string()));
@@ -1589,6 +1589,35 @@ fn list_of<S: AsRef<str>>(column: &str, values: &[S]) -> Outcome {
     }
 }
 
+/// The pragma names SQLite compiles only on Windows.
+///
+/// **`data_store_directory` is `SQLITE_OS_WIN`-only, and this engine listed it
+/// everywhere (task-1946, M5).** SQLite's `pragma.h` builds its table from the
+/// same `#if` the VFS is chosen by, so a Linux build's `pragma_list` is one name
+/// shorter than a Windows build's. Nothing here could see that until the first
+/// Linux run that had an oracle to compare against - the oracle stage had failed
+/// on every Linux run there had ever been - and
+/// `registers.rs::the_pragma_register_agrees_exactly` then reported the two
+/// lists differing by exactly this name.
+///
+/// It stays in `SQLITE_PRAGMAS` rather than being cut, because the list is also
+/// what decides whether an unanswered name is refused or ignored, and that
+/// decision is the same on both platforms: `PRAGMA data_store_directory` is a
+/// pragma either way, and a Linux caller asking for it gets SQLite's own silence
+/// rather than an error.
+const WINDOWS_ONLY_PRAGMAS: [&str; 1] = ["data_store_directory"];
+
+/// Returns the names `pragma_list` reports on this platform.
+///
+/// @returns every name in `SQLITE_PRAGMAS` that this platform's SQLite has
+fn listed_pragmas() -> Vec<&'static str> {
+    SQLITE_PRAGMAS
+        .iter()
+        .copied()
+        .filter(|name| cfg!(windows) || !WINDOWS_ONLY_PRAGMAS.contains(name))
+        .collect()
+}
+
 /// Every pragma name SQLite 3.53.4's own `pragma_list` reports.
 ///
 /// **The list is the contract.** A name here that this engine does not answer
@@ -1597,6 +1626,9 @@ fn list_of<S: AsRef<str>>(column: &str, values: &[S]) -> Outcome {
 /// `pragma_pragma_list` reports, so a tool can ask this engine what it knows
 /// about - and get the same set of names either engine would give, with the
 /// difference showing up as a refusal rather than as an absence.
+///
+/// One name on it is platform-dependent; `listed_pragmas` is what
+/// `pragma_list` reports, and `WINDOWS_ONLY_PRAGMAS` says which.
 pub(crate) const SQLITE_PRAGMAS: &[&str] = &[
     "analysis_limit",
     "application_id",

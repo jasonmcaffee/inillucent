@@ -45,17 +45,11 @@ use crate::load::{index_from_create_sql, table_from_create_sql};
 /// The name the catalog tree answers to in a query.
 pub const SCHEMA_TABLE: &[u8] = b"sqlite_schema";
 
-/// The alias SQLite has always accepted for it.
-pub const SCHEMA_ALIAS: &[u8] = b"sqlite_master";
-
 /// The tree id the catalog is written under.
 ///
 /// Tree ids identify a tree inside the file the way SQLite's root pages do, and
 /// the catalog takes the first so that no imported table can collide with it.
 pub const SCHEMA_TREE_ID: u64 = 1;
-
-/// How many columns a catalog row has, not counting the rowid key.
-pub const SCHEMA_COLUMNS: usize = 5;
 
 /// What kind of object a catalog row describes.
 ///
@@ -189,12 +183,6 @@ pub fn schema_layout() -> Vec<ColumnSpec> {
         ColumnSpec::new(PhysicalType::Int64),
     ]
 }
-
-/// How many columns the catalog tree has, the rowid key included.
-pub const CATALOG_WIDTH: usize = 10;
-
-/// How many of them `sqlite_schema` shows, the rowid key included.
-pub const SCHEMA_VIEW_WIDTH: usize = 6;
 
 /// Returns the `CREATE TABLE` text the catalog tree describes itself with.
 ///

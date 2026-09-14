@@ -10,7 +10,7 @@
 //! doc comment warns against, and the thing this module exists to avoid.
 //!
 //! So enforcement is this: the binder already fills `triggers` on every
-//! [`BoundInsert`], [`BoundUpdate`] and [`BoundDelete`], from written triggers
+//! [`BoundInsert`], `BoundUpdate` and [`BoundDelete`], from written triggers
 //! and from `TableInfo::foreign_key_triggers` alike, and the only piece that
 //! was missing is a place that runs one.
 //!
@@ -65,13 +65,6 @@ use crate::dml::{self, Row, WriteTarget};
 use crate::expr::RAISE_IGNORE;
 use crate::physical::{self, Params};
 
-/// How deep one write may push another before the engine refuses.
-///
-/// SQLite's `SQLITE_MAX_TRIGGER_DEPTH`. A cycle of triggers is a program that
-/// does not end, and the only difference between that and a slow one is a
-/// number, so there is a number.
-pub const MAX_TRIGGER_DEPTH: usize = 1000;
-
 /// The two row images a firing trigger can read.
 ///
 /// Both are optional because an `INSERT` has no `OLD` and a `DELETE` has no
@@ -108,15 +101,22 @@ pub enum Fired {
 pub struct Depth(pub usize);
 
 impl Depth {
-    /// Returns the depth one level further in, refusing past the cap.
-    fn deeper(self) -> DbResult<Depth> {
-        let next = self.0.saturating_add(1);
-        if next > MAX_TRIGGER_DEPTH {
-            return Err(misuse(format!(
-                "too many levels of trigger recursion: the limit is {MAX_TRIGGER_DEPTH}"
-            )));
-        }
-        Ok(Depth(next))
+    /// Returns the depth one level further in.
+    ///
+    /// **It cannot refuse, and the check that used to be here could not fire.**
+    /// This module declared its own `MAX_TRIGGER_DEPTH` at 1000 and compared
+    /// against it on every entry, but the executor walks a tree the binder has
+    /// already inlined - and the binder caps that inlining at
+    /// `Limit::TriggerDepth`, so a tree deep enough to trip this one never
+    /// reaches the executor at all (task-1946, H3). Two constants of the same
+    /// name holding different numbers is worse than one: the enforced number
+    /// was the binder's and the advertised one was this, and they disagreed by
+    /// a factor of thirty.
+    ///
+    /// The depth itself is still carried, because `fire` reports it and a
+    /// trigger body's own statements are compiled against it.
+    fn deeper(self) -> Depth {
+        Depth(self.0.saturating_add(1))
     }
 }
 
@@ -219,7 +219,7 @@ pub fn fire(
     if triggers.is_empty() {
         return Ok(Fired::Continue);
     }
-    let deeper = depth.deeper()?;
+    let deeper = depth.deeper();
     for trigger in triggers {
         if trigger.time != time {
             continue;

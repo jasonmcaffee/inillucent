@@ -43,7 +43,7 @@ impl Scheme {
 }
 
 /// Where to connect, as who, and to which database.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct ConnectionUrl {
     /// Which protocol to speak.
     pub scheme: Scheme,
@@ -322,6 +322,49 @@ impl Transport {
     }
 }
 
+impl fmt::Debug for ConnectionUrl {
+    /// Writes every field, with `***` for the password.
+    ///
+    /// **`Debug` was derived, and a derived `Debug` prints the password.** The
+    /// module's invariant above says the password is never formatted; `Display`
+    /// honoured it and had a test, and `{:?}` walked straight past both. No
+    /// `{:?}` on this type existed when task-1946 found it (H5), which is what
+    /// made it latent rather than a leak: one `dbg!`, one `#[derive(Debug)]` on
+    /// a struct holding a `ConnectionUrl`, or one error type wrapping it, and a
+    /// password is in a log file that outlives the run.
+    ///
+    /// Every other field is printed, because the reason to reach for `{:?}` on a
+    /// connection URL is to see how it parsed - which port was defaulted, which
+    /// parameters survived - and a `Debug` that hid those would be replaced by a
+    /// worse one the first time somebody needed them.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ConnectionUrl")
+            .field("scheme", &self.scheme)
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("user", &self.user)
+            .field("password", &self.password.as_ref().map(|_| Redacted))
+            .field("database", &self.database)
+            .field("parameters", &self.parameters)
+            .finish()
+    }
+}
+
+/// What stands in for a password in a `Debug` rendering.
+///
+/// A unit struct rather than the string `"***"`, so the field reads
+/// `password: Some(***)` rather than `password: Some("***")` - the quotes would
+/// say a password of three asterisks, which is a different claim.
+struct Redacted;
+
+impl fmt::Debug for Redacted {
+    /// Writes `***`.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("***")
+    }
+}
+
 impl fmt::Display for ConnectionUrl {
     /// Writes the URL with the password replaced by `***`.
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -478,10 +521,10 @@ mod tests {
     #[test]
     fn a_full_postgres_url_parses_into_its_parts() {
         let url =
-            ConnectionUrl::parse("postgres://jason:hunter2@db.example:5433/corpus?sslmode=disable")
+            ConnectionUrl::parse("postgres://user:hunter2@db.example:5433/corpus?sslmode=disable")
                 .expect("parses");
         assert_eq!(url.scheme, Scheme::Postgres);
-        assert_eq!(url.user, "jason");
+        assert_eq!(url.user, "user");
         assert_eq!(url.password.as_deref(), Some("hunter2"));
         assert_eq!(url.host, "db.example");
         assert_eq!(url.port, 5433);
@@ -525,10 +568,48 @@ mod tests {
     /// keeps a credential out of a report, a manifest and an agent transcript.
     #[test]
     fn display_redacts_the_password() {
-        let url = ConnectionUrl::parse("postgres://jason:hunter2@db:5432/corpus").expect("parses");
+        let url = ConnectionUrl::parse("postgres://user:hunter2@db:5432/corpus").expect("parses");
         let shown = url.to_string();
         assert!(!shown.contains("hunter2"), "{shown}");
-        assert_eq!(shown, "postgres://jason:***@db:5432/corpus");
+        assert_eq!(shown, "postgres://user:***@db:5432/corpus");
+    }
+
+    /// `{:?}` redacts the password too, which the derived `Debug` did not.
+    #[test]
+    fn debug_redacts_the_password() {
+        let url = ConnectionUrl::parse(
+            "postgres://user:hunter2@db:5432/corpus?sslmode=disable&connect_timeout=10",
+        )
+        .expect("parses");
+        let shown = format!("{url:?}");
+        assert!(!shown.contains("hunter2"), "{shown}");
+        assert!(shown.contains("password: Some(***)"), "{shown}");
+
+        // And the fields somebody reaches for `{:?}` to see are all still there,
+        // including the port the URL stated and the parameters after it.
+        for expected in [
+            "ConnectionUrl",
+            "scheme: Postgres",
+            "host: \"db\"",
+            "port: 5432",
+            "user: \"user\"",
+            "database: \"corpus\"",
+            "sslmode",
+            "connect_timeout",
+        ] {
+            assert!(
+                shown.contains(expected),
+                "{expected} is missing from {shown}"
+            );
+        }
+    }
+
+    /// A URL with no password says so rather than saying it is redacted.
+    #[test]
+    fn debug_says_none_when_there_is_no_password() {
+        let url = ConnectionUrl::parse("postgres://user@db:5432/corpus").expect("parses");
+        let shown = format!("{url:?}");
+        assert!(shown.contains("password: None"), "{shown}");
     }
 
     /// A URL with no password shows no colon at all, rather than an empty one.

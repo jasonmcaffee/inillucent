@@ -1,0 +1,97 @@
+# What `cargo deny check` is allowed to find in the resolved dependency graph.
+#
+# `docs/dependency-policy.md` and `docs/invariants/layering.toml` decide which
+# crates a production crate may *name*; `crates/inillucent-compat/tests/policy.rs`
+# enforces that. Neither of them looks at what an approved crate drags in behind
+# it, and neither knows anything about licences or published advisories - so a
+# dependency with a known vulnerability, or one under a licence this repository
+# cannot ship, passed every check the workspace had (task-1946, M8).
+#
+# This file is the other half. `tools/validate.ps1`, `tools/validate.sh` and
+# `.github/workflows/ci.yml` all run `cargo deny check` against it.
+
+[graph]
+# Dev and build dependencies are checked too. A build script's licence travels
+# in the binary's provenance even when its code does not, and an advisory
+# against a proc macro is an advisory against everything it compiled.
+all-features = true
+
+[advisories]
+# An advisory with no patched version is still an advisory. Every one of them
+# fails, and the way past it is to argue in a review and add its id below with
+# the argument, not to lower this.
+yanked = "deny"
+ignore = [
+    # `paste`, reached only through `tokenizers`, which `inillucent-core` links
+    # for the ONNX embedder behind its `onnx` feature.
+    #
+    # **It is unmaintained, not vulnerable.** RUSTSEC-2024-0436 says the author
+    # has archived the repository; it names no defect and no version to move to,
+    # and cargo-deny's own report says "No safe upgrade is available". A `paste`
+    # in the graph is a proc macro that pastes identifiers together at compile
+    # time - it reads no input, opens no file and is not in the produced binary.
+    #
+    # The way out is `tokenizers` dropping it, which is not this repository's to
+    # do. Reviewed rather than lowered: `unmaintained` stays a failure for
+    # everything else, and this one entry is what a review looked at.
+    "RUSTSEC-2024-0436",
+]
+
+[licenses]
+# **The workspace is MIT, and so is everything it links.** These are the
+# permissive licences a crate under MIT may carry without changing what a user of
+# `inillucent` is agreeing to. No copyleft licence is on this list, weak or
+# otherwise: linking one would make the published binaries carry its obligations,
+# which is a decision for a person rather than a `cargo add`. So MPL-2.0 is not
+# here either, even though it is the one people usually add without thinking.
+#
+# Every entry is a licence some crate in the resolved graph actually carries.
+# `cargo deny list` says which, and an allow list longer than the graph is a list
+# nobody has read - the first version of this file allowed MPL-2.0, CC0-1.0 and
+# OpenSSL, and not one crate in the graph used any of them.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "Unlicense",
+    "BSL-1.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+# **A duplicate version is a warning, not a failure, and the reason is measured
+# rather than assumed.** Two versions of one crate in the graph costs binary size
+# and nothing else here: none of this workspace's public types is a re-export of
+# a dependency's type, so there is no version in any signature for two copies to
+# disagree about. A warning keeps it visible without failing a build for
+# something a transitive dependency chose.
+multiple-versions = "warn"
+wildcards = "deny"
+
+# The crates `docs/dependency-policy.md` refuses outright, restated here so the
+# resolved graph is checked as well as the declared one. The policy test matches
+# on substrings of a manifest; this matches on what actually got resolved, which
+# is what catches an engine arriving two levels down behind something reasonable.
+deny = [
+    { name = "rusqlite" },
+    { name = "libsqlite3-sys" },
+    { name = "sqlx" },
+    { name = "diesel" },
+    { name = "sled" },
+    { name = "rocksdb" },
+    { name = "redb" },
+    { name = "sqlparser" },
+    { name = "duckdb" },
+]
+
+[sources]
+# Everything comes from crates.io. A git dependency is a dependency on somebody's
+# branch, which is not a version and cannot be audited the same way.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

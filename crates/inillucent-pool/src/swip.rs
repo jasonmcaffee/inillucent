@@ -3,7 +3,7 @@
 //!
 //! Invariant: a swip written to disk is always a page id. Nothing else can be
 //! true - a frame number means nothing to the next process to open the file -
-//! and it is enforced in one place, [`crate::pool::Pool::writeback`], which
+//! and it is enforced in one place, `crate::pool::Pool::writeback`, which
 //! translates every swizzled swip in the I/O copy and leaves the in-memory
 //! frame alone. That is TDD invariant 6.
 //!

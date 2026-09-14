@@ -98,13 +98,6 @@ impl Model {
         self.durable
     }
 
-    /// Reports whether a transaction is open.
-    ///
-    /// @param txn - the transaction's number
-    pub fn is_open(&self, txn: u32) -> bool {
-        self.open.contains_key(&txn)
-    }
-
     /// Begins a transaction at the current committed state.
     ///
     /// @param txn - the transaction's number

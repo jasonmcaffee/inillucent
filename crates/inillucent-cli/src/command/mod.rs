@@ -526,7 +526,7 @@ impl Context {
     /// Refuses a path outside the root, when a root was set.
     ///
     /// **The decision is not made here.** It is made by
-    /// [`inillucent_vfs::confine`], which resolves the path through the file
+    /// `inillucent_vfs::confine`, which resolves the path through the file
     /// system rather than reading its text, and which the VFS consults again
     /// at the moment the file is opened. This method exists so that a person
     /// reading a refusal is told the path they typed and the directory they
@@ -787,7 +787,20 @@ mod tests {
         };
         assert!(context.confine("inner/app.rdb").is_ok());
         assert!(context.confine("../outside.rdb").is_err());
-        assert!(context.confine("C:/elsewhere/app.rdb").is_err());
+        // **An absolute path for this platform, not for Windows
+        // (task-1946, M5).** This was `C:/elsewhere/app.rdb`, which is absolute
+        // on Windows and a directory named `C:` on Linux - so the case that was
+        // meant to be "somewhere else entirely" resolved *inside* the root
+        // there, and the assertion that it is refused failed on the first Linux
+        // run that ever reached it. Refusing it there would have been the real
+        // defect: a relative path under the root is exactly what confinement
+        // allows.
+        let elsewhere = if cfg!(windows) {
+            "C:/elsewhere/app.rdb"
+        } else {
+            "/elsewhere/app.rdb"
+        };
+        assert!(context.confine(elsewhere).is_err());
         assert!(context.confine(":memory:").is_ok());
     }
 
@@ -817,6 +830,7 @@ mod tests {
             #[cfg(unix)]
             let made = std::os::unix::fs::symlink(&outside, &link).is_ok();
             if !made {
+                eprintln!("this machine cannot create a symlink here; skipping");
                 return;
             }
         }

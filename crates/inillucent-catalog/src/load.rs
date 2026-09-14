@@ -19,7 +19,7 @@
 //! The two failures are therefore separated here and reported differently:
 //!
 //! - The bytes were read and the **statement** could not be understood —
-//!   [`unparseable_schema`]. That is a refusal carrying the parser's own words
+//!   `unparseable_schema`. That is a refusal carrying the parser's own words
 //!   and offset, and it keeps the `Unsupported` marker when the parser set one,
 //!   so a construct this engine has not implemented reaches a caller as exactly
 //!   that rather than as damage.
@@ -344,15 +344,6 @@ pub fn view_from_create_sql(sql: &[u8]) -> DbResult<inillucent_sql::catalog_view
         columns: names,
         ast: parsed.ast,
     })
-}
-
-/// Puts one trigger on the table or view it fires for.
-///
-/// The body is parsed once, here, for the reason a view body is: the arena
-/// belongs to the snapshot, so the binder can bind the body in place instead of
-/// re-parsing it on every write to the table.
-pub fn attach_trigger(tables: &mut [TableInfo], row: &SchemaObject) -> DbResult<()> {
-    attach_trigger_if_present(tables, row).map(|_| ())
 }
 
 /// Attaches a trigger to its table, reporting whether the table was there.

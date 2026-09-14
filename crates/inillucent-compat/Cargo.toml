@@ -2,6 +2,7 @@
 name = "inillucent-compat"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 # Never published. This is the assurance harness / the benchmark arm: it links
 # things that exist to measure the engine rather than to run it, and nobody
@@ -14,7 +15,7 @@ description = "Parity manifest, compatibility report generator, and the SQLite o
 inillucent-alloc = { workspace = true }
 inillucent-base = { workspace = true }
 inillucent-value = { workspace = true }
-inillucent-storage = { workspace = true }
+inillucent-storage = { workspace = true, features = ["check"] }
 inillucent-vfs = { workspace = true }
 inillucent-sim = { workspace = true }
 inillucent-sql = { workspace = true }

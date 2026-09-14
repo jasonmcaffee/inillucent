@@ -21,7 +21,7 @@
 //! already known to be mostly the C runtime's heap: 59% of a trivial compile.
 //!
 //! Usage:
-//!   inillucent-execprofile <sqlite fixture> [--iterations N] [--page-size N]
+//!   inillucent-execprofile `<sqlite fixture>` [--iterations N] [--page-size N]
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::{Path, PathBuf};

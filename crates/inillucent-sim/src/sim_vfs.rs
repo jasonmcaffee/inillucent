@@ -388,6 +388,50 @@ impl Vfs for SimVfs {
         }))
     }
 
+    /// Replaces `to` with `from`, and can be cut in the middle.
+    ///
+    /// **The cut is before the move, which is the only place it can be.** The
+    /// simulator's directory is one map behind one lock, so the move itself is
+    /// a single assignment nothing can observe half of - the same thing a real
+    /// file system's directory update is, and the reason `VACUUM` ends with a
+    /// rename rather than a copy. What a campaign is really asking is whether
+    /// the database survives a machine that stopped with the rebuilt file
+    /// written, the original still in place, and the rename not yet made; that
+    /// is this failpoint, and recovery has to find the original.
+    fn rename(&self, from: &DbPath, to: &DbPath) -> VfsResult<()> {
+        self.state.yield_point();
+        self.state.require_power(VfsOperation::Rename)?;
+        if let Some(failure) = self.state.failpoint(Site::Rename) {
+            if failure == Failure::Crash {
+                self.state.powered_off.store(true, Ordering::SeqCst);
+                return Err(VfsError::new(
+                    VfsOperation::Rename.extended_code(),
+                    "the simulated machine lost power during a rename",
+                ));
+            }
+            if let Some(error) = failure.to_error(Site::Rename) {
+                return Err(error);
+            }
+        }
+        {
+            let mut files = guard(&self.state.files);
+            let Some(inode) = files.remove(from.as_path()) else {
+                return Err(VfsError::new(
+                    VfsOperation::Rename.extended_code(),
+                    format!("rename: {} is not there", from.as_path().display()),
+                ));
+            };
+            files.insert(to.as_path().to_path_buf(), inode);
+        }
+        // The destination's old entry is gone for good, so it is no longer a
+        // removal waiting for a directory flush to make it durable.
+        guard(&self.state.pending_deletes).remove(to.as_path());
+        self.state
+            .trace
+            .record(current_actor().0, "rename", &from.display(), 0, 0, "ok");
+        Ok(())
+    }
+
     /// Removes a file.
     fn delete(&self, path: &DbPath, sync_dir: bool) -> VfsResult<()> {
         self.state.yield_point();

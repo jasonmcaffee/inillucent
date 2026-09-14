@@ -7,7 +7,7 @@
 //! already times them; nothing printed them.
 //!
 //! Usage:
-//!   inillucent-indexprofile <sqlite fixture> [--iterations N] [--sql "CREATE INDEX ..."]
+//!   inillucent-indexprofile `<sqlite fixture>` [--iterations N] [--sql "CREATE INDEX ..."]
 
 /// The engine's own allocator, installed for this program.
 ///

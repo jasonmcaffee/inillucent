@@ -30,6 +30,17 @@ corpus.jsonl
 *.rdb-wal.*
 *.rdb-journal
 
+# A file whose name begins with two dashes is a database a command line wrote
+# after reading its own flag as a path. `inillucent --db app.rdb ...` with the
+# flag in the wrong position makes a file literally called `--db`, plus its log
+# segments, in whatever directory the command ran in. Two of those were tracked
+# under `crates/inillucent-compat` for a whole release, because the rules above
+# match on `.rdb` and `.db` and a file called `--db` has no extension at all.
+# `no_tracked_file_is_named_like_a_flag` in `crates/inillucent-compat/tests/policy.rs`
+# is the check that says so out loud; these two rules are what stop the next one
+# being offered for staging.
+--*
+
 # With one exception, and it is the point of the thing it belongs to.
 # `examples/rag-agent/greek-philosophy.rdb` is the example's deliverable: a
 # corpus that is already embedded, so a reader asks a question in their first

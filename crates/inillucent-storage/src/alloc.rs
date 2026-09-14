@@ -25,7 +25,6 @@ use inillucent_base::ids::PageId;
 use inillucent_base::page::PageSize;
 use inillucent_base::{bytes, DbResult};
 
-use crate::header::VacuumMode;
 use crate::pager::{FailSite, Pager};
 use crate::ptrmap;
 
@@ -476,10 +475,4 @@ pub fn freelist_pages(pager: &mut Pager) -> DbResult<Vec<PageId>> {
         next = following;
     }
     Ok(pages)
-}
-
-/// Reports whether the database keeps a pointer map, which decides whether a
-/// freed page can be told from a live one without a traversal.
-pub fn tracks_ownership(pager: &Pager) -> bool {
-    pager.header().vacuum_mode != VacuumMode::None
 }

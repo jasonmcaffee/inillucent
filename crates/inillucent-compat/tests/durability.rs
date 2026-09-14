@@ -1189,8 +1189,8 @@ fn segments_present(vfs: &SimVfs) -> std::collections::HashSet<u64> {
 /// the segment a defect needs gone is actually gone in the snapshot handed to
 /// recovery. That is exactly the gap that let
 /// `a_page_untouched_through_several_checkpoints_never_asks_recovery_for_a_retired_segment`
-/// pass with `retained_lsn` removed from `Pool::note_dirty_from` during Codex
-/// Sol's review of this ticket - sweeping many seeds was tried first and
+/// pass with `retained_lsn` removed from `Pool::note_dirty_from` during the
+/// task-1911 review - sweeping many seeds was tried first and
 /// rejected, because a test that needs luck across a sweep still needs luck.
 ///
 /// This forces the strictest, most conservative outcome every real crash

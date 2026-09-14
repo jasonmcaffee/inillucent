@@ -183,7 +183,7 @@ red. That is a different thing from a feature list somebody wrote by hand and th
 
 ```sh
 inillucent migrate legacy.db                                --destination app.rdb
-inillucent migrate "postgres://jason@127.0.0.1:5432/corpus" --destination corpus.rdb
+inillucent migrate "postgres://user@127.0.0.1:5432/corpus" --destination corpus.rdb
 inillucent migrate "mysql://root@127.0.0.1:3306/app"        --destination app.rdb
 ```
 

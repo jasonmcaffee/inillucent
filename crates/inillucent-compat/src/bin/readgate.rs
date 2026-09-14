@@ -33,7 +33,7 @@
 //! reader moves it.
 //!
 //! Usage:
-//!   inillucent-readgate <sqlite fixture> [--rounds N] [--page-size N] [--scale S]
+//!   inillucent-readgate `<sqlite fixture>` [--rounds N] [--page-size N] [--scale S]
 //!                   [--frames N] [--families a,b] [--repeat N]
 
 /// The engine's own allocator, installed for this program.

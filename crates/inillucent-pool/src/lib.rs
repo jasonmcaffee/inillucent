@@ -23,7 +23,7 @@
 //! **load, checkpoint, close** lifecycle. Phase 3 adds the WAL, and with it the
 //! write-ahead rule that a dirty page may not be written before the log record
 //! that describes it. The rule's *seam* is here already - every page write goes
-//! through [`pool::Pool::writeback`] - so Phase 3 adds a condition rather than a
+//! through `pool::Pool::writeback` - so Phase 3 adds a condition rather than a
 //! caller.
 //!
 //! ## Threading

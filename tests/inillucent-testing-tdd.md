@@ -573,7 +573,7 @@ rather than months is that the differential suites ask SQLite the same question.
 
 ### 7.2 Three the review found in the fix itself
 
-The virtual-table rollback fix was reviewed by `codex exec review`, and the
+The virtual-table rollback fix was reviewed again in task-1857, and that
 review found three defects **in the fix**, all on the same two lines. They are
 listed because they are more instructive than the original bug:
 

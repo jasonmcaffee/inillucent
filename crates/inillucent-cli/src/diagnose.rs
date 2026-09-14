@@ -13,7 +13,7 @@
 //! own comments.
 
 use crate::shell::Shell;
-use inillucent_engine::vfs::Vfs;
+use inillucent_driver::vfs::Vfs;
 use inillucent_value::Value;
 
 /// `.sha3sum ?OPTIONS? ?LIKE-PATTERN?`: a SHA3 over the database's content.
@@ -249,10 +249,10 @@ pub fn limit(shell: &mut Shell, arguments: &[&str]) {
         ("trigger_depth", Limit::TriggerDepth),
         ("worker_threads", Limit::WorkerThreads),
     ];
-    let limits = inillucent_base::limits::Limits::default();
     let Some(wanted) = arguments.first() else {
         for (name, limit) in register {
-            shell.say(&format!("{:>20} {}", name, limits.get(limit)));
+            let value = shell.limit(limit);
+            shell.say(&format!("{name:>20} {value}"));
         }
         return;
     };
@@ -266,7 +266,27 @@ pub fn limit(shell: &mut Shell, arguments: &[&str]) {
         [] => shell.complain(&format!(
             "unknown limit: \"{wanted}\"\nenter \".limits\" with no arguments for a list."
         )),
-        [(name, limit)] => shell.say(&format!("{:>20} {}", name, limits.get(*limit))),
+        [(name, limit)] => {
+            let (name, limit) = (*name, *limit);
+            // **A second argument sets, which it always said it did.** The
+            // reference's `.limit NAME VALUE` sets and then prints what is now
+            // in force; this printed the compiled-in default and dropped the
+            // value on the floor, so the whole register was read-only and every
+            // reading was a constant (task-1946, H3).
+            if let Some(value) = arguments.get(1) {
+                match value.parse::<i64>() {
+                    Ok(requested) => {
+                        shell.set_limit(limit, requested);
+                    }
+                    Err(_) => {
+                        shell.complain(&format!("not a number: \"{value}\""));
+                        return;
+                    }
+                }
+            }
+            let now = shell.limit(limit);
+            shell.say(&format!("{name:>20} {now}"));
+        }
         _ => shell.complain(&format!("ambiguous limit: \"{wanted}\"")),
     }
 }
@@ -724,7 +744,7 @@ struct VfsEntry {
 fn installed() -> Vec<VfsEntry> {
     vec![
         VfsEntry {
-            name: inillucent_engine::vfs::OsVfs::new().name().to_string(),
+            name: inillucent_driver::vfs::OsVfs::new().name().to_string(),
             version: 3,
             file_size: std::mem::size_of::<std::fs::File>(),
             path_limit: 32_768,

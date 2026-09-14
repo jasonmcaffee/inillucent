@@ -6,7 +6,7 @@
 //! rather than by a lock: a pin is taken and released without the shard's mutex,
 //! and the eviction sweep reads them while holding it.
 //!
-//! It is a separate module so that [`loom`] can drive the real thing. Loom
+//! It is a separate module so that `loom` can drive the real thing. Loom
 //! replaces the atomics with instrumented ones and runs every interleaving a
 //! thread could observe, which it can only do for types built out of *its*
 //! atomics - so the alternative was a hand-written copy of this protocol in a

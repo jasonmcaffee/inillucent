@@ -5,7 +5,7 @@
 //! # fn main() -> Result<(), inillucent_base::DbError> {
 //! use inillucent_remote::{migrate, ConnectionUrl, Plan};
 //!
-//! let url = ConnectionUrl::parse("postgres://jason@127.0.0.1:5432/corpus")?;
+//! let url = ConnectionUrl::parse("postgres://user@127.0.0.1:5432/corpus")?;
 //! let report = migrate::migrate(&Plan::new(url, "corpus.rdb"))?;
 //! assert!(report.passed());
 //! # Ok(())

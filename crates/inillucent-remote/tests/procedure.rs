@@ -190,7 +190,7 @@ fn clean(destination: &Path) {
 ///
 /// @param destination - where to publish
 fn plan(destination: &Path) -> Plan {
-    let url = ConnectionUrl::parse("postgres://jason:hunter2@example:5432/corpus").expect("parses");
+    let url = ConnectionUrl::parse("postgres://user:hunter2@example:5432/corpus").expect("parses");
     Plan::new(url, destination)
 }
 

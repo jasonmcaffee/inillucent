@@ -17,7 +17,7 @@
 //!
 //! ## The one thing to read before using it
 //!
-//! **This engine is deliberately incomplete, and [`capability`] is how you find
+//! **This engine is deliberately incomplete, and `capability` is how you find
 //! out what it will not do.** It cannot enforce a foreign key, answer a `LEFT
 //! JOIN`, run a recursive CTE, use a derived table in `FROM`, register a
 //! function, or stop a running statement. It refuses those rather than
@@ -84,6 +84,16 @@ pub use value::{Column, Value, ValueKind};
 /// it the one surface, and a surface a caller has to reach past is not one.
 pub use inillucent_engine::base::budget::Limits as StatementLimits;
 pub use inillucent_engine::DEFAULT_STATEMENT_CACHE;
+
+/// The file system layer, for a caller that reports which one it is on.
+///
+/// **Re-exported so the command line does not have to name the engine
+/// (task-1946, M11).** `inillucent diagnose` prints the VFS it opened through,
+/// which is a fact about the connection rather than a reach into the engine's
+/// internals - and `crates/inillucent-cli/src/diagnose.rs` was one of the seven
+/// files `no_shell_file_reaches_past_the_driver_more_than_it_is_recorded_at`
+/// counts, for those two lines alone.
+pub use inillucent_engine::vfs;
 
 /// Arming a statement budget, for a front end that runs statements itself.
 ///

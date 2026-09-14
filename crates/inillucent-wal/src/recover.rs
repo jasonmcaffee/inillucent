@@ -727,25 +727,6 @@ pub fn inspect(vfs: &dyn Vfs, base: &DbPath, start: RecoveryStart) -> DbResult<R
     recover(vfs, base, start, &mut dry)
 }
 
-/// Refuses a chain whose first segment is not the one the meta page names.
-///
-/// Exposed so that a caller can distinguish "there is no log" - a database that
-/// was closed cleanly - from "the log is not this database's", which is the one
-/// case where continuing would apply another file's records.
-///
-/// @param vfs - the file system
-/// @param base - the database file's path
-/// @param start - what the meta page says
-pub fn chain_is_present(vfs: &dyn Vfs, base: &DbPath, start: RecoveryStart) -> DbResult<bool> {
-    let name = base.as_path().to_string_lossy().to_string();
-    let directory = base.as_path().parent().map(std::path::Path::to_path_buf);
-    let path = segment_path(&name, directory.as_deref(), start.sequence.max(1));
-    match vfs.access(&path, AccessMode::Exists) {
-        Ok(present) => Ok(present),
-        Err(error) => Err(error.into_db_error()),
-    }
-}
-
 /// Returns the error a caller should raise when a chain is refused.
 ///
 /// @param detail - what was wrong

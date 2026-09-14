@@ -2,6 +2,7 @@
 name = "inillucent-scalar"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "The dialect's scalar functions, three-valued logic and value coercions, shared by both executors"

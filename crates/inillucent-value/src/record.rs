@@ -27,7 +27,7 @@ use inillucent_base::limits::{Limit, Limits};
 use inillucent_base::varint;
 use inillucent_base::{DbError, DbResult};
 
-use crate::collation::{self, Collation};
+use crate::collation::Collation;
 use crate::compare;
 use crate::encoding::TextEncoding;
 use crate::value::{BlobValue, Bytes, StorageClass, TextValue, Value};
@@ -47,11 +47,6 @@ pub struct SerialType(pub u64);
 impl SerialType {
     /// NULL.
     pub const NULL: SerialType = SerialType(0);
-    /// The integer zero, which occupies no payload bytes.
-    pub const INTEGER_ZERO: SerialType = SerialType(8);
-    /// The integer one, which occupies no payload bytes.
-    pub const INTEGER_ONE: SerialType = SerialType(9);
-
     /// Returns the number of payload bytes this serial type occupies.
     ///
     /// Reserved types 10 and 11 have no length because they may not appear in
@@ -400,44 +395,6 @@ pub fn header_length(prefix: &[u8]) -> DbResult<u64> {
     Ok(header.value)
 }
 
-/// Returns where one field of a record starts and how long it is.
-///
-/// `header` must hold at least the record's header. Nothing else is read: the
-/// header says how long every field is, so finding where the fifth value
-/// begins is a walk of four varints rather than a read of the four values. It
-/// is what lets a blob handle open a hundred-megabyte value without reading
-/// any of it.
-pub fn field_extent(header: &[u8], index: usize) -> DbResult<(u64, u64)> {
-    let header_len = header_length(header)?;
-    let header_len_usize =
-        usize::try_from(header_len).map_err(|_| corrupt("a record header longer than memory"))?;
-    if header_len_usize > header.len() {
-        return Err(corrupt("a record header shorter than the size it declares"));
-    }
-    let leading = varint::decode(header)
-        .map_err(|_| corrupt("a record's header size varint is truncated"))?;
-    let mut cursor = leading.len;
-    let mut start = header_len;
-    let mut field = 0usize;
-    while cursor < header_len_usize {
-        let window = header
-            .get(cursor..header_len_usize)
-            .ok_or_else(|| corrupt("a record's header runs past its own end"))?;
-        let decoded = varint::decode(window)
-            .map_err(|_| corrupt("a record's serial type varint is truncated"))?;
-        let len = SerialType(decoded.value).payload_len()?;
-        if field == index {
-            return Ok((start, len));
-        }
-        start = start.saturating_add(len);
-        cursor = cursor.saturating_add(decoded.len);
-        field = field.saturating_add(1);
-    }
-    Err(corrupt(format!(
-        "a record of {field} fields has no field {index}"
-    )))
-}
-
 /// Decodes one field's payload under its serial type.
 pub fn decode_field(
     serial: SerialType,
@@ -680,17 +637,6 @@ pub fn compare_records(
         }
     }
     Ok(Ordering::Equal)
-}
-
-/// Compares two text payloads under a collation, for callers that already
-/// have the bytes and do not want to build values first.
-pub fn compare_text_payloads(
-    left: &[u8],
-    right: &[u8],
-    encoding: TextEncoding,
-    collation: Collation,
-) -> Ordering {
-    collation::compare_text(left, encoding, right, encoding, collation)
 }
 
 #[cfg(test)]

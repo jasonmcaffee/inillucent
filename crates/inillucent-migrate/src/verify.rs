@@ -361,6 +361,51 @@ fn dictionaries(connection: &Connection<'_>, store: &Store) -> Check {
 /// destination's ranking with the cap applied through the relational mapping,
 /// which is the claim an application actually depends on: the same question
 /// gets the same answer.
+/// Returns the chunks the legacy index answers one probe with.
+///
+/// **One place where a refusal is impossible, rather than six.** The probes are
+/// built from the legacy index's own vectors, so a width mismatch is a defect in
+/// this file rather than a condition to report, and a lexical probe never reads
+/// the vector at all (task-1946, H4).
+///
+/// @param source - the legacy index
+/// @param text - the query text, empty for a vector-only probe
+/// @param vector - the query vector, empty for a lexical-only probe
+/// @param filter - which chunks the probe may see
+/// @param width - the traversal width, or the index's configured default
+/// @param branches - which branches to run
+fn probe(
+    source: &Index,
+    text: &str,
+    vector: &[f32],
+    filter: &inillucent_core::filter::CompiledFilter,
+    width: Option<usize>,
+    branches: Branches,
+) -> Vec<inillucent_core::rank::FusedHit> {
+    source
+        .search_branches(text, vector, filter, PROBE_K, width, branches)
+        .expect("the probe vectors are the index's own")
+        .0
+}
+
+/// The same probe with the approximation switched off, which is how both sides
+/// are asked whenever their two graphs would otherwise be compared.
+///
+/// @param source - the legacy index
+/// @param text - the query text, empty for a vector-only probe
+/// @param vector - the query vector
+/// @param filter - which chunks the probe may see
+/// @param branches - which branches to run
+fn exact_probe(
+    source: &Index,
+    text: &str,
+    vector: &[f32],
+    filter: &inillucent_core::filter::CompiledFilter,
+    branches: Branches,
+) -> Vec<inillucent_core::rank::FusedHit> {
+    probe(source, text, vector, filter, Some(usize::MAX), branches)
+}
+
 fn retrieval(source: &Index, sql: &mut SqlIndex) -> Vec<Check> {
     let store = source.store();
     if store.n_chunks() == 0 {
@@ -434,8 +479,7 @@ fn retrieval(source: &Index, sql: &mut SqlIndex) -> Vec<Check> {
     // for and what it must be able to ask a migrated database for.
     let mut grouped = Vec::new();
     for query in &probes {
-        let (wanted, _) =
-            source.search_branches(query, &[], &everything, PROBE_K, None, Branches::Lexical);
+        let wanted = probe(source, query, &[], &everything, None, Branches::Lexical);
         let expected: Vec<i64> = wanted.iter().map(|hit| i64::from(hit.chunk)).collect();
         match ranked(sql, query, &[], wide) {
             Ok(found) => {
@@ -485,14 +529,7 @@ fn retrieval(source: &Index, sql: &mut SqlIndex) -> Vec<Check> {
         let mut probed = 0usize;
         for ordinal in sample(store.n_chunks(), PROBES) {
             let query = source.vectors().copy_of(ordinal as u32);
-            let (wanted, _) = source.search_branches(
-                "",
-                &query,
-                &everything,
-                PROBE_K,
-                Some(usize::MAX),
-                Branches::Vector,
-            );
+            let wanted = exact_probe(source, "", &query, &everything, Branches::Vector);
             let expected: Vec<i64> = wanted.iter().map(|hit| i64::from(hit.chunk)).collect();
             match exhaustive(sql, "", &query, wide) {
                 Ok(found) => {
@@ -507,8 +544,7 @@ fn retrieval(source: &Index, sql: &mut SqlIndex) -> Vec<Check> {
             // The same probe again, at the width each index uses by default,
             // scored against the answer brute force says is right.
             let truth = exact_neighbours(source, &query, &everything, PROBE_K);
-            let (approximate, _) =
-                source.search_branches("", &query, &everything, PROBE_K, None, Branches::Vector);
+            let approximate = probe(source, "", &query, &everything, None, Branches::Vector);
             let theirs: Vec<i64> = approximate.iter().map(|hit| i64::from(hit.chunk)).collect();
             theirs_found += recall(&theirs, &truth);
             if let Ok(found) = ranked(sql, "", &query, wide) {
@@ -553,14 +589,7 @@ fn retrieval(source: &Index, sql: &mut SqlIndex) -> Vec<Check> {
                 continue;
             };
             let vector = source.vectors().copy_of(ordinal as u32);
-            let (wanted, _) = source.search_branches(
-                query,
-                &vector,
-                &everything,
-                PROBE_K,
-                Some(usize::MAX),
-                Branches::Both,
-            );
+            let wanted = exact_probe(source, query, &vector, &everything, Branches::Both);
             let expected: Vec<i64> = wanted.iter().map(|hit| i64::from(hit.chunk)).collect();
             match exhaustive(sql, query, &vector, wide) {
                 Ok(found) => {
@@ -615,8 +644,7 @@ fn scores_match(
     let mut wrong = Vec::new();
     let mut compared = 0usize;
     for query in probes {
-        let (wanted, _) =
-            source.search_branches(query, &[], filter, PROBE_K, None, Branches::Lexical);
+        let wanted = probe(source, query, &[], filter, None, Branches::Lexical);
         let found = match ranked_hits(sql, query, &[], wide) {
             Ok(hits) => hits,
             Err(failure) => {
@@ -674,8 +702,7 @@ fn live_filter(
     // least as many live candidates as the legacy engine fused over.
     let deep = wide.saturating_add(deleted.len());
     for query in probes {
-        let (wanted, _) =
-            source.search_branches(query, &[], live, PROBE_K, None, Branches::Lexical);
+        let wanted = probe(source, query, &[], live, None, Branches::Lexical);
         let expected: Vec<i64> = wanted.iter().map(|hit| i64::from(hit.chunk)).collect();
         match ranked(sql, query, &[], deep) {
             Ok(found) => {

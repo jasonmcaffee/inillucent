@@ -47,7 +47,7 @@ members = [
 #
 # SQLite ships as an amalgamation: one translation unit, so every call in the
 # engine is a candidate for inlining and every constant is visible to the
-# optimiser. A Rust workspace of eighteen crates compiled with the default
+# optimiser. A Rust workspace of 29 crates compiled with the default
 # sixteen codegen units and no link-time optimisation is not the same build, and
 # comparing the two would be comparing build configurations rather than engines.
 # Fat LTO and one codegen unit is the closest equivalent, and it is what the
@@ -88,6 +88,28 @@ repository = "https://github.com/Black-Rainbow-Labs/Inillucent"
 readme = "README.md"
 edition = "2021"
 license = "MIT"
+# The oldest compiler the workspace builds on, which is a different claim from
+# the one `rust-toolchain.toml` makes.
+#
+# **The pin says what the numbers were produced with; this says what a user needs
+# (task-1946, M6).** `rust-toolchain.toml` names 1.95.0 because every published
+# ratio and every strict lint run came from that compiler, and a machine on
+# another one is measuring something else. Neither of those facts is a reason to
+# refuse a `cargo install inillucent` on an older toolchain, and without this
+# line cargo has nothing to check and a user finds out from a compile error in
+# somebody else's crate.
+#
+# Measured rather than guessed. `cargo +1.85.0 check --workspace --all-targets
+# --all-features` refuses with `rustc 1.85.0 is not supported by the following
+# packages: libloading@0.9.0 requires rustc 1.88.0, ort@2.0.0-rc.13 requires
+# rustc 1.88`; the same command on 1.88.0 completes. So 1.88 is the floor, and
+# it is a dependency's floor rather than this workspace's own - nothing written
+# here needs anything newer than edition 2021 gives.
+#
+# Raising it is fine when something needs a newer compiler. Lowering it is a
+# claim that has to be re-measured the same way, by installing that toolchain
+# and running that command.
+rust-version = "1.88"
 
 [workspace.dependencies]
 # ---------------------------------------------------------------------------

@@ -16,7 +16,7 @@
 //! implementations traditionally go wrong.
 //!
 //! So this one does not. A balance decodes the pages it is going to touch into
-//! an ordered list of owned [`Entry`] values, decides how to lay them out again,
+//! an ordered list of owned `Entry` values, decides how to lay them out again,
 //! and writes each page from scratch. No offset into a page survives a
 //! reorganisation, because no offset is kept. The cost is a page rewrite where
 //! SQLite would shuffle bytes; the benefit is that the partitioning step is a
@@ -32,7 +32,7 @@
 //! child pointer and the largest rowid below it, so the divider is *derived*
 //! from the last entry of the page and the entry itself stays on the leaf.
 //! Getting that backwards duplicates or loses a row per split, which is why it
-//! is decided in one place, [`promotes_dividers`], and read from there.
+//! is decided in one place, `promotes_dividers`, and read from there.
 
 use std::sync::Arc;
 

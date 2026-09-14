@@ -247,17 +247,6 @@ pub fn observe(connection: &Connection<'_>, sql: &str, query: bool) -> Observati
     observation
 }
 
-/// Compares one observation against the oracle's, failing on any difference.
-pub fn compare_observations(
-    label: &str,
-    sql: &str,
-    candidate: &Observation,
-    reference: &Observation,
-    query: bool,
-) {
-    compare_with_counters(label, sql, candidate, reference, query, true)
-}
-
 /// Compares one observation, saying whether the cumulative counters count.
 pub fn compare_with_counters(
     label: &str,
@@ -442,7 +431,7 @@ mod tests {
             "transport: the fake server did not start; skipping",
             "no ONNX weights found; skipping",
             "could not load the model (out of memory); skipping",
-            "no models root at J:/models; skipping",
+            "no models root at /models; skipping",
             "the inillucent binary is not built; skipping",
             "budgets: the MCP server did not start; skipping",
             "running 4 tests

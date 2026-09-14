@@ -46,6 +46,7 @@ pub mod deflate;
 pub mod error;
 pub mod hash;
 pub mod ids;
+pub mod json;
 pub mod limits;
 pub mod page;
 pub mod probe;

@@ -760,17 +760,6 @@ impl Levers {
     }
 }
 
-/// Plans a bound SELECT, and every block nested inside it.
-///
-/// The predicate list is split before any path is chosen, because a path can
-/// only consume a term of a conjunction and the rest has to be kept. An outer
-/// join's `ON` condition is deliberately *not* in that list: a row that fails
-/// it is still emitted, null-extended, so treating it as a filter would drop
-/// exactly the rows the join exists to keep.
-pub fn plan_select(select: BoundSelect) -> PhysicalPlan {
-    plan_select_with(select, Levers::all())
-}
-
 /// Plans a bound SELECT with some optimizations switched off.
 ///
 /// The levers travel with the recursion rather than being read from anywhere
@@ -2081,38 +2070,6 @@ fn order_offer(id: usize, position: usize, select: &BoundSelect) -> Vec<crate::v
     offer
 }
 
-/// Builds the offer a module is shown for one term and one predicate list.
-///
-/// The write paths use it too: a `DELETE FROM t WHERE rowid = ?` on a virtual
-/// table has to be able to offer that equality, or every delete is a scan.
-pub fn virtual_offer(id: usize, table: &TableInfo, terms: &[BoundExpr]) -> Vec<VirtualConstraint> {
-    let mut offer = Vec::new();
-    for term in terms {
-        let Some((column, op, value)) = virtual_constraint(id, table, term) else {
-            continue;
-        };
-        offer.push(VirtualConstraint {
-            spec: crate::vtab::ConstraintSpec {
-                column,
-                op,
-                // A write scans one term and nothing else, so every value it
-                // could use is available before the loop starts.
-                usable: value.is_constant() || !mentions(&value, id),
-            },
-            value,
-            predicate: term.clone(),
-        });
-    }
-    offer
-}
-
-/// Returns whether an expression reads one FROM term.
-fn mentions(expr: &BoundExpr, id: usize) -> bool {
-    let mut used = Vec::new();
-    expr.sources_used(&mut used);
-    used.contains(&id)
-}
-
 /// Splits a predicate into the conjunction the offer is built from.
 pub fn conjunction(filter: &BoundExpr) -> Vec<BoundExpr> {
     let mut terms = Vec::new();
@@ -2173,30 +2130,6 @@ fn binary_constraint(op: BinaryOp) -> Option<crate::vtab::ConstraintOp> {
         BinaryOp::GreaterEqual => ConstraintOp::Ge,
         _ => return None,
     })
-}
-
-/// Chooses the access path a write's collection pass should walk.
-///
-/// An `UPDATE` or a `DELETE` finds the rows it will change before it changes
-/// any of them - the two passes are what stop a write from tripping over its
-/// own edits while it walks the tree it is editing. What the first pass had no
-/// way to say, until this existed, was *which* rows to look at: it rewound the
-/// table and read all of them, so `DELETE FROM t WHERE id = ?` visited every
-/// row of `t` to find the one it was told about. On a five-thousand-row table
-/// that is sixty page reads and half a millisecond where the same predicate in
-/// a `SELECT` costs two page reads and ten microseconds.
-///
-/// The path chosen here is the same one the read planner would choose for the
-/// same predicate, and the caller keeps applying the whole `WHERE` clause
-/// afterwards. That is what makes this safe to add: a path can only narrow
-/// which rows are *visited*, and every row it visits is still tested. A path
-/// that wrongly excluded a row would be a bug, so the paths offered are only
-/// the ones whose bounds provably cover every row the predicate accepts.
-/// @param table - the table being written
-/// @param source_id - the statement-wide number of the term being written
-/// @param filter - the `WHERE` clause, when there is one
-pub fn write_path(table: &TableInfo, source_id: usize, filter: Option<&BoundExpr>) -> AccessPath {
-    write_path_with(table, source_id, filter, Levers::all())
 }
 
 /// Returns how an UPDATE or a DELETE should find the rows it touches, with some

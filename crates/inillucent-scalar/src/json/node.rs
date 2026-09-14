@@ -103,24 +103,14 @@ fn needs_no_escape(character: char) -> bool {
 }
 
 /// Escapes SQL text into the body of a JSON string.
+///
+/// One of three identical copies until task-1946's M4, and this was the one that
+/// decided what `json_quote` and every other SQL JSON function produce. It is
+/// `inillucent_base::json::escape` now, which escapes exactly what this did.
+///
+/// @param content - the text to escape
 pub fn escape(content: &str) -> String {
-    let mut out = String::with_capacity(content.len());
-    for character in content.chars() {
-        match character {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{8}' => out.push_str("\\b"),
-            '\u{c}' => out.push_str("\\f"),
-            character if character < ' ' || character == '\u{7f}' => {
-                out.push_str(&format!("\\u{:04x}", character as u32));
-            }
-            character => out.push(character),
-        }
-    }
-    out
+    inillucent_base::json::escape(content)
 }
 
 #[cfg(test)]

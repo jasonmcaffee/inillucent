@@ -4,7 +4,6 @@
 //!
 //! Phase 7 fills in the rollback half. [`journal`] is the file format and the
 //! five journal modes; [`recovery`] is what a connection does when it finds one
-//! of those files left behind by a process that is no longer running; [`state`]
 //! is the connection-level machine that decides when a transaction begins, what
 //! a savepoint costs, and what a statement failure is allowed to undo.
 //!
@@ -19,7 +18,6 @@
 //! - [`journal`] - the rollback journal codec, modes, and durability levels;
 //! - [`recovery`] - hot-journal detection and replay, and the opener that runs
 //!   it before a single page is exposed;
-//! - [`state`] - autocommit, begin modes, savepoints, and the change counters;
 //! - [`super_journal`] - the file that makes a commit across several
 //!   databases one event;
 //! - [`wal`] - the write-ahead log, its shared-memory index, and checkpoints.
@@ -42,7 +40,6 @@
 
 pub mod journal;
 pub mod recovery;
-pub mod state;
 pub mod super_journal;
 pub mod wal;
 
@@ -51,10 +48,6 @@ pub use journal::{
     JournalMode, JournalOptions, RollbackJournal, Synchronous,
 };
 pub use recovery::{open_database, DatabaseOptions};
-pub use state::{
-    BeginMode, ChangeCounters, ConflictAlgorithm, Savepoint, Transaction, TransactionState,
-    TransactionStats,
-};
 pub use super_journal::SuperJournal;
 pub use wal::{Wal, WalOptions};
 

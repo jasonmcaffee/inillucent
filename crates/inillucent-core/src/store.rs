@@ -732,7 +732,7 @@ mod flag_tests {
     }
 }
 
-/// One chunk's fixed-width on-disk record./// One chunk's fixed-width on-disk record.
+/// One chunk's fixed-width on-disk record.
 ///
 /// Declared as a plain-old-data struct so 598,560 of them are one 19 MB write and
 /// one 19 MB read rather than six million field-at-a-time calls.

@@ -245,11 +245,6 @@ impl Registry {
             .insert(module.name().to_ascii_lowercase(), module);
     }
 
-    /// Removes one module by name.
-    pub fn unregister_module(&mut self, name: &str) -> bool {
-        self.modules.remove(&name.to_ascii_lowercase()).is_some()
-    }
-
     /// Returns one module by name.
     pub fn module(&self, name: &[u8]) -> Option<Arc<dyn Module>> {
         let folded = String::from_utf8_lossy(name).to_ascii_lowercase();
@@ -320,23 +315,6 @@ impl Registry {
             return Ok(());
         }
         Err(refused(name, "is not allowed in a schema"))
-    }
-
-    /// Decides whether a module may be named by a stored schema.
-    ///
-    /// A module that is not eponymous has rows of its own, so naming it in a
-    /// schema is naming a table rather than calling a function - which is what
-    /// `CREATE VIRTUAL TABLE` is for and is always allowed. An *eponymous* one
-    /// in a schema is a function call wearing a table's clothes, and is
-    /// governed like one.
-    pub fn authorize_module(&self, name: &[u8], site: CallSite) -> DbResult<()> {
-        let Some(module) = self.module(name) else {
-            return Err(refused(name, "is not a registered module"));
-        };
-        if site == CallSite::Statement || !module.eponymous() {
-            return Ok(());
-        }
-        self.authorize_function(name, site)
     }
 
     /// Decides whether an extension at a path may be loaded.

@@ -36,7 +36,7 @@
 //! inillucent side too, and the comparison the gate reads is inillucent's best plan
 //! against SQLite's best plan, with the like-structure pairs printed beside it.
 //!
-//! Usage: inillucent-paxscan <sqlite fixture> [rounds] [page size...]
+//! Usage: inillucent-paxscan `<sqlite fixture>` `rounds` [page size...]
 
 use std::path::{Path, PathBuf};
 use std::time::Instant;

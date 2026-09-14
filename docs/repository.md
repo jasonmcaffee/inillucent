@@ -127,7 +127,7 @@ already removed the cause and nobody re-ran it, which is recorded in
   simulator — so "the simulator behaves like a disk" is a checked claim rather than a hope.
 - **100% branch coverage** held on the page pool's interior, latch, meta, extent, free map and swip
   modules, and on the tree's key codec.
-- **26 of the 29 crates deny `unwrap`, `expect`, `panic` and slice indexing**, and 22 forbid
+- **28 of the 29 crates deny `unwrap`, `expect`, `panic` and slice indexing**, and 21 forbid
   `unsafe`, on every path that reads SQL text, database pages, log frames, network bytes or file
   system results.
 

@@ -50,7 +50,7 @@ changed the engine, and this ticket does not.
 
 ## 2. The consumer, because it decides the shape
 
-The first consumer is **`crates/unluminous-db`** in `C:/jason/dev/unluminous`,
+The first consumer is **`crates/unluminous-db`** in the Unluminous repository,
 whose database explorer is driver-per-engine: `src/source.rs` has
 `pub enum Engine { Postgres, Sqlite }` and `src/engine.rs` has a matching
 `pub enum Database`, with SQLite reached through `rusqlite` and PostgreSQL

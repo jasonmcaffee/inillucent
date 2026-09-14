@@ -214,6 +214,173 @@ function crateLints() {
   return { members, forbidsUnsafe, deniesFour };
 }
 
+/* ------------------------------------- what a public repository must not carry */
+
+/**
+ * Strings that must not appear in a tracked file, and the places each is still allowed.
+ *
+ * **This is the check that says the repository can be published.** A password, a
+ * personal address, a machine's drive letter and the name of a private repository
+ * were all in tracked content at the 0.1.2 release, and nothing looked at them
+ * (task-1946, H7). Each row below is one of those, with the reason it must not be
+ * here; `allow` names the files where the same characters mean something else, and
+ * every entry says why, because an unexplained exclusion is how a check goes quiet.
+ */
+const PRIVATE_REFERENCES = [
+  { needle: 'jasonlmcaffee', why: 'a personal email address' },
+  { needle: 'black.rainbow.labs@', why: 'a personal email address' },
+  { needle: '360water', why: "a real company's domain, used as a test fixture" },
+  { needle: 'postgres:inillucent@', why: 'a database password' },
+  { needle: 'C:\\jason', why: "a path on one developer's machine" },
+  { needle: 'C:/jason', why: "a path on one developer's machine" },
+  { needle: 'J:/inillucent', why: "a drive letter on one developer's machine" },
+  { needle: 'jason-25', why: 'a personal hostname' },
+  { needle: 'Codex Sol', why: 'a reviewer by name, where the house style credits a ticket' },
+  { needle: 'codex exec', why: 'a reviewer by name, where the house style credits a ticket' },
+  { needle: 'npmjs.com/settings', why: 'a registry URL carrying an account name' },
+  {
+    needle: '~/.claude',
+    why: 'a path inside a private instruction directory',
+    // `~/.claude/skills` is where Claude Code reads skills from on any machine, so
+    // these two lines are telling a reader of `agent-skills/` what to do with it.
+    // The reference H7 was about was `~/.claude/CLAUDE.md`, a private instruction
+    // file, and that one is gone.
+    allow: ['README.md', 'agent-skills/README.md'],
+  },
+  { needle: 'opencode.json', why: 'a file in a private repository' },
+  { needle: 'aiservice-web', why: 'a private repository' },
+];
+
+/**
+ * Files this check does not read, and why.
+ *
+ * Two files necessarily hold every string in the list above, because they are where
+ * the list is written down: this file, and the review document the list came from.
+ * Excluding anything else from `tasks/` was considered and rejected - the other
+ * design documents were corrected instead, which is what the list is for.
+ */
+const PRIVATE_REFERENCE_EXEMPT = [
+  'tools/doc-facts/check.mjs',
+  'tasks/task-1946-inillucent-code-review-round-two-tdd.md',
+];
+
+/** Every file `git ls-files` reports, as repository-relative paths with forward slashes. */
+function trackedFiles() {
+  const listing = execFileSync('git', ['-C', ROOT, 'ls-files', '-z'], {
+    encoding: 'utf8',
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  return listing.split('\0').filter((entry) => entry.length > 0);
+}
+
+/**
+ * Reports every tracked file that carries one of the strings above.
+ *
+ * Binary files are read as UTF-8 and searched the same way; a database that happens
+ * to hold the bytes of a password is exactly as much of a problem as a document
+ * that does, so there is nothing to gain by skipping them.
+ */
+function privateReferences() {
+  const problems = [];
+  let files = 0;
+  for (const relative of trackedFiles()) {
+    if (PRIVATE_REFERENCE_EXEMPT.includes(relative)) continue;
+    const full = path.join(ROOT, relative);
+    let text;
+    try {
+      text = fs.readFileSync(full, 'utf8');
+    } catch {
+      continue;
+    }
+    files += 1;
+    for (const { needle, why, allow } of PRIVATE_REFERENCES) {
+      if (allow && allow.includes(relative)) continue;
+      const at = text.indexOf(needle);
+      if (at < 0) continue;
+      const line = text.slice(0, at).split('\n').length;
+      problems.push(`${relative}:${line} carries \`${needle}\` — ${why}`);
+    }
+  }
+  return { label: 'no tracked file carries a private reference', problems, scanned: files };
+}
+
+/* --------------------------------------------- every release version pin agrees */
+
+/**
+ * Each place a release version is written down, and the pattern that reads it.
+ *
+ * **Nothing tied these together, and two of them were wrong at 0.1.2.** The Python
+ * package reported 0.1.0 and the PHP installer downloaded 0.1.1, so
+ * `composer require` followed by the installer fetched the release that cannot
+ * embed (task-1946, H9). `packaging/release.ps1` runs this check before it builds.
+ *
+ * The npm platform packages are not listed: `packages/npm/build.mjs` writes each
+ * one's manifest from the wrapper's version, so the wrapper is the only copy.
+ */
+const VERSION_PINS = [
+  { file: 'packages/python/pyproject.toml', pattern: /^version = "([^"]+)"/m, what: 'the Python distribution' },
+  { file: 'packages/python/src/inillucent/__init__.py', pattern: /^__version__ = "([^"]+)"/m, what: "the Python package's own report" },
+  { file: 'packages/npm/inillucent/package.json', pattern: /"version":\s*"([^"]+)"/, what: 'the npm wrapper' },
+  { file: 'packages/go/cmd/inillucent-install/main.go', pattern: /^const nativeVersion = "([^"]+)"/m, what: 'the Go installer' },
+  { file: 'packages/php/bin/inillucent-install', pattern: /^const NATIVE_VERSION = '([^']+)';/m, what: 'the PHP installer' },
+  { file: 'packaging/homebrew/inillucent.rb', pattern: /^\s*version "([^"]+)"/m, what: 'the Homebrew formula' },
+];
+
+/** Reports every pinned copy of the release version that is not the workspace's. */
+function versionPins() {
+  const manifest = fs.readFileSync(path.join(ROOT, 'Cargo.toml'), 'utf8');
+  const workspace = /\[workspace\.package\][\s\S]*?^version = "([^"]+)"/m.exec(manifest);
+  if (!workspace) {
+    return { label: 'every version pin equals the workspace version', problems: ['Cargo.toml has no [workspace.package] version'] };
+  }
+  const expected = workspace[1];
+  const problems = [];
+  for (const { file, pattern, what } of VERSION_PINS) {
+    const full = path.join(ROOT, file);
+    if (!fs.existsSync(full)) {
+      problems.push(`${file} is not there, and ${what} is pinned in it`);
+      continue;
+    }
+    const found = pattern.exec(fs.readFileSync(full, 'utf8'));
+    if (!found) {
+      problems.push(`${file} no longer states a version where ${what} had one`);
+      continue;
+    }
+    if (found[1] !== expected) {
+      problems.push(`${file} pins ${what} at ${found[1]}, and the workspace is ${expected}`);
+    }
+  }
+  return { label: 'every version pin equals the workspace version', problems, expected };
+}
+
+/* --------------------------------------- what the README says about the repository */
+
+/**
+ * Reports whether `README.md` describes this repository as private.
+ *
+ * **A sentence that is true today and false on the day the repository is
+ * published is a sentence nobody will remember to delete.** The README told a Go
+ * user to set `GOPRIVATE` "because the repository is private and Go's public
+ * checksum database cannot read it", which becomes a wrong instruction the
+ * moment the repository is public - and the person it misleads is the first
+ * stranger who tries to install it (task-1946, M6).
+ *
+ * The word is allowed where it is not about this repository: "a private
+ * corpus", "a private key", "private field". Only a sentence that puts it next
+ * to the repository, the source or the project fails.
+ */
+function readmeCallsTheRepositoryPrivate() {
+  const label = 'README.md does not call the repository private';
+  const text = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
+  const lines = text.split('\n');
+  const about = /\bprivate\b[^.\n]{0,40}\b(repository|repo|source|project)\b|\b(repository|repo|source|project)\b[^.\n]{0,40}\bprivate\b/i;
+  const problems = [];
+  lines.forEach((line, index) => {
+    if (about.test(line)) problems.push(`README.md:${index + 1}: ${line.trim()}`);
+  });
+  return { label, problems };
+}
+
 /** The prerequisites `--strict` is allowed to report as absent on a machine with no server on it. */
 const OPTIONAL_PREREQUISITES = ['postgres', 'mysql'];
 
@@ -439,6 +606,10 @@ const lints = crateLints();
 const tests = testRun();
 const chapters = await bookChapters();
 
+// Two assertions that are not counts: what a public repository must not carry, and
+// whether every packaged copy of the release version agrees with the workspace.
+const assertions = [privateReferences(), versionPins(), readmeCallsTheRepositoryPrivate()];
+
 const checks = [
   assertWritten('command line verbs', verbs, /\b(\d+)\s+(?:command line )?(?:verbs|commands)\b(?!\s+(?:over MCP|served|an agent|as MCP))/i, /(?:dot|reference's)\s+$/),
   assertWritten('MCP tools', tools, /(\d+)\s+(?:of the (?:same|CLI's) commands served|MCP tools|tools an agent can call|tools an AI agent can call|of those commands over MCP|of the CLI's commands as MCP tools|of the same commands served)/i),
@@ -472,7 +643,7 @@ const instrumentErrors = [];
 if (tests?.error) instrumentErrors.push(tests.error);
 
 if (asJson) {
-  console.log(JSON.stringify({ measured, checks, instrumentErrors }, null, 2));
+  console.log(JSON.stringify({ measured, checks, assertions, instrumentErrors }, null, 2));
 } else {
   console.log('what the engine reports\n');
   for (const [name, value] of Object.entries(measured)) {
@@ -492,13 +663,24 @@ if (asJson) {
     for (const place of check.wrong) console.log(`          ${place.file}:${place.line} says ${place.written}`);
   }
   for (const problem of instrumentErrors) console.log(`  FAIL  the instrument itself — ${problem}`);
+  console.log('\nwhat the repository must not carry, and what it pins\n');
+  for (const assertion of assertions) {
+    if (assertion.problems.length === 0) { console.log(`  ok    ${assertion.label}`); continue; }
+    console.log(`  FAIL  ${assertion.label}`);
+    for (const problem of assertion.problems) console.log(`          ${problem}`);
+  }
 }
 
 const failed = checks.filter((check) => !check.skipped && (check.wrong.length > 0 || check.seen === 0));
-if (failed.length > 0 || instrumentErrors.length > 0) {
+const broken = assertions.filter((assertion) => assertion.problems.length > 0);
+if (failed.length > 0 || broken.length > 0 || instrumentErrors.length > 0) {
   if (!asJson) {
     const parts = [];
     if (failed.length > 0) parts.push(`${failed.length} fact(s) disagree with the engine`);
+    if (broken.length > 0) {
+      const count = broken.reduce((total, assertion) => total + assertion.problems.length, 0);
+      parts.push(`${count} thing(s) the repository must not carry or must agree on`);
+    }
     if (instrumentErrors.length > 0) parts.push(`${instrumentErrors.length} instrument(s) could not answer`);
     console.log(`\n${parts.join(', and ')}.`);
   }

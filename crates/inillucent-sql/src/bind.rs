@@ -1447,6 +1447,12 @@ pub struct Binder<'a> {
     /// also what makes inlining terminate, so the two agree: this list is both
     /// the parity rule and the recursion guard.
     pub(crate) firing: Vec<Vec<u8>>,
+    /// How deep `firing` may get, from the connection's `Limit::TriggerDepth`.
+    ///
+    /// The limit is settable - `.limit trigger_depth 10` and the driver's limit
+    /// setter both reach it - so it is a field rather than the constant it used
+    /// to be, and the refusal names the number that was in force.
+    pub(crate) trigger_depth: usize,
 }
 
 /// How deeply query blocks may nest.
@@ -1487,31 +1493,6 @@ pub const OLD_SOURCE: usize = usize::MAX - 1;
 
 /// The source number a column of a trigger's `NEW` row carries.
 pub const NEW_SOURCE: usize = usize::MAX - 2;
-
-/// How deep one write may drive triggers firing other triggers.
-///
-/// SQLite's own limit is `SQLITE_MAX_TRIGGER_DEPTH`, enforced when the frame is
-/// pushed. Trigger bodies are inlined here rather than run as frames, so the
-/// same limit is enforced where the inlining happens - and it has to be, or a
-/// schema in which two triggers write each other's tables would compile until
-/// the compiler ran out of memory.
-pub const MAX_TRIGGER_DEPTH: usize = 32;
-
-/// How deep one chain of foreign-key actions may go.
-///
-/// A cascade reaches this only when the keys form a cycle, which in practice
-/// means a table whose parent column points at itself. SQLite's own limit is a
-/// run-time recursion depth; this one is a compile-time inlining depth, and it
-/// is smaller for that reason.
-pub const MAX_FOREIGN_KEY_DEPTH: usize = 64;
-
-/// How many foreign-key action bodies one statement may inline in total.
-///
-/// The depth limit alone is not enough: a table with three keys that all cycle
-/// would inline three bodies per level, so the limit that matters is the total.
-/// A chain, which is what a self-referencing tree produces, spends one per
-/// level and reaches the depth limit first.
-pub const MAX_FOREIGN_KEY_STATEMENTS: usize = 256;
 
 /// The row a trigger body's `OLD` and `NEW` name.
 ///
@@ -1586,13 +1567,28 @@ impl<'a> Binder<'a> {
             row_aliases: None,
             view_target: None,
             firing: Vec::new(),
+            trigger_depth: crate::dml::MAX_TRIGGER_DEPTH,
             pending_constraints: Vec::new(),
             foreign_keys: false,
             defer_foreign_keys: false,
             firing_foreign_keys: Vec::new(),
             foreign_key_depth: 0,
-            foreign_key_budget: MAX_FOREIGN_KEY_STATEMENTS,
+            foreign_key_budget: crate::dml::MAX_FOREIGN_KEY_STATEMENTS,
         }
+    }
+
+    /// Names the limits this connection is configured with.
+    ///
+    /// Only `Limit::TriggerDepth` is read here; the parser reads the rest for
+    /// itself. A limit below one would refuse the first trigger of any chain,
+    /// which is not what a limit of zero means anywhere else, so it is floored
+    /// at one the way `limits.toml`'s own `minimum` says.
+    ///
+    /// @param limits - the connection's limits
+    pub fn with_limits(mut self, limits: &inillucent_base::limits::Limits) -> Binder<'a> {
+        let configured = limits.get(inillucent_base::limits::Limit::TriggerDepth);
+        self.trigger_depth = configured.max(1) as usize;
+        self
     }
 
     /// Turns foreign-key enforcement on, and says whether it is deferred.
@@ -2284,6 +2280,7 @@ impl<'a> Binder<'a> {
         let limits = inillucent_base::limits::Limits::default();
         let (ast, expr) = crate::parser::parse_expression(sql, &limits).ok()?;
         let mut nested = Binder::new(self.catalog, &ast, self.authorizer);
+        nested.trigger_depth = self.trigger_depth;
         nested.sources = vec![alone.clone()];
         nested.scopes = vec![vec![alone.id]];
         nested.bind_expr(expr).ok()

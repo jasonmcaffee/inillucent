@@ -276,16 +276,6 @@ pub fn sort_mode_for(sql: &str) -> &'static str {
     "rowsort"
 }
 
-/// Returns the type letter a value implies.
-pub fn type_letter(value: &inillucent_value::Value<'_>) -> char {
-    use inillucent_value::Value;
-    match value {
-        Value::Integer(_) => 'I',
-        Value::Real(_) => 'R',
-        _ => 'T',
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -2,6 +2,7 @@
 name = "inillucent-remote"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Reads a running PostgreSQL or MySQL server over its own wire protocol and migrates it into an inillucent database, verified."

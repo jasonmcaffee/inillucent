@@ -44,11 +44,6 @@ impl Status {
             Status::IntentionalDeviation => "intentional-deviation",
         }
     }
-
-    /// Reports whether this status may be released in the full profile.
-    pub fn is_releasable(self) -> bool {
-        self == Status::Pass
-    }
 }
 
 /// One capability row.
@@ -108,14 +103,6 @@ impl Manifest {
             *counts.entry(capability.status.as_str()).or_insert(0) += 1;
         }
         counts
-    }
-
-    /// Returns every test identifier the manifest cites.
-    pub fn cited_tests(&self) -> BTreeSet<String> {
-        self.capabilities
-            .iter()
-            .flat_map(|capability| capability.tests.iter().cloned())
-            .collect()
     }
 }
 

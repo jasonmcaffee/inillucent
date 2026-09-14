@@ -64,9 +64,6 @@ pub const WRITE_LOCK: u16 = 0;
 /// The lock slot a checkpointer holds.
 pub const CHECKPOINT_LOCK: u16 = 1;
 
-/// The lock slot a connection rebuilding the index holds.
-pub const RECOVER_LOCK: u16 = 2;
-
 /// Returns the lock slot of reader mark `index`.
 pub fn read_lock(index: u16) -> u16 {
     3u16.saturating_add(index)
@@ -161,15 +158,6 @@ impl IndexHeader {
     /// Returns the page size the header declares.
     pub fn page_size(&self) -> DbResult<PageSize> {
         PageSize::from_encoded(self.page_size_encoded)
-    }
-
-    /// Returns the byte order the log's checksums are read in.
-    pub fn byte_order(&self) -> WalByteOrder {
-        if self.big_endian_checksum {
-            WalByteOrder::Big
-        } else {
-            WalByteOrder::Little
-        }
     }
 
     /// Encodes the header, computing the checksum over what it wrote.
@@ -293,11 +281,6 @@ impl WalIndex {
                 exclusive,
             })
             .map_err(|error| error.into_db_error())
-    }
-
-    /// Reports whether the index file exists and has a region to read.
-    pub fn is_present(&mut self) -> DbResult<bool> {
-        Ok(self.region(0, false)?.is_some())
     }
 
     /// Reads the published header, or `None` when there is not a valid one.

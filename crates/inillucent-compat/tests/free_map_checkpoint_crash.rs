@@ -554,7 +554,7 @@ fn write_page_targets(vfs: &dyn Vfs, wal: &inillucent_wal::Wal) -> std::collecti
 /// record for it - not only the redundant "unchanged" checkpoint the sibling
 /// campaign already proves is safe to crash during.
 ///
-/// **Asserts the branch Codex Sol's review of this ticket found unproven,
+/// **Asserts the branch the task-1911 review found unproven,
 /// directly - not through a crash, and not through a journal mode.** The
 /// crash sweep above tried proving this by removing the rollback journal
 /// (`PRAGMA journal_mode = off`) so its hot-journal repair could not mask a

@@ -58,7 +58,8 @@ struct Cli {
 
     /// Where models live, one directory per model id, each holding its weights,
     /// its tokenizer and the `model.json` that says what it is. Defaults to
-    /// `J:/inillucent-embeddings/models`, or `INILLUCENT_MODELS` when set.
+    /// `INILLUCENT_MODELS` when it is set, and to `~/.cache/inillucent-models`
+    /// otherwise.
     #[arg(long, global = true)]
     models_root: Option<PathBuf>,
 
@@ -559,6 +560,17 @@ fn parse_adaptive(text: &str) -> Result<Vec<AdaptiveWeights>> {
 }
 
 /// Expand a leading `~/` so a default path can name the home directory.
+/// Unwraps a search over a vector this program took out of the index itself.
+///
+/// The entry points refuse a query whose width is not the index's (task-1946,
+/// H4); a probe vector copied out of the same index cannot be one of those, so
+/// a refusal here is a defect in this program rather than a condition to handle.
+///
+/// @param answered - what the search returned
+fn probe<T>(answered: anyhow::Result<T>) -> T {
+    answered.expect("the probe vector comes from this index")
+}
+
 fn expand_home(path: &str) -> Result<String> {
     Ok(match path.strip_prefix("~/") {
         Some(rest) => format!("{}/{}", std::env::var("HOME")?, rest),
@@ -687,13 +699,13 @@ fn main() -> Result<()> {
             ] {
                 let compiled = index.compile(&filter);
                 let start = Instant::now();
-                let hits = index.vector_search(&query, &compiled, 10, None);
+                let hits = probe(index.vector_search(&query, &compiled, 10, None));
                 let vector_ms = start.elapsed().as_secs_f64() * 1000.0;
                 let start = Instant::now();
                 let lexical = index.lexical_search("offer eligibility rules", &compiled, 10);
                 let lexical_ms = start.elapsed().as_secs_f64() * 1000.0;
                 let start = Instant::now();
-                let hybrid = index.hybrid_search("offer eligibility rules", &query, &compiled, 10, None);
+                let hybrid = probe(index.hybrid_search("offer eligibility rules", &query, &compiled, 10, None));
                 let hybrid_ms = start.elapsed().as_secs_f64() * 1000.0;
                 eprintln!(
                     "  {label}: {} passing chunks, path {} | vector {} hits {:.2}ms | lexical {} hits {:.2}ms | hybrid {} hits {:.2}ms",

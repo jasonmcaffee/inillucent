@@ -2,6 +2,7 @@
 name = "inillucent-storage"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "SQLite file codec, pager, page cache, B-trees, overflow chains, freelist, and vacuum."
@@ -15,6 +16,10 @@ inillucent-vfs = { workspace = true }
 # Brackets the halves of a page edit and records them in `inillucent-base::probe`.
 # Off by default and never on in a shipped build.
 opcode-probe = []
+# The integrity checker in `src/check.rs`. Off by default because nothing in a
+# shipped binary calls it; `inillucent-compat` asks for it, and this crate's own
+# tests get it through `cfg(test)` (task-1946, M1).
+check = []
 
 [target.'cfg(loom)'.dev-dependencies]
 # Only ever in a `RUSTFLAGS="--cfg loom"` build, so it cannot reach the

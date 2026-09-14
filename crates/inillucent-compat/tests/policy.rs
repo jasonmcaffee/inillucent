@@ -485,6 +485,77 @@ fn the_dependency_policy_covers_what_the_contract_allows() {
     );
 }
 
+/// No tracked file has a name that begins with two dashes.
+///
+/// **A file called `--db` is a database the command line wrote after reading
+/// its own flag as a path.** `inillucent --db app.rdb ...` with the flag in the
+/// wrong position creates a file literally named `--db`, plus its log segments,
+/// in whatever directory the command ran in. Two of those were committed in
+/// `654cc79` and stayed tracked through a whole release, because `.gitignore`
+/// matches on `.rdb` and `.db` and a file called `--db` has no extension at all
+/// for a rule to match (task-1946, H8).
+///
+/// `.gitignore` now carries a `--*` rule, so the next one is never offered for
+/// staging. This is the half of the fix that speaks: an ignore rule does
+/// nothing about a file that is *already* tracked, and only a test that reads
+/// `git ls-files` can see one.
+///
+/// **Why the two known files do not fail this test.** They are binary output an
+/// agent did not create and does not delete, so `tasks/task-1946-inillucent-code-review-round-two-tdd.md`
+/// section 6 lists them for a person to remove. They are named below, and a
+/// name that is no longer tracked is passed over rather than reported - unlike
+/// the ratchets elsewhere in this file, which fail when a recorded row
+/// disappears. Removing them is the intended end state, and a test that turned
+/// red on the commit that did it would be a test arguing against its own fix.
+#[test]
+fn no_tracked_file_is_named_like_a_flag() {
+    /// The flag-named files tracked when this check was written, for
+    /// `git rm` by a person. Nothing may be added to this list.
+    const AWAITING_DELETION: [&str; 2] = [
+        // 131,072 bytes, magic `RDB2`: a database.
+        "crates/inillucent-compat/--db",
+        // 64 bytes: its first log segment.
+        "crates/inillucent-compat/--db-wal.0000000001",
+    ];
+
+    let root = workspace_root();
+    let listing = Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["ls-files", "-z"])
+        .output()
+        .expect("git ls-files runs");
+    assert!(
+        listing.status.success(),
+        "git ls-files failed: {}",
+        String::from_utf8_lossy(&listing.stderr)
+    );
+    let tracked = String::from_utf8_lossy(&listing.stdout);
+
+    let mut offenders: Vec<String> = Vec::new();
+    for path in tracked.split('\0').filter(|entry| !entry.is_empty()) {
+        let named_like_a_flag = path
+            .rsplit('/')
+            .next()
+            .is_some_and(|name| name.starts_with("--"));
+        if !named_like_a_flag {
+            continue;
+        }
+        if AWAITING_DELETION.contains(&path) {
+            continue;
+        }
+        offenders.push(path.to_string());
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "these tracked files are named like a command line flag:\n{}\n\
+         A file whose name begins with `--` is what a command line writes when it \
+         reads its own flag as a path. Delete it, and check the command that made it.",
+        offenders.join("\n")
+    );
+}
+
 /// The crates the rearchitecture retires are named by a shrinking list, and
 /// the list is the test.
 ///
@@ -888,7 +959,11 @@ fn no_new_crate_reaches_into_the_retired_engine() {
 // below already fails loudly with "is not there any more; remove its row"
 // for exactly this reason - removing them here is answering that failure
 // before it happens rather than after.
-const CEILINGS: [(&str, usize); 10] = [
+const CEILINGS: [(&str, usize); 11] = [
+    // Added at its post-split size in task-1946 (M12). It was 2,728 lines
+    // holding the frame table, eviction, the journal's sync gating and the
+    // swip logic together; the last three are child modules now.
+    ("crates/inillucent-pool/src/pool.rs", 1_994),
     // Lowered from 7,875 in task-1932. The plan cache's value type
     // (`Cached`) and its ceiling moved to `plans.rs`, which is the module
     // whose header explains when a plan is reused - the two halves of one
@@ -1114,36 +1189,78 @@ fn every_skip_site_carries_the_one_marker() {
 /// `; skipping` marker, or an announcement inside the helper the `let` calls.
 /// A `panic!` or an `assert!` counts too: a test that fails is not a test that
 /// silently passed.
+///
+/// **It reads inline `#[cfg(test)] mod` blocks under `src/` as well now
+/// (task-1946, H10).** It used to require a `tests` component in the path, so
+/// every test written beside the code it tests was invisible to it - and that is
+/// where the next five silent skips were: `crates/inillucent-core/src/residency.rs`
+/// had a helper returning `None` through a `?` when no weights were installed,
+/// and the five `#[cfg(feature = "onnx")]` tests that called it reported green
+/// on a machine with no model. `every_early_return_in_a_test_says_why` could not
+/// see them because of the path filter, and
+/// `every_skip_site_carries_the_one_marker` could not see them because there was
+/// no message to read.
+///
+/// **And a test-module helper that can answer `None` has to say why.** That is
+/// the shape `managed_or_skip` had: not a `let ... else`, but a function whose
+/// `Option` return *is* the skip. The rule is stated on the signature rather
+/// than on the body, because a `?` on an `Option` is an early return with no
+/// syntax of its own to look for.
 #[test]
 fn every_early_return_in_a_test_says_why() {
     let root = workspace_root();
     let mut silent: Vec<String> = Vec::new();
     let mut found = 0usize;
     for file in rust_sources(&root) {
-        if !file.components().any(|part| part.as_os_str() == "tests") {
-            continue;
-        }
         let Ok(text) = std::fs::read_to_string(&file) else {
             continue;
         };
+        let under_tests = file.components().any(|part| part.as_os_str() == "tests");
+        if !under_tests && !text.contains("#[cfg(test)]") {
+            continue;
+        }
         let lines: Vec<&str> = text.lines().collect();
         let helpers = announcing_helpers(&lines);
+        for at in silent_option_helpers(&lines) {
+            found = found.saturating_add(1);
+            silent.push(format!(
+                "{}:{}: {}",
+                file.strip_prefix(&root).unwrap_or(&file).display(),
+                at.saturating_add(1),
+                lines.get(at).map(|line| line.trim()).unwrap_or_default()
+            ));
+        }
         for at in test_function_lines(&lines) {
             let Some(line) = lines.get(at) else {
                 continue;
             };
-            if !line.trim_end().ends_with("else {") {
+            // Two shapes: a `let ... else { return; }`, and a bare `return;` or
+            // `return None;` standing on its own inside the test. The second was
+            // added in task-1946's H10 - `return None;` is how a helper skips
+            // when its own answer is the prerequisite.
+            let bare = matches!(line.trim(), "return;" | "return None;");
+            if !bare && !line.trim_end().ends_with("else {") {
                 continue;
             }
-            let block = lines
-                .get(at..at.saturating_add(8))
-                .unwrap_or_default()
-                .join("\n");
-            let block = match block.find("};") {
-                Some(end) => block.get(..end).unwrap_or(&block).to_string(),
-                None => block,
+            let block = if bare {
+                // Everything from the start of the enclosing statement is too
+                // much to find; the four lines above are where an announcement
+                // belongs and where every one in this workspace is.
+                lines
+                    .get(at.saturating_sub(4)..=at)
+                    .unwrap_or_default()
+                    .join("\n")
+            } else {
+                let block = lines
+                    .get(at..at.saturating_add(8))
+                    .unwrap_or_default()
+                    .join("\n");
+                match block.find("};") {
+                    Some(end) => block.get(..end).unwrap_or(&block).to_string(),
+                    None => block,
+                }
             };
-            if !block.lines().any(|line| line.trim() == "return;") {
+            if !bare && !block.lines().any(|line| line.trim() == "return;") {
                 continue;
             }
             found = found.saturating_add(1);
@@ -1154,8 +1271,17 @@ fn every_early_return_in_a_test_says_why() {
             // `cli_arguments.rs` and `confinement.rs` do it: one place to get
             // right rather than one per case. Only the `let` line is read -
             // taking the comment above it as well let a helper *named* in
-            // prose stand in for one that was called.
-            let call = line.split("//").next().unwrap_or("");
+            // prose stand in for one that was called. For a bare `return;` the
+            // `let` is one of the few lines above, so the same rule reads those.
+            let call = if bare {
+                block
+                    .lines()
+                    .map(|source| source.split("//").next().unwrap_or(""))
+                    .collect::<Vec<&str>>()
+                    .join("\n")
+            } else {
+                line.split("//").next().unwrap_or("").to_string()
+            };
             if helpers
                 .iter()
                 .any(|name| call.contains(&format!("{name}(")))
@@ -1185,6 +1311,184 @@ fn every_early_return_in_a_test_says_why() {
     );
 }
 
+/// Returns how the braces on one line change the depth, ignoring strings and
+/// comments.
+///
+/// **A `{` inside a string literal is not a block.** Counting `line.matches('{')`
+/// made `unsafe_code_is_confined_and_justified` - which has a `format!` and a
+/// message with unbalanced braces in them - look as if it ran from its own line
+/// to the end of the file, so every helper below it was read as part of a test
+/// (task-1946, H10). This is a scanner rather than a parser: it handles `"..."`
+/// with backslash escapes, `r"..."` and `r#"..."#`, a `//` comment, and a
+/// character literal, which is every shape this file's sources use.
+///
+/// @param line - the source line
+/// @returns the net change in brace depth
+fn brace_delta(line: &str) -> i32 {
+    let mut depth = 0i32;
+    let bytes = line.as_bytes();
+    let mut at = 0usize;
+    while at < bytes.len() {
+        let byte = bytes.get(at).copied().unwrap_or(0);
+        match byte {
+            b'/' if bytes.get(at.saturating_add(1)) == Some(&b'/') => break,
+            b'\'' => {
+                // A character literal, or a lifetime. A lifetime has no closing
+                // quote, so it is the one that must not eat the rest of the line.
+                let close = line
+                    .get(at.saturating_add(1)..)
+                    .and_then(|rest| rest.find('\''))
+                    .filter(|found| *found <= 3);
+                match close {
+                    Some(found) => at = at.saturating_add(found).saturating_add(2),
+                    None => at = at.saturating_add(1),
+                }
+            }
+            b'r' if matches!(bytes.get(at.saturating_add(1)), Some(&b'"') | Some(&b'#')) => {
+                let hashes = line
+                    .get(at.saturating_add(1)..)
+                    .map(|rest| rest.chars().take_while(|c| *c == '#').count())
+                    .unwrap_or(0);
+                let terminator = format!("\"{}", "#".repeat(hashes));
+                let body = at.saturating_add(2).saturating_add(hashes);
+                match line.get(body..).and_then(|rest| rest.find(&terminator)) {
+                    Some(found) => {
+                        at = body.saturating_add(found).saturating_add(terminator.len());
+                    }
+                    None => break,
+                }
+            }
+            b'"' => {
+                let mut cursor = at.saturating_add(1);
+                while cursor < bytes.len() {
+                    match bytes.get(cursor).copied().unwrap_or(0) {
+                        b'\\' => cursor = cursor.saturating_add(2),
+                        b'"' => break,
+                        _ => cursor = cursor.saturating_add(1),
+                    }
+                }
+                at = cursor.saturating_add(1);
+            }
+            b'{' => {
+                depth = depth.saturating_add(1);
+                at = at.saturating_add(1);
+            }
+            b'}' => {
+                depth = depth.saturating_sub(1);
+                at = at.saturating_add(1);
+            }
+            _ => at = at.saturating_add(1),
+        }
+    }
+    depth
+}
+
+/// Returns the line numbers inside every `#[cfg(test)] mod ... { }` block.
+///
+/// **A file that merely holds one somewhere is not the same thing.** The first
+/// cut of `silent_option_helpers` read every `-> Option<T>` in any file with a
+/// `#[cfg(test)]` in it, which caught `inillucent-search`'s `traversal_width`
+/// and `legacy_manifest` - ordinary production functions whose `None` means
+/// "the configured default" and "this segment has no legacy manifest", neither
+/// of which is a skip. The rule only makes sense inside the test module, so
+/// that is what this finds.
+///
+/// @param lines - the file's lines
+fn test_module_lines(lines: &[&str]) -> Vec<usize> {
+    let mut inside = Vec::new();
+    let mut at = 0usize;
+    while at < lines.len() {
+        let is_attribute = lines
+            .get(at)
+            .is_some_and(|line| line.trim() == "#[cfg(test)]");
+        let opens_module = lines
+            .get(at.saturating_add(1))
+            .is_some_and(|line| line.trim_start().starts_with("mod "));
+        if !is_attribute || !opens_module {
+            at = at.saturating_add(1);
+            continue;
+        }
+        let mut depth = 0i32;
+        let mut opened = false;
+        let mut cursor = at.saturating_add(1);
+        while cursor < lines.len() {
+            let Some(line) = lines.get(cursor) else {
+                break;
+            };
+            depth = depth.saturating_add(brace_delta(line));
+            if brace_delta(line) > 0 || (line.contains('{') && brace_delta(line) == 0) {
+                opened = true;
+            }
+            inside.push(cursor);
+            if opened && depth <= 0 {
+                break;
+            }
+            cursor = cursor.saturating_add(1);
+        }
+        at = cursor.saturating_add(1);
+    }
+    inside
+}
+
+/// Returns the line of every function in an inline test module whose `Option`
+/// return is a skip it does not announce.
+///
+/// **The shape `managed_or_skip` had (task-1946, H10).** A helper inside
+/// `#[cfg(test)] mod tests` that returns `Option<T>` is answering "here is the
+/// thing, or this machine has not got it" - which is a skip, and the five tests
+/// that called this one reported green on a machine with no weights. There is no
+/// syntax to look for, because the early return was a `?`; the rule is therefore
+/// stated on the signature: a test helper that can answer `None` says why
+/// somewhere in its body.
+///
+/// A helper that never returns `None` at all is not one of these, and neither is
+/// one that panics or asserts - a test that fails is not a test that silently
+/// passed.
+///
+/// @param lines - the file's lines
+fn silent_option_helpers(lines: &[&str]) -> Vec<usize> {
+    let mut found = Vec::new();
+    for at in test_module_lines(lines) {
+        let Some(line) = lines.get(at) else {
+            continue;
+        };
+        let Some(_) = function_name(line) else {
+            continue;
+        };
+        if !line.contains("-> Option<") {
+            continue;
+        }
+        let mut body: Vec<&str> = Vec::new();
+        let mut inner = 0i32;
+        let mut opened = false;
+        for cursor in at..lines.len() {
+            let Some(source) = lines.get(cursor) else {
+                break;
+            };
+            inner = inner.saturating_add(brace_delta(source));
+            if brace_delta(source) > 0 || (source.contains('{') && brace_delta(source) == 0) {
+                opened = true;
+            }
+            body.push(source);
+            if opened && inner <= 0 {
+                break;
+            }
+        }
+        let body = body.join("\n");
+        // A helper with no way to answer `None` is not a skip site at all.
+        let can_refuse =
+            body.contains("return None") || body.contains("?;") || body.contains("?\n");
+        if !can_refuse {
+            continue;
+        }
+        if announces(&body) {
+            continue;
+        }
+        found.push(at);
+    }
+    found
+}
+
 /// Reports whether a block announces that it did not run.
 ///
 /// **Comments do not count.** The doc comment above `binary()` in
@@ -1204,7 +1508,19 @@ fn announces(block: &str) -> bool {
 /// @param block - the source to read
 fn announces_by_saying_so(block: &str) -> bool {
     code_of(block).any(|code| {
-        code.contains("skipping(") || code.contains("announce_skip") || code.contains("; skipping")
+        code.contains("skipping(")
+            || code.contains("announce_skip")
+            || code.contains("; skipping")
+            // **`differential::compare` announces for its caller.** It has one
+            // way to return zero - `start_oracle` answering `None`, after which
+            // it calls `announce_skip()` - so `if compared == 0 { return; }` in
+            // the caller is a skip that has already been announced, by the only
+            // code that knows the oracle was the thing missing. Naming the
+            // function here rather than teaching the scan to follow calls across
+            // crates keeps the rule readable; the cost is that a second way for
+            // it to return zero would have to be added to its own doc comment.
+            || code.contains("compare(")
+            || code.contains("compare_queries(")
     })
 }
 
@@ -1236,10 +1552,8 @@ fn announcing_helpers(lines: &[&str]) -> Vec<String> {
             let Some(source) = lines.get(cursor) else {
                 break;
             };
-            depth = depth
-                .saturating_add(source.matches('{').count() as i32)
-                .saturating_sub(source.matches('}').count() as i32);
-            if source.contains('{') {
+            depth = depth.saturating_add(brace_delta(source));
+            if brace_delta(source) > 0 || (source.contains('{') && brace_delta(source) == 0) {
                 opened = true;
             }
             body.push(source);
@@ -1294,10 +1608,8 @@ fn test_function_lines(lines: &[&str]) -> Vec<usize> {
             let Some(line) = lines.get(cursor) else {
                 break;
             };
-            depth = depth
-                .saturating_add(line.matches('{').count() as i32)
-                .saturating_sub(line.matches('}').count() as i32);
-            if line.contains('{') {
+            depth = depth.saturating_add(brace_delta(line));
+            if brace_delta(line) > 0 || (line.contains('{') && brace_delta(line) == 0) {
                 opened = true;
             }
             inside.push(cursor);
@@ -1387,19 +1699,22 @@ fn no_shell_file_reaches_past_the_driver_more_than_it_is_recorded_at() {
         // The dot commands, which reach the engine for `.dbinfo`, `.stats` and
         // the serialisation verbs.
         ("crates/inillucent-cli/src/commands.rs", 7),
-        // The VFS, for `inillucent diagnose`. Reached through the engine's own
-        // re-export rather than through engine internals, so this one is a
-        // dependency question rather than a surface question.
-        ("crates/inillucent-cli/src/diagnose.rs", 2),
+        // The VFS, for `inillucent diagnose`. Down from two to zero in
+        // task-1946 (M11): it was reaching through the engine's own re-export
+        // rather than into engine internals, which made it a dependency
+        // question, and the driver re-exports `vfs` now.
+        ("crates/inillucent-cli/src/diagnose.rs", 0),
         // `migrate` and `batch`, which drive a transaction.
         ("crates/inillucent-cli/src/command/verbs.rs", 2),
         // One function signature taking an engine connection, which follows
         // `shell.rs`.
         ("crates/inillucent-cli/src/import.rs", 1),
-        // A sentence in a module comment naming `inillucent_engine::pragma`.
-        // Not a dependency; it is counted because the check reads lines rather
-        // than imports, and a comment that stops being true is worth the row.
-        ("crates/inillucent-cli/src/dbconfig.rs", 1),
+        // Down from one to zero in task-1946 (M11). It was never a
+        // dependency at all - the one hit was a sentence in a module comment
+        // naming the crate by path, counted because the check reads lines
+        // rather than imports. The sentence says "the engine's `pragma`
+        // module" now, which is the same fact and not a reach.
+        ("crates/inillucent-cli/src/dbconfig.rs", 0),
         // The MCP server. Down from one to zero in task-1932: the budget types
         // it needed are re-exported by the driver now.
         ("crates/inillucent-cli/src/mcp.rs", 0),
@@ -1462,6 +1777,238 @@ fn no_shell_file_reaches_past_the_driver_more_than_it_is_recorded_at() {
          A new file reaching past the driver is the thing this check exists to stop.",
         unlisted.join("\n")
     );
+}
+
+/// No public item is named only where it is defined.
+///
+/// **The check the compiler cannot do.** `dead_code` sees a private item nothing
+/// calls and warns; a `pub` one it says nothing about, because anything outside
+/// the crate might use it. Nothing outside this workspace does - none of these
+/// crates is published - so a `pub fn` that appears exactly once, at its own
+/// definition, is dead code that never warns.
+///
+/// A mechanical sweep in task-1946 found 101 of them, about two thousand lines,
+/// including a 724 line module re-exported and named nowhere, a 767 line
+/// integrity checker with no production caller, and six of seven public
+/// functions in a vacuum that the shipping `VACUUM` does not use. Deleting them
+/// is M1, M2 and M3 of that review; this is what stops the list regrowing.
+///
+/// **What counts as a caller.** The identifier appearing anywhere else in any
+/// tracked `.rs` file, including another line of the file it is defined in. That
+/// is deliberately generous - a mention in a doc comment counts - because the
+/// alternative is parsing Rust, and a grep that occasionally forgives is far
+/// better than no check at all. What it catches is the item nothing anywhere
+/// says the name of twice.
+///
+/// **The exclusions, each with its reason:**
+///
+/// - **Trait methods.** A method is called through the trait, so its name
+///   appears at the declaration and at each implementation and nowhere else in a
+///   crate whose callers are generic.
+/// - **`extern "C"` exports.** The C ABI's whole purpose is to be called from
+///   outside this workspace, where no grep can see it.
+/// - **`main`.** Called by the operating system.
+/// - **Items under `#[cfg(test)]`.** A test function is named by the harness.
+/// - **`#[allow(dead_code)]` with a reason beside it.** Thirteen of those exist
+///   and each carries an argument; this check does not relitigate them.
+/// - **The three files section 6 of the review leaves for a person to delete.**
+///   They are unreferenced by design at this commit and the build does not need
+///   them, which is what that section asked for.
+#[test]
+fn no_public_item_is_callerless() {
+    let root = workspace_root();
+    let sources = rust_sources(&root);
+
+    // One pass to read every file, because the answer for each item is a
+    // question about all of them.
+    let mut corpus: Vec<(String, String)> = Vec::new();
+    for path in &sources {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            continue;
+        };
+        corpus.push((relative(&root, path), text));
+    }
+
+    let mut callerless: Vec<String> = Vec::new();
+    for (named, text) in &corpus {
+        if AWAITING_DELETION_FILES.iter().any(|file| named == file) {
+            continue;
+        }
+        let lines: Vec<&str> = text.lines().collect();
+        let in_tests = test_module_lines(&lines);
+        for (at, line) in lines.iter().enumerate() {
+            if in_tests.contains(&at) {
+                continue;
+            }
+            let Some((kind, name)) = public_item(line) else {
+                continue;
+            };
+            if is_trait_item(&lines, at) || exported_to_c(&lines, at) || allowed_dead(&lines, at) {
+                continue;
+            }
+            if name == "main" {
+                continue;
+            }
+            let mentions = corpus
+                .iter()
+                .map(|(_, other)| mentions_of(other, &name))
+                .fold(0usize, usize::saturating_add);
+            if mentions > 1 {
+                continue;
+            }
+            callerless.push(format!("{named}:{}: {kind} {name}", at.saturating_add(1)));
+        }
+    }
+
+    assert!(
+        callerless.is_empty(),
+        "these public items are named only where they are defined, so nothing calls \
+         them and the compiler cannot say so:\n{}\n\
+         Delete it, or give it the caller it was written for. If it is genuinely an \
+         entry point nothing in this workspace uses, say so with \
+         `#[allow(dead_code)]` and the reason.",
+        callerless.join("\n")
+    );
+}
+
+/// The files section 6 of the task-1946 review leaves for a person to delete.
+///
+/// Every reference to them is gone and the build does not need them, which is
+/// what that section asked the implementation ticket for; an unreferenced `.rs`
+/// file is not compiled, so both orders build. Until `git rm` runs they are
+/// still tracked, and every item in them is callerless by design.
+///
+/// **`crates/inillucent-storage/src/check.rs` is not here, and section 6 is
+/// wrong about it.** Two of its seven callers are `inillucent-storage`'s own
+/// `#[cfg(test)]` modules, in `mutate.rs` and `vacuum.rs`, and those cannot
+/// reach `inillucent-compat` - that crate depends on this one. Deleting the
+/// file takes two working tests with it. It is behind an off-by-default
+/// `check` feature instead, so a release build does not carry its 767 lines,
+/// and its items have the callers this check asks for.
+const AWAITING_DELETION_FILES: [&str; 2] = [
+    "crates/inillucent-transaction/src/state.rs",
+    "crates/inillucent-catalog/src/rebuild.rs",
+];
+
+/// Returns what kind of public item a line declares, and its name.
+///
+/// @param line - the source line
+fn public_item(line: &str) -> Option<(&'static str, String)> {
+    let trimmed = line.trim_start();
+    let rest = trimmed.strip_prefix("pub ")?;
+    for (keyword, kind) in [
+        ("fn ", "fn"),
+        ("const ", "const"),
+        ("struct ", "struct"),
+        ("static ", "static"),
+    ] {
+        let Some(after) = rest.strip_prefix(keyword) else {
+            continue;
+        };
+        let name: String = after
+            .chars()
+            .take_while(|letter| letter.is_alphanumeric() || *letter == '_')
+            .collect();
+        if name.is_empty() {
+            return None;
+        }
+        // A tuple struct with no body and a unit struct are still declarations;
+        // what is excluded is a `pub fn` whose name is followed by nothing that
+        // could be a parameter or generic list, which is not a declaration.
+        if kind == "fn" {
+            let following = after.get(name.len()..)?;
+            if !following.starts_with('(') && !following.starts_with('<') {
+                return None;
+            }
+        }
+        return Some((kind, name));
+    }
+    None
+}
+
+/// Reports whether the item at `at` is inside a `trait` block.
+///
+/// Read backwards rather than by brace counting, because a trait's items are the
+/// only ones indented under a line that begins `trait` or `pub trait` - and an
+/// `impl Trait for Type` block's items are calls of the trait's own names, which
+/// is what makes them mentions rather than definitions.
+///
+/// @param lines - the file's lines
+/// @param at - the line the item is on
+fn is_trait_item(lines: &[&str], at: usize) -> bool {
+    let indent = lines
+        .get(at)
+        .map(|line| line.len().saturating_sub(line.trim_start().len()))
+        .unwrap_or(0);
+    if indent == 0 {
+        return false;
+    }
+    for earlier in (0..at).rev() {
+        let Some(line) = lines.get(earlier) else {
+            return false;
+        };
+        let trimmed = line.trim_start();
+        let outer = line.len().saturating_sub(trimmed.len());
+        if outer >= indent || trimmed.is_empty() {
+            continue;
+        }
+        return trimmed.starts_with("trait ")
+            || trimmed.starts_with("pub trait ")
+            || trimmed.starts_with("pub(crate) trait ");
+    }
+    false
+}
+
+/// Reports whether the item at `at` is exported through the C ABI.
+///
+/// @param lines - the file's lines
+/// @param at - the line the item is on
+fn exported_to_c(lines: &[&str], at: usize) -> bool {
+    lines
+        .get(at)
+        .is_some_and(|line| line.contains("extern \"C\""))
+        || lines
+            .get(at.saturating_sub(3)..at)
+            .unwrap_or_default()
+            .iter()
+            .any(|line| line.contains("#[no_mangle]") || line.contains("#[unsafe(no_mangle)]"))
+}
+
+/// Reports whether the item at `at` carries `#[allow(dead_code)]`.
+///
+/// @param lines - the file's lines
+/// @param at - the line the item is on
+fn allowed_dead(lines: &[&str], at: usize) -> bool {
+    lines
+        .get(at.saturating_sub(3)..at)
+        .unwrap_or_default()
+        .iter()
+        .any(|line| line.contains("allow(dead_code)"))
+}
+
+/// Counts how many times an identifier appears in some source, as a whole word.
+///
+/// @param text - the source to read
+/// @param name - the identifier
+fn mentions_of(text: &str, name: &str) -> usize {
+    let bytes = text.as_bytes();
+    let mut count = 0usize;
+    let mut from = 0usize;
+    while let Some(found) = text.get(from..).and_then(|rest| rest.find(name)) {
+        let at = from.saturating_add(found);
+        let before = at
+            .checked_sub(1)
+            .and_then(|earlier| bytes.get(earlier).copied());
+        let after = bytes.get(at.saturating_add(name.len())).copied();
+        let word = |byte: Option<u8>| {
+            byte.is_some_and(|letter| letter.is_ascii_alphanumeric() || letter == b'_')
+        };
+        if !word(before) && !word(after) {
+            count = count.saturating_add(1);
+        }
+        from = at.saturating_add(name.len().max(1));
+    }
+    count
 }
 
 /// Every fuzz target is in the scheduled workflow's matrix.
@@ -1543,7 +2090,9 @@ fn every_fuzz_target_is_in_the_scheduled_workflow() {
 /// brace. That is a lexical rule rather than a parse, and it is the same rule
 /// for every entry, which is what a ratchet needs.
 const FUNCTION_CEILINGS: [(&str, &str, usize); 65] = [
-    ("crates/inillucent-bench/src/gradeembed.rs", "run", 531),
+    // 531 before task-1946 H6 moved the card's four path rows into
+    // `runs::note_inputs` and `runs::note_run_files`.
+    ("crates/inillucent-bench/src/gradeembed.rs", "run", 527),
     ("crates/inillucent-exec/src/physical.rs", "translate", 494),
     ("crates/inillucent-bench/src/main.rs", "main", 488),
     ("crates/inillucent-compat/src/perf.rs", "plan_for", 450),
@@ -1582,7 +2131,9 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 65] = [
         "measure",
         232,
     ),
-    ("crates/inillucent-migrate/src/verify.rs", "retrieval", 229),
+    // 229 before task-1946 H4 made `search_branches` fallible and the six
+    // probes it is asked through became one helper.
+    ("crates/inillucent-migrate/src/verify.rs", "retrieval", 213),
     ("crates/inillucent-storage/src/mutate.rs", "balance", 224),
     ("crates/inillucent-compat/src/bin/analytical.rs", "run", 223),
     ("crates/inillucent-engine/src/lib.rs", "write", 219),
@@ -1595,7 +2146,10 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 65] = [
     ("crates/inillucent-bench/src/synth.rs", "check", 214),
     ("crates/inillucent-model/tests/campaign.rs", "segment", 213),
     ("crates/inillucent-engine/src/lib.rs", "import_into", 210),
-    ("crates/inillucent-tree/src/write.rs", "write_row", 206),
+    // 206 before task-1946 M12 moved the row encoding, the locate and the
+    // orphaned-extent read into `encode_row_spilling_wide_values`,
+    // `locate_and_read_previous` and `orphaned_extents`.
+    ("crates/inillucent-tree/src/write.rs", "write_row", 137),
     ("crates/inillucent-exec/src/dml.rs", "insert_at", 205),
     ("crates/inillucent-engine/src/ddl.rs", "create_index", 192),
     (
@@ -1630,7 +2184,9 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 65] = [
         167,
     ),
     ("crates/inillucent-core/src/bm25.rs", "search", 167),
-    ("crates/inillucent-tree/src/write.rs", "make_room", 166),
+    // 166 before task-1946 M12 moved the decision into `choose_fit`, which is
+    // 133 and is the half with the argument in it.
+    ("crates/inillucent-tree/src/write.rs", "make_room", 40),
     (
         "crates/inillucent-sql/src/bind.rs",
         "bind_column_reference",
@@ -1709,6 +2265,9 @@ fn function_lengths(text: &str) -> std::collections::BTreeMap<String, usize> {
         let Some(name) = opens_a_function(trimmed) else {
             continue;
         };
+        if declaration(&lines, at) {
+            continue;
+        }
         let closing = format!("{}}}", " ".repeat(indent));
         for (offset, later) in lines.iter().enumerate().skip(at.saturating_add(1)) {
             if *later == closing {
@@ -1720,6 +2279,35 @@ fn function_lengths(text: &str) -> std::collections::BTreeMap<String, usize> {
         }
     }
     found
+}
+
+/// Reports whether the `fn` at `at` is a declaration rather than a definition.
+///
+/// **A declaration has no body to measure.** A trait method written
+/// `fn read(&self, ...) -> VfsResult<()>;` ends at the semicolon, and measuring
+/// from it to the next closing brace at the same indent measures the rest of the
+/// trait instead - so `VfsFile::read` reported 159 lines, and adding a method
+/// further down the file made it grow. Found in task-1946 by adding
+/// `Vfs::rename` above it.
+///
+/// A signature may run over several lines, so this reads forward to whichever
+/// comes first: the `{` that opens a body, or the `;` that ends a declaration.
+///
+/// @param lines - the file's lines
+/// @param at - the line the `fn` is on
+fn declaration(lines: &[&str], at: usize) -> bool {
+    for offset in at..lines.len().min(at.saturating_add(12)) {
+        let Some(line) = lines.get(offset) else {
+            return false;
+        };
+        let code = line.split("//").next().unwrap_or("");
+        match (code.find('{'), code.rfind(';')) {
+            (Some(_), _) => return false,
+            (None, Some(_)) => return true,
+            (None, None) => continue,
+        }
+    }
+    false
 }
 
 /// Returns the name a line declares, when the line opens a function.

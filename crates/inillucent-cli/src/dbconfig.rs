@@ -3,7 +3,7 @@
 //! Invariant: a flag this shell lists is a flag this engine acts on, or it is a
 //! flag whose value cannot be moved and says so. There is no third state where
 //! `.dbconfig X on` prints `on` and nothing changes - that is the failure the
-//! pragma surface was rebuilt to remove (see `inillucent_engine::pragma`), and
+//! pragma surface was rebuilt to remove (see the engine's `pragma` module), and
 //! a connection flag is no different from a pragma in what a caller may
 //! conclude from it.
 //!

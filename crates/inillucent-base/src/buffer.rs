@@ -83,11 +83,6 @@ pub fn clear_allocation_failpoint() {
     FAIL_ALLOCATION_AT.with(|slot| slot.set(0));
 }
 
-/// Returns which allocation the failpoint is armed to refuse.
-pub fn armed_allocation() -> u64 {
-    FAIL_ALLOCATION_AT.with(core::cell::Cell::get)
-}
-
 /// Returns how many allocations have happened since the failpoint was armed.
 pub fn allocations_since_armed() -> u64 {
     ALLOCATIONS_SINCE_ARMED.with(core::cell::Cell::get)

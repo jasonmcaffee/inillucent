@@ -1932,11 +1932,6 @@ impl ImportedDatabase {
         self.database.pool().stats()
     }
 
-    /// Forgets the pool's counters, so a measurement starts from zero.
-    pub fn reset_pool_stats(&self) {
-        self.database.pool().reset_stats();
-    }
-
     /// Reads every page of every tree, so a measurement starts warm.
     ///
     /// A cold pool measures the file system, and neither engine's scorecard
@@ -2066,36 +2061,6 @@ impl ImportedDatabase {
         physical::prepare(plan, self, ForcePlan::default())
     }
 
-    /// Chooses a statement's physical plan under forced levers.
-    ///
-    /// The metamorphic tests' entry point: the same query under each
-    /// alternative must produce the same digest.
-    ///
-    /// @param plan - a plan from [`ImportedDatabase::plan`]
-    /// @param forced - the levers to apply
-    pub fn prepare_forced(
-        &self,
-        plan: &PhysicalPlan,
-        forced: ForcePlan,
-    ) -> DbResult<physical::Prepared> {
-        physical::prepare(plan, self, forced)
-    }
-
-    /// Runs an already-prepared statement.
-    ///
-    /// @param plan - a plan from [`ImportedDatabase::plan`]
-    /// @param prepared - the choices [`ImportedDatabase::prepare`] made
-    /// @param params - the values bound to `?1`, `?2`, ...
-    pub fn execute_prepared(
-        &self,
-        plan: &PhysicalPlan,
-        prepared: &physical::Prepared,
-        params: &Params,
-    ) -> DbResult<(Vec<Vec<OwnedDatum>>, Vec<String>)> {
-        let (rows, shape) = physical::run_prepared(plan, self, prepared, params)?;
-        Ok((rows, names_of(&shape)))
-    }
-
     /// Builds a pipeline over an already-prepared statement.
     ///
     /// The measurement path: a caller hands in the sink it wants and drives the
@@ -2161,18 +2126,6 @@ impl ImportedDatabase {
         self.execute(&plan, params)
     }
 
-    /// Returns the physical operator list a prepared statement will run.
-    ///
-    /// Printed beside SQLite's `EXPLAIN QUERY PLAN` so a reader can see which
-    /// structure each engine chose. A ratio measured against a different
-    /// structure is not a ratio between engines, which is the single largest
-    /// thing Phase 1 learned.
-    ///
-    /// @param prepared - the choices [`ImportedDatabase::prepare`] made
-    pub fn describe_physical(&self, prepared: &physical::Prepared) -> Vec<String> {
-        prepared.describe()
-    }
-
     /// Returns the `EXPLAIN QUERY PLAN` lines a statement's plan renders as.
     ///
     /// The harness prints these beside SQLite's so a reader can see whether the
@@ -2219,6 +2172,7 @@ impl ImportedDatabase {
             .with_source(sql.as_bytes())
             .with_functions(&externals)
             .with_collations(&self.collations)
+            .with_limits(&self.limits)
             .with_foreign_keys(self.foreign_keys, self.defer_foreign_keys);
         let bound = binder.bind_statement(&parsed.statement).map_err(refused)?;
         let mut names: Vec<(&'static str, Vec<u8>)> = Vec::new();
@@ -3035,39 +2989,6 @@ impl ImportedDatabase {
         total
     }
 
-    /// Checks every tree's structure: key order, separators and fill.
-    ///
-    /// Writes a verified copy of this database into a new file.
-    ///
-    /// **What `VACUUM INTO` does**, and the same thing
-    /// `connect::Database::backup_to` does for a caller with a handle: fold the
-    /// log into the file, copy the file, then open the copy and walk it. A
-    /// backup nobody checked is a file that is assumed to be a database, and
-    /// the cost of finding out otherwise is paid at the worst possible moment.
-    ///
-    /// It is a copy rather than a page-by-page rebuild because this engine is
-    /// single threaded and one file is one pool: there is no second writer to
-    /// race, which is the whole reason SQLite's backup API is incremental.
-    ///
-    /// @param path - where the copy goes
-    ///
-    /// **Unreachable since `VACUUM INTO` took over producing a verified copy.**
-    /// Kept rather than deleted for now; it is a candidate for removal in a
-    /// later cleanup pass.
-    #[allow(dead_code)]
-    pub(crate) fn backup_into(&mut self, path: &std::path::Path) -> DbResult<()> {
-        self.checkpoint()?;
-        std::fs::copy(&self.path, path).map_err(|error| {
-            inillucent_base::error::misuse(format!(
-                "cannot copy {} to {}: {error}",
-                self.path.display(),
-                path.display()
-            ))
-        })?;
-        let copy = ImportedDatabase::open(path.to_path_buf(), self.page_size, self.frames)?;
-        copy.check_trees()
-    }
-
     /// The campaign tests run this after every statement. A tree that has
     /// drifted structurally still answers a scan correctly for a long time,
     /// which is precisely why the check has to be a check rather than a query.
@@ -3116,7 +3037,13 @@ impl ImportedDatabase {
     /// @param destination - the file to write, which must not already exist
     pub(crate) fn rebuild_into(&mut self, destination: &std::path::Path) -> DbResult<()> {
         self.checkpoint()?;
-        crate::rebuild::rebuild_into(self, destination, self.page_size, self.frames)
+        crate::rebuild::rebuild_into(
+            std::sync::Arc::clone(&self.vfs),
+            self,
+            destination,
+            self.page_size,
+            self.frames,
+        )
     }
 
     /// Gives free pages back to the filesystem, up to a budget.
@@ -3143,95 +3070,11 @@ impl ImportedDatabase {
 
     /// Rebuilds this database over itself, reclaiming everything nothing uses.
     ///
-    /// **Written beside the database and renamed over it, not copied**: see
-    /// `crate::rebuild::commit_rebuild` for why a rename is what a crash
-    /// cannot catch halfway and a byte copy is. The connection reopens onto
-    /// the new file afterwards, because every tree handle it holds names a
-    /// root that has moved. This is real `std::fs`, not `self.vfs` - see
-    /// `docs/relational-architecture.md` §6 for what that means for a
-    /// connection not on an `OsVfs`, and why this is crash-tested against
-    /// real files rather than through a simulated one.
-    ///
-    /// **Every temporary table and every attached database is carried across
-    /// too**, by `crate::rebuild::AttachedSchemas` (see its doc) - `main` is
-    /// the only file this rewrites, so both are simply moved onto the
-    /// reopened connection unchanged. Refused instead for a declared imposter
-    /// table, which is bound into `main`'s own trees by page - every index
-    /// below gets a fresh one, so there is nothing to move it onto.
-    ///
-    /// **`changes()`, `total_changes()` and `last_insert_rowid()` are
-    /// preserved - except when the rebuilt schema holds a view**, which moves
-    /// the last one; see `crate::rebuild::last_rowid_after_vacuum`. Every
-    /// other connection setting is captured before the first reopen and put
-    /// back after the second, by `crate::rebuild::ConnectionSettings`.
+    /// The work is `crate::rebuild::vacuum_in_place`, which is where every other
+    /// piece of the statement already lives; this is the method the directive
+    /// and `reclaim_free_pages` call.
     pub(crate) fn vacuum_in_place(&mut self) -> DbResult<()> {
-        if !self.imposters.is_empty() {
-            return Err(refusal(
-                "cannot VACUUM a connection with an imposter table declared - every index gets a fresh tree below",
-            ));
-        }
-        let stamp = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|since| since.as_nanos() as u64)
-            .unwrap_or(0);
-        let scratch = crate::rebuild::scratch_beside(&self.path, stamp);
-        let _ = std::fs::remove_file(&scratch);
-        self.rebuild_into(&scratch)?;
-        let path = self.path.clone();
-        let page_size = self.page_size;
-        let frames = self.frames;
-        // **`changes()`/`total_changes()`/`last_insert_rowid()` are the
-        // connection's own history, not a fact about the file `VACUUM` is
-        // rewriting, and SQLite's own `VACUUM` leaves them alone.** Assigning
-        // through `self` below replaces the whole `ImportedDatabase` with a
-        // freshly opened one, whose `last_changes`/`changed_ever`/
-        // `last_rowid`/`session_change_baseline` all start at zero - so the
-        // differential suite's `vacuum_matches_sqlite` read `changes()` as 0
-        // and `last_insert_rowid()` as 0 straight after a `VACUUM` that
-        // changed nothing itself and inserted no row, where the reference
-        // still answered whatever the last real write left there. Saved here
-        // and restored once, after the second and final swap - nothing runs a
-        // statement on `self` between the two, so there is nothing to restore
-        // in between.
-        let last_changes = self.last_changes.get();
-        let changed_ever = self.changed_ever.get();
-        let last_rowid = self.last_rowid.get();
-        let session_change_baseline = std::mem::take(&mut self.session_change_baseline);
-        let settings = crate::rebuild::ConnectionSettings::capture(self);
-        let schemas = crate::rebuild::AttachedSchemas::take(self);
-        // **The old file is closed before it is replaced, not after** -
-        // assigning through `self` drops the old value first, which is the
-        // only moment in this function when neither file is open by us. A
-        // pool still holding frames of a file whose bytes changed underneath
-        // it would answer from the database that used to be there.
-        *self = ImportedDatabase::open(scratch.clone(), page_size, frames)?;
-        // **The one crash-sensitive moment.** Up to here neither `path` nor
-        // its log segments have been touched, so a crash recovers the
-        // original the ordinary way. `commit_rebuild` is a single rename, and
-        // once it returns `path` holds the rebuilt bytes durably.
-        crate::rebuild::commit_rebuild(&scratch, &path)?;
-        // Only now, with the rename durable, do `path`'s pre-rebuild segments
-        // stop describing anything true - left beside the new file they would
-        // be replayed over it on the next open, undoing the rebuild. Removing
-        // them earlier, before the rename could be proven to land, was this
-        // function's defect: a crash between the removal and the copy left
-        // the original unrecoverable, its log already gone.
-        crate::rebuild::remove_log_segments(&path);
-        *self = ImportedDatabase::open(path, page_size, frames)?;
-        self.last_changes.set(last_changes);
-        self.changed_ever.set(changed_ever);
-        self.last_rowid
-            .set(crate::rebuild::last_rowid_after_vacuum(self, last_rowid));
-        self.session_change_baseline = session_change_baseline;
-        // Before the settings: `ConnectionSettings::restore`'s
-        // `refresh_catalog` needs the tables `rebuild_tables` derives here
-        // already in place to describe them.
-        schemas.restore(self)?;
-        settings.restore(self)?;
-        // The scratch name is spent - `commit_rebuild` renamed the file away -
-        // so this is only the log segments it picked up along the way.
-        crate::rebuild::remove_log_segments(&scratch);
-        Ok(())
+        crate::rebuild::vacuum_in_place(self)
     }
 
     /// Checks every tree in every attached database, and their agreement.
@@ -3612,6 +3455,7 @@ impl ImportedDatabase {
             .with_source(sql.as_bytes())
             .with_functions(&externals)
             .with_collations(&self.collations)
+            .with_limits(&self.limits)
             .with_foreign_keys(self.foreign_keys, self.defer_foreign_keys);
         binder.bind_statement(&parsed.statement).map_err(refused)
     }
@@ -4664,6 +4508,7 @@ impl ImportedDatabase {
             .with_source(sql.as_bytes())
             .with_functions(&externals)
             .with_collations(&self.collations)
+            .with_limits(&self.limits)
             .with_foreign_keys(self.foreign_keys, self.defer_foreign_keys);
         let bound = binder.bind_statement(inner).map_err(refused)?;
         let lines = match bound {

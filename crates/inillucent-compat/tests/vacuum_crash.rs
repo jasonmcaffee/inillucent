@@ -6,40 +6,40 @@
 //! into a second file and swaps it in, so it is the one statement whose failure
 //! can take the whole database with it.
 //!
-//! ## Why this campaign is on real files and the others are on a simulator
+//! ## This campaign is on the simulator, and it was not
 //!
-//! `search_crash.rs`, `overflow_crash.rs` and `reindex_crash.rs` arm a failure
-//! at the Nth call a run makes to `inillucent-sim`'s VFS. `VACUUM` cannot be cut
-//! that way, because `vacuum_in_place` deliberately does not go through the
-//! connection's VFS: it writes the rebuilt file beside the original with
-//! `std::fs` and swaps it in with `std::fs::rename`, because a rename is a
-//! single directory update that a crash cannot catch halfway and the `Vfs`
-//! trait has no rename to express that with. `docs/relational-architecture.md`
-//! §6 records the decision. Running the statement on a simulated VFS therefore
-//! fails outright, with `Open: The system cannot find the path specified`,
-//! which is a fact about the design rather than a crash to grade.
+//! Until task-1946's H2 it could not be. `vacuum_in_place` did not go through
+//! the connection's VFS: it wrote the rebuilt file with `ImportedDatabase::open`
+//! - which constructs a fresh `OsVfs` - swapped it in with `std::fs::rename`,
+//! and removed the old log segments with `std::fs::read_dir` and
+//! `std::fs::remove_file`. Running the statement on a simulated VFS therefore
+//! failed outright with `Open: The system cannot find the path specified`, and
+//! the campaign that used to be in this file worked around that by enumerating
+//! the *states* a crash could leave rather than the *calls* a run makes -
+//! building each one out of `VACUUM INTO`'s output and a hand-written rename.
 //!
-//! So this campaign enumerates the states instead of the calls. The sequence
-//! has exactly three points a crash can land between - the rebuilt file being
-//! written, the rename, and the old log segments being removed - and the
-//! rebuilt file is a partial file at every length while it is being written.
-//! Each of those is built here out of the statement's own artefacts:
-//! `VACUUM INTO` produces the rebuilt bytes through the same `rebuild_into`
-//! that `vacuum_in_place` calls, and the rest is the rename and the removal it
-//! performs.
+//! That was an honest workaround for a design it could not change, and it had
+//! the weakness every workaround of that shape has: it graded the states
+//! somebody had thought of. The rename in particular was never cut, because a
+//! `std::fs::rename` is not a thing a test can be inside.
 //!
-//! `crates/inillucent-engine/src/rebuild.rs` has two of these points as unit
-//! tests against the private primitives. This is the same question asked from
-//! outside, at forty lengths of a half-written rebuild, which is where a
-//! recovery that read a truncated file as a database would show up.
+//! `Vfs::rename` exists now and `SimVfs` implements it with a failpoint, so the
+//! ordinary campaign harness covers this statement the way it covers every
+//! other one: four thousand cuts, each at the Nth VFS call a run makes, with
+//! every recovery graded against the two states that are allowed. The cut
+//! inside the rename is one of them rather than a case somebody wrote out.
+//!
+//! `crates/inillucent-engine/src/rebuild.rs` keeps its unit tests against the
+//! private primitives, and `vacuum_on_vfs.rs` asserts the other half of H2 -
+//! that the connection is still on the file system it was opened on afterwards.
 
-use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use inillucent_compat::facade::Database;
-use inillucent_compat::workspace_root;
-
-/// How many truncation points a half-written rebuild is graded at.
-const TRUNCATIONS: usize = 40;
+use inillucent_compat::crashcampaign::{record, Campaign};
+use inillucent_engine::ImportedDatabase;
+use inillucent_sim::failpoint::{Failure, Policy, Site};
+use inillucent_sim::sim_vfs::{SimConfig, SimVfs};
+use inillucent_vfs::Vfs;
 
 /// The database every run starts from, with enough rows that the delete below
 /// frees whole pages and the rebuild has real work to do.
@@ -49,216 +49,221 @@ const SCHEMA: &str = "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT, c INTEGER);
      WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 400)
      SELECT hex(zeroblob(200)), i * 7 FROM n;";
 
-/// What runs before the `VACUUM`, so that there is free space to reclaim.
-const WORKLOAD: &str = "DELETE FROM t WHERE a > 120;";
-
-/// Returns a scratch directory for one scenario.
+/// What each run tries to do, and is cut in the middle of.
 ///
-/// @param name - what to name it after
-fn scratch(name: &str) -> PathBuf {
-    let directory = workspace_root()
-        .join("_agent_output/vacuum-crash")
-        .join(name);
-    let _ = std::fs::remove_dir_all(&directory);
-    let _ = std::fs::create_dir_all(&directory);
-    directory
-}
+/// **The delete is in the workload rather than in the schema**, and it has to
+/// be: the campaign harness refuses a workload that changes nothing, and a
+/// `VACUUM` on its own changes no answer - that is the whole point of it. So
+/// the run is the delete and the rebuild together, which is also what an
+/// application does, and the two states a crash may leave are the database
+/// before the delete and the database after the vacuum.
+const WORKLOAD: &str = "DELETE FROM t WHERE a > 120;
+     VACUUM;";
 
-/// Runs statements on a database and closes it tidily.
-///
-/// @param path - the database file
-/// @param sql - the statements
-fn run(path: &Path, sql: &str) {
-    let database = Database::open(path).expect("the database opens");
-    let connection = database.connect().expect("the connection opens");
-    connection.execute_batch(sql).expect("the statements run");
-}
+/// The statements after the workload, so a cut can land past the rebuild.
+const TAIL: &str = "SELECT count(*) FROM t; PRAGMA wal_checkpoint;";
 
-/// Returns the state a database reads back as, or why it refused.
+/// What a run is graded on.
 ///
 /// The three queries together are the state: the rows, the index's answer, and
 /// the totals. Splitting them would let a database that had lost entries from
-/// the index match on the other two.
+/// the index match on the other two - and a rebuild is exactly the operation
+/// that rewrites every index, so that is the failure worth catching here.
+const PROBES: &[&str] = &[
+    "SELECT a, length(b), c FROM t ORDER BY a",
+    "SELECT a FROM t WHERE c BETWEEN 70 AND 700 ORDER BY c",
+    "SELECT count(*), sum(a), sum(c) FROM t",
+];
+
+/// Power loss anywhere in a delete and the rebuild that follows it.
+#[test]
+fn a_vacuum_cut_anywhere_leaves_one_of_the_two_databases() {
+    let report = Campaign {
+        name: "vacuum-journal-crash",
+        mode: "delete",
+        schema: SCHEMA,
+        workload: WORKLOAD,
+        tail: TAIL,
+        probes: PROBES,
+        failure: Failure::Crash,
+        cuts: CUTS,
+    }
+    .run();
+    record("vacuum-journal-crash", &report);
+}
+
+/// The same, through a write-ahead log.
+#[test]
+fn a_vacuum_under_a_log_cut_anywhere_leaves_one_of_the_two_databases() {
+    let report = Campaign {
+        name: "vacuum-wal-crash",
+        mode: "wal",
+        schema: SCHEMA,
+        workload: WORKLOAD,
+        tail: TAIL,
+        probes: PROBES,
+        failure: Failure::Crash,
+        cuts: CUTS,
+    }
+    .run();
+    record("vacuum-wal-crash", &report);
+}
+
+/// A device that refuses a write never leaves the database a mixture.
+#[test]
+fn a_reported_write_failure_during_a_vacuum_leaves_one_of_the_two() {
+    let report = Campaign {
+        name: "vacuum-journal-io",
+        mode: "delete",
+        schema: SCHEMA,
+        workload: WORKLOAD,
+        tail: TAIL,
+        probes: PROBES,
+        failure: Failure::IoError,
+        cuts: CUTS,
+    }
+    .run();
+    record("vacuum-journal-io", &report);
+}
+
+/// How many cut points each campaign grades.
 ///
-/// @param path - the database file
-fn state(path: &Path) -> Result<Vec<String>, String> {
-    let database = Database::open(path).map_err(|failure| format!("{failure}"))?;
-    let connection = database.connect().map_err(|failure| format!("{failure}"))?;
+/// **A hundred and fifty rather than the four thousand its siblings use, and
+/// the difference is what a run costs.** `overflow_crash` cuts a transaction;
+/// each of these cuts a transaction *and* a whole-database rebuild, so one cut
+/// here is worth far more wall time than one of those. Measured on this
+/// machine: four thousand ran for over half an hour and was killed, three
+/// hundred took 647 seconds for the three campaigns together, and a hundred and
+/// fifty takes about half of that - which puts this suite alongside
+/// `overflow_crash` at 298 seconds rather than doubling the strict pass.
+///
+/// It is not a number that can be lowered until the campaign stops covering
+/// anything: the harness refuses fewer than twenty cuts and asserts that both
+/// legitimate states were reached, so a count too small to get past the delete
+/// and into the rebuild fails rather than passing quietly.
+const CUTS: u64 = 150;
+
+/// The page size the direct case below runs at.
+const PAGE_SIZE: usize = 32_768;
+
+/// How many frames its pool holds.
+const FRAMES: usize = 64;
+
+/// The path the direct case's database takes inside the simulator.
+const DIRECT_PATH: &str = "/sim/vacuum_rename.db";
+
+/// Returns a simulator with the campaign's device model.
+///
+/// @param seed - what the device model's randomness starts from
+fn simulator(seed: u64) -> Arc<SimVfs> {
+    Arc::new(SimVfs::new(SimConfig {
+        seed,
+        ..SimConfig::default()
+    }))
+}
+
+/// Runs a script, reporting rather than panicking.
+///
+/// @param engine - the open connection
+/// @param script - the statements, separated by semicolons
+fn script(engine: &mut ImportedDatabase, script: &str) -> Result<(), inillucent_base::DbError> {
+    for statement in script.split(';') {
+        if statement.trim().is_empty() {
+            continue;
+        }
+        engine.execute_any(statement, &inillucent_exec::physical::Params::new())?;
+    }
+    Ok(())
+}
+
+/// Returns the rows a database answers the probes with.
+///
+/// @param engine - the open connection
+fn state(engine: &mut ImportedDatabase) -> Result<Vec<String>, inillucent_base::DbError> {
     let mut rows = Vec::new();
-    for query in [
-        "SELECT a, length(b), c FROM t ORDER BY a",
-        "SELECT a FROM t WHERE c BETWEEN 70 AND 700 ORDER BY c",
-        "SELECT count(*), sum(a), sum(c) FROM t",
-    ] {
-        rows.push(format!("-- {query}"));
-        let answered = connection
-            .query(query)
-            .map_err(|failure| format!("{failure}"))?;
-        for row in answered {
-            let rendered: Vec<String> = row
-                .iter()
-                .map(|value| match value.as_integer() {
-                    Some(number) => number.to_string(),
-                    None => format!("{value:?}"),
-                })
-                .collect();
-            rows.push(rendered.join("|"));
+    for probe in PROBES {
+        rows.push(format!("-- {probe}"));
+        let outcome = engine.execute_any(probe, &inillucent_exec::physical::Params::new())?;
+        for row in outcome.rows {
+            rows.push(format!("{row:?}"));
         }
     }
     Ok(rows)
 }
 
-/// Returns the log segments beside a database file.
+/// The cut the rest of this file could not reach until the rename went through
+/// the VFS: a crash *inside* `Vfs::rename`, with the rebuilt file written and
+/// the original still in place.
 ///
-/// @param database - the database file
-fn log_segments(database: &Path) -> Vec<PathBuf> {
-    let Some(directory) = database.parent() else {
-        return Vec::new();
-    };
-    let Some(stem) = database.file_name().and_then(|name| name.to_str()) else {
-        return Vec::new();
-    };
-    let prefix = format!("{stem}-wal.");
-    let Ok(listing) = std::fs::read_dir(directory) else {
-        return Vec::new();
-    };
-    listing
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with(&prefix))
-        })
-        .collect()
-}
-
-/// Builds a database, frees space in it, and returns it with the state it holds.
-///
-/// A `VACUUM` changes no answer, so the state below is both the state a crash
-/// before it must leave and the state a finished one must leave. That is why
-/// every assertion here compares a *reading* of the database rather than its
-/// size: a rebuild that lost a row is the failure, and a rebuild that did not
-/// compact is not.
-///
-/// @param directory - where the files go
-fn prepared(directory: &Path) -> (PathBuf, Vec<String>) {
-    let path = directory.join("main.rdb");
-    run(&path, SCHEMA);
-    run(&path, WORKLOAD);
-    let expected = state(&path).expect("the prepared database reads");
-    (path, expected)
-}
-
-/// Writes the rebuilt bytes a `VACUUM` would swap in, beside the database.
-///
-/// `VACUUM INTO` is the same rebuild through the same function -
-/// `rebuild_into` - so the file this produces is the one `vacuum_in_place`
-/// writes and then renames.
-///
-/// @param path - the database file
-fn rebuilt_beside(path: &Path) -> PathBuf {
-    let rebuilt = path.with_extension("rebuilt");
-    let _ = std::fs::remove_file(&rebuilt);
-    run(
-        path,
-        &format!(
-            "VACUUM INTO '{}'",
-            rebuilt.to_string_lossy().replace('\\', "/")
-        ),
-    );
-    rebuilt
-}
-
-/// A crash before the rename leaves the database it started from.
-///
-/// At every length of a half-written rebuild, because that is what the file
-/// beside the database looks like while `rebuild_into` is running, and none of
-/// them may change what the database answers.
+/// **The one crash-sensitive moment of the whole statement.** Everything before
+/// it is written beside the database and can be thrown away; everything after
+/// it is bookkeeping over a file that already holds the rebuilt bytes. The
+/// campaigns above reach this point among four thousand others; this asks it
+/// directly, so a change that stopped the rename from being a failpoint at all
+/// would fail a test that names the rename rather than quietly reducing the
+/// coverage of one that counts cuts.
 #[test]
-fn a_rebuild_cut_short_leaves_the_original_readable() {
-    let directory = scratch("before-the-rename");
-    let (path, expected) = prepared(&directory);
-    let rebuilt = rebuilt_beside(&path);
-    let whole = std::fs::read(&rebuilt).expect("the rebuilt file reads back");
+fn a_crash_inside_the_rename_recovers_the_original() {
+    let vfs = simulator(51_515);
+    let path = std::path::PathBuf::from(DIRECT_PATH);
+
+    let expected = {
+        let mut engine = ImportedDatabase::create_on(
+            Arc::clone(&vfs) as Arc<dyn Vfs>,
+            path.clone(),
+            PAGE_SIZE,
+            FRAMES,
+        )
+        .expect("the database is created in the simulator");
+        script(&mut engine, "PRAGMA journal_mode=delete").expect("the journal mode applies");
+        script(&mut engine, SCHEMA).expect("the schema builds");
+        script(&mut engine, "DELETE FROM t WHERE a > 120").expect("the delete runs");
+        state(&mut engine).expect("the prepared database reads")
+    };
+
+    // Every rename this run makes loses power. There is exactly one: the swap
+    // at the end of `vacuum_in_place`.
+    vfs.failpoints()
+        .set(Site::Rename, Policy::Always(Failure::Crash));
+    let mut engine = ImportedDatabase::open_on(
+        Arc::clone(&vfs) as Arc<dyn Vfs>,
+        path.clone(),
+        PAGE_SIZE,
+        FRAMES,
+    )
+    .expect("the database reopens");
+    script(&mut engine, "PRAGMA journal_mode=delete").expect("the journal mode applies");
+    let refused = script(&mut engine, "VACUUM");
     assert!(
-        whole.len() > 64 * 1024,
-        "the rebuilt file is {} bytes, too small for this to be a campaign",
-        whole.len()
+        refused.is_err(),
+        "the VACUUM reported success through a machine that lost power inside its rename"
     );
-
-    let partial = directory.join("main.rdb-partial");
-    for cut in 0..TRUNCATIONS {
-        let length = whole.len().saturating_mul(cut).saturating_div(TRUNCATIONS);
-        std::fs::write(&partial, whole.get(..length).unwrap_or(&whole))
-            .expect("the partial rebuild is written");
-        assert_eq!(
-            state(&path),
-            Ok(expected.clone()),
-            "a rebuild cut at {length} bytes changed what the original answers"
-        );
-    }
-    let _ = std::fs::remove_file(&partial);
-}
-
-/// A crash after the rename leaves the rebuilt database, not a replay over it.
-///
-/// The old file's log segments are still beside the new bytes at this point -
-/// `vacuum_in_place` removes them only once the rename is durable - and
-/// replaying them over the rebuilt file would undo the rebuild. That is what
-/// the removal order exists to prevent, so it is asserted from outside here as
-/// well as inside `rebuild.rs`.
-#[test]
-fn a_crash_after_the_rename_leaves_the_rebuilt_database() {
-    let directory = scratch("after-the-rename");
-    let (path, expected) = prepared(&directory);
-    let rebuilt = rebuilt_beside(&path);
-    let segments = log_segments(&path);
-    std::fs::rename(&rebuilt, &path).expect("the rename lands");
     assert_eq!(
-        state(&path),
-        Ok(expected),
-        "the database after the rename is not the one the rebuild wrote, with {} segments beside it",
-        segments.len()
+        vfs.failpoints()
+            .counts()
+            .get(&Site::Rename)
+            .copied()
+            .unwrap_or(0),
+        1,
+        "the rename was never reached, so this test cut nothing"
     );
-}
 
-/// A crash after the segments are removed leaves the rebuilt database.
-#[test]
-fn a_crash_after_the_segments_are_removed_leaves_the_rebuilt_database() {
-    let directory = scratch("after-the-removal");
-    let (path, expected) = prepared(&directory);
-    let rebuilt = rebuilt_beside(&path);
-    std::fs::rename(&rebuilt, &path).expect("the rename lands");
-    for segment in log_segments(&path) {
-        let _ = std::fs::remove_file(&segment);
-    }
-    assert_eq!(
-        state(&path),
-        Ok(expected),
-        "the database with its old segments removed is not the rebuilt one"
-    );
-}
+    let snapshot = vfs.crash();
+    drop(engine);
 
-/// The statement itself, run to the end, answers what it started with.
-///
-/// The cases above grade the states a crash leaves; this grades the one the
-/// statement is supposed to reach, which is what says those are the right two.
-#[test]
-fn a_vacuum_that_finishes_answers_what_it_started_with() {
-    let directory = scratch("finished");
-    let (path, expected) = prepared(&directory);
-    run(&path, "VACUUM");
+    let recovered_vfs = Arc::new(SimVfs::recovered(
+        SimConfig {
+            seed: 52_525,
+            ..SimConfig::default()
+        },
+        &snapshot,
+    ));
+    let mut recovered =
+        ImportedDatabase::open_on(recovered_vfs as Arc<dyn Vfs>, path, PAGE_SIZE, FRAMES)
+            .expect("the original still opens after a crash inside the rename");
     assert_eq!(
-        state(&path),
-        Ok(expected),
-        "a finished VACUUM changed what the database answers"
+        state(&mut recovered).expect("the recovered database reads"),
+        expected,
+        "a crash inside the rename must leave the database exactly as it was"
     );
-    // **Nothing here asserts the file got smaller**, and the reason is worth
-    // knowing before somebody adds it: the delete above is committed but not
-    // checkpointed, so most of what this database holds is in its log segments
-    // rather than in the file, and the rebuilt file - which holds all of it -
-    // is larger than the one it replaced. Measured: 131,072 bytes before and
-    // 262,144 after. Reclamation is `storage.rs`'s question and it asks it
-    // after a checkpoint; this campaign's question is whether a row survives.
 }

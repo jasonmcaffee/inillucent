@@ -524,45 +524,6 @@ fn free_space(page: &mut [u8], layout: &PageLayout, start: usize, size: usize) -
     Ok(())
 }
 
-/// Replaces the child pointer of the cell at `index` on an interior page.
-pub fn set_cell_child(
-    page: &mut [u8],
-    layout: &PageLayout,
-    index: usize,
-    child: PageId,
-) -> DbResult<()> {
-    if layout.kind.is_leaf() {
-        return Err(corrupt("a child pointer was set on a leaf page"));
-    }
-    let offset = *layout
-        .cell_pointers
-        .get(index)
-        .ok_or_else(|| corrupt(format!("cell {index} does not exist on this page")))?;
-    bytes::write_u32(page, offset, child.get())
-}
-
-/// Replaces an interior page's right-most child pointer.
-pub fn set_right_child(page: &mut [u8], layout: &PageLayout, child: PageId) -> DbResult<()> {
-    if layout.kind.is_leaf() {
-        return Err(corrupt("a right-most child was set on a leaf page"));
-    }
-    bytes::write_u32(
-        page,
-        layout.base.saturating_add(offsets::RIGHT_CHILD),
-        child.get(),
-    )
-}
-
-/// Returns every cell on a page as owned bytes, in key order.
-pub fn take_cells(page: &BTreePage<'_>) -> DbResult<Vec<Vec<u8>>> {
-    let mut cells = Vec::with_capacity(page.cell_count());
-    for index in 0..page.cell_count() {
-        let cell = page.cell(index)?;
-        cells.push(bytes::window(page.raw(), cell.offset, cell.len)?.to_vec());
-    }
-    Ok(cells)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

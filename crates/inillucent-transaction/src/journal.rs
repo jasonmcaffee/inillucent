@@ -25,7 +25,7 @@
 use std::sync::Arc;
 
 use inillucent_base::error::{corrupt, misuse};
-use inillucent_base::{bytes, DbError, DbResult};
+use inillucent_base::{bytes, DbResult};
 use inillucent_storage::journal::{Journal, JournalStats};
 use inillucent_vfs::{AccessMode, DbPath, FileKind, OpenOptions, SyncMode, Vfs, VfsFile};
 
@@ -886,15 +886,6 @@ pub fn journal_is_hot(vfs: &dyn Vfs, database_path: &DbPath) -> DbResult<bool> {
         file.read_exact_at(0, &mut raw)?;
     }
     Ok(decode_journal(&raw)?.is_some())
-}
-
-/// Reports whether a file that is not corrupt would be left alone.
-///
-/// A database with a hot journal beside it cannot be trusted until the journal
-/// has been replayed, and reading one before that is the mistake this exists
-/// to prevent being made silently.
-pub fn corrupt_journal(detail: impl Into<String>) -> DbError {
-    corrupt(detail)
 }
 
 #[cfg(test)]

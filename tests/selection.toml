@@ -349,6 +349,15 @@ name = "analyze_reopen"
 tier = "engine"
 covers = ["inillucent-engine"]
 
+# The half `analyze_reopen` cannot ask, because every case in it reopens first:
+# that the connection which ran `ANALYZE` reads the statistics it wrote.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "analyze_same_session"
+tier = "engine"
+covers = ["inillucent-engine", "inillucent-catalog", "inillucent-sql"]
+
 [[target]]
 package = "inillucent-compat"
 kind = "test"
@@ -865,6 +874,15 @@ tier = "differential"
 covers = ["inillucent-engine"]
 requires = ["oracle"]
 
+# One trigger depth constant, read from the connection's `Limit::TriggerDepth`.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "trigger_depth"
+tier = "differential"
+covers = ["inillucent-engine", "inillucent-sql", "inillucent-exec"]
+requires = ["oracle"]
+
 [[target]]
 package = "inillucent-compat"
 kind = "test"
@@ -1025,6 +1043,14 @@ name = "reindex_crash"
 tier = "durability"
 covers = ["inillucent-engine", "inillucent-tree", "inillucent-txn"]
 
+# A statement never moves the connection onto a different file system.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "vacuum_on_vfs"
+tier = "engine"
+covers = ["inillucent-engine", "inillucent-vfs"]
+
 [[target]]
 package = "inillucent-compat"
 kind = "test"
@@ -1080,6 +1106,15 @@ kind = "test"
 name = "wal_crash"
 tier = "durability"
 covers = ["inillucent-engine", "inillucent-wal"]
+
+# The ordering `journal.rs` states as its whole invariant: a page's old image is
+# on disk and synced before its new image is written.
+[[target]]
+package = "inillucent-pool"
+kind = "test"
+name = "journal_ordering"
+tier = "engine"
+covers = ["inillucent-pool"]
 
 [[target]]
 package = "inillucent-pool"

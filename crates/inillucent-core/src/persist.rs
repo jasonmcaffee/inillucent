@@ -926,7 +926,7 @@ pub fn is_segment_delta(bytes: &[u8]) -> bool {
 }
 
 /// One folded input's own contribution to a checkpoint: what it put, and
-/// what it bare-tombstoned. See [`PART_BATCH`] for why a checkpoint that
+/// what it bare-tombstoned. See `PART_BATCH` for why a checkpoint that
 /// folded several inputs keeps them as separate batches rather than one
 /// combined list.
 #[derive(Default)]
@@ -1166,7 +1166,7 @@ pub struct ParsedDelta {
 ///
 /// A truncated or malformed delta is refused rather than partially trusted:
 /// every read here is bounds checked against what is actually left in the
-/// buffer, the same rule [`read_section`] follows for bytes that may have
+/// buffer, the same rule `read_section` follows for bytes that may have
 /// come out of a database another process could write to.
 /// @param bytes - one `%_gen` row's worth of bytes, already known to be a
 ///   segment delta by [`is_segment_delta`]
@@ -1676,11 +1676,13 @@ mod tests {
 
         let a: Vec<u32> = original
             .vector_search(&query, &f_orig, 10, Some(64))
+            .expect("the query is this index's width and finite")
             .iter()
             .map(|n| n.chunk)
             .collect();
         let b: Vec<u32> = loaded
             .vector_search(&query, &f_load, 10, Some(64))
+            .expect("the query is this index's width and finite")
             .iter()
             .map(|n| n.chunk)
             .collect();
@@ -1864,11 +1866,13 @@ mod tests {
         let f_load = loaded.compile(&Filter::default());
         let a: Vec<(u32, f32)> = original
             .hybrid_search("offer eligibility", &query, &f_orig, 10, Some(64))
+            .expect("the query is this index's width and finite")
             .iter()
             .map(|h| (h.chunk, h.score))
             .collect();
         let b: Vec<(u32, f32)> = loaded
             .hybrid_search("offer eligibility", &query, &f_load, 10, Some(64))
+            .expect("the query is this index's width and finite")
             .iter()
             .map(|h| (h.chunk, h.score))
             .collect();
@@ -2221,6 +2225,7 @@ mod tests {
         let filter = loaded.compile(&Filter::default());
         assert!(!loaded
             .vector_search(&query, &filter, 5, Some(64))
+            .expect("the query is this index's width and finite")
             .is_empty());
         fs::remove_dir_all(&dir).ok();
     }
@@ -2273,11 +2278,13 @@ mod tests {
         let f_load = loaded.compile(&Filter::default());
         let a: Vec<u32> = original
             .vector_search(&query, &f_orig, 5, Some(64))
+            .expect("the query is this index's width and finite")
             .iter()
             .map(|n| n.chunk)
             .collect();
         let b: Vec<u32> = loaded
             .vector_search(&query, &f_load, 5, Some(64))
+            .expect("the query is this index's width and finite")
             .iter()
             .map(|n| n.chunk)
             .collect();

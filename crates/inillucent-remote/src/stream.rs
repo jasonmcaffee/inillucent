@@ -177,11 +177,6 @@ impl Stream {
         self.peer.as_deref()
     }
 
-    /// Reports whether this connection is encrypted.
-    pub fn is_encrypted(&self) -> bool {
-        matches!(self.socket, Transport::Secure(_))
-    }
-
     /// Wraps an already-connected socket, which is what the tests hand it.
     ///
     /// @param socket - a connected stream

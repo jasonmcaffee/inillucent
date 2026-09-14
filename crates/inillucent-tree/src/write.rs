@@ -420,6 +420,152 @@ impl PagedTree {
     /// @param row - the row
     /// @param want_previous - whether to copy out the row that was there
     /// @param replace - whether a key already there is overwritten or left alone
+    /// Encodes one row, writing any value too wide for a leaf out of line first.
+    ///
+    /// **A value too large for a leaf is written out of line before the row is
+    /// placed, not instead of placing it.**
+    ///
+    /// The first version repacked the whole leaf around such a row, because the
+    /// builder is where the spiller is. That made a two-kilobyte value cost a
+    /// page rewrite and a full-page log record: on the gate's
+    /// `extension.fts.build`, three thousand of FTS5's segment blocks fall
+    /// between the threshold and what a leaf holds, and the repacks were 111 ms
+    /// of a 250 ms workload - more than half of it.
+    ///
+    /// Spilling first turns the row into one a delta area can hold: the
+    /// seventeen tagged bytes of a reference in place of the value. From there
+    /// it is an ordinary write, with an ordinary short log record, and the leaf
+    /// is repacked when it fills rather than once per wide row.
+    ///
+    /// Called once by [`Tree::write_row`], outside its retry loop, because a
+    /// retry after a compaction must reuse the run rather than write a second
+    /// and leak the first.
+    ///
+    /// @param database - the open database
+    /// @param log - where the extent's own record goes
+    /// @param row - the values, in tree-column order
+    /// @returns the encoded row, and whether anything was spilled
+    fn encode_row_spilling_wide_values(
+        &mut self,
+        database: &mut Database,
+        log: &mut dyn TreeLog,
+        row: &[Datum<'_>],
+    ) -> DbResult<(Vec<u8>, bool)> {
+        let mut spilled = false;
+        let mut encoded_row = Vec::new();
+        for (column, value) in row.iter().enumerate() {
+            match self.out_of_line(column, value) {
+                Some(bytes) => {
+                    let reference =
+                        crate::paged::write_extent(database, log, self.tree_id(), bytes)?;
+                    crate::leaf::encode_extent_tagged(&mut encoded_row, reference);
+                    spilled = true;
+                }
+                None => value.encode_tagged(&mut encoded_row),
+            }
+        }
+        Ok((encoded_row, spilled))
+    }
+
+    /// Finds the key in a leaf and reads the row that was there.
+    ///
+    /// **The key is found once.** Where it sits decides three things - whether
+    /// it was there, what the caller gets back, and what the mutation has to
+    /// displace - and the first version asked the page all three times. A locate
+    /// is a page parse, a binary search and a walk of the delta area, and the
+    /// delta area is up to thirty-two rows compared column by column; on the
+    /// gate's `write.insert.batch` the two indexes cost 8.4 us of a 19 us insert,
+    /// and half of that was asking twice.
+    ///
+    /// Nothing between this and the mutation changes the page: the room check
+    /// only reads, and the log append does not touch pages at all. A `make_room`
+    /// restarts the attempt, which re-locates.
+    ///
+    /// The guard is dropped before this returns, because the write that follows
+    /// needs the page mutably.
+    ///
+    /// @param database - the open database
+    /// @param page - the leaf the key belongs on
+    /// @param key - the key columns of the row being written
+    /// @param want_previous - whether the row that was there has to be read
+    /// @returns where the key sits, and the row that was there
+    fn locate_and_read_previous(
+        &self,
+        database: &mut Database,
+        page: PageId,
+        key: &[Datum<'_>],
+        want_previous: bool,
+    ) -> DbResult<(Located, Option<Vec<OwnedDatum>>)> {
+        let guard = database.pool().fetch(page)?;
+        let leaf = LeafRef::parse(&guard)?
+            .with_collations(self.collations())
+            .with_directions(self.directions());
+        let located = leaf.locate(&key, self.key_columns())?;
+        // One row's out-of-line values, and only when the caller wants
+        // the row it is replacing. Locating reads key columns, which are
+        // never out of line, so this comes after.
+        let held = match (want_previous, located) {
+            (true, Located::Sorted(row)) => self.read_extents_row(database.pool(), &leaf, row)?,
+            (true, Located::Delta(index)) => {
+                self.read_extents_delta(database.pool(), &leaf, index)?
+            }
+            _ => crate::leaf::Extents::default(),
+        };
+        let leaf = leaf.with_extents(&held);
+        let previous = match (want_previous, located) {
+            (_, Located::Absent) => None,
+            (false, _) => {
+                // A marker, not the row: `put` reports presence and this
+                // value never leaves `write_row`.
+                Some(Vec::new())
+            }
+            (true, Located::Sorted(row)) => {
+                let mut values = Vec::with_capacity(leaf.column_count());
+                for column in 0..leaf.column_count() {
+                    values.push(OwnedDatum::from_datum(&leaf.value(row, column)?));
+                }
+                Some(values)
+            }
+            (true, Located::Delta(index)) => {
+                let mut values = Vec::with_capacity(leaf.column_count());
+                for column in 0..leaf.column_count() {
+                    values.push(OwnedDatum::from_datum(&leaf.delta_value(index, column)?));
+                }
+                Some(values)
+            }
+        };
+        Ok((located, previous))
+    }
+
+    /// Returns the out-of-line pages a delta row about to be removed owns.
+    ///
+    /// **Nothing else names them.** A tombstoned *sorted* row's reference is
+    /// still on the page for the next repack to free; a removed delta row's is
+    /// not, so it has to be read before the write and freed after it.
+    ///
+    /// @param database - the open database
+    /// @param page - the leaf
+    /// @param located - where the key sits
+    fn orphaned_extents(
+        &self,
+        database: &mut Database,
+        page: PageId,
+        located: Located,
+    ) -> DbResult<Vec<inillucent_pool::extent::ExtentRef>> {
+        let Located::Delta(index) = located else {
+            return Ok(Vec::new());
+        };
+        let guard = database.pool().fetch(page)?;
+        let leaf = LeafRef::parse(&guard)?;
+        let mut refs = Vec::new();
+        for column in 0..leaf.column_count() {
+            if let Some(reference) = leaf.delta_extent_at(index, column)? {
+                refs.push(reference);
+            }
+        }
+        Ok(refs)
+    }
+
     fn write_row(
         &mut self,
         database: &mut Database,
@@ -460,19 +606,8 @@ impl PagedTree {
         //
         // Spilled once, outside the loop, because a retry after a compaction
         // must reuse the run rather than write a second and leak the first.
-        let mut spilled = false;
-        let mut encoded_row = Vec::new();
-        for (column, value) in row.iter().enumerate() {
-            match self.out_of_line(column, value) {
-                Some(bytes) => {
-                    let reference =
-                        crate::paged::write_extent(database, log, self.tree_id(), bytes)?;
-                    crate::leaf::encode_extent_tagged(&mut encoded_row, reference);
-                    spilled = true;
-                }
-                None => value.encode_tagged(&mut encoded_row),
-            }
-        }
+        let (mut encoded_row, spilled) =
+            self.encode_row_spilling_wide_values(database, log, row)?;
 
         // Two attempts at most: the first may find the leaf full, and the
         // compaction or split that follows leaves a page that has room for one
@@ -492,49 +627,8 @@ impl PagedTree {
             // Nothing between here and the mutation changes the page: the
             // room check only reads, and the log append does not touch pages
             // at all. A `make_room` restarts the attempt, which re-locates.
-            let (located, mut previous) = {
-                let guard = database.pool().fetch(page)?;
-                let leaf = LeafRef::parse(&guard)?
-                    .with_collations(self.collations())
-                    .with_directions(self.directions());
-                let located = leaf.locate(&key, self.key_columns())?;
-                // One row's out-of-line values, and only when the caller wants
-                // the row it is replacing. Locating reads key columns, which are
-                // never out of line, so this comes after.
-                let held = match (want_previous, located) {
-                    (true, Located::Sorted(row)) => {
-                        self.read_extents_row(database.pool(), &leaf, row)?
-                    }
-                    (true, Located::Delta(index)) => {
-                        self.read_extents_delta(database.pool(), &leaf, index)?
-                    }
-                    _ => crate::leaf::Extents::default(),
-                };
-                let leaf = leaf.with_extents(&held);
-                let previous = match (want_previous, located) {
-                    (_, Located::Absent) => None,
-                    (false, _) => {
-                        // A marker, not the row: `put` reports presence and this
-                        // value never leaves `write_row`.
-                        Some(Vec::new())
-                    }
-                    (true, Located::Sorted(row)) => {
-                        let mut values = Vec::with_capacity(leaf.column_count());
-                        for column in 0..leaf.column_count() {
-                            values.push(OwnedDatum::from_datum(&leaf.value(row, column)?));
-                        }
-                        Some(values)
-                    }
-                    (true, Located::Delta(index)) => {
-                        let mut values = Vec::with_capacity(leaf.column_count());
-                        for column in 0..leaf.column_count() {
-                            values.push(OwnedDatum::from_datum(&leaf.delta_value(index, column)?));
-                        }
-                        Some(values)
-                    }
-                };
-                (located, previous)
-            };
+            let (located, mut previous) =
+                self.locate_and_read_previous(database, page, &key, want_previous)?;
             // A caller that refuses a duplicate is told so before anything is
             // written, which is the whole point of asking.
             if !replace && previous.is_some() {
@@ -569,24 +663,7 @@ impl PagedTree {
                 log.undo(self.tree_id(), &key, recorded)?;
             }
 
-            // A delta row that is about to be removed may own out-of-line
-            // pages, and nothing else names them: a tombstoned *sorted* row's
-            // reference is still on the page for the next repack to free, but a
-            // removed delta row's is not. Read before the write, freed after.
-            let orphaned = match located {
-                Located::Delta(index) => {
-                    let guard = database.pool().fetch(page)?;
-                    let leaf = LeafRef::parse(&guard)?;
-                    let mut refs = Vec::new();
-                    for column in 0..leaf.column_count() {
-                        if let Some(reference) = leaf.delta_extent_at(index, column)? {
-                            refs.push(reference);
-                        }
-                    }
-                    refs
-                }
-                _ => Vec::new(),
-            };
+            let orphaned = self.orphaned_extents(database, page, located)?;
             let lsn = log.log(Body::InsertRow {
                 tree: self.tree_id(),
                 page: page.0,
@@ -840,33 +917,31 @@ impl PagedTree {
         Ok(true)
     }
 
-    /// Records a commit timestamp on every leaf a transaction touched.
-    ///
-    /// @param pool - the buffer pool
-    /// @param pages - the leaves
-    /// @param cts - the commit timestamp
-    pub fn stamp_commit(&self, pool: &Pool, pages: &[PageId], cts: u64) -> DbResult<()> {
-        for page in pages {
-            pool.modify(*page, |bytes| LeafMut::new(bytes)?.set_max_cts(cts))?;
-        }
-        Ok(())
-    }
-
     /// Compacts a leaf, or splits it when its live rows no longer fit one page.
     ///
     /// @param database - the file
     /// @param log - where the record goes
     /// @param page - the leaf
     /// @param arriving - the key about to be written, when there is one
-    pub fn make_room(
-        &mut self,
+    /// Chooses between compacting, splitting and repacking a full leaf.
+    ///
+    /// **The decision half of [`Tree::make_room`], which is the half with the
+    /// argument in it.** Everything here reads the page through one guard and
+    /// answers a `Fit`; the caller drops the guard and does what it says. They
+    /// were one function of 166 lines until task-1946's M12, and the two halves
+    /// were already separate paragraphs.
+    ///
+    /// @param database - the open database
+    /// @param page - the full leaf
+    /// @param arriving - the key of the row that needs room, when there is one
+    /// @param needed - how many bytes it needs
+    fn choose_fit(
+        &self,
         database: &mut Database,
-        log: &mut dyn TreeLog,
         page: PageId,
-        path: &[PageId],
         arriving: Option<&[Datum<'_>]>,
         needed: usize,
-    ) -> DbResult<()> {
+    ) -> DbResult<Fit> {
         // **Packed straight out of the page.** The rows a compaction repacks are
         // already in a leaf, where a text or a blob is a slice; copying them to
         // owned values and borrowing them straight back was two allocations per
@@ -879,121 +954,143 @@ impl PagedTree {
         //
         // The guard is dropped before anything is written, because the write
         // needs the page mutably and this only needs to read it.
-        let fit = 'fit: {
-            let guard = database.pool().fetch(page)?;
-            let leaf = LeafRef::parse(&guard)?
-                .with_collations(self.collations())
-                .with_directions(self.directions());
-            let held = self.read_extents(database.pool(), &leaf)?;
-            let leaf = leaf.with_extents(&held);
-            // **Positions, not values.** `live()` allocates a `Vec<Datum>` per
-            // row and one more for the outer vector; on an index leaf holding
-            // three and a half thousand entries that is three and a half
-            // thousand allocations per compaction, to produce values that are
-            // already on the page. `live_order` is one allocation of four bytes
-            // a row and the builder reads through it.
-            let source = leaf.live_source()?;
-            // **A leaf with out-of-line values always takes the owned route.**
-            // The fast path below packs straight out of the page, which needs
-            // the guard held - and repacking an extent needs the *file*, to
-            // allocate the run the value moves into. The two cannot be held at
-            // once, and a leaf with extents holds few rows, so the copy costs
-            // little where it costs anything at all.
-            let spilled = leaf.has_extents();
-            // **An append splits *lopsidedly*; it does not split *early*.**
-            //
-            // This flag used to force a split instead of a compaction, on the
-            // argument that a leaf filled by rows arriving in key order is
-            // compacted, filled again by the next thirty-two, and compacted
-            // again - and that a compaction repacks every live row and writes
-            // the whole page to the log.
-            //
-            // The argument does not survive being measured on a page rather
-            // than on a workload. A leaf can only hold
-            // `DELTA_LIMIT` rows before it is full, so forcing a split gave the
-            // left page **thirty-two rows** and the right page none - and the
-            // next thirty-two filled the new page and split it again. Every
-            // page in an appended tree held thirty-two rows where the same
-            // table built out of key order held nine hundred and sixty-two:
-            // `INSERT INTO w SELECT id, v FROM u` over a hundred thousand rows
-            // wrote 3,130 pages for 104 pages of data, and a 200,000-row table
-            // was 221 MB against SQLite's 10.7.
-            //
-            // The log went the same way, which is what settles it: the same
-            // insert checkpoints **72** pages now against **3,134** before, so
-            // splitting three pages per thirty-two rows always cost more log
-            // than compacting one. On the gate: `write.insert.batch` 0.35x to
-            // 0.50x, `fts.build` 0.15x to 0.25x, `rtree.insert` 0.26x to 0.33x,
-            // the `transaction` family over the 1.00x floor for the first time,
-            // the headline 3.01x to 3.11x, and every read family inside the
-            // run-to-run spread.
-            //
-            // What the flag still does is choose the fill when a split really
-            // is needed - the page is genuinely full - because rows arriving in
-            // order never come back to the page they left behind. See
-            // `APPEND_FILL`.
-            let last_row: Option<Vec<Datum<'_>>> = (!source.is_empty()).then(|| {
-                (0..self.key_columns())
-                    .map(|column| source.value(source.len().saturating_sub(1), column))
-                    .collect()
-            });
-            let appending = leaf.right_sibling().is_none()
-                && source.len() >= 2
-                && match (arriving, last_row.as_deref()) {
-                    (Some(key), Some(last)) => {
-                        is_above(key, last, self.collations(), self.key_columns())
-                    }
-                    _ => false,
-                };
-            if spilled {
-                // The rows are *not* copied out here. Reading them through the
-                // guard would resolve every out-of-line value, which is the read
-                // the repack exists to avoid; `rows_to_repack` reads them again
-                // without one.
-                break 'fit Fit::Repack(appending);
-            }
-            let builder = LeafBuilder::new(
-                self.page_size(),
-                self.tree_id(),
-                self.columns().to_vec(),
-                self.key_columns(),
-            )?;
-            // **Two fills, and a split only when neither of them holds the
-            // rows.** The preferred fill leaves the delta room `COMPACT_FILL`
-            // exists to leave; the tight one is what stands between a leaf that
-            // arrived at 0.9 from a bulk build and two leaves at 0.5. See
-            // `TIGHT_FILL`.
-            //
-            // **The room check is on the chosen image, not part of the
-            // choosing.** Recovery replays a compaction by running
-            // `compact_image` again over the same rows, and it has no idea what
-            // row the write was making room for - so the fill has to be a
-            // function of the rows alone, or the replayed page would differ from
-            // the logged one. A compaction whose page has no room for the
-            // arriving row is therefore not a tighter compaction, it is a split.
-            let mut compacted = compact_image(&builder, &source)?;
-            if let Some(image) = compacted.as_mut() {
-                if !LeafMut::new(image)?.room_for(needed)? {
-                    compacted = None;
+        let guard = database.pool().fetch(page)?;
+        let leaf = LeafRef::parse(&guard)?
+            .with_collations(self.collations())
+            .with_directions(self.directions());
+        let held = self.read_extents(database.pool(), &leaf)?;
+        let leaf = leaf.with_extents(&held);
+        // **Positions, not values.** `live()` allocates a `Vec<Datum>` per
+        // row and one more for the outer vector; on an index leaf holding
+        // three and a half thousand entries that is three and a half
+        // thousand allocations per compaction, to produce values that are
+        // already on the page. `live_order` is one allocation of four bytes
+        // a row and the builder reads through it.
+        let source = leaf.live_source()?;
+        // **A leaf with out-of-line values always takes the owned route.**
+        // The fast path below packs straight out of the page, which needs
+        // the guard held - and repacking an extent needs the *file*, to
+        // allocate the run the value moves into. The two cannot be held at
+        // once, and a leaf with extents holds few rows, so the copy costs
+        // little where it costs anything at all.
+        let spilled = leaf.has_extents();
+        // **An append splits *lopsidedly*; it does not split *early*.**
+        //
+        // This flag used to force a split instead of a compaction, on the
+        // argument that a leaf filled by rows arriving in key order is
+        // compacted, filled again by the next thirty-two, and compacted
+        // again - and that a compaction repacks every live row and writes
+        // the whole page to the log.
+        //
+        // The argument does not survive being measured on a page rather
+        // than on a workload. A leaf can only hold
+        // `DELTA_LIMIT` rows before it is full, so forcing a split gave the
+        // left page **thirty-two rows** and the right page none - and the
+        // next thirty-two filled the new page and split it again. Every
+        // page in an appended tree held thirty-two rows where the same
+        // table built out of key order held nine hundred and sixty-two:
+        // `INSERT INTO w SELECT id, v FROM u` over a hundred thousand rows
+        // wrote 3,130 pages for 104 pages of data, and a 200,000-row table
+        // was 221 MB against SQLite's 10.7.
+        //
+        // The log went the same way, which is what settles it: the same
+        // insert checkpoints **72** pages now against **3,134** before, so
+        // splitting three pages per thirty-two rows always cost more log
+        // than compacting one. On the gate: `write.insert.batch` 0.35x to
+        // 0.50x, `fts.build` 0.15x to 0.25x, `rtree.insert` 0.26x to 0.33x,
+        // the `transaction` family over the 1.00x floor for the first time,
+        // the headline 3.01x to 3.11x, and every read family inside the
+        // run-to-run spread.
+        //
+        // What the flag still does is choose the fill when a split really
+        // is needed - the page is genuinely full - because rows arriving in
+        // order never come back to the page they left behind. See
+        // `APPEND_FILL`.
+        let last_row: Option<Vec<Datum<'_>>> = (!source.is_empty()).then(|| {
+            (0..self.key_columns())
+                .map(|column| source.value(source.len().saturating_sub(1), column))
+                .collect()
+        });
+        let appending = leaf.right_sibling().is_none()
+            && source.len() >= 2
+            && match (arriving, last_row.as_deref()) {
+                (Some(key), Some(last)) => {
+                    is_above(key, last, self.collations(), self.key_columns())
                 }
+                _ => false,
+            };
+        if spilled {
+            // The rows are *not* copied out here. Reading them through the
+            // guard would resolve every out-of-line value, which is the read
+            // the repack exists to avoid; `rows_to_repack` reads them again
+            // without one.
+            return Ok(Fit::Repack(appending));
+        }
+        let builder = LeafBuilder::new(
+            self.page_size(),
+            self.tree_id(),
+            self.columns().to_vec(),
+            self.key_columns(),
+        )?;
+        // **Two fills, and a split only when neither of them holds the
+        // rows.** The preferred fill leaves the delta room `COMPACT_FILL`
+        // exists to leave; the tight one is what stands between a leaf that
+        // arrived at 0.9 from a bulk build and two leaves at 0.5. See
+        // `TIGHT_FILL`.
+        //
+        // **The room check is on the chosen image, not part of the
+        // choosing.** Recovery replays a compaction by running
+        // `compact_image` again over the same rows, and it has no idea what
+        // row the write was making room for - so the fill has to be a
+        // function of the rows alone, or the replayed page would differ from
+        // the logged one. A compaction whose page has no room for the
+        // arriving row is therefore not a tighter compaction, it is a split.
+        let mut compacted = compact_image(&builder, &source)?;
+        if let Some(image) = compacted.as_mut() {
+            if !LeafMut::new(image)?.room_for(needed)? {
+                compacted = None;
             }
-            match compacted {
-                Some(image) => Fit::Compact(image, leaf.right_sibling(), leaf.max_cts()),
-                // A split rewrites three pages and needs the rows to outlive the
-                // guard, so this is where they are copied - and a split is the
-                // rarer half by a wide margin.
-                None => Fit::Split(
-                    (0..source.len())
-                        .map(|row| {
-                            (0..source.width())
-                                .map(|column| OwnedDatum::from_datum(&source.value(row, column)))
-                                .collect()
-                        })
-                        .collect(),
-                    appending,
-                ),
-            }
-        };
+        }
+        Ok(match compacted {
+            Some(image) => Fit::Compact(image, leaf.right_sibling(), leaf.max_cts()),
+            // A split rewrites three pages and needs the rows to outlive the
+            // guard, so this is where they are copied - and a split is the
+            // rarer half by a wide margin.
+            None => Fit::Split(
+                (0..source.len())
+                    .map(|row| {
+                        (0..source.width())
+                            .map(|column| OwnedDatum::from_datum(&source.value(row, column)))
+                            .collect()
+                    })
+                    .collect(),
+                appending,
+            ),
+        })
+    }
+
+    /// Compacts a leaf, or splits it when its live rows no longer fit one page.
+    ///
+    /// **The action half.** [`Tree::choose_fit`] reads the page and answers which
+    /// of the three this is; this drops the guard and does it. They were one
+    /// function of 166 lines until task-1946's M12.
+    ///
+    /// @param database - the file
+    /// @param log - where the record goes
+    /// @param page - the leaf
+    /// @param path - the interior pages above it, for a split
+    /// @param arriving - the key about to be written, when there is one
+    /// @param needed - how many bytes the arriving row needs
+    pub fn make_room(
+        &mut self,
+        database: &mut Database,
+        log: &mut dyn TreeLog,
+        page: PageId,
+        path: &[PageId],
+        arriving: Option<&[Datum<'_>]>,
+        needed: usize,
+    ) -> DbResult<()> {
+        let fit = self.choose_fit(database, page, arriving, needed)?;
         match fit {
             Fit::Compact(image, right, max_cts) => {
                 self.compact_into(database, log, page, image, right, max_cts, true)

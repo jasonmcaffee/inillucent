@@ -40,7 +40,7 @@
 //! buys now is that the machinery is exercised on every descent rather than
 //! being written and never run: the pool bumps a frame's version on every load
 //! and every eviction, so a descent that raced one really would restart, and
-//! [`crate::paged::tests`] forces exactly that race.
+//! `crate::paged::tests` forces exactly that race.
 
 use std::cell::RefCell;
 
@@ -1646,7 +1646,7 @@ impl PagedTree {
     /// binary search was being paid two hundred times per `join.range`
     /// execution to find a run that is usually one entry long.
     ///
-    /// The forward walk is capped: past [`RUN_SCAN`] matching rows it stops
+    /// The forward walk is capped: past `RUN_SCAN` matching rows it stops
     /// guessing and bisects, so a prefix that matches a whole leaf costs a
     /// binary search rather than a linear one.
     ///
@@ -1839,7 +1839,7 @@ impl PagedTree {
     /// partition point that says where the run of equal prefixes ends. That
     /// partition point is what a descent has to compute *after* it arrives, so
     /// when the run ends in the leaf already open the descent never happens.
-    /// When it does not, the walk steps right up to [`WALK_BUDGET`] leaves
+    /// When it does not, the walk steps right up to `WALK_BUDGET` leaves
     /// before giving up and descending - and the first time it gives up it
     /// switches itself off, because a tree's runs are all about the same length.
     ///

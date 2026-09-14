@@ -329,6 +329,21 @@ impl Shell {
         held.database.connect_as(held.session)
     }
 
+    /// Returns what one run-time limit is set to on the open database.
+    ///
+    /// @param limit - which limit
+    pub fn limit(&self, limit: inillucent_base::limits::Limit) -> i64 {
+        self.open_slot().database.limit(limit)
+    }
+
+    /// Sets one run-time limit on the open database, returning its old value.
+    ///
+    /// @param limit - which limit
+    /// @param requested - the value asked for
+    pub fn set_limit(&mut self, limit: inillucent_base::limits::Limit, requested: i64) -> i64 {
+        self.open_slot().database.set_limit(limit, requested)
+    }
+
     /// Returns whether a boolean pragma reads on.
     ///
     /// @param name - the pragma's name
@@ -1115,7 +1130,7 @@ fn value_of(datum: &OwnedDatum) -> Value<'static> {
 
 /// Returns one value as the datum a bind takes.
 ///
-/// The reverse of [`value_of`], and the shell's own half of `.parameter`.
+/// The reverse of `value_of`, and the shell's own half of `.parameter`.
 ///
 /// @param value - the value the shell is holding
 pub fn datum_of(value: &Value<'static>) -> OwnedDatum {

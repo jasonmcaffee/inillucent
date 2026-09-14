@@ -52,20 +52,15 @@ impl Event {
 }
 
 /// Escapes the characters JSON forbids in a string body.
+///
+/// One of three copies until task-1946's M4, and the one that was two branches
+/// short: it wrote `\u0008` and `\u000c` where the other two wrote `\b` and
+/// `\f`. Both are the same JSON string, so no trace was ever wrong; what the
+/// difference cost was a reader deciding whether it was deliberate.
+///
+/// @param text - the text to escape
 fn escape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for character in text.chars() {
-        match character {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            other if (other as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", other as u32)),
-            other => out.push(other),
-        }
-    }
-    out
+    inillucent_base::json::escape(text)
 }
 
 /// Every event of one run, in order.

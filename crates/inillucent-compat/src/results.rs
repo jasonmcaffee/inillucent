@@ -158,6 +158,26 @@ impl ResultSet {
         })
     }
 
+    /// Returns the cited tests no run has recorded an outcome for, on any
+    /// platform.
+    ///
+    /// **A name nothing records is a different fault from a suite that was
+    /// skipped, and it does not heal.** A skipped suite leaves the identifier
+    /// recorded elsewhere - the other platform, an earlier run - so the fix is
+    /// to run it. An identifier that appears in no result file at all is a test
+    /// that was renamed, moved to another crate, or deleted, and no amount of
+    /// running will produce it.
+    ///
+    /// @param tests - the identifiers a capability cites
+    /// @returns those of them nothing has ever recorded, in the order cited
+    pub fn never_recorded(&self, tests: &[String]) -> Vec<String> {
+        tests
+            .iter()
+            .filter(|test| !self.by_test.contains_key(test.as_str()))
+            .cloned()
+            .collect()
+    }
+
     /// Returns how many results have been recorded.
     pub fn len(&self) -> usize {
         self.by_test.values().map(Vec::len).sum()

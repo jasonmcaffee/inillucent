@@ -162,13 +162,6 @@ impl Tree {
         LeafRef::parse(page)
     }
 
-    /// Returns the raw bytes of one leaf.
-    ///
-    /// @param index - the leaf's position in key order
-    pub fn leaf_bytes(&self, index: usize) -> Option<&[u8]> {
-        self.pages.get(index).map(|page| page.as_slice())
-    }
-
     /// Writes each leaf's right-sibling pointer.
     ///
     /// The sibling chain is what a scan follows once the pool exists; in Phase 1
@@ -682,11 +675,6 @@ impl<'t> ScanCursor<'t> {
             .ok_or_else(|| corrupt("leaf vanished mid-scan"))?;
         self.leaf = self.leaf.saturating_add(1);
         Ok(Some(LeafRef::parse(page)?))
-    }
-
-    /// Restarts the cursor at the first leaf.
-    pub fn rewind(&mut self) {
-        self.leaf = 0;
     }
 }
 

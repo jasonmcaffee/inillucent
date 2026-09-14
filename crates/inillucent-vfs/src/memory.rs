@@ -81,15 +81,6 @@ impl MemoryVfs {
         }
     }
 
-    /// Returns the number of files currently present, for tests that assert a
-    /// temporary file really was deleted.
-    pub fn file_count(&self) -> usize {
-        match self.directory.lock() {
-            Ok(directory) => directory.files.len(),
-            Err(poisoned) => poisoned.into_inner().files.len(),
-        }
-    }
-
     /// Reports whether a path exists, without opening it.
     pub fn contains(&self, path: &DbPath) -> bool {
         match self.directory.lock() {
@@ -188,6 +179,28 @@ impl Vfs for MemoryVfs {
     fn delete(&self, path: &DbPath, _sync_dir: bool) -> VfsResult<()> {
         let mut directory = lock_or_recover(&self.directory);
         directory.files.remove(path.as_path());
+        Ok(())
+    }
+
+    /// Moves one entry of the directory to another name, replacing whatever
+    /// was there.
+    ///
+    /// Atomic for free: the whole directory is behind one lock, so no reader
+    /// can observe a state in which neither name resolves. A rename of a file
+    /// that is not there is a failure rather than a silent success - unlike
+    /// `delete`, which the pager calls twice on purpose - because a caller
+    /// renaming a file it did not create is a caller with a bug.
+    fn rename(&self, from: &DbPath, to: &DbPath) -> VfsResult<()> {
+        let mut directory = lock_or_recover(&self.directory);
+        let Some(file) = directory.files.remove(from.as_path()) else {
+            return Err(VfsError::new(
+                inillucent_base::error::ExtendedCode::from_primary(
+                    inillucent_base::error::PrimaryCode::IoErr,
+                ),
+                format!("rename: {} is not there", from.as_path().display()),
+            ));
+        };
+        directory.files.insert(to.as_path().to_path_buf(), file);
         Ok(())
     }
 

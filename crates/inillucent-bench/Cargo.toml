@@ -2,6 +2,7 @@
 name = "inillucent-bench"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "The benchmark arm: measures this engine against SQLite, PostgreSQL and pgvector."
@@ -11,8 +12,13 @@ description = "The benchmark arm: measures this engine against SQLite, PostgreSQ
 publish = false
 
 [dependencies]
-inillucent-core = { path = "../inillucent-core", features = ["onnx"] }
-inillucent-base = { path = "../inillucent-base" }
+# **Through the workspace table, not by path alone.** A `path` with no
+# `version` is a wildcard: it resolves to whatever is in the directory and says
+# nothing about what a published copy would need. Every other internal edge in
+# the workspace already carries a version beside its path, and these two were the
+# exception `cargo deny` found (task-1946, M8).
+inillucent-core = { workspace = true, features = ["onnx"] }
+inillucent-base = { workspace = true }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

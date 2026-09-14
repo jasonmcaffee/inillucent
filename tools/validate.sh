@@ -90,6 +90,32 @@ stage build 'every target compiles from the lock file as it stands' \
 stage lint 'the strict lint set, which the pinned compiler fixes' \
     cargo clippy --manifest-path "$root/Cargo.toml" --workspace --all-targets --all-features --locked -- -D warnings
 
+# **What a declared dependency drags in behind it, and under what licence.**
+# `policy.rs` checks the edges a manifest names; nothing looked at the resolved
+# graph, so a crate with a published advisory or a licence this repository cannot
+# ship passed every check the workspace had (task-1946, M8). `deny.toml` at the
+# root says what is allowed and why.
+#
+# `cargo-deny` is installed when it is absent rather than skipped: a stage that
+# quietly does nothing on the machine that has not got the tool is a stage that
+# reports green having checked nothing.
+dependencies() {
+    if ! cargo deny --version >/dev/null 2>&1; then
+        echo '    installing cargo-deny'
+        cargo install cargo-deny --locked
+    fi
+    cargo deny --manifest-path "$root/Cargo.toml" check
+}
+stage dependencies 'advisories, licences and the resolved graph, which the manifest checks cannot see' dependencies
+
+# **A broken intra-doc link is a build failure here rather than a hole in the
+# published documentation.**
+documentation() {
+    RUSTDOCFLAGS='-D warnings' cargo doc --manifest-path "$root/Cargo.toml" \
+        --workspace --no-deps --all-features
+}
+stage docs 'a link that resolves to nothing is a defect, not a warning' documentation
+
 # Built before anything grades against it (task-1932, H10). Sixty-nine
 # differential tests across ten files compare this engine with SQLite 3.53.4 and
 # each of them skips when the oracle is absent; --strict at the end of this
@@ -100,8 +126,18 @@ stage lint 'the strict lint set, which the pinned compiler fixes' \
 #
 # Idempotent and cheap on a second run: every artifact is checked against the
 # SHA3-256 sum SQLite publishes and re-downloaded only when it is absent.
+#
+# **`bash`, not `sh`, and this is why no Linux run ever had an oracle
+# (task-1946, M5).** `tools/sqlite-reference.sh` is `#!/usr/bin/env bash` and
+# uses `set -o pipefail`; `/bin/sh` on Debian and Ubuntu is dash, which answers
+# `Illegal option -o pipefail` and stops at line 15. So this stage failed at
+# once on every Linux run, every oracle-graded suite then skipped, and
+# `compat/results/linux-x86_64.jsonl` recorded no passing result for any of
+# them - which is the fourteen rows the Problems table in
+# `compat/compat-report.md` carried. The same defect, in the same shape, as the
+# one `packaging/PUBLISHING.md` records for `install.sh`.
 stage oracle 'the sixty-nine differential suites have nothing to compare against without it' \
-    sh "$root/tools/sqlite-reference.sh"
+    bash "$root/tools/sqlite-reference.sh"
 
 # Two durability tests could not run without this, and nobody knew
 # (task-1932, H10). `new_engine_log_lead.rs` builds an index through a 64-frame
@@ -110,12 +146,29 @@ stage oracle 'the sixty-nine differential suites have nothing to compare against
 # of the phrases --strict looked for, so the suite reported green having
 # asserted nothing on every machine that had not built the file by hand. Eight
 # seconds buys two durability tests that actually run.
+# `bash` for the same reason: it is a bash script too.
 stage fixtures 'the log-lead durability tests read a fixture that is not checked in' \
-    sh "$root/tools/build-gate-fixtures.sh" "$root/_agent_output/fixtures"
+    bash "$root/tools/build-gate-fixtures.sh" "$root/_agent_output/fixtures"
 
 stage contracts 'dependencies, layering, the command table and the test map' \
     cargo test --manifest-path "$root/Cargo.toml" -p inillucent-compat \
     --test policy --test selection --test command_parity --test harness
+
+# **A published compatibility report may not carry its own unresolved Problems
+# table (task-1946, M5).** compat/compat-report.md shipped fourteen rows saying
+# a capability the manifest calls `pass` has no passing result recorded on
+# linux-x86_64. `inillucent-manifest report` has always exited non-zero when it
+# finds one; nothing ever ran it, so the table grew instead.
+#
+# It regenerates the report from `compat/results` as it goes, so a run whose
+# recorded results have moved leaves the checked-in report agreeing with them.
+# That is also what makes the stage fail a checkout whose report is stale: the
+# `harness.report.reproducible` suite compares the two.
+compat_report() {
+    cargo run --manifest-path "$root/Cargo.toml" -p inillucent-compat \
+        --bin inillucent-manifest -- report
+}
+stage compat 'the published compatibility report states no unresolved problem' compat_report
 
 smoke() {
     cargo build --manifest-path "$root/Cargo.toml" -p inillucent-compat --bin inillucent-testrun --features testrun \

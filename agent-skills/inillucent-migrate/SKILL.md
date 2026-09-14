@@ -32,7 +32,7 @@ named.
 ## From a running PostgreSQL or MySQL
 
 ```sh
-inillucent migrate "postgres://jason@127.0.0.1:5432/corpus" --destination corpus.rdb
+inillucent migrate "postgres://user@127.0.0.1:5432/corpus" --destination corpus.rdb
 inillucent migrate "mysql://root@127.0.0.1:3306/app"        --destination app.rdb
 ```
 
@@ -124,7 +124,7 @@ Every check is printed whether it passed or not: knowing that the counts are rig
 digest is not is a different problem from knowing that nothing arrived.
 
 ```
-postgres://jason:***@127.0.0.1:5432/corpus -> corpus.rdb
+postgres://user:***@127.0.0.1:5432/corpus -> corpus.rdb
 PostgreSQL 17.2, 6 tables, 13 rows
   pass structure.integrity every tree walks in key order on a fresh open
   pass source.count.note 3 rows, counted separately from the scan

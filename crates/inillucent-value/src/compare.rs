@@ -55,24 +55,6 @@ impl SqlOrdering {
             _ => Truth::False,
         }
     }
-
-    /// Returns the truth value of `left < right`.
-    pub fn less_than(self) -> Truth {
-        match self {
-            SqlOrdering::Less => Truth::True,
-            SqlOrdering::Unknown => Truth::Unknown,
-            _ => Truth::False,
-        }
-    }
-
-    /// Returns the truth value of `left > right`.
-    pub fn greater_than(self) -> Truth {
-        match self {
-            SqlOrdering::Greater => Truth::True,
-            SqlOrdering::Unknown => Truth::Unknown,
-            _ => Truth::False,
-        }
-    }
 }
 
 /// A SQL truth value.

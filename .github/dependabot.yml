@@ -1,0 +1,51 @@
+# Dependency updates, weekly.
+#
+# **`cargo deny check` in the gate says whether what is in the lock file has a
+# published advisory; this is what moves it.** The two are different jobs and the
+# repository had neither until task-1946's M7 and M8 - so a dependency with a
+# known vulnerability would have sat in `Cargo.lock` until somebody happened to
+# look.
+#
+# Grouped rather than one pull request per crate: a workspace this size resolves
+# a few hundred crates, and an ungrouped weekly run is thirty pull requests
+# nobody reads. One per ecosystem is one `tools/validate.*` run to judge.
+version: 2
+
+updates:
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      # Everything that is not a major version, in one request. A major version
+      # arrives on its own, because it is the one that needs a person.
+      rust-dependencies:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  # The npm wrapper. It has no runtime dependencies - the shim resolves a
+  # platform package and runs a binary - so this is its build and test tooling.
+  - package-ecosystem: npm
+    directory: /packages/npm/inillucent
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 2
+    groups:
+      npm-dependencies:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  # The actions the gate runs on. A pinned action that is never updated is a
+  # dependency like any other.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 2
+    groups:
+      actions:
+        patterns: ["*"]

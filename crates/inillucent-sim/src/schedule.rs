@@ -119,13 +119,6 @@ impl Scheduler {
     pub fn recorded_schedule(&self) -> Vec<usize> {
         guard(&self.state).recorded.clone()
     }
-
-    /// Renders the recorded schedule as a one-line artifact.
-    pub fn schedule_text(&self) -> String {
-        let choices = self.recorded_schedule();
-        let rendered: Vec<String> = choices.iter().map(|choice| choice.to_string()).collect();
-        format!("[{}]", rendered.join(","))
-    }
 }
 
 /// Picks the next actor to run, from the replay schedule when it still has

@@ -2,7 +2,7 @@
 //!
 //! Invariant: this pass never changes what a query means, only how it is run.
 //! Every construct it does not recognise is **refused** rather than
-//! approximated - [`unsupported`] returns an error naming what was not handled,
+//! approximated - `unsupported` returns an error naming what was not handled,
 //! so a query the new engine cannot run yet fails loudly instead of returning a
 //! plausible wrong answer. That is the whole reason it is written as a
 //! whitelist: a differential digest comparison catches a wrong answer, but only
@@ -82,8 +82,8 @@ use crate::batch::Batch;
 use crate::expr::{compile, ArithOp, CompareOp, Expr, StaticType};
 use crate::join::{IndexNestedLoopJoin, JoinKind, NestedLoopJoin, ValuesScan};
 use crate::ops::{
-    AdjacentDistinct, AggregateSpec, CollectInto, Distinct, Filter, Flow, HashAggregate, Limit,
-    Project, SimpleAggregate, Sink, Sort, SortKey, StreamAggregate, TopN,
+    AdjacentDistinct, AggregateSpec, CollectInto, Distinct, Filter, HashAggregate, Limit, Project,
+    SimpleAggregate, Sink, Sort, SortKey, StreamAggregate, TopN,
 };
 use crate::paged::{FullScan, PointProbe, ReverseScan, SkipScan, SpanScan};
 use crate::scan::Projection;
@@ -896,22 +896,6 @@ impl Params {
             .lock()
             .map(|held| held.clone())
             .unwrap_or_default()
-    }
-
-    /// Copies another set's values into this one's cell.
-    ///
-    /// The cell is shared with a compiled chain, so this is how a statement
-    /// built against one execution's parameters is pointed at the next
-    /// execution's without rebuilding anything.
-    ///
-    /// @param from - the set holding the new values
-    pub fn adopt(&self, from: &Params) {
-        let source = from.held();
-        let Ok(mut held) = self.values.lock() else {
-            return;
-        };
-        held.clear();
-        held.extend_from_slice(&source);
     }
 
     /// Records that the chain being built folded in a value that is only true
@@ -2953,7 +2937,7 @@ impl<'t> Statement<'t> {
     /// for anything baked into the chain - a folded value read there is
     /// counted against [`Statement::rebindable`]. It is *not* correct for the
     /// **source**: a seek key from `WHERE id = (SELECT max(id) FROM t)` calls
-    /// [`source_for_run`] on every run, which used to see the raw `params` this
+    /// `source_for_run` on every run, which used to see the raw `params` this
     /// method was handed - subquery slots empty, nothing having folded them
     /// since the one-time pass - and answered "a correlated subquery used as a
     /// value" for a block that was never correlated. Folding costs about 40 ns
@@ -5721,12 +5705,4 @@ fn name_of(expr: &BoundExpr) -> &'static str {
             Box::leak(format!("a {name} expression").into_boxed_str())
         }
     }
-}
-
-/// Returns the flow a sink reports, for the `Flow` re-export.
-///
-/// Kept so that a caller of this module does not have to reach into
-/// [`crate::ops`] for the one type a custom sink needs.
-pub fn continue_flow() -> Flow {
-    Flow::Continue
 }

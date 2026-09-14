@@ -552,9 +552,23 @@ mod tests {
         // cases point at directories they made. The lock is held only for the
         // lookup, because the embedding that follows takes seconds and holding
         // it there would serialize four cases that have no reason to wait.
+        // **The `?` used to be the whole of it, and it said nothing.** Five
+        // tests in this module returned green on a machine with no weights, and
+        // neither `--strict` nor `every_skip_site_carries_the_one_marker` could
+        // see them, because a skip with no message is a skip nothing can read
+        // (task-1946, H10).
         let dir = {
             let _held = crate::install::env_guard();
-            crate::install::model_dir(crate::install::DEFAULT_MODEL)?
+            match crate::install::model_dir(crate::install::DEFAULT_MODEL) {
+                Some(dir) => dir,
+                None => {
+                    eprintln!(
+                        "no {} is installed and no model root holds one; skipping",
+                        crate::install::DEFAULT_MODEL
+                    );
+                    return None;
+                }
+            }
         };
         let manifest = crate::model::ModelManifest::read(&dir)
             .unwrap_or_else(|_| crate::model::ModelManifest::nomic_v1_5());
@@ -566,7 +580,7 @@ mod tests {
         // One embedding up front, so a machine that has the weights but cannot
         // load the runtime skips rather than failing inside the assertions.
         if managed.embed_query("a warm up").is_err() {
-            eprintln!("skipping: the ONNX runtime would not load");
+            eprintln!("the ONNX runtime would not load; skipping");
             return None;
         }
         Some(managed)

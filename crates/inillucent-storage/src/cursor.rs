@@ -280,28 +280,6 @@ impl BTreeCursor {
         )
     }
 
-    /// Returns where the entry's payload lives, without reading it.
-    ///
-    /// A blob handle wants a range of one value and not the row it is in, so
-    /// it asks where the payload is and reads the pages that hold the range.
-    pub fn payload_place(&self) -> DbResult<crate::overflow::PayloadPlace> {
-        let frame = self.positioned_frame()?;
-        let cell = frame.page().cell(frame.slot)?;
-        Ok(crate::overflow::PayloadPlace {
-            page: frame.page,
-            local_offset: cell.local_offset,
-            local_len: cell.local_payload.len(),
-            total: cell.split.total,
-            overflow: cell.overflow,
-        })
-    }
-
-    /// Returns whether the entry the cursor is on has an overflow chain.
-    pub fn payload_overflows(&self) -> DbResult<bool> {
-        let frame = self.positioned_frame()?;
-        Ok(frame.page().cell(frame.slot)?.split.overflows)
-    }
-
     /// Returns the frame the cursor is positioned on.
     fn positioned_frame(&self) -> DbResult<&Frame> {
         if self.state != CursorState::OnEntry {
