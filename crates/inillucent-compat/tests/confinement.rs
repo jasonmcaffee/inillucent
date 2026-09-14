@@ -29,8 +29,11 @@ use inillucent_compat::workspace_root;
 ///
 /// @param name - the case's own directory, so two cases never share a root
 fn area(name: &str) -> PathBuf {
+    // One component per `join`, so the path has no forward slash in it: this
+    // file hands paths to `cmd`, which reads one as a switch (task-1913).
     let path = workspace_root()
-        .join("_agent_output/confinement")
+        .join("_agent_output")
+        .join("confinement")
         .join(name);
     let _ = std::fs::remove_dir_all(&path);
     let _ = std::fs::create_dir_all(&path);
@@ -39,23 +42,35 @@ fn area(name: &str) -> PathBuf {
 
 /// Returns the verb-shaped command line, building it first.
 ///
-/// Returns `None` when the build failed, which is a compile error the rest of
-/// the suite will report more clearly than a missing-file assertion here.
+/// **`None` is announced as a skip rather than returned quietly (task-1913).**
+/// Ten cases in this file opened with `let Some(program) = binary(...) else {
+/// return; };`, so a build that did not produce the binary made all ten pass
+/// without running anything - and these are the cases that check a confined
+/// server cannot be talked into opening a file outside its root, which is the
+/// last place a silent pass belongs. `--strict` turns the announced skip into
+/// a failure; the two link cases in this file already announced theirs.
+///
+/// @param name - the binary's name, without the platform's suffix
 fn binary(name: &str) -> Option<PathBuf> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let status = Command::new(cargo)
+    let built = Command::new(cargo)
         .current_dir(workspace_root())
         .args(["build", "-p", "inillucent-cli"])
-        .status()
-        .ok()?;
-    if !status.success() {
-        return None;
+        .status();
+    let found = match built {
+        Ok(status) if status.success() => {
+            let mut directory = std::env::current_exe().unwrap_or_default();
+            directory.pop();
+            directory.pop();
+            let path = directory.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+            path.is_file().then_some(path)
+        }
+        _ => None,
+    };
+    if found.is_none() {
+        inillucent_compat::differential::skipping(&format!("{name} did not build"));
     }
-    let mut directory = std::env::current_exe().unwrap_or_default();
-    directory.pop();
-    directory.pop();
-    let path = directory.join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-    path.is_file().then_some(path)
+    found
 }
 
 /// What one run of the command line printed and what it returned.
@@ -112,10 +127,22 @@ fn run(program: &Path, root: &Path, arguments: &[&str]) -> Ran {
 fn link_directory(link: &Path, target: &Path) -> bool {
     #[cfg(windows)]
     {
+        // **Every separator is a backslash before `cmd` sees it
+        // (task-1913).** `mklink` is a `cmd` builtin, and `cmd` reads a
+        // forward slash as the start of a switch: with one anywhere in the
+        // path it answered `Invalid switch - "confinement\\link\\root\\escape"`
+        // and exited 1. `area()` built its path from the single component
+        // `_agent_output/confinement`, so every junction this file ever tried
+        // to make failed, and the two cases that check a junction cannot widen
+        // a confinement root have never run on Windows. They announced the
+        // skip, so nothing lied - but `cargo test` captures the output of a
+        // passing test, so the announcement was only ever visible under
+        // `--strict`, where it became the failure it should have been.
+        let backslashed = |path: &Path| path.to_string_lossy().replace('/', "\\");
         Command::new("cmd")
             .args(["/C", "mklink", "/J"])
-            .arg(link)
-            .arg(target)
+            .arg(backslashed(link))
+            .arg(backslashed(target))
             .output()
             .map(|produced| produced.status.success())
             .unwrap_or(false)
