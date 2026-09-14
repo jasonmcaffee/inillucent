@@ -290,6 +290,144 @@ fn every_differential_target_declares_what_it_needs() {
     );
 }
 
+/// Every feature a workspace crate declares is either built by the runner or
+/// written down here as one nobody tests.
+///
+/// **A test behind a feature the build does not turn on is in no binary at
+/// all (task-1913).** It is not skipped and it is not reported: `cargo test
+/// --workspace` compiles with default features, so the code never exists and
+/// the runner has nothing to count. The source still reads as coverage, which
+/// makes it worse than a missing test - somebody looking for a case finds one.
+///
+/// Measured before the fix, by listing each crate's tests with the feature on
+/// and off: `inillucent-core` had **287** tests with `onnx` and **260**
+/// without, and `inillucent-search` **55** with `embed` and **52** without. So
+/// thirty tests were in the tree, had never run, and nothing said so. task-1952
+/// found the first of them the only way it could be found - by reading the
+/// source and noticing the test it wanted was not in the output - and
+/// `inillucent-search/src/lib.rs` already carries the lesson beside
+/// `embed_refusal`, which was pulled out from behind the feature for exactly
+/// this reason.
+///
+/// The rule is a decision rather than an analysis: a new feature is named by a
+/// selection row, so the runner builds it, or it is listed below with why it
+/// holds nothing worth running. Both answers are fine; not answering is not.
+#[test]
+fn every_feature_is_either_built_or_written_off() {
+    // A feature the runner does not build, and why that is right.
+    const UNTESTED: [(&str, &str, &str); 5] = [
+        (
+            "inillucent-storage",
+            "check",
+            "turns on the integrity checker in `src/check.rs`, which this crate's own tests reach \
+             through `cfg(test)`; the crate's test count is the same with it on and off",
+        ),
+        (
+            "inillucent-storage",
+            "opcode-probe",
+            "brackets page edits for the profiling instruments and is never on in a shipped \
+             build; the crate's test count is the same with it on and off",
+        ),
+        (
+            "inillucent-compat",
+            "testrun",
+            "builds the runner itself, which is why it exists - a runner that built its own \
+             binary could not replace a file it was executing",
+        ),
+        (
+            "inillucent-engine",
+            "embed",
+            "passes `inillucent-search/embed` through and adds no test of its own; the tests \
+             behind it are the search crate's, and that row names the feature",
+        ),
+        (
+            "inillucent-cli",
+            "embed",
+            "passes `inillucent-engine/embed` through and adds no test of its own, for the \
+             same reason",
+        ),
+    ];
+
+    let root = workspace_root();
+    let built: BTreeSet<String> = map()
+        .rows
+        .iter()
+        .flat_map(|row| row.features.iter().cloned())
+        .collect();
+    let excused: BTreeSet<String> = UNTESTED
+        .iter()
+        .map(|(package, feature, _)| format!("{package}/{feature}"))
+        .collect();
+
+    let mut unanswered: Vec<String> = Vec::new();
+    let mut read = 0usize;
+    for member in members() {
+        // `members()` answers the paths the root manifest lists -
+        // `crates/inillucent-core` - and the package name is the last
+        // component. Joining the whole thing under `crates/` again produced
+        // `crates/crates/inillucent-core`, which is not a file, so the loop
+        // read no manifest and the check passed having compared nothing. It
+        // was caught by reverting a row and watching this stay green, which is
+        // the only way that kind of pass ever shows itself.
+        let manifest = root.join(&member).join("Cargo.toml");
+        let Ok(text) = std::fs::read_to_string(&manifest) else {
+            continue;
+        };
+        read = read.saturating_add(1);
+        let package = member.rsplit('/').next().unwrap_or(&member).to_string();
+        for feature in declared_features(&text) {
+            let named = format!("{package}/{feature}");
+            if built.contains(&named) || excused.contains(&named) {
+                continue;
+            }
+            unanswered.push(named);
+        }
+    }
+    assert!(
+        read >= 20,
+        "read {read} manifests, which means this is looking in the wrong place rather than          that the workspace has no features"
+    );
+    assert!(
+        unanswered.is_empty(),
+        "these features are neither built by the runner nor written off:\n  {}\n\
+         A test behind a feature nothing turns on is in no binary and reads as coverage. \
+         Either add `features = [\"<package>/<feature>\"]` to that package's row in \
+         `tests/selection.toml`, or add the feature to `UNTESTED` in this test with the \
+         reason it holds nothing worth running.",
+        unanswered.join("\n  ")
+    );
+}
+
+/// Returns the features a manifest's `[features]` table declares.
+///
+/// `default` is not one: it is the list the build already uses, so it can hide
+/// nothing.
+///
+/// @param manifest - the text of a `Cargo.toml`
+fn declared_features(manifest: &str) -> Vec<String> {
+    let mut features = Vec::new();
+    let mut inside = false;
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            inside = trimmed == "[features]";
+            continue;
+        }
+        if !inside || trimmed.starts_with('#') || trimmed.is_empty() {
+            continue;
+        }
+        let Some((name, _)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let name = name.trim();
+        if name == "default" || name.is_empty() {
+            continue;
+        }
+        features.push(name.to_string());
+    }
+    features
+}
+
 /// A change to the transaction crate has to select the segment suites.
 ///
 /// **It did not (task-1932, M11).** `segmented_generations`,

@@ -384,6 +384,110 @@ fn the_more_selective_index_wins() {
     );
 }
 
+/// A comparison on the column proves `IS NOT NULL`, so a partial index
+/// declared that way is searched.
+///
+/// **`CREATE UNIQUE INDEX ... WHERE col IS NOT NULL` is how SQLite spells
+/// "unique among the rows that have one", and this engine never used it
+/// (task-1913).** The rule for choosing a partial index was that its predicate
+/// appears unchanged as a conjunct of the `WHERE`, so `WHERE n = 1` did not
+/// match `WHERE n IS NOT NULL` and the query scanned the table. The pinned
+/// 3.53.4 answers the same statement with `SEARCH t USING COVERING INDEX t_n
+/// (n=?)`.
+///
+/// A comparison is three valued: `n = 1` is *true* only when `n` is not NULL,
+/// and the same holds for the other five comparison operators. `IS NULL` is
+/// the case that must not match, and it is asserted here rather than left to
+/// the reading: an index holding no NULL row cannot answer a query asking for
+/// exactly the NULL rows, and choosing it would lose them silently.
+///
+/// Every arm checks the rows as well as the plan, because a plan test on its
+/// own cannot tell a better route from a wrong one.
+#[test]
+fn a_comparison_proves_a_partial_index_predicate_of_is_not_null() {
+    let path = scratch("partial-not-null");
+    let database = Database::open(&path).expect("the database opens");
+    let connection = database.connect().expect("the connection opens");
+    run_all(
+        &connection,
+        &[
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, n INTEGER, s TEXT)",
+            "INSERT INTO t (id, n, s) VALUES (1, 10, 'a'), (2, 20, 'b'), (3, 30, 'c')",
+            "INSERT INTO t (id, n, s) VALUES (4, NULL, 'd'), (5, NULL, 'e')",
+            "CREATE UNIQUE INDEX t_n ON t (n) WHERE n IS NOT NULL",
+        ],
+    );
+
+    // Each of the six comparison operators proves the predicate, so each makes
+    // the index a candidate. The projection is `n`, which the index covers:
+    // whether a *non-covering* range then beats a scan is a costing question
+    // this engine answers differently from the reference for an ordinary index
+    // too, so it is not what this case is about.
+    for statement in [
+        "SELECT n FROM t WHERE n = 10",
+        "SELECT n FROM t WHERE n > 25",
+        "SELECT n FROM t WHERE n >= 30",
+        "SELECT n FROM t WHERE n < 15",
+        "SELECT n FROM t WHERE n <= 10",
+        "SELECT n FROM t WHERE n <> 10 AND n < 25",
+    ] {
+        let chosen = plan(&connection, statement);
+        assert!(
+            chosen.iter().any(|line| line.contains("INDEX t_n")),
+            "{statement} did not use the partial index: {chosen:?}"
+        );
+    }
+
+    // The lookup form, which is the one the defect was reported on: an
+    // equality reaching a column the index does not carry.
+    let looked_up = plan(&connection, "SELECT s FROM t WHERE n = 10");
+    assert!(
+        looked_up.iter().any(|line| line.contains("INDEX t_n")),
+        "{looked_up:?}"
+    );
+
+    assert_eq!(
+        run(&connection, "SELECT s FROM t WHERE n = 10"),
+        Ok(vec!["text:a".to_string()])
+    );
+    assert_eq!(
+        run(&connection, "SELECT n FROM t WHERE n > 25 ORDER BY n"),
+        Ok(vec!["int:30".to_string()])
+    );
+    assert_eq!(
+        run(&connection, "SELECT n FROM t WHERE n < 25 ORDER BY n"),
+        Ok(vec!["int:10".to_string(), "int:20".to_string()])
+    );
+
+    // **The rows the index does not hold.** `IS NULL` asks for exactly the
+    // rows the predicate excludes, so the index must not be chosen and the
+    // answer must be both of them.
+    let refused = plan(&connection, "SELECT s FROM t WHERE n IS NULL");
+    assert!(
+        !refused.iter().any(|line| line.contains("INDEX t_n")),
+        "a query for the NULL rows used an index that holds none of them: {refused:?}"
+    );
+    assert_eq!(
+        run(&connection, "SELECT s FROM t WHERE n IS NULL ORDER BY id"),
+        Ok(vec!["text:d".to_string(), "text:e".to_string()])
+    );
+
+    // `IS` is not a comparison: it is true when both sides are NULL, so it
+    // proves nothing about the operand being non-NULL.
+    let by_is = plan(&connection, "SELECT s FROM t WHERE n IS NULL AND s = 'd'");
+    assert!(
+        !by_is.iter().any(|line| line.contains("INDEX t_n")),
+        "{by_is:?}"
+    );
+
+    // A whole-table query still sees every row, including the ones the index
+    // does not hold.
+    assert_eq!(
+        run(&connection, "SELECT count(*) FROM t"),
+        Ok(vec!["int:5".to_string()])
+    );
+}
+
 /// Statistics the pinned binary gathered are read by inillucent.
 #[test]
 fn statistics_sqlite_wrote_are_read_back() {

@@ -480,3 +480,103 @@ fn the_skills_state_the_number_of_commands_and_tools_there_are() {
         wrong.join("\n")
     );
 }
+
+/// Returns some text with every run of whitespace as one space.
+///
+/// @param text - the text to collapse
+fn collapse(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<&str>>().join(" ")
+}
+
+/// Returns the source of every crate's `lib.rs`, with the crate's name.
+///
+/// A workspace member with no library is not here, which is why the counts
+/// below are out of 28 rather than out of the 29 members: `inillucent-bench`
+/// is a binary and has nowhere to put a crate attribute.
+fn crate_libraries() -> Vec<(String, String)> {
+    let root = workspace_root();
+    let mut libraries = Vec::new();
+    for group in ["crates", "drivers"] {
+        let Ok(entries) = std::fs::read_dir(root.join(group)) else {
+            continue;
+        };
+        let mut paths: Vec<PathBuf> = entries
+            .map(|entry| entry.map(|e| e.path()))
+            .flatten()
+            .collect();
+        paths.sort();
+        for path in paths {
+            let lib = path.join("src/lib.rs");
+            let Ok(source) = std::fs::read_to_string(&lib) else {
+                continue;
+            };
+            let name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            libraries.push((name, source));
+        }
+    }
+    assert!(
+        libraries.len() > 20,
+        "found {} crate libraries, which means this is looking in the wrong place",
+        libraries.len()
+    );
+    libraries
+}
+
+/// `docs/repository.md` states how many crates carry the lint attributes, and
+/// the two numbers are the ones the crates actually carry.
+///
+/// **These are the two facts that had already drifted (task-1913).** The page
+/// said 26 crates denied the four lints and 22 forbade `unsafe`; the crates
+/// said 28 and 21. `tools/doc-facts/check.mjs` measures both and reports the
+/// disagreement, and it is run by nothing - no test, no script, no packaging
+/// step - so it caught this the day somebody ran it by hand and not before.
+/// This is the same measurement as a test, which is what makes the number in
+/// the page fail a build when a new crate arrives without its attributes.
+#[test]
+fn the_repository_page_counts_the_crates_under_each_lint_correctly() {
+    let libraries = crate_libraries();
+    let forbidding = libraries
+        .iter()
+        .filter(|(_, source)| source.contains("forbid(unsafe_code)"))
+        .count();
+    let four = ["unwrap_used", "expect_used", "panic", "indexing_slicing"];
+    let denies_four = libraries
+        .iter()
+        .filter(|(_, source)| four.iter().all(|lint| source.contains(lint)))
+        .count();
+
+    let page = workspace_root().join("docs/repository.md");
+    let text = std::fs::read_to_string(&page).expect("the repository page reads");
+    // **Matched on the words rather than the typography.** The sentence wraps
+    // across two lines, and a checkout with CRLF endings holds a different
+    // string from one with LF - so a literal that carried the newline passed on
+    // one machine and failed on the next for a reason that has nothing to do
+    // with the numbers it is checking. It failed exactly that way the first
+    // time this landed beside a rebase (task-1913).
+    let text = collapse(&text);
+    let denied = format!("{denies_four} of the 29 crates deny");
+    let forbidden = format!("and {forbidding} forbid `unsafe`");
+    assert!(
+        text.contains(&denied),
+        "docs/repository.md does not say `{denied}`, and {denies_four} crates deny the four lints. \
+         The crates that do not: {:?}",
+        libraries
+            .iter()
+            .filter(|(_, source)| !four.iter().all(|lint| source.contains(lint)))
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<&str>>()
+    );
+    assert!(
+        text.contains(&forbidden),
+        "docs/repository.md does not say `and {forbidding} forbid `unsafe``, and \
+         {forbidding} crates forbid it. The crates that do not: {:?}",
+        libraries
+            .iter()
+            .filter(|(_, source)| !source.contains("forbid(unsafe_code)"))
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<&str>>()
+    );
+}

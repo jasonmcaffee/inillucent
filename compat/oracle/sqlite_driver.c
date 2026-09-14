@@ -287,6 +287,15 @@ static void do_query(const char *sql){
     printf(",\"ok\":false,\"code\":%d,\"extended\":%d,\"message\":", code & 0xff, code);
     put_json_string(message);
     sqlite3_finalize(statement);
+    /* The reply carries the connection's state whether the query worked or
+    ** not (task-1913). This path did not, and the reader defaults a missing
+    ** field to zero, so a query that failed part way through reported
+    ** changes 0, total_changes 0, last_insert_rowid 0 and autocommit false -
+    ** four numbers nobody measured, compared against the engine's real ones
+    ** as though they had been. `compare_counters` grades a failed statement
+    ** on exactly those, which is what made it look as if this engine had
+    ** kept a counter SQLite reset. */
+    put_state();
     fputs("}\n", stdout);
     fflush(stdout);
     return;

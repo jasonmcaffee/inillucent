@@ -19,8 +19,15 @@
  *   node tools/doc-facts/check.mjs --self-test      # shows that the test-run judgement can fail
  *
  * `--run-tests` fails when the runner is absent, when its output cannot be read, and when it reports
- * a failing or undetermined test. The one nonzero exit it accepts is `--strict` reporting that
- * `live_postgres` and `live_mysql` had no server, which `docs/repository.md` documents.
+ * a failing or undetermined test. The nonzero exits it accepts are `--strict` reporting a
+ * prerequisite this machine does not have: no PostgreSQL or MySQL server, no
+ * `INILLUCENT_NETWORK_TESTS`, and no ONNX weights. `docs/repository.md` documents all four.
+ *
+ * `onnx` joined that list in task-1913. Before it, `inillucent-core`'s twenty-seven embedding tests
+ * were behind a cargo feature the build did not turn on, so they were in no binary and nothing
+ * reported them; now they are built and run, and twenty-nine cases across two suites say
+ * `no ONNX weights found; skipping` on a machine where `inillucent setup-embeddings all` has not
+ * been run. That is the absence being reported rather than a new one appearing.
  *
  * It exits 1 when anything disagrees.
  */
@@ -391,7 +398,7 @@ function readmeCallsTheRepositoryPrivate() {
  * `docs/repository.md` names the same three, and a fourth name here without a line there is the
  * drift this list exists to stop.
  */
-const OPTIONAL_PREREQUISITES = ['postgres', 'mysql', 'INILLUCENT_NETWORK_TESTS'];
+const OPTIONAL_PREREQUISITES = ['postgres', 'mysql', 'INILLUCENT_NETWORK_TESTS', 'onnx'];
 
 /**
  * Runs the test runner, for the test and target counts.

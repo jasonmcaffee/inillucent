@@ -435,14 +435,44 @@ impl Connection<'_> {
     /// rather than a scan of the text, so it cannot be talked past by
     /// whitespace or a comment.
     ///
+    /// **`limit` is a count and not a sentinel: `0` hands back no rows.** It
+    /// is a real count because [`Connection::execute`] passes `0` to run a
+    /// statement for its effect, so there is no spare value that could mean
+    /// "all of them" - and every other embedded database treats `0` as no
+    /// limit, so `0` is what a caller reaches for. What comes back is an empty
+    /// `rows` beside a [`Rows::total`] reporting the true count and a status
+    /// saying success, which reads as a fault in the caller's own mapping
+    /// code. It cost task-1947 five of its eight storage tests at once, and
+    /// the symptom was "the board is empty" rather than "the query is wrong".
+    /// Use [`Connection::query_all`] when you want every row.
+    ///
     /// @param sql - the statement
     /// @param params - the values bound to `?1`, `?2`, ...
-    /// @param limit - how many rows to hand back
+    /// @param limit - how many rows to hand back; `0` hands back none
     pub fn query(&self, sql: &str, params: &[Value], limit: usize) -> Result<Rows> {
         if self.database.options.read_only {
             self.refuse_if_it_writes(sql)?;
         }
         self.run(sql, params, limit)
+    }
+
+    /// Runs one statement and returns every row it produced.
+    ///
+    /// **The call almost every application wants, so that no caller has to
+    /// know what number means "all of them" (task-1947).** The engine
+    /// materialises the answer either way - which is what makes
+    /// [`Rows::total`] exact - so handing all of it back costs the rows
+    /// themselves and nothing else. `Rows::more` is always false here, because
+    /// nothing was left behind.
+    ///
+    /// The consumer that found this wrote its own `ALL_ROWS: usize =
+    /// usize::MAX` constant with a comment explaining why the constant had to
+    /// exist. That constant is this function.
+    ///
+    /// @param sql - the statement
+    /// @param params - the values bound to `?1`, `?2`, ...
+    pub fn query_all(&self, sql: &str, params: &[Value]) -> Result<Rows> {
+        self.query(sql, params, usize::MAX)
     }
 
     /// Runs one statement for its effect and returns how many rows it changed.

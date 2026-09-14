@@ -60,6 +60,16 @@ const SCHEMA: &[&str] = &[
     "INSERT INTO edge VALUES (-9223372036854775808, 'floor')",
     "INSERT INTO edge VALUES (9223372036854775807, 'ceiling')",
     "INSERT INTO edge VALUES (1, 'one')",
+    // One-column tables, for the `IN table-name` form: `IN` over a table is
+    // `IN` over its single column, and a table of more than one column is
+    // refused (task-1913).
+    "CREATE TABLE teams (team TEXT)",
+    "INSERT INTO teams VALUES ('blue')",
+    "INSERT INTO teams VALUES ('red')",
+    "CREATE TABLE scores (score REAL)",
+    "INSERT INTO scores VALUES (10.5)",
+    "INSERT INTO scores VALUES (99.25)",
+    "INSERT INTO scores VALUES (NULL)",
     "CREATE VIEW blue AS SELECT id, name, score FROM a WHERE team = 'blue'",
     "CREATE VIEW ranked (who, place) AS SELECT a.name, b.rank FROM a JOIN b ON a.team = b.team",
 ];
@@ -251,6 +261,17 @@ fn joins_match_the_oracle() {
         "SELECT a.name, b.region FROM a RIGHT JOIN b ON a.team = b.team WHERE a.name IS NULL ORDER BY b.id",
         "SELECT a.name, b.region FROM a FULL JOIN b ON a.team = b.team AND b.rank > 1 ORDER BY a.id, b.id",
         "SELECT a.name, b.region, c.v FROM a RIGHT JOIN b ON a.team = b.team JOIN c ON c.k = b.rank ORDER BY b.id, c.v",
+        // **A cross join whose inner side is read through a covering index
+        // (task-1913).** `a_team` covers `SELECT count(*) FROM c, a`, so the
+        // planner reads `a` as `SCAN a USING COVERING INDEX a_team` - an index
+        // seek with no equality and no bound, which is a full scan of the
+        // index and therefore exactly the cross product an empty probe key
+        // means. The physical pass refused it together with the *bounded*
+        // no-equality case, so a plain `FROM c, a` failed outright.
+        "SELECT count(*) FROM c, a",
+        "SELECT count(*) FROM a, c",
+        "SELECT c.v, a.name FROM c, a ORDER BY c.v, a.name",
+        "SELECT count(*) FROM c, edge",
     ]);
 }
 
@@ -326,6 +347,22 @@ fn ctes_match_the_oracle() {
         "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 5) SELECT i FROM n",
         "WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i * 2 FROM n WHERE i < 40) SELECT i FROM n",
         "WITH RECURSIVE n(i) AS (SELECT 1 UNION SELECT 1 FROM n) SELECT count(*) FROM n",
+        // **`RECURSIVE` is optional in SQLite, and these prove it here
+        // (task-1913).** A CTE whose FROM names itself is the recursion
+        // whether or not the keyword is written. Reading the keyword as the
+        // only evidence made the binder bind the same definition inside
+        // itself, and the process ran out of stack - so before the fix this
+        // file did not fail, it died.
+        "WITH n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 5) SELECT i FROM n",
+        "WITH n(i) AS (VALUES(1) UNION ALL SELECT i * 2 FROM n WHERE i < 40) SELECT i FROM n",
+        "WITH n AS (SELECT 1 AS i UNION ALL SELECT i + 1 FROM n WHERE i < 3) SELECT sum(i) FROM n",
+        // An inner `WITH` binding the same name shadows the outer one, so this
+        // is an ordinary query and not a recursion - which is why the test for
+        // a self-reference stops at a nested rebinding of the name.
+        "WITH n AS (WITH n AS (SELECT 7 AS i) SELECT * FROM n) SELECT i FROM n",
+        // A CTE may name one declared after it, which is a forward reference
+        // rather than a cycle.
+        "WITH x AS (SELECT * FROM y), y AS (SELECT 1 AS i) SELECT i FROM x",
     ]);
 }
 
@@ -503,6 +540,37 @@ fn windows_match_the_oracle() {
             "SELECT team, count(*), row_number() OVER (ORDER BY team) FROM a GROUP BY team ORDER BY team",
             "SELECT name, sum(id) OVER (ORDER BY id) FROM a ORDER BY id LIMIT 2 OFFSET 1",
             "SELECT DISTINCT count(*) OVER (PARTITION BY team) FROM a ORDER BY 1",
+            // **A `RANGE` offset over a column that holds a NULL (task-1913).**
+            // `a.score` is NULL for one row. A NULL ordering value has no
+            // distance to anything, so SQLite gives such a row the frame of
+            // its own peer group - every NULL row and nothing else - and never
+            // lets it inside the frame of a row that has a value. This engine
+            // read a NULL as `0.0`, which put the NULL row one unit from zero:
+            // `a` holds a score of `0.0` and one of `-2.0`, so the wrong rows
+            // were drawn into each other's frames in both directions. The
+            // `UNBOUNDED` arms are here too, because those bounds *do* reach a
+            // NULL row and the fix must not stop them.
+            "SELECT name, sum(score) OVER (ORDER BY score RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM a ORDER BY id",
+            "SELECT name, count(*) OVER (ORDER BY score RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM a ORDER BY id",
+            "SELECT name, sum(score) OVER (ORDER BY score RANGE BETWEEN UNBOUNDED PRECEDING AND 1 FOLLOWING) FROM a ORDER BY id",
+            "SELECT name, sum(score) OVER (ORDER BY score RANGE BETWEEN 1 PRECEDING AND UNBOUNDED FOLLOWING) FROM a ORDER BY id",
+            "SELECT name, sum(score) OVER (ORDER BY score DESC RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM a ORDER BY id",
+            "SELECT name, sum(id) OVER (ORDER BY rank RANGE BETWEEN 2 PRECEDING AND 2 FOLLOWING) FROM b ORDER BY id",
+            // **A frame written entirely off one end of the partition
+            // (task-1913).** On the last row `1 FOLLOWING AND 2 FOLLOWING`
+            // names rows that are not there, and the answer is NULL rather
+            // than the row itself. Clamping both ends into the partition
+            // instead left a frame of one row. Both edges and all three units
+            // are here: `ROWS` was wrong at both, `GROUPS` and `RANGE` at the
+            // start only.
+            "SELECT name, sum(id) OVER (ORDER BY id ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING) FROM a ORDER BY id",
+            "SELECT name, sum(id) OVER (ORDER BY id ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING) FROM a ORDER BY id",
+            "SELECT name, sum(id) OVER (ORDER BY id GROUPS BETWEEN 1 FOLLOWING AND 2 FOLLOWING) FROM a ORDER BY id",
+            "SELECT name, sum(id) OVER (ORDER BY id GROUPS BETWEEN 2 PRECEDING AND 1 PRECEDING) FROM a ORDER BY id",
+            "SELECT name, sum(id) OVER (ORDER BY id RANGE BETWEEN 1 FOLLOWING AND 2 FOLLOWING) FROM a ORDER BY id",
+            "SELECT name, sum(id) OVER (ORDER BY id RANGE BETWEEN 2 PRECEDING AND 1 PRECEDING) FROM a ORDER BY id",
+            "SELECT name, count(*) OVER (ORDER BY id ROWS BETWEEN 9 FOLLOWING AND 9 FOLLOWING) FROM a ORDER BY id",
+            "SELECT name, count(*) OVER (PARTITION BY team ORDER BY id ROWS BETWEEN 1 FOLLOWING AND 2 FOLLOWING) FROM a ORDER BY id",
         ],
     );
 }
@@ -772,6 +840,119 @@ fn refusals_match_the_oracle() {
             // the one row here that both engines must *not* refuse.
             "SELECT count(*) FROM a RIGHT JOIN b ON a.team = b.team",
             "SELECT count(*) FROM a FULL JOIN b ON a.team = b.team",
+            // **A CTE that names itself where the recursion cannot read it
+            // (task-1913).** SQLite answers `circular reference`. This engine
+            // bound the same definition again and again until the process ran
+            // out of stack, so these three did not fail the suite, they ended
+            // it. The first has no compound arm to separate a seed from a
+            // step; the second names itself from a scalar subquery, which the
+            // recursion has no way to feed; the third is a cycle through two
+            // names rather than one.
+            "WITH q AS (SELECT * FROM q) SELECT * FROM q",
+            "WITH q AS (SELECT 1 AS v WHERE (SELECT count(*) FROM q) = 0) SELECT * FROM q",
+            "WITH x AS (SELECT * FROM y), y AS (SELECT * FROM x) SELECT * FROM x",
+            // **`DISTINCT` takes exactly one argument (task-1913).** There is
+            // nothing for a second one to be distinct by, so SQLite refuses
+            // the call rather than choosing which duplicate's separator wins.
+            // This answered it.
+            "SELECT group_concat(DISTINCT name, '-') FROM a",
+            "SELECT group_concat(DISTINCT name, id) FROM a",
+        ],
+    );
+}
+
+/// `group_concat` with a separator that is a value of each row.
+///
+/// **A form the engine refused outright (task-1913).** The separator had to be
+/// a literal; anything else answered `group_concat with a computed separator`,
+/// which is a documented SQLite form this engine did not have. The rule the
+/// reference follows, measured rather than assumed: the separator written
+/// before a row is *that row's own*, so the first row contributes none; a NULL
+/// separator contributes nothing, which is why `group_concat(s, NULL)` is the
+/// values run together rather than NULL; and a row whose value is NULL is
+/// skipped entirely, separator and all.
+///
+/// The ordered arms matter on their own: the rows are sorted first and the
+/// rule then applies to the sorted order, so the separator between the first
+/// two of them comes from whichever row the sort put second.
+#[test]
+fn a_computed_group_concat_separator_matches_the_oracle() {
+    grade(
+        "group-concat-separator",
+        &[
+            "SELECT group_concat(name, id) FROM a",
+            "SELECT group_concat(name, NULL) FROM a",
+            "SELECT group_concat(name, 3) FROM a",
+            "SELECT group_concat(name, 1.5) FROM a",
+            "SELECT group_concat(name, team) FROM a",
+            // Ordered, because `a.team` is indexed and the two engines read it
+            // through different plans: `group_concat` over an unordered scan
+            // has no defined order, and grading one would grade the plan.
+            "SELECT group_concat(team, id ORDER BY id) FROM a",
+            "SELECT group_concat(DISTINCT team ORDER BY team) FROM a",
+            "SELECT group_concat(name, id ORDER BY name DESC) FROM a",
+            "SELECT group_concat(name, id ORDER BY id DESC) FROM a",
+            "SELECT group_concat(name, id) FROM a WHERE 0",
+            "SELECT team, group_concat(name, id) FROM a GROUP BY team ORDER BY team",
+            "SELECT group_concat(name, id) FILTER (WHERE id > 2) FROM a",
+            // The literal form, beside it, so a change that routed everything
+            // through the new path is caught by the old answers.
+            "SELECT group_concat(name) FROM a",
+            "SELECT group_concat(name, '-') FROM a",
+        ],
+    );
+}
+
+/// A call's own `ORDER BY` does not turn its `DISTINCT` off.
+///
+/// **Adding an `ORDER BY` to an aggregate used to drop its `DISTINCT`
+/// entirely (task-1913).** The de-duplication lived on the path that folds one
+/// value per row, and a call with an `ORDER BY` keeps whole rows instead
+/// because they cannot be folded until they are in order - so it went straight
+/// past. `group_concat(DISTINCT t ORDER BY t)` answered every duplicate. The
+/// three forms here are the three that keep rows: an ordered `group_concat`,
+/// an ordered JSON array, and an unordered one, which was always right and is
+/// here so that a fix which de-duplicated the wrong thing is caught.
+#[test]
+fn a_distinct_aggregate_with_its_own_order_by_matches_the_oracle() {
+    grade(
+        "distinct-ordered",
+        &[
+            "SELECT group_concat(DISTINCT team ORDER BY team) FROM a",
+            "SELECT json_group_array(DISTINCT team ORDER BY team) FROM a",
+            "SELECT count(DISTINCT team) FROM a",
+            "SELECT group_concat(DISTINCT k ORDER BY k) FROM c",
+            "SELECT json_group_array(DISTINCT k ORDER BY k) FROM c",
+            "SELECT group_concat(k ORDER BY k) FROM c",
+        ],
+    );
+}
+
+/// `IN` over a bare table name, which is SQLite's own form.
+///
+/// **A form the engine simply did not answer (task-1913).** The binder refused
+/// it as `IN over a table name`; it is documented SQL in the reference, it is
+/// not named as a gap in `docs/sql.md` or in the 416-case probe, and nothing
+/// here graded it. It now reads as `x IN (SELECT * FROM t)`, which is what the
+/// reference means by it - including the refusal when the table has more than
+/// one column, and the unknown-rather-than-false answer when the table holds a
+/// NULL.
+#[test]
+fn in_over_a_table_name_matches_the_oracle() {
+    grade(
+        "in-table",
+        &[
+            "SELECT name FROM a WHERE team IN teams ORDER BY id",
+            "SELECT name FROM a WHERE team NOT IN teams ORDER BY id",
+            "SELECT 'blue' IN teams, 'none' IN teams",
+            "SELECT name FROM a WHERE score IN scores ORDER BY id",
+            "SELECT 1 IN scores, 99.25 IN scores",
+            // A table of more than one column is refused, the way a subquery
+            // of more than one column is.
+            "SELECT 1 IN c",
+            // A table that does not exist is refused rather than read as a
+            // value.
+            "SELECT 1 IN nosuchtable",
         ],
     );
 }

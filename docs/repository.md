@@ -95,20 +95,28 @@ mistaken for a green run.
 If you do use `cargo test --workspace`, pass `--no-fail-fast`. Without it the run stops at the first
 failing binary, and has reported about a quarter of the suite.
 
-**No test fails today.** `inillucent-testrun --strict` reports 169 targets, 2,789 tests, 0 failed
+**No test fails today.** `inillucent-testrun --strict` reports 170 targets, 2,819 tests, 0 failed
 and 0 undetermined. The counts are exact. The wall clock was 840 seconds on a 24 processor desktop
 that was carrying other work while it ran, so read it as one run on one machine rather than as a
-figure to plan against. It still prints `not ok`, because three suites
+figure to plan against. It still prints `not ok`, because five suites
 evidenced nothing: `inillucent-remote::live_postgres` and `inillucent-remote::live_mysql` have no
-server configured on this machine, and `inillucent-remote::lib` runs only when
-`INILLUCENT_NETWORK_TESTS` is set, because it opens sockets. That is the condition `--strict` exists
-to report, and `tools/doc-facts/check.mjs` accepts those three and no others. This page used to say seventeen tests failed; task-1869 had
+server configured on this machine, `inillucent-remote::lib` runs only when
+`INILLUCENT_NETWORK_TESTS` is set, because it opens sockets, and `inillucent-core::lib` and
+`inillucent-bench` hold twenty-nine cases that need the embedding weights, which
+`inillucent setup-embeddings all` installs. That is the condition `--strict` exists
+to report, and `tools/doc-facts/check.mjs` accepts those four prerequisites and no others.
+
+The last two joined the list in task-1913 and are not a new absence. Those twenty-nine cases sit
+behind the `onnx` cargo feature, which the runner did not turn on, so they were in no binary at all
+and nothing reported them - the source read as coverage while no run had ever started them.
+`tests/selection.toml` now names the features a target is built with, so they are built, they run,
+and the ones that need the weights say so. This page used to say seventeen tests failed; task-1869 had
 already removed the cause and nobody re-ran it, which is recorded in
 [the roadmap](roadmap.md#what-task-1911-closed).
 
 ## What the tests cover
 
-2,789 tests across 169 test targets in the workspace, in these classes:
+2,819 tests across 170 test targets in the workspace, in these classes:
 
 - **A differential harness** that runs the same SQL through the pinned SQLite 3.53.4 and compares
   transcripts. 208 of those cases are `semantics.rs`, and 416 are the wider feature probe.
@@ -133,7 +141,8 @@ already removed the cause and nobody re-ran it, which is recorded in
   modules, and on the tree's key codec.
 - **28 of the 29 crates deny `unwrap`, `expect`, `panic` and slice indexing**, and 21 forbid
   `unsafe`, on every path that reads SQL text, database pages, log frames, network bytes or file
-  system results.
+  system results. The twenty-ninth is `inillucent-bench`, which has no library to put the attributes
+  in.
 
 ## The contracts a test enforces
 

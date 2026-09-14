@@ -230,15 +230,43 @@ impl InsertPlan {
             }
         }
         // The generated columns, now that the rest of the row exists.
+        self.apply_generated(space, &mut row, &[])?;
+        Ok(row)
+    }
+
+    /// Recomputes every `STORED` generated column against a row.
+    ///
+    /// **A row that is rewritten rewrites them (task-1913).** The insert path
+    /// always did this; the `DO UPDATE` arm did not, so
+    /// `INSERT ... ON CONFLICT DO UPDATE SET a = excluded.a` left a column
+    /// declared `GENERATED ALWAYS AS (a + 100) STORED` holding the number it
+    /// was given when the row was first inserted. It is the same defect the
+    /// plain `UPDATE` had, in the other statement that rewrites a row, and it
+    /// is worse in the same way: the stale value is written to the disk, so
+    /// every later read of that file reads it, and an index over the column
+    /// indexes it.
+    ///
+    /// A `VIRTUAL` column has no slot and is skipped, because it is computed
+    /// when it is read rather than stored.
+    ///
+    /// @param space - the row space the expressions read
+    /// @param row - the row to fill in, which the expressions also read
+    /// @param excluded - the `excluded` image, empty outside a `DO UPDATE`
+    pub(crate) fn apply_generated(
+        &self,
+        space: &RowSpace,
+        row: &mut [OwnedDatum],
+        excluded: &[OwnedDatum],
+    ) -> DbResult<()> {
         for planned in &self.columns {
             let (Some(slot), PlannedValue::Generated(eval)) = (planned.slot, &planned.from) else {
                 continue;
             };
-            let value = space.evaluate(eval.as_ref(), &[row.as_slice()])?;
+            let value = space.evaluate(eval.as_ref(), &[&*row, excluded])?;
             if let Some(cell) = row.get_mut(slot) {
                 *cell = value;
             }
         }
-        Ok(row)
+        Ok(())
     }
 }
