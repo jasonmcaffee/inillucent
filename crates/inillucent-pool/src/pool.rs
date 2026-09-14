@@ -87,6 +87,31 @@ pub enum FrameState {
     Cooling,
 }
 
+/// Why a page is being written to the file.
+///
+/// **No-steal is a rule about the checkpointer, and only the checkpointer can
+/// obey it by doing nothing.** A checkpoint that leaves an open transaction's
+/// page out of the file has lost nothing: the frame is still resident and
+/// still dirty, and the checkpoint after that transaction ends writes it. An
+/// eviction has no such option, because the frame it would have written from
+/// is about to hold a different page - so the same skip there does not hold
+/// the page back, it throws it away.
+///
+/// That is what page 597 of `new_engine_log_lead` was. A `CREATE INDEX`
+/// through a 64-frame pool evicted 129 dirty pages during the build, every one
+/// of them skipped by no-steal and then freed, and the file was left with a
+/// hole of never-written zeros where the index's own pages should have been -
+/// `page 597 checksum 00000000 is not the computed 8d1053d3`, which is the
+/// checksum of a page of zeros. The build reported success; the `SELECT` after
+/// it did not.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Writing {
+    /// A checkpoint's flush, which may leave a page for the next checkpoint.
+    Checkpoint,
+    /// An eviction, which either writes the page or keeps the frame.
+    Eviction,
+}
+
 /// What the pool has been asked to do, for the report.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PoolStats {
@@ -434,7 +459,7 @@ pub struct Pool {
     /// `None` means there is nothing to ask, which is a read-only open and a
     /// bulk build with no log.
     #[allow(clippy::type_complexity)]
-    advance_log: RefCell<Option<Box<dyn Fn() -> DbResult<u64>>>>,
+    advance_log: RefCell<Option<std::rc::Rc<dyn Fn() -> DbResult<u64>>>>,
     /// The LSN at or above which a page's change belongs to a transaction that
     /// has not committed.
     ///
@@ -450,6 +475,20 @@ pub struct Pool {
     /// reaching the pool through the file, and reaching the file was the one
     /// thing that could not be done at that moment.
     uncommitted_lsn: Arc<AtomicU64>,
+    /// Whether an eviction has written a page an open transaction had changed
+    /// since the current rollback journal was started.
+    ///
+    /// **What makes such a write undoable is the journal, so the journal has to
+    /// outlive the transaction that needed it.** A checkpoint disposes of the
+    /// journal once its own meta record is durable, which is right when every
+    /// page in the file belongs to a committed transaction. It is wrong while a
+    /// writer is still open and an eviction has already put one of that
+    /// writer's pages in the file: deleting the pre-images there would leave a
+    /// crash with an uncommitted page it could neither replay away - recovery
+    /// is redo-only and discards a loser rather than undoing it - nor put back.
+    /// So [`Pool::checkpoint`] keeps the journal while this is set and the
+    /// writer is still open, and [`Pool::finish_journal`] clears it.
+    stolen: Cell<bool>,
 }
 
 /// The pool's counters, one cell each.
@@ -557,6 +596,7 @@ impl Pool {
             advance_log: RefCell::new(None),
             // Nothing is uncommitted until a transaction says so.
             uncommitted_lsn: Arc::new(AtomicU64::new(u64::MAX)),
+            stolen: Cell::new(false),
         })
     }
 
@@ -608,8 +648,13 @@ impl Pool {
     /// gets a chance to satisfy it.
     ///
     /// @param advance - makes the log durable and returns its new durable point
+    ///
+    /// An `Rc` rather than a `Box` so that [`Pool::refuse_if_ahead_of_the_log`]
+    /// can take a handle to it and drop its borrow before calling it. A `Box`
+    /// would have to be moved out of the cell and put back, which loses the
+    /// closure on the error path the call is most likely to take.
     #[allow(clippy::type_complexity)]
-    pub fn on_log_behind(&self, advance: Box<dyn Fn() -> DbResult<u64>>) {
+    pub fn on_log_behind(&self, advance: std::rc::Rc<dyn Fn() -> DbResult<u64>>) {
         *self.advance_log.borrow_mut() = Some(advance);
     }
 
@@ -1048,9 +1093,57 @@ impl Pool {
         if let Some(frame) = self.state.borrow_mut().free.pop() {
             return Ok(frame);
         }
+        // Nothing is evictable, and the two reasons for that are different
+        // enough to the caller that they are told apart. A pool whose frames
+        // are all pinned is a caller holding too many guards at once. A pool
+        // whose frames all hold pages an open transaction has changed, with no
+        // rollback journal to undo an eviction from, is the documented limit of
+        // a no-steal policy: such a page may not reach the file before its
+        // commit, and it may not be dropped either, so the transaction cannot
+        // dirty more pages than the pool holds. Selecting a journal mode that
+        // keeps pre-images, or a larger `PRAGMA cache_size`, is what lifts it.
+        let held = self.frames_no_steal_is_holding();
+        if held > 0 {
+            return Err(no_mem(format!(
+                "the open transaction has changed {held} of the buffer pool's {} pages, and no \
+                 rollback journal is in force to undo an eviction from, so none of them may \
+                 be written before it commits: a transaction cannot dirty more pages than \
+                 the pool holds",
+                self.buffers.len()
+            )));
+        }
         Err(no_mem(
             "every frame in the buffer pool is pinned; nothing can be evicted",
         ))
+    }
+
+    /// Returns how many resident frames hold a page no-steal will not let go.
+    ///
+    /// Only asked when the pool has nothing to give, so that the refusal names
+    /// the reason it is refusing rather than the first reason anybody wrote a
+    /// message for.
+    fn frames_no_steal_is_holding(&self) -> usize {
+        if self.can_undo_a_steal() {
+            return 0;
+        }
+        let uncommitted = self.uncommitted_lsn.load(Ordering::SeqCst);
+        if uncommitted == u64::MAX {
+            return 0;
+        }
+        let dirty: Vec<u32> = {
+            let state = self.state.borrow();
+            state
+                .frames
+                .iter()
+                .enumerate()
+                .filter(|(_, meta)| meta.dirty && meta.state != FrameState::Free)
+                .map(|(index, _)| index as u32)
+                .collect()
+        };
+        dirty
+            .into_iter()
+            .filter(|frame| self.lsn_of(*frame).is_ok_and(|lsn| lsn >= uncommitted))
+            .count()
     }
 
     /// Makes sure a claimed frame has a page-sized buffer.
@@ -1274,8 +1367,21 @@ impl Pool {
                 }
                 continue;
             }
-            if dirty {
-                self.writeback(frame, page)?;
+            if dirty && !self.writeback(frame, page, Writing::Eviction)? {
+                // No-steal held the page back and there is no durable rollback
+                // journal to undo a steal with, so this frame cannot be freed:
+                // the frame holds the only copy of the page, and emptying it
+                // would lose the change rather than defer it. Back to hot, and
+                // on to the next candidate. A pool with nothing else to give
+                // then fails the statement in `take_frame`, which is the
+                // documented limit of a no-steal policy - a transaction can
+                // dirty at most the pool - and is an error rather than a file
+                // with a hole in it.
+                let mut state = self.state.borrow_mut();
+                if let Some(meta) = state.frames.get_mut(frame as usize) {
+                    meta.state = FrameState::Hot;
+                }
+                continue;
             }
             // TDD invariant 5: a frame is never reused while a swizzled swip
             // still names it. The only thing that can name it is the parent
@@ -1312,9 +1418,14 @@ impl Pool {
     /// swizzled swips; unswizzling a page because it was written would throw
     /// away the descent work for nothing.
     ///
+    /// Returns whether the page reached the file. `false` is no-steal holding
+    /// it back, which is a decision only a [`Writing::Checkpoint`] may act on -
+    /// see [`Writing`] for why an eviction that acted on it lost the page.
+    ///
     /// @param frame - the frame to write
     /// @param page - the page it holds
-    fn writeback(&self, frame: u32, page: PageId) -> DbResult<()> {
+    /// @param why - a checkpoint's flush, or an eviction
+    fn writeback(&self, frame: u32, page: PageId, why: Writing) -> DbResult<bool> {
         // The write-ahead rule, and the only place in the engine it is
         // enforced. Phase 2 said this seam was here and that Phase 3 would add
         // "a condition rather than a caller"; this is that condition. Every
@@ -1325,9 +1436,30 @@ impl Pool {
         // No-steal: a page an open transaction has changed does not go to the
         // file. It stays dirty, so a later checkpoint - after the transaction
         // ends either way - writes it then.
+        //
+        // **That sentence is true of a checkpoint and false of an eviction**,
+        // which is what `why` is here to tell apart. An evicted frame does not
+        // stay dirty, because it does not stay: the page is dropped and the
+        // frame is handed to the next caller. So an eviction writes the page
+        // instead, and what makes that safe is the rollback journal - the
+        // pre-image is saved and synced below, before the new image goes to the
+        // file, so a crash before the transaction commits puts the page back.
+        // `crate::journal`'s own header already names this case: "a transaction
+        // whose dirty pages outgrow the buffer pool evicts, which creates the
+        // journal".
+        //
+        // **A journal whose pre-images do not reach the disk cannot undo the
+        // write**, so `memory` and `off` do not get to steal; there the frame
+        // is simply not evictable and `evict_one` moves on. Under those two
+        // modes the engine has already been told it may lose a half-written
+        // checkpoint, so refusing here is the stricter of the two answers, not
+        // a new hole.
         if self.holds_uncommitted(frame, page)? {
-            Counters::add(&self.counters.held_back, 1);
-            return Ok(());
+            if why == Writing::Checkpoint || !self.can_undo_a_steal() {
+                Counters::add(&self.counters.held_back, 1);
+                return Ok(false);
+            }
+            self.stolen.set(true);
         }
         let mut image = {
             let bytes = self
@@ -1377,7 +1509,21 @@ impl Pool {
         drop(state);
         Counters::add(&self.counters.writes, 1);
         Counters::add(&self.counters.translated, translated as u64);
-        Ok(())
+        Ok(true)
+    }
+
+    /// Reports whether a page written before its transaction committed could be
+    /// put back after a crash.
+    ///
+    /// Which is to say: whether a rollback journal whose pre-images reach the
+    /// disk is in force. `wal` takes a `delete` journal rather than none, so
+    /// this is true of every mode the engine ships with except `memory` and
+    /// `off` - see `journal_for` in `crates/inillucent-engine/src/lib.rs`.
+    fn can_undo_a_steal(&self) -> bool {
+        self.journal
+            .borrow()
+            .as_ref()
+            .is_some_and(|journal| journal.mode().is_durable())
     }
 
     /// Refuses a writeback the log has not caught up with.
@@ -1491,23 +1637,19 @@ impl Pool {
         // candidate it has carries an LSN the log has not reached, so refusing
         // outright fails a statement that has done nothing wrong.
         //
-        // The borrow is taken and released around the call so that an
-        // `advance` which reached back into the pool could not find this
-        // already borrowed.
-        let asked = self.advance_log.borrow().is_some();
-        if !asked {
+        // The handle is cloned out and the borrow dropped before the call,
+        // so an `advance` that reaches back into the pool - to register a
+        // different one, or to write a page of its own - does not find this
+        // cell already borrowed. The comment here used to say that while the
+        // borrow was held straight through the call (task-1932, M9).
+        let advance = self.advance_log.borrow().as_ref().map(std::rc::Rc::clone);
+        let Some(advance) = advance else {
             return Err(misuse(format!(
                 "page {} carries lsn {lsn} and the log is durable to {durable}: writing it would put the data file ahead of the log",
                 page.0
             )));
-        }
-        let reached = {
-            let held = self.advance_log.borrow();
-            match held.as_ref() {
-                Some(advance) => advance()?,
-                None => durable,
-            }
         };
+        let reached = advance()?;
         self.durable_lsn.set(reached);
         if lsn <= reached {
             return Ok(());
@@ -1816,7 +1958,7 @@ impl Pool {
             self.seal_journal()?;
         }
         for (page, frame) in &dirty {
-            self.writeback(*frame, *page)?;
+            self.writeback(*frame, *page, Writing::Checkpoint)?;
         }
         Ok(dirty.len())
     }
@@ -1892,6 +2034,18 @@ impl Pool {
         // **And disposed of after the meta record is durable**, which is the
         // moment the commit exists. A journal removed a line earlier would
         // leave a crash with a file it could neither trust nor repair.
+        //
+        // **Unless an eviction has already put an open transaction's page in
+        // the file**, in which case the pre-images in this journal are the only
+        // way back from that page and the journal outlives the checkpoint. The
+        // journal restores the meta record too, so keeping it does not leave a
+        // half-undone file: a crash puts the data pages, the meta page and its
+        // shadow all back to what they were before this checkpoint, and the log
+        // replays forward from the recovery point that older meta record names.
+        // The next checkpoint with no writer open disposes of it.
+        if self.stolen.get() && self.uncommitted_lsn.load(Ordering::SeqCst) != u64::MAX {
+            return Ok(());
+        }
         self.finish_journal()?;
         Ok(())
     }
@@ -1965,11 +2119,19 @@ impl Pool {
     }
 
     /// Disposes of the journal once the commit is durable.
+    ///
+    /// Clears the record of what evictions have stolen along with it: the
+    /// pre-images are gone, so the next steal is the first one this journal
+    /// has to outlive.
     pub fn finish_journal(&self) -> DbResult<()> {
-        match self.journal.borrow_mut().as_mut() {
+        let outcome = match self.journal.borrow_mut().as_mut() {
             Some(journal) => journal.finish(),
             None => Ok(()),
+        };
+        if outcome.is_ok() {
+            self.stolen.set(false);
         }
+        outcome
     }
 
     /// Raises the lock on the database file.
@@ -2282,6 +2444,144 @@ mod tests {
         assert!(pool.stats().writes > 0, "nothing was written back");
         let guard = pool.fetch(PageId(5)).unwrap();
         assert_eq!(page::read_u64(&guard, 40).unwrap(), 0xABCD);
+    }
+
+    /// Fills a memory file with `pages` zeroed, checksummed pages.
+    ///
+    /// Split out of [`pool_over`] so a test that needs the VFS afterwards - to
+    /// put a rollback journal beside the database - can keep it.
+    ///
+    /// @param vfs - where the file lives
+    /// @param path - the database's name
+    /// @param page_size - how big a page is
+    /// @param frames - how many frames the pool holds
+    /// @param pages - how many pages to write
+    fn pool_beside(
+        vfs: &Arc<MemoryVfs>,
+        path: &DbPath,
+        page_size: usize,
+        frames: usize,
+        pages: u64,
+    ) -> Pool {
+        let file = vfs.open(path, OpenOptions::main_db()).unwrap();
+        for page in 0..pages {
+            let mut image = vec![0u8; page_size];
+            page::write_common(&mut image, PageKind::Leaf, 0, 1).unwrap();
+            page::write_u64(&mut image, 32, page).unwrap();
+            page::checksum_page(&mut image).unwrap();
+            file.write_all_at(page * page_size as u64, &image).unwrap();
+        }
+        Pool::new(file, page_size, frames, pages).unwrap()
+    }
+
+    /// Stamps a page with an LSN and a marker, and opens a transaction under it.
+    ///
+    /// The stamp is what `holds_uncommitted` reads, so a page stamped above the
+    /// watermark is one no-steal holds back.
+    ///
+    /// @param pool - the pool
+    /// @param page - the page to dirty
+    fn dirty_under_an_open_transaction(pool: &Pool, page: PageId) {
+        pool.modify(page, |bytes| {
+            page::write_u64(bytes, page::header::LSN, 900)?;
+            page::write_u64(bytes, 40, 0xABCD)
+        })
+        .unwrap();
+        pool.set_uncommitted_lsn(800);
+    }
+
+    /// A page an open transaction changed is written, not dropped, when its
+    /// frame is evicted.
+    ///
+    /// No-steal lets a **checkpoint** leave such a page out of the file, because
+    /// the frame keeps it and the next checkpoint writes it. An eviction does
+    /// not keep it, so the same skip there discards the change - which is what
+    /// a `CREATE INDEX` through a 64-frame pool did to 129 pages, and what
+    /// `inillucent-compat`'s `new_engine_log_lead` reported as
+    /// `page 597 checksum 00000000 is not the computed 8d1053d3`: the checksum
+    /// of a page of zeros, on a page nothing had ever written.
+    ///
+    /// The pre-image goes to the rollback journal before the new image goes to
+    /// the file, so a crash before the transaction commits can still put the
+    /// page back. See [`Writing`].
+    #[test]
+    fn an_uncommitted_page_is_written_rather_than_dropped_when_its_frame_goes() {
+        let vfs = Arc::new(MemoryVfs::new());
+        let path = DbPath::new("steal-test.rdb");
+        let pool = pool_beside(&vfs, &path, 512, 2, 12);
+        pool.set_journal(Some(crate::journal::Journal::new(
+            Arc::clone(&vfs) as Arc<dyn Vfs>,
+            &path,
+            crate::journal::JournalMode::Delete,
+            512,
+        )));
+        dirty_under_an_open_transaction(&pool, PageId(5));
+        for page in 6..12u64 {
+            let _ = pool.fetch(PageId(page)).unwrap();
+        }
+        assert!(
+            !pool.is_resident(PageId(5)),
+            "the frame was never evicted, so this proves nothing"
+        );
+        let guard = pool.fetch(PageId(5)).unwrap();
+        assert_eq!(
+            page::read_u64(&guard, 40).unwrap(),
+            0xABCD,
+            "the change was thrown away with the frame"
+        );
+    }
+
+    /// With no journal to undo a steal with, the frame is kept instead.
+    ///
+    /// `memory` and `off` hold no pre-images on disk, so an eviction there has
+    /// no way to put an uncommitted page back after a crash and must not write
+    /// it. What it must also not do is free the frame: the page is still only
+    /// in memory, and emptying the frame would lose it. So the page stays
+    /// resident and the evictor takes another frame.
+    #[test]
+    fn an_uncommitted_page_keeps_its_frame_when_nothing_can_undo_a_steal() {
+        let pool = pool_over(512, 2, 12);
+        dirty_under_an_open_transaction(&pool, PageId(5));
+        for page in 6..12u64 {
+            let _ = pool.fetch(PageId(page));
+        }
+        assert!(
+            pool.is_resident(PageId(5)),
+            "the page with nowhere to go was evicted anyway"
+        );
+        let guard = pool.fetch(PageId(5)).unwrap();
+        assert_eq!(
+            page::read_u64(&guard, 40).unwrap(),
+            0xABCD,
+            "the change was thrown away with the frame"
+        );
+    }
+
+    /// A pool with nothing left to give says which rule is refusing.
+    ///
+    /// The documented limit of a no-steal policy is that a transaction cannot
+    /// dirty more pages than the pool holds, and a caller who has hit it needs
+    /// to be told that rather than told its frames are pinned - they are not,
+    /// and no number of released guards would help.
+    #[test]
+    fn a_pool_full_of_uncommitted_pages_says_so_rather_than_blaming_pins() {
+        let pool = pool_over(512, 2, 12);
+        for page in [PageId(5), PageId(6)] {
+            pool.modify(page, |bytes| {
+                page::write_u64(bytes, page::header::LSN, 900)?;
+                page::write_u64(bytes, 40, 0xABCD)
+            })
+            .unwrap();
+        }
+        pool.set_uncommitted_lsn(800);
+        let refusal = pool
+            .fetch(PageId(7))
+            .expect_err("a full pool has to refuse");
+        let detail = refusal.detail().unwrap_or_default();
+        assert!(
+            detail.contains("the open transaction has changed 2"),
+            "the refusal did not name no-steal: {detail}"
+        );
     }
 
     /// A page installed by the loader is dirty, readable, and flushed.

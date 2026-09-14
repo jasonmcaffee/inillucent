@@ -31,6 +31,48 @@
 //! condition and costs seconds instead of minutes: what matters is that the
 //! statement dirties more pages than the pool can hold at once.
 
+//! ## The second defect these tests found, and why nobody saw it
+//!
+//! Once the log stopped refusing the write, the write still did not happen.
+//! Both tests failed with `page 597 checksum 00000000 is not the computed
+//! 8d1053d3` (and `page 538` in the reopen) - the same computed checksum on two
+//! different pages, because `8d1053d3` is what a page of zeros checksums to.
+//! Nothing had ever written those pages.
+//!
+//! `Pool::writeback` enforced two rules, and only one of them belonged to an
+//! eviction. No-steal says a page an open transaction has changed does not go
+//! to the file, "because it stays dirty and a later checkpoint writes it" -
+//! which is true of a checkpoint's flush and false of an eviction, whose frame
+//! is about to hold a different page. `evict_one` freed the frame whether or
+//! not anything had been written, so a `CREATE INDEX` through a 64-frame pool
+//! threw away **129 dirty pages**, every one of them a page the build had just
+//! created. The file grew past them when later pages were written and what was
+//! left behind was a hole of zeros.
+//!
+//! The fix is in `inillucent-pool`: `Pool::writeback` is told why it is writing
+//! and reports whether the page reached the file. A checkpoint still holds an
+//! open transaction's page back; an eviction writes it, with the page's
+//! pre-image saved and synced to the rollback journal first - the case
+//! `crates/inillucent-pool/src/journal.rs`'s own header already names, "a
+//! transaction whose dirty pages outgrow the buffer pool evicts, which creates
+//! the journal". Where no journal can undo a steal (`memory` and `off`) the
+//! frame is kept rather than emptied, which is the documented limit of a
+//! no-steal policy and an error rather than a file with a hole in it.
+//!
+//! ## These tests skipped for months, and that is why the defect survived
+//!
+//! `fixture()` returns `None` when `_agent_output/fixtures/medium.db` is not
+//! built, and both tests then skip. The fixture is 17 MB and is not checked in,
+//! so on a machine that has not built it these tests assert nothing at all
+//! while reporting green. Build it before trusting a run of this file:
+//!
+//! ```text
+//! tools/build-gate-fixtures.sh _agent_output/fixtures
+//! ```
+//!
+//! `inillucent-testrun --strict` now names a test that evidenced nothing, which
+//! is what finally made this visible.
+
 use std::path::PathBuf;
 
 use inillucent_compat::newengine::ImportedDatabase;
