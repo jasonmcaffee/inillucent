@@ -160,6 +160,12 @@ function Get-TreeOf {
     list carries tags from both repositories and cannot say which remote has
     which. Only v<x.y.z> is a release tag here; the packages/go/ ones name a Go
     module version and are handled by the Go route.
+
+    **Both kinds of tag count.** `ls-remote` prints an annotated tag twice, as
+    `refs/tags/X` and again as `refs/tags/X^{}` for the commit inside it, and a
+    lightweight tag only once. Matching the `^{}` line alone therefore finds
+    annotated tags and reports every lightweight one as absent - which is what
+    this did to v0.1.2 in the minute after pushing it.
 .PARAMETER RemoteName
     The git remote to ask.
 #>
@@ -167,7 +173,7 @@ function Get-RemoteReleaseTags {
     param([string] $RemoteName)
     $tags = @()
     foreach ($line in (Invoke-GitLines ls-remote --tags $RemoteName)) {
-        if ($line -match 'refs/tags/(v\d+\.\d+\.\d+)\^\{\}$') { $tags += $Matches[1] }
+        if ($line -match 'refs/tags/(v\d+\.\d+\.\d+)(\^\{\})?$') { $tags += $Matches[1] }
     }
     return @($tags | Sort-Object -Unique)
 }
@@ -341,12 +347,38 @@ $commit = Invoke-Git commit-tree $tree -p $parent -m $Message
 $built = Invoke-Git rev-parse "$commit^{tree}"
 if ($built -ne $tree) { throw "the commit that was built holds tree $built rather than $tree" }
 
+# An annotated tag, not a lightweight one.
+#
+# v0.1.0 and v0.1.1 on the mirror are annotated, so a lightweight v0.1.2 would
+# be the odd one out, and an annotated tag is the only kind that records who
+# tagged it and when. `git tag` can only write refs/tags/<name>, and this
+# repository already has a local v<version> naming a commit in the development
+# history, so the object is written with `git mktag` and put under a ref this
+# script owns instead.
+$tagObject = @"
+object $commit
+type commit
+tag $tag
+tagger $authorName <$authorEmail> $(Invoke-Git log -1 --format=%at $releaseCommit) +0000
+
+inillucent $Version
+"@ -replace "`r", ''
+$tagSha = ($tagObject | & git -C $root mktag)
+if ($LASTEXITCODE -ne 0) { throw 'git mktag refused the tag object' }
+$tagSha = $tagSha.Trim()
+
 Invoke-Git update-ref "refs/mirror/$Remote/main" $commit | Out-Null
-Invoke-Git update-ref "refs/mirror/$Remote/$tag" $commit | Out-Null
+Invoke-Git update-ref "refs/mirror/$Remote/$tag" $tagSha | Out-Null
+
+# The tag has to name the commit that was just built, and a tag object that
+# names something else is a tag nobody would look inside.
+$tagged = Invoke-Git rev-parse "$tagSha^{commit}"
+if ($tagged -ne $commit) { throw "the tag object names commit $tagged rather than $commit" }
 
 Write-Host ''
 Write-Host "built          $commit"
 Write-Host "               tree $built, which is $tag's tree"
+Write-Host "tag object     $tagSha, annotated, naming $commit"
 Write-Host ''
 
 if (-not $Push) {
