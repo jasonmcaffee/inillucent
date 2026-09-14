@@ -928,14 +928,21 @@ const CEILINGS: [(&str, usize); 10] = [
     // argument that used to sit inside it. The file is 931 lines shorter
     // than this ticket found it either way.
     ("crates/inillucent-exec/src/physical.rs", 5_732),
-    // Lowered from 5,315 in task-1913, which added ninety-nine lines to
-    // this file and put it exactly over. The ratchet asks for an
-    // extraction, so the ten items that answer "what does this name in a
-    // `WITH` stand for" are `bind/cte.rs`: the two CTE types, `push_ctes`,
-    // `pop_ctes`, `find_cte`, `bind_recursive_cte`, `push_recursive_self`
-    // and the three that read whether a definition names itself. Nothing
-    // moved changed in the move.
-    ("crates/inillucent-sql/src/bind.rs", 5_111),
+    // task-1913 lowered this to 5,111 in the shared checkout, with this
+    // note: "the ratchet asks for an extraction, so the ten items that
+    // answer 'what does this name in a `WITH` stand for' are `bind/cte.rs`:
+    // the two CTE types, `push_ctes`, `pop_ctes`, `find_cte`,
+    // `bind_recursive_cte`, `push_recursive_self` and the three that read
+    // whether a definition names itself."
+    //
+    // **It is back at 5,315 here until that extraction is committed
+    // (task-1932).** `bind/cte.rs` and the `bind.rs` it was taken out of are
+    // still uncommitted work in the checkout, and this file had to be
+    // committed for task-1932's own rows - so a number describing a state
+    // the repository does not hold would fail every clean checkout of it.
+    // Nothing of task-1913's was reverted: only this number, and it goes
+    // back to 5,111 when the extraction beside it lands.
+    ("crates/inillucent-sql/src/bind.rs", 5_315),
     ("crates/inillucent-tree/src/leaf.rs", 5_175),
     ("crates/inillucent-tree/src/paged.rs", 3_570),
     ("crates/inillucent-exec/src/dml.rs", 3_122),
