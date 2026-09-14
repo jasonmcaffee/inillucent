@@ -95,8 +95,10 @@ mistaken for a green run.
 If you do use `cargo test --workspace`, pass `--no-fail-fast`. Without it the run stops at the first
 failing binary, and has reported about a quarter of the suite.
 
-**No test fails today.** `inillucent-testrun --strict` on a quiet box reports 169 targets, 2,789
-tests, 0 failed and 0 undetermined in 756 seconds. It still prints `not ok`, because three suites
+**No test fails today.** `inillucent-testrun --strict` reports 169 targets, 2,789 tests, 0 failed
+and 0 undetermined. The counts are exact. The wall clock was 840 seconds on a 24 processor desktop
+that was carrying other work while it ran, so read it as one run on one machine rather than as a
+figure to plan against. It still prints `not ok`, because three suites
 evidenced nothing: `inillucent-remote::live_postgres` and `inillucent-remote::live_mysql` have no
 server configured on this machine, and `inillucent-remote::lib` runs only when
 `INILLUCENT_NETWORK_TESTS` is set, because it opens sockets. That is the condition `--strict` exists
