@@ -47,9 +47,10 @@ inillucent query "SELECT length(embed('hello'))"
 ```
 
 If that says `no such function: embed`, the binary you have was built without the embedding feature,
-which is what the published 0.1.1 archives are. Build the command line from a checkout:
-`cargo build --release -p inillucent-cli --features inillucent-cli/embed`. The next release carries
-the feature, because `packaging/release-all.ps1` passes that flag.
+which is what the published 0.1.1 archives are. The 0.1.2 archives carry it, because
+`packaging/release-all.ps1` passes `--features inillucent-cli/embed`, so upgrading fixes it. Building
+the command line from a checkout is the other way:
+`cargo build --release -p inillucent-cli --features inillucent-cli/embed`.
 
 Then start your agent with this directory as its working directory. `AGENTS.md` is here for it
 (`CLAUDE.md` imports the same file), and it carries the two commands and the one rule that is easy to
