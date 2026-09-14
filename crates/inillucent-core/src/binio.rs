@@ -133,7 +133,7 @@ pub fn write_str(w: &mut impl Write, s: &str) -> std::io::Result<()> {
 /// Reads back a string written by [`write_str`].
 ///
 /// The length is a number out of the source, so the bytes are read in steps
-/// rather than allocated from it - see [`read_records`].
+/// rather than allocated from it - see `read_records`.
 ///
 /// @param r - the source
 pub fn read_str(r: &mut impl Read) -> std::io::Result<String> {

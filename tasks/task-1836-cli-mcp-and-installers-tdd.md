@@ -398,7 +398,6 @@ ticket asks for it; §7 records it as the thing to confirm rather than assume.
 The bar the ticket sets is *"verify our qwen localai is able to use it effectively"*, and "we wired it
 up" is not that. So the verification is a scored run, not a screenshot:
 
-- the MCP server is registered in `opencode.json` beside `aiservice-web`;
 - the local Qwen build on `llama-server` :8080 is given a fresh database and a list of tasks it can
   only complete through the tools — create a table, insert rows, ask a question whose answer requires
   a `GROUP BY`, describe a table it did not create, and hit one thing the engine refuses;
@@ -444,8 +443,7 @@ It also runs through **opencode** against the same model, which is the studio's 
   Tokyo is larger than Delhi by 4,000,000 people.
 ```
 
-and the rows were still in the file afterwards. The server is registered in
-`claude-settings/opencode/opencode.json` beside `aiservice-web`.
+and the rows were still in the file afterwards.
 
 **The one thing the run found** is in §3.4: a second process cannot write to a database the server
 has open. The harness hit it, and it is the engine's one-writer rule rather than a defect.

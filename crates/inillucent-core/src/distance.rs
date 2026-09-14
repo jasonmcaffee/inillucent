@@ -12,6 +12,41 @@
 //! `Metric` travels with the vectors rather than being chosen at the call
 //! site.
 
+/// Refuses a query vector this index cannot answer with.
+///
+/// **The dot product zips the two slices and stops at the shorter one, so a
+/// query of the wrong width returns a plausible ranking rather than an error.**
+/// A four wide query against an eight wide index ranked every vector by its
+/// first four components and came back with a list nothing marked as wrong; a
+/// NaN component went through `rank.rs`'s `clamp` unchanged and made a distance
+/// that compares equal to everything, which is not a total order, so the heap
+/// the graph search walks stops being a heap (task-1946, H4).
+///
+/// The SQL boundary in `inillucent-search` has checked both since task-1932's
+/// M4. This is the same check for the library API `docs/vector-search.md`
+/// documents, worded the same way so a caller that handles one handles the
+/// other, and placed at the entry points rather than inside `dot`, which is the
+/// hot loop and runs once per candidate where this runs once per query.
+///
+/// @param query - the query vector as the caller supplied it
+/// @param dims - the width the index was built at
+pub fn check_query(query: &[f32], dims: usize) -> anyhow::Result<()> {
+    if query.len() != dims {
+        anyhow::bail!(
+            "inillucent_core: this index has {dims} dimensions, and the vector has {}",
+            query.len()
+        );
+    }
+    if let Some(at) = query.iter().position(|component| !component.is_finite()) {
+        anyhow::bail!(
+            "inillucent_core: component {at} of this vector is {}, and a vector's \
+             components have to be finite numbers",
+            query.get(at).copied().unwrap_or(f32::NAN)
+        );
+    }
+    Ok(())
+}
+
 /// Dot product of two equal length slices.
 pub fn dot(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());

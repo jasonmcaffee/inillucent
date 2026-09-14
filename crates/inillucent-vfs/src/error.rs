@@ -61,6 +61,19 @@ impl VfsError {
         VfsError::new(extended, format!("{operation:?}: {error}"))
     }
 
+    /// Adds the path the failure is about to the detail.
+    ///
+    /// **A file error that does not say which file is half a report.** The
+    /// operating system's own text is `No such file or directory`, and a
+    /// statement may touch a database, several log segments and a scratch file
+    /// in one go, so the reader is left to guess which of them was missing.
+    ///
+    /// @param path - the file the operation was on
+    pub fn about(mut self, path: &std::path::Path) -> VfsError {
+        self.detail = format!("{} ({})", self.detail, path.display());
+        self
+    }
+
     /// Converts into the engine-wide error type.
     pub fn into_db_error(self) -> DbError {
         DbError::new(self.extended).with_detail(self.detail)
@@ -110,6 +123,8 @@ pub enum VfsOperation {
     Close,
     /// Deleting a file.
     Delete,
+    /// Replacing one path with another.
+    Rename,
     /// Testing whether a path exists or is writable.
     Access,
     /// Resolving a path to its canonical form.
@@ -142,6 +157,11 @@ impl VfsOperation {
             VfsOperation::CheckReservedLock => ExtendedCode::IO_ERR_CHECK_RESERVED_LOCK,
             VfsOperation::Close => ExtendedCode::IO_ERR_CLOSE,
             VfsOperation::Delete => ExtendedCode::IO_ERR_DELETE,
+            // SQLite has no `SQLITE_IOERR_RENAME`, because its own VFS has no
+            // rename: it moves a file by copying. The generic `SQLITE_IOERR` is
+            // therefore the honest code rather than a near neighbour that would
+            // tell a caller's error handling something untrue.
+            VfsOperation::Rename => ExtendedCode::from_primary(PrimaryCode::IoErr),
             VfsOperation::Access => ExtendedCode::IO_ERR_ACCESS,
             VfsOperation::FullPathname => ExtendedCode::CANT_OPEN_FULL_PATH,
             VfsOperation::ShmOpen => ExtendedCode::IO_ERR_SHM_OPEN,

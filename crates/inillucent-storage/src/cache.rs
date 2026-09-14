@@ -675,22 +675,6 @@ impl PageCache {
         }
     }
 
-    /// Returns how many frames are dirty right now.
-    pub fn dirty_frames(&self) -> u64 {
-        let mut count = 0u64;
-        for index in 0..self.shards.len() {
-            let Some(shard) = self.lock(index) else {
-                continue;
-            };
-            for frame in shard.frames.values() {
-                if matches!(frame.state(), PageState::Dirty { .. }) {
-                    count = count.saturating_add(1);
-                }
-            }
-        }
-        count
-    }
-
     /// Evicts until the resident bytes are inside the budget, or until nothing
     /// can be evicted.
     fn enforce_budget(&self) {

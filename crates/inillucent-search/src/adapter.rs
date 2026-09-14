@@ -150,14 +150,16 @@ impl RetrievalIndex for Index {
                 None
             }
         });
-        let (hits, _) = self.search_branches(
-            &query.text,
-            &query.vector,
-            &filter,
-            query.limit.max(1),
-            width,
-            branches,
-        );
+        let (hits, _) = self
+            .search_branches(
+                &query.text,
+                &query.vector,
+                &filter,
+                query.limit.max(1),
+                width,
+                branches,
+            )
+            .map_err(|why| failure(why.to_string()))?;
         let store = self.store();
         Ok(hits
             .into_iter()

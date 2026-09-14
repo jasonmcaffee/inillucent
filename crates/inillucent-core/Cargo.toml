@@ -2,6 +2,18 @@
 name = "inillucent-core"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+description = "The retrieval engine: HNSW vectors, BM25 and the hybrid ranking the SQL layer reaches through."
+
+# **The only crate in the workspace that carried none of this**, and the one a
+# reader is most likely to depend on by itself (task-1946, M6). `cargo deny`
+# reported it as `unlicensed`, which is what a missing `license` means to
+# anybody assembling a licence manifest from the graph.
+[lints]
+workspace = true
 
 [dependencies]
 anyhow.workspace = true

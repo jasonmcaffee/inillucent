@@ -338,6 +338,31 @@ pub trait Vfs: Send + Sync + Debug {
     /// deletion itself is durable.
     fn delete(&self, path: &DbPath, sync_dir: bool) -> VfsResult<()>;
 
+    /// Replaces `to` with `from`, atomically.
+    ///
+    /// **The one operation a crash cannot catch halfway**, which is what makes
+    /// it the last step of `VACUUM`: a directory entry either names the rebuilt
+    /// file or the original, never a half-copied thing. `to` is replaced when it
+    /// exists, rather than the rename failing, because replacing is the whole
+    /// point of the call; `from` must exist.
+    ///
+    /// **It is on this trait because it was not.** `inillucent-engine`'s rebuild
+    /// called `std::fs::rename` directly and `VACUUM` reopened the connection on
+    /// a freshly constructed `OsVfs`, so an application running on `MemoryVfs`,
+    /// `SimVfs` or its own encrypting VFS either got `Open: The system cannot
+    /// find the path specified` or - if a real file happened to exist at that
+    /// path string - silently finished the statement on the operating system's
+    /// file system and stayed there for the rest of the session (task-1946, H2).
+    ///
+    /// Whether the rename's own directory entry is flushed is the
+    /// implementation's business, the way it is for `delete`: Unix needs an
+    /// explicit directory `fsync` and Windows does not, because NTFS journals a
+    /// rename's metadata itself.
+    ///
+    /// @param from - the file to move, which must exist
+    /// @param to - the path it takes, replacing whatever is there
+    fn rename(&self, from: &DbPath, to: &DbPath) -> VfsResult<()>;
+
     /// Reports whether a path exists or is accessible in the requested mode.
     fn access(&self, path: &DbPath, mode: AccessMode) -> VfsResult<bool>;
 

@@ -48,15 +48,7 @@ pub enum ForeignKeyEvent {
     ParentUpdate,
 }
 
-impl ForeignKeyEvent {
-    /// Reports whether the event happens on the child's side.
-    pub fn is_child(self) -> bool {
-        matches!(
-            self,
-            ForeignKeyEvent::ChildInsert | ForeignKeyEvent::ChildUpdate
-        )
-    }
-}
+impl ForeignKeyEvent {}
 
 /// The parent columns a key refers to.
 ///

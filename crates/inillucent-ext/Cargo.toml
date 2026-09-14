@@ -2,6 +2,7 @@
 name = "inillucent-ext"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Scalar, aggregate, and window functions, collations, virtual tables, and loadable extension policy."

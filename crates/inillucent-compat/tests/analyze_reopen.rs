@@ -39,9 +39,9 @@
 //! ## What the 6.9 GB database had that a fresh one does not
 //!
 //! **A page carrying an LSN from a log stream that no longer exists**, and `ANALYZE` is the
-//! messenger rather than the cause. Reproduced against a copy of the parked file at
-//! `J:/nikaya-data/wal-parked-task1876/nikaya.rdb.after-checkpoint-recovery`: copy it, run
-//! `analyze`, reopen. Nine seconds, deterministic, and the same message.
+//! messenger rather than the cause. Reproduced against a copy of the file task-1876 parked,
+//! `nikaya.rdb.after-checkpoint-recovery`, which that ticket records the location of: copy it,
+//! run `analyze`, reopen. Nine seconds, deterministic, and the same message.
 //!
 //! What the file says, read out of its own bytes:
 //!

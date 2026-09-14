@@ -13,7 +13,7 @@
 //! before the frame is reused.
 //!
 //! Invariant (TDD 6): a page written to disk contains no frame references.
-//! [`Pool::writeback`] copies the frame, translates every swizzled swip in the
+//! `Pool::writeback` copies the frame, translates every swizzled swip in the
 //! copy, checksums the copy, and writes that. The in-memory frame keeps its
 //! swizzled swips, because unswizzling a page just because it was written would
 //! throw away the work for no reason.
@@ -524,6 +524,14 @@ impl Counters {
     }
 }
 
+// **The three seams `pool.rs` was split along (task-1946, M12).** They are
+// child modules rather than siblings so that each stays an `impl Pool` block
+// reading the same private state: privacy in Rust reaches a module's
+// descendants, so the move needed no field to become `pub(crate)`.
+mod eviction;
+mod journal_gate;
+mod swizzle;
+
 impl Pool {
     /// Returns a pool over an open file.
     ///
@@ -602,7 +610,7 @@ impl Pool {
 
     /// Tells the pool how far the log is durable.
     ///
-    /// After this, [`Pool::writeback`] refuses any page whose LSN is above
+    /// After this, `Pool::writeback` refuses any page whose LSN is above
     /// `lsn`. The caller sets it after every sync of the log and never before
     /// one: a watermark that ran ahead of the media would turn the check into a
     /// formality that always passes, which is worse than no check at all
@@ -614,7 +622,7 @@ impl Pool {
     }
 
     /// Records the lowest LSN a checkpoint has persisted as this file's
-    /// recovery point - the floor [`Pool::note_dirty_from`] clamps a newly
+    /// recovery point - the floor `Pool::note_dirty_from` clamps a newly
     /// dirtied page's `rec_lsn` against.
     ///
     /// A caller with a log calls this from the same place it calls
@@ -649,7 +657,7 @@ impl Pool {
     ///
     /// @param advance - makes the log durable and returns its new durable point
     ///
-    /// An `Rc` rather than a `Box` so that [`Pool::refuse_if_ahead_of_the_log`]
+    /// An `Rc` rather than a `Box` so that `Pool::refuse_if_ahead_of_the_log`
     /// can take a handle to it and drop its borrow before calling it. A `Box`
     /// would have to be moved out of the cell and put back, which loses the
     /// closure on the error path the call is most likely to take.
@@ -835,98 +843,6 @@ impl Pool {
         self.borrow_frame(frame)
     }
 
-    /// Returns the page a swip names, whichever form it is in.
-    ///
-    /// A swizzled swip names a frame, and the frame knows its page, so this is
-    /// the one place the two forms are reconciled. It is separate from
-    /// [`Pool::fetch`] because a descent needs the page id before it fetches -
-    /// it records the child in its path, and a path of frame numbers would stop
-    /// meaning anything the moment one was evicted.
-    ///
-    /// @param swip - the child reference read from an interior page
-    pub fn page_of_swip(&self, swip: Swip) -> DbResult<PageId> {
-        if let Some(page) = swip.page() {
-            if page.is_none() {
-                return Err(corrupt("an interior slot names no child"));
-            }
-            return Ok(page);
-        }
-        let frame = swip
-            .frame()
-            .ok_or_else(|| corrupt("a swip is neither a page nor a frame"))?;
-        let page = self
-            .page_in_frame(frame)
-            .ok_or_else(|| corrupt(format!("a swip names frame {frame}, which holds no page")))?;
-        if page.is_none() {
-            return Err(corrupt(format!("frame {frame} holds no page")));
-        }
-        Ok(page)
-    }
-
-    /// Returns the page a frame currently holds.
-    ///
-    /// @param frame - the frame's index
-    pub fn page_in_frame(&self, frame: u32) -> Option<PageId> {
-        self.state
-            .borrow()
-            .frames
-            .get(frame as usize)
-            .map(|meta| meta.page)
-    }
-
-    /// Records which slot of which frame points at a child.
-    ///
-    /// This is the back-reference eviction needs: to reuse a frame it must
-    /// first put a page id back into whatever swizzled swip names it, and the
-    /// child is the only thing that knows where that is.
-    ///
-    /// @param child - the child's frame
-    /// @param parent - the parent's frame
-    /// @param parent_page - the page that frame holds
-    /// @param at - the swip's byte offset inside the parent page
-    pub fn note_parent(&self, child: u32, parent: u32, parent_page: PageId, at: usize) {
-        let mut state = self.state.borrow_mut();
-        if let Some(meta) = state.frames.get_mut(child as usize) {
-            meta.parent = Some((parent, parent_page, at));
-        }
-    }
-
-    /// Writes a swizzled swip into a parent page, if the parent is still there.
-    ///
-    /// The page check is what makes this safe to call after the parent's guard
-    /// has been dropped: a frame that was reused in between holds somebody
-    /// else's page, and writing eight bytes of frame number into the middle of
-    /// it would be a corruption with no error attached. A skipped swizzle costs
-    /// one page-table lookup on the next descent and nothing else.
-    ///
-    /// The write does not dirty the frame. A swizzled swip and an unswizzled
-    /// one name the same child; the page's *content* is unchanged, and
-    /// [`Pool::writeback`] translates the form back on the way out.
-    ///
-    /// @param parent - the parent's frame
-    /// @param expected - the page the parent frame should still hold
-    /// @param at - the swip's byte offset inside the parent page
-    /// @param swip - the reference to store
-    pub fn swizzle_into(
-        &self,
-        parent: u32,
-        expected: PageId,
-        at: usize,
-        swip: Swip,
-    ) -> DbResult<bool> {
-        if self.page_in_frame(parent) != Some(expected) {
-            return Ok(false);
-        }
-        let Some(cell) = self.buffers.get(parent as usize) else {
-            return Ok(false);
-        };
-        let Ok(mut bytes) = cell.try_borrow_mut() else {
-            return Ok(false);
-        };
-        page::write_u64(&mut bytes, at, swip.raw())?;
-        Ok(true)
-    }
-
     /// Pins and borrows a frame by index.
     ///
     /// @param frame - the frame's index
@@ -1046,372 +962,6 @@ impl Pool {
         page::verify_checksum(&bytes, page)
     }
 
-    /// Returns a frame holding nothing, cooling and evicting to get one.
-    ///
-    /// The one place a frame is handed out for a page it does not yet hold, and
-    /// therefore the one place its buffer has to exist by. Every caller - the
-    /// read path through `fill_frame`, and `install` for a page built in memory
-    /// - comes through here.
-    fn claim_frame(&self) -> DbResult<u32> {
-        let frame = self.take_frame()?;
-        self.give_the_frame_a_buffer(frame)?;
-        Ok(frame)
-    }
-
-    /// Returns a free frame's index, cooling and evicting to get one.
-    ///
-    /// **The budget is consulted before the free list.** `PRAGMA cache_size` is
-    /// a ceiling on how many database pages are held in memory - that is
-    /// SQLite's own definition of it - so a pool asked for a smaller cache
-    /// stops taking fresh frames once that many are resident and re-uses one
-    /// instead. The allocated buffers stay allocated, which is what SQLite's
-    /// page cache does too; what the setting bounds is the pages, and that is
-    /// what this bounds.
-    ///
-    /// With no `cache_size` set the budget is the whole pool, so the first
-    /// branch is the only one taken until the pool is full - the same path, and
-    /// the same cost, as before the budget existed.
-    fn take_frame(&self) -> DbResult<u32> {
-        let budget = self.budget.get();
-        {
-            let mut state = self.state.borrow_mut();
-            let resident = self.buffers.len().saturating_sub(state.free.len());
-            if resident < budget {
-                if let Some(frame) = state.free.pop() {
-                    return Ok(frame);
-                }
-            }
-        }
-        self.cool()?;
-        if let Some(frame) = self.evict_one()? {
-            return Ok(frame);
-        }
-        // Over budget with nothing evictable - every resident page is pinned.
-        // The budget is a ceiling on caching, not a wall the statement runs
-        // into, so a frame the pool owns and is not using is better than a
-        // refusal.
-        if let Some(frame) = self.state.borrow_mut().free.pop() {
-            return Ok(frame);
-        }
-        // Nothing is evictable, and the two reasons for that are different
-        // enough to the caller that they are told apart. A pool whose frames
-        // are all pinned is a caller holding too many guards at once. A pool
-        // whose frames all hold pages an open transaction has changed, with no
-        // rollback journal to undo an eviction from, is the documented limit of
-        // a no-steal policy: such a page may not reach the file before its
-        // commit, and it may not be dropped either, so the transaction cannot
-        // dirty more pages than the pool holds. Selecting a journal mode that
-        // keeps pre-images, or a larger `PRAGMA cache_size`, is what lifts it.
-        let held = self.frames_no_steal_is_holding();
-        if held > 0 {
-            return Err(no_mem(format!(
-                "the open transaction has changed {held} of the buffer pool's {} pages, and no \
-                 rollback journal is in force to undo an eviction from, so none of them may \
-                 be written before it commits: a transaction cannot dirty more pages than \
-                 the pool holds",
-                self.buffers.len()
-            )));
-        }
-        Err(no_mem(
-            "every frame in the buffer pool is pinned; nothing can be evicted",
-        ))
-    }
-
-    /// Returns how many resident frames hold a page no-steal will not let go.
-    ///
-    /// Only asked when the pool has nothing to give, so that the refusal names
-    /// the reason it is refusing rather than the first reason anybody wrote a
-    /// message for.
-    fn frames_no_steal_is_holding(&self) -> usize {
-        if self.can_undo_a_steal() {
-            return 0;
-        }
-        let uncommitted = self.uncommitted_lsn.load(Ordering::SeqCst);
-        if uncommitted == u64::MAX {
-            return 0;
-        }
-        let dirty: Vec<u32> = {
-            let state = self.state.borrow();
-            state
-                .frames
-                .iter()
-                .enumerate()
-                .filter(|(_, meta)| meta.dirty && meta.state != FrameState::Free)
-                .map(|(index, _)| index as u32)
-                .collect()
-        };
-        dirty
-            .into_iter()
-            .filter(|frame| self.lsn_of(*frame).is_ok_and(|lsn| lsn >= uncommitted))
-            .count()
-    }
-
-    /// Makes sure a claimed frame has a page-sized buffer.
-    ///
-    /// Costs a length check on every claim and an allocation on the first one
-    /// per frame; a pool that has been full once never allocates again, because
-    /// an evicted frame keeps its buffer.
-    ///
-    /// @param frame - the frame just claimed
-    fn give_the_frame_a_buffer(&self, frame: u32) -> DbResult<()> {
-        let cell = self
-            .buffers
-            .get(frame as usize)
-            .ok_or_else(|| misuse("frame index out of range"))?;
-        let mut bytes = cell
-            .try_borrow_mut()
-            .map_err(|_| misuse("a frame chosen for a new page was still borrowed"))?;
-        if bytes.len() == self.page_size {
-            return Ok(());
-        }
-        // `try_reserve` rather than `resize`, so a pool that cannot grow says
-        // so as an error instead of aborting the process.
-        let wanted = self.page_size.saturating_sub(bytes.len());
-        bytes
-            .try_reserve_exact(wanted)
-            .map_err(|_| no_mem(format!("a frame of {} bytes", self.page_size)))?;
-        bytes.resize(self.page_size, 0);
-        Ok(())
-    }
-
-    /// Moves a share of the pool into the cooling FIFO.
-    ///
-    /// Sampling random hot frames rather than scanning is LeanStore's clock:
-    /// the sweep costs what it cools rather than what the pool holds, and a
-    /// frame that keeps being used keeps being rewarmed out of the queue before
-    /// it reaches the front.
-    ///
-    /// Returns how many frames it moved.
-    pub fn cool(&self) -> DbResult<usize> {
-        let total = self.buffers.len();
-        let want = ((total as f64) * COOL_FRACTION).ceil() as usize;
-        let want = want.max(1);
-        let mut moved = 0usize;
-        let mut attempts = 0usize;
-        let budget = want.saturating_mul(SAMPLE_FACTOR).max(total.min(64));
-        while moved < want && attempts < budget {
-            attempts = attempts.saturating_add(1);
-            let candidate = {
-                let mut state = self.state.borrow_mut();
-                if state.cooling.len() >= want {
-                    break;
-                }
-                let pick = (state.clock.next_u64() as usize) % total.max(1);
-                match state.frames.get(pick) {
-                    Some(meta)
-                        if meta.state == FrameState::Hot
-                            && self.pins_of(pick as u32) == 0
-                            && !self.parent_is_pinned(meta.parent) =>
-                    {
-                        Some(pick as u32)
-                    }
-                    _ => None,
-                }
-            };
-            let Some(frame) = candidate else {
-                continue;
-            };
-            if self.unswizzle_from_parent(frame)? {
-                let mut state = self.state.borrow_mut();
-                if let Some(meta) = state.frames.get_mut(frame as usize) {
-                    meta.state = FrameState::Cooling;
-                    meta.parent = None;
-                }
-                state.cooling.push_back(frame);
-                moved = moved.saturating_add(1);
-            }
-        }
-        if moved == 0 {
-            // Sampling is a policy, not a guarantee. In a pool of a few frames
-            // a random walk can miss the one evictable frame there is, and the
-            // caller's next step is to report that the pool is full - which is
-            // wrong when it is not. So a sweep that found nothing falls back to
-            // a scan, and the pool reports "everything is pinned" only when
-            // everything really is.
-            //
-            // The eight-frame campaign is what found this: a descent pinned two
-            // frames, six were coolable, and the clock sampled its budget away
-            // without touching one of them.
-            for frame in 0..total {
-                let candidate = {
-                    let state = self.state.borrow();
-                    match state.frames.get(frame) {
-                        Some(meta)
-                            if meta.state == FrameState::Hot
-                                && self.pins_of(frame as u32) == 0
-                                && !self.parent_is_pinned(meta.parent) =>
-                        {
-                            Some(frame as u32)
-                        }
-                        _ => None,
-                    }
-                };
-                let Some(frame) = candidate else {
-                    continue;
-                };
-                if self.unswizzle_from_parent(frame)? {
-                    let mut state = self.state.borrow_mut();
-                    if let Some(meta) = state.frames.get_mut(frame as usize) {
-                        meta.state = FrameState::Cooling;
-                        meta.parent = None;
-                    }
-                    state.cooling.push_back(frame);
-                    moved = moved.saturating_add(1);
-                    break;
-                }
-            }
-        }
-        Counters::add(&self.counters.cooled, moved as u64);
-        Ok(moved)
-    }
-
-    /// Forgets every back-reference that points into a page being rewritten.
-    ///
-    /// A child records *where in its parent* its swip lives, so that eviction
-    /// can put a page id back there. That offset is only meaningful for the
-    /// layout the parent had when the child was swizzled - and a split rewrites
-    /// its parent with one more separator and one more child, which moves every
-    /// slot after the insertion point.
-    ///
-    /// The existing guard checks that the parent's *frame* still holds the
-    /// parent's *page*, which is true throughout: it is the same page, rewritten
-    /// in place. So without this, evicting a child after a split writes eight
-    /// bytes of page id into whatever the new layout put at the old offset. The
-    /// symptom was an interior page whose seventh key claimed to start at byte
-    /// 23, which is inside the header.
-    ///
-    /// Called only for interior pages, because only an interior page is ever a
-    /// parent - so the bulk builder's leaf installs do not pay for the sweep.
-    ///
-    /// @param page - the page whose layout is about to change
-    fn forget_children_of(&self, page: PageId) {
-        let mut state = self.state.borrow_mut();
-        for meta in state.frames.iter_mut() {
-            if let Some((_, parent_page, _)) = meta.parent {
-                if parent_page == page {
-                    meta.parent = None;
-                }
-            }
-        }
-    }
-
-    /// Puts a page id back into the parent's swip, so the child can be reused.
-    ///
-    /// Returns false when the parent could not be written, which leaves the
-    /// child hot rather than making it unreachable.
-    ///
-    /// @param frame - the child frame
-    fn unswizzle_from_parent(&self, frame: u32) -> DbResult<bool> {
-        let (parent, parent_page, at, page) = {
-            let state = self.state.borrow();
-            let Some(meta) = state.frames.get(frame as usize) else {
-                return Ok(false);
-            };
-            match meta.parent {
-                Some((parent, parent_page, at)) => (parent, parent_page, at, meta.page),
-                None => return Ok(true),
-            }
-        };
-        // The parent may itself have been evicted since it swizzled this child.
-        // If its frame now holds a different page then nothing points at this
-        // one any more - the parent's own writeback translated the swip on its
-        // way out - so there is nothing to put back, and writing into that
-        // frame would corrupt whatever page it holds now.
-        //
-        // The page check is necessary and, on its own, **not sufficient**: it
-        // catches a frame reused for a different page and misses the same page
-        // rewritten with a different layout, where `at` now points at some other
-        // field. A split does exactly that to a parent, and the symptom was a
-        // page id appearing where an interior page's key offset should be -
-        // `interior key 7 starts at 23, before the heap`. What closes it is
-        // [`Pool::forget_children_of`], called from `install`, which is the one
-        // operation that replaces a whole page image.
-        if self.page_in_frame(parent) != Some(parent_page) {
-            return Ok(true);
-        }
-        let Some(cell) = self.buffers.get(parent as usize) else {
-            return Ok(false);
-        };
-        let Ok(mut bytes) = cell.try_borrow_mut() else {
-            return Ok(false);
-        };
-        page::write_u64(&mut bytes, at, Swip::unswizzled(page).raw())?;
-        Ok(true)
-    }
-
-    /// Evicts the coldest frame in the FIFO, writing it back if it is dirty.
-    ///
-    /// Returns the freed frame, or `None` when nothing in the queue could go.
-    pub fn evict_one(&self) -> DbResult<Option<u32>> {
-        loop {
-            let frame = {
-                let mut state = self.state.borrow_mut();
-                match state.cooling.pop_front() {
-                    Some(frame) => frame,
-                    None => return Ok(None),
-                }
-            };
-            let (page, dirty, pins) = {
-                let state = self.state.borrow();
-                match state.frames.get(frame as usize) {
-                    Some(meta) => (meta.page, meta.dirty, self.pins_of(frame)),
-                    None => continue,
-                }
-            };
-            if pins > 0 {
-                // Somebody pinned it after it was queued. Put it back to hot
-                // rather than evicting under a live reader.
-                let mut state = self.state.borrow_mut();
-                if let Some(meta) = state.frames.get_mut(frame as usize) {
-                    meta.state = FrameState::Hot;
-                }
-                continue;
-            }
-            if dirty && !self.writeback(frame, page, Writing::Eviction)? {
-                // No-steal held the page back and there is no durable rollback
-                // journal to undo a steal with, so this frame cannot be freed:
-                // the frame holds the only copy of the page, and emptying it
-                // would lose the change rather than defer it. Back to hot, and
-                // on to the next candidate. A pool with nothing else to give
-                // then fails the statement in `take_frame`, which is the
-                // documented limit of a no-steal policy - a transaction can
-                // dirty at most the pool - and is an error rather than a file
-                // with a hole in it.
-                let mut state = self.state.borrow_mut();
-                if let Some(meta) = state.frames.get_mut(frame as usize) {
-                    meta.state = FrameState::Hot;
-                }
-                continue;
-            }
-            // TDD invariant 5: a frame is never reused while a swizzled swip
-            // still names it. The only thing that can name it is the parent
-            // recorded on the way in, and cooling put a page id back there.
-            debug_assert!(
-                self.state
-                    .borrow()
-                    .frames
-                    .get(frame as usize)
-                    .map(|meta| meta.parent.is_none())
-                    .unwrap_or(true),
-                "a frame was evicted with a parent still pointing at it"
-            );
-            let mut state = self.state.borrow_mut();
-            state.table.remove(&page);
-            if let Some(meta) = state.frames.get_mut(frame as usize) {
-                *meta = FrameMeta::empty();
-            }
-            drop(state);
-            // The frame no longer holds the page a descent may have observed.
-            if let Some(latch) = self.latch(frame) {
-                if latch.try_exclusive() {
-                    latch.release_exclusive();
-                }
-            }
-            Counters::add(&self.counters.evicted, 1);
-            return Ok(Some(frame));
-        }
-    }
-
     /// Writes one frame to the file with every swizzled swip translated back.
     ///
     /// The translation is done on a copy so the resident frame keeps its
@@ -1512,154 +1062,6 @@ impl Pool {
         Ok(true)
     }
 
-    /// Reports whether a page written before its transaction committed could be
-    /// put back after a crash.
-    ///
-    /// Which is to say: whether a rollback journal whose pre-images reach the
-    /// disk is in force. `wal` takes a `delete` journal rather than none, so
-    /// this is true of every mode the engine ships with except `memory` and
-    /// `off` - see `journal_for` in `crates/inillucent-engine/src/lib.rs`.
-    fn can_undo_a_steal(&self) -> bool {
-        self.journal
-            .borrow()
-            .as_ref()
-            .is_some_and(|journal| journal.mode().is_durable())
-    }
-
-    /// Refuses a writeback the log has not caught up with.
-    ///
-    /// Reads the LSN out of the page's own header rather than out of any
-    /// bookkeeping beside it, because the header is what the file will hold and
-    /// bookkeeping is what can drift from it. A page whose LSN is at or above
-    /// the durable watermark describes a change whose log record is not on the
-    /// media, and writing it would mean a crash could leave the data file ahead
-    /// of the log with no way back.
-    ///
-    /// Reports whether a page holds a change no transaction has committed.
-    ///
-    /// **This is no-steal, and it is a condition rather than a convention.** The
-    /// checkpointer's whole correctness argument is that an open transaction's
-    /// pages are not in the file: recovery is redo-only, so a page written
-    /// before its transaction committed can never be taken back out - replaying
-    /// from an earlier point does not *undo* anything, it only re-applies.
-    ///
-    /// Until this existed the argument was written down and nothing enforced
-    /// it. A checkpoint taken while a transaction was open wrote that
-    /// transaction's dirty pages, the crash that followed rolled it back
-    /// everywhere except the data file, and the row was still there afterwards.
-    /// The model campaign found it on its second seed: "(0, 12) is there and
-    /// should not be".
-    ///
-    /// A page above the watermark is **skipped**, not refused. A checkpoint
-    /// with a writer open is an ordinary thing to do and has to succeed; what
-    /// it must not do is advance the recovery point past the pages it skipped,
-    /// which is why the caller sets `recovery_from` no higher than the oldest
-    /// open transaction's first record.
-    ///
-    /// @param frame - the frame about to be written
-    /// @param page - the page it holds
-    fn holds_uncommitted(&self, frame: u32, page: PageId) -> DbResult<bool> {
-        let uncommitted = self.uncommitted_lsn.load(Ordering::SeqCst);
-        if uncommitted == u64::MAX {
-            return Ok(false);
-        }
-        let _ = page;
-        let lsn = self.lsn_of(frame)?;
-        Ok(lsn >= uncommitted)
-    }
-
-    /// Returns the LSN stamped on a frame's page.
-    ///
-    /// @param frame - the frame
-    fn lsn_of(&self, frame: u32) -> DbResult<u64> {
-        let bytes = self
-            .buffers
-            .get(frame as usize)
-            .ok_or_else(|| misuse("frame index out of range"))?
-            .try_borrow()
-            .map_err(|_| misuse("a frame chosen for writeback was mutably borrowed"))?;
-        page::read_u64(&bytes, page::header::LSN)
-    }
-
-    /// Sets the LSN at or above which a page's change is uncommitted.
-    ///
-    /// `u64::MAX` means nothing is uncommitted, which is the state between
-    /// transactions and the state of a database with no log at all.
-    ///
-    /// @param lsn - the open writer's first record, or `u64::MAX` for none
-    pub fn set_uncommitted_lsn(&self, lsn: u64) {
-        self.uncommitted_lsn.store(lsn, Ordering::SeqCst);
-    }
-
-    /// Returns how many writebacks no-steal has held back.
-    pub fn held_back(&self) -> u64 {
-        self.counters.held_back.get()
-    }
-
-    /// Returns the LSN at or above which a page's change is uncommitted.
-    pub fn uncommitted_lsn(&self) -> u64 {
-        self.uncommitted_lsn.load(Ordering::SeqCst)
-    }
-
-    /// Returns a handle to the watermark, for a caller that has to move it
-    /// while the file is borrowed.
-    ///
-    /// The transaction manager takes one at assembly and keeps it. A
-    /// transaction's first log record is written from inside the tree mutation
-    /// that holds the file mutably, so reaching the pool through the file at
-    /// that moment is not possible - and setting the watermark afterwards would
-    /// leave a window in which an eviction could steal the page.
-    pub fn uncommitted_handle(&self) -> Arc<AtomicU64> {
-        Arc::clone(&self.uncommitted_lsn)
-    }
-
-    /// @param frame - the frame about to be written
-    /// @param page - the page it holds, for the message
-    fn refuse_if_ahead_of_the_log(&self, frame: u32, page: PageId) -> DbResult<()> {
-        let durable = self.durable_lsn.get();
-        if durable == u64::MAX {
-            return Ok(());
-        }
-        let lsn = {
-            let bytes = self
-                .buffers
-                .get(frame as usize)
-                .ok_or_else(|| misuse("frame index out of range"))?
-                .try_borrow()
-                .map_err(|_| misuse("a frame chosen for writeback was mutably borrowed"))?;
-            page::read_u64(&bytes, page::header::LSN)?
-        };
-        if lsn <= durable {
-            return Ok(());
-        }
-        // The log is behind. Ask it to catch up before refusing: a statement
-        // that dirties more pages than the pool holds has to evict, and every
-        // candidate it has carries an LSN the log has not reached, so refusing
-        // outright fails a statement that has done nothing wrong.
-        //
-        // The handle is cloned out and the borrow dropped before the call,
-        // so an `advance` that reaches back into the pool - to register a
-        // different one, or to write a page of its own - does not find this
-        // cell already borrowed. The comment here used to say that while the
-        // borrow was held straight through the call (task-1932, M9).
-        let advance = self.advance_log.borrow().as_ref().map(std::rc::Rc::clone);
-        let Some(advance) = advance else {
-            return Err(misuse(format!(
-                "page {} carries lsn {lsn} and the log is durable to {durable}: writing it would put the data file ahead of the log",
-                page.0
-            )));
-        };
-        let reached = advance()?;
-        self.durable_lsn.set(reached);
-        if lsn <= reached {
-            return Ok(());
-        }
-        Err(misuse(format!(
-            "page {} carries lsn {lsn}, the log was asked to catch up and reached {reached}: writing it would put the data file ahead of the log",
-            page.0
-        )))
-    }
-
     /// Pins a frame and borrows its bytes.
     ///
     /// @param frame - the frame to borrow
@@ -1697,29 +1099,6 @@ impl Pool {
     fn unpin(&self, frame: u32) {
         if let Some(slot) = self.pins.get(frame as usize) {
             slot.set(slot.get().saturating_sub(1));
-        }
-    }
-
-    /// Reports whether a frame is queued for eviction.
-    ///
-    /// @param frame - the frame's index
-    fn frame_is_cooling(&self, frame: u32) -> bool {
-        self.state
-            .borrow()
-            .frames
-            .get(frame as usize)
-            .map(|meta| meta.state == FrameState::Cooling)
-            .unwrap_or(false)
-    }
-
-    /// Reports whether a frame's parent is pinned, so its swip cannot be
-    /// rewritten.
-    ///
-    /// @param parent - the parent reference, if any
-    fn parent_is_pinned(&self, parent: Option<(u32, PageId, usize)>) -> bool {
-        match parent {
-            Some((frame, _, _)) => self.pins_of(frame) > 0,
-            None => false,
         }
     }
 
@@ -2050,90 +1429,6 @@ impl Pool {
         Ok(())
     }
 
-    /// Saves one page's current contents to the rollback journal, reporting
-    /// whether it saved anything.
-    ///
-    /// The answer is what tells `writeback` whether it owes a sync: a page
-    /// already saved by this checkpoint's first pass needs neither the read
-    /// below nor a second sync, and in write-ahead-log mode there is no
-    /// journal and the answer is always no.
-    ///
-    /// Reads the page **from the file**, not from the pool: the pre-image the
-    /// journal needs is what is durably there, and the frame holds the new
-    /// version. A page beyond the end of the file has no pre-image, which is
-    /// the right answer - restoring it would mean writing zeros over a page the
-    /// transaction created.
-    ///
-    /// @param page - the page about to be overwritten
-    fn journal_page(&self, page: PageId) -> DbResult<bool> {
-        let mut journal = self.journal.borrow_mut();
-        let Some(journal) = journal.as_mut() else {
-            return Ok(false);
-        };
-        if page.0 >= self.page_count.get() || !journal.wants(page) {
-            return Ok(false);
-        }
-        // **A read that fails is a refusal, not an absence** - unless the page
-        // is genuinely not in the file yet. This used to answer "no pre-image
-        // needed" for *any* read error, and both callers then carried on and
-        // overwrote the page, so a transient read error followed by a crash
-        // left a modified page with nothing to put back. That is the one thing
-        // the invariant at the top of `crate::journal` forbids.
-        //
-        // The page count above is not the test for "not in the file yet", and
-        // using it as one is what made the first attempt at this refuse every
-        // growing transaction: `page_count` is the pool's logical count, and it
-        // runs ahead of the file whenever pages have been allocated but not yet
-        // written. The file's own length is the answer. A page at or past it
-        // has no pre-image because it has no image, and restoring it would mean
-        // writing zeros over a page the transaction created.
-        let offset = page.0.saturating_mul(self.page_size as u64);
-        let length = self
-            .file
-            .file_size()
-            .map_err(|error| error.into_db_error())?;
-        if offset.saturating_add(self.page_size as u64) > length {
-            return Ok(false);
-        }
-        let mut before = vec![0u8; self.page_size];
-        self.file
-            .read_exact_at(offset, &mut before)
-            .map_err(|error| error.into_db_error())?;
-        journal.save(page, &before)?;
-        Ok(true)
-    }
-
-    /// Puts a rollback journal in force, or takes it out of force.
-    ///
-    /// @param journal - the journal, or nothing for the write-ahead log
-    pub fn set_journal(&self, journal: Option<crate::journal::Journal>) {
-        *self.journal.borrow_mut() = journal;
-    }
-
-    /// Syncs the journal, which must happen before the first page is written.
-    pub fn seal_journal(&self) -> DbResult<()> {
-        match self.journal.borrow().as_ref() {
-            Some(journal) => journal.seal(),
-            None => Ok(()),
-        }
-    }
-
-    /// Disposes of the journal once the commit is durable.
-    ///
-    /// Clears the record of what evictions have stolen along with it: the
-    /// pre-images are gone, so the next steal is the first one this journal
-    /// has to outlive.
-    pub fn finish_journal(&self) -> DbResult<()> {
-        let outcome = match self.journal.borrow_mut().as_mut() {
-            Some(journal) => journal.finish(),
-            None => Ok(()),
-        };
-        if outcome.is_ok() {
-            self.stolen.set(false);
-        }
-        outcome
-    }
-
     /// Raises the lock on the database file.
     ///
     /// **The pool owns the file, so the pool owns the lock.** The protocol
@@ -2195,35 +1490,6 @@ impl Pool {
             .read_exact_at(page_size as u64, &mut shadow)
             .map_err(|error| error.into_db_error())?;
         Ok((primary, shadow))
-    }
-
-    /// Drops every cached page, so the next read comes from the file.
-    ///
-    /// **What a connection does when another process has committed.** Every
-    /// frame is written back if it is dirty and then released, and every
-    /// swizzled pointer into it is put back to a page id on the way - which is
-    /// `evict_one`'s job and the reason this is written in terms of it rather
-    /// than by clearing the tables. Clearing them directly would leave a parent
-    /// page holding a pointer to a frame that now holds something else, which
-    /// is the single worst thing this engine can do.
-    ///
-    /// Returns how many frames went.
-    pub fn discard_all(&self) -> DbResult<usize> {
-        let mut gone = 0usize;
-        // Bounded by the frame count: a pinned frame cannot be evicted, and a
-        // caller that still holds a guard gets fewer frames dropped rather than
-        // an endless sweep.
-        for _ in 0..self.frames().saturating_mul(2) {
-            if self.resident() == 0 {
-                break;
-            }
-            self.cool()?;
-            match self.evict_one()? {
-                Some(_) => gone = gone.saturating_add(1),
-                None => break,
-            }
-        }
-        Ok(gone)
     }
 
     /// Grows the file by one page and returns its id.

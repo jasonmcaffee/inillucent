@@ -35,7 +35,7 @@ use crate::btree::PageKind;
 use crate::cache::{CacheCounters, PageCache, PageKey, PagePin, PageState};
 use crate::header::{DatabaseHeader, VacuumMode, HEADER_SIZE};
 use crate::journal::{Journal, JournalStats};
-use crate::wal::{CheckpointMode, CheckpointOutcome, WalSnapshot, WalStats, WriteAheadLog};
+use crate::wal::{CheckpointMode, CheckpointOutcome, WalSnapshot, WriteAheadLog};
 
 /// What the pager is doing.
 ///
@@ -373,15 +373,6 @@ impl Pager {
     /// Returns the largest the file may grow to, in pages.
     pub fn max_page_count(&self) -> u32 {
         self.max_page_count
-    }
-
-    /// Changes the largest the file may grow to.
-    ///
-    /// A limit below the current size is not an error and does not shrink the
-    /// file: it stops it growing, which is what SQLite does and the only thing
-    /// it *can* do without deleting somebody's rows.
-    pub fn set_max_page_count(&mut self, pages: u32) {
-        self.max_page_count = pages.max(1);
     }
 
     /// Returns how many whole pages the file actually holds.
@@ -853,30 +844,6 @@ impl Pager {
         self.journal = Some(journal);
     }
 
-    /// Reports whether a journal is attached.
-    pub fn has_journal(&self) -> bool {
-        self.journal.is_some()
-    }
-
-    /// Returns what the journal has cost since the pager was opened.
-    pub fn journal_stats(&self) -> JournalStats {
-        let mut totals = self.journal_totals;
-        if let Some(journal) = self.journal.as_ref() {
-            totals.add(journal.stats());
-        }
-        totals
-    }
-
-    /// Returns how many pages this transaction has written to the journal.
-    pub fn journalled_page_count(&self) -> usize {
-        self.journalled.len()
-    }
-
-    /// Reports whether this pager refuses every write.
-    pub fn is_read_only(&self) -> bool {
-        self.read_only
-    }
-
     /// Reports whether a write transaction is open.
     pub fn is_writing(&self) -> bool {
         matches!(
@@ -888,17 +855,6 @@ impl Pager {
     /// Returns how many pages the transaction has modified.
     pub fn dirty_page_count(&self) -> usize {
         self.dirty.len()
-    }
-
-    /// Returns the page numbers the transaction has modified.
-    pub fn dirty_pages(&self) -> Vec<u32> {
-        self.dirty.iter().copied().collect()
-    }
-
-    /// Returns how many undo levels are open: one for the transaction, and one
-    /// for each live statement or savepoint.
-    pub fn undo_depth(&self) -> usize {
-        self.undo.len()
     }
 
     /// Begins a write transaction, taking a RESERVED lock.
@@ -1762,62 +1718,9 @@ impl Pager {
         self.wal = Some(wal);
     }
 
-    /// Detaches the log, which is how a mode change gets it back to close it.
-    pub fn detach_wal(&mut self) -> Option<Box<dyn WriteAheadLog>> {
-        self.wal_snapshot = None;
-        self.wal.take()
-    }
-
-    /// Closes and removes the log, leaving the database in rollback mode.
-    ///
-    /// The log is closed before it is dropped so that the frames in it reach
-    /// the database file. A log that was merely forgotten would leave a
-    /// database whose pages are correct only when read through a log nobody is
-    /// going to open.
-    pub fn close_wal(&mut self) -> DbResult<()> {
-        let Some(mut wal) = self.wal.take() else {
-            return Ok(());
-        };
-        self.wal_snapshot = None;
-        self.cache.discard_above(self.database, 0);
-        let outcome = wal.close(self.file.as_ref());
-        self.file_bytes = self.file.file_size()?;
-        outcome
-    }
-
-    /// Reports whether a log is attached.
-    pub fn has_wal(&self) -> bool {
-        self.wal.is_some()
-    }
-
-    /// Returns what the log has cost since the pager was opened.
-    pub fn wal_stats(&self) -> WalStats {
-        self.wal
-            .as_ref()
-            .map_or(WalStats::default(), |wal| wal.stats())
-    }
-
     /// Returns the snapshot the connection is reading, when there is one.
     pub fn wal_snapshot(&self) -> Option<WalSnapshot> {
         self.wal_snapshot
-    }
-
-    /// Returns how many frames the log may reach before a commit checkpoints
-    /// it, or zero when it never does.
-    pub fn wal_auto_checkpoint(&self) -> u32 {
-        self.wal.as_ref().map_or(0, |wal| wal.auto_checkpoint())
-    }
-
-    /// Sets how many frames the log may reach before a commit checkpoints it.
-    pub fn set_wal_auto_checkpoint(&mut self, frames: u32) {
-        if let Some(wal) = self.wal.as_mut() {
-            wal.set_auto_checkpoint(frames);
-        }
-    }
-
-    /// Returns how many frames the log currently holds.
-    pub fn wal_frame_count(&self) -> u32 {
-        self.wal.as_ref().map_or(0, |wal| wal.frame_count())
     }
 
     /// Copies frames from the log into the database file.

@@ -2,6 +2,7 @@
 name = "inillucent-migrate"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Resumable copy-and-verify migration of a legacy inillucent index directory into a inillucent database, and the legacy direct index API over one."

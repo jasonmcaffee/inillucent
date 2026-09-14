@@ -972,7 +972,7 @@ mod tests {
     /// to be attached to a bug report.
     #[test]
     fn the_report_never_carries_the_password() {
-        let url = ConnectionUrl::parse("postgres://jason:hunter2@db:5432/corpus").expect("parses");
+        let url = ConnectionUrl::parse("postgres://user:hunter2@db:5432/corpus").expect("parses");
         let report = Report {
             source: url.to_string(),
             server: "PostgreSQL 17.2".to_string(),

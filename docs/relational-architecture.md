@@ -253,20 +253,26 @@ at one fixed point rather than at every cut of a commit.
 - **Neither may run inside an explicit transaction.** A rebuild reads a schema and its rows, and a
   transaction still open has neither committed.
 - Both paths are confined by `--root` (§8).
-- **Both act on the real file system directly, not through the connection's `Vfs`.** `rebuild.rs`
-  builds the rebuilt file and swaps it into place with `std::fs::create`/`rename`/`remove_file`
-  against the database's path string, regardless of what `Vfs` the connection was opened on. For a
-  connection on `OsVfs` - every connection opened by path, which is the ordinary case - this is the
-  real file being rebuilt and is exactly right. For a connection given some other `Vfs` (a
-  `MemoryVfs`, or a test double such as `inillucent-sim`'s `SimVfs`), `VACUUM` and `VACUUM INTO`
-  reach the **real disk** at whatever that path string happens to be, entirely bypassing the `Vfs`
-  the rest of the connection uses - an embedder that supplies its own `Vfs` gets a `VACUUM` that
-  writes somewhere its own file system was never asked about. This is a pre-existing limitation
-  rather than something a `VACUUM` change should quietly fix; threading the `Vfs` through the
-  rebuild is a larger change than a rename fix should absorb; and it is why a crash campaign for
-  `VACUUM` cannot yet be driven through `SimVfs`'s fault injection - the simulator never sees the
-  calls the rebuild and the rename actually make. `crates/inillucent-engine/src/rebuild.rs`'s
-  `vacuum_crash` tests cover the rename's own crash safety directly, against real files, instead.
+- **Both act on the connection's own `Vfs`**, every step of the way: the rebuilt file is created
+  through it, the swap is `Vfs::rename`, the old log segments are deleted through it, and both
+  reopens carry the same handle. An application that supplies an encrypting or in-memory `Vfs` gets
+  a `VACUUM` that stays inside it.
+- **`Vfs::rename` is on the trait for this.** It is documented as an atomic replace of the target;
+  `OsVfs` is `std::fs::rename` plus the directory flush Unix needs and Windows does not, `MemoryVfs`
+  moves one entry of its directory map, and `SimVfs` delegates with a failpoint so a campaign can
+  cut inside it. The segments are removed by generating their names from the database's own name
+  rather than by listing the directory, because `inillucent_wal::segment::segment_name` makes the
+  name a function of the base path and a sequence number - so no listing method was needed on the
+  trait.
+- **This was not always true, and the difference is worth knowing.** Until task-1946's H2, the
+  rebuild used `std::fs` directly and `vacuum_in_place` reopened with `ImportedDatabase::open`,
+  which constructs a fresh `OsVfs`. A connection on any other `Vfs` therefore got one of two
+  things from `VACUUM` or `PRAGMA incremental_vacuum`: a failure to find its own database, or - if a
+  real file happened to exist at the path string - a silent move onto the operating system's file
+  system for the rest of the session. `crates/inillucent-compat/tests/vacuum_on_vfs.rs` is the test
+  that says it cannot happen again, and `vacuum_crash.rs` is the crash campaign that became
+  possible: it runs on `SimVfs` like every other one, and one of its cases cuts the machine inside
+  the rename.
 
 `integrity-check` walks every tree. **It is not a proof that a database opens**: the case study
 above records a file that answered `ok` and could not be opened, because the damage was in the log

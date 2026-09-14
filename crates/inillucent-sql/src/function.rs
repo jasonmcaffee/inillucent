@@ -537,19 +537,6 @@ impl WindowFunc {
             WindowFunc::Lag | WindowFunc::Lead => (1, 3),
         }
     }
-
-    /// Returns whether the function reads the frame or the whole partition.
-    ///
-    /// `lag` and `lead` are defined on the partition and ignore the frame
-    /// entirely; the ranking functions are defined on the peer groups. Only
-    /// `first_value`, `last_value` and `nth_value` read the frame, and treating
-    /// them alike is a wrong answer for every query with a narrow frame.
-    pub fn reads_frame(self) -> bool {
-        matches!(
-            self,
-            WindowFunc::FirstValue | WindowFunc::LastValue | WindowFunc::NthValue
-        )
-    }
 }
 
 /// Returns the window function a folded name spells.

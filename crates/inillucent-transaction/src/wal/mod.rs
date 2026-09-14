@@ -23,7 +23,7 @@
 //!
 //! Module map:
 //!
-//! - [`format`] - the log file's header, frames, and rolling checksum;
+//! - `format` - the log file's header, frames, and rolling checksum;
 //! - [`index`] - the shared-memory index, its read marks, and its lock slots;
 //! - [`checkpoint`] - moving frames back into the database file.
 
@@ -561,19 +561,9 @@ impl Wal {
         }
     }
 
-    /// Reports whether this connection currently holds the write lock.
-    pub fn holds_write_lock(&self) -> bool {
-        self.write_lock
-    }
-
     /// Returns the snapshot's frame count, for diagnostics.
     pub fn max_frame(&self) -> u32 {
         self.header.max_frame
-    }
-
-    /// Returns how many frames the log file holds beyond the snapshot.
-    pub fn appended_frames(&self) -> u32 {
-        self.append_frame
     }
 
     /// Runs a checkpoint with the checkpoint lock held.

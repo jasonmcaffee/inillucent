@@ -17,7 +17,6 @@ use inillucent_base::limits::Limits;
 use inillucent_base::DbResult;
 use inillucent_sql::catalog_view::{IndexInfo, TableInfo};
 use inillucent_storage::cursor::BTreeCursor;
-use inillucent_storage::mutate;
 use inillucent_storage::pager::Pager;
 use inillucent_value::record::{KeyInfo, RecordRef};
 use inillucent_value::{compare, Collation, Value};
@@ -185,38 +184,6 @@ fn key_info(index: &IndexInfo) -> KeyInfo {
             })
             .collect(),
     }
-}
-
-/// Empties a statistics table, keeping its root page.
-pub fn clear_stats(pager: &mut Pager, root: u32) -> DbResult<()> {
-    if root == 0 {
-        return Ok(());
-    }
-    mutate::clear_tree(
-        pager,
-        PageId::new(root)
-            .ok_or_else(|| inillucent_base::error::corrupt("a statistics table with no root"))?,
-    )?;
-    Ok(())
-}
-
-/// Writes one statistics row.
-pub fn write_stat(pager: &mut Pager, root: u32, rowid: i64, stat: &Stat) -> DbResult<()> {
-    let values = [
-        Value::owned_text(&stat.table)?,
-        match &stat.index {
-            Some(index) => Value::owned_text(index)?,
-            None => Value::Null,
-        },
-        Value::owned_text(&stat.stat)?,
-    ];
-    let encoding = pager.text_encoding();
-    let format = pager.header().schema_format.max(1);
-    let payload = inillucent_value::record::encode_record(&values, encoding, format)?;
-    let root = PageId::new(root)
-        .ok_or_else(|| inillucent_base::error::corrupt("a statistics table with no root"))?;
-    mutate::insert_row(pager, root, rowid, &payload)?;
-    Ok(())
 }
 
 /// Parses a `stat` column into the numbers the planner reads.

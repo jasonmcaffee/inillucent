@@ -531,7 +531,7 @@ impl Engine {
     /// **The open writer's uncommitted changes are hidden first, then the
     /// version log's committed ones.** The two cover different windows and both
     /// are needed: the version log says what a *committed* transaction
-    /// overwrote since the snapshot, and [`Engine::uncommitted`] says what the
+    /// overwrote since the snapshot, and `Engine::uncommitted` says what the
     /// transaction that is writing *right now* has overwritten and not yet
     /// committed. A reader that consulted only the second saw a dirty read, and
     /// one that consulted only the first saw a stale read.

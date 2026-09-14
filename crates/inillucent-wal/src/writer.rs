@@ -439,8 +439,8 @@ impl Wal {
     /// continuing past it is not a fix, because `read_chain` cannot skip a
     /// gap either way.** An earlier version of this function kept walking
     /// lower after an unreadable segment, on the theory that an *earlier*
-    /// surviving segment might still legitimately hold `lsn`. Codex Sol's
-    /// review of this ticket named the flaw directly: even when such an
+    /// surviving segment might still legitimately hold `lsn`. The task-1911
+    /// review named the flaw directly: even when such an
     /// earlier segment exists and its own `first_lsn` is at or below `lsn`,
     /// `read_chain` reads segments in strict, unbroken sequence from where it
     /// starts - the gap left by the unreadable one still ends the chain

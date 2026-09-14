@@ -96,13 +96,6 @@ impl PageSize {
     }
 }
 
-/// The smallest page a database may be created with, in bytes.
-///
-/// Named separately from [`PageSize`] because one place needs it before a
-/// `PageSize` exists: opening a file reads the meta page, and the meta page
-/// says what the page size is. The probe read is this long.
-pub const MIN_PAGE_BYTES: usize = 8_192;
-
 /// The size of the header every page carries.
 pub const COMMON_HEADER: usize = 32;
 

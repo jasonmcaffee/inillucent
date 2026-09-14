@@ -173,15 +173,6 @@ impl<'p> Vector<'p> {
         }
     }
 
-    /// Returns the contiguous double bytes, when this is a typed real vector
-    /// with no NULLs.
-    pub fn dense_real_bytes(&self) -> Option<&'p [u8]> {
-        match self {
-            Vector::Float64 { bytes, class: None } => Some(bytes),
-            _ => None,
-        }
-    }
-
     /// Builds a vector over one leaf mini-column.
     ///
     /// Chooses the typed fast path when the column's physical type is inline

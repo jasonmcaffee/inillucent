@@ -8,7 +8,7 @@
 //!
 //! Page 2 is the first map, and every `entries_per_map + 1` page after it is
 //! another; each map covers the pages that follow it. The arithmetic lives in
-//! [`DatabaseHeader::pointer_map_page`] so that the reader and the writer
+//! `DatabaseHeader::pointer_map_page` so that the reader and the writer
 //! cannot disagree about which page covers which.
 //!
 //! An entry is five bytes: a one-byte kind and a four-byte parent. The kinds

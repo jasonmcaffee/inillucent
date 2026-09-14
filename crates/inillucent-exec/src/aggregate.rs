@@ -730,21 +730,6 @@ impl Accumulator {
         }
     }
 
-    /// Reports whether [`Accumulator::push_dense_ints`] is available for this
-    /// aggregate.
-    ///
-    /// Every kind supports it; the method exists so a caller reads a name
-    /// rather than a comment when it decides which path to take.
-    pub fn takes_dense_ints(&self) -> bool {
-        !matches!(
-            self.kind,
-            AggregateKind::External(_)
-                | AggregateKind::JsonGroupArray(_)
-                | AggregateKind::JsonGroupObject(_)
-                | AggregateKind::Bare(_)
-        )
-    }
-
     /// Folds one numeric value into the running total.
     ///
     /// @param value - the value to add

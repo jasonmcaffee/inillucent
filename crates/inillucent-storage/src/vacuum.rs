@@ -34,8 +34,6 @@ use inillucent_base::error::corrupt;
 use inillucent_base::ids::PageId;
 use inillucent_base::limits::Limits;
 use inillucent_base::{bytes, DbResult};
-use inillucent_value::record::{encode_record, RecordRef};
-use inillucent_value::Value;
 
 use crate::alloc;
 use crate::btree::{BTreePage, PageLayout};
@@ -44,7 +42,16 @@ use crate::header::VacuumMode;
 use crate::mutate;
 use crate::pager::{FailSite, Pager};
 use crate::ptrmap;
+
+// What `auto_vacuum_commit` and `copy_database` need. They are `#[cfg(test)]`
+// now, so these are too - a release build carries neither the functions nor
+// their imports (task-1946, M1).
+#[cfg(test)]
 use crate::schema;
+#[cfg(test)]
+use inillucent_value::record::{encode_record, RecordRef};
+#[cfg(test)]
+use inillucent_value::Value;
 
 /// Moves a page's contents to another page and repoints everything at it.
 ///
@@ -55,6 +62,24 @@ use crate::schema;
 /// leaves reverse pointers that name a page whose contents are still correct,
 /// which the integrity check reports; the opposite order would leave a live
 /// reference to a page that had already been overwritten.
+// **What this module's seven functions are actually reached by**, because the
+// task-1946 review's M1 listed six of them as callerless and a grep says
+// otherwise (checked function by function):
+//
+// - `relocate_page` - `mutate.rs`, in this crate. Public.
+// - `incremental_vacuum` - `inillucent-compat`'s `writeperf` benchmark and
+//   `btree_model.rs`. Public, and its numbers are recorded in
+//   `compat/baseline/phase4-mutation-baselines.json` as `incremental-vacuum`.
+// - `copy_tree` - the same benchmark, recorded as `vacuum-copy-tree`. Public.
+// - `final_size` and `incremental_step` - called from inside this module by the
+//   two above. Private now; they were never named from outside it.
+// - `auto_vacuum_commit` and `copy_database` - this module's own tests, and
+//   nothing else anywhere. Private now.
+//
+// So nothing here is dead, and nothing here is reached by the shipping engine
+// either: `VACUUM` is `inillucent-engine/src/rebuild.rs`, and what this file
+// measures is what the retired pager did. Three of the seven stop being part of
+// the crate's public surface, which is the part of M1 that was true.
 pub fn relocate_page(pager: &mut Pager, from: PageId, to: PageId) -> DbResult<()> {
     pager.reach_failpoint(FailSite::Relocate)?;
     if from.get() < 3 || to.get() < 3 {
@@ -178,7 +203,7 @@ fn read_layout(pager: &mut Pager, page: PageId) -> DbResult<Arc<PageLayout>> {
 /// so the file shrinks by more than the free count. Getting it wrong does not
 /// corrupt anything - it makes a vacuum stop one page early or try one page too
 /// many - but it is what decides when the work is done.
-pub fn final_size(pager: &Pager) -> DbResult<u32> {
+fn final_size(pager: &Pager) -> DbResult<u32> {
     let original = pager.page_count();
     let free = pager.header().freelist_count;
     let usable = pager.usable_size()?;
@@ -229,7 +254,7 @@ fn map_page_number(pager: &Pager, page: u32) -> DbResult<u32> {
 /// freelist, and if it is in use it is moved into a free page lower down. Then
 /// the file loses its trailing page, together with any pointer maps that have
 /// nothing left to cover.
-pub fn incremental_step(pager: &mut Pager) -> DbResult<bool> {
+fn incremental_step(pager: &mut Pager) -> DbResult<bool> {
     if pager.header().vacuum_mode == VacuumMode::None {
         return Ok(false);
     }
@@ -302,6 +327,10 @@ pub fn incremental_vacuum(pager: &mut Pager, pages: u32) -> DbResult<u32> {
     Ok(done)
 }
 
+// Only this module's own tests reach it, so a release build does not carry
+// it (task-1946, M1). Nothing in the shipping engine ever did: `VACUUM` is
+// `inillucent-engine/src/rebuild.rs`.
+#[cfg(test)]
 /// Shrinks the file as far as it will go, which is what a FULL auto-vacuum
 /// database does at commit.
 ///
@@ -309,7 +338,7 @@ pub fn incremental_vacuum(pager: &mut Pager, pages: u32) -> DbResult<u32> {
 /// belongs. This runs the incremental step until there is nothing left to do,
 /// which reaches the same file with more page moves. The end state is what the
 /// format specifies; the route to it is not.
-pub fn auto_vacuum_commit(pager: &mut Pager) -> DbResult<u32> {
+fn auto_vacuum_commit(pager: &mut Pager) -> DbResult<u32> {
     if pager.header().vacuum_mode != VacuumMode::Auto {
         return Ok(0);
     }
@@ -361,6 +390,10 @@ pub fn copy_tree(source: &mut Pager, destination: &mut Pager, root: PageId) -> D
     }
 }
 
+// Only this module's own tests reach it, so a release build does not carry
+// it (task-1946, M1). Nothing in the shipping engine ever did: `VACUUM` is
+// `inillucent-engine/src/rebuild.rs`.
+#[cfg(test)]
 /// Copies a whole database into another, rewriting each schema row's root page.
 ///
 /// This is the mechanism a full `VACUUM` runs on: build the new file, copy every
@@ -372,7 +405,7 @@ pub fn copy_tree(source: &mut Pager, destination: &mut Pager, root: PageId) -> D
 /// this touches. Reading a row, replacing one field and encoding it again is
 /// record work rather than SQL work: nothing here knows what the column is
 /// called, only which position the format puts it in.
-pub fn copy_database(source: &mut Pager, destination: &mut Pager) -> DbResult<usize> {
+fn copy_database(source: &mut Pager, destination: &mut Pager) -> DbResult<usize> {
     let objects = schema::load_schema(source)?;
     let mut moved = Vec::new();
     for object in &objects {

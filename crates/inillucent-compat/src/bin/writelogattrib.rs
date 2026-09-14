@@ -19,7 +19,7 @@
 //! estimated.
 //!
 //! Usage:
-//!   inillucent-writelogattrib <medium sqlite fixture> [--page-size N] [--frames N] [--iterations N]
+//!   inillucent-writelogattrib `<medium sqlite fixture>` [--page-size N] [--frames N] [--iterations N]
 
 use std::path::Path;
 use std::process::{Command, ExitCode};

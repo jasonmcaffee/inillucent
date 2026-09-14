@@ -46,7 +46,7 @@
 //! about every index, after every statement.
 //!
 //! Usage:
-//!   inillucent-writegate <sqlite fixture> [--rounds N] [--page-size N]
+//!   inillucent-writegate `<sqlite fixture>` [--rounds N] [--page-size N]
 //!                        [--scale S] [--frames N] [--families a,b] [--repeat N]
 
 use std::path::{Path, PathBuf};

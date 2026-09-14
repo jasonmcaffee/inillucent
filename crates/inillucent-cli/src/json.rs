@@ -196,25 +196,13 @@ fn real(number: f64) -> String {
 
 /// Escapes the characters a JSON string may not carry raw.
 ///
+/// One of three identical copies until task-1946's M4. The answer lives in
+/// `inillucent_base::json` now; this name stays because the rest of this module
+/// calls it.
+///
 /// @param text - the string to escape
 pub fn escape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for character in text.chars() {
-        match character {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{8}' => out.push_str("\\b"),
-            '\u{c}' => out.push_str("\\f"),
-            other if (other as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", other as u32));
-            }
-            other => out.push(other),
-        }
-    }
-    out
+    inillucent_base::json::escape(text)
 }
 
 /// Builds an object from pairs, so a caller writes one line instead of five.

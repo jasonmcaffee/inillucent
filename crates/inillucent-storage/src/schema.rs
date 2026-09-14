@@ -19,7 +19,7 @@ use inillucent_base::DbResult;
 use inillucent_value::record::RecordRef;
 use inillucent_value::Value;
 
-use crate::cursor::{BTreeCursor, SeekBias};
+use crate::cursor::BTreeCursor;
 use crate::pager::Pager;
 
 /// The page the schema table is always rooted at.
@@ -91,12 +91,7 @@ pub struct SchemaObject {
     pub sql: Option<String>,
 }
 
-impl SchemaObject {
-    /// Reports whether this row describes an index on `table`.
-    pub fn is_index_on(&self, table: &str) -> bool {
-        self.kind == SchemaKind::Index && self.table_name == table
-    }
-}
+impl SchemaObject {}
 
 /// Reads every row of `sqlite_schema`.
 ///
@@ -159,26 +154,6 @@ pub fn root_pages(objects: &[SchemaObject]) -> Vec<PageId> {
     roots.sort_unstable_by_key(|page| page.get());
     roots.dedup_by_key(|page| page.get());
     roots
-}
-
-/// Positions a cursor on the schema row with a given rowid.
-///
-/// This is what a schema-cookie reload uses to re-read one row rather than the
-/// whole table.
-pub fn seek_schema_row(pager: &mut Pager, rowid: i64) -> DbResult<Option<SchemaObject>> {
-    let limits = Limits::default();
-    let root = PageId::from_persisted(SCHEMA_ROOT)?;
-    let encoding = pager.text_encoding();
-    let mut cursor = BTreeCursor::table(root);
-    if !cursor.seek_rowid(pager, rowid, SeekBias::AtOrAfter)? {
-        cursor.reset();
-        return Ok(None);
-    }
-    let payload = cursor.payload(pager, &limits)?;
-    let record = RecordRef::parse_with_limits(&payload, encoding, &limits)?;
-    let object = decode_schema_row(rowid, &record)?;
-    cursor.reset();
-    Ok(Some(object))
 }
 
 /// Decodes one schema record into an object.

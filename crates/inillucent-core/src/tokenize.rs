@@ -181,8 +181,8 @@ impl Tokenizer {
         for word in text.split_whitespace() {
             // An address is recognised before the general compound rule, and is
             // never stemmed. `compound_identifier` would keep
-            // `gordon@360water.com` whole by accident, because its domain happens
-            // to hold a digit, and shatter `jasonlmcaffee@gmail.com`, whose local
+            // `dana@3rivers.example.com` whole by accident, because its domain happens
+            // to hold a digit, and shatter `whitmore@example.com`, whose local
             // part would then be stemmed into `jasonlmcaffe` - a string that
             // appears nowhere. Half a mailbox's addresses indexing as themselves
             // and half dissolving is worse than either.
@@ -228,8 +228,8 @@ impl Tokenizer {
 /// whole address as one unstemmed term:
 ///
 /// ```text
-/// to_tsvector('english','gordon@360water.com jasonlmcaffee@gmail.com')
-///   => 'gordon@360water.com':1 'jasonlmcaffee@gmail.com':2
+/// to_tsvector('english','dana@3rivers.example.com whitmore@example.com')
+///   => 'dana@3rivers.example.com':1 'whitmore@example.com':2
 /// ```
 ///
 /// The shape is deliberately narrow - one `@`, a non-empty local part, and a
@@ -417,16 +417,16 @@ mod tests {
     fn an_email_address_survives_whole_and_unstemmed() {
         let t = Tokenizer::default();
         // The measured failure: this address used to shatter into
-        // `["jasonlmcaffe", "gmail", "com"]`, so a search for one person's address
-        // quietly matched every message mentioning gmail. The address itself is
+        // `["whitmor", "exampl", "com"]`, so a search for one person's address
+        // quietly matched every message mentioning the provider. The address is
         // now a term, and it is not put through the stemmer.
-        let terms = t.terms("jasonlmcaffee@gmail.com");
+        let terms = t.terms("whitmore@example.com");
         assert!(
-            terms.contains(&"jasonlmcaffee@gmail.com".to_string()),
+            terms.contains(&"whitmore@example.com".to_string()),
             "got {terms:?}"
         );
         assert!(
-            !terms.contains(&"jasonlmcaffe@gmail.com".to_string()),
+            !terms.contains(&"whitmor@example.com".to_string()),
             "the address itself was stemmed: {terms:?}"
         );
     }
@@ -434,11 +434,11 @@ mod tests {
     #[test]
     fn every_address_shape_is_kept_whole_not_only_the_lucky_ones() {
         let t = Tokenizer::default();
-        // `gordon@360water.com` used to survive only because its domain holds a
+        // `dana@3rivers.example.com` used to survive only because its domain holds a
         // digit, which made the general compound rule fire. Both must survive now.
         for address in [
-            "jasonlmcaffee@gmail.com",
-            "gordon@360water.com",
+            "whitmore@example.com",
+            "dana@3rivers.example.com",
             "Terri.Shaw@example.org",
             "first+tag@sub.example.co.uk",
         ] {
@@ -453,8 +453,8 @@ mod tests {
     #[test]
     fn an_address_is_still_split_so_a_part_query_matches() {
         let t = Tokenizer::default();
-        let terms = t.terms("jasonlmcaffee@gmail.com");
-        assert!(terms.contains(&"gmail".to_string()), "got {terms:?}");
+        let terms = t.terms("whitmore@example.com");
+        assert!(terms.contains(&"exampl".to_string()), "got {terms:?}");
         assert!(terms.contains(&"com".to_string()));
     }
 
@@ -501,8 +501,8 @@ mod tests {
         // The parts are still emitted and still stemmed, so the two sides agree:
         // a document holding the address and a query holding only the local part
         // both produce the same stem.
-        let document = t.terms("From: jasonlmcaffee@gmail.com");
-        let query = t.query_terms("jasonlmcaffee");
+        let document = t.terms("From: whitmore@example.com");
+        let query = t.query_terms("whitmore");
         assert_eq!(query.len(), 1);
         assert!(
             document.contains(&query[0]),
@@ -516,8 +516,11 @@ mod tests {
         // The compound rule would also have kept this one, so the address rule has
         // to replace it rather than run beside it, or the term is double counted
         // and its term frequency is wrong.
-        let terms = t.terms("gordon@360water.com");
-        let count = terms.iter().filter(|x| *x == "gordon@360water.com").count();
+        let terms = t.terms("dana@3rivers.example.com");
+        let count = terms
+            .iter()
+            .filter(|x| *x == "dana@3rivers.example.com")
+            .count();
         assert_eq!(count, 1, "got {terms:?}");
     }
 

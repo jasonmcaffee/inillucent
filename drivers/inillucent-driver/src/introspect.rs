@@ -90,21 +90,7 @@ pub struct Table {
     pub without_rowid: bool,
 }
 
-impl Table {
-    /// Returns whether a column refuses NULL.
-    ///
-    /// @param nth - the column's position
-    pub fn column_not_null(&self, nth: usize) -> bool {
-        self.not_null.get(nth).copied().unwrap_or(false)
-    }
-
-    /// Returns whether a column is part of the primary key.
-    ///
-    /// @param name - the column's name
-    pub fn column_in_key(&self, name: &str) -> bool {
-        self.key.iter().any(|part| part == name)
-    }
-}
+impl Table {}
 
 /// Puts quotes round an identifier, doubling any quote already inside it.
 ///

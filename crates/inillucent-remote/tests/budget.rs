@@ -143,7 +143,7 @@ fn scratch(name: &str) -> PathBuf {
 /// @param destination - where to publish
 /// @param limits - what the migration may spend
 fn plan(destination: &Path, limits: Option<Limits>) -> Plan {
-    let url = ConnectionUrl::parse("postgres://jason:hunter2@example:5432/corpus").expect("parses");
+    let url = ConnectionUrl::parse("postgres://user:hunter2@example:5432/corpus").expect("parses");
     let mut plan = Plan::new(url, destination);
     // One row per destination transaction, so the budget is read once per row.
     // A migration in production uses a batch of thousands; this is the setting

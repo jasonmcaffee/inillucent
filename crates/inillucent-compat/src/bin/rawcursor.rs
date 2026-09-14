@@ -24,7 +24,7 @@
 //! bound does not clear 3x, no amount of work above the storage layer reaches
 //! it, and the bottleneck is the page cache and the cursor rather than the VM.
 //!
-//! Usage: inillucent-rawcursor <database> [rounds]
+//! Usage: inillucent-rawcursor `<database>` `rounds`
 //!
 //! It prints ns per scan and ns per row, and the aggregate it computed, so the
 //! answer can be checked against `sqlite3` on the same file.

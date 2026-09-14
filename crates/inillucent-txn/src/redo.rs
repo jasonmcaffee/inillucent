@@ -215,8 +215,11 @@ pub struct RedoTree {
 /// it - [`Applier::page_lsn`] reports the leaf's stamp, the scan skips any
 /// record at or below it, and every method here stamps the leaf with the
 /// record's LSN before it returns. A method that forgot to stamp would be
-/// replayed on every recovery, which is what the recover-twice-byte-identical
-/// test exists to catch.
+/// replayed on every recovery, which is what
+/// `crates/inillucent-txn/tests/durability.rs`'s
+/// `recovering_checkpointing_and_recovering_again_is_the_same_database` exists
+/// to catch. It had no name here at all until task-1946's M9, which is a
+/// comment asking a reader to take its word for it.
 ///
 /// ## Where a key comes from
 ///

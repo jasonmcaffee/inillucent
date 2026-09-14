@@ -94,6 +94,32 @@ pub fn generate(manifest: &Manifest, sources: &SourceRegister, results: &ResultS
                 detail: format!("`{}` is not in compat/sources.toml", capability.source),
             });
         }
+        // **A cited identifier nothing has ever recorded (task-1946, M5).**
+        // `missing-test` above asks only whether the row cites something, so a
+        // row citing a name that does not exist read as an unevidenced claim
+        // and was filed under "no passing result recorded" - the same words a
+        // skipped suite produces, and a skipped suite is fixed by running it.
+        // `ext.fts5.queries` sat in the Problems table under those words
+        // because it cited `inillucent-compat::a_tokenizer_this_build_has_not_
+        // got_is_refused`, which lives in `inillucent-ext`, and no Linux run
+        // could ever have cleared it.
+        //
+        // Only asked when something has been recorded: with no results at all
+        // every identifier is unrecorded, and that is the state a checkout is
+        // in before `inillucent-evidence` has run.
+        if !results.is_empty() {
+            let unrecorded = results.never_recorded(&capability.tests);
+            if !unrecorded.is_empty() {
+                problems.push(Problem {
+                    kind: "unrecorded-test",
+                    capability: capability.id.clone(),
+                    detail: format!(
+                        "no run has recorded an outcome for {} - the name is wrong, or the test is gone",
+                        unrecorded.join(", ")
+                    ),
+                });
+            }
+        }
         let platforms = results.platforms_passing(&capability.tests);
         let evidenced = evidence_status(capability.status, &capability.tests, &platforms, results);
         if capability.status == Status::Pass && evidenced != Status::Pass {
@@ -410,6 +436,32 @@ mod tests {
             .problems
             .iter()
             .any(|problem| problem.kind == "missing-test"));
+    }
+
+    /// A cited test nothing records is a wrong name, and says so in those words
+    /// rather than the ones a skipped suite produces.
+    #[test]
+    fn a_cited_test_no_run_has_recorded_is_detected() {
+        let manifest = manifest_with("pass", "\"t1\", \"typo\"");
+        let report = generate(&manifest, &sources(), &passing("t1", &REQUIRED_PLATFORMS));
+        let problem = report
+            .problems
+            .iter()
+            .find(|problem| problem.kind == "unrecorded-test")
+            .expect("the unrecorded citation is reported");
+        assert!(
+            problem.detail.contains("typo"),
+            "the report names which identifier: {}",
+            problem.detail
+        );
+
+        // And a row whose every citation was recorded raises nothing.
+        let sound = generate(
+            &manifest_with("pass", "\"t1\""),
+            &sources(),
+            &passing("t1", &REQUIRED_PLATFORMS),
+        );
+        assert!(sound.is_clean(), "{:?}", sound.problems);
     }
 
     /// A source that is not in the register is a dead link.

@@ -4,50 +4,30 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 
 | status | capabilities |
 |---|---|
-| missing | 14 |
-| partial | 14 |
-| pass | 247 |
-| **total** | **275** |
+| missing | 13 |
+| pass | 263 |
+| **total** | **276** |
 
 ## By phase
 
 | phase | pass | partial | missing | deviation |
 |---|---|---|---|---|
-| phase 0: contract, provenance, and harness foundation | 24 | 0 | 0 | 0 |
-| phase 10: WAL and concurrent connection semantics | 10 | 2 | 0 | 0 |
-| phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree | 9 | 4 | 0 | 0 |
+| phase 0: contract, provenance, and harness foundation | 25 | 0 | 0 | 0 |
+| phase 10: WAL and concurrent connection semantics | 12 | 0 | 0 | 0 |
+| phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree | 14 | 0 | 0 | 0 |
 | phase 12: C ABI and CLI completion | 12 | 0 | 0 | 0 |
 | phase 13: transactional inillucent search and legacy migration | 3 | 0 | 0 | 0 |
 | phase 14: performance qualification and release | 3 | 0 | 0 | 0 |
-| phase 15: optional surfaces this release does not implement | 0 | 0 | 7 | 0 |
+| phase 15: optional surfaces this release does not implement | 0 | 0 | 6 | 0 |
 | phase 1: VFS, binary primitives, and simulator | 46 | 0 | 0 | 0 |
 | phase 2: values, affinities, collations, and records | 17 | 0 | 0 | 0 |
 | phase 3: read-only header, pager, page cache, and B-tree | 19 | 0 | 0 | 0 |
 | phase 4: B-tree mutation, allocation, and rollback pages | 16 | 0 | 1 | 0 |
 | phase 5: lexer, parser, AST, and syntax parity | 10 | 0 | 0 | 0 |
-| phase 6: catalog, binder, expression VM, and read-only SELECT | 14 | 6 | 2 | 0 |
+| phase 6: catalog, binder, expression VM, and read-only SELECT | 20 | 0 | 2 | 0 |
 | phase 7: single-database rollback transactions and DML | 26 | 0 | 4 | 0 |
-| phase 8: complete SELECT, planner, schema, and SQL semantics | 31 | 2 | 0 | 0 |
+| phase 8: complete SELECT, planner, schema, and SQL semantics | 33 | 0 | 0 | 0 |
 | phase 9: foreign keys, ATTACH, and multi-database commit | 7 | 0 | 0 | 0 |
-
-## Problems
-
-| kind | capability | detail |
-|---|---|---|
-| unsupported-release-claim | `api.rust.bind-step-reset` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `catalog.sqlite-schema` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `ext.fts5.queries` | no passing result recorded on windows-x86_64, linux-x86_64 |
-| unsupported-release-claim | `functions.date-time` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `pragma.rearchitecture.fixed` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `pragma.rearchitecture.honoured` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `pragma.rearchitecture.silent` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `sql.binder.name-resolution` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `sql.expr.like-glob` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `sql.expr.operators` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `sql.functions.scalar-core` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `sql.select.window` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `wal.checkpoint.full` | no passing result recorded on linux-x86_64 |
-| unsupported-release-claim | `wal.checkpoint.restart` | no passing result recorded on linux-x86_64 |
 
 ## Capabilities
 
@@ -57,6 +37,7 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `harness.manifest.duplicate-ids` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `harness.manifest.missing-tests` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
 | `harness.manifest.dead-source-links` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `harness.manifest.unrecorded-tests` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `harness.manifest.unsupported-release-claims` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
 | `harness.report.reproducible` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
 | `harness.report.shipped-manifest-is-sound` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
@@ -171,11 +152,11 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `sql.select.where` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
 | `sql.select.order-by` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
 | `sql.select.limit-offset` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
-| `sql.expr.operators` | pass | partial | windows-x86_64 | 7 |
+| `sql.expr.operators` | pass | pass | linux-x86_64, windows-x86_64 | 7 |
 | `sql.expr.case` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
-| `sql.expr.like-glob` | pass | partial | windows-x86_64 | 6 |
+| `sql.expr.like-glob` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
 | `sql.expr.in-subquery` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
-| `catalog.sqlite-schema` | pass | partial | windows-x86_64 | 6 |
+| `catalog.sqlite-schema` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
 | `catalog.schema-cookie` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
 | `catalog.prepared-statement-invalidation` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
 | `sql.insert` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
@@ -188,7 +169,7 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `txn.begin-commit-rollback` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
 | `txn.rollback-journal` | pass | pass | linux-x86_64, windows-x86_64 | 7 |
 | `txn.hot-journal-recovery` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
-| `txn.savepoints` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
+| `txn.savepoints` | pass | pass | linux-x86_64, windows-x86_64 | 7 |
 | `txn.statement-journal` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
 | `txn.synchronous-modes` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
 | `sql.select.joins` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
@@ -197,7 +178,7 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `sql.select.distinct` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
 | `sql.with.cte` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `sql.with.recursive` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
-| `sql.select.window` | pass | partial | windows-x86_64 | 4 |
+| `sql.select.window` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
 | `sql.upsert` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `sql.returning` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
 | `sql.create-view` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
@@ -228,15 +209,15 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `wal.read-transactions` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
 | `wal.write-transactions` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
 | `wal.checkpoint.passive` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
-| `wal.checkpoint.full` | pass | partial | windows-x86_64 | 2 |
-| `wal.checkpoint.restart` | pass | partial | windows-x86_64 | 2 |
+| `wal.checkpoint.full` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `wal.checkpoint.restart` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
 | `wal.checkpoint.truncate` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `wal.recovery` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
 | `txn.busy-handler` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `txn.isolation` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
 | `functions.core` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `functions.aggregate` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
-| `functions.date-time` | pass | partial | windows-x86_64 | 2 |
+| `functions.date-time` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
 | `functions.math` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `functions.json` | pass | pass | linux-x86_64, windows-x86_64 | 8 |
 | `functions.window` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
@@ -244,12 +225,12 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `pragma.pager` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
 | `pragma.integrity` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `pragma.query-only` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
-| `pragma.rearchitecture.honoured` | pass | partial | windows-x86_64 | 4 |
-| `pragma.rearchitecture.fixed` | pass | partial | windows-x86_64 | 1 |
-| `pragma.rearchitecture.silent` | pass | partial | windows-x86_64 | 1 |
+| `pragma.rearchitecture.honoured` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
+| `pragma.rearchitecture.fixed` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
+| `pragma.rearchitecture.silent` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `vtab.contract` | pass | pass | linux-x86_64, windows-x86_64 | 7 |
 | `vtab.eponymous` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
-| `ext.fts5.queries` | pass | partial | - | 18 |
+| `ext.fts5.queries` | pass | pass | linux-x86_64, windows-x86_64 | 18 |
 | `ext.fts5.ranking` | pass | pass | linux-x86_64, windows-x86_64 | 5 |
 | `ext.rtree` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
 | `capi.open-close` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
@@ -275,7 +256,7 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `optional.snapshot-api` | missing | missing | - | 0 |
 | `optional.unlock-notify` | missing | missing | - | 0 |
 | `optional.rbu` | missing | missing | - | 0 |
-| `optional.geopoly` | missing | missing | - | 0 |
+| `optional.geopoly` | pass | pass | linux-x86_64, windows-x86_64 | 9 |
 | `optional.rtree-geometry-callbacks` | missing | missing | - | 0 |
 | `sql.negative.right-outer-join-pre-3-39` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
 | `sql.negative.grant-revoke` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
@@ -301,17 +282,17 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `sql.parser.differential-fuzzing` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
 | `sql.parser.limits` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
 | `sql.parser.purity` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
-| `sql.binder.name-resolution` | pass | partial | windows-x86_64 | 4 |
+| `sql.binder.name-resolution` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
 | `sql.binder.collation-precedence` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `sql.select.distinct-basic` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
 | `sql.select.aggregates-basic` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
 | `sql.select.group-by-basic` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
 | `sql.select.inner-join-basic` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
-| `sql.functions.scalar-core` | pass | partial | windows-x86_64 | 7 |
+| `sql.functions.scalar-core` | pass | pass | linux-x86_64, windows-x86_64 | 7 |
 | `vm.bytecode.verifier` | missing | missing | - | 0 |
 | `vm.statement.lifecycle` | pass | pass | linux-x86_64, windows-x86_64 | 4 |
 | `vm.statement.interrupt` | missing | missing | - | 0 |
-| `api.rust.bind-step-reset` | pass | partial | windows-x86_64 | 3 |
+| `api.rust.bind-step-reset` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
 | `api.rust.read-only-open` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
 | `txn.journal-modes` | pass | pass | linux-x86_64, windows-x86_64 | 6 |
 | `txn.crash-matrix` | pass | pass | linux-x86_64, windows-x86_64 | 6 |

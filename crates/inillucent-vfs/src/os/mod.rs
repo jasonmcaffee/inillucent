@@ -101,9 +101,15 @@ impl Vfs for OsVfs {
             fs_options.create(options.create && !options.exclusive);
             fs_options.create_new(options.exclusive);
         }
+        // **The path is in the message (task-1946).** `from_io` alone answers
+        // `Open: No such file or directory (os error 2)`, which names neither the
+        // file nor which of the several a statement touches - and every file this
+        // workspace opens is opened here, so that one sentence was the whole
+        // report for a missing database, a missing log segment and a missing
+        // scratch file alike.
         let file = fs_options
             .open(path.as_path())
-            .map_err(|error| VfsError::from_io(VfsOperation::Open, &error))?;
+            .map_err(|error| VfsError::from_io(VfsOperation::Open, &error).about(path.as_path()))?;
         let identity = platform::file_identity(&file)?;
         let file = Arc::new(file);
         Ok(Box::new(OsFile {
@@ -126,9 +132,26 @@ impl Vfs for OsVfs {
             Err(removal) => return Err(VfsError::from_io(VfsOperation::Delete, &removal)),
         }
         if sync_dir {
-            if let Some(parent) = path.parent() {
+            if let Some(parent) = path.containing_directory() {
                 platform::sync_directory(&parent)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Replaces `to` with `from` through the platform's own rename.
+    ///
+    /// `std::fs::rename` replaces an existing destination on both platforms
+    /// this ships on, which is the atomicity the contract promises. The
+    /// directory entry is then flushed the same way `delete` flushes it: Unix
+    /// has to be told, Windows journals the metadata itself.
+    fn rename(&self, from: &DbPath, to: &DbPath) -> VfsResult<()> {
+        crate::confine::authorize(from)?;
+        crate::confine::authorize(to)?;
+        std::fs::rename(from.as_path(), to.as_path())
+            .map_err(|error| VfsError::from_io(VfsOperation::Rename, &error))?;
+        if let Some(parent) = to.containing_directory() {
+            platform::sync_directory(&parent)?;
         }
         Ok(())
     }

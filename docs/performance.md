@@ -277,7 +277,12 @@ since has been measured on Linux.
   bound, and that is 1.33x at both ends, so `extension` reads MISSED at all three scales. The reason
   it is better at the ends than in the middle is the same one: FTS5's build is four ordinary row
   writes per document, and a row write is where the per-statement cost lands.
-- **One machine.** Windows 11 on x64. The disk matters more than it looks: part way through a four
+- **One machine.** Windows 11 on x64, which `tests/performance-history.tsv` records in its
+  `machine` column as `machine-` and eight hex digits. That label is a digest of the
+  machine's own name rather than the name: the column exists so rows taken on two machines
+  can be told apart and rows taken on one can be read as a series, and a digest does both
+  without publishing whose machine it was. `INILLUCENT_MACHINE` sets the label directly for
+  a fleet that would rather read `ci-linux-x64`. The disk matters more than it looks: part way through a four
   run sequence, `txn.batched` is 200 commits and 200 `fsync`s, and it goes from 309 ms to 895 ms
   **on
   SQLite's own arm**, on the same fixture with the same binary, because the volume stops keeping up

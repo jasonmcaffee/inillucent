@@ -47,6 +47,18 @@ status = "pass"
 tests = ["inillucent-compat::report::tests::dead_source_links_are_detected"]
 
 [[capability]]
+id = "harness.manifest.unrecorded-tests"
+source = "https://sqlite.org/rescode.html"
+profile = "default"
+phase = "phase 0: contract, provenance, and harness foundation"
+# A row may cite a test that does not exist, and until task-1946 that read as an
+# unevidenced claim rather than a wrong name. `ext.fts5.queries` sat in the
+# Problems table for exactly that: the tokenizer test it named lives in
+# `inillucent-ext`, not `inillucent-compat`.
+status = "pass"
+tests = ["inillucent-compat::report::tests::a_cited_test_no_run_has_recorded_is_detected"]
+
+[[capability]]
 id = "harness.manifest.unsupported-release-claims"
 source = "https://sqlite.org/rescode.html"
 profile = "default"
@@ -1099,7 +1111,9 @@ source = "https://sqlite.org/lang_transaction.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["inillucent-compat::transactions_match_sqlite", "inillucent-compat::a_rolled_back_transaction_changes_nothing", "inillucent-transaction::state::tests::begin_within_begin_is_refused", "inillucent-transaction::state::tests::immediate_begins_as_a_writer_and_deferred_does_not"]
+# The two `inillucent-transaction::state` tests this cited went with that
+# module in task-1946's M1; `inillucent-engine` carries the behaviour now.
+tests = ["inillucent-compat::transactions_match_sqlite", "inillucent-compat::a_rolled_back_transaction_changes_nothing", "inillucent-compat::a_rollback_is_heard_and_the_next_transaction_begins_again", "inillucent-compat::begin_fires_once_per_transaction_not_once_per_statement"]
 
 [[capability]]
 id = "txn.rollback-journal"
@@ -1123,7 +1137,9 @@ source = "https://sqlite.org/lang_savepoint.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["inillucent-compat::a_savepoint_undoes_only_what_it_covers", "inillucent-compat::a_savepoint_restores_rows_and_counters_together", "inillucent-compat::nested_savepoints_unwind_innermost_first", "inillucent-compat::a_savepoint_outside_a_transaction_commits_on_release", "inillucent-transaction::state::tests::duplicate_savepoints_resolve_from_the_inside_out", "inillucent-transaction::state::tests::rollback_to_keeps_the_savepoint_and_does_not_restore_the_rowid"]
+# The two `inillucent-transaction::state` tests this cited went with that
+# module in task-1946's M1; `inillucent-txn`'s undo log carries the savepoint stack now.
+tests = ["inillucent-compat::a_savepoint_undoes_only_what_it_covers", "inillucent-compat::a_savepoint_restores_rows_and_counters_together", "inillucent-compat::nested_savepoints_unwind_innermost_first", "inillucent-compat::a_savepoint_outside_a_transaction_commits_on_release", "inillucent-txn::undo::tests::a_savepoint_rolls_back_exactly_what_came_after_it", "inillucent-txn::undo::tests::rolling_back_to_an_outer_savepoint_closes_the_inner_ones", "inillucent-txn::undo::tests::the_same_savepoint_name_twice_nests"]
 
 [[capability]]
 id = "txn.statement-journal"
@@ -1131,7 +1147,9 @@ source = "https://sqlite.org/atomiccommit.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["inillucent-compat::a_failed_statement_undoes_only_itself", "inillucent-compat::every_conflict_algorithm_undoes_what_it_says", "inillucent-transaction::state::tests::a_rolled_back_statement_does_not_publish_its_count", "inillucent-transaction::state::tests::fail_keeps_the_rows_written_before_the_conflict"]
+# The two `inillucent-transaction::state` tests this cited went with that
+# module in task-1946's M1; `inillucent-engine` carries the behaviour now.
+tests = ["inillucent-compat::a_failed_statement_undoes_only_itself", "inillucent-compat::every_conflict_algorithm_undoes_what_it_says", "inillucent-compat::the_counters_after_a_failed_statement_are_sqlites", "inillucent-compat::a_failed_statement_leaves_the_savepoint_around_it"]
 
 [[capability]]
 id = "txn.synchronous-modes"
@@ -1715,7 +1733,7 @@ phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
 # takes SQLite's own answer to the same statements first, so what is recorded as
 # the difference is measured rather than assumed.
 status = "pass"
-tests = ["inillucent-compat::a_tokenizer_this_build_has_not_got_is_refused_rather_than_substituted", "inillucent-compat::a_tokenizer_this_build_has_not_got_is_refused", "inillucent-compat::the_shadow_tables_are_the_documented_ones", "inillucent-compat::the_content_table_holds_the_rows", "inillucent-compat::a_term_finds_its_rows", "inillucent-compat::a_phrase_requires_the_words_together", "inillucent-compat::the_operators_combine_matches", "inillucent-compat::a_prefix_matches_every_term_that_starts_with_it", "inillucent-compat::a_column_filter_restricts_the_match", "inillucent-compat::near_requires_the_terms_close_together", "inillucent-compat::the_index_follows_the_rows", "inillucent-compat::a_scan_and_a_rowid_lookup_need_no_match", "inillucent-compat::an_unindexed_column_is_stored_but_not_matched", "inillucent-compat::the_tokenizer_folds_case_and_splits_on_punctuation", "inillucent-compat::the_special_commands_are_accepted", "inillucent-compat::a_rebuild_restores_every_answer", "inillucent-compat::an_unknown_command_is_refused", "inillucent-compat::the_settings_are_written_to_the_config_table"]
+tests = ["inillucent-compat::a_tokenizer_this_build_has_not_got_is_refused_rather_than_substituted", "inillucent-ext::vtab::fts5::tokenize::tests::a_tokenizer_this_build_has_not_got_is_refused", "inillucent-compat::the_shadow_tables_are_the_documented_ones", "inillucent-compat::the_content_table_holds_the_rows", "inillucent-compat::a_term_finds_its_rows", "inillucent-compat::a_phrase_requires_the_words_together", "inillucent-compat::the_operators_combine_matches", "inillucent-compat::a_prefix_matches_every_term_that_starts_with_it", "inillucent-compat::a_column_filter_restricts_the_match", "inillucent-compat::near_requires_the_terms_close_together", "inillucent-compat::the_index_follows_the_rows", "inillucent-compat::a_scan_and_a_rowid_lookup_need_no_match", "inillucent-compat::an_unindexed_column_is_stored_but_not_matched", "inillucent-compat::the_tokenizer_folds_case_and_splits_on_punctuation", "inillucent-compat::the_special_commands_are_accepted", "inillucent-compat::a_rebuild_restores_every_answer", "inillucent-compat::an_unknown_command_is_refused", "inillucent-compat::the_settings_are_written_to_the_config_table"]
 
 [[capability]]
 id = "ext.fts5.ranking"
@@ -1987,9 +2005,38 @@ tests = []
 id = "optional.geopoly"
 source = "https://sqlite.org/geopoly.html"
 profile = "default"
-phase = "phase 15: optional surfaces this release does not implement"
-status = "missing"
-tests = []
+phase = "phase 11: full built-ins, PRAGMAs, virtual tables, FTS5, and R-Tree"
+# **What this row measures, which it did not say before task-1946 (M5).** It sat
+# in phase 15 as `missing` while `inillucent-scalar/src/geopoly.rs` and
+# `inillucent-ext/src/vtab/rtree.rs` implemented the whole surface, so a reader
+# comparing the table against the engine found a row contradicted by the build
+# it describes, with nothing to say which was right.
+#
+# The row measures the geopoly surface as an application reaches it: the eleven
+# registered `geopoly_*()` scalar functions - `area`, `blob`, `json`, `svg`,
+# `within`, `overlap`, `contains_point`, `bbox`, `ccw`, `xform`, `regular` - the
+# `geopoly_group_bbox()` aggregate, and the `geopoly` virtual table module whose
+# `_shape` column stores a polygon in an R-Tree. It does not measure
+# `geopoly_debug`, which answers nothing in either build.
+#
+# The five `geopoly.*` cases in `semantics.rs` take SQLite's own answer to the
+# same scripts and compare byte for byte, which is what makes the blob format a
+# measured match rather than a claimed one - the polygon blob is a file format,
+# so a table written by one engine is read by the other. The unit tests beside
+# them cover the two ports the module's own header calls exact rather than
+# equivalent: the reference's fifth-order sine, and the sweep's tie-breaking.
+status = "pass"
+tests = [
+  "inillucent-compat::every_probed_construct_answers_as_the_table_says",
+  "inillucent-compat::the_function_register_names_what_the_engine_answers",
+  "inillucent-compat::the_module_register_names_what_the_engine_answers",
+  "inillucent-scalar::geopoly::tests::a_square_round_trips_through_both_forms",
+  "inillucent-scalar::geopoly::tests::winding_shows_in_the_sign_of_the_area",
+  "inillucent-scalar::geopoly::tests::a_regular_polygon_matches_the_references_approximation",
+  "inillucent-scalar::geopoly::tests::the_sweep_names_every_way_two_shapes_can_meet",
+  "inillucent-scalar::geopoly::tests::a_point_is_in_out_or_on_the_edge",
+  "inillucent-scalar::geopoly::tests::what_is_not_a_polygon_is_refused_rather_than_half_read",
+]
 
 [[capability]]
 id = "optional.rtree-geometry-callbacks"
@@ -2328,7 +2375,9 @@ source = "https://sqlite.org/c3ref/changes.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["inillucent-compat::crud_matches_sqlite", "inillucent-compat::conflict_algorithms_match_sqlite", "inillucent-compat::the_counters_report_what_a_statement_changed", "inillucent-transaction::state::tests::a_rolled_back_statement_does_not_publish_its_count"]
+# The one `inillucent-transaction::state` test this cited went with that
+# module in task-1946's M1; `inillucent-engine` carries the behaviour now.
+tests = ["inillucent-compat::crud_matches_sqlite", "inillucent-compat::conflict_algorithms_match_sqlite", "inillucent-compat::the_counters_report_what_a_statement_changed", "inillucent-compat::the_counters_after_a_failed_statement_are_sqlites"]
 
 [[capability]]
 id = "txn.autocommit"
@@ -2336,7 +2385,9 @@ source = "https://sqlite.org/c3ref/get_autocommit.html"
 profile = "default"
 phase = "phase 7: single-database rollback transactions and DML"
 status = "pass"
-tests = ["inillucent-compat::transactions_match_sqlite", "inillucent-compat::a_rolled_back_transaction_changes_nothing", "inillucent-transaction::state::tests::a_new_connection_is_in_autocommit", "inillucent-transaction::state::tests::a_savepoint_outside_a_transaction_starts_a_transaction"]
+# The two `inillucent-transaction::state` tests this cited went with that
+# module in task-1946's M1; `inillucent-engine` carries the behaviour now.
+tests = ["inillucent-compat::transactions_match_sqlite", "inillucent-compat::a_rolled_back_transaction_changes_nothing", "inillucent-compat::the_connection_is_in_autocommit", "inillucent-compat::a_savepoint_outside_a_transaction_commits_on_release"]
 
 [[capability]]
 id = "txn.resource-failures"

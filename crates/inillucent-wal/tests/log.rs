@@ -319,6 +319,9 @@ impl Vfs for CountingVfs {
     fn delete(&self, path: &DbPath, sync_dir: bool) -> inillucent_vfs::VfsResult<()> {
         self.inner.delete(path, sync_dir)
     }
+    fn rename(&self, from: &DbPath, to: &DbPath) -> inillucent_vfs::VfsResult<()> {
+        self.inner.rename(from, to)
+    }
     fn access(
         &self,
         path: &DbPath,

@@ -39,7 +39,7 @@
 //! inside the timed region, exactly as the SQLite arm does.
 //!
 //! Usage:
-//!   inillucent-fullgate <sqlite fixture> [--rounds N] [--page-size N]
+//!   inillucent-fullgate `<sqlite fixture>` [--rounds N] [--page-size N]
 //!                       [--scale S] [--frames N] [--families a,b] [--repeat N]
 
 /// The engine's own allocator, installed for this program.

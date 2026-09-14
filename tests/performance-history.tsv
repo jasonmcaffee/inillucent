@@ -18,17 +18,22 @@
 # processor time in ~15.6 ms units and a median of five short rounds is one of two
 # values. `*_peak_mib` is the largest round, because that is what a peak is.
 #
+# `machine` is a label, not a hostname: the first eight hex digits of a digest of
+# whatever this operating system calls the machine, so two machines get two labels
+# and one machine keeps its own across runs, without the name itself being published.
+# `INILLUCENT_MACHINE` overrides it when a fleet would rather read `ci-linux-x64`.
+#
 # `calibration_ms` is a fixed arithmetic loop timed before the run: it says how fast
 # this machine is, so rows from two machines can be compared. `drift` is the same
 # loop timed again afterwards, divided by the first - a row whose drift is far from
 # 1.000 was taken on a machine that changed under it and should be distrusted.
 #
 stamp	commit	machine	workload	rounds	ours_wall_ms	ours_cpu_ms	ours_peak_mib	sqlite_wall_ms	sqlite_cpu_ms	sqlite_peak_mib	startup_ours_wall_ms	startup_sqlite_wall_ms	wall_ratio	cpu_ratio	rss_ratio	calibration_ms	drift
-2026-09-08T20:00:09Z	b935dab-dirty	jason-25	insert.10k	5	5191.18	5521.88	15.70	35.96	15.62	5.65	25.34	12.26	0.005	0.001	0.360	199.2	0.762
-2026-09-08T20:00:09Z	b935dab-dirty	jason-25	index.build	5	57.18	50.00	10.52	74.62	53.12	8.77	25.34	12.26	1.958	1.167	0.834	199.2	0.762
-2026-09-08T20:00:09Z	b935dab-dirty	jason-25	lookup.indexed	5	98.72	93.75	8.05	26.90	25.00	5.66	25.34	12.26	0.199	0.192	0.703	199.2	0.762
-2026-09-08T20:00:09Z	b935dab-dirty	jason-25	scan.aggregate	5	119.53	96.88	7.74	97.43	96.88	6.66	25.34	12.26	0.904	1.037	0.861	199.2	0.762
-2026-09-08T20:00:09Z	b935dab-dirty	jason-25	update.churn	5	1148.56	1134.38	15.06	57.88	50.00	5.71	25.34	12.26	0.041	0.036	0.380	199.2	0.762
-2026-09-08T20:00:09Z	b935dab-dirty	jason-25	join.two-tables	5	120.32	118.75	7.37	55.36	50.00	6.83	25.34	12.26	0.454	0.382	0.927	199.2	0.762
-2026-09-08T20:00:09Z	b935dab-dirty	jason-25	text.like	5	161.15	159.38	8.17	51.94	43.75	6.39	25.34	12.26	0.292	0.234	0.783	199.2	0.762
-2026-09-08T20:00:09Z	b935dab-dirty	jason-25	delete.half	5	659.12	646.88	19.31	55.26	50.00	5.90	25.34	12.26	0.068	0.064	0.305	199.2	0.762
+2026-09-08T20:00:09Z	b935dab-dirty	machine-e909e6bf	insert.10k	5	5191.18	5521.88	15.70	35.96	15.62	5.65	25.34	12.26	0.005	0.001	0.360	199.2	0.762
+2026-09-08T20:00:09Z	b935dab-dirty	machine-e909e6bf	index.build	5	57.18	50.00	10.52	74.62	53.12	8.77	25.34	12.26	1.958	1.167	0.834	199.2	0.762
+2026-09-08T20:00:09Z	b935dab-dirty	machine-e909e6bf	lookup.indexed	5	98.72	93.75	8.05	26.90	25.00	5.66	25.34	12.26	0.199	0.192	0.703	199.2	0.762
+2026-09-08T20:00:09Z	b935dab-dirty	machine-e909e6bf	scan.aggregate	5	119.53	96.88	7.74	97.43	96.88	6.66	25.34	12.26	0.904	1.037	0.861	199.2	0.762
+2026-09-08T20:00:09Z	b935dab-dirty	machine-e909e6bf	update.churn	5	1148.56	1134.38	15.06	57.88	50.00	5.71	25.34	12.26	0.041	0.036	0.380	199.2	0.762
+2026-09-08T20:00:09Z	b935dab-dirty	machine-e909e6bf	join.two-tables	5	120.32	118.75	7.37	55.36	50.00	6.83	25.34	12.26	0.454	0.382	0.927	199.2	0.762
+2026-09-08T20:00:09Z	b935dab-dirty	machine-e909e6bf	text.like	5	161.15	159.38	8.17	51.94	43.75	6.39	25.34	12.26	0.292	0.234	0.783	199.2	0.762
+2026-09-08T20:00:09Z	b935dab-dirty	machine-e909e6bf	delete.half	5	659.12	646.88	19.31	55.26	50.00	5.90	25.34	12.26	0.068	0.064	0.305	199.2	0.762

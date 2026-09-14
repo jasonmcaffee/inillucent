@@ -380,14 +380,6 @@ impl Index {
         self.config.lexical_rescore_depth = depth.max(1);
     }
 
-    /// Changes how much a heading term outweighs a body term, on a committed index.
-    /// The heading lengths it reads were recorded at build time, so only the weight
-    /// is a setting.
-    /// @param boost - 0 ignores where a term occurred, above 0 favours the heading
-    pub fn set_lexical_heading_boost(&mut self, boost: f32) {
-        self.config.lexical_heading_boost = boost.max(0.0);
-    }
-
     /// Turns per-query vector weighting on or off, and sets the rule it uses.
     /// @param on - whether the weight is chosen per query
     /// @param weights - the rule; every gain at zero reproduces the fixed weight
@@ -862,30 +854,43 @@ impl Index {
 
     /// Exact top k under this index's declared metric. The reference the rest
     /// is graded against.
+    ///
+    /// @param query - the query vector, at this index's width and all finite
+    /// @param filter - the compiled predicate
+    /// @param k - how many neighbours to return
+    /// @returns the neighbours, or a refusal when the query cannot be compared
     pub fn exhaustive_search(
         &self,
         query: &[f32],
         filter: &CompiledFilter,
         k: usize,
-    ) -> Vec<Neighbour> {
-        flat::search(&self.vectors, &self.store, filter, query, k)
+    ) -> anyhow::Result<Vec<Neighbour>> {
+        crate::distance::check_query(query, self.config.dims)?;
+        Ok(flat::search(&self.vectors, &self.store, filter, query, k))
     }
 
     /// Approximate top k through the graph, with the quantized first pass when
     /// configured.
+    ///
+    /// @param query - the query vector, at this index's width and all finite
+    /// @param filter - the compiled predicate
+    /// @param k - how many neighbours to return
+    /// @param ef_search - traversal width, or the configured default
+    /// @returns the neighbours, or a refusal when the query cannot be compared
     pub fn vector_search(
         &self,
         query: &[f32],
         filter: &CompiledFilter,
         k: usize,
         ef_search: Option<usize>,
-    ) -> Vec<Neighbour> {
+    ) -> anyhow::Result<Vec<Neighbour>> {
+        crate::distance::check_query(query, self.config.dims)?;
         let Some(graph) = &self.graph else {
             return self.exhaustive_search(query, filter, k);
         };
 
         match &self.quantized {
-            None => graph.search(&self.vectors, &self.store, filter, query, k, ef_search),
+            None => Ok(graph.search(&self.vectors, &self.store, filter, query, k, ef_search)),
             Some(codes) => {
                 // Walk the graph on the int8 codes, drawing more candidates than
                 // needed, then rescore the survivors with the full precision
@@ -904,7 +909,7 @@ impl Index {
                         .then(a.chunk.cmp(&b.chunk))
                 });
                 candidates.truncate(k);
-                candidates
+                Ok(candidates)
             }
         }
     }
@@ -942,9 +947,10 @@ impl Index {
         filter: &CompiledFilter,
         k: usize,
         ef_search: Option<usize>,
-    ) -> Vec<FusedHit> {
-        self.hybrid_search_explained(query, query_vector, filter, k, ef_search)
-            .0
+    ) -> anyhow::Result<Vec<FusedHit>> {
+        Ok(self
+            .hybrid_search_explained(query, query_vector, filter, k, ef_search)?
+            .0)
     }
 
     /// The full pipeline, and what it decided on the way.
@@ -966,7 +972,7 @@ impl Index {
         filter: &CompiledFilter,
         k: usize,
         ef_search: Option<usize>,
-    ) -> (Vec<FusedHit>, QueryExplanation) {
+    ) -> anyhow::Result<(Vec<FusedHit>, QueryExplanation)> {
         self.search_branches(query, query_vector, filter, k, ef_search, Branches::Both)
     }
 
@@ -992,10 +998,14 @@ impl Index {
         k: usize,
         ef_search: Option<usize>,
         branches: Branches,
-    ) -> (Vec<FusedHit>, QueryExplanation) {
+    ) -> anyhow::Result<(Vec<FusedHit>, QueryExplanation)> {
         let candidates = self.config.candidates.max(k);
+        // **Only when the vector branch runs.** A lexical-only search is the
+        // fallback a caller uses when its embedder is down, and it passes an
+        // empty vector deliberately; refusing that would turn the fallback into
+        // a failure, which is the opposite of what it is for.
         let vector_hits = if branches.runs_vector() {
-            self.vector_search(query_vector, filter, candidates, ef_search)
+            self.vector_search(query_vector, filter, candidates, ef_search)?
         } else {
             Vec::new()
         };
@@ -1035,7 +1045,7 @@ impl Index {
             vector_candidates: vector_hits.len(),
             lexical_candidates: lexical_hits.len(),
         };
-        (hits, explanation)
+        Ok((hits, explanation))
     }
 
     /// The fusion this query should use: the configured one, or the same method
@@ -1217,7 +1227,7 @@ impl Index {
         query_vector: &[f32],
         filter: &CompiledFilter,
         params: GroupedParams,
-    ) -> GroupedSearch {
+    ) -> anyhow::Result<GroupedSearch> {
         // Enough chunk hits that the requested number of documents can be filled
         // even when every document contributes its cap.
         //
@@ -1241,7 +1251,7 @@ impl Index {
             chunk_budget,
             params.ef_search,
             params.branches,
-        );
+        )?;
 
         let mut order: Vec<u32> = Vec::new();
         let mut grouped: std::collections::HashMap<u32, Vec<FusedHit>> =
@@ -1295,11 +1305,11 @@ impl Index {
         } else {
             "lexical"
         };
-        GroupedSearch {
+        Ok(GroupedSearch {
             documents,
             path,
             explanation,
-        }
+        })
     }
 }
 
@@ -1410,6 +1420,122 @@ mod tests {
         index
     }
 
+    /// A query narrower or wider than the index is refused, not truncated.
+    ///
+    /// **All three of these used to return a `Vec<Neighbour>` in a release
+    /// build.** `dot` zips the two slices and stops at the shorter one, so a
+    /// four wide query against an eight wide index scored every vector on its
+    /// first four components and came back with a plausible ranking; a twelve
+    /// wide one scored on eight and ignored the rest. Nothing said either had
+    /// happened (task-1946, H4). A debug build reached `dot`'s own
+    /// `debug_assert_eq!` on the two lengths and panicked there instead, which
+    /// is why the release binary a user runs was the one that answered.
+    #[test]
+    fn a_query_of_the_wrong_width_is_refused() {
+        let index = build(200, 8, IndexConfig::default());
+        let filter = index.compile(&Filter::default());
+
+        for width in [4usize, 12] {
+            let query = vector(width, 0.25);
+            let refusals = [
+                index
+                    .exhaustive_search(&query, &filter, 10)
+                    .err()
+                    .map(|why| why.to_string()),
+                index
+                    .vector_search(&query, &filter, 10, None)
+                    .err()
+                    .map(|why| why.to_string()),
+                index
+                    .hybrid_search("offer", &query, &filter, 10, None)
+                    .err()
+                    .map(|why| why.to_string()),
+            ];
+            for refusal in refusals {
+                let Some(message) = refusal else {
+                    panic!("a {width} wide query against an 8 wide index was answered");
+                };
+                assert!(
+                    message.contains("8 dimensions") && message.contains(&width.to_string()),
+                    "the refusal does not say which widths disagreed: {message}"
+                );
+            }
+        }
+    }
+
+    /// A query carrying a component that is not a finite number is refused.
+    ///
+    /// A NaN passes `rank.rs`'s `clamp` unchanged and makes a distance that
+    /// compares equal to everything, which is not a total order - so the heap
+    /// the graph search walks stops being a heap, and what comes out is an
+    /// arbitrary set of neighbours rather than a wrong score.
+    #[test]
+    fn a_query_with_a_component_that_is_not_a_number_is_refused() {
+        let index = build(200, 8, IndexConfig::default());
+        let filter = index.compile(&Filter::default());
+
+        for (name, bad) in [
+            ("NaN", f32::NAN),
+            ("an infinity", f32::INFINITY),
+            ("a negative infinity", f32::NEG_INFINITY),
+        ] {
+            let mut query = vector(8, 0.25);
+            query[3] = bad;
+            let refusal = index
+                .vector_search(&query, &filter, 10, None)
+                .err()
+                .map(|why| why.to_string());
+            let Some(message) = refusal else {
+                panic!("a query holding {name} was answered");
+            };
+            assert!(
+                message.contains("component 3"),
+                "the refusal does not say which component: {message}"
+            );
+            assert!(
+                message.contains("finite"),
+                "the refusal does not say what was wrong with it: {message}"
+            );
+        }
+    }
+
+    /// A query of the right width and all finite is still answered.
+    ///
+    /// The other half of the check: a guard that refuses everything would pass
+    /// both tests above and break every caller.
+    #[test]
+    fn a_query_of_the_right_width_is_still_answered() {
+        let index = build(200, 8, IndexConfig::default());
+        let filter = index.compile(&Filter::default());
+        let query = vector(8, 0.25);
+
+        assert!(!index
+            .exhaustive_search(&query, &filter, 10)
+            .expect("the query is this index's width and finite")
+            .is_empty());
+        assert!(!index
+            .vector_search(&query, &filter, 10, None)
+            .expect("the query is this index's width and finite")
+            .is_empty());
+    }
+
+    /// A lexical-only search is still answered with no vector at all.
+    ///
+    /// **The fallback a caller uses when its embedder is down passes an empty
+    /// vector deliberately**, and `inillucent-migrate`'s verification passes
+    /// `&[]` with `Branches::Lexical` at six sites. Checking the width
+    /// unconditionally would have turned every one of them into a failure, so
+    /// the check runs only when the vector branch does.
+    #[test]
+    fn a_lexical_only_search_needs_no_vector() {
+        let index = build(200, 8, IndexConfig::default());
+        let filter = index.compile(&Filter::default());
+        let (hits, _) = index
+            .search_branches("offer", &[], &filter, 10, None, Branches::Lexical)
+            .expect("a lexical search does not look at the vector");
+        assert!(!hits.is_empty(), "the lexical branch answered nothing");
+    }
+
     #[test]
     fn commit_reports_the_structures_it_built() {
         let mut index = Index::new(IndexConfig {
@@ -1470,8 +1596,12 @@ mod tests {
         );
         let f = index.compile(&Filter::default());
         let q = index.vectors().copy_of(5);
-        let exact = index.exhaustive_search(&q, &f, 10);
-        let approx = index.vector_search(&q, &f, 10, Some(200));
+        let exact = index
+            .exhaustive_search(&q, &f, 10)
+            .expect("the query is this index's width and finite");
+        let approx = index
+            .vector_search(&q, &f, 10, Some(200))
+            .expect("the query is this index's width and finite");
         let want: std::collections::HashSet<u32> = exact.iter().map(|n| n.chunk).collect();
         let overlap = approx.iter().filter(|n| want.contains(&n.chunk)).count();
         assert!(
@@ -1496,7 +1626,9 @@ mod tests {
         for source in ["slack", "jira"] {
             let f = index.compile(&Filter::source(source));
             let q = index.vectors().copy_of(1);
-            let hits = index.hybrid_search("offer eligibility rules", &q, &f, 10, Some(64));
+            let hits = index
+                .hybrid_search("offer eligibility rules", &q, &f, 10, Some(64))
+                .expect("the query is this index's width and finite");
             assert_eq!(hits.len(), 10, "{source} returned {} of 10", hits.len());
         }
     }
@@ -1529,8 +1661,12 @@ mod tests {
         let f = plain.compile(&Filter::default());
         let fq = quant.compile(&Filter::default());
         let q = plain.vectors().copy_of(9);
-        let a = plain.vector_search(&q, &f, 10, Some(128));
-        let b = quant.vector_search(&q, &fq, 10, Some(128));
+        let a = plain
+            .vector_search(&q, &f, 10, Some(128))
+            .expect("the query is this index's width and finite");
+        let b = quant
+            .vector_search(&q, &fq, 10, Some(128))
+            .expect("the query is this index's width and finite");
         let want: std::collections::HashSet<u32> = a.iter().map(|n| n.chunk).collect();
         let overlap = b.iter().filter(|n| want.contains(&n.chunk)).count();
         assert!(overlap >= 9, "quantized ranking kept only {overlap} of 10");
@@ -1541,7 +1677,9 @@ mod tests {
         let index = build(400, 16, IndexConfig::default());
         let f = index.compile(&Filter::default());
         let q = index.vectors().copy_of(0);
-        let hits = index.hybrid_search("offer eligibility", &q, &f, 20, None);
+        let hits = index
+            .hybrid_search("offer eligibility", &q, &f, 20, None)
+            .expect("the query is this index's width and finite");
         let mut per_doc = std::collections::HashMap::new();
         for h in &hits {
             *per_doc
@@ -1560,6 +1698,7 @@ mod tests {
 
         let mut chunks: Vec<u32> = index
             .vector_search(&q, &f, 20, None)
+            .expect("the query is this index's width and finite")
             .iter()
             .map(|n| n.chunk)
             .collect();
@@ -1572,6 +1711,7 @@ mod tests {
         chunks.extend(
             index
                 .hybrid_search("offer eligibility", &q, &f, 20, None)
+                .expect("the query is this index's width and finite")
                 .iter()
                 .map(|h| h.chunk),
         );
@@ -1590,12 +1730,19 @@ mod tests {
         });
         index.commit();
         let f = index.compile(&Filter::default());
-        assert!(index.vector_search(&[0.0; 8], &f, 10, None).is_empty());
+        assert!(index
+            .vector_search(&[0.0; 8], &f, 10, None)
+            .expect("the query is this index's width and finite")
+            .is_empty());
         assert!(index.lexical_search("anything", &f, 10).is_empty());
         assert!(index
             .hybrid_search("anything", &[0.0; 8], &f, 10, None)
+            .expect("the query is this index's width and finite")
             .is_empty());
-        assert!(index.exhaustive_search(&[0.0; 8], &f, 10).is_empty());
+        assert!(index
+            .exhaustive_search(&[0.0; 8], &f, 10)
+            .expect("the query is this index's width and finite")
+            .is_empty());
     }
 
     #[test]
@@ -1641,15 +1788,17 @@ mod tests {
         let index = build(2000, 32, IndexConfig::default());
         let f = index.compile(&Filter::default());
         let q = index.vectors().copy_of(0);
-        let grouped = index.hybrid_search_grouped(
-            "offer eligibility rules",
-            &q,
-            &f,
-            GroupedParams {
-                documents: 10,
-                ..Default::default()
-            },
-        );
+        let grouped = index
+            .hybrid_search_grouped(
+                "offer eligibility rules",
+                &q,
+                &f,
+                GroupedParams {
+                    documents: 10,
+                    ..Default::default()
+                },
+            )
+            .expect("the query is this index's width and finite");
         assert_eq!(grouped.documents.len(), 10);
         let unique: std::collections::HashSet<u32> =
             grouped.documents.iter().map(|d| d.document).collect();
@@ -1668,28 +1817,32 @@ mod tests {
         // A vector that matches nothing in particular, and a query that does.
         let q = vector(32, 999.0);
 
-        let lexical = index.hybrid_search_grouped(
-            "offer eligibility rules",
-            &q,
-            &f,
-            GroupedParams {
-                branches: Branches::Lexical,
-                ..Default::default()
-            },
-        );
+        let lexical = index
+            .hybrid_search_grouped(
+                "offer eligibility rules",
+                &q,
+                &f,
+                GroupedParams {
+                    branches: Branches::Lexical,
+                    ..Default::default()
+                },
+            )
+            .expect("the query is this index's width and finite");
         assert_eq!(lexical.path, "lexical");
         assert!(!lexical.documents.is_empty());
         assert!(lexical.explanation.vector_candidates == 0);
 
-        let vector_only = index.hybrid_search_grouped(
-            "a query holding no term this corpus knows",
-            &q,
-            &f,
-            GroupedParams {
-                branches: Branches::Vector,
-                ..Default::default()
-            },
-        );
+        let vector_only = index
+            .hybrid_search_grouped(
+                "a query holding no term this corpus knows",
+                &q,
+                &f,
+                GroupedParams {
+                    branches: Branches::Vector,
+                    ..Default::default()
+                },
+            )
+            .expect("the query is this index's width and finite");
         assert!(
             !vector_only.documents.is_empty(),
             "the vector branch found nothing"
@@ -1704,8 +1857,12 @@ mod tests {
 
         let everything = index.compile(&Filter::default());
         let selective = index.compile(&Filter::source("jira"));
-        let broad = index.hybrid_search_grouped("offer", &q, &everything, GroupedParams::default());
-        let narrow = index.hybrid_search_grouped("offer", &q, &selective, GroupedParams::default());
+        let broad = index
+            .hybrid_search_grouped("offer", &q, &everything, GroupedParams::default())
+            .expect("the query is this index's width and finite");
+        let narrow = index
+            .hybrid_search_grouped("offer", &q, &selective, GroupedParams::default())
+            .expect("the query is this index's width and finite");
 
         assert_eq!(broad.path, index.path_for(&everything, None));
         assert_eq!(narrow.path, "exhaustive", "a selective filter should scan");
@@ -1717,24 +1874,28 @@ mod tests {
         let f = index.compile(&Filter::default());
         let q = index.vectors().copy_of(0);
 
-        let none = index.hybrid_search_grouped(
-            "offer eligibility",
-            &q,
-            &f,
-            GroupedParams {
-                corroboration: 0.0,
-                ..Default::default()
-            },
-        );
-        let weighted = index.hybrid_search_grouped(
-            "offer eligibility",
-            &q,
-            &f,
-            GroupedParams {
-                corroboration: 1.0,
-                ..Default::default()
-            },
-        );
+        let none = index
+            .hybrid_search_grouped(
+                "offer eligibility",
+                &q,
+                &f,
+                GroupedParams {
+                    corroboration: 0.0,
+                    ..Default::default()
+                },
+            )
+            .expect("the query is this index's width and finite");
+        let weighted = index
+            .hybrid_search_grouped(
+                "offer eligibility",
+                &q,
+                &f,
+                GroupedParams {
+                    corroboration: 1.0,
+                    ..Default::default()
+                },
+            )
+            .expect("the query is this index's width and finite");
         let multi_chunk = weighted.documents.iter().find(|d| d.chunks.len() > 1);
         let Some(multi) = multi_chunk else {
             return; // nothing in this fixture matched twice; the rule is untested but not wrong
@@ -1756,26 +1917,30 @@ mod tests {
         let index = build(2000, 32, IndexConfig::default());
         let f = index.compile(&Filter::default());
         let q = index.vectors().copy_of(0);
-        let first = index.hybrid_search_grouped(
-            "offer eligibility",
-            &q,
-            &f,
-            GroupedParams {
-                documents: 5,
-                offset: 0,
-                ..Default::default()
-            },
-        );
-        let second = index.hybrid_search_grouped(
-            "offer eligibility",
-            &q,
-            &f,
-            GroupedParams {
-                documents: 5,
-                offset: 5,
-                ..Default::default()
-            },
-        );
+        let first = index
+            .hybrid_search_grouped(
+                "offer eligibility",
+                &q,
+                &f,
+                GroupedParams {
+                    documents: 5,
+                    offset: 0,
+                    ..Default::default()
+                },
+            )
+            .expect("the query is this index's width and finite");
+        let second = index
+            .hybrid_search_grouped(
+                "offer eligibility",
+                &q,
+                &f,
+                GroupedParams {
+                    documents: 5,
+                    offset: 5,
+                    ..Default::default()
+                },
+            )
+            .expect("the query is this index's width and finite");
         let front: std::collections::HashSet<u32> =
             first.documents.iter().map(|d| d.document).collect();
         assert!(second
@@ -1789,8 +1954,9 @@ mod tests {
         let index = build(2000, 32, IndexConfig::default());
         let f = index.compile(&Filter::default());
         let q = index.vectors().copy_of(0);
-        let grouped =
-            index.hybrid_search_grouped("offer eligibility", &q, &f, GroupedParams::default());
+        let grouped = index
+            .hybrid_search_grouped("offer eligibility", &q, &f, GroupedParams::default())
+            .expect("the query is this index's width and finite");
         for document in &grouped.documents {
             let best = document
                 .chunks
@@ -1812,7 +1978,9 @@ mod tests {
             .expect("the chunks are added");
         let v = vector(16, 3.0);
         let f = index.compile(&Filter::default());
-        let before = index.hybrid_search_grouped("tirzepatide", &v, &f, GroupedParams::default());
+        let before = index
+            .hybrid_search_grouped("tirzepatide", &v, &f, GroupedParams::default())
+            .expect("the query is this index's width and finite");
         assert!(before
             .documents
             .iter()
@@ -1820,7 +1988,9 @@ mod tests {
 
         index.tombstone("slack", "doomed");
         let f = index.compile(&Filter::default());
-        let after = index.hybrid_search_grouped("tirzepatide", &v, &f, GroupedParams::default());
+        let after = index
+            .hybrid_search_grouped("tirzepatide", &v, &f, GroupedParams::default())
+            .expect("the query is this index's width and finite");
         assert!(after
             .documents
             .iter()
@@ -1843,7 +2013,9 @@ mod tests {
             );
             let f = index.compile(&Filter::default());
             let q = index.vectors().copy_of(0);
-            let hits = index.hybrid_search("offer eligibility rules", &q, &f, 10, None);
+            let hits = index
+                .hybrid_search("offer eligibility rules", &q, &f, 10, None)
+                .expect("the query is this index's width and finite");
             assert_eq!(hits.len(), 10, "{fusion:?} returned {} of 10", hits.len());
         }
     }
@@ -1924,7 +2096,9 @@ mod tests {
             .expect("the chunks are added");
 
         let f = index.compile(&Filter::default());
-        let hits = index.vector_search(&v, &f, 5, Some(200));
+        let hits = index
+            .vector_search(&v, &f, 5, Some(200))
+            .expect("the query is this index's width and finite");
         assert!(
             hits.iter()
                 .any(|h| h.chunk == index.store().n_chunks() as u32 - 1),
@@ -2021,14 +2195,17 @@ mod tests {
         let v = vector(16, 3.0);
         assert!(index
             .vector_search(&v, &f, 10, None)
+            .expect("the query is this index's width and finite")
             .iter()
             .all(|h| h.chunk != 400));
         assert!(index
             .exhaustive_search(&v, &f, 10)
+            .expect("the query is this index's width and finite")
             .iter()
             .all(|h| h.chunk != 400));
         assert!(index
             .hybrid_search("tirzepatide", &v, &f, 10, None)
+            .expect("the query is this index's width and finite")
             .iter()
             .all(|h| h.chunk != 400));
     }
@@ -2250,8 +2427,12 @@ mod tests {
         let probes = 20;
         for i in 0..probes {
             let q = vector(32, 900.0 + i as f32);
-            let exact = appended.exhaustive_search(&q, &f, 20);
-            let approximate = appended.vector_search(&q, &f, 20, Some(200));
+            let exact = appended
+                .exhaustive_search(&q, &f, 20)
+                .expect("the query is this index's width and finite");
+            let approximate = appended
+                .vector_search(&q, &f, 20, Some(200))
+                .expect("the query is this index's width and finite");
             let want: std::collections::HashSet<u32> = exact.iter().map(|n| n.chunk).collect();
             total += approximate
                 .iter()

@@ -93,12 +93,12 @@ pub mod state {
     /// The segment manifest: which immutable segments are live, in the order
     /// a query has to fold them in.
     ///
-    /// Encoded by [`encode_segments`] and stored as a blob rather than an
+    /// Encoded by `encode_segments` and stored as a blob rather than an
     /// integer, which is why it lives beside the other counters instead of
     /// inside them - `%_state` is an ordinary key/value table and a blob is
     /// just another value. Its **absence** is meaningful: a table written
     /// before task-1911 has no row under this key at all, and
-    /// [`crate::module::SearchTable::live_segments`] reads that as "one
+    /// `crate::module::SearchTable::live_segments` reads that as "one
     /// segment, the one `GENERATION` and `COVERED` already name" rather than
     /// as zero segments - see the module for why that distinction is the one
     /// that must never read as "no rows".
@@ -117,7 +117,7 @@ pub mod state {
     /// old, undropped generation is still using.
     pub const SEGMENT_ID: &str = "segment_id";
     /// Every in-flight segment merge that ran out of its per commit budget
-    /// before it finished, encoded by [`encode_merge_states`].
+    /// before it finished, encoded by `encode_merge_states`.
     ///
     /// **A list, because more than one level can be merging at once** - a
     /// table under enough write pressure to have two levels both over
@@ -125,7 +125,7 @@ pub mod state {
     /// rather than starving one while the other resumes. **Absence means
     /// nothing is waiting to be resumed** - a table that has never started a
     /// merge, or whose last commit finished every one it was running, has no
-    /// row here at all. [`crate::module::SearchTable::merge_cascade`] is the
+    /// row here at all. `crate::module::SearchTable::merge_cascade` is the
     /// only reader and writer of this row that matters: it resumes whatever
     /// is here before it starts anything new, and removes an entry the
     /// moment that merge finishes. `compact` and `rebuild` also clear the

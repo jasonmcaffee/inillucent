@@ -630,20 +630,6 @@ pub fn as_a_query_sees_it(value: Value<'static>, declared: &str) -> Value<'stati
     value
 }
 
-/// Returns every fixture file the corpus holds, valid then malformed.
-pub fn all_fixture_names() -> Vec<String> {
-    let mut names: Vec<String> = fixtures::valid_fixtures()
-        .iter()
-        .map(|fixture| fixture.name.to_string())
-        .collect();
-    names.extend(
-        fixtures::malformed_fixtures()
-            .iter()
-            .map(|fixture| fixture.name.to_string()),
-    );
-    names
-}
-
 /// Returns the bytes of every file in the corpus directory, for a read-only
 /// proof that compares a directory before and after.
 pub fn directory_snapshot(directory: &Path) -> std::io::Result<Vec<(String, u64, String)>> {

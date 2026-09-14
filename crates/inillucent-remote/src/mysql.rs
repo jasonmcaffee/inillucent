@@ -4,7 +4,7 @@
 //! plugins, `COM_QUERY` and the text resultset. Everything is framed the same
 //! way - a three-byte little-endian payload length, a one-byte sequence number,
 //! then the payload - and a payload of exactly `0xffffff` bytes means the
-//! message continues in the next packet, which is why [`Connection::packet`]
+//! message continues in the next packet, which is why `Connection::packet`
 //! concatenates rather than returning one frame.
 //!
 //! **`caching_sha2_password` full authentication is refused, not faked.** Its

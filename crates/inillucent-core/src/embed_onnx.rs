@@ -11,7 +11,7 @@
 //! Which steps those are is the model's business, not this module's, so every
 //! one of them - the four task prefixes, the pooling, the truncation bound, the
 //! width, whether the export takes `token_type_ids` - comes from a
-//! [`ModelManifest`](crate::model::ModelManifest). `OnnxOptions::default()`
+//! [`ModelManifest`]. `OnnxOptions::default()`
 //! still reproduces `nomic-embed-text-v1.5` exactly, so the baseline arm is
 //! unchanged by the generalisation and the existing score card is unmoved.
 //!
@@ -1041,7 +1041,7 @@ fn use_installed_runtime() {
                 builder.commit();
             }
             Err(error) => eprintln!(
-                "warning: the ONNX Runtime at {} would not load ({error}); falling back to the                  system loader",
+                "warning: the ONNX Runtime at {} would not load ({error}); falling back to the system loader",
                 library.display()
             ),
         }
@@ -1107,14 +1107,30 @@ mod tests {
     use crate::distance::dot;
 
     fn model_dir() -> Option<PathBuf> {
+        // The roots are the installer's, read from the environment rather than
+        // written here: this list used to hold a drive letter from the machine
+        // the engine was written on (task-1946, H7).
+        let roots = std::env::var(crate::install::MODEL_ROOTS_VAR)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| {
+                value
+                    .split(if cfg!(windows) { ';' } else { ':' })
+                    .map(str::trim)
+                    .filter(|entry| !entry.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         let dir = std::env::var("INILLUCENT_ONNX_DIR")
             .ok()
             .map(PathBuf::from)
             .or_else(|| {
-                for root in [
-                    "J:/inillucent-embeddings/models",
-                    "~/.cache/inillucent-models",
-                ] {
+                for root in roots
+                    .iter()
+                    .map(String::as_str)
+                    .chain(["~/.cache/inillucent-models"])
+                {
                     let root = match root.strip_prefix("~/") {
                         Some(rest) => PathBuf::from(std::env::var("HOME").ok()?).join(rest),
                         None => PathBuf::from(root),
@@ -1124,11 +1140,15 @@ mod tests {
                         return Some(dir);
                     }
                 }
+                eprintln!("no model root holds nomic-embed-text-v1.5; skipping");
                 None
             })?;
         if dir.join("model.onnx").exists() && dir.join("tokenizer.json").exists() {
             Some(dir)
         } else {
+            // The five cases that call this reported green on a machine with no
+            // weights and said nothing at all (task-1946, H10).
+            eprintln!("{} holds no complete model; skipping", dir.display());
             None
         }
     }

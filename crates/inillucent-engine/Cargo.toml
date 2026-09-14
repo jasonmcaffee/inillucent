@@ -2,6 +2,7 @@
 name = "inillucent-engine"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "The rearchitected engine as a database: import, catalog, DDL, pragmas, statements and virtual tables over the PAX trees."

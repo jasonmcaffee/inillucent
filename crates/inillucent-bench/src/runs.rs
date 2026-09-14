@@ -215,9 +215,123 @@ pub fn redact(url: &str) -> String {
     }
 }
 
-/// The command that produced this run, as typed.
+/// The command that produced this run, with credentials and directories removed.
+///
+/// **The card is a tracked file, so the command line in it is published.** This
+/// used to join `std::env::args()` as typed, and `--database-url` is one of the
+/// arguments: the committed card carried a PostgreSQL password in clear, beside
+/// the redacted copy of the same URL two rows below it, along with the absolute
+/// paths of two disks on the machine that produced it (task-1946, H6).
+///
+/// The command is still the reproducibility record the card exists for, so it is
+/// redacted rather than dropped. Each token is treated one of three ways:
+///
+/// - a token that parses as a URL with credentials goes through `redact`, so the
+///   user, the host, the port and the database survive and the password does not;
+/// - a token that looks like a path keeps its last component only, so the card
+///   says `corpus.cache` rather than which drive it was on;
+/// - everything else is kept as typed, because the flags and their values are
+///   what makes the run repeatable.
+///
+/// @returns the command line, safe to commit
 pub fn command_line() -> String {
-    std::env::args().collect::<Vec<_>>().join(" ")
+    std::env::args()
+        .map(|token| published_token(&token))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// One command line token, as it may appear in a file people share.
+///
+/// @param token - the argument as typed
+/// @returns the argument with a credential or a directory removed
+fn published_token(token: &str) -> String {
+    if token.contains("://") {
+        return redact(token);
+    }
+    if !looks_like_a_path(token) {
+        return token.to_string();
+    }
+    published_path(token)
+}
+
+/// A path as it may appear in a file people share: its last component only.
+///
+/// **The card names four files besides the command, and all four were absolute.**
+/// The corpus cache, the model weights, the per-query records and the run
+/// manifest each went into the card as `path.display()`, which on the machine
+/// that produced the committed card meant two drive letters nobody else has
+/// (task-1946, H6). The file name is what identifies the artifact; the drive it
+/// sat on identifies the machine and nothing else.
+///
+/// @param path - the path as it was resolved
+/// @returns its last component, or the path unchanged when it has none
+pub fn published_path(path: &str) -> String {
+    // A trailing separator would otherwise make the last component empty, and a
+    // card that says nothing is worse than one that names a directory.
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    match trimmed.rsplit(['/', '\\']).next() {
+        Some(name) if !name.is_empty() => name.to_string(),
+        _ => path.to_string(),
+    }
+}
+
+/// Records where the corpus cache and the model weights were, by name.
+///
+/// The card names four files besides the command, and all four used to go in as
+/// absolute paths (task-1946, H6). These two are the run's inputs; the other two
+/// are its outputs and go through `note_run_files`. They live here rather than at
+/// the two call sites because both callers need the same shortening and both are
+/// already over the length ratchet in `crates/inillucent-compat/tests/policy.rs`.
+///
+/// @param provenance - the card's provenance table
+/// @param cache - where the corpus cache was read from
+/// @param model_dir - the directory the weights were read from
+/// @param model_file - the weights file inside it
+pub fn note_inputs(
+    provenance: &mut BTreeMap<String, String>,
+    cache: &Path,
+    model_dir: &str,
+    model_file: &str,
+) {
+    let cache = published_path(&cache.display().to_string());
+    let model = published_path(model_dir);
+    provenance.insert("corpus cache".into(), cache);
+    provenance.insert("embedding model".into(), format!("{model}/{model_file}"));
+}
+
+/// Records where the run's per-query records and manifest are, by run rather
+/// than by disk.
+///
+/// The directory's own name is the run id, which is a row of its own; naming it
+/// again beside each file identifies the artifact without naming the disk it
+/// sits on.
+///
+/// @param provenance - the card's provenance table
+/// @param records - how many per-query lines were written
+/// @param dir - the run directory
+pub fn note_run_files(provenance: &mut BTreeMap<String, String>, records: usize, dir: &Path) {
+    let run = published_path(&dir.display().to_string());
+    provenance.insert(
+        "per-query records".into(),
+        format!("{records} lines in {run}/per-query.jsonl"),
+    );
+    provenance.insert("run manifest".into(), format!("{run}/manifest.json"));
+}
+
+/// Whether a token names a place on a disk rather than a value.
+///
+/// A separator is the signal, and a leading dash is the counter-signal: a flag
+/// such as `--per-source` holds no separator, and a Windows drive prefix such as
+/// a drive letter and a separator holds one. `cuda:0` holds a colon and no separator, so it survives
+/// as typed, which matters because the device is part of what the run measured.
+///
+/// @param token - the argument as typed
+fn looks_like_a_path(token: &str) -> bool {
+    if token.starts_with('-') {
+        return false;
+    }
+    token.contains('/') || token.contains('\\')
 }
 
 pub fn host_facts() -> HostFacts {
@@ -247,6 +361,64 @@ mod tests {
             "postgres://127.0.0.1:5433/inillucent_synth"
         );
         assert_eq!(redact("not a url"), "not a url");
+    }
+
+    #[test]
+    fn command_line_redacts_credentials_and_paths() {
+        // The argv that produced the committed card, which carried the password
+        // and both drives in clear until task-1946's H6.
+        let argv = [
+            r"C:\dev\inillucent\target\release\inillucent-bench.exe",
+            "grade",
+            "--database-url",
+            "postgres://postgres:hunter2@127.0.0.1:5433/inillucent_synth",
+            "--cache",
+            "J:/embeddings/corpus.cache",
+            "--model-dir",
+            "J:/embeddings/models/nomic-embed-text-v1.5",
+            "--device",
+            "cuda:0",
+            "--per-source",
+            "100",
+            "--out",
+            "C:/dev/inillucent/inillucent-scorecard.md",
+        ];
+        let published = argv
+            .iter()
+            .map(|token| published_token(token))
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        assert!(
+            !published.contains("hunter2"),
+            "the password survived: {published}"
+        );
+        assert!(
+            published.contains("postgres://postgres:***@127.0.0.1:5433/inillucent_synth"),
+            "the rest of the URL did not survive: {published}"
+        );
+        for directory in [r"C:\dev", "C:/dev", "J:/embeddings"] {
+            assert!(
+                !published.contains(directory),
+                "{directory} survived: {published}"
+            );
+        }
+        for kept in [
+            "inillucent-bench.exe",
+            "grade",
+            "corpus.cache",
+            "nomic-embed-text-v1.5",
+            "--device",
+            "cuda:0",
+            "--per-source",
+            "100",
+            "inillucent-scorecard.md",
+        ] {
+            assert!(
+                published.contains(kept),
+                "{kept} was lost, and the command is the reproducibility record: {published}"
+            );
+        }
     }
 
     #[test]

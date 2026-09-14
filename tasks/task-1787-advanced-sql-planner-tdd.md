@@ -1,7 +1,7 @@
 # task-1787 — Advanced SQL, schema features, and the cost optimizer
 
 Phase 8 of the [task-1781 SQLite-parity design](./task-1781-sqlite-feature-parity-tdd.md).
-Repository: `C:\jason\dev\inillucent`. Depends on task-1786 (DML, DDL, rollback, constraints), which
+Depends on task-1786 (DML, DDL, rollback, constraints), which
 is `agent_done`.
 
 ## Introduction

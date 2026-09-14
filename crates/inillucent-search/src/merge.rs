@@ -188,7 +188,7 @@ impl Cache {
         let Some(cached) = held.as_ref() else {
             return Ok(Vec::new());
         };
-        Ok(run(&cached.index, options, request))
+        run(&cached.index, options, request)
     }
 
     /// Returns how many live rows the merged index holds.
@@ -483,7 +483,7 @@ mod width_tests {
     }
 }
 
-/// Builds a whole index from every row a search table holds, in one pass./// Builds a whole index from every row a search table holds, in one pass.
+/// Builds a whole index from every row a search table holds, in one pass.
 ///
 /// This is what the `compact` and `rebuild` commands both do. It is deliberately
 /// not the incremental path: a graph grown one insert at a time is not the graph
@@ -611,7 +611,7 @@ pub struct RecordedBatch {
 /// Folds one already-loaded segment onto an accumulator, recording exactly
 /// what was applied: its still-live documents by `replace_document`, then its
 /// own bare-deleted ids by `tombstone` - the same two steps a query's own
-/// fold ([`refresh`], below) already applies to every segment it walks, now
+/// fold (`refresh`, below) already applies to every segment it walks, now
 /// shared by a merge checkpoint as well rather than only by a read.
 ///
 /// **Fixes a defect this ticket's tests found.** Before this, folding a
@@ -1122,7 +1122,12 @@ fn live_rows_of(index: &Index) -> usize {
 }
 
 /// Runs one request against a loaded index.
-fn run(index: &Index, options: &Options, request: &Request) -> Vec<Hit> {
+///
+/// @param index - the loaded index
+/// @param options - the traversal settings
+/// @param request - what was asked for
+/// @returns the hits, or the index's refusal of a query it cannot compare
+fn run(index: &Index, options: &Options, request: &Request) -> DbResult<Vec<Hit>> {
     let limit = request.limit.max(1);
     let filter = index.compile(&Filter::default());
     let ef = traversal_width(options, request, limit);
@@ -1133,11 +1138,14 @@ fn run(index: &Index, options: &Options, request: &Request) -> Vec<Hit> {
         (true, true) => inillucent_core::index::Branches::Both,
         (true, false) => inillucent_core::index::Branches::Lexical,
         (false, true) => inillucent_core::index::Branches::Vector,
-        (false, false) => return Vec::new(),
+        (false, false) => return Ok(Vec::new()),
     };
-    let (hits, _) = index.search_branches(&text, &request.vector, &filter, limit, ef, branches);
+    let (hits, _) = index
+        .search_branches(&text, &request.vector, &filter, limit, ef, branches)
+        .map_err(|why| failure(why.to_string()))?;
     let store = index.store();
-    hits.into_iter()
+    Ok(hits
+        .into_iter()
         .filter_map(|hit| {
             let external = store.chunk_external_id(hit.chunk);
             let id = external.parse::<i64>().ok()?;
@@ -1148,7 +1156,7 @@ fn run(index: &Index, options: &Options, request: &Request) -> Vec<Hit> {
                 origin: hit.origin,
             })
         })
-        .collect()
+        .collect())
 }
 
 /// Returns the traversal width one request asks for.

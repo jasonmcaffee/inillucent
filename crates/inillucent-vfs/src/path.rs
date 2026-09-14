@@ -83,6 +83,30 @@ impl DbPath {
         self.inner.parent().map(DbPath::new)
     }
 
+    /// Returns the directory this path's file sits in, as a directory that can
+    /// be opened.
+    ///
+    /// **`Path::parent` answers `Some("")` for a bare file name, and `""` is not
+    /// a directory anything can open (task-1946, M5).** `OsVfs` flushes the
+    /// containing directory after a delete and after a rename so that the
+    /// directory entry survives a power loss, and on Unix that means opening it
+    /// and calling `fsync`. Opening `""` answers `ENOENT`, so `ATTACH 'app.rdb'`
+    /// - a name with no directory in it, which is what a relative name from a
+    /// shell looks like - failed on Linux with `DirSync: No such file or
+    /// directory`. It did not fail on Windows because `sync_directory` there is
+    /// a no-op: the file system journals its own metadata.
+    ///
+    /// The containing directory of a bare file name is the process's current
+    /// directory, which is what `.` names.
+    pub fn containing_directory(&self) -> Option<DbPath> {
+        let parent = self.inner.parent()?;
+        Some(if parent.as_os_str().is_empty() {
+            DbPath::new(".")
+        } else {
+            DbPath::new(parent)
+        })
+    }
+
     /// Reports whether this path is the special in-memory database name.
     pub fn is_memory(&self) -> bool {
         self.to_str() == Some(":memory:")
@@ -147,5 +171,26 @@ mod tests {
         let database = DbPath::from("/var/lib/app.db");
         assert_eq!(database.journal(), database.journal());
         assert_eq!(database.wal().parent(), Some(DbPath::from("/var/lib")));
+    }
+
+    /// A bare file name's containing directory is one that can be opened.
+    ///
+    /// `Path::parent` answers `Some("")` here, and `""` opens as nothing. On
+    /// Unix that is the difference between a durable delete and
+    /// `DirSync: No such file or directory`, which is what `ATTACH 'app.rdb'`
+    /// answered on Linux until task-1946.
+    #[test]
+    fn a_name_with_no_directory_in_it_is_contained_by_the_current_one() {
+        assert_eq!(
+            DbPath::from("app.rdb").containing_directory(),
+            Some(DbPath::from("."))
+        );
+        assert_eq!(
+            DbPath::from("/var/lib/app.rdb").containing_directory(),
+            Some(DbPath::from("/var/lib"))
+        );
+        // The root has no containing directory, and asking for one answers so
+        // rather than answering `.`, which would be a different directory.
+        assert_eq!(DbPath::from("/").containing_directory(), None);
     }
 }

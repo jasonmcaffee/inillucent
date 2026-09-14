@@ -13,7 +13,7 @@ today is four manual steps:
 3. find `nomic-embed-text-v1.5`'s ONNX export on Hugging Face, download five files out of a
    repository that holds eight variants of the weights, and put them in a directory;
 4. set `INILLUCENT_ONNX_DIR` to that directory, or place it under one of two hard-coded roots, one of
-   which is `J:/inillucent-embeddings/models` — a drive letter on one developer's machine.
+   which was a drive letter on one developer's machine.
 
 Every one of those steps is a place to get it wrong quietly. The wrong ONNX Runtime version refuses
 to open a session with a message about an enum value. The wrong weights file — `model_int8.onnx`

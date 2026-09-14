@@ -91,11 +91,6 @@ impl CheckReport {
         self.problem_count == 0
     }
 
-    /// Reports whether the report stopped describing problems.
-    pub fn is_truncated(&self) -> bool {
-        self.problem_count > self.problems.len() as u64
-    }
-
     /// Returns the text SQLite's own pragma would print.
     pub fn as_pragma_output(&self) -> Vec<String> {
         if self.problems.is_empty() {

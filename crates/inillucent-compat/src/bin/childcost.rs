@@ -13,7 +13,7 @@
 //! after `main` returns it would not work at all.
 //!
 //! Usage:
-//!   inillucent-childcost <program> [arguments...]
+//!   inillucent-childcost `<program>` [arguments...]
 
 use std::process::{Command, ExitCode, Stdio};
 

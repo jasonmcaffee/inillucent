@@ -55,29 +55,6 @@ impl TextEncoding {
         }
     }
 
-    /// Reports whether this encoding is one of the two UTF-16 forms.
-    pub fn is_utf16(self) -> bool {
-        matches!(self, TextEncoding::Utf16Le | TextEncoding::Utf16Be)
-    }
-
-    /// Returns the number of bytes one code unit occupies.
-    pub fn code_unit_bytes(self) -> usize {
-        if self.is_utf16() {
-            2
-        } else {
-            1
-        }
-    }
-
-    /// Returns the name `PRAGMA encoding` reports.
-    pub fn pragma_name(self) -> &'static str {
-        match self {
-            TextEncoding::Utf8 => "UTF-8",
-            TextEncoding::Utf16Le => "UTF-16le",
-            TextEncoding::Utf16Be => "UTF-16be",
-        }
-    }
-
     /// Returns every encoding, for exhaustive matrices.
     pub fn all() -> [TextEncoding; 3] {
         [

@@ -26,7 +26,7 @@
 //! built implementation then failed to reproduce.
 //!
 //! Usage:
-//!   inillucent-probeprofile <sqlite fixture> [--scale S] [--page-size N] [--frames N]
+//!   inillucent-probeprofile `<sqlite fixture>` [--scale S] [--page-size N] [--frames N]
 
 /// The engine's own allocator, installed for this program.
 ///

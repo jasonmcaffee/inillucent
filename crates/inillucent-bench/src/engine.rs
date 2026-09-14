@@ -552,7 +552,7 @@ impl SearchEngine for InillucentEngine {
         let compiled = self.index.compile(filter);
         Ok(self
             .index
-            .vector_search(query, &compiled, k, self.budget_for(filter))
+            .vector_search(query, &compiled, k, self.budget_for(filter))?
             .into_iter()
             .map(|n| Hit {
                 key: self.key(n.chunk),
@@ -593,7 +593,7 @@ impl SearchEngine for InillucentEngine {
         let compiled = self.index.compile(filter);
         Ok(self
             .index
-            .hybrid_search(query, query_vector, &compiled, k, self.budget_for(filter))
+            .hybrid_search(query, query_vector, &compiled, k, self.budget_for(filter))?
             .into_iter()
             .map(|h| Hit {
                 key: self.key(h.chunk),
@@ -617,6 +617,7 @@ pub fn exhaustive_reference(
     engine
         .index
         .exhaustive_search(query, &compiled, k)
+        .expect("the harness embeds at the index's width")
         .into_iter()
         .map(|n| engine.keys[n.chunk as usize].clone())
         .collect()
@@ -773,7 +774,8 @@ pub fn fuse_with(
     let candidates = engine.index.config().candidates.max(k);
     let vector_hits = engine
         .index
-        .vector_search(query_vector, &compiled, candidates, engine.ef_search);
+        .vector_search(query_vector, &compiled, candidates, engine.ef_search)
+        .expect("the harness embeds at the index's width");
     let lexical_hits = engine.index.lexical_search(query, &compiled, candidates);
     rank::fuse(
         &vector_hits,

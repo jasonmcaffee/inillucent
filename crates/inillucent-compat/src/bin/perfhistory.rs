@@ -768,22 +768,55 @@ fn commit_hash(root: &Path) -> String {
     }
 }
 
-/// Returns a name for this machine.
+/// The environment variable a machine labels its own rows with.
+const MACHINE_LABEL_VAR: &str = "INILLUCENT_MACHINE";
+
+/// Returns a label for this machine, stable across runs and not its hostname.
+///
+/// **The column exists so rows from two machines can be told apart, and a
+/// hostname is more than that takes.** This used to return `COMPUTERNAME`
+/// directly, so eight rows of `tests/performance-history.tsv` - a tracked,
+/// published file - carried the personal hostname of the machine the engine was
+/// written on (task-1946, M9). The comparison the column supports needs only
+/// that two machines produce two different labels and that one machine produces
+/// the same one every time, which a digest gives and a name is not needed for.
+///
+/// `INILLUCENT_MACHINE` overrides it, for a fleet that would rather its rows say
+/// `ci-linux-x64` than a digest.
 fn machine_name() -> String {
+    if let Ok(value) = std::env::var(MACHINE_LABEL_VAR) {
+        let value = value.trim();
+        if !value.is_empty() {
+            return value.to_string();
+        }
+    }
+    match host_identity() {
+        Some(identity) => {
+            let digest = inillucent_base::hash::sha256_hex(identity.as_bytes());
+            format!("machine-{}", &digest[..8])
+        }
+        None => "machine-unknown".to_string(),
+    }
+}
+
+/// Whatever this operating system will say this machine is called, for hashing.
+///
+/// @returns the raw name, which is never written anywhere
+fn host_identity() -> Option<String> {
     for key in ["COMPUTERNAME", "HOSTNAME"] {
         if let Ok(value) = std::env::var(key) {
-            if !value.is_empty() {
-                return value;
+            if !value.trim().is_empty() {
+                return Some(value.trim().to_string());
             }
         }
     }
-    if let Ok(output) = Command::new("hostname").output() {
-        let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !name.is_empty() {
-            return name;
-        }
+    let output = Command::new("hostname").output().ok()?;
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
     }
-    "unknown".to_string()
 }
 
 /// Returns the current time as an ISO-8601 date and time in UTC.

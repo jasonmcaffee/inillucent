@@ -26,7 +26,7 @@
 //! inside the library, and the fairness section of the scorecard report is where
 //! that is declared - not here, and not silently.
 //!
-//! Usage: inillucent-prepareperf <sqlite fixture> [rounds]
+//! Usage: inillucent-prepareperf `<sqlite fixture>` `rounds`
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};

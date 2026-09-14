@@ -17,7 +17,7 @@
 //! when `x` is text.
 
 use inillucent_base::limits::Limits;
-use inillucent_value::{Affinity, Collation};
+use inillucent_value::Collation;
 
 use crate::ast::{self, ConflictAction};
 use crate::bind::{
@@ -278,7 +278,7 @@ pub struct BoundUpdate {
     /// tables, and the values it assigns are not expressions over the target
     /// row: they read a *different* row, one the join found. So the query that
     /// finds the keys carries these terms too, and projects the assigned values
-    /// beside the key; see [`crate::dml::BoundUpdate::joins`].
+    /// beside the key; see [`BoundUpdate::from`], which is this field.
     ///
     /// Empty for every ordinary `UPDATE`, which is what keeps the wider row off
     /// the path the gate's `txn.large` measures.
@@ -420,6 +420,42 @@ const ROWID_TARGET: u16 = u16::MAX;
 fn is_rowid_name(folded: &[u8]) -> bool {
     matches!(folded, b"rowid" | b"oid" | b"_rowid_")
 }
+
+/// How deep one write may drive triggers firing other triggers.
+///
+/// SQLite's own limit is `SQLITE_MAX_TRIGGER_DEPTH`, enforced when the frame is
+/// pushed. Trigger bodies are inlined here rather than run as frames, so the
+/// same limit is enforced where the inlining happens - and it has to be, or a
+/// schema in which two triggers write each other's tables would compile until
+/// the compiler ran out of memory.
+///
+/// **This is one number now, and it is the one `.limit` reports.** There used
+/// to be two constants of this name: this one at 32, which was the number
+/// actually enforced, and `inillucent-exec`'s at 1000, checked at run time over
+/// a tree the binder had already capped at 32 - so that check could never fire.
+/// `crates/inillucent-base/manifests/limits.toml` advertised 1000 and
+/// `inillucent diagnose` printed 1000, and a chain of forty distinct triggers
+/// that the oracle ran was refused here (task-1946, H3). The binder reads
+/// `Limit::TriggerDepth` from the connection now, which `.limit trigger_depth`
+/// and the driver both set; this constant is what a binder built without limits
+/// falls back to, and it is the manifest's default.
+pub const MAX_TRIGGER_DEPTH: usize = 1000;
+
+/// How deep one chain of foreign-key actions may go.
+///
+/// A cascade reaches this only when the keys form a cycle, which in practice
+/// means a table whose parent column points at itself. SQLite's own limit is a
+/// run-time recursion depth; this one is a compile-time inlining depth, and it
+/// is smaller for that reason.
+pub const MAX_FOREIGN_KEY_DEPTH: usize = 64;
+
+/// How many foreign-key action bodies one statement may inline in total.
+///
+/// The depth limit alone is not enough: a table with three keys that all cycle
+/// would inline three bodies per level, so the limit that matters is the total.
+/// A chain, which is what a self-referencing tree produces, spends one per
+/// level and reaches the depth limit first.
+pub const MAX_FOREIGN_KEY_STATEMENTS: usize = 256;
 
 impl<'a> Binder<'a> {
     /// Binds an `INSERT` or `REPLACE`.
@@ -704,9 +740,15 @@ impl<'a> Binder<'a> {
             if self.firing.contains(&trigger.folded) {
                 continue;
             }
-            if self.firing.len() >= crate::bind::MAX_TRIGGER_DEPTH {
+            if self.firing.len() >= self.trigger_depth {
+                // The number is in the message because a settable limit that
+                // refuses without saying what it was leaves a reader guessing
+                // between the default and whatever `.limit` last set.
                 return Err(refused(
-                    "too many levels of trigger recursion",
+                    format!(
+                        "too many levels of trigger recursion: the limit is {}",
+                        self.trigger_depth
+                    ),
                     Span::default(),
                 ));
             }
@@ -789,9 +831,7 @@ impl<'a> Binder<'a> {
         trigger: &'a TriggerInfo,
         event: &TriggerEventInfo,
     ) -> Result<BoundTrigger, ParseError> {
-        if self.foreign_key_depth >= crate::bind::MAX_FOREIGN_KEY_DEPTH
-            || self.foreign_key_budget == 0
-        {
+        if self.foreign_key_depth >= MAX_FOREIGN_KEY_DEPTH || self.foreign_key_budget == 0 {
             return Err(refused(
                 "too many levels of foreign key recursion",
                 Span::default(),
@@ -1402,6 +1442,7 @@ impl<'a> Binder<'a> {
         let limits = Limits::default();
         let (ast, expr) = parse_expression(sql, &limits)?;
         let mut nested = Binder::new(self.catalog, &ast, self.authorizer);
+        nested.trigger_depth = self.trigger_depth;
         nested.sources = self.sources.clone();
         nested.scopes = self.scopes.clone();
         let bound = nested.bind_expr(expr)?;
@@ -1537,17 +1578,6 @@ fn bare_indexed_column(ast: &crate::Ast, column: &ast::IndexedColumn) -> Option<
         }) => Some(ast.folded(*name).to_vec()),
         _ => None,
     }
-}
-
-/// Returns the affinity and collation a table column compares with.
-pub fn column_rules(table: &TableInfo, position: u16) -> (Affinity, Collation) {
-    let Some(column) = table.column(position) else {
-        return (Affinity::Blob, Collation::Binary);
-    };
-    let collation =
-        Collation::from_name(core::str::from_utf8(&column.collation).unwrap_or("BINARY"))
-            .unwrap_or(Collation::Binary);
-    (column.affinity, collation)
 }
 
 /// The extended result codes a rejected write reports.

@@ -15,9 +15,7 @@
 //! through the same pager as everything else.
 
 use crate::ast::{self, ObjectKind, TransactionBehaviour};
-use crate::bind::{
-    no_such_table, refused, schema_refused, unsupported, Binder, BoundExpr, BoundStatement,
-};
+use crate::bind::{no_such_table, refused, schema_refused, unsupported, Binder, BoundExpr};
 use crate::catalog_view::CatalogView;
 use crate::catalog_view::TableKind;
 use crate::diagnostic::ParseError;
@@ -2079,11 +2077,6 @@ impl<'a> Binder<'a> {
             .find_index(Some(name.as_slice()), folded)
             .map(|(_, index)| index.root)
     }
-}
-
-/// Returns whether a bound statement is one the session carries out itself.
-pub fn is_directive(statement: &BoundStatement) -> bool {
-    matches!(statement, BoundStatement::Directive(_))
 }
 
 /// Returns a column name as it can be written back into a `CREATE` statement.

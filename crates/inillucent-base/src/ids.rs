@@ -75,38 +75,6 @@ impl RootPageId {
     }
 }
 
-/// The schema change counter stored in the database header.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct SchemaCookie(pub u32);
-
-/// A connection's identity within one process.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct ConnectionId(pub u64);
-
-/// A transaction's identity within one process.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct TransactionId(pub u64);
-
-/// A savepoint's depth within its transaction.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct SavepointId(pub u32);
-
-/// A one-based frame number in a write-ahead log.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct WalFrameNo(pub u32);
-
-/// A monotonically increasing commit number, used to order snapshots.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct CommitSequence(pub u64);
-
-/// A cursor slot inside a compiled program.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct CursorId(pub u32);
-
-/// A register slot inside a compiled program.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub struct RegisterId(pub u32);
-
 #[cfg(test)]
 mod tests {
     use super::*;

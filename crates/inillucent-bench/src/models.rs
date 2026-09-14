@@ -26,12 +26,31 @@ pub const MANIFEST_FILE: &str = "model.json";
 
 /// Where downloaded and trained models live.
 ///
-/// On J:, not C:, because a set of eight embedding models is a hundred gigabytes
-/// and C: filling up is a machine-wide outage. `INILLUCENT_MODELS` overrides it.
+/// **`INILLUCENT_MODELS` is how a machine says, and there is no useful default.**
+/// A set of eight embedding models is a hundred gigabytes, so on most machines
+/// this is a second disk rather than the system one, and which disk that is
+/// belongs to the machine. It used to be a drive letter written into this
+/// function - the one the engine was written on - which meant nothing to anybody
+/// else and is the kind of path a public repository must not carry (task-1946,
+/// H7). The fallback is the directory `inillucent-core`'s installer documents,
+/// so a machine that has never set the variable still finds an installed model.
 pub fn default_models_root() -> PathBuf {
     match std::env::var("INILLUCENT_MODELS") {
         Ok(path) if !path.trim().is_empty() => PathBuf::from(path),
-        _ => PathBuf::from("J:/inillucent-embeddings/models"),
+        _ => home_cache_models(),
+    }
+}
+
+/// `~/.cache/inillucent-models`, resolved, or that literal path when there is no
+/// home directory to resolve it against.
+fn home_cache_models() -> PathBuf {
+    let home = std::env::var("HOME")
+        .ok()
+        .or_else(|| std::env::var("USERPROFILE").ok())
+        .filter(|value| !value.trim().is_empty());
+    match home {
+        Some(home) => PathBuf::from(home).join(".cache").join("inillucent-models"),
+        None => PathBuf::from("~/.cache/inillucent-models"),
     }
 }
 
@@ -338,7 +357,7 @@ mod arms {
     fn installed() -> Vec<ResolvedModel> {
         let root = default_models_root();
         let Ok(entries) = std::fs::read_dir(&root) else {
-            eprintln!("skipping: no models root at {}", root.display());
+            eprintln!("no models root at {}; skipping", root.display());
             return Vec::new();
         };
         let mut out = Vec::new();
@@ -368,7 +387,7 @@ mod arms {
         match OnnxEmbedder::open_manifest(&model.dir, &model.manifest, 8, Device::Cpu) {
             Ok(e) => Some(e),
             Err(err) => {
-                eprintln!("skipping {}: {err:#}", model.manifest.id);
+                eprintln!("{}: {err:#}; skipping", model.manifest.id);
                 None
             }
         }

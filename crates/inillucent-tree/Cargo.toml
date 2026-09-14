@@ -2,6 +2,7 @@
 name = "inillucent-tree"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "B+tree over PAX leaves: the storage layer of the rearchitected engine"

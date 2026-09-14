@@ -16,7 +16,7 @@
 //! locking and the bookkeeping glibc does per call.
 //!
 //! Usage:
-//!   inillucent-allocarm <sqlite fixture> [--rounds N] [--scale S] [--system]
+//!   inillucent-allocarm `<sqlite fixture>` [--rounds N] [--scale S] [--system]
 //!
 //! `--system` runs the identical loop on the system allocator, so the pair is
 //! one binary and one code path with one thing changed.

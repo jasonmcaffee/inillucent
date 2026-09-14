@@ -277,10 +277,11 @@ Every page that states something these five change, and the site:
 - `docs/repository.md` — four crates fewer.
 - `AGENTS.md` and `agent-skills/` — the crate list and the search skill.
 - `README.md`, `drivers/README.md`, `examples/rag-agent/`.
-- **`inillucent.com`**, in `C:\jason\dev\inillucent-site`: `src/data/documentation.ts` still says "The
+- **`inillucent.com`**, in the site repository: `src/data/documentation.ts` still says "The
   current distance metric is cosine", which stopped being true earlier in this ticket, and
   `src/data/content.ts` carries the headline numbers.
 
 ## 7. Review
 
-Codex Sol reviews the finished work and everything it raises is addressed here, not filed onward.
+The finished work is reviewed again and everything that review raises is addressed here, not
+filed onward.

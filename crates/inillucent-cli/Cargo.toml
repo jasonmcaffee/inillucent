@@ -2,6 +2,7 @@
 name = "inillucent-cli"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 description = "inillucent's command surface: the sqlite3-shaped shell, the verb-shaped CLI, and the MCP server."
 repository = "https://github.com/Black-Rainbow-Labs/Inillucent"

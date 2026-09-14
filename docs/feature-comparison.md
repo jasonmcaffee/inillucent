@@ -876,6 +876,11 @@ The eight that answer nothing do so in **both**: `case_sensitive_like`, `data_st
 `temp_store_directory`. A pragma that answers nothing is one whose whole effect is what it does, and
 each of those does it.
 
+One of the eight is on Windows only. SQLite compiles `data_store_directory` under `SQLITE_OS_WIN`,
+so a Linux build's `pragma_list` is one name shorter than the list above, and so is this engine's as
+of task-1946 - `registers.rs::the_pragma_register_agrees_exactly` compares the two on both platforms
+now, which it could not do until the Linux runs had an oracle to compare against.
+
 ---
 
 ## EXPLAIN, transactions and multi-file work

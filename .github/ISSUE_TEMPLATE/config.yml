@@ -1,0 +1,15 @@
+# Where the two things that are not bug reports go.
+blank_issues_enabled: true
+
+contact_links:
+  - name: A security problem
+    url: https://github.com/Black-Rainbow-Labs/Inillucent/security/advisories/new
+    about: >-
+      Report it privately. SECURITY.md says what is in scope, what to expect and
+      when. Do not put the details in a public issue.
+  - name: Something the engine has not built yet
+    url: https://github.com/Black-Rainbow-Labs/Inillucent/blob/main/docs/roadmap.md
+    about: >-
+      Exit code 3 means "not yet" rather than "wrong". `inillucent capabilities`
+      enumerates what is built and docs/roadmap.md says what is coming; open a
+      blank issue if it is on neither.

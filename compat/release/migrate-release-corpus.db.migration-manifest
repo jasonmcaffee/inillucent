@@ -1,14 +1,14 @@
 manifest 1
 tool inillucent-migrate
-source.path C:/jason/dev/inillucent/_agent_output/migrate/release/index
+source.path _agent_output/migrate/release/index
 source.generation g000000000001
 source.file config.bin 697 30d01bbc0668357f54d3e93050bca520f2b0a6a413ff37435e2719f5d7e35ff8
 source.file graph.bin 353284 556a322b426ff1faba8521c36945dd346680ee94bdba53b8fbcbf29ffd895302
 source.file lexical.bin 1802743 dbdc3aefdad184d49255c03d7b31afc9a3835e7c5b58f985088698208e1af7d1
 source.file store.bin 1620159 f001ca11550b514115d68893596cd8eaf779779a6c1f4f957e680ae16c3ea5a4
 source.file vectors.bin 606997 81db740e59260131a3fdac511d24aa4e36ed22e27e30568e07586c7b2b8633a4
-destination.staging C:/jason/dev/inillucent/_agent_output/measurements/migrate/release\corpus.db.migrating
-destination.final C:/jason/dev/inillucent/_agent_output/measurements/migrate/release/corpus.db
+destination.staging _agent_output/measurements/migrate/release\corpus.db.migrating
+destination.final _agent_output/measurements/migrate/release/corpus.db
 stage schema
 copied document 426
 copied chunk 512
@@ -50,6 +50,6 @@ verify hybrid.exact ok 12 fused rankings agree when both graphs are traversed in
 verify filter.deleted ok 157 tombstoned chunks excluded identically
 verify reopen ok 17 checks pass again on a fresh open
 stage verify
-destination.published C:/jason/dev/inillucent/_agent_output/measurements/migrate/release/corpus.db
+destination.published _agent_output/measurements/migrate/release/corpus.db
 stage publish
-source.retained C:/jason/dev/inillucent/_agent_output/migrate/release/index
+source.retained _agent_output/migrate/release/index

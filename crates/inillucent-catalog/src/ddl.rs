@@ -17,7 +17,7 @@ use inillucent_base::error::misuse;
 use inillucent_base::ids::PageId;
 use inillucent_base::limits::Limits;
 use inillucent_base::DbResult;
-use inillucent_storage::cursor::{BTreeCursor, SeekBias};
+use inillucent_storage::cursor::BTreeCursor;
 use inillucent_storage::mutate;
 use inillucent_storage::pager::Pager;
 use inillucent_storage::schema::{SchemaKind, SCHEMA_ROOT};
@@ -131,29 +131,6 @@ fn text_field(record: &RecordRef<'_>, column: usize) -> Vec<u8> {
         Ok(inillucent_value::Value::Text(text)) => text.utf8_bytes().to_vec(),
         _ => Vec::new(),
     }
-}
-
-/// Rewrites one `sqlite_schema` row in place, keeping its rowid.
-///
-/// In place rather than delete-and-insert: the rowid is the row's identity, and
-/// a re-inserted row lands at the end of the table where a reader that had
-/// saved a position would not find it.
-pub fn update_schema_row(pager: &mut Pager, rowid: i64, row: &SchemaRow) -> DbResult<()> {
-    let values = [
-        Value::owned_text(row.kind.as_text().as_bytes())?,
-        Value::owned_text(&row.name)?,
-        Value::owned_text(&row.table)?,
-        Value::Integer(i64::from(row.root)),
-        match &row.sql {
-            Some(sql) => Value::owned_text(sql)?,
-            None => Value::Null,
-        },
-    ];
-    let encoding = pager.text_encoding();
-    let format = pager.header().schema_format.max(1);
-    let payload = encode_record(&values, encoding, format)?;
-    mutate::insert_row(pager, schema_root()?, rowid, &payload)?;
-    Ok(())
 }
 
 /// Removes every `sqlite_schema` row belonging to one object.
@@ -278,33 +255,4 @@ pub fn automatic_index_name(table: &[u8], ordinal: u32) -> Vec<u8> {
     name.push(b'_');
     name.extend_from_slice(ordinal.to_string().as_bytes());
     name
-}
-
-/// Positions a cursor on a schema row by name, for a test or a check.
-pub fn find_schema_row(pager: &mut Pager, folded: &[u8]) -> DbResult<Option<SchemaRow>> {
-    let limits = Limits::default();
-    let mut cursor = BTreeCursor::table(schema_root()?);
-    let mut more = cursor.first(pager)?;
-    while more {
-        let payload = cursor.payload(pager, &limits)?;
-        let record = inillucent_value::record::RecordRef::parse(&payload, pager.text_encoding())?;
-        let name = text_of(&record, 1)?.to_ascii_lowercase();
-        if name == folded {
-            let kind = SchemaKind::from_text(&text_of(&record, 0)?)?;
-            let sql = match record.value(4)? {
-                Value::Text(text) => Some(text.raw().to_vec()),
-                _ => None,
-            };
-            return Ok(Some(SchemaRow {
-                kind,
-                name: text_of(&record, 1)?,
-                table: text_of(&record, 2)?,
-                root: integer_of(&record, 3)?,
-                sql,
-            }));
-        }
-        more = cursor.next(pager)?;
-    }
-    let _ = SeekBias::AtOrAfter;
-    Ok(None)
 }

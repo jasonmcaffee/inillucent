@@ -28,7 +28,7 @@
 //!
 //! Holding everything else equal is what makes the difference attributable.
 //!
-//! Usage: inillucent-exprperf [rounds]
+//! Usage: inillucent-exprperf `rounds`
 
 use std::time::Instant;
 

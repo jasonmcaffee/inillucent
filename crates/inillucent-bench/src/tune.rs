@@ -246,7 +246,10 @@ fn score_arm(
     for (name, queries, vectors, grading) in families {
         let mut values: Vec<f64> = Vec::new();
         for (q, v) in queries.iter().zip(vectors.iter()) {
-            let hits = engine.index.hybrid_search(&q.text, v, &compiled, 10, engine.ef_search);
+            let hits = engine
+                .index
+                .hybrid_search(&q.text, v, &compiled, 10, engine.ef_search)
+                .expect("the harness embeds at the index's width");
             let keys: Vec<String> =
                 hits.iter().map(|h| engine.keys[h.chunk as usize].clone()).collect();
             let mut space = KeySpace::new();
@@ -290,6 +293,7 @@ fn score_arm(
                 engine
                     .index
                     .hybrid_search(&q.text, v, &compiled, 10, engine.ef_search)
+                    .expect("the harness embeds at the index's width")
                     .first()
                     .map(|h| h.confidence as f64)
                     .unwrap_or(0.0)
@@ -311,7 +315,10 @@ fn score_arm(
     let mut hits_at_10: Vec<f64> = Vec::new();
     if let Some((_, queries, vectors, _)) = families.first() {
         for (q, v) in queries.iter().zip(vectors.iter()) {
-            let hits = engine.index.hybrid_search(&q.text, v, &compiled, 10, engine.ef_search);
+            let hits = engine
+                .index
+                .hybrid_search(&q.text, v, &compiled, 10, engine.ef_search)
+                .expect("the harness embeds at the index's width");
             let keys: Vec<String> =
                 hits.iter().map(|h| engine.keys[h.chunk as usize].clone()).collect();
             let mut space = KeySpace::new();

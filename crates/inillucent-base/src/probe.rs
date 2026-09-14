@@ -8,18 +8,17 @@
 //! binary that owns the allocator and the crate that runs the instruction can
 //! reach, and that place has to be the crate they both already depend on.
 //!
-//! The opcode tables are written only by a build with the virtual machine's
+//! The stage tables are written only by a build with `inillucent-storage`'s
 //! `opcode-probe` feature on, which is off by default and is never on in a
 //! shipped build.
+//!
+//! **The per-opcode tables went with the machine they profiled (task-1946, M3).**
+//! `OPCODE_SLOTS`, `OPCODE_RUNS`, `OPCODE_NANOS`, `OPCODE_ALLOCATIONS` and
+//! `reset_opcodes` attributed time and allocations to a bytecode instruction,
+//! and there is no bytecode engine: `inillucent-vm` was deleted with the rest of
+//! the old one. Nothing had written one of them since.
 
 use core::sync::atomic::AtomicU64;
-
-/// How many opcodes the tables below have room for.
-///
-/// The instruction set is smaller than this and a new opcode does not need the
-/// number changed; an index past the end is dropped rather than wrapped, so a
-/// table that is too small loses a row of a profile instead of corrupting one.
-pub const OPCODE_SLOTS: usize = 256;
 
 /// How many heap allocations the process has made, when something is counting.
 ///
@@ -27,31 +26,6 @@ pub const OPCODE_SLOTS: usize = 256;
 /// build leaves it at zero, which reads as "nobody is counting" rather than as
 /// "no allocations happened", because a profile is only compared against itself.
 pub static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
-
-/// How many times each opcode has run.
-pub static OPCODE_RUNS: [AtomicU64; OPCODE_SLOTS] = [const { AtomicU64::new(0) }; OPCODE_SLOTS];
-
-/// How many nanoseconds each opcode has spent.
-pub static OPCODE_NANOS: [AtomicU64; OPCODE_SLOTS] = [const { AtomicU64::new(0) }; OPCODE_SLOTS];
-
-/// How many heap allocations each opcode has made.
-pub static OPCODE_ALLOCATIONS: [AtomicU64; OPCODE_SLOTS] =
-    [const { AtomicU64::new(0) }; OPCODE_SLOTS];
-
-/// Clears the opcode tables, so a measurement starts from zero.
-pub fn reset_opcodes() {
-    for slot in 0..OPCODE_SLOTS {
-        if let (Some(runs), Some(nanos), Some(allocations)) = (
-            OPCODE_RUNS.get(slot),
-            OPCODE_NANOS.get(slot),
-            OPCODE_ALLOCATIONS.get(slot),
-        ) {
-            runs.store(0, core::sync::atomic::Ordering::Relaxed);
-            nanos.store(0, core::sync::atomic::Ordering::Relaxed);
-            allocations.store(0, core::sync::atomic::Ordering::Relaxed);
-        }
-    }
-}
 
 /// How many named stages the tables below have room for.
 pub const STAGE_SLOTS: usize = 16;
@@ -82,21 +56,6 @@ pub fn record_stage(slot: usize, nanos: u64) {
     if let (Some(runs), Some(total)) = (STAGE_RUNS.get(slot), STAGE_NANOS.get(slot)) {
         runs.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         total.fetch_add(nanos, core::sync::atomic::Ordering::Relaxed);
-    }
-}
-
-/// Clears the stage tables.
-pub fn reset_stages() {
-    for slot in 0..STAGE_SLOTS {
-        if let (Some(runs), Some(total), Some(allocations)) = (
-            STAGE_RUNS.get(slot),
-            STAGE_NANOS.get(slot),
-            STAGE_ALLOCATIONS.get(slot),
-        ) {
-            runs.store(0, core::sync::atomic::Ordering::Relaxed);
-            total.store(0, core::sync::atomic::Ordering::Relaxed);
-            allocations.store(0, core::sync::atomic::Ordering::Relaxed);
-        }
     }
 }
 

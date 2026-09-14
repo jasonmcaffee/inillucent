@@ -50,6 +50,19 @@
 pub mod alloc;
 pub mod btree;
 pub mod cache;
+/// The integrity checker, which nothing in a shipped binary calls.
+///
+/// **Off by default (task-1946, M1).** 767 lines with no production caller:
+/// `PRAGMA integrity_check` on the shipping engine is `inillucent-engine`'s own
+/// walk over `inillucent-tree`, not this. What uses it is this crate's own test
+/// modules in `mutate.rs` and `vacuum.rs`, and five suites in
+/// `inillucent-compat` that grade what the retired pager did with a file - so it
+/// is a test tool, and a release build should not carry it.
+///
+/// It is not simply moved into the test crate because two of its seven callers
+/// are inside this crate, and `inillucent-compat` depends on this crate rather
+/// than the other way round.
+#[cfg(any(test, feature = "check"))]
 pub mod check;
 pub mod cursor;
 pub mod databases;
@@ -67,9 +80,8 @@ pub mod wal;
 
 pub use btree::{BTreePage, CellRef, PageKind, PageLayout};
 pub use cache::{CacheCounters, PageCache, PageKey, PagePin, PageVersion};
-pub use check::{CheckLevel, CheckReport};
 pub use cursor::{BTreeCursor, CursorState, SavedPosition, SeekBias, TreeKind};
-pub use databases::{PagerSet, MAIN_DATABASE, TEMP_DATABASE};
+pub use databases::TEMP_DATABASE;
 pub use edit::{encode_cell, rewrite_page};
 pub use header::{DatabaseHeader, VacuumMode};
 pub use journal::{Journal, JournalStats};

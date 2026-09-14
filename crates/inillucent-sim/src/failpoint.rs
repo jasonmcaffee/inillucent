@@ -37,6 +37,14 @@ pub enum Site {
     Lock,
     /// Deleting a file.
     Delete,
+    /// Replacing one path with another.
+    ///
+    /// **The one crash-sensitive moment of `VACUUM`.** The rebuilt file is
+    /// durable and the original is untouched right up to the rename, so what a
+    /// campaign has to be able to cut is the rename itself - and until
+    /// task-1946's H2 it could not, because the rebuild called `std::fs::rename`
+    /// and never went through a VFS at all.
+    Rename,
     /// Mapping or growing shared memory.
     Shm,
     /// Allocating a buffer.
@@ -45,7 +53,7 @@ pub enum Site {
 
 impl Site {
     /// Returns every site, so a campaign can enumerate them.
-    pub fn all() -> [Site; 9] {
+    pub fn all() -> [Site; 10] {
         [
             Site::Open,
             Site::Read,
@@ -54,6 +62,7 @@ impl Site {
             Site::Truncate,
             Site::Lock,
             Site::Delete,
+            Site::Rename,
             Site::Shm,
             Site::Allocate,
         ]
@@ -69,6 +78,7 @@ impl Site {
             Site::Truncate => VfsOperation::Truncate,
             Site::Lock => VfsOperation::Lock,
             Site::Delete => VfsOperation::Delete,
+            Site::Rename => VfsOperation::Rename,
             Site::Shm => VfsOperation::ShmMap,
             Site::Allocate => VfsOperation::Read,
         }

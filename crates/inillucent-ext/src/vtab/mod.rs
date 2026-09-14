@@ -74,7 +74,7 @@ pub struct Context<'host> {
 /// was the last thing making `inillucent-ext` - a crate the *new*
 /// engine links - depend on `inillucent-storage`, the storage model the
 /// rearchitecture retired. Every host now reaches its rows through
-/// [`Context::store`], including the old engine, whose implementation of that
+/// `Context::store`, including the old engine, whose implementation of that
 /// trait is `inillucent_vm::shadow_pager::PagerShadowStore`. One interface,
 /// two engines behind it, and only the retired crates name the retired
 /// storage.

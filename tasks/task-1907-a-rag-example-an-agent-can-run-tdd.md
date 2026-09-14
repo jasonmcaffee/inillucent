@@ -118,9 +118,10 @@ reader ever executes.
 
 ### The corpus
 
-Source: the two extracts `scripts/fetch-public-corpus.sh` already produces, which on this box are
-`J:/inillucent-embeddings/derived/enwiki-articles.jsonl` (60,000 English articles from the 20251222
-CirrusSearch content dump) and `articles.jsonl` (81,740 Simple English articles).
+Source: the two extracts `scripts/fetch-public-corpus.sh` already produces, which are
+`enwiki-articles.jsonl` (60,000 English articles from the 20251222 CirrusSearch content dump)
+and `articles.jsonl` (81,740 Simple English articles), under whatever directory that script was
+pointed at.
 
 Selection is **one explicit list of titles**, written out in `scripts/select-corpus.py`: 80 articles,
 Thales to Proclus, plus the concept pages the demonstration questions land on.

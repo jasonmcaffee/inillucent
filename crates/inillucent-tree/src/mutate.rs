@@ -281,17 +281,6 @@ impl<'p> LeafMut<'p> {
         }))
     }
 
-    /// Reports whether a row of this size would fit the delta area.
-    ///
-    /// The room check, which needs the row's *length* and not its bytes. The
-    /// caller has the bytes and would otherwise have to hand over a copy of
-    /// them to be told no.
-    ///
-    /// @param encoded_len - how many bytes the row's tagged form occupies
-    pub fn fits_delta(&self, encoded_len: usize) -> DbResult<bool> {
-        Ok(self.delta_offsets(encoded_len)?.is_some())
-    }
-
     /// Returns where a row of this size would land, or `None` if it would not.
     ///
     /// @param encoded_len - how many bytes the row's tagged form occupies
@@ -577,7 +566,7 @@ impl<'p> LeafMut<'p> {
     /// whatever length the new value is - the same length and shorter are
     /// written where the value lies, and longer is written at the bottom of the
     /// heap with the slot repointed at it. See
-    /// [`LeafMut::overwrite_heap_slot`], which is where the argument for that
+    /// `LeafMut::overwrite_heap_slot`, which is where the argument for that
     /// is.
     ///
     /// The text case is not a curiosity: it is what an `UPDATE` of a string
@@ -1302,6 +1291,7 @@ mod tests {
     #[test]
     fn a_value_too_wide_for_the_slot_is_refused() {
         if !crate::leaf::NARROW_INT_SLOTS {
+            eprintln!("narrow integer slots are compiled out; skipping");
             return;
         }
         let mut page = leaf_of(4096, 8);

@@ -271,6 +271,22 @@ the repository grades itself against.
     }
 
     if ($SkipBuild) { $script:waived += 'SkipBuild' }
+
+    # **Every packaged copy of the version has to agree with the workspace, and no
+    # tracked file may carry a credential or a personal reference.** Both are
+    # things nothing checked: at 0.1.2 the Python package reported 0.1.0 and the
+    # PHP installer downloaded 0.1.1, so `composer require` followed by the
+    # installer fetched the release that cannot embed, and the tracked score card
+    # carried a PostgreSQL password in clear (task-1946, H7 and H9). Neither is
+    # reachable by building the workspace, so the release script is where it has
+    # to be asked, before an archive exists to be published.
+    & node (Join-Path $root 'tools/doc-facts/check.mjs')
+    if ($LASTEXITCODE -ne 0) {
+        Deny-Unless -Allowed:$AllowDirty -Name 'AllowDirty' -Because @"
+tools/doc-facts/check.mjs failed: a document disagrees with the engine, a packaged version pin
+disagrees with the workspace, or a tracked file carries something a public repository must not.
+"@
+    }
 }
 
 Write-Host "inillucent $Version for $Target"

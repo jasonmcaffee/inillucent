@@ -8,7 +8,7 @@
 //! implementation, and each has a case in the tests below.
 
 use inillucent_sql::function::ScalarFunc;
-use inillucent_value::{cast, compare, numeric, Affinity, Collation, TextEncoding, Value};
+use inillucent_value::{cast, compare, numeric, Collation, TextEncoding, Value};
 
 use crate::eval;
 
@@ -992,15 +992,6 @@ fn pattern_call(
         crate::pattern::glob(&pattern_bytes, &subject_bytes)
     };
     Value::Integer(i64::from(matched))
-}
-
-/// Returns the affinity a scalar function's result should be given, if any.
-///
-/// Nothing in the built-in set needs one; the hook exists so a registered
-/// function can later declare one without the machine having to special-case
-/// it.
-pub fn result_affinity(_func: ScalarFunc) -> Option<Affinity> {
-    None
 }
 
 /// A vector, as this engine stores one: little-endian `f32` in a blob.

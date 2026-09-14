@@ -27,7 +27,7 @@ seconds. A category rule cannot, and the articles it admits by mistake are
 exactly the ones a search will return when the corpus has nothing better.
 
 Usage:
-    python scripts/select-corpus.py --derived J:/inillucent-embeddings/derived \\
+    python scripts/select-corpus.py --derived <the derived Wikipedia directory> \\
         --out corpus/greek-philosophy.jsonl
 """
 

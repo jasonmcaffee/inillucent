@@ -368,7 +368,7 @@ pub struct TableInfo {
     /// The child's side of the relationship, which is the side the table
     /// carries. Finding the keys that point *at* a table means walking the
     /// database's tables and asking each one, which is what
-    /// [`CatalogView::foreign_keys_referencing`] does - and is what SQLite does
+    /// `CatalogView::foreign_keys_referencing` does - and is what SQLite does
     /// too, because nothing in the file records the reverse direction.
     pub foreign_keys: Vec<ForeignKeyInfo>,
     /// Every `CHECK` constraint, as the source text it was written as.
@@ -651,19 +651,6 @@ impl TableInfo {
             order.push(position as u16);
         }
         order
-    }
-
-    /// Returns how many columns the record holds.
-    pub fn record_width(&self) -> usize {
-        self.columns
-            .iter()
-            .filter(|column| !column.generated || column.stored)
-            .count()
-    }
-
-    /// Returns whether the table has any generated column at all.
-    pub fn has_generated(&self) -> bool {
-        self.columns.iter().any(|column| column.generated)
     }
 
     /// Returns whether a name is one of the rowid's three spellings and is not

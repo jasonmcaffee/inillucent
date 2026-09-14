@@ -21,7 +21,6 @@ use std::collections::HashMap;
 use inillucent_base::error::refusal;
 use inillucent_base::DbResult;
 use inillucent_catalog::analyze::STAT1_SQL;
-use inillucent_catalog::paged::ObjectKind;
 use inillucent_pool::Pool;
 use inillucent_sql::catalog_view::{IndexInfo, TableInfo};
 use inillucent_tree::datum::{Datum, OwnedDatum};
@@ -85,6 +84,17 @@ impl ImportedDatabase {
         let names: Vec<Vec<u8>> = subjects.iter().map(|held| held.name.clone()).collect();
         self.clear_stat1(&names)?;
         self.write_stat1(&rows)?;
+        // **The rows are on disk and the planner has not read them yet.**
+        // `refresh_catalog` is the only path to `republish_statistics`, so
+        // without this the connection that ran `ANALYZE` keeps the snapshot it
+        // took before the statistics existed: `IndexInfo::prefix_rows` stays
+        // `Some([])` and every table's row count stays the planner's guess of
+        // `DEFAULT_ROWS`, 1,048,576, until the database is reopened. Every other
+        // schema writing directive - `ddl.rs`, `attach.rs`, `vtab.rs`,
+        // `marks.rs` - ends the same way, and the suite missed this one because
+        // every case in `analyze_reopen.rs` reopens before it reads anything
+        // back (task-1946, H1).
+        self.refresh_catalog();
         self.seal()?;
         Ok(Outcome::empty())
     }
@@ -403,13 +413,6 @@ impl ImportedDatabase {
             _ => Vec::new(),
         };
         apply_statistics(&mut self.tables, &rows);
-    }
-
-    /// Reports whether the schema has a `sqlite_stat1` row.
-    pub fn has_statistics(&self) -> bool {
-        self.entries
-            .iter()
-            .any(|held| held.entry.kind == ObjectKind::Table && held.entry.name == STAT1)
     }
 }
 

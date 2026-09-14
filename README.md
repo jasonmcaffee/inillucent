@@ -63,9 +63,7 @@ inillucent-install
 ```
 
 `go install` builds a small program that downloads the release for your machine,
-checks its SHA-256 and puts the four programs in `GOBIN`. It needs
-`GOPRIVATE=github.com/Black-Rainbow-Labs/*` set, because the repository is
-private and Go's public checksum database cannot read it.
+checks its SHA-256 and puts the four programs in `GOBIN`.
 
 ### The other five package managers are not published yet
 
@@ -141,12 +139,16 @@ An application calls the engine in its own process through the C ABI. **The eigh
 are not published**: there is no `inillucent-clients` repository and none of the eight packages below
 exists on its registry, so none of these lines works today. They are what the packages will be named.
 
+The Rust row is the exception, and it names something that exists: the crate is
+`drivers/inillucent-driver` in this repository and it would publish under that
+name. The other seven are names nothing answers to yet.
+
 | | |
 |---|---|
 | TypeScript | `npm install inillucent-client` |
 | JavaScript | `npm install inillucent-client` |
 | Python | `pip install inillucent-client` |
-| Rust | `cargo add inillucent-client` |
+| Rust | `cargo add inillucent-driver` |
 | Go | `go get github.com/Black-Rainbow-Labs/inillucent-clients/go` |
 | Java | `com.inillucent:inillucent-client` |
 | C# | `dotnet add package Inillucent.Client` |

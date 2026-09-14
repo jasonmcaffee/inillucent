@@ -1110,11 +1110,7 @@ pub fn run(options: &EmbeddingGradeOptions) -> Result<EmbeddingCard> {
                 .collect(),
         };
         let dir = w.finish(&manifest)?;
-        provenance.insert(
-            "per-query records".into(),
-            format!("{records} lines in {}", dir.join("per-query.jsonl").display()),
-        );
-        provenance.insert("run manifest".into(), dir.join("manifest.json").display().to_string());
+        runs::note_run_files(&mut provenance, records, &dir);
     } else {
         provenance.insert("per-query records".into(), "**not written**".into());
     }
@@ -2295,6 +2291,7 @@ mod tests {
             let query = &vectors[probe];
             let card_ranking: Vec<String> = index
                 .exhaustive_search(query, &compiled, K)
+                .expect("the harness embeds at the index's width")
                 .into_iter()
                 .map(|n| index_keys[n.chunk as usize].clone())
                 .collect();

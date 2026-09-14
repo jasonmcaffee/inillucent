@@ -62,17 +62,57 @@ pub const DEFAULT_MODEL: &str = "nomic-embed-text-v1.5";
 /// The file inside the home directory that records what was installed.
 pub const STATE_FILE: &str = "embeddings.json";
 
-/// Directories the weights are looked for in when the install root does not
-/// hold them.
+/// The environment variable naming extra directories to look for weights in.
 ///
-/// Both predate the installer and both are still in use: the first is where this
-/// repository's own grading corpus keeps its eight models, and the second is
-/// where the documentation has told people to put them since the embedder
-/// arrived. Dropping either would break a working machine to tidy up a list.
-const LEGACY_MODEL_ROOTS: [&str; 2] = [
-    "J:/inillucent-embeddings/models",
-    "~/.cache/inillucent-models",
-];
+/// A list separated by the platform's path separator - `;` on Windows, `:`
+/// elsewhere - searched after the install root and before nothing. Each entry
+/// holds one directory per model id, the way `models_root` does.
+///
+/// **It exists because a drive letter is machine configuration and was tracked
+/// source.** This list used to be a constant naming a second drive on the
+/// machine the engine was written on, where the grading corpus keeps its eight
+/// models. That path means nothing to anybody else, and a path to one
+/// developer's disk is exactly what a public repository must not carry
+/// (task-1946, H7). A machine that keeps its weights somewhere unusual says so
+/// here; nothing about that belongs in the source.
+pub const MODEL_ROOTS_VAR: &str = "INILLUCENT_MODEL_ROOTS";
+
+/// The directory the documentation has told people to put weights in since the
+/// embedder arrived, looked in when the install root does not hold them.
+const LEGACY_MODEL_ROOTS: [&str; 1] = ["~/.cache/inillucent-models"];
+
+/// Every extra root to search, in order: the ones `INILLUCENT_MODEL_ROOTS`
+/// names, then the documented one.
+///
+/// @returns the directories, home-expanded, skipping any that cannot be resolved
+fn extra_model_roots() -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(named) = non_empty_var(MODEL_ROOTS_VAR) {
+        for entry in named.split(SEPARATOR) {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            if let Some(root) = expand_home(entry) {
+                roots.push(root);
+            }
+        }
+    }
+    for root in LEGACY_MODEL_ROOTS {
+        if let Some(root) = expand_home(root) {
+            roots.push(root);
+        }
+    }
+    roots
+}
+
+/// The character `MODEL_ROOTS_VAR` separates directories with.
+#[cfg(windows)]
+const SEPARATOR: char = ';';
+
+/// The character `MODEL_ROOTS_VAR` separates directories with.
+#[cfg(not(windows))]
+const SEPARATOR: char = ':';
 
 /// The install root.
 ///
@@ -246,7 +286,8 @@ fn version_key(version: &str) -> Vec<u64> {
 /// The directory holding one model's weights, when it can be found.
 ///
 /// Looked for in this order: the directory `INILLUCENT_ONNX_DIR` names, the
-/// install root, and then the two roots this code has always looked in. A
+/// install root, then the directories `INILLUCENT_MODEL_ROOTS` names, then the
+/// documented `~/.cache/inillucent-models`. A
 /// directory only counts when it holds both the weights and the tokenizer,
 /// because half a model produces a failure at the first embedding rather than at
 /// the point somebody could still fix it.
@@ -275,10 +316,7 @@ pub fn model_dir(id: &str) -> Option<PathBuf> {
     if complete_model(&installed) {
         return Some(installed);
     }
-    for root in LEGACY_MODEL_ROOTS {
-        let Some(root) = expand_home(root) else {
-            continue;
-        };
+    for root in extra_model_roots() {
         let dir = root.join(id);
         if complete_model(&dir) {
             return Some(dir);

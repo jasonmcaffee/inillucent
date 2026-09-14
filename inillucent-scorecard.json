@@ -46057,17 +46057,17 @@
   "stats_seed": 20260901,
   "provenance": {
     "baseline database": "postgres://postgres:***@127.0.0.1:5433/inillucent_synth",
-    "command": "C:\\jason\\dev\\inillucent\\target\\release\\inillucent-bench.exe grade --database-url postgres://postgres:inillucent@127.0.0.1:5433/inillucent_synth --cache J:/inillucent-embeddings/corpus.cache --model-dir J:/inillucent-embeddings/models/nomic-embed-text-v1.5 --device cuda:0 --per-source 100 --runs-dir J:/inillucent-embeddings/runs --out C:/jason/dev/inillucent/inillucent-scorecard.md",
+    "command": "inillucent-bench.exe grade --database-url postgres://postgres:***@127.0.0.1:5433/inillucent_synth --cache corpus.cache --model-dir nomic-embed-text-v1.5 --device cuda:0 --per-source 100 --runs-dir runs --out inillucent-scorecard.md",
     "commit": "0c14f71d979e38345138479caff3988513d372fb (working tree dirty)",
-    "corpus cache": "J:/inillucent-embeddings/corpus.cache",
+    "corpus cache": "corpus.cache",
     "device": "Cuda(0)",
-    "embedding model": "J:/inillucent-embeddings/models/nomic-embed-text-v1.5/model.onnx",
+    "embedding model": "nomic-embed-text-v1.5/model.onnx",
     "host": "windows x86_64, 24 logical processors",
-    "per-query records": "8139 lines in J:/inillucent-embeddings/runs\\1788237655-0c14f71d\\per-query.jsonl",
+    "per-query records": "8139 lines in 1788237655-0c14f71d/per-query.jsonl",
     "query seeds": "calibration=1012, heading=12, identifier=13, identity=11, multi_source=16, passage=14, unanswerable=15",
     "ranking settings": "adaptive=AdaptiveWeights { base: 0.35, out_of_vocabulary_gain: 0.1, identifier_gain: 0.1, separation_gain: 0.1, coverage_gain: 0.1, floor: 0.05, ceiling: 0.95 }, adaptive_fusion=true, filtered_ef_search=400, fusion=NormalizedScore { vector_weight: 0.35 }, lexical_coverage=3, lexical_phrase=0.75, lexical_prefix=false, lexical_proximity=1, lexical_rescore_depth=6, lexical_tier=false, mmr_lambda=1, per_source=100",
     "run id": "1788237655-0c14f71d",
-    "run manifest": "J:/inillucent-embeddings/runs\\1788237655-0c14f71d\\manifest.json",
+    "run manifest": "1788237655-0c14f71d/manifest.json",
     "statistics seed": "20260901"
   },
   "query_counts": {

@@ -642,6 +642,10 @@ fn payloads_at_the_local_boundary_match_the_model() {
 fn every_retained_sequence_still_passes() {
     let directory = corpus_directory();
     if !directory.is_dir() {
+        inillucent_compat::differential::skipping(&format!(
+            "no retained sequences at {}",
+            directory.display()
+        ));
         return;
     }
     let entries = match std::fs::read_dir(&directory) {

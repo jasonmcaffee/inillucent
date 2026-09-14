@@ -44,7 +44,7 @@
 //! **A row is self-describing, not the table.** `%_idx`'s third column holds
 //! an `Integer` for a page number when an older build wrote the row and this
 //! build has not touched it since, or a `Blob` for the doclist inline when
-//! this build wrote it. [`term_value`] is where that is decided, and it is
+//! this build wrote it. `term_value` is where that is decided, and it is
 //! decided per row rather than by a schema version in `%_config`, because the
 //! truth is per row: a file can hold both kinds side by side while it is being
 //! written to gradually, and every write from this build replaces whatever it

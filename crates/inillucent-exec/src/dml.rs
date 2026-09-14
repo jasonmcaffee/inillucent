@@ -191,7 +191,7 @@ fn count_view_row(changes: &mut Changes) {
 /// A map from root page to tree, whichever map the caller happens to hold.
 ///
 /// The write path needs a mutable tree and a mutable [`Database`] at the same
-/// instant, which no single accessor can hand out. [`WriteTarget::parts`]
+/// instant, which no single accessor can hand out. `WriteTarget::parts`
 /// therefore hands out both at once, and this is the tree half of that pair -
 /// a trait rather than a concrete map so the harness's `HashMap` and a test's
 /// `BTreeMap` are both usable without either being the one true type.
@@ -325,7 +325,7 @@ pub trait WriteTarget {
 /// A statement's stages are not FROM terms here - they are *row images*: the
 /// row being written, the row already there, the `excluded` row of an upsert, a
 /// trigger's `OLD` and `NEW`. Each is one stage of the same table's layout at
-/// its own offset, so [`translate_scan`] resolves a bound column of any of them
+/// its own offset, so `translate_scan` resolves a bound column of any of them
 /// with no special case at all.
 pub struct RowSpace {
     /// One stage per row image, in the order the batch concatenates them.
@@ -414,11 +414,6 @@ impl RowSpace {
         self
     }
 
-    /// Returns the binder's number for each correlated block, in cell order.
-    pub fn correlation_ids(&self) -> Vec<usize> {
-        self.correlations.iter().map(|(id, _)| *id).collect()
-    }
-
     /// Compiles one bound expression against this space.
     ///
     /// **The catalog is a parameter, not a field.** A `RowSpace` is carried
@@ -428,7 +423,7 @@ impl RowSpace {
     /// refuse by name here (`docs/roadmap.md` item 13): the physical pass
     /// resolves a registered function's body through the catalog, and this
     /// space carried none. Every caller already holds a [`WriteTarget`], and
-    /// [`WriteTarget::catalog`] is exactly the view [`translate_scan`] needs -
+    /// [`WriteTarget::catalog`] is exactly the view `translate_scan` needs -
     /// handed in for the one call it is needed on rather than stored.
     ///
     /// @param expr - the bound expression

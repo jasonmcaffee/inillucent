@@ -2682,30 +2682,6 @@ impl LeafBuilder {
         self.page_size / EXTENT_DIVISOR
     }
 
-    /// Returns the bytes a leaf of `count` rows spends before its heap.
-    ///
-    /// The header, the directory, and each mini-column's class array and inline
-    /// slots. It depends on the row count and not on the values, which is what
-    /// makes the size of a prefix a closed form plus a prefix sum - and that is
-    /// what lets [`LeafBuilder::pack`] answer "does one more row fit" in the
-    /// cost of one row.
-    ///
-    /// @param count - how many rows
-    ///
-    /// **Unreachable since the narrow-slot pricing moved onto the width
-    /// arrays.** It is kept rather than deleted because removing it is a
-    /// separate decision; it is flagged for removal elsewhere so a person
-    /// decides.
-    #[allow(dead_code)]
-    fn fixed_size(&self, count: usize) -> usize {
-        let widths: Vec<usize> = self
-            .columns
-            .iter()
-            .map(|column| column.physical.slot_width())
-            .collect();
-        self.fixed_size_with(count, &widths, false)
-    }
-
     /// Returns the bytes a leaf of `count` rows spends before its heap, at the
     /// slot widths given.
     ///
@@ -3102,7 +3078,7 @@ fn align8(at: usize) -> usize {
 ///
 /// Derived from the values that leaf actually holds, by
 /// [`LeafBuilder::fit_widths`] as it prices the page and by
-/// [`LeafBuilder::layout_over`] when nothing has priced it yet. The two follow
+/// `LeafBuilder::layout_over` when nothing has priced it yet. The two follow
 /// the same rule over the same rows, which is what makes the page the sizing
 /// pass measured the page the encoder writes.
 #[derive(Clone, Debug, Default)]
@@ -3355,108 +3331,6 @@ fn narrow_floor(physical: PhysicalType, page_size: usize) -> usize {
     }
 }
 
-/// Returns the slot width one value forces on its column.
-///
-/// A NULL forces nothing - its slot is never read. An **exception** forces
-/// four: its slot holds a `u32` offset into the heap rather than the value, so
-/// a column with one in it cannot be narrower than that however small its
-/// integers are.
-///
-/// @param physical - the column's layout
-/// @param value - the value being placed
-/// @param threshold - the longest value kept in the leaf
-///
-/// **Unreachable since the narrow-slot pricing moved onto the width
-/// arrays.** It is kept rather than deleted because removing it is a
-/// separate decision; it is flagged for removal elsewhere so a person
-/// decides.
-#[allow(dead_code)]
-fn slot_need(
-    physical: PhysicalType,
-    value: &Datum<'_>,
-    threshold: usize,
-    page_size: usize,
-) -> usize {
-    if !NARROW_INT_SLOTS || !physical.narrows() {
-        return physical.slot_width();
-    }
-    slot_need_of(
-        physical,
-        value,
-        classify_at(physical, value, threshold),
-        page_size,
-    )
-}
-
-/// Returns the slot width one value forces, its class already known.
-///
-/// @param physical - the column's layout
-/// @param value - the value being placed
-/// @param class - the class the value classified as
-///
-/// **Unreachable since the narrow-slot pricing moved onto the width
-/// arrays.** It is kept rather than deleted because removing it is a
-/// separate decision; it is flagged for removal elsewhere so a person
-/// decides.
-#[allow(dead_code)]
-fn slot_need_of(
-    physical: PhysicalType,
-    value: &Datum<'_>,
-    class: ValueClass,
-    page_size: usize,
-) -> usize {
-    if !NARROW_INT_SLOTS || !physical.narrows() {
-        return physical.slot_width();
-    }
-    match physical {
-        PhysicalType::Int64 => match class {
-            ValueClass::Null => 1,
-            ValueClass::Typed => int_slot_width(value.as_int().unwrap_or(0)),
-            // An exception's slot holds a heap offset rather than a value, and
-            // an integer column's offset is a `u32`.
-            _ => 4,
-        },
-        // The length is what decides it: a value longer than a `u16` needs the
-        // wide pair, and so does a page larger than 64 KiB. NULLs, exceptions
-        // and extents all fit the narrow pair - an exception stores one offset
-        // and an extent one too, and both are page offsets.
-        _ => heap_slot_width(
-            page_size,
-            match class {
-                ValueClass::Typed => value.as_bytes().map(<[u8]>::len).unwrap_or(0),
-                _ => 0,
-            },
-        ),
-    }
-}
-
-/// Returns the heap bytes and the slot width one value costs its column.
-///
-/// Both are functions of the same classification, and the sizing pass wants
-/// both - so it classifies once.
-///
-/// @param physical - the column's layout
-/// @param value - the value being placed
-/// @param threshold - the longest value kept in the leaf
-///
-/// **Unreachable since the narrow-slot pricing moved onto the width
-/// arrays.** It is kept rather than deleted because removing it is a
-/// separate decision; it is flagged for removal elsewhere so a person
-/// decides.
-#[allow(dead_code)]
-fn costs_at(
-    physical: PhysicalType,
-    value: &Datum<'_>,
-    threshold: usize,
-    page_size: usize,
-) -> (usize, usize) {
-    let class = classify_at(physical, value, threshold);
-    (
-        heap_cost_of(physical, value, class),
-        slot_need_of(physical, value, class, page_size),
-    )
-}
-
 /// Returns the class a value takes in a column of the given physical type.
 ///
 /// @param physical - the column's layout
@@ -3501,29 +3375,6 @@ fn classify_at(physical: PhysicalType, value: &Datum<'_>, threshold: usize) -> V
         (PhysicalType::Blob, Datum::Blob(_)) => ValueClass::Typed,
         _ => ValueClass::Exception,
     }
-}
-
-/// Returns the heap bytes one value costs in a column of the given type.
-///
-/// @param physical - the column's layout
-/// @param value - the value to measure
-/// Returns the heap bytes one value costs, given the spill threshold.
-///
-/// A value that goes out of line costs the leaf sixteen bytes whatever its
-/// length, which is the whole point of the extent and is why the threshold has
-/// to reach the size calculation and not only the encoder.
-///
-/// @param physical - the column's layout
-/// @param value - the value to measure
-/// @param threshold - the longest value kept in the leaf
-///
-/// **Unreachable since the narrow-slot pricing moved onto the width
-/// arrays.** It is kept rather than deleted because removing it is a
-/// separate decision; it is flagged for removal elsewhere so a person
-/// decides.
-#[allow(dead_code)]
-fn heap_cost_at(physical: PhysicalType, value: &Datum<'_>, threshold: usize) -> usize {
-    heap_cost_of(physical, value, classify_at(physical, value, threshold))
 }
 
 /// Returns the heap bytes one value costs, its class already known.

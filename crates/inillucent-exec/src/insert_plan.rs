@@ -4,16 +4,16 @@
 //! build a closure tree per row of a `VALUES` list. Every value an `INSERT`
 //! writes - a supplied one, a `DEFAULT`, a generated column, an upsert's `DO
 //! UPDATE`, a `RETURNING` expression - depends on the statement's parameters
-//! and not on which row is being built, so [`InsertPlan::compile`] resolves
-//! all of them once and [`InsertPlan::build_row`] only ever reads the result.
+//! and not on which row is being built, so `InsertPlan::compile` resolves
+//! all of them once and `InsertPlan::build_row` only ever reads the result.
 //!
 //! Split out of `dml.rs` to keep that module under the size this workspace
 //! holds its largest files to (`crates/inillucent-compat/tests/policy.rs`,
 //! `no_module_grows_past_the_size_it_is_recorded_at`) - this is one idea, *what
 //! an insert's own row looks like before any row exists to write*, and it is
 //! named from exactly three places: [`crate::dml::insert_at`] and
-//! [`crate::dml::insert_into_view`], which compile it, and
-//! [`crate::dml::write_one`], which drives it one row at a time.
+//! `crate::dml::insert_into_view`, which compile it, and
+//! `crate::dml::write_one`, which drives it one row at a time.
 
 use inillucent_base::{DbError, DbResult, ExtendedCode};
 use inillucent_sql::catalog_view::TableInfo;

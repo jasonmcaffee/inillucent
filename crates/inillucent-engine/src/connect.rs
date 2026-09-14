@@ -297,6 +297,22 @@ impl Database {
         self.engine.borrow().clear_statement_cache();
     }
 
+    /// Returns what one run-time limit is set to on this database.
+    ///
+    /// @param limit - which limit
+    pub fn limit(&self, limit: inillucent_base::limits::Limit) -> i64 {
+        self.engine.borrow().limit(limit)
+    }
+
+    /// Sets one run-time limit, and returns what it was before.
+    ///
+    /// @param limit - which limit
+    /// @param requested - the value asked for
+    /// @returns the value that was in force before this call
+    pub fn set_limit(&self, limit: inillucent_base::limits::Limit, requested: i64) -> i64 {
+        self.engine.borrow_mut().set_limit(limit, requested)
+    }
+
     /// Returns what the page cache has been asked to do.
     ///
     /// For `.stats`, which reports the work a statement caused rather than the

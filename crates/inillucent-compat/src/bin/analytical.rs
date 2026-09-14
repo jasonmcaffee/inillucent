@@ -38,7 +38,7 @@
 //! comparable to, and not identical with, the ones the Phase 1 report
 //! captured.
 //!
-//! Usage: inillucent-analytical <sqlite fixture> [--rounds N] [--page-size N]
+//! Usage: inillucent-analytical `<sqlite fixture>` [--rounds N] [--page-size N]
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
