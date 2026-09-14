@@ -438,3 +438,188 @@ fn statistics_sqlite_wrote_are_read_back() {
     );
     assert_eq!(run(&connection, query), Ok(vec!["int:60".to_string()]));
 }
+
+/// How many rows the seek-union cases build.
+///
+/// Large enough that `ANALYZE` says the one-column seek is expensive, which is
+/// what makes the planner choose the union at all - and the union is what these
+/// cases are about.
+const UNION_ROWS: usize = 20_000;
+
+/// Fills a table whose `a` has ten values and whose `b` has 997.
+///
+/// @param connection - the database to write to
+/// @param columns - the index to create over `t`
+fn build_union_corpus(connection: &inillucent_compat::facade::Connection, columns: &str) {
+    run_all(
+        connection,
+        &[
+            "CREATE TABLE t (a INTEGER, b INTEGER, c TEXT)",
+            &format!("CREATE INDEX i ON t ({columns})"),
+            "BEGIN",
+        ],
+    );
+    for row in 0..UNION_ROWS {
+        let sql = format!(
+            "INSERT INTO t VALUES ({}, {}, 'r{row}')",
+            row % 10,
+            row % 997
+        );
+        run_all(connection, &[sql.as_str()]);
+    }
+    run_all(connection, &["COMMIT", "ANALYZE"]);
+}
+
+/// An `IN` list over a non-unique index answers every row with each key.
+///
+/// **A wrong answer in the shipping engine, found while implementing M7
+/// (task-1932).** `WHERE b IN (1, 2)` on a non-unique index over `(b)` answered
+/// two rows where `WHERE b = 1` alone answers twenty-one. Every branch of an
+/// equality union ran as a point probe, which finds the first entry with a key
+/// and stops - correct for a rowid and for a unique index, and wrong for every
+/// other one, where an equality is a run of entries.
+///
+/// **Why nothing caught it.** The union has to be *chosen* first, and the cost
+/// model only prefers it over a plain seek once `ANALYZE` has run and its
+/// statistics have reached a fresh connection. Every other suite's tables are
+/// small, unanalysed, or both - so this case is deliberately twenty thousand
+/// rows and deliberately re-opened.
+#[test]
+fn an_in_list_over_a_non_unique_index_answers_every_matching_row() {
+    let path = scratch("in-union");
+    {
+        let database = Database::open(&path).expect("the database opens");
+        let connection = database.connect().expect("a connection opens");
+        build_union_corpus(&connection, "b");
+    }
+
+    let database = Database::open(&path).expect("the database reopens");
+    let connection = database.connect().expect("a connection opens");
+    let chosen = plan(&connection, "SELECT c FROM t WHERE b IN (1, 2)").join(" ");
+    assert!(
+        chosen.contains("SEARCH") && chosen.contains("INDEX i"),
+        "the planner did not choose the index, so this case is not about the union: {chosen}"
+    );
+
+    let expected = (0..UNION_ROWS)
+        .filter(|row| matches!(row % 997, 1 | 2))
+        .count();
+    assert!(
+        expected >= 20,
+        "the corpus holds {expected} matching rows, too few to tell a probe from a scan"
+    );
+    assert_eq!(
+        run(&connection, "SELECT count(*) FROM t WHERE b IN (1, 2)"),
+        Ok(vec![format!("int:{expected}")]),
+        "an IN list over a non-unique index lost rows"
+    );
+
+    // The two equalities separately, so a failure says whether the union lost
+    // rows or the corpus is not what this case thinks it is.
+    let ones = (0..UNION_ROWS).filter(|row| row % 997 == 1).count();
+    assert_eq!(
+        run(&connection, "SELECT count(*) FROM t WHERE b = 1"),
+        Ok(vec![format!("int:{ones}")])
+    );
+}
+
+/// An `IN` list behind an equality prefix seeks on both columns.
+///
+/// **M7's second bullet.** `WHERE a = 5 AND b IN (1, 2, 3)` on an index over
+/// `(a, b)` is three seeks to `(5, 1)`, `(5, 2)` and `(5, 3)`. The planner
+/// looked at the leading column only, so the `IN` became a residual and the
+/// query read every row with `a = 5` - two thousand rows here, to answer six.
+#[test]
+fn an_in_list_behind_an_equality_prefix_seeks_on_both_columns() {
+    let path = scratch("in-prefix");
+    {
+        let database = Database::open(&path).expect("the database opens");
+        let connection = database.connect().expect("a connection opens");
+        build_union_corpus(&connection, "a, b");
+    }
+
+    let database = Database::open(&path).expect("the database reopens");
+    let connection = database.connect().expect("a connection opens");
+    let chosen = plan(
+        &connection,
+        "SELECT c FROM t WHERE a = 5 AND b IN (1, 2, 3)",
+    )
+    .join(" ");
+    assert!(
+        chosen.contains("a=? AND b=?"),
+        "the plan pins only the leading column, so the IN list is still a residual: {chosen}"
+    );
+
+    let expected = (0..UNION_ROWS)
+        .filter(|row| row % 10 == 5 && matches!(row % 997, 1..=3))
+        .count();
+    assert!(expected > 0, "the corpus holds no matching row");
+    assert_eq!(
+        run(
+            &connection,
+            "SELECT count(*) FROM t WHERE a = 5 AND b IN (1, 2, 3)"
+        ),
+        Ok(vec![format!("int:{expected}")]),
+        "the two-column seek lost rows"
+    );
+}
+
+/// An anchored `GLOB` on an indexed column seeks rather than scanning.
+///
+/// **M7's first bullet.** `k GLOB 'abc*'` selects exactly the keys from `abc`
+/// up to but not including `abd`, and the planner matched `BoundExpr::Compare`
+/// only - a pattern binds to `BoundExpr::Pattern`, so every prefix query on an
+/// indexed column read the whole table.
+///
+/// `GLOB` on a `BINARY` column and `LIKE` on a `NOCASE` one are the two
+/// pairings where the pattern's case sensitivity matches the index's, and they
+/// are exactly the two the pinned 3.53.4 seeks for. The other two it scans, and
+/// so does this: a case-sensitive range over a case-insensitive index excludes
+/// rows the pattern matches.
+#[test]
+fn an_anchored_pattern_on_an_indexed_column_seeks() {
+    let path = scratch("prefix-seek");
+    let database = Database::open(&path).expect("the database opens");
+    let connection = database.connect().expect("a connection opens");
+    run_all(
+        &connection,
+        &[
+            "CREATE TABLE t (k TEXT, v INTEGER)",
+            "CREATE INDEX i ON t (k)",
+            "INSERT INTO t VALUES ('ab', 1), ('abc', 2), ('abcd', 3), ('abd', 4), ('ABC', 5)",
+            "CREATE TABLE n (k TEXT COLLATE NOCASE)",
+            "CREATE INDEX j ON n (k)",
+        ],
+    );
+
+    let seeking = plan(&connection, "SELECT v FROM t WHERE k GLOB 'abc*'").join(" ");
+    assert!(
+        seeking.contains("SEARCH") && seeking.contains("INDEX i"),
+        "an anchored GLOB on an indexed column did not seek: {seeking}"
+    );
+    assert_eq!(
+        run(
+            &connection,
+            "SELECT k FROM t WHERE k GLOB 'abc*' ORDER BY k"
+        ),
+        Ok(vec!["text:abc".to_string(), "text:abcd".to_string()]),
+        "the prefix seek lost the exact prefix or admitted the row past it"
+    );
+
+    let folded = plan(&connection, "SELECT k FROM n WHERE k LIKE 'abc%'").join(" ");
+    assert!(
+        folded.contains("SEARCH"),
+        "a LIKE prefix on a NOCASE index did not seek: {folded}"
+    );
+    let mismatched = plan(&connection, "SELECT k FROM n WHERE k GLOB 'abc*'").join(" ");
+    assert!(
+        mismatched.contains("SCAN"),
+        "a case-sensitive GLOB seeks over a case-insensitive index, which excludes rows it \
+         matches: {mismatched}"
+    );
+    let unanchored = plan(&connection, "SELECT v FROM t WHERE k GLOB '*abc'").join(" ");
+    assert!(
+        unanchored.contains("SCAN"),
+        "a pattern with a leading wildcard selects no range: {unanchored}"
+    );
+}

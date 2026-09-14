@@ -51,6 +51,21 @@ pub enum AggregateKind {
     Maximum,
     /// `group_concat(x, sep)`.
     GroupConcat(String),
+    /// `group_concat(x, y)` where `y` is not a literal, so the separator is a
+    /// value of each row rather than a constant of the call.
+    ///
+    /// **The separator SQLite uses before a row is that row's own (task-1913).**
+    /// `group_concat(s, n)` over `('a',1), ('b',2), ('c',3)` is `a2b3c`: the
+    /// first kept row contributes no separator, and every later one is preceded
+    /// by the separator read from itself. A NULL separator contributes nothing,
+    /// which is why `group_concat(s, NULL)` is `abc` rather than NULL. Measured
+    /// against the pinned 3.53.4 rather than reasoned about, including through
+    /// the call's own `ORDER BY`, where the rows are sorted first and the rule
+    /// then applies to the sorted order.
+    ///
+    /// It keeps whole rows rather than folding as they arrive, because the
+    /// separator cannot be known until the row it belongs to is there.
+    GroupConcatComputed,
     /// `json_group_array(x)` and its `jsonb_` spelling.
     ///
     /// The flag is the binary form. A NULL is a *member* here rather than a row
@@ -178,6 +193,11 @@ pub struct Accumulator {
     /// `count(DISTINCT team)` over a `NOCASE` column agrees with `SELECT DISTINCT
     /// team` over it.
     seen: Option<(Collation, HashSet<Vec<u8>>)>,
+    /// The encoded key `seen` is asked about, reused between rows.
+    ///
+    /// One buffer rather than one allocation per row; see the note in `push`
+    /// (task-1932, M7).
+    scratch: Vec<u8>,
     /// Rows counted, or non-NULL values seen.
     count: i64,
     /// The integer running total, while the sum is still exact.
@@ -235,6 +255,7 @@ impl Accumulator {
         Accumulator {
             kind,
             seen: None,
+            scratch: Vec::new(),
             count: 0,
             integer_sum: 0,
             real_sum: 0.0,
@@ -347,6 +368,18 @@ impl Accumulator {
             }
             return;
         }
+        // **`DISTINCT` is applied here too (task-1913).** It used to live only
+        // in `push`, so an aggregate that keeps whole rows lost it entirely:
+        // `group_concat(DISTINCT t ORDER BY t)` answered `blue,blue,gone,red`
+        // where the reference answers `blue,gone,red`. Adding an `ORDER BY` to
+        // a call turned its `DISTINCT` off, which is a wrong answer to a
+        // perfectly ordinary query and not one the shape of the statement
+        // warns anybody about. The key is the call's first argument, which is
+        // the value `DISTINCT` is about - a second argument is refused by the
+        // binder, in the reference's own words.
+        if !self.keep_distinct(values.first()) {
+            return;
+        }
         if self.sort.is_some()
             || matches!(
                 self.kind,
@@ -357,6 +390,32 @@ impl Accumulator {
             return;
         }
         self.rows.push(values);
+    }
+
+    /// Reports whether a value is new, and records it when it is.
+    ///
+    /// Always true for a call that did not say `DISTINCT`. The encoding and
+    /// the reused buffer are the ones [`Accumulator::push`] uses, so the two
+    /// paths agree on what counts as the same value - which matters because a
+    /// `NOCASE` column makes `'a'` and `'A'` one value here and two under a
+    /// binary comparison.
+    ///
+    /// @param value - the call's first argument for this row
+    fn keep_distinct(&mut self, value: Option<&inillucent_value::value::Value<'static>>) -> bool {
+        let Some((collation, seen)) = &mut self.seen else {
+            return true;
+        };
+        let Some(value) = value else {
+            return true;
+        };
+        let datum = crate::scalar::from_value(value.clone());
+        self.scratch.clear();
+        inillucent_tree::key::encode_into_with(&datum.borrow(), *collation, &mut self.scratch);
+        if seen.contains(&self.scratch) {
+            return false;
+        }
+        seen.insert(self.scratch.clone());
+        true
     }
 
     /// Folds one value in.
@@ -371,11 +430,17 @@ impl Accumulator {
             return;
         }
         if let Some((collation, seen)) = &mut self.seen {
-            let mut encoded = Vec::new();
-            inillucent_tree::key::encode_into_with(value, *collation, &mut encoded);
-            if !seen.insert(encoded) {
+            // **Encoded into a reused buffer and only cloned when the value is
+            // new (task-1932, M7).** A `DISTINCT` aggregate over a column with
+            // few distinct values allocated one key per *row* and dropped
+            // almost all of them - `count(DISTINCT status)` over a million rows
+            // with six statuses allocated a million times to keep six.
+            self.scratch.clear();
+            inillucent_tree::key::encode_into_with(value, *collation, &mut self.scratch);
+            if seen.contains(&self.scratch) {
                 return;
             }
+            seen.insert(self.scratch.clone());
         }
         self.count = self.count.saturating_add(1);
         match &self.kind {
@@ -403,7 +468,42 @@ impl Accumulator {
             // another arm so a kind added later is a compilation error.
             AggregateKind::JsonGroupArray(_)
             | AggregateKind::JsonGroupObject(_)
+            | AggregateKind::GroupConcatComputed
             | AggregateKind::Bare(_) => {}
+        }
+    }
+
+    /// Joins the collected rows with the separator each of them carries.
+    ///
+    /// A row whose *value* is NULL is not in the answer at all - the reference
+    /// skips it, separator and all - and a NULL separator contributes nothing.
+    /// The first row that survives contributes no separator, which is what
+    /// makes `group_concat(s, n)` over `('a',1),('b',2)` read `a2b` rather
+    /// than `1a2b`. See [`AggregateKind::GroupConcatComputed`].
+    fn group_concat_computed(&self) -> OwnedDatum {
+        let mut joined = String::new();
+        let mut any = false;
+        for row in &self.rows {
+            let Some(value) = row.first() else {
+                continue;
+            };
+            if matches!(value, inillucent_value::value::Value::Null) {
+                continue;
+            }
+            if any {
+                if let Some(separator) = row.get(1) {
+                    if !matches!(separator, inillucent_value::value::Value::Null) {
+                        joined.push_str(&text_of(separator));
+                    }
+                }
+            }
+            joined.push_str(&text_of(value));
+            any = true;
+        }
+        if any {
+            OwnedDatum::Text(joined.into_bytes())
+        } else {
+            OwnedDatum::Null
         }
     }
 
@@ -624,6 +724,9 @@ impl Accumulator {
                     self.push(&Datum::Int(value));
                 }
             }
+            // Unreachable: a computed separator makes the call a whole-row
+            // one, and no operator offers one of those a mini-column.
+            AggregateKind::GroupConcatComputed => {}
         }
     }
 
@@ -782,7 +885,14 @@ impl Accumulator {
                     // suspect. `total()` and `avg()` are documented to be
                     // doubles and keep answering one, which is why the check is
                     // on this arm alone.
-                    return Err(inillucent_base::error::refusal("integer overflow"));
+                    // `SQLITE_ERROR`, not `SQLITE_MISUSE` (task-1913). The
+                    // pinned 3.53.4 answers primary code 1 here, measured
+                    // against the oracle; `refusal` hardcodes 21, so the
+                    // message matched and the code a driver branches on did
+                    // not.
+                    return Err(inillucent_base::error::statement_refusal(
+                        "integer overflow",
+                    ));
                 } else if self.is_real {
                     OwnedDatum::Real(self.compensated())
                 } else {
@@ -854,6 +964,7 @@ impl Accumulator {
                     OwnedDatum::Text(self.joined.clone().into_bytes())
                 }
             }
+            AggregateKind::GroupConcatComputed => self.group_concat_computed(),
         })
     }
     /// Returns the aggregate's value over its rows in the sort's own order.
@@ -902,8 +1013,13 @@ impl Accumulator {
         let mut folded = Accumulator::new(self.kind.clone());
         for row in sorted {
             match self.kind {
-                // The document builders keep taking whole rows.
-                AggregateKind::JsonGroupArray(_) | AggregateKind::JsonGroupObject(_) => {
+                // The document builders keep taking whole rows, and so does a
+                // `group_concat` whose separator is a value of each row: the
+                // separator travels with the value it precedes, so folding the
+                // value alone would lose it (task-1913).
+                AggregateKind::JsonGroupArray(_)
+                | AggregateKind::JsonGroupObject(_)
+                | AggregateKind::GroupConcatComputed => {
                     folded.push_values(row);
                 }
                 // Everything else reduces one value, and a NULL is a row it
@@ -930,6 +1046,24 @@ fn render(value: &Datum<'_>) -> String {
         Datum::Int(number) => number.to_string(),
         Datum::Real(number) => format_real(*number),
         Datum::Text(bytes) | Datum::Blob(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+    }
+}
+
+/// Returns a value as the text `group_concat` writes into its answer.
+///
+/// The same rendering [`render`] does, over the owned form the whole-row path
+/// collects: NULL is empty, a real is formatted the way the reference formats
+/// one, and a blob is its bytes.
+///
+/// @param value - the collected value
+fn text_of(value: &inillucent_value::value::Value<'_>) -> String {
+    use inillucent_value::value::Value;
+    match value {
+        Value::Null => String::new(),
+        Value::Integer(number) => number.to_string(),
+        Value::Real(number) => format_real(*number),
+        Value::Text(text) => String::from_utf8_lossy(&text.utf8_bytes()).into_owned(),
+        Value::Blob(blob) => String::from_utf8_lossy(blob.raw()).into_owned(),
     }
 }
 
