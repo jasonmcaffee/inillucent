@@ -229,7 +229,15 @@ pub struct ImportedDatabase {
     /// The file, and everything that reads or writes a page of it.
     pub(crate) storage: Storage,
     /// What a transaction in progress has done so far.
-    pub(crate) writing: Writing,
+    ///
+    /// **Shared rather than owned (task-1962, A1 step 3).** Every one of the
+    /// group's ten fields is behind its own cell, so nothing here needs `&mut`
+    /// to write it, and the `Rc` lets [`crate::connect::Database`] hold the
+    /// same writer the engine holds. A caller asking whether a transaction is
+    /// open then reads it directly, rather than borrowing the engine - which is
+    /// what aborted the process when the question was asked from inside a
+    /// callback the engine was already running.
+    pub(crate) writing: std::rc::Rc<Writing>,
     /// The compiled statements this connection is holding on to.
     pub(crate) compiled: Compiled,
     /// What the engine remembers about statements that have already run.
@@ -1560,11 +1568,13 @@ impl ImportedDatabase {
     ///
     /// @param writing - whether the statement changes the database
     pub(crate) fn enter(&mut self, writing: bool) -> DbResult<()> {
-        self.writing.running = self.writing.running.saturating_add(1);
+        self.writing
+            .running
+            .set(self.writing.running.get().saturating_add(1));
         // **A transaction holds its lock from the first write to the commit.**
         // Once inside one, the retry loop's release would open a window another
         // process could write through - see `Database::begin_write_within`.
-        let inside = self.writing.batch.get().is_some() || self.writing.running > 1;
+        let inside = self.writing.batch.get().is_some() || self.writing.running.get() > 1;
         let reloaded = if writing {
             self.storage.database.begin_write_within(!inside)?
         } else {
@@ -1594,8 +1604,10 @@ impl ImportedDatabase {
     /// file go between its statements would be a transaction another process
     /// could write through the middle of.
     pub(crate) fn leave(&mut self) -> DbResult<()> {
-        self.writing.running = self.writing.running.saturating_sub(1);
-        if self.writing.running > 0
+        self.writing
+            .running
+            .set(self.writing.running.get().saturating_sub(1));
+        if self.writing.running.get() > 0
             || self.session_state.locking_exclusive
             || self.writing.batch.get().is_some()
         {

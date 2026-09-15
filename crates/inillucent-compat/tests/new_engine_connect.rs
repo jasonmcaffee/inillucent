@@ -228,3 +228,62 @@ fn cache_size_grows_the_pool_and_reads_back_what_was_asked_for() {
         .expect("the row reads back");
     assert_eq!(column(&rows), vec!["after the grow".to_string()]);
 }
+
+/// A `VACUUM` does not leave the connection answering the wrong transaction
+/// state.
+///
+/// **`VACUUM` replaces the whole engine (task-1962, A1 step 3).**
+/// `rebuild::vacuum_in_place` reopens the rebuilt file by assigning a freshly
+/// opened `ImportedDatabase` over the connection, and `Database` holds a second
+/// handle on the group that records the open transaction. The first version of
+/// that second handle was left pointing at the group the *old* engine had, so a
+/// `BEGIN` after a `VACUUM` wrote to one group and `autocommit()` read the
+/// other, and answered `true` inside an open transaction.
+///
+/// The differential suite found it - `dml_differential::vacuum_matches_sqlite`,
+/// step 24 - but that suite needs the pinned SQLite oracle built, and this does
+/// not.
+#[test]
+fn autocommit_is_still_right_after_a_vacuum() {
+    let path = scratch("vacuum-autocommit");
+    let database = Database::open(&path).expect("the database opens");
+    let connection = database.session();
+    connection
+        .execute_batch("CREATE TABLE t (a INTEGER); INSERT INTO t VALUES (1), (2), (3)")
+        .expect("the table is written");
+
+    assert!(
+        connection.autocommit().expect("the state is readable"),
+        "nothing has opened a transaction yet"
+    );
+    connection
+        .execute_batch("VACUUM")
+        .expect("the file rebuilds");
+    assert!(
+        connection.autocommit().expect("the state is readable"),
+        "a VACUUM commits itself, so the connection is back in autocommit"
+    );
+
+    connection
+        .execute_batch("BEGIN")
+        .expect("the transaction opens");
+    assert!(
+        !connection.autocommit().expect("the state is readable"),
+        "a transaction is open, so the connection is not in autocommit;          answering true here means the handle is on a group nothing writes to"
+    );
+    connection
+        .execute_batch("INSERT INTO t VALUES (4)")
+        .expect("the row is written");
+    connection
+        .execute_batch("COMMIT")
+        .expect("the transaction commits");
+    assert!(
+        connection.autocommit().expect("the state is readable"),
+        "the commit closed the transaction"
+    );
+
+    let rows = connection
+        .query("SELECT count(*) FROM t")
+        .expect("the count reads back");
+    assert_eq!(rows, vec![vec![OwnedDatum::Int(4)]]);
+}

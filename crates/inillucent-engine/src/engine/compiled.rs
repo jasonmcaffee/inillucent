@@ -732,7 +732,7 @@ impl crate::ImportedDatabase {
                 return Err(self.abandon(error, mark, autocommit, wrote, txn));
             }
         };
-        self.writing.touched |= wrote;
+        self.writing.touched.set(self.writing.touched.get() | wrote);
         // **Inside the same transaction, and after the trees rather than
         // during them.** The module is registered on the connection and the
         // write borrowed the connection apart, so this is the first moment both
@@ -786,7 +786,7 @@ impl crate::ImportedDatabase {
         // `total_changes()` where SQLite puts them.
         self.record_changes(counted.0, counted.1);
         let committed = if autocommit {
-            let participants = std::mem::take(&mut self.writing.touched);
+            let participants = self.writing.touched.replace(0);
             self.commit_across(txn, participants)
         } else {
             Ok(())
@@ -845,15 +845,15 @@ impl crate::ImportedDatabase {
         };
         if autocommit {
             self.writing.undo.borrow_mut().clear();
-            self.writing.marks.clear();
+            self.writing.marks.borrow_mut().clear();
             if matches!(unwind, Unwind::Nothing) && undone.is_ok() {
                 // **`OR FAIL` outside a transaction commits.** The rows written
                 // before the failure are kept, and keeping them only in the
                 // page cache would make them a fact this process believes and
                 // the file does not. The statement failed; its transaction did
                 // not.
-                self.writing.touched |= wrote;
-                let participants = std::mem::take(&mut self.writing.touched);
+                self.writing.touched.set(self.writing.touched.get() | wrote);
+                let participants = self.writing.touched.replace(0);
                 if let Err(failure) = self.commit_across(txn, participants) {
                     return failure;
                 }
@@ -871,7 +871,7 @@ impl crate::ImportedDatabase {
                         database.pool().set_uncommitted_lsn(u64::MAX);
                     }
                 }
-                self.writing.touched = 0;
+                self.writing.touched.set(0);
             }
         }
         // The statement is over, so its transaction number stops being the

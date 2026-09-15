@@ -400,9 +400,20 @@ pub(crate) struct Writing {
     /// and a `BTreeSet` allocates a node the first time each one is inserted
     /// into. Twelve bits is `main`, `temp` and the ten databases
     /// [`MAX_ATTACHED`] allows, which is every schema a connection can hold.
-    pub(crate) touched: u16,
+    ///
+    /// **Behind a cell (task-1962, A1 step 3).** Every other field of this
+    /// group already was, and the two that were not are what made the whole
+    /// group need `&mut`. With all ten behind their own cells the group is
+    /// reachable through a shared reference, which is what lets a connection
+    /// hold the writer without borrowing the engine.
+    pub(crate) touched: std::cell::Cell<u16>,
     /// Named savepoints, and where each one sits in `undo`.
-    pub(crate) marks: Vec<(Vec<u8>, usize)>,
+    ///
+    /// Behind a cell for the reason `touched` is, and it is a `RefCell` rather
+    /// than a `Cell` because the list is read in place - `release` finds a name
+    /// in it - and copying it to read one entry would allocate per savepoint
+    /// statement.
+    pub(crate) marks: std::cell::RefCell<Vec<(Vec<u8>, usize)>>,
     /// How many schemas the last commit was decided over.
     ///
     /// **The instrument for the one claim about this protocol that is otherwise
@@ -458,7 +469,9 @@ pub(crate) struct Writing {
     /// released on the way out of it. A counter rather than a flag because the
     /// nesting is real and an inner release would drop the file while the outer
     /// statement was still reading it.
-    pub(crate) running: usize,
+    ///
+    /// Behind a cell for the reason `touched` is.
+    pub(crate) running: std::cell::Cell<usize>,
     /// Whether a cyclic-key sweep is already running.
     ///
     /// The sweep runs statements, and a statement runs the sweep; without this
@@ -681,6 +694,36 @@ impl SessionState {
         } else {
             mask | Levers::AUTOMATIC_INDEX
         });
+    }
+}
+
+impl Writing {
+    /// Takes every field from a freshly opened connection's group, keeping this
+    /// group's identity.
+    ///
+    /// **For the one place that replaces a whole `ImportedDatabase`
+    /// (task-1962, A1 step 3).** `VACUUM` reopens the file by assigning a
+    /// freshly opened engine over the connection, and
+    /// [`crate::connect::Database`] holds a second handle on the writer the
+    /// connection was built with. A fresh group there left that handle reading
+    /// a writer nothing writes to, so `autocommit()` answered `true` inside a
+    /// `BEGIN`; the differential suite's `vacuum_matches_sqlite` is what found
+    /// it. Copying rather than swapping keeps both handles on one group and
+    /// leaves the values exactly what the reopen decided.
+    ///
+    /// @param fresh - the group the reopened connection built
+    pub(crate) fn adopt(&self, fresh: &Writing) {
+        self.batch.set(fresh.batch.get());
+        self.undo.replace(fresh.undo.take());
+        self.touched.set(fresh.touched.get());
+        self.marks.replace(fresh.marks.take());
+        self.decided_over.set(fresh.decided_over.get());
+        self.implicit_transaction
+            .set(fresh.implicit_transaction.get());
+        self.next_txn.set(fresh.next_txn.get());
+        self.statement_txn.set(fresh.statement_txn.get());
+        self.running.set(fresh.running.get());
+        self.settling.set(fresh.settling.get());
     }
 }
 

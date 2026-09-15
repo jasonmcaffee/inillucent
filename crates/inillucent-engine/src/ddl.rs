@@ -407,7 +407,8 @@ impl ImportedDatabase {
                 // released, and that transaction stays open for the `COMMIT`
                 // that follows - `implicit_transaction` is what tells the two
                 // apart.
-                if self.writing.marks.is_empty() && self.writing.implicit_transaction.get() {
+                if self.writing.marks.borrow().is_empty() && self.writing.implicit_transaction.get()
+                {
                     self.commit_batch()?;
                 }
                 Ok(Outcome::empty())

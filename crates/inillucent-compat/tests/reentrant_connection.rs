@@ -22,6 +22,16 @@
 //! `sqlite3_set_authorizer` has, and it reaches the same `borrow_mut` every
 //! statement goes through - so proving it here proves it for every other route
 //! into the cell.
+//!
+//! ## And the question that is answered rather than refused
+//!
+//! A11 made a reentrant call an error; task-1962's A1 step 3 started taking the
+//! cases out of it. `sqlite3_get_autocommit` is documented as callable from a
+//! callback, and applications do call it there to decide whether they may open
+//! a transaction of their own. `Connection::autocommit` reads the writer the
+//! database holds beside the engine, so it takes no borrow and answers while
+//! the statement that invoked the callback is still running. The last test
+//! below is that answer, and it is a value rather than a refusal.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -136,4 +146,81 @@ fn the_refusal_is_the_misuse_code() {
         said.contains("cannot call back into it"),
         "the refusal said {said:?}, which does not name what the caller did"
     );
+}
+
+/// An authorizer that asks whether a transaction is open, from inside one.
+struct AsksAutocommit {
+    /// The database the question goes to, which is the one being authorized.
+    database: Rc<Database>,
+    /// Every answer, in the order the authorizer was called.
+    answers: RefCell<Vec<Result<bool, String>>>,
+}
+
+impl Authorizer for AsksAutocommit {
+    /// Allows the action, having first asked the connection for its state.
+    ///
+    /// @param _action - what the binder is asking about
+    fn authorize(&self, _action: AuthAction<'_>) -> Authorization {
+        let asked = self
+            .database
+            .session()
+            .autocommit()
+            .map_err(|error| error.detail().unwrap_or("no detail").to_string());
+        self.answers.borrow_mut().push(asked);
+        Authorization::Allow
+    }
+}
+
+/// A callback asking whether a transaction is open gets `false`, not an error.
+///
+/// **The one reentrant question that is answered (task-1962, A1 step 3).** The
+/// engine's transaction state is ten fields each behind its own cell, held
+/// through an `Rc` that `Database` has a second handle on, so this reads it
+/// without taking the borrow the running statement holds. Before that it went
+/// through `Database::engine`, which is the same cell, and every call from here
+/// answered `already running a statement` - for a question SQLite documents as
+/// callable from exactly this place.
+///
+/// The transaction is open, so every answer is `false`. A test that only
+/// asserted "not an error" would pass on a stale `true`.
+#[test]
+fn a_callback_can_ask_whether_a_transaction_is_open() {
+    let directory = scratch("autocommit");
+    let database = Rc::new(Database::open(directory.join("c.rdb")).expect("the database opens"));
+    let connection = database.session();
+    connection
+        .execute("CREATE TABLE t (a INTEGER)")
+        .expect("the table is made");
+    connection
+        .execute_batch("BEGIN")
+        .expect("the transaction opens");
+
+    let watcher = Rc::new(AsksAutocommit {
+        database: Rc::clone(&database),
+        answers: RefCell::new(Vec::new()),
+    });
+    connection
+        .set_authorizer(Some(Rc::clone(&watcher) as Rc<dyn Authorizer>))
+        .expect("nothing is running on this connection");
+    let _ = connection.query("SELECT a FROM t");
+    connection
+        .set_authorizer(None)
+        .expect("the authorizer comes off");
+
+    let answers = watcher.answers.borrow().clone();
+    assert!(
+        !answers.is_empty(),
+        "the authorizer was never called, so nothing was asked"
+    );
+    for answer in &answers {
+        assert_eq!(
+            answer.as_ref(),
+            Ok(&false),
+            "a transaction is open, so `autocommit` from inside the authorizer              should answer false; it answered {answer:?}"
+        );
+    }
+
+    connection
+        .execute_batch("ROLLBACK")
+        .expect("the transaction closes");
 }

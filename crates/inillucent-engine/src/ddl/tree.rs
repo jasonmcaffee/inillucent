@@ -115,7 +115,9 @@ impl crate::ImportedDatabase {
         let page = tree.root();
         self.schema.trees.insert(root, tree);
         self.schema.layouts.insert(root, std::rc::Rc::new(layout));
-        self.writing.touched |= crate::schema_bit(at);
+        self.writing
+            .touched
+            .set(self.writing.touched.get() | crate::schema_bit(at));
         Ok(page)
     }
     /// Gives one tree's pages back to the free map and forgets it.

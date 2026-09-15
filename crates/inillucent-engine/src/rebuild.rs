@@ -688,6 +688,12 @@ pub(crate) fn vacuum_in_place(connection: &mut ImportedDatabase) -> DbResult<()>
     // the handle is taken here, while it is still the one the caller
     // gave us (task-1946, H2).
     let vfs = std::sync::Arc::clone(&connection.storage.vfs);
+    // **And the writer is taken here for the same reason (task-1962, A1
+    // step 3).** `crate::connect::Database` holds a second handle on it, so a
+    // reopen that left a fresh group behind would leave that handle reading a
+    // writer nothing writes to. Put back below, with the reopen's own values
+    // copied into it.
+    let writer = std::rc::Rc::clone(&connection.writing);
     // **`changes()`/`total_changes()`/`last_insert_rowid()` are the
     // connection's own history, not a fact about the file `VACUUM` is
     // rewriting, and SQLite's own `VACUUM` leaves them alone.** Assigning
@@ -730,6 +736,8 @@ pub(crate) fn vacuum_in_place(connection: &mut ImportedDatabase) -> DbResult<()>
     // the original unrecoverable, its log already gone.
     remove_log_segments(&vfs, &path);
     *connection = reopened(&vfs, &path, page_size, frames, "the database it replaced")?;
+    writer.adopt(&connection.writing);
+    connection.writing = writer;
     connection.counters.last_changes.set(last_changes);
     connection.counters.changed_ever.set(changed_ever);
     connection

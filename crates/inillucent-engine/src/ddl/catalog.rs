@@ -392,7 +392,9 @@ impl crate::ImportedDatabase {
             .push(Recorded { rowid, root, entry });
         // A schema change is a write, and a transaction that made one in two
         // files commits both or neither like any other.
-        self.writing.touched |= crate::schema_bit(at);
+        self.writing
+            .touched
+            .set(self.writing.touched.get() | crate::schema_bit(at));
         Ok(())
     }
     /// Returns the shape of a tree, for its catalog row.
@@ -714,7 +716,7 @@ impl crate::ImportedDatabase {
         // statement would find a schema in it that it had not written: a
         // one-file insert paying for a two-file protocol, and a `Commit` record
         // in a log for a transaction that never touched it.
-        let participants = std::mem::take(&mut self.writing.touched) | crate::schema_bit(at);
+        let participants = self.writing.touched.replace(0) | crate::schema_bit(at);
         self.commit_across(txn, participants)
     }
 }

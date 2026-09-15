@@ -109,6 +109,18 @@ pub struct Database {
     /// the process. A counter is the database's own bookkeeping; the engine
     /// learns the number on the first statement that runs under it.
     next_session: std::cell::Cell<u64>,
+    /// The same writer the engine holds.
+    ///
+    /// **A second handle on one group, not a second group (task-1962, A1
+    /// step 3).** `Writing`'s ten fields are each behind their own cell, so the
+    /// engine writes through this `Rc` and so does everything here; there is
+    /// one transaction and both handles see it. What it buys is the questions
+    /// below - [`Connection::autocommit`] and [`Connection::decided_over`] -
+    /// which a callback asks *while* the engine is running the statement that
+    /// called it. Reading them through [`Database::engine`] took the cell the
+    /// statement was already holding, so the answer was an error rather than a
+    /// number.
+    writer: std::rc::Rc<crate::engine::state::Writing>,
 }
 
 /// Reports whether a path names an in-memory database rather than a file.
@@ -148,6 +160,7 @@ impl Database {
                 std::sync::Arc::new(inillucent_vfs::MemoryVfs::new());
             let engine = ImportedDatabase::create_on(vfs, path.clone(), PAGE_SIZE, frames)?;
             return Ok(Database {
+                writer: std::rc::Rc::clone(&engine.writing),
                 engine: RefCell::new(engine),
                 path,
                 changes: std::cell::Cell::new(0),
@@ -160,6 +173,7 @@ impl Database {
             ImportedDatabase::create(path.clone(), PAGE_SIZE, frames)?
         };
         Ok(Database {
+            writer: std::rc::Rc::clone(&engine.writing),
             engine: RefCell::new(engine),
             path,
             changes: std::cell::Cell::new(0),
@@ -198,6 +212,7 @@ impl Database {
         let target = PathBuf::from(target);
         let engine = ImportedDatabase::import_into(source, target.clone(), PAGE_SIZE, frames)?;
         Ok(Database {
+            writer: std::rc::Rc::clone(&engine.writing),
             engine: RefCell::new(engine),
             path: target,
             changes: std::cell::Cell::new(0),
@@ -829,14 +844,21 @@ impl<'d> Connection<'d> {
     /// One for an ordinary statement; two or more for a transaction that wrote
     /// two files and was therefore committed through a super-journal.
     pub fn decided_over(&self) -> DbResult<usize> {
-        Ok(self.engine()?.decided_over())
+        Ok(self.database.writer.decided_over.get())
     }
 
     /// Returns whether every statement is its own transaction.
     ///
     /// `false` between a `BEGIN` and its `COMMIT`.
+    ///
+    /// **Answerable while a statement is running (task-1962, A1 step 3).** This
+    /// read the engine, so a function registered on the connection that asked
+    /// it got the `already running a statement` error - and this is exactly the
+    /// question such a function asks, because SQLite's `sqlite3_get_autocommit`
+    /// is documented as callable from a callback. It reads the writer the
+    /// database holds beside the engine instead, and takes no cell at all.
     pub fn autocommit(&self) -> DbResult<bool> {
-        Ok(self.engine()?.autocommit())
+        Ok(self.database.writer.batch.get().is_none())
     }
 
     /// Opens a transaction that rolls back unless it is committed.

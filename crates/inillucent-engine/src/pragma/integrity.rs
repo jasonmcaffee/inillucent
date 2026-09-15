@@ -103,7 +103,7 @@ impl crate::ImportedDatabase {
         // transaction's own first record - which is what letting it proceed
         // would require - is exactly the no-steal argument `holds_uncommitted`
         // makes, so this is refused rather than made honest.
-        if self.writing.batch.get().is_some() && self.writing.touched != 0 {
+        if self.writing.batch.get().is_some() && self.writing.touched.get() != 0 {
             return Err(DbError::primary(PrimaryCode::Locked)
                 .with_detail("cannot checkpoint: a transaction has written and not committed"));
         }

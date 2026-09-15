@@ -45,8 +45,8 @@ impl crate::ImportedDatabase {
         self.writing.next_txn.set(txn.saturating_add(1));
         self.writing.batch.set(Some(txn));
         self.writing.undo.borrow_mut().clear();
-        self.writing.marks.clear();
-        self.writing.touched = 0;
+        self.writing.marks.borrow_mut().clear();
+        self.writing.touched.set(0);
     }
 
     /// Undoes everything the open transaction changed, newest first.
@@ -67,19 +67,16 @@ impl crate::ImportedDatabase {
         let floor = match to {
             Some(name) => {
                 let folded = name.to_ascii_lowercase();
-                let Some(position) = self
-                    .writing
-                    .marks
-                    .iter()
-                    .rposition(|(held, _)| *held == folded)
-                    .map(|index| {
-                        self.writing
-                            .marks
-                            .get(index)
-                            .map(|(_, at)| *at)
-                            .unwrap_or(0)
-                    })
-                else {
+                // One borrow, held only long enough to find the savepoint:
+                // `undo_to_floor` below takes the group again.
+                let found = {
+                    let marks = self.writing.marks.borrow();
+                    marks
+                        .iter()
+                        .rposition(|(held, _)| *held == folded)
+                        .and_then(|index| marks.get(index).map(|(_, at)| *at))
+                };
+                let Some(position) = found else {
                     return Err(refusal(format!(
                         "no such savepoint: {}",
                         String::from_utf8_lossy(name)
@@ -165,7 +162,10 @@ impl crate::ImportedDatabase {
             }
         }
         let held = self.writing.undo.borrow().len();
-        self.writing.marks.retain(|(_, at)| *at <= held);
+        self.writing
+            .marks
+            .borrow_mut()
+            .retain(|(_, at)| *at <= held);
         // **A DML statement cannot have changed the catalog, so undoing one has
         // nothing to rebuild from it.** `CREATE`, `DROP` and `ALTER` do not go
         // through `write`, and reloading here would cost a catalog read on
@@ -431,13 +431,13 @@ impl crate::ImportedDatabase {
         self.session_state.modules_begun.set(false);
         let told = self.rollback_modules(None);
         let undone = self.undo_to(None);
-        self.writing.marks.clear();
+        self.writing.marks.borrow_mut().clear();
         self.writing.batch.set(None);
         self.writing.implicit_transaction.set(false);
         // Rolled back, so no-steal has nothing left to hold back on any
         // schema this transaction touched - read before `touched` is cleared
         // below, which is the only record of which schemas those were.
-        for at in schemas_in(self.writing.touched) {
+        for at in schemas_in(self.writing.touched.get()) {
             if let Some(database) = self.schema_file(at) {
                 database.pool().set_uncommitted_lsn(u64::MAX);
             }
@@ -445,7 +445,7 @@ impl crate::ImportedDatabase {
         // Nothing to decide: an abandoned transaction has no commit for a
         // super-journal to be about, and the records it left are never replayed
         // because no `Commit` follows them.
-        self.writing.touched = 0;
+        self.writing.touched.set(0);
         // The transaction's own setting goes with the transaction, which is
         // SQLite's rule for `PRAGMA defer_foreign_keys`.
         self.session_state.defer_foreign_keys = false;
@@ -495,13 +495,13 @@ impl crate::ImportedDatabase {
         // Nothing to abandon once it is committed, and holding the before-images
         // would hold every row a long transaction touched.
         self.writing.undo.borrow_mut().clear();
-        self.writing.marks.clear();
+        self.writing.marks.borrow_mut().clear();
         self.writing.implicit_transaction.set(false);
         let Some(txn) = self.writing.batch.take() else {
-            self.writing.touched = 0;
+            self.writing.touched.set(0);
             return Ok(());
         };
-        let participants = std::mem::take(&mut self.writing.touched);
+        let participants = self.writing.touched.replace(0);
         self.commit_across(txn, participants)
     }
 
