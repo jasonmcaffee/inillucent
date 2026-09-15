@@ -162,41 +162,41 @@ already removed the cause and nobody re-ran it, which is recorded in
 
 ### How much of it is covered
 
-Measured on 2026-09-15 at commit `37695de`, with `tools/validate.ps1 -Coverage`
-(`tools/validate.sh --coverage` on Unix), which runs every suite under
-`cargo llvm-cov` and prints this table. Region and line coverage, not branch:
-branch coverage needs `-Z coverage-options=branch`, a nightly option, and
-`rust-toolchain.toml` pins the compiler to stable for the reason written beside
-the pin.
+Measured on 2026-09-15 at commit `f9d1433`, which is `v0.1.3`, with
+`tools/validate.ps1 -Coverage` (`tools/validate.sh --coverage` on Unix), which
+runs every suite under `cargo llvm-cov` and prints this table. Region and line
+coverage, not branch: branch coverage needs `-Z coverage-options=branch`, a
+nightly option, and `rust-toolchain.toml` pins the compiler to stable for the
+reason written beside the pin.
 
 | crate | regions | region coverage | lines | line coverage |
 |---|---:|---:|---:|---:|
-| `inillucent-compat` | 32,460 | 40.9% | 19,717 | 42.7% |
-| `inillucent-exec` | 21,917 | 89.7% | 12,896 | 91.5% |
-| `inillucent-sql` | 20,966 | 86.0% | 12,937 | 88.0% |
-| `inillucent-engine` | 17,242 | 87.6% | 10,922 | 89.2% |
+| `inillucent-compat` | 32,756 | 40.6% | 19,940 | 42.3% |
+| `inillucent-exec` | 22,980 | 90.3% | 13,552 | 92.0% |
+| `inillucent-sql` | 21,174 | 86.1% | 13,065 | 88.2% |
+| `inillucent-engine` | 17,737 | 87.3% | 11,377 | 88.9% |
 | `inillucent-tree` | 16,992 | 92.0% | 8,465 | 93.8% |
-| `inillucent-storage` | 14,417 | 83.0% | 7,761 | 83.2% |
-| `inillucent-cli` | 13,087 | 47.9% | 7,731 | 49.5% |
+| `inillucent-cli` | 13,208 | 48.4% | 7,836 | 50.1% |
+| `inillucent-storage` | 14,409 | 82.9% | 7,751 | 82.8% |
 | `inillucent-scalar` | 11,724 | 84.8% | 6,441 | 84.9% |
 | `inillucent-ext` | 10,877 | 83.8% | 6,269 | 83.7% |
 | `inillucent-remote` | 8,145 | 80.8% | 4,609 | 78.5% |
-| `inillucent-pool` | 8,062 | 93.3% | 4,176 | 94.2% |
-| `inillucent-transaction` | 6,193 | 85.3% | 3,143 | 88.5% |
+| `inillucent-pool` | 8,062 | 93.4% | 4,176 | 94.3% |
 | `inillucent-search` | 5,481 | 82.0% | 3,300 | 82.4% |
+| `inillucent-transaction` | 6,193 | 85.3% | 3,143 | 88.5% |
 | `inillucent-value` | 5,425 | 95.4% | 3,073 | 95.6% |
-| `inillucent-vfs` | 4,539 | 80.3% | 2,572 | 80.9% |
-| `inillucent-base` | 4,376 | 88.7% | 2,348 | 89.0% |
+| `inillucent-vfs` | 4,539 | 80.3% | 2,572 | 81.1% |
 | `inillucent-migrate` | 4,330 | 77.5% | 2,418 | 79.4% |
+| `inillucent-base` | 4,376 | 88.7% | 2,348 | 89.0% |
 | `inillucent-catalog` | 3,458 | 78.2% | 2,068 | 80.4% |
-| `inillucent-wal` | 2,650 | 93.7% | 1,683 | 96.7% |
-| `inillucent-txn` | 2,470 | 89.8% | 1,432 | 87.4% |
-| `inillucent-sim` | 2,146 | 95.2% | 1,317 | 95.7% |
-| `inillucent-driver` | 1,379 | 70.8% | 910 | 70.4% |
-| `inillucent-driver-capi` | 1,108 | 0.8% | 847 | 0.9% |
-| `inillucent-sqlite-reader` | 432 | 84.5% | 228 | 87.3% |
+| `inillucent-wal` | 2,650 | 93.7% | 1,683 | 96.8% |
+| `inillucent-txn` | 2,527 | 89.8% | 1,464 | 88.0% |
+| `inillucent-sim` | 2,146 | 95.0% | 1,317 | 95.4% |
+| `inillucent-driver` | 1,806 | 65.1% | 1,185 | 64.6% |
+| `inillucent-driver-capi` | 1,112 | 0.8% | 851 | 0.9% |
+| `inillucent-sqlite-reader` | 432 | 86.6% | 228 | 89.9% |
 | `inillucent-alloc` | 355 | 91.3% | 165 | 84.8% |
-| **total** | **220,231** | **77.2%** | **127,428** | **77.8%** |
+| **total** | **222,894** | **77.2%** | **129,296** | **77.8%** |
 
 Three rows need reading rather than ranking.
 

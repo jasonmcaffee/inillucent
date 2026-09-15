@@ -139,11 +139,21 @@ function shellOptions() {
 
 /** Reads the engine's function register: distinct names, and the rows one per name and arity. */
 function functionRegister() {
-  const out = run('inillucent', ['functions', '--output', 'json', '--limit', '0']);
-  if (out === null) return null;
-  let answer;
-  try { answer = JSON.parse(out); } catch { return null; }
-  const names = answer.rows.map((row) => row[0]);
+  // **Read out of the generated register rather than by running the CLI
+  // (task-1962).** `run` prefers `target/release`, so this asked whichever
+  // binary happened to be there - and the shipped archive is built with
+  // `--features inillucent-cli/embed`, which registers `embed(TEXT)` and one
+  // more name than a default build. The check therefore answered 191 on a box
+  // that had just cut a release and 190 everywhere else, for one unchanged
+  // tree. Its own label says "in the register", and the register is a file:
+  // `compat/api/builtins.toml`, generated straight out of
+  // `inillucent_sql::function::every_function` and checked against the engine
+  // by `obligations::the_registers_match_the_engine`. Reading it makes this
+  // answer the same thing on every machine.
+  const file = path.join(ROOT, 'compat', 'api', 'builtins.toml');
+  if (!fs.existsSync(file)) return null;
+  const names = [...fs.readFileSync(file, 'utf8').matchAll(/^name = "(.*)"$/gm)].map((found) => found[1]);
+  if (names.length === 0) return null;
   const distinct = [...new Set(names)];
   const family = (test) => distinct.filter(test).length;
   return {
