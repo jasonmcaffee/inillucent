@@ -53,6 +53,15 @@ pub struct ArmOptions {
     pub token_budget: usize,
     /// Texts per request for a llama.cpp arm, at or below the server's `-np`.
     pub max_texts: usize,
+    /// Requests a llama.cpp arm keeps in flight at once.
+    ///
+    /// One by default, and deliberately: a served model's throughput depends on how
+    /// many requests are in flight far more than on the model, so the cost lane holds
+    /// it at one and its numbers stay comparable between arms and with what task-1818
+    /// recorded. Embedding a corpus asks for more, because there the round trip is
+    /// waste rather than measurement - v2-moe's corpus embed ran at 64.6 chunks a
+    /// second falling to 12 with the card at 6 per cent, entirely on latency.
+    pub concurrency: usize,
     /// Ceiling on `texts in an ONNX batch x longest sequence in it, squared`.
     ///
     /// A machine setting rather than a model property, which is why it is here
@@ -84,6 +93,7 @@ impl Default for ArmOptions {
             // real text and passes on whatever short fixture it was tested with.
             token_budget: 6_000,
             max_texts: 32,
+            concurrency: 1,
             max_batch_cells: 24_000_000,
         }
     }
@@ -128,6 +138,7 @@ impl Arm {
                     &model.manifest,
                     options.token_budget,
                     options.max_texts,
+                    options.concurrency,
                 )?)))
             }
         }
@@ -242,6 +253,16 @@ mod tests {
         assert_eq!(split_endpoint(options.endpoint_for("student-q8")).unwrap(), ("127.0.0.1".into(), 8191));
         options.endpoint_overrides.insert("broken".into(), "127.0.0.1".into());
         assert!(split_endpoint(options.endpoint_for("broken")).is_err());
+    }
+
+    /// A served arm's throughput depends on how many requests are in flight far more
+    /// than on the model: measured on this box against a 32 slot server, one request
+    /// gives 28 texts a second and eight give 621. So the default is one, and a number
+    /// the cost lane produces means the same thing between arms and against what
+    /// task-1818 recorded. A caller that wants the other behaviour asks for it.
+    #[test]
+    fn a_served_arm_keeps_one_request_in_flight_unless_asked() {
+        assert_eq!(ArmOptions::default().concurrency, 1);
     }
 
     #[test]

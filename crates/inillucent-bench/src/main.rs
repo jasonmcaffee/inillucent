@@ -79,6 +79,18 @@ struct Cli {
     #[arg(long = "endpoint-for", global = true, value_name = "MODEL=HOST:PORT")]
     endpoint_for: Vec<String>,
 
+    /// Requests a `llama-server` arm keeps in flight at once.
+    ///
+    /// One by default, which is what anything being timed wants: a served model's
+    /// throughput depends on how many requests are in flight far more than on the
+    /// model, and the cost lane's numbers are only comparable between arms if that
+    /// number is the same. Raise it for `synth-embed`, where the round trip is waste
+    /// rather than measurement - embedding v2-moe's 185,078 chunks one request at a
+    /// time ran at 64.6 chunks a second falling to 12, with the card at 6 per cent.
+    /// Never raise it for `grade-embedding --cost`.
+    #[arg(long, global = true, default_value_t = 1)]
+    llama_concurrency: usize,
+
     /// Ceiling on `texts in a batch x longest sequence in it, squared`, which is
     /// what bounds an attention allocation. A machine setting rather than a model
     /// property: it is in no manifest and changing it moves no digest.
@@ -748,6 +760,7 @@ fn main() -> Result<()> {
                     device: devices[0],
                     endpoint: cli.endpoint.clone(),
                     endpoint_overrides: parse_endpoint_overrides(&cli.endpoint_for)?,
+                    concurrency: cli.llama_concurrency,
                     max_batch_cells: cli.max_batch_cells,
                     ..Default::default()
                 },
@@ -905,6 +918,7 @@ fn main() -> Result<()> {
                     device: Device::parse(&device)?,
                     endpoint: cli.endpoint.clone(),
                     endpoint_overrides: parse_endpoint_overrides(&cli.endpoint_for)?,
+                    concurrency: cli.llama_concurrency,
                     max_batch_cells: cli.max_batch_cells,
                     ..Default::default()
                 },
@@ -999,6 +1013,7 @@ fn main() -> Result<()> {
                     device: Device::parse(&device)?,
                     endpoint: cli.endpoint.clone(),
                     endpoint_overrides: parse_endpoint_overrides(&cli.endpoint_for)?,
+                    concurrency: cli.llama_concurrency,
                     max_batch_cells: cli.max_batch_cells,
                     ..Default::default()
                 },
@@ -1090,6 +1105,7 @@ fn main() -> Result<()> {
                     device: Device::parse(&device)?,
                     endpoint: cli.endpoint.clone(),
                     endpoint_overrides: parse_endpoint_overrides(&cli.endpoint_for)?,
+                    concurrency: cli.llama_concurrency,
                     max_batch_cells: cli.max_batch_cells,
                     ..Default::default()
                 },

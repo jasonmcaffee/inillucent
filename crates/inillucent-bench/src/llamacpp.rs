@@ -21,6 +21,19 @@
 //! cache. A repeated-text benchmark on this box reported 300 chunks a second
 //! against a real 85 to 134. Nothing here repeats a text, and the cost lane feeds
 //! it stride-sampled chunks from across the corpus.
+//!
+//! **One request at a time by default, and the default is not a performance
+//! choice.** A throughput number for a served model has to say how many requests
+//! were in flight, because the answer changes by an order of magnitude: measured
+//! here against a 32 slot server, one request in flight gives 28 texts a second
+//! and eight give 621. The cost lane keeps one, so its number stays comparable
+//! with what task-1818 recorded and means the same thing between arms. Building a
+//! 185,078 chunk cache asks for more, because there the latency is pure waste:
+//! embedding v2-moe's corpus at one request in flight measured 64.6 chunks a
+//! second falling to 12 as the run reached the corpus's code chunks, with the card
+//! at 6 per cent - the batch shrinks from 32 texts to 12 when 500-token chunks
+//! meet a 6,000 token budget, and with nothing else in flight throughput falls
+//! with it.
 
 use std::time::Duration;
 
@@ -52,6 +65,9 @@ pub struct LlamaCppEmbedder {
     /// Texts in one request, whatever the token budget allows. `llama-server`
     /// also bounds the number of sequences in a batch.
     max_texts: usize,
+    /// Requests in flight at once. One unless a caller asks for more; see the
+    /// module note for why the default is not a performance choice.
+    concurrency: usize,
     /// The model's own tokenizer, loaded from the model directory.
     ///
     /// Not the server's `/tokenize`, after measuring what that costs: the corpus
@@ -73,6 +89,7 @@ impl LlamaCppEmbedder {
     /// @param manifest - the model, for its prefixes, width and token bound
     /// @param token_budget - tokens per request, at or below the server's `-b`
     /// @param max_texts - texts per request, at or below the server's `-np`
+    /// @param concurrency - requests in flight at once; one for anything being timed
     pub fn connect(
         dir: &Path,
         host: &str,
@@ -80,6 +97,7 @@ impl LlamaCppEmbedder {
         manifest: &ModelManifest,
         token_budget: usize,
         max_texts: usize,
+        concurrency: usize,
     ) -> Result<LlamaCppEmbedder> {
         let health = http::get(host, port, "/health", Duration::from_secs(10))
             .with_context(|| format!("no llama-server answering on {host}:{port}"))?;
@@ -104,6 +122,7 @@ impl LlamaCppEmbedder {
             manifest: manifest.clone(),
             token_budget,
             max_texts,
+            concurrency: concurrency.max(1),
             tokenizer,
             seen: std::sync::atomic::AtomicUsize::new(0),
             truncated: std::sync::atomic::AtomicUsize::new(0),
@@ -289,7 +308,9 @@ impl LlamaCppEmbedder {
             prepared[i] = self.truncate_to_bound(&texts[i])?;
         }
 
-        let mut out: Vec<Vec<f32>> = Vec::with_capacity(prepared.len());
+        // The batches, decided before any of them is sent, so they can be sent in
+        // whatever order and still come back in this one.
+        let mut batches: Vec<(usize, usize)> = Vec::new();
         let mut start = 0usize;
         while start < prepared.len() {
             let mut end = start;
@@ -305,8 +326,54 @@ impl LlamaCppEmbedder {
                 budget += cost;
                 end += 1;
             }
-            out.extend(self.request(&prepared[start..end])?);
+            batches.push((start, end));
             start = end;
+        }
+
+        let mut out: Vec<Vec<f32>> = Vec::with_capacity(prepared.len());
+        if self.concurrency <= 1 || batches.len() <= 1 {
+            for &(from, to) in &batches {
+                out.extend(self.request(&prepared[from..to])?);
+            }
+            anyhow::ensure!(
+                out.len() == texts.len(),
+                "the server returned {} vectors for {} texts",
+                out.len(),
+                texts.len()
+            );
+            return Ok(out);
+        }
+
+        // Several in flight. Each batch's result is written into its own slot and
+        // the slots are flattened in batch order afterwards, so concurrency cannot
+        // reorder a single vector: the order is the order of `batches`, decided
+        // above, and never the order the replies happen to arrive in.
+        let mut results: Vec<Option<Result<Vec<Vec<f32>>>>> = (0..batches.len()).map(|_| None).collect();
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let slots: Vec<std::sync::Mutex<Option<Result<Vec<Vec<f32>>>>>> =
+            (0..batches.len()).map(|_| std::sync::Mutex::new(None)).collect();
+        std::thread::scope(|scope| {
+            for _ in 0..self.concurrency.min(batches.len()) {
+                scope.spawn(|| loop {
+                    let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some(&(from, to)) = batches.get(index) else {
+                        return;
+                    };
+                    let answer = self.request(&prepared[from..to]);
+                    if let Ok(mut slot) = slots[index].lock() {
+                        *slot = Some(answer);
+                    }
+                });
+            }
+        });
+        for (index, slot) in slots.into_iter().enumerate() {
+            results[index] = slot.into_inner().unwrap_or(None);
+        }
+        for (index, answer) in results.into_iter().enumerate() {
+            let vectors = answer.with_context(|| {
+                format!("request {index} of {} produced no result at all", batches.len())
+            })??;
+            out.extend(vectors);
         }
         anyhow::ensure!(
             out.len() == texts.len(),

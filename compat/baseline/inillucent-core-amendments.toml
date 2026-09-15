@@ -15,8 +15,8 @@ sha256 = "96da8955190374e20a9de9b984d845213c944e4846fd58478ebf5fcf34fdcbf1"
 [[amendment]]
 path = "crates/inillucent-bench/src/arm.rs"
 ticket = "task-1966"
-reason = "per-model llama-server endpoints, the cache-from-vectors and query-texts subcommands, the query-vector sidecar, and weighing a sharded checkpoint by its shards"
-sha256 = "318f145cb69a1540f2c719f65888e0ba3de5eb63966da65183196270c1a40f03"
+reason = "opt-in concurrency for a served arm, defaulting to one so the cost lane keeps single-stream semantics"
+sha256 = "a515e0ac177969b8708eba96aaea5bb2eb7165a060ae74d94b6b4365d4810d03"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/corpus.rs"
@@ -50,15 +50,15 @@ sha256 = "23a44f8e6cff13abbbcb560968fd91429be40c4a9a9f6d7be73c25ee874f78b8"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/llamacpp.rs"
-ticket = "embedding model head to head grading"
-reason = "The grading harness was generalised from one embedding model to a head-to-head between several, matching the success criteria the design document set for that comparison. A model is now a manifest (id, width, Matryoshka widths, four prefixes, pooling, token bound, backend, output, tokenizer and weights digests) instead of a set of constants; a cache carries a header naming the corpus digest, the model, the manifest digest and the truncation it performed; grade-embedding compares two or more caches and refuses before it starts unless they agree on corpus, chunk count and query seeds; and the embedder gained CLS and last-token pooling, graph-driven inputs, and a llama.cpp backend for the one model with no ONNX export. ModelManifest::nomic_v1_5() reproduces every constant it replaced: the fresh baseline cache agrees with the August run at cosine 1.000000 minimum over 5000 chunks, and grade's card is unchanged on every measurement row."
-sha256 = "c606a322fe69ffecb0e7ebc0f58771217a3fda556f24940ea9a580c575e2db31"
+ticket = "task-1966"
+reason = "opt-in concurrency for a served arm, defaulting to one so the cost lane keeps single-stream semantics"
+sha256 = "f084ff66b3d606c560f38404eb36fdd509c007f138f48ea63e31a03f385e9140"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/main.rs"
 ticket = "task-1966"
-reason = "per-model llama-server endpoints, the cache-from-vectors and query-texts subcommands, the query-vector sidecar, and weighing a sharded checkpoint by its shards"
-sha256 = "0e4dd5fb5cd0e7a932f0b104bb4750caf746aa1be8ccf68f857ff0e92038d2de"
+reason = "opt-in concurrency for a served arm, defaulting to one so the cost lane keeps single-stream semantics"
+sha256 = "414e33f2eb24e84cbd862f793fdc224f3443ac02b6ba554cc5e5728c16da5816"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/models.rs"
