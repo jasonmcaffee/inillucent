@@ -125,6 +125,22 @@ pub struct EmbeddingGradeOptions {
     /// Chunks re-embedded to time each model. Distinct chunks, spread across the
     /// corpus: timing a model on repeated text measures a cache rather than a
     /// model, which is a mistake this box has already made once.
+    /// Query vectors an arm's model produced elsewhere, by model id.
+    ///
+    /// An arm's queries are embedded by that arm's own model, which means the harness
+    /// has to be able to open it, and two things this ticket grades it cannot:
+    /// `Qwen3-Embedding-8B` and `-4B` are safetensors with no ONNX graph and no GGUF,
+    /// and the loop grades five weight interpolations an iteration straight out of
+    /// PyTorch. Exporting first would put the exporter inside the loop, and task-1818
+    /// measured the exporter's own effect at cosine 0.99999 over 300 chunks, which is
+    /// small but is not nothing when the kill test's threshold is 0.01.
+    ///
+    /// So the vectors can come from the same producer that made the corpus vectors,
+    /// through `query-texts` and `cache-from-vectors`. Nothing is taken on trust: the
+    /// sidecar records the corpus digest, the seed digest, the per-source count and
+    /// the model id it was made for, and every one is checked against what this run
+    /// generated before a single vector is read.
+    pub query_vectors: BTreeMap<String, PathBuf>,
     pub cost_samples: usize,
     /// Processors the cost lane times each model on.
     pub cost_devices: Vec<Device>,
@@ -588,6 +604,169 @@ fn build_families(corpus: &Corpus, keys: &[String], per_source: usize, n: usize)
     Families { named, counts, abstention }
 }
 
+/// Write every generated query, in the order an arm's vectors have to be in.
+///
+/// The order is the contract between this harness and whatever embeds the queries: the
+/// six named families in the order the composite concatenates them, then the two
+/// abstention families. It is written out rather than described, and the header line
+/// carries the corpus digest, the seed digest and the `--per-source` the queries were
+/// generated at, so the sidecar built from this file can be refused when any of them
+/// stops matching.
+/// @param cache - a cache of the corpus the queries are generated from
+/// @param per_source - queries per source for the identity family
+/// @param limit - grade only the first N chunks, as `grade-embedding`'s own `--limit` does
+/// @param out - where the JSONL goes
+pub fn write_query_texts(
+    cache: &Path,
+    per_source: usize,
+    limit: Option<usize>,
+    out: &Path,
+) -> Result<usize> {
+    use std::io::Write;
+
+    let corpus = corpus::load_cache(cache)?;
+    let n = limit.unwrap_or(corpus.len()).min(corpus.len());
+    // The same keys `run` builds, spelled the same way. A different key spelling would
+    // generate a different query set and the sidecar would be vectors of the wrong text.
+    let keys: Vec<String> = (0..corpus.len())
+        .map(|i| format!("{}#{}", corpus.chunks[i].external_doc_id, corpus.chunks[i].chunk_index))
+        .collect();
+    let families = build_families(&corpus, &keys, per_source, n);
+    let total: usize = families
+        .named
+        .iter()
+        .chain(families.abstention.iter())
+        .map(|(_, qs)| qs.len())
+        .sum();
+    let mut file = std::io::BufWriter::new(std::fs::File::create(out)?);
+    writeln!(
+        file,
+        "{}",
+        serde_json::json!({
+            "corpus_sha256": corpus.header.corpus_sha256,
+            "query_seed_digest": corpus.header.query_seed_digest,
+            "per_source": per_source,
+            "queries": total,
+            "chunks": n,
+        })
+    )?;
+    for (name, qs) in families.named.iter().chain(families.abstention.iter()) {
+        for q in qs {
+            writeln!(file, "{}", serde_json::json!({"family": name, "text": q.text}))?;
+        }
+    }
+    file.flush()?;
+    Ok(total)
+}
+
+/// What a query-vector sidecar claims about itself, written beside the `.f32` file.
+///
+/// Every field is here to be checked rather than to be read. A sidecar made against a
+/// different corpus, a different seed table, a different `--per-source` or a different
+/// model is a file that would otherwise load, produce numbers, and be wrong quietly.
+#[derive(serde::Deserialize)]
+struct QueryVectorSidecar {
+    corpus_sha256: String,
+    query_seed_digest: String,
+    per_source: usize,
+    queries: usize,
+    model_id: String,
+    dims: usize,
+}
+
+/// Read query vectors an external embedder produced, refusing anything that does not
+/// describe this run.
+///
+/// The file is little-endian f32, `dims` floats a query, in exactly the order
+/// `query-texts` wrote them: every named family in order, then the two abstention
+/// families. The sidecar JSON beside it says which corpus, which seed table, which
+/// `--per-source` and which model it was made for, and all four have to match or this
+/// refuses by name. That is the same standard the cache header is held to, and for the
+/// same reason: a number from the wrong file looks exactly like a number from the right
+/// one.
+/// @param path - the `.f32` vector file
+/// @param model_id - the arm this is supposed to belong to
+/// @param dims - the arm's declared width
+/// @param header - the cache header this run is grading against
+/// @param per_source - the queries-per-source this run generated with
+/// @param expected - how many queries were generated, named and abstention together
+fn read_query_vectors(
+    path: &Path,
+    model_id: &str,
+    dims: usize,
+    header: &CacheHeader,
+    per_source: usize,
+    expected: usize,
+) -> Result<Vec<Vec<f32>>> {
+    use std::io::Read;
+
+    let meta_path = path.with_extension("meta.json");
+    let meta: QueryVectorSidecar = serde_json::from_str(
+        &std::fs::read_to_string(&meta_path)
+            .with_context(|| format!("reading {}", meta_path.display()))?,
+    )
+    .with_context(|| format!("parsing {}", meta_path.display()))?;
+    anyhow::ensure!(
+        meta.model_id == model_id,
+        "{} was made for {} and is being read for {model_id}",
+        meta_path.display(),
+        meta.model_id
+    );
+    anyhow::ensure!(
+        meta.corpus_sha256 == header.corpus_sha256,
+        "{} was made against corpus {} and this run grades corpus {}",
+        meta_path.display(),
+        short(&meta.corpus_sha256),
+        short(&header.corpus_sha256)
+    );
+    anyhow::ensure!(
+        meta.query_seed_digest == header.query_seed_digest,
+        "{} was made against seed table {} and this run's is {}",
+        meta_path.display(),
+        short(&meta.query_seed_digest),
+        short(&header.query_seed_digest)
+    );
+    anyhow::ensure!(
+        meta.per_source == per_source,
+        "{} was made at --per-source {} and this run is {per_source}",
+        meta_path.display(),
+        meta.per_source
+    );
+    anyhow::ensure!(
+        meta.dims == dims,
+        "{} says {} dims and {model_id}'s manifest says {dims}",
+        meta_path.display(),
+        meta.dims
+    );
+    anyhow::ensure!(
+        meta.queries == expected,
+        "{} holds {} queries and this run generated {expected}",
+        meta_path.display(),
+        meta.queries
+    );
+    let size = std::fs::metadata(path)
+        .with_context(|| format!("reading {}", path.display()))?
+        .len() as usize;
+    anyhow::ensure!(
+        size == expected * dims * 4,
+        "{} is {size} bytes and {expected} queries at {dims} dims is {} bytes",
+        path.display(),
+        expected * dims * 4
+    );
+    let mut reader = std::io::BufReader::new(std::fs::File::open(path)?);
+    let mut buf = vec![0u8; dims * 4];
+    let mut out = Vec::with_capacity(expected);
+    for _ in 0..expected {
+        reader.read_exact(&mut buf)?;
+        out.push(
+            buf.chunks_exact(4)
+                .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+                .collect(),
+        );
+    }
+    Ok(out)
+}
+
 /// The per-query composite: every family's scores concatenated in a fixed order.
 ///
 /// A mean of family means would weight a 300-query family the same as a 600-query
@@ -701,20 +880,62 @@ pub fn run(options: &EmbeddingGradeOptions) -> Result<EmbeddingCard> {
         );
         eprintln!("  loaded {} chunks in {:.1}s", corpus.len(), started.elapsed().as_secs_f64());
 
-        // Queries, embedded by this arm's own model with this arm's own prefixes.
-        let embedder = queryset::open_query_embedder(
-            &arm.model,
-            &crate::arm::ArmOptions { device: options.device, ..options.arm_options.clone() },
-        )
-        .with_context(|| format!("opening {id} to embed the query set"))?;
+        // Queries, embedded by this arm's own model with this arm's own prefixes - or read
+        // from a sidecar that model produced, when the harness cannot open it at all.
+        let external = options.query_vectors.get(&id).cloned();
+        let mut embedder: Option<crate::arm::Arm> = None;
+        let mut supplied: Option<std::collections::VecDeque<Vec<f32>>> = None;
+        match &external {
+            Some(path) => {
+                let expected: usize = families
+                    .named
+                    .iter()
+                    .chain(families.abstention.iter())
+                    .map(|(_, qs)| qs.len())
+                    .sum();
+                let rows = read_query_vectors(
+                    path,
+                    &id,
+                    arm.model.manifest.dims,
+                    &arm.header,
+                    options.per_source,
+                    expected,
+                )
+                .with_context(|| {
+                    format!("reading {id}'s query vectors from {}", path.display())
+                })?;
+                eprintln!("  {expected} query vectors read from {}", path.display());
+                supplied = Some(rows.into());
+            }
+            None => {
+                embedder = Some(
+                    queryset::open_query_embedder(
+                        &arm.model,
+                        &crate::arm::ArmOptions {
+                            device: options.device,
+                            ..options.arm_options.clone()
+                        },
+                    )
+                    .with_context(|| format!("opening {id} to embed the query set"))?,
+                );
+            }
+        }
         let mut query_vectors: Vec<Vec<Vec<f32>>> = Vec::new();
         for (name, qs) in &families.named {
-            let texts: Vec<String> = qs.iter().map(|q| q.text.clone()).collect();
-            let vectors = queryset::embed_with(&embedder, &texts)
-                .with_context(|| format!("embedding the {name} family with {id}"))?;
+            let vectors = match supplied.as_mut() {
+                Some(rows) => rows.drain(..qs.len()).collect(),
+                None => {
+                    let texts: Vec<String> = qs.iter().map(|q| q.text.clone()).collect();
+                    queryset::embed_with(
+                        embedder.as_ref().expect("an arm with no sidecar opened its model"),
+                        &texts,
+                    )
+                    .with_context(|| format!("embedding the {name} family with {id}"))?
+                }
+            };
             query_vectors.push(vectors);
         }
-        eprintln!("  embedded {} queries", query_vectors.iter().map(|v| v.len()).sum::<usize>());
+        eprintln!("  {} queries for {id}", query_vectors.iter().map(|v| v.len()).sum::<usize>());
 
         let mut facts = ArmFacts {
             model_id: id.clone(),
@@ -922,9 +1143,17 @@ pub fn run(options: &EmbeddingGradeOptions) -> Result<EmbeddingCard> {
         // as the next one's - which is the whole premise of a threshold.
         if options.abstention {
             for (name, qs) in &families.abstention {
-                let texts: Vec<String> = qs.iter().map(|q| q.text.clone()).collect();
-                let vectors = queryset::embed_with(&embedder, &texts)
-                    .with_context(|| format!("embedding the {name} family with {id}"))?;
+                let vectors: Vec<Vec<f32>> = match supplied.as_mut() {
+                    Some(rows) => rows.drain(..qs.len()).collect(),
+                    None => {
+                        let texts: Vec<String> = qs.iter().map(|q| q.text.clone()).collect();
+                        queryset::embed_with(
+                            embedder.as_ref().expect("an arm with no sidecar opened its model"),
+                            &texts,
+                        )
+                        .with_context(|| format!("embedding the {name} family with {id}"))?
+                    }
+                };
                 let vectors_slice = &corpus.vectors[..n];
                 let tops: Vec<f64> = vectors
                     .iter()
@@ -970,7 +1199,10 @@ pub fn run(options: &EmbeddingGradeOptions) -> Result<EmbeddingCard> {
                     Ok((rates, tokens, share)) => {
                         let label = match arm.model.manifest.backend {
                             inillucent_core::model::Backend::LlamaCpp => {
-                                format!("llama.cpp at {}", options.arm_options.endpoint)
+                                format!(
+                                    "llama.cpp at {}",
+                                    options.arm_options.endpoint_for(&arm.model.manifest.id)
+                                )
                             }
                             inillucent_core::model::Backend::Onnx => device.label(),
                         };
@@ -1154,9 +1386,19 @@ fn mean(values: Option<&Vec<f64>>) -> f64 {
 /// and counting only the graph put it *inside* gate G8's footprint budget when it
 /// is the heaviest arm on the board. That is a reporting error that changes a
 /// conclusion rather than a number.
+/// A safetensors checkpoint has the same problem in a different shape: its weights are
+/// several numbered shards and the file the manifest names is a JSON index listing them.
+/// `Qwen3-Embedding-8B` is 30 KB of index in front of 15.1 GB of shards, so the same
+/// mistake would report the heaviest arm on a board as the lightest by six orders of
+/// magnitude. When the named file is an index, the shards it names are summed.
 /// @param dir - the model directory
 /// @param model_file - the graph file named by the manifest
 fn weights_bytes(dir: &Path, model_file: &str) -> u64 {
+    if model_file.ends_with(".index.json") {
+        if let Some(total) = sharded_weights_bytes(&dir.join(model_file)) {
+            return total;
+        }
+    }
     let mut total = std::fs::metadata(dir.join(model_file)).map(|m| m.len()).unwrap_or(0);
     let Ok(entries) = std::fs::read_dir(dir) else { return total };
     for entry in entries.flatten() {
@@ -1170,6 +1412,26 @@ fn weights_bytes(dir: &Path, model_file: &str) -> u64 {
         }
     }
     total
+}
+
+/// Sum the distinct shards a safetensors index names, or nothing if it cannot be read.
+///
+/// Distinct, because the index maps every tensor name to its shard and a checkpoint has
+/// far more tensors than shards; counting per entry would multiply the real size by the
+/// tensor count.
+/// @param index - the `model.safetensors.index.json` path
+fn sharded_weights_bytes(index: &Path) -> Option<u64> {
+    let text = std::fs::read_to_string(index).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let map = parsed.get("weight_map")?.as_object()?;
+    let dir = index.parent()?;
+    let shards: std::collections::BTreeSet<&str> =
+        map.values().filter_map(|v| v.as_str()).collect();
+    let mut total = std::fs::metadata(index).map(|m| m.len()).unwrap_or(0);
+    for shard in shards {
+        total += std::fs::metadata(dir.join(shard)).map(|m| m.len()).unwrap_or(0);
+    }
+    Some(total)
 }
 
 /// Top k by cosine over a borrowed sample, returning positions within it.
@@ -2007,6 +2269,7 @@ mod tests {
             cost_samples: 8,
             cost_devices: vec![],
             cost_repeats: 3,
+            query_vectors: BTreeMap::new(),
             matryoshka_chunks: 8,
             arm_options: crate::arm::ArmOptions::default(),
         }
@@ -2237,6 +2500,130 @@ mod tests {
     /// dense lane and the accuracy scenario were measuring against two different
     /// truths, and the card would carry both without saying so. This is cheap and
     /// it is the one place that can be checked directly.
+    /// A safetensors checkpoint names its weights from a JSON index, and the index is
+    /// tiny. `Qwen3-Embedding-8B` is 30 KB of index in front of four shards totalling
+    /// 15.1 GB, so reading the named file alone would put the heaviest arm on the board
+    /// under every footprint budget there is - the same reporting error that put
+    /// `qwen3-embedding-0.6b` inside task-1818's gate G8 at 307 MB against a real 2,401.
+    #[test]
+    fn a_sharded_checkpoint_is_weighed_by_its_shards_and_not_its_index() {
+        let dir = sidecar_dir("shards");
+        std::fs::write(dir.join("model-00001-of-00002.safetensors"), vec![0u8; 4096]).unwrap();
+        std::fs::write(dir.join("model-00002-of-00002.safetensors"), vec![0u8; 2048]).unwrap();
+        // Many tensors, two shards: the sum is over the shards, not over the entries.
+        let index = serde_json::json!({"weight_map": {
+            "a": "model-00001-of-00002.safetensors",
+            "b": "model-00001-of-00002.safetensors",
+            "c": "model-00002-of-00002.safetensors",
+        }});
+        let index_path = dir.join("model.safetensors.index.json");
+        std::fs::write(&index_path, index.to_string()).unwrap();
+        let index_bytes = std::fs::metadata(&index_path).unwrap().len();
+        assert_eq!(
+            weights_bytes(&dir, "model.safetensors.index.json"),
+            4096 + 2048 + index_bytes
+        );
+    }
+
+    /// A scratch directory for the sidecar tests, named by process so two runs cannot
+    /// read each other's files.
+    fn sidecar_dir(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("inillucent-sidecar-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// Write a sidecar pair: the vectors and the JSON that claims what they are.
+    fn write_sidecar(dir: &Path, meta: serde_json::Value, rows: usize, dims: usize) -> PathBuf {
+        let vectors = dir.join("q.f32");
+        let mut bytes = Vec::with_capacity(rows * dims * 4);
+        for row in 0..rows {
+            for d in 0..dims {
+                bytes.extend_from_slice(&((row * dims + d) as f32).to_le_bytes());
+            }
+        }
+        std::fs::write(&vectors, bytes).unwrap();
+        std::fs::write(vectors.with_extension("meta.json"), meta.to_string()).unwrap();
+        vectors
+    }
+
+    fn sidecar_header() -> CacheHeader {
+        CacheHeader {
+            version: 4,
+            corpus_sha256: "corpus-a".into(),
+            model_id: "teacher".into(),
+            manifest_sha256: "d".into(),
+            dims: 4,
+            max_tokens: 512,
+            chunk_count: 10,
+            truncated_chunks: 0,
+            query_seed_digest: "seeds-a".into(),
+        }
+    }
+
+    fn sidecar_meta() -> serde_json::Value {
+        serde_json::json!({
+            "corpus_sha256": "corpus-a",
+            "query_seed_digest": "seeds-a",
+            "per_source": 40,
+            "queries": 3,
+            "model_id": "teacher",
+            "dims": 4,
+        })
+    }
+
+    /// The whole point of the sidecar is that vectors can come from a model this
+    /// harness cannot open. A matching one loads and keeps its row order, because the
+    /// families are split off the front of it in the order `query-texts` wrote them.
+    #[test]
+    fn a_matching_query_vector_sidecar_loads_in_order() {
+        let dir = sidecar_dir("match");
+        let path = write_sidecar(&dir, sidecar_meta(), 3, 4);
+        let rows = read_query_vectors(&path, "teacher", 4, &sidecar_header(), 40, 3).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0], vec![0.0, 1.0, 2.0, 3.0]);
+        assert_eq!(rows[2], vec![8.0, 9.0, 10.0, 11.0]);
+    }
+
+    /// Each of these produces a file that opens, parses and yields numbers. That is
+    /// exactly why every one has to be refused by name: a sidecar built against last
+    /// week's corpus, or at a different `--per-source`, or for a different model, is
+    /// not a bad file, it is a plausible one, and it would put a wrong number on a
+    /// gate card with nothing in the output to say so.
+    #[test]
+    fn a_sidecar_that_does_not_describe_this_run_is_refused_by_name() {
+        let header = sidecar_header();
+        let cases: Vec<(&str, serde_json::Value, &str, usize, usize, usize, &str)> = vec![
+            ("corpus", serde_json::json!({"corpus_sha256":"corpus-b","query_seed_digest":"seeds-a","per_source":40,"queries":3,"model_id":"teacher","dims":4}), "teacher", 4, 40, 3, "corpus"),
+            ("seeds", serde_json::json!({"corpus_sha256":"corpus-a","query_seed_digest":"seeds-b","per_source":40,"queries":3,"model_id":"teacher","dims":4}), "teacher", 4, 40, 3, "seed table"),
+            ("per-source", serde_json::json!({"corpus_sha256":"corpus-a","query_seed_digest":"seeds-a","per_source":20,"queries":3,"model_id":"teacher","dims":4}), "teacher", 4, 40, 3, "--per-source"),
+            ("model", serde_json::json!({"corpus_sha256":"corpus-a","query_seed_digest":"seeds-a","per_source":40,"queries":3,"model_id":"someone-else","dims":4}), "teacher", 4, 40, 3, "made for"),
+            ("dims", serde_json::json!({"corpus_sha256":"corpus-a","query_seed_digest":"seeds-a","per_source":40,"queries":3,"model_id":"teacher","dims":8}), "teacher", 4, 40, 3, "dims"),
+            ("count", serde_json::json!({"corpus_sha256":"corpus-a","query_seed_digest":"seeds-a","per_source":40,"queries":5,"model_id":"teacher","dims":4}), "teacher", 4, 40, 3, "queries"),
+        ];
+        for (name, meta, model, dims, per_source, expected, wanted) in cases {
+            let dir = sidecar_dir(name);
+            let path = write_sidecar(&dir, meta, 3, 4);
+            let error = read_query_vectors(&path, model, dims, &header, per_source, expected)
+                .expect_err("the mismatch must be refused");
+            let text = format!("{error:#}");
+            assert!(text.contains(wanted), "the {name} refusal should name {wanted}: {text}");
+        }
+    }
+
+    /// A sidecar whose JSON is right and whose bytes are short is the one failure the
+    /// metadata cannot catch, and reading past the end would give a partly-zero query
+    /// vector that still ranks documents.
+    #[test]
+    fn a_sidecar_shorter_than_its_own_metadata_is_refused() {
+        let dir = sidecar_dir("short");
+        let path = write_sidecar(&dir, sidecar_meta(), 2, 4);
+        let error = read_query_vectors(&path, "teacher", 4, &sidecar_header(), 40, 3)
+            .expect_err("a short file must be refused");
+        assert!(format!("{error:#}").contains("bytes"), "{error:#}");
+    }
+
     #[test]
     fn the_dense_lane_agrees_with_the_exhaustive_search_the_card_uses() {
         let dims = 16;

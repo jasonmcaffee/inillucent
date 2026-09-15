@@ -32,7 +32,7 @@ mod synth;
 use std::path::PathBuf;
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use inillucent_core::embed_onnx::Device;
 use inillucent_core::rank::{AdaptiveWeights, Fusion};
@@ -68,6 +68,17 @@ struct Cli {
     #[arg(long, global = true, default_value_t = default_endpoint())]
     endpoint: String,
 
+    /// Where one named model's `llama-server` listens, as `<model id>=<host:port>`,
+    /// repeatable. Falls back to `--endpoint` for any model not named.
+    ///
+    /// One server holds one model, so comparing several GGUF arms on one card means
+    /// several servers on several ports. Gate C1 does exactly that: the student's
+    /// q8_0 against `nomic-embed-text-v2-moe`'s f16 and its q8_0, all through the
+    /// same llama.cpp build. A machine setting, like `--max-batch-cells`: it is in
+    /// no manifest, it moves no digest, and it invalidates no cache.
+    #[arg(long = "endpoint-for", global = true, value_name = "MODEL=HOST:PORT")]
+    endpoint_for: Vec<String>,
+
     /// Ceiling on `texts in a batch x longest sequence in it, squared`, which is
     /// what bounds an attention allocation. A machine setting rather than a model
     /// property: it is in no manifest and changing it moves no digest.
@@ -84,6 +95,51 @@ struct Cli {
 /// home.
 fn default_endpoint() -> String {
     format!("127.0.0.1:{}", arm::DEFAULT_LLAMA_PORT)
+}
+
+/// Turn the repeated `--query-vectors <model>=<path>` arguments into a lookup.
+///
+/// Same shape and the same refusals as the endpoint overrides: a value with no `=` and
+/// a model named twice are both silent in a long command line and both would grade an
+/// arm against a file nobody meant.
+/// @param pairs - the raw command line values, in the order they were given
+fn parse_query_vectors(pairs: &[String]) -> Result<std::collections::BTreeMap<String, PathBuf>> {
+    let mut map = std::collections::BTreeMap::new();
+    for pair in pairs {
+        let (model, path) = pair
+            .split_once('=')
+            .with_context(|| format!("--query-vectors {pair} is not <model id>=<path>"))?;
+        anyhow::ensure!(!model.is_empty(), "--query-vectors {pair} names no model");
+        anyhow::ensure!(!path.is_empty(), "--query-vectors {pair} names no file");
+        if map.insert(model.to_string(), PathBuf::from(path)).is_some() {
+            anyhow::bail!("--query-vectors names {model} twice");
+        }
+    }
+    Ok(map)
+}
+
+/// Turn the repeated `--endpoint-for <model>=<host:port>` arguments into a lookup.
+///
+/// Refuses a value with no `=`, and refuses naming the same model twice, because both
+/// are silent in a long command line and both would put an arm on a server the reader
+/// did not intend. The `host:port` half is checked where it is used, by the same
+/// splitter every endpoint goes through.
+/// @param pairs - the raw command line values, in the order they were given
+fn parse_endpoint_overrides(
+    pairs: &[String],
+) -> Result<std::collections::BTreeMap<String, String>> {
+    let mut map = std::collections::BTreeMap::new();
+    for pair in pairs {
+        let (model, endpoint) = pair
+            .split_once('=')
+            .with_context(|| format!("--endpoint-for {pair} is not <model id>=<host:port>"))?;
+        anyhow::ensure!(!model.is_empty(), "--endpoint-for {pair} names no model");
+        anyhow::ensure!(!endpoint.is_empty(), "--endpoint-for {pair} names no endpoint");
+        if map.insert(model.to_string(), endpoint.to_string()).is_some() {
+            anyhow::bail!("--endpoint-for names {model} twice");
+        }
+    }
+    Ok(map)
 }
 
 #[derive(Subcommand)]
@@ -131,6 +187,73 @@ enum Command {
         /// Chunks between progress lines.
         #[arg(long, default_value_t = 2000)]
         report_every: usize,
+    },
+    /// Write every query `grade-embedding` would generate, in the order an arm's
+    /// query vectors have to be in.
+    ///
+    /// Half of the pair that lets a model the harness cannot open be a graded arm:
+    /// this writes the texts, an external embedder writes the vectors, and
+    /// `grade-embedding --query-vectors` reads them back under the same refusal
+    /// checks a cache header gets.
+    QueryTexts {
+        /// A cache of the corpus the queries are generated from. Any arm's will do:
+        /// the queries come from the chunks, and every arm holds the same chunks.
+        #[arg(long)]
+        from_cache: PathBuf,
+        #[arg(long, default_value_t = 40)]
+        per_source: usize,
+        /// Generate against only the first N chunks, matching `grade-embedding --limit`.
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Assemble a sealed cache from a vector file another program produced, so a
+    /// model with no ONNX graph and no GGUF can still be graded by this harness.
+    ///
+    /// Two models this ticket has to grade have neither. `Qwen3-Embedding-8B` and
+    /// `-4B` are the candidate teachers and ship as safetensors only, and a teacher
+    /// that is not graded on the suite before it teaches is exactly the gap
+    /// task-1818 left. Every student checkpoint is in the same position: the loop
+    /// grades five weight interpolations an iteration and exporting each to ONNX
+    /// first would cost more than the pilot that produced them.
+    ///
+    /// The vector file is little-endian f32, `dims` floats a chunk, in corpus order,
+    /// which is the same shape `synth-embed` writes and `export-vectors` reads. What
+    /// this command adds is the header: the corpus digest, the manifest digest, the
+    /// query seed digest and the truncation count all come from the harness's own
+    /// code, so a cache assembled here carries the same provenance as one the
+    /// harness embedded itself and `grade-embedding`'s refusal checks apply to it
+    /// unchanged. A producer that gets the model wrong is caught by those checks
+    /// rather than by this command trusting it.
+    CacheFromVectors {
+        #[arg(long, default_value = "corpus.jsonl")]
+        corpus: PathBuf,
+        /// The model directory, holding the `model.json` these vectors belong to.
+        #[arg(long)]
+        model_dir: String,
+        /// The weights file, used only when the directory has no `model.json`.
+        #[arg(long, default_value = "model.onnx")]
+        model_file: String,
+        /// The little-endian f32 vector file, `dims` floats a chunk, in corpus order.
+        #[arg(long)]
+        vectors: PathBuf,
+        /// How many chunks the producer had to cut at the model's token bound.
+        ///
+        /// Not derivable from the vectors, and the truncation share is a gate (C3),
+        /// so it is required rather than defaulted to zero. Task-1818 had a path that
+        /// silently reassembled a cache with a truncation count of zero and the card
+        /// reported it as fact.
+        #[arg(long)]
+        truncated: usize,
+        /// Skip the weights and tokenizer digest check.
+        ///
+        /// For a model whose weights this harness cannot see, which is the whole
+        /// reason the command exists: a `sentence-transformers` checkpoint has no
+        /// `model.onnx` to digest. The manifest digest still goes into the header,
+        /// so the cache is still bound to the model contract that produced it.
+        #[arg(long, default_value_t = false)]
+        unverified_weights: bool,
     },
     /// Create the PostgreSQL schema and load the corpus and its vectors into it.
     SynthLoad {
@@ -352,6 +475,13 @@ enum Command {
         /// Queries per source for the document identity family.
         #[arg(long, default_value_t = 40)]
         per_source: usize,
+        /// Query vectors an arm's own model produced elsewhere, as
+        /// `<model id>=<path.f32>`, repeatable. Use it for a model this harness cannot
+        /// open - a safetensors checkpoint with no export - after writing the texts
+        /// with `query-texts`. The `.meta.json` beside the file has to name the same
+        /// corpus, seed table, `--per-source`, model and width, or the run refuses.
+        #[arg(long = "query-vectors", value_name = "MODEL=PATH")]
+        query_vectors: Vec<String>,
         /// Processor the queries are embedded on: `cpu`, `cuda` or `cuda:N`.
         #[arg(long, default_value = "cpu")]
         device: String,
@@ -617,6 +747,7 @@ fn main() -> Result<()> {
                     batch_size: batch,
                     device: devices[0],
                     endpoint: cli.endpoint.clone(),
+                    endpoint_overrides: parse_endpoint_overrides(&cli.endpoint_for)?,
                     max_batch_cells: cli.max_batch_cells,
                     ..Default::default()
                 },
@@ -624,6 +755,46 @@ fn main() -> Result<()> {
                 &devices,
                 window_batches,
             )?;
+        }
+        Command::QueryTexts { from_cache, per_source, limit, out } => {
+            let total = gradeembed::write_query_texts(&from_cache, per_source, limit, &out)?;
+            eprintln!("wrote {total} queries to {}", out.display());
+        }
+        Command::CacheFromVectors {
+            corpus,
+            model_dir,
+            model_file,
+            vectors,
+            truncated,
+            unverified_weights,
+        } => {
+            let dir = expand_home(&model_dir)?;
+            let model = models::resolve_dir(std::path::Path::new(&dir), &model_file)?;
+            if !unverified_weights {
+                model.verify_files()?;
+            }
+            let chunks = synth::read_corpus(&corpus)?;
+            anyhow::ensure!(
+                truncated <= chunks.len(),
+                "{truncated} truncated chunks were reported for a corpus of {}",
+                chunks.len()
+            );
+            synth::assemble_cache(
+                &chunks,
+                &vectors,
+                &cli.cache,
+                &model.manifest,
+                &scenarios::seeds(),
+                truncated,
+            )?;
+            let assembled = corpus::load_cache(&cli.cache)?;
+            eprintln!(
+                "{} chunks of {} at {} dims, {truncated} truncated, corpus {}",
+                assembled.len(),
+                assembled.header.model_id,
+                assembled.dims,
+                corpus::short(&assembled.header.corpus_sha256)
+            );
         }
         Command::SynthLoad { corpus, no_indexes } => {
             let chunks = synth::read_corpus(&corpus)?;
@@ -733,6 +904,7 @@ fn main() -> Result<()> {
                     batch_size: batch,
                     device: Device::parse(&device)?,
                     endpoint: cli.endpoint.clone(),
+                    endpoint_overrides: parse_endpoint_overrides(&cli.endpoint_for)?,
                     max_batch_cells: cli.max_batch_cells,
                     ..Default::default()
                 },
@@ -826,6 +998,7 @@ fn main() -> Result<()> {
                 arm_options: arm::ArmOptions {
                     device: Device::parse(&device)?,
                     endpoint: cli.endpoint.clone(),
+                    endpoint_overrides: parse_endpoint_overrides(&cli.endpoint_for)?,
                     max_batch_cells: cli.max_batch_cells,
                     ..Default::default()
                 },
@@ -876,6 +1049,7 @@ fn main() -> Result<()> {
             baseline,
             limit,
             per_source,
+            query_vectors,
             device,
             out,
             runs_dir,
@@ -911,9 +1085,11 @@ fn main() -> Result<()> {
                 cost_devices: if cost { parse_devices(&cost_devices)? } else { Vec::new() },
                 cost_repeats,
                 matryoshka_chunks,
+                query_vectors: parse_query_vectors(&query_vectors)?,
                 arm_options: arm::ArmOptions {
                     device: Device::parse(&device)?,
                     endpoint: cli.endpoint.clone(),
+                    endpoint_overrides: parse_endpoint_overrides(&cli.endpoint_for)?,
                     max_batch_cells: cli.max_batch_cells,
                     ..Default::default()
                 },

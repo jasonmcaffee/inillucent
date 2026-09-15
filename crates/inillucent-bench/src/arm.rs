@@ -38,8 +38,17 @@ pub enum Arm {
 pub struct ArmOptions {
     pub batch_size: usize,
     pub device: Device,
-    /// `host:port` for a llama.cpp arm.
+    /// `host:port` for a llama.cpp arm that has no entry in `endpoint_overrides`.
     pub endpoint: String,
+    /// `host:port` for one named model, when several GGUF arms are compared at once.
+    ///
+    /// Gate C1 times the student's q8_0 against `nomic-embed-text-v2-moe`'s f16 **and**
+    /// its q8_0 through the same llama.cpp build, which is three served arms on one
+    /// card. A single global endpoint cannot express that: each GGUF needs its own
+    /// `llama-server`, because a server holds one model. Like `max_batch_cells` this
+    /// is a property of the machine and not of the model, so it lives here and not in
+    /// the manifest, and setting it moves no manifest digest and invalidates no cache.
+    pub endpoint_overrides: std::collections::BTreeMap<String, String>,
     /// Tokens per request for a llama.cpp arm, at or below the server's `-b`.
     pub token_budget: usize,
     /// Texts per request for a llama.cpp arm, at or below the server's `-np`.
@@ -68,6 +77,7 @@ impl Default for ArmOptions {
             batch_size: 16,
             device: Device::Cpu,
             endpoint: format!("127.0.0.1:{DEFAULT_LLAMA_PORT}"),
+            endpoint_overrides: std::collections::BTreeMap::new(),
             // Well under the 8,192 physical batch a `llama-server` is started
             // with here. Sixty-four real chunks from this corpus measured 17,029
             // tokens, so a batch sized by count rather than by tokens fails on
@@ -76,6 +86,17 @@ impl Default for ArmOptions {
             max_texts: 32,
             max_batch_cells: 24_000_000,
         }
+    }
+}
+
+impl ArmOptions {
+    /// Where this model's `llama-server` listens.
+    ///
+    /// The model's own override when it has one, and the shared endpoint otherwise, so a
+    /// card with one GGUF arm needs no override at all and a card with three names each.
+    /// @param model_id - the model's id, as its manifest declares it
+    pub fn endpoint_for(&self, model_id: &str) -> &str {
+        self.endpoint_overrides.get(model_id).map_or(self.endpoint.as_str(), |e| e.as_str())
     }
 }
 
@@ -99,7 +120,7 @@ impl Arm {
                 )?)))
             }
             Backend::LlamaCpp => {
-                let (host, port) = split_endpoint(&options.endpoint)?;
+                let (host, port) = split_endpoint(options.endpoint_for(&model.manifest.id))?;
                 Ok(Arm::Llama(Box::new(LlamaCppEmbedder::connect(
                     &model.dir,
                     &host,
@@ -146,10 +167,16 @@ impl Arm {
     }
 
     /// A label for progress output, so a log says which backend produced a rate.
-    pub fn backend_label(&self, options: &ArmOptions) -> String {
+    ///
+    /// The endpoint in the label is the one this arm actually connected to, not the
+    /// shared default, so a card comparing three GGUF arms does not print the same
+    /// endpoint against three different servers.
+    /// @param options - the machine settings the arm was opened with
+    /// @param model_id - the model's id, for its endpoint override
+    pub fn backend_label(&self, options: &ArmOptions, model_id: &str) -> String {
         match self {
             Arm::Onnx(_) => options.device.label(),
-            Arm::Llama(_) => format!("llama.cpp at {}", options.endpoint),
+            Arm::Llama(_) => format!("llama.cpp at {}", options.endpoint_for(model_id)),
         }
     }
 }
@@ -188,6 +215,33 @@ mod tests {
     fn the_default_llama_port_is_not_nikayas() {
         assert_ne!(DEFAULT_LLAMA_PORT, 8087);
         assert!(ArmOptions::default().endpoint.ends_with(&DEFAULT_LLAMA_PORT.to_string()));
+    }
+
+    /// Gate C1(a) compares three GGUF arms - the student's q8_0 against v2-moe's f16
+    /// and q8_0 - and a `llama-server` serves one model, so three servers on three
+    /// ports have to be addressable from one card. Before this, every llama.cpp arm
+    /// read the same global endpoint and the second and third arms would have been
+    /// timed against the first one's model while the card reported three model ids.
+    #[test]
+    fn each_model_can_name_its_own_server() {
+        let mut options = ArmOptions::default();
+        options.endpoint = "127.0.0.1:8189".into();
+        options.endpoint_overrides.insert("v2moe-q8".into(), "127.0.0.1:8190".into());
+        options.endpoint_overrides.insert("student-q8".into(), "127.0.0.1:8191".into());
+        assert_eq!(options.endpoint_for("nomic-embed-text-v2-moe"), "127.0.0.1:8189");
+        assert_eq!(options.endpoint_for("v2moe-q8"), "127.0.0.1:8190");
+        assert_eq!(options.endpoint_for("student-q8"), "127.0.0.1:8191");
+    }
+
+    /// An override is only useful if it is a real endpoint, and a typo in one would
+    /// otherwise surface as a connection refused against a port nobody chose.
+    #[test]
+    fn an_overridden_endpoint_is_still_split_into_a_host_and_a_port() {
+        let mut options = ArmOptions::default();
+        options.endpoint_overrides.insert("student-q8".into(), "127.0.0.1:8191".into());
+        assert_eq!(split_endpoint(options.endpoint_for("student-q8")).unwrap(), ("127.0.0.1".into(), 8191));
+        options.endpoint_overrides.insert("broken".into(), "127.0.0.1".into());
+        assert!(split_endpoint(options.endpoint_for("broken")).is_err());
     }
 
     #[test]

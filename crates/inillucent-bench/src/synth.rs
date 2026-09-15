@@ -1564,7 +1564,7 @@ fn open_arms(
         let arm = Arm::open(model, options)?;
         eprintln!(
             "  {} ready in {:.1}s",
-            arm.backend_label(options),
+            arm.backend_label(options, &model.manifest.id),
             load.elapsed().as_secs_f64()
         );
         return Ok(vec![arm]);

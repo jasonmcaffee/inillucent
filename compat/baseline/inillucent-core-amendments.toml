@@ -14,9 +14,9 @@ sha256 = "96da8955190374e20a9de9b984d845213c944e4846fd58478ebf5fcf34fdcbf1"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/arm.rs"
-ticket = "embedding model head to head grading"
-reason = "The grading harness was generalised from one embedding model to a head-to-head between several, matching the success criteria the design document set for that comparison. A model is now a manifest (id, width, Matryoshka widths, four prefixes, pooling, token bound, backend, output, tokenizer and weights digests) instead of a set of constants; a cache carries a header naming the corpus digest, the model, the manifest digest and the truncation it performed; grade-embedding compares two or more caches and refuses before it starts unless they agree on corpus, chunk count and query seeds; and the embedder gained CLS and last-token pooling, graph-driven inputs, and a llama.cpp backend for the one model with no ONNX export. ModelManifest::nomic_v1_5() reproduces every constant it replaced: the fresh baseline cache agrees with the August run at cosine 1.000000 minimum over 5000 chunks, and grade's card is unchanged on every measurement row."
-sha256 = "3b63ebd7cc8fc9dc6f5ea383ef18ddbc7456174cc20e0d6369d4a1a651f92d4f"
+ticket = "task-1966"
+reason = "per-model llama-server endpoints, the cache-from-vectors and query-texts subcommands, the query-vector sidecar, and weighing a sharded checkpoint by its shards"
+sha256 = "318f145cb69a1540f2c719f65888e0ba3de5eb63966da65183196270c1a40f03"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/corpus.rs"
@@ -38,9 +38,9 @@ sha256 = "7a5be6a0b5b8f36097605c76889785d6fca3b218e26cbf936b51587b59e84233"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/gradeembed.rs"
-ticket = "task-1953"
-reason = "task-1946 H6 and H4: the run's two file rows go through runs::note_run_files, which names the run rather than the disk; the exhaustive probe carries H4's refusal. No measurement is affected."
-sha256 = "adf4c23badf181f92cdacf72bf9b6b409b89311df59b521a0c1e6af388553dc4"
+ticket = "task-1966"
+reason = "per-model llama-server endpoints, the cache-from-vectors and query-texts subcommands, the query-vector sidecar, and weighing a sharded checkpoint by its shards"
+sha256 = "3eed8ce22e522c4374d9e41671f80dfa5200d3099ded42b206777be0a52f747c"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/http.rs"
@@ -56,9 +56,9 @@ sha256 = "c606a322fe69ffecb0e7ebc0f58771217a3fda556f24940ea9a580c575e2db31"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/main.rs"
-ticket = "task-1962"
-reason = "task-1961 A9: the one call to tune::build_settings passes a Sweep rather than nine slices, five of which were &[f32] in a row. No dial changed and no measurement moved: the struct holds the same nine values in the same order."
-sha256 = "17427e47615c7c5f002c4d3937a75e6c2bddc73adec60e0a25f71b68c6c3d0e3"
+ticket = "task-1966"
+reason = "per-model llama-server endpoints, the cache-from-vectors and query-texts subcommands, the query-vector sidecar, and weighing a sharded checkpoint by its shards"
+sha256 = "0e4dd5fb5cd0e7a932f0b104bb4750caf746aa1be8ccf68f857ff0e92038d2de"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/models.rs"
@@ -98,9 +98,9 @@ sha256 = "cc00c83ecc304470c757a8f1e7dcc7f744b6adda66dbdbf5c05e9a2fb41c5350"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/synth.rs"
-ticket = "strict lint remediation"
-reason = "The strict lint set became a required check, and these are the findings it had in the retrieval engine. Every edit is local: bounds-checked division, a NaN comparison kept and explained, an identity map removed, a test module moved below the items it follows. No retrieval behaviour changes, and no file was reformatted - these two crates have never been formatted and doing it would move 35 files for no reason connected to a lint."
-sha256 = "98727e1c22c61c09fef9a0ae52fef3bf6dc8244de9c1e507dd8fee7c6a1a4cd1"
+ticket = "task-1966"
+reason = "per-model llama-server endpoints, the cache-from-vectors and query-texts subcommands, the query-vector sidecar, and weighing a sharded checkpoint by its shards"
+sha256 = "4b6376899ba466107aeb05e71aa16422216adfa719978c7da3916e3c30ca66e5"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/tune.rs"
