@@ -9,7 +9,7 @@
 //! green. A suite that exercises the layer underneath the broken one reports a
 //! pass and means nothing; this one runs the command a person types.
 
-use inillucent_cli::command::{self, Arguments, Context};
+use inillucent_cli::command::{self, Arguments, Context, OpenMode};
 use inillucent_cli::json::Json;
 
 /// Where this suite's scratch files live.
@@ -79,7 +79,8 @@ fn the_verb_loads_a_csv_file() {
         "people.csv",
         "id,name,note\n1,Seneca,\"a Stoic, and a playwright\"\n2,Epictetus,born a slave\n",
     );
-    let mut context = Context::open(":memory:", false, None).expect("an in-memory database opens");
+    let mut context =
+        Context::open(":memory:", OpenMode::ReadWrite, None).expect("an in-memory database opens");
     let produced = run(
         &mut context,
         "import",
@@ -106,7 +107,8 @@ fn the_verb_loads_a_csv_file() {
 #[test]
 fn the_verb_reads_tab_separated_input() {
     let path = written("tabbed.tsv", "id\tname\n1\tZeno\n2\tChrysippus\n");
-    let mut context = Context::open(":memory:", false, None).expect("an in-memory database opens");
+    let mut context =
+        Context::open(":memory:", OpenMode::ReadWrite, None).expect("an in-memory database opens");
     run(
         &mut context,
         "import",
@@ -131,7 +133,8 @@ fn the_verb_skips_leading_rows() {
         "preamble.csv",
         "# produced by something\nid,name\n1,Plato\n2,Aristotle\n",
     );
-    let mut context = Context::open(":memory:", false, None).expect("an in-memory database opens");
+    let mut context =
+        Context::open(":memory:", OpenMode::ReadWrite, None).expect("an in-memory database opens");
     run(
         &mut context,
         "import",
@@ -162,7 +165,8 @@ fn the_verb_skips_leading_rows() {
 /// never typed and sends them looking for the wrong thing.
 #[test]
 fn a_missing_file_names_the_file() {
-    let mut context = Context::open(":memory:", false, None).expect("an in-memory database opens");
+    let mut context =
+        Context::open(":memory:", OpenMode::ReadWrite, None).expect("an in-memory database opens");
     let outcome = run(
         &mut context,
         "import",
@@ -198,7 +202,8 @@ fn loading_a_full_text_table_reports_its_rows() {
         "fts.csv",
         "id,title,body\n1,Zeno,paradox of the arrow\n2,Zeno,Stoic founder\n",
     );
-    let mut context = Context::open(":memory:", false, None).expect("an in-memory database opens");
+    let mut context =
+        Context::open(":memory:", OpenMode::ReadWrite, None).expect("an in-memory database opens");
     run(
         &mut context,
         "exec",

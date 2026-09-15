@@ -233,9 +233,15 @@ stage smoke 'a real file opened, written, reopened, read' smoke
 # `inillucent_compat::interchange::our_shell` builds it there. Building it here
 # instead does not work: `cargo llvm-cov` cleans the target directory before it
 # starts, so anything built ahead of it is gone by the time a test looks.
+#
+# **Through `tools/coverage.mjs` rather than `cargo llvm-cov` directly.** The
+# report names one object file per test binary and there are 176 of them, which
+# is a command line of about forty thousand characters - past what Windows
+# accepts, so the run ended with `os error 206` and no number after twenty
+# minutes of work. The wrapper re-runs that same command through a response
+# file, and prints the per-crate table `docs/repository.md` publishes.
 coverage_run() {
-    cargo llvm-cov --manifest-path "$root/Cargo.toml" --workspace --release --summary-only \
-        --exclude inillucent-bench --exclude inillucent-core --exclude inillucent-model
+    node "$root/tools/coverage.mjs" --per-crate
 }
 if [ "$coverage" -eq 1 ]; then
     stage coverage 'the coverage number docs/repository.md publishes, re-measured' coverage_run

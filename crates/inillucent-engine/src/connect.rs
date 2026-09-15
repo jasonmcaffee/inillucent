@@ -24,6 +24,7 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
+use inillucent_base::error::misuse;
 use inillucent_base::{DbError, DbResult, PrimaryCode};
 use inillucent_exec::physical::Params;
 use inillucent_tree::datum::OwnedDatum;
@@ -100,6 +101,14 @@ pub struct Database {
     /// `sqlite3_changes` reads it from: a caller asks the connection what the
     /// last statement did, having already dropped the statement.
     changes: std::cell::Cell<i64>,
+    /// The next connection number to hand out.
+    ///
+    /// **On the database rather than on the engine (task-1962, A11).** It used
+    /// to live behind the cell, so opening a connection borrowed the engine -
+    /// and a callback that asked for one while a statement was running aborted
+    /// the process. A counter is the database's own bookkeeping; the engine
+    /// learns the number on the first statement that runs under it.
+    next_session: std::cell::Cell<u64>,
 }
 
 /// Reports whether a path names an in-memory database rather than a file.
@@ -142,6 +151,7 @@ impl Database {
                 engine: RefCell::new(engine),
                 path,
                 changes: std::cell::Cell::new(0),
+                next_session: std::cell::Cell::new(1),
             });
         }
         let engine = if path.is_file() {
@@ -153,6 +163,7 @@ impl Database {
             engine: RefCell::new(engine),
             path,
             changes: std::cell::Cell::new(0),
+            next_session: std::cell::Cell::new(1),
         })
     }
 
@@ -190,6 +201,7 @@ impl Database {
             engine: RefCell::new(engine),
             path: target,
             changes: std::cell::Cell::new(0),
+            next_session: std::cell::Cell::new(1),
         })
     }
 
@@ -225,7 +237,8 @@ impl Database {
     /// now says which of the two things it is. `connect` is kept as a
     /// deprecated alias for one release.
     pub fn session(&self) -> Connection<'_> {
-        let session = self.engine.borrow().open_session();
+        let session = self.next_session.get();
+        self.next_session.set(session.saturating_add(1));
         Connection {
             database: self,
             session,
@@ -467,15 +480,35 @@ impl<'d> Connection<'d> {
     /// that has its own temporary tables sees a different set from the one
     /// before it, and a binder handed the previous connection's is the leak
     /// `temp` exists to prevent.
-    fn engine(&self) -> std::cell::RefMut<'_, ImportedDatabase> {
+    fn engine(&self) -> DbResult<std::cell::RefMut<'_, ImportedDatabase>> {
         self.engine_mut()
     }
 
     /// Returns the engine, having told it which connection is asking.
-    fn engine_mut(&self) -> std::cell::RefMut<'_, ImportedDatabase> {
-        let mut held = self.database.engine.borrow_mut();
+    ///
+    /// **It answers an error rather than aborting the process (task-1962,
+    /// A11).** This was `borrow_mut()`, which panics when the cell is already
+    /// borrowed, and the reachable case is a scalar function registered through
+    /// [`Connection::create_scalar_function`] whose body calls back into the
+    /// connection it was registered on: the statement holds the borrow, the
+    /// function asks for it again, and the process aborts. `AGENTS.md` bans
+    /// `panic!` on a path that reads SQL text, and a panicking `borrow_mut` is
+    /// the same failure under another name.
+    ///
+    /// The refusal is `misuse`, which is the code the driver already documents
+    /// for a caller that broke this API's own contract - and calling a
+    /// connection from inside a function running on it is exactly that, because
+    /// one `RefCell` holds the whole engine. A1 step 3 splits that cell into
+    /// three and most of this goes with it.
+    fn engine_mut(&self) -> DbResult<std::cell::RefMut<'_, ImportedDatabase>> {
+        let mut held = self.database.engine.try_borrow_mut().map_err(|_| {
+            misuse(
+                "this connection is already running a statement; a function registered on a \
+                 connection cannot call back into it",
+            )
+        })?;
         held.use_session(self.session);
-        held
+        Ok(held)
     }
 
     /// Runs one or more statements for their effect.
@@ -516,14 +549,14 @@ impl<'d> Connection<'d> {
             if rest.is_empty() {
                 return Ok(());
             }
-            let consumed = self.engine().statement_length(rest)?;
+            let consumed = self.engine()?.statement_length(rest)?;
             let Some(head) = rest.get(..consumed) else {
                 return Ok(());
             };
             if head.trim().is_empty() {
                 return Ok(());
             }
-            let outcome = self.engine_mut().execute_any(head, &Params::new())?;
+            let outcome = self.engine_mut()?.execute_any(head, &Params::new())?;
             self.database.changes.set(outcome.changes.rows as i64);
             rest = rest.get(consumed..).unwrap_or("");
         }
@@ -541,7 +574,7 @@ impl<'d> Connection<'d> {
     /// @param sql - the statement
     /// @param params - the values bound to `?1`, `?2`, ...
     pub fn query_with(&self, sql: &str, params: &Params) -> DbResult<Vec<Vec<OwnedDatum>>> {
-        let outcome = self.engine_mut().execute_any(sql, params)?;
+        let outcome = self.engine_mut()?.execute_any(sql, params)?;
         self.database.changes.set(outcome.changes.rows as i64);
         Ok(outcome.rows)
     }
@@ -555,7 +588,7 @@ impl<'d> Connection<'d> {
     ///
     /// @param sql - the script, positioned at the statement to compile
     pub fn prepare_with_tail(&self, sql: &str) -> DbResult<Prepared<'d>> {
-        let consumed = self.engine().statement_length(sql)?;
+        let consumed = self.engine()?.statement_length(sql)?;
         let head = sql.get(..consumed).unwrap_or(sql);
         Ok(Prepared {
             statement: self.prepare(head)?,
@@ -608,7 +641,7 @@ impl<'d> Connection<'d> {
         flags: inillucent_ext::registry::FunctionFlags,
         body: inillucent_ext::registry::ScalarBody,
     ) -> DbResult<()> {
-        self.engine_mut()
+        self.engine_mut()?
             .create_scalar_function(name, arity, flags, body)
     }
 
@@ -625,7 +658,7 @@ impl<'d> Connection<'d> {
         flags: inillucent_ext::registry::FunctionFlags,
         body: inillucent_ext::registry::AggregateBody,
     ) -> DbResult<()> {
-        self.engine_mut()
+        self.engine_mut()?
             .create_aggregate_function(name, arity, flags, body)
     }
 
@@ -633,8 +666,8 @@ impl<'d> Connection<'d> {
     ///
     /// @param name - the name it was registered under
     /// @param arity - the arity it was registered for
-    pub fn remove_function(&self, name: &str, arity: i32) -> bool {
-        self.engine_mut().remove_function(name, arity)
+    pub fn remove_function(&self, name: &str, arity: i32) -> DbResult<bool> {
+        Ok(self.engine_mut()?.remove_function(name, arity))
     }
 
     /// Registers a collating sequence an application defined.
@@ -646,12 +679,12 @@ impl<'d> Connection<'d> {
         name: &str,
         comparator: inillucent_value::collation::Comparator,
     ) -> DbResult<()> {
-        self.engine_mut().create_collation(name, comparator)
+        self.engine_mut()?.create_collation(name, comparator)
     }
 
     /// Returns how many statements are compiled and held.
-    pub fn cached_plan_count(&self) -> usize {
-        self.engine().cached_plan_count()
+    pub fn cached_plan_count(&self) -> DbResult<usize> {
+        Ok(self.engine()?.cached_plan_count())
     }
 
     /// Returns how many statements this connection has compiled since it opened.
@@ -661,15 +694,16 @@ impl<'d> Connection<'d> {
     /// It is here rather than only in the engine because
     /// `crates/inillucent/tests/budget.rs` asserts on it, and that file writes
     /// against this facade.
-    pub fn compiled_statement_count(&self) -> u64 {
-        self.engine().compiled_statement_count()
+    pub fn compiled_statement_count(&self) -> DbResult<u64> {
+        Ok(self.engine()?.compiled_statement_count())
     }
 
     /// Turns off one or more planner optimizations for this connection.
     ///
     /// @param mask - the levers to switch off
-    pub fn disable_optimizations(&self, levers: inillucent_sql::plan::Levers) {
-        self.engine_mut().disable_optimizations(levers);
+    pub fn disable_optimizations(&self, levers: inillucent_sql::plan::Levers) -> DbResult<()> {
+        self.engine_mut()?.disable_optimizations(levers);
+        Ok(())
     }
 
     /// Puts the connection into or out of defensive mode.
@@ -680,8 +714,9 @@ impl<'d> Connection<'d> {
     /// corrupt a database with one statement.
     ///
     /// @param on - whether the flag is in force
-    pub fn set_defensive(&self, on: bool) {
-        self.engine_mut().set_defensive(on);
+    pub fn set_defensive(&self, on: bool) -> DbResult<()> {
+        self.engine_mut()?.set_defensive(on);
+        Ok(())
     }
 
     /// Installs the authorizer every later statement is bound under.
@@ -691,8 +726,12 @@ impl<'d> Connection<'d> {
     /// Pass `None` to allow everything again.
     ///
     /// @param authorizer - the callback, or nothing
-    pub fn set_authorizer(&self, authorizer: Option<std::rc::Rc<dyn crate::Authorizer>>) {
-        self.engine_mut().set_authorizer(authorizer);
+    pub fn set_authorizer(
+        &self,
+        authorizer: Option<std::rc::Rc<dyn crate::Authorizer>>,
+    ) -> DbResult<()> {
+        self.engine_mut()?.set_authorizer(authorizer);
+        Ok(())
     }
 
     /// Declares a table over one index's own b-tree, or removes every such
@@ -704,17 +743,17 @@ impl<'d> Connection<'d> {
     /// @param index - the index to read, or nothing to remove them all
     /// @param name - the table name to declare it under
     pub fn imposter(&self, index: Option<&[u8]>, name: &[u8]) -> DbResult<Option<String>> {
-        self.engine_mut().imposter(index, name)
+        self.engine_mut()?.imposter(index, name)
     }
 
     /// Rereads the schema from the file.
     pub fn reload_schema(&self) -> DbResult<()> {
-        self.engine_mut().reload_catalog()
+        self.engine_mut()?.reload_catalog()
     }
 
     /// Returns the schema's generation, which changes when the schema does.
-    pub fn schema_cookie(&self) -> u64 {
-        self.engine().schema_generation()
+    pub fn schema_cookie(&self) -> DbResult<u64> {
+        Ok(self.engine()?.schema_generation())
     }
 
     /// Returns the named parameters one statement declares, with their indexes.
@@ -736,9 +775,9 @@ impl<'d> Connection<'d> {
         // asking afterwards reached into the arena the plan had just been built
         // out of. The symptom was not a crash: correlated subqueries in an
         // `UPDATE` or a `DELETE` quietly answered against the wrong rows.
-        let declared = self.engine().parameter_count(sql)?;
-        let compiled = self.engine().prepare_statement(sql)?;
-        let generation = self.engine().schema_generation();
+        let declared = self.engine()?.parameter_count(sql)?;
+        let compiled = self.engine()?.prepare_statement(sql)?;
+        let generation = self.engine()?.schema_generation();
         let mut params = Params::new();
         params.expect(declared);
         Ok(Statement {
@@ -761,7 +800,7 @@ impl<'d> Connection<'d> {
     /// @param sql - the statement
     pub fn execute(&self, sql: &str) -> DbResult<i64> {
         self.query(sql)?;
-        Ok(self.changes())
+        self.changes()
     }
 
     /// Returns how many rows the last statement on this database changed.
@@ -771,33 +810,33 @@ impl<'d> Connection<'d> {
     /// `Outcome` they got back - so a statement that failed partway left it
     /// holding the previous statement's number, and `sqlite3_changes` and
     /// `changes()` could answer differently about the same statement.
-    pub fn changes(&self) -> i64 {
-        self.engine().changes()
+    pub fn changes(&self) -> DbResult<i64> {
+        Ok(self.engine()?.changes())
     }
 
     /// Returns how many rows every statement so far has changed.
-    pub fn total_changes(&self) -> i64 {
-        self.engine().total_changes()
+    pub fn total_changes(&self) -> DbResult<i64> {
+        Ok(self.engine()?.total_changes())
     }
 
     /// Returns the rowid the last `INSERT` assigned.
-    pub fn last_insert_rowid(&self) -> i64 {
-        self.engine().last_insert_rowid()
+    pub fn last_insert_rowid(&self) -> DbResult<i64> {
+        Ok(self.engine()?.last_insert_rowid())
     }
 
     /// Returns how many databases the last commit was decided over.
     ///
     /// One for an ordinary statement; two or more for a transaction that wrote
     /// two files and was therefore committed through a super-journal.
-    pub fn decided_over(&self) -> usize {
-        self.engine().decided_over()
+    pub fn decided_over(&self) -> DbResult<usize> {
+        Ok(self.engine()?.decided_over())
     }
 
     /// Returns whether every statement is its own transaction.
     ///
     /// `false` between a `BEGIN` and its `COMMIT`.
-    pub fn autocommit(&self) -> bool {
-        self.engine().autocommit()
+    pub fn autocommit(&self) -> DbResult<bool> {
+        Ok(self.engine()?.autocommit())
     }
 
     /// Opens a transaction that rolls back unless it is committed.
@@ -820,7 +859,7 @@ impl<'d> Connection<'d> {
     /// transaction here" while one was open on a sibling, and committing it
     /// would settle work the sibling had not finished.
     pub fn begin(&self) -> DbResult<Transaction<'_>> {
-        if !self.autocommit() {
+        if !self.autocommit()? {
             // `SQLITE_ERROR`, which is what the pinned reference answers for
             // `BEGIN` inside a transaction ("cannot start a transaction within
             // a transaction"), rather than the `SQLITE_MISUSE` `refusal`

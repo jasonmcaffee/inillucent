@@ -56,9 +56,9 @@ sha256 = "c606a322fe69ffecb0e7ebc0f58771217a3fda556f24940ea9a580c575e2db31"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/main.rs"
-ticket = "task-1953"
-reason = "task-1946 H7 and H4: the --models-root help named a drive letter on one developer's machine and now names the environment variable and the documented default; the two index probes carry H4's refusal through one small helper rather than inline, which keeps main under the length ratchet."
-sha256 = "9d29aca7e15437858151da8bb50821eefc05da46c6710e9893f3d047e0c4ef33"
+ticket = "task-1962"
+reason = "task-1961 A9: the one call to tune::build_settings passes a Sweep rather than nine slices, five of which were &[f32] in a row. No dial changed and no measurement moved: the struct holds the same nine values in the same order."
+sha256 = "17427e47615c7c5f002c4d3937a75e6c2bddc73adec60e0a25f71b68c6c3d0e3"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/models.rs"
@@ -104,9 +104,9 @@ sha256 = "98727e1c22c61c09fef9a0ae52fef3bf6dc8244de9c1e507dd8fee7c6a1a4cd1"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/tune.rs"
-ticket = "task-1953"
-reason = "task-1946 H4: three hybrid_search calls carry the refusal. A tuning sweep supplies its own vectors from its own corpus, so a width mismatch would be a defect in the sweep. No measurement is affected."
-sha256 = "483415faaa6c1d7b3013aea6f5ae4b061c32f59c95422f09e63d0af14f7cc575"
+ticket = "task-1962"
+reason = "task-1961 A9: build_settings takes a Sweep and label_for takes a Dials, instead of nine positional arguments each. Both are the same values in the same order, and the sweep produces the same settings in the same sequence - the baseline arm first, and the same cross product after it."
+sha256 = "83e11e769024aad6ed3366f014bde3165bf0d6bcc3b84aacb5dbbf8a9d152fa8"
 
 [[amendment]]
 path = "crates/inillucent-core/Cargo.toml"
@@ -158,9 +158,9 @@ sha256 = "ef2b935a4f7ec6a35b8755f758e11eb863dc37fb28f7abeda781f3b9154c2e0d"
 
 [[amendment]]
 path = "crates/inillucent-core/src/hnsw.rs"
-ticket = "task-1932"
-reason = "M4: the two graph invariants nothing asserted - reachability from the entry point and the degree cap, both on the sequential build"
-sha256 = "6335c21267c0abd0cfa847ddedc493604a07c056d61f1b287037e25f5bf3ace1"
+ticket = "task-1962"
+reason = "task-1961 A9: search_layer_filtered takes a VisitBudget instead of ef, max_visits and exhausted as its last three arguments - two usize in a row, which is the pair a caller swaps. The walk is unchanged: the same budget, the same stopping condition, the same exhausted flag. task-1932 M4's two graph invariants are still there."
+sha256 = "bc8c99f22be1196d8381b20212f450331c583419f61d85c7451f91f5f72c8af5"
 
 [[amendment]]
 path = "crates/inillucent-core/src/index.rs"

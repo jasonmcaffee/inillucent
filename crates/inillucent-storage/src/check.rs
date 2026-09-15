@@ -290,19 +290,21 @@ pub fn check_database_with_options(
         if root.get() != 1 {
             expected.insert(root.get(), ptrmap::Entry::root());
         }
-        if let Err(error) = check_tree(
+        let mut state = CheckState {
             pager,
+            report: &mut report,
+            uses: &mut uses,
+            expected: &mut expected,
+        };
+        let subject = CheckSubject {
             root,
-            root,
-            &mut report,
-            &mut uses,
-            &mut expected,
-            &limits,
+            limits: &limits,
             encoding,
-            &key,
+            key: &key,
             check_order,
             level,
-        ) {
+        };
+        if let Err(error) = check_tree(&mut state, &subject, root) {
             report.report(format!(
                 "the tree rooted at page {} could not be walked: {error}",
                 root.get()
@@ -337,28 +339,62 @@ pub fn check_database_with_options(
     Ok(report)
 }
 
-/// Walks one B-tree, validating every page and the order of its keys.
-#[allow(clippy::too_many_arguments)]
-fn check_tree(
-    pager: &mut Pager,
+/// What a tree walk is accumulating into.
+///
+/// **A type rather than four of eleven arguments (task-1962, A9).**
+/// `check_tree` threaded four `&mut` accumulators through every recursive call,
+/// and a recursion that has to re-list its own accumulators is a recursion that
+/// can drop one.
+struct CheckState<'a> {
+    /// The pages, read through the pager this check was given.
+    pager: &'a mut Pager,
+    /// What the check has found.
+    report: &'a mut CheckReport,
+    /// What each page has been claimed for, so a page used twice is found.
+    uses: &'a mut BTreeMap<u32, PageUse>,
+    /// What the pointer map should say about each page.
+    expected: &'a mut BTreeMap<u32, ptrmap::Entry>,
+}
+
+/// What a tree walk is checking, which does not change as it descends.
+struct CheckSubject<'a> {
+    /// The tree's root page, which every page under it is claimed for.
     root: PageId,
-    page_id: PageId,
-    report: &mut CheckReport,
-    uses: &mut BTreeMap<u32, PageUse>,
-    expected: &mut BTreeMap<u32, ptrmap::Entry>,
-    limits: &Limits,
+    /// The limits the records are read under.
+    limits: &'a Limits,
+    /// The database's text encoding.
     encoding: TextEncoding,
-    key: &KeyInfo,
+    /// The key the entries are ordered by, when the tree is an index.
+    key: &'a KeyInfo,
+    /// Whether the order is checked, which it is only for a declared index.
     check_order: bool,
+    /// How thorough the check is.
     level: CheckLevel,
+}
+
+/// Walks one B-tree, validating every page and the order of its keys.
+fn check_tree(
+    state: &mut CheckState<'_>,
+    subject: &CheckSubject<'_>,
+    page_id: PageId,
 ) -> DbResult<Option<Vec<u8>>> {
-    claim(uses, page_id, PageUse::Tree(root.get()), report);
-    let pin = pager.get_page(page_id)?;
-    let usable = pager.usable_size()?;
+    let CheckSubject {
+        root,
+        limits,
+        encoding,
+        key,
+        check_order,
+        level,
+    } = *subject;
+    claim(state.uses, page_id, PageUse::Tree(root.get()), state.report);
+    let pin = state.pager.get_page(page_id)?;
+    let usable = state.pager.usable_size()?;
     let layout = match pin.layout(usable) {
         Ok(layout) => layout,
         Err(error) => {
-            report.report(format!("page {} is malformed: {error}", page_id.get()));
+            state
+                .report
+                .report(format!("page {} is malformed: {error}", page_id.get()));
             return Ok(None);
         }
     };
@@ -366,7 +402,7 @@ fn check_tree(
 
     if level == CheckLevel::Integrity {
         if let Err(error) = page.check_layout() {
-            report.report(format!(
+            state.report.report(format!(
                 "page {} does not tile its content area: {error}",
                 page_id.get()
             ));
@@ -381,7 +417,7 @@ fn check_tree(
         let cell = match page.cell(index) {
             Ok(cell) => cell,
             Err(error) => {
-                report.report(format!(
+                state.report.report(format!(
                     "cell {index} on page {} is malformed: {error}",
                     page_id.get()
                 ));
@@ -390,27 +426,17 @@ fn check_tree(
         };
 
         if let Some(child) = cell.left_child {
-            expected.insert(child.get(), ptrmap::Entry::child_of(page_id));
-            let child_key = check_tree(
-                pager,
-                root,
-                child,
-                report,
-                uses,
-                expected,
-                limits,
-                encoding,
-                key,
-                check_order,
-                level,
-            )?;
+            state
+                .expected
+                .insert(child.get(), ptrmap::Entry::child_of(page_id));
+            let child_key = check_tree(state, subject, child)?;
             if !is_table && check_order {
                 if let (Some(previous), Some(child_last)) = (last_key.as_ref(), child_key.as_ref())
                 {
                     if compare_keys(child_last, previous, encoding, key, limits)
                         .is_some_and(|ordering| ordering == std::cmp::Ordering::Less)
                     {
-                        report.report(format!(
+                        state.report.report(format!(
                             "page {} has a child subtree whose last key precedes an earlier one",
                             page_id.get()
                         ));
@@ -423,7 +449,7 @@ fn check_tree(
             if let Some(rowid) = cell.rowid {
                 if let Some(previous) = last_rowid {
                     if rowid <= previous {
-                        report.report(format!(
+                        state.report.report(format!(
                             "page {} has rowid {rowid} after {previous}, which is out of order",
                             page_id.get()
                         ));
@@ -434,20 +460,25 @@ fn check_tree(
         }
 
         if cell.split.overflows {
-            match overflow::chain_pages(pager, cell.split.total, cell.split.local, cell.overflow) {
+            match overflow::chain_pages(
+                state.pager,
+                cell.split.total,
+                cell.split.local,
+                cell.overflow,
+            ) {
                 Ok(pages) => {
                     let mut previous: Option<PageId> = None;
                     for overflow_page in pages {
-                        claim(uses, overflow_page, PageUse::Overflow, report);
+                        claim(state.uses, overflow_page, PageUse::Overflow, state.report);
                         let entry = match previous {
                             Some(before) => ptrmap::Entry::overflow_next(before),
                             None => ptrmap::Entry::overflow_head(page_id),
                         };
-                        expected.insert(overflow_page.get(), entry);
+                        state.expected.insert(overflow_page.get(), entry);
                         previous = Some(overflow_page);
                     }
                 }
-                Err(error) => report.report(format!(
+                Err(error) => state.report.report(format!(
                     "cell {index} on page {} has a bad overflow chain: {error}",
                     page_id.get()
                 )),
@@ -456,7 +487,7 @@ fn check_tree(
 
         if page.kind() != PageKind::InteriorTable {
             let payload = match overflow::read_payload(
-                pager,
+                state.pager,
                 cell.local_payload,
                 cell.split.total,
                 cell.overflow,
@@ -464,7 +495,7 @@ fn check_tree(
             ) {
                 Ok(payload) => payload,
                 Err(error) => {
-                    report.report(format!(
+                    state.report.report(format!(
                         "cell {index} on page {} could not be read: {error}",
                         page_id.get()
                     ));
@@ -472,19 +503,19 @@ fn check_tree(
                 }
             };
             if let Err(error) = RecordRef::parse_with_limits(&payload, encoding, limits) {
-                report.report(format!(
+                state.report.report(format!(
                     "cell {index} on page {} holds a malformed record: {error}",
                     page_id.get()
                 ));
             }
-            report.entries = report.entries.saturating_add(1);
+            state.report.entries = state.report.entries.saturating_add(1);
             if !is_table {
                 if check_order {
                     if let Some(previous) = last_key.as_ref() {
                         if compare_keys(&payload, previous, encoding, key, limits)
                             .is_some_and(|ordering| ordering != std::cmp::Ordering::Greater)
                         {
-                            report.report(format!(
+                            state.report.report(format!(
                                 "page {} has index keys out of order at cell {index}",
                                 page_id.get()
                             ));
@@ -494,25 +525,15 @@ fn check_tree(
                 last_key = Some(payload);
             }
         } else {
-            report.entries = report.entries.saturating_add(1);
+            state.report.entries = state.report.entries.saturating_add(1);
         }
     }
 
     if let Some(right) = page.right_child() {
-        expected.insert(right.get(), ptrmap::Entry::child_of(page_id));
-        let child_key = check_tree(
-            pager,
-            root,
-            right,
-            report,
-            uses,
-            expected,
-            limits,
-            encoding,
-            key,
-            check_order,
-            level,
-        )?;
+        state
+            .expected
+            .insert(right.get(), ptrmap::Entry::child_of(page_id));
+        let child_key = check_tree(state, subject, right)?;
         if !is_table && child_key.is_some() {
             last_key = child_key;
         }

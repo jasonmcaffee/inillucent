@@ -262,7 +262,7 @@ impl Shell {
         // It is a connection flag rather than a shell one, so setting the field
         // below is not enough: the engine has to be told, or
         // `PRAGMA journal_mode = OFF` is honoured here and refused there.
-        database.session_as(session).set_defensive(true);
+        let _ = database.session_as(session).set_defensive(true);
         Ok(Opened {
             database,
             session,
@@ -372,7 +372,7 @@ impl Shell {
                 seen: std::rc::Rc::clone(&self.authorized),
             }) as std::rc::Rc<dyn inillucent_engine::Authorizer>
         });
-        self.connection().set_authorizer(installed);
+        let _ = self.connection().set_authorizer(installed);
     }
 
     /// Prints and clears whatever the authorizer recorded.
@@ -387,7 +387,7 @@ impl Shell {
     ///
     /// @param on - whether the flag is in force
     pub fn set_defensive(&mut self, on: bool) -> bool {
-        self.connection().set_defensive(on);
+        let _ = self.connection().set_defensive(on);
         true
     }
 
@@ -657,10 +657,10 @@ impl Shell {
                     self.say(&line);
                 }
                 if self.show_changes {
-                    let changes = self.connection().changes();
+                    let changes = self.connection().changes().unwrap_or_default();
                     // The reference prints both counters, aligned with three
                     // spaces between them.
-                    let total = self.connection().total_changes();
+                    let total = self.connection().total_changes().unwrap_or_default();
                     self.say(&format!("changes: {changes}   total_changes: {total}"));
                 }
             }

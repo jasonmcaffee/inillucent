@@ -35,7 +35,7 @@
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
-use crate::command::{self, Arguments, Command, Context, Failed};
+use crate::command::{self, Arguments, Command, Context, Failed, OpenMode};
 use crate::json::{self, Json};
 
 /// The protocol version this server speaks.
@@ -233,8 +233,12 @@ pub fn serve<R: BufRead + Send + 'static>(
     mut input: R,
     output: &mut impl Write,
 ) -> Result<(), String> {
-    let mut context = Context::open(&settings.database, settings.readonly, settings.root.clone())
-        .map_err(|failure| failure.message)?;
+    let mut context = Context::open(
+        &settings.database,
+        OpenMode::of(settings.readonly),
+        settings.root.clone(),
+    )
+    .map_err(|failure| failure.message)?;
     context.limit = settings.limit.min(settings.max_rows);
     context.set_max_rows(Some(settings.max_rows));
     // **The engine's own budget, armed for the life of the server rather than
@@ -812,7 +816,7 @@ mod tests {
 
     /// Opens a scratch context for a test.
     fn context() -> Context {
-        Context::open(":memory:", false, None).expect("an in-memory database opens")
+        Context::open(":memory:", OpenMode::ReadWrite, None).expect("an in-memory database opens")
     }
 
     /// Every served tool is a command, and every command that is not cli-only
@@ -1067,7 +1071,7 @@ mod tests {
     /// A read-only server refuses a write and says why.
     #[test]
     fn read_only_refuses_a_write() {
-        let mut held = Context::open(":memory:", true, None).expect("opens");
+        let mut held = Context::open(":memory:", OpenMode::ReadOnly, None).expect("opens");
         let answer = handle(
             &mut held,
             "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{\

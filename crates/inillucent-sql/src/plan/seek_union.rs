@@ -93,19 +93,21 @@ pub(super) fn rowid_in_list_path(
 /// a scan or a one-column seek over every `a = 5`. There is no Cartesian
 /// question: every column ahead of the `IN` is pinned by a *single* equality,
 /// so the prefix is one tuple however long it is.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn in_list_union_path(
-    id: usize,
-    position: usize,
-    ids: &[usize],
-    table: &TableInfo,
+    context: &super::CandidateContext<'_>,
     index: &IndexInfo,
     usable: bool,
-    terms: &[BoundExpr],
-    consumed: &[bool],
-    needed: &ColumnUse,
-    levers: Levers,
 ) -> Option<(AccessPath, Vec<usize>)> {
+    let super::CandidateContext {
+        id,
+        position,
+        ids,
+        table,
+        terms,
+        consumed,
+        needed,
+        levers,
+    } = *context;
     // Every leading key column pinned by an equality, in key order. The `IN`
     // is looked for on the column after them.
     let mut prefix: Vec<BoundExpr> = Vec::new();
@@ -270,19 +272,21 @@ pub(super) fn in_list_union_path(
 /// branch that carries anything beyond the tuple comparison are the same idea
 /// with a different final term and are left unmatched here rather than
 /// guessed at.
-#[allow(clippy::too_many_arguments)]
 pub(super) fn keyset_range_union_path(
-    id: usize,
-    position: usize,
-    ids: &[usize],
-    table: &TableInfo,
+    context: &super::CandidateContext<'_>,
     index: &IndexInfo,
     usable: bool,
-    terms: &[BoundExpr],
-    consumed: &[bool],
-    needed: &ColumnUse,
-    levers: Levers,
 ) -> Option<(AccessPath, Vec<usize>)> {
+    let super::CandidateContext {
+        id,
+        position,
+        ids,
+        table,
+        terms,
+        consumed,
+        needed,
+        levers,
+    } = *context;
     // **A range is an outermost-term path only**, the same rule and the same
     // reason [`super::rowid_path`]'s range half follows: the shallowest
     // branch here has no equality prefix at all, so it is a walk between two

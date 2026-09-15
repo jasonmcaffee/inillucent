@@ -52,6 +52,7 @@ use inillucent_value::collation::Collation;
 // trees it builds, and the four statements. Every method moved whole and
 // nothing changed shape.
 mod alter;
+pub(crate) use alter::Already;
 mod catalog;
 mod index;
 mod reindex;
@@ -283,8 +284,7 @@ impl ImportedDatabase {
                 name_offset,
                 &name,
                 &name,
-                exists,
-                if_not_exists,
+                Already::of(exists, if_not_exists),
             ),
             // **Stored and fired.** It used to be refused,
             // and the refusal was right at the time: this engine could store a
@@ -310,12 +310,11 @@ impl ImportedDatabase {
                 name_offset,
                 &name,
                 &table,
-                exists,
                 // The directive carries no `if_not_exists` because it does not
                 // need one: `bind_create_trigger` has already refused a
                 // duplicate that did not say so, and `exists` reaching here at
                 // all therefore means the statement did.
-                true,
+                Already::of(exists, true),
             ),
             Directive::CreateVirtualTable {
                 if_not_exists,

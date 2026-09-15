@@ -664,3 +664,37 @@ fn largest_key(tree: &PagedTree, pool: &Pool) -> DbResult<i64> {
     })?;
     Ok(largest.unwrap_or(0))
 }
+
+/// What every row a statement writes is written under.
+///
+/// **A type rather than four arguments repeated across three functions
+/// (task-1962, A9).** `write_one` took nine, `remove_with_triggers` nine and
+/// `upsert_row` ten, and four of them were the same four in the same order.
+/// None of them changes as a write descends into a trigger body, which is why
+/// this is passed on rather than rebuilt.
+#[derive(Clone, Copy)]
+pub(crate) struct WriteRequest<'a> {
+    /// The record layout of the table's rows.
+    pub(crate) layout: &'a SourceLayout,
+    /// The values bound to `?1`, `?2`, ...
+    pub(crate) params: &'a Params,
+    /// How deep in a trigger body this write already is.
+    pub(crate) depth: Depth,
+    /// The compiled expressions of any expression index on the table.
+    pub(crate) indexes: IndexExprs<'a>,
+}
+
+/// What an upsert found, and which arm answers it.
+///
+/// **The three arguments that are only an upsert's (task-1962, A9).**
+/// `upsert_row` took ten; these three plus a [`WriteRequest`] are what is left
+/// of them.
+pub(crate) struct Upsert<'a> {
+    /// The conflict the insert ran into.
+    pub(crate) clash: &'a super::conflict::Conflict,
+    /// The row the statement tried to insert, which the arm reads as
+    /// `excluded`.
+    pub(crate) excluded: &'a [OwnedDatum],
+    /// Which `ON CONFLICT` arm matched, when the statement has several.
+    pub(crate) arm: Option<usize>,
+}

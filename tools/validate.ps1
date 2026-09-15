@@ -182,13 +182,13 @@ Invoke-Stage -Name 'fixtures' -Because 'the log-lead durability tests read a fix
     # fixture exists for skipped every time - which is the failure the stage was
     # added to stop.
     #
-    # `$root` is `C:\jason\dev\inillucent` here and bash reads a backslash as an
-    # escape, so the argument arrived as `C:jasondevinillucent/tools/...`. And
-    # `bash` on PATH is `C:\Windows\system32\bash.exe`, which is the WSL
-    # launcher: it runs a Linux filesystem where `C:/jason/...` is not a path,
-    # and it answers "No such file or directory" for a script that is right
-    # there. Git for Windows ships the bash every script in this repository is
-    # written for.
+    # `$root` holds a Windows path with backslashes in it, and bash reads a
+    # backslash as an escape, so every separator was eaten and the argument
+    # arrived as one run-together word. And `bash` on PATH is the WSL launcher
+    # under System32: it runs a Linux filesystem where a drive-lettered path is
+    # not a path at all, and it answers "No such file or directory" for a script
+    # that is right there. Git for Windows ships the bash every script in this
+    # repository is written for.
     $posix = $root -replace '\\', '/'
     $shell = @(
         "$env:ProgramFiles/Git/bin/bash.exe",
@@ -282,8 +282,7 @@ if ($Coverage) {
     # The shell the `schema_forms` cases need is built by `our_shell`, into this
     # run's own target directory. See the note in tools/validate.sh.
     Invoke-Stage -Name 'coverage' -Because 'the coverage number docs/repository.md publishes, re-measured' -Body {
-        cargo llvm-cov --manifest-path "$root/Cargo.toml" --workspace --release --summary-only `
-            --exclude inillucent-bench --exclude inillucent-core --exclude inillucent-model
+        node "$root/tools/coverage.mjs" --per-crate
     }
 }
 

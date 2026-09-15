@@ -390,17 +390,17 @@ fn commit_family(scratch: &Path, synchronous: Synchronous) -> Result<Measurement
     let checkpoint = checkpoint_started.elapsed();
     let total = started.elapsed();
     let counters = Counters::of(database).since(before);
-    Ok(measure(
-        "wal-commit",
-        "insert-autocommit",
-        &level(synchronous),
-        ROWS,
+    Ok(measure(Timed {
+        family: "wal-commit",
+        workload: "insert-autocommit",
+        synchronous: &level(synchronous),
+        operations: ROWS,
         latencies,
         total,
         checkpoint,
         counters,
-        "one transaction per row, then the whole log copied back",
-    ))
+        note: "one transaction per row, then the whole log copied back",
+    }))
 }
 
 /// One checkpoint of a log of a known size.
@@ -424,17 +424,17 @@ fn checkpoint_family(scratch: &Path) -> Result<Measurement, String> {
     let reported = checkpoint_report(&connection)?;
     let total = started.elapsed();
     let counters = Counters::of(database).since(before);
-    let mut measured = measure(
-        "checkpoint",
-        "checkpoint",
-        "full",
-        log_frames.max(1),
-        vec![total.as_nanos()],
+    let mut measured = measure(Timed {
+        family: "checkpoint",
+        workload: "checkpoint",
+        synchronous: "full",
+        operations: log_frames.max(1),
+        latencies: vec![total.as_nanos()],
         total,
-        total,
+        checkpoint: total,
         counters,
-        "",
-    );
+        note: "",
+    });
     // A checkpoint writes one page per *page* in the log, not one per record:
     // two thousand commits to a small table leave two thousand copies of the
     // same handful of pages, and only the newest of each is copied. That is
@@ -498,17 +498,17 @@ fn recovery_family(scratch: &Path) -> Result<Measurement, String> {
     let rows = count_rows(&connection, "SELECT a FROM t")?;
     let total = started.elapsed();
     let counters = Counters::of(database);
-    let mut measured = measure(
-        "recovery",
-        "reopen-and-rebuild",
-        "full",
-        LOG_ROWS,
-        vec![total.as_nanos()],
+    let mut measured = measure(Timed {
+        family: "recovery",
+        workload: "reopen-and-rebuild",
+        synchronous: "full",
+        operations: LOG_ROWS,
+        latencies: vec![total.as_nanos()],
         total,
-        Duration::ZERO,
+        checkpoint: Duration::ZERO,
         counters,
-        "",
-    );
+        note: "",
+    });
     measured.note = format!("{rows} rows read back after the log replayed");
     Ok(measured)
 }
@@ -562,17 +562,17 @@ fn foreign_key_family(scratch: &Path) -> Result<Vec<Measurement>, String> {
         }
         let total = started.elapsed();
         let counters = Counters::of(database).since(before);
-        measured.push(measure(
-            "foreign-keys",
-            &format!("insert-child-{name}"),
-            "full",
-            ROWS,
+        measured.push(measure(Timed {
+            family: "foreign-keys",
+            workload: &format!("insert-child-{name}"),
+            synchronous: "full",
+            operations: ROWS,
             latencies,
             total,
-            Duration::ZERO,
+            checkpoint: Duration::ZERO,
             counters,
-            "the same inserts with the parent lookup on and off",
-        ));
+            note: "the same inserts with the parent lookup on and off",
+        }));
         if !enforced {
             continue;
         }
@@ -586,17 +586,17 @@ fn foreign_key_family(scratch: &Path) -> Result<Vec<Measurement>, String> {
         }
         let total = started.elapsed();
         let counters = Counters::of(database).since(before);
-        measured.push(measure(
-            "foreign-keys",
-            "delete-parent-cascade",
-            "full",
-            ROWS,
+        measured.push(measure(Timed {
+            family: "foreign-keys",
+            workload: "delete-parent-cascade",
+            synchronous: "full",
+            operations: ROWS,
             latencies,
             total,
-            Duration::ZERO,
+            checkpoint: Duration::ZERO,
             counters,
-            "each delete takes one child with it",
-        ));
+            note: "each delete takes one child with it",
+        }));
     }
     Ok(measured)
 }
@@ -655,21 +655,21 @@ fn attach_family(scratch: &Path) -> Result<Vec<Measurement>, String> {
         }
         let total = started.elapsed();
         let counters = Counters::of(database).since(before);
-        measured.push(measure(
-            "attach",
-            &format!("{databases}-database-commit"),
-            "full",
-            ROWS,
+        measured.push(measure(Timed {
+            family: "attach",
+            workload: &format!("{databases}-database-commit"),
+            synchronous: "full",
+            operations: ROWS,
             latencies,
             total,
-            Duration::ZERO,
+            checkpoint: Duration::ZERO,
             counters,
-            if databases == 2 {
+            note: if databases == 2 {
                 "two databases committed together"
             } else {
                 "one database, for scale"
             },
-        ));
+        }));
     }
     Ok(measured)
 }
@@ -742,17 +742,45 @@ impl Counters {
 
 /// Builds a measurement from a family's timings and what its counters did.
 #[allow(clippy::too_many_arguments)]
-fn measure(
-    family: &str,
-    workload: &str,
-    synchronous: &str,
+/// One timed run of a log workload, as `measure` turns it into a row.
+///
+/// **A type rather than eight of nine arguments (task-1962, A9).** Three of
+/// them are `Duration` and `Vec<u128>` next to each other, and `total` and
+/// `checkpoint` are the pair a call site is most likely to swap - which would
+/// report the checkpoint as the whole run.
+struct Timed<'a> {
+    /// Which family of the gate this row belongs to.
+    family: &'a str,
+    /// The workload's name.
+    workload: &'a str,
+    /// The `synchronous` level it ran at.
+    synchronous: &'a str,
+    /// How many operations it performed.
     operations: u64,
-    mut latencies: Vec<u128>,
+    /// Each operation's latency, in nanoseconds.
+    latencies: Vec<u128>,
+    /// How long the whole run took.
     total: Duration,
+    /// How much of that was the checkpoint.
     checkpoint: Duration,
+    /// What the log counted while it ran.
     counters: Counters,
-    note: &str,
-) -> Measurement {
+    /// One sentence saying what the run did.
+    note: &'a str,
+}
+
+fn measure(timed: Timed<'_>) -> Measurement {
+    let Timed {
+        family,
+        workload,
+        synchronous,
+        operations,
+        mut latencies,
+        total,
+        checkpoint,
+        counters,
+        note,
+    } = timed;
     latencies.sort_unstable();
     Measurement {
         family: family.to_string(),

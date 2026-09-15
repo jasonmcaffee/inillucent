@@ -166,7 +166,9 @@ fn every_class_binds_and_returns() {
 #[test]
 fn the_connection_is_in_autocommit() {
     let connection = connect();
-    assert!(connection.autocommit());
+    assert!(connection
+        .autocommit()
+        .expect("nothing is running on this connection"));
     let _ = connection.prepare("SELECT 1").expect("it prepares");
 }
 
@@ -329,7 +331,12 @@ fn lifecycle_and_metadata_match_the_oracle() {
         assert_eq!(observation.columns, expected, "{sql}");
         assert_eq!(ours, expected, "{sql}");
         assert!(observation.autocommit);
-        assert_eq!(connection.autocommit(), observation.autocommit);
+        assert_eq!(
+            connection
+                .autocommit()
+                .expect("nothing is running on this connection"),
+            observation.autocommit
+        );
     }
 
     // Bound values reach both engines as the same bits.

@@ -27,6 +27,28 @@ use crate::ops::{CollectInto, Sink, SortKey};
 use crate::paged::{FullScan, PointProbe};
 use crate::scan::Projection;
 
+/// What a vector probe's counting rounds read, and what they are planned over.
+///
+/// **A type rather than six of ten arguments (task-1962, A9).**
+/// [`iterative_candidates`] took ten, of which four were the planning context
+/// every function in this module takes and two were the stage and the probe it
+/// reads through. What varies per call is the store, the vector and the two
+/// depths; those are still arguments.
+pub(crate) struct CandidateProbe<'a, 't> {
+    /// The planner's output, for the residual predicates.
+    pub(crate) plan: &'a PhysicalPlan,
+    /// Where the index and the pool come from.
+    pub(crate) catalog: &'a dyn TreeCatalog,
+    /// The joined column space the predicates are compiled over.
+    pub(crate) space: &'a Space<'a>,
+    /// The values bound to `?1`, `?2`, ...
+    pub(crate) params: &'a Params,
+    /// The vector stage, for its tree's pool.
+    pub(crate) stage: &'a PreparedStage,
+    /// The probe the counting rounds read rows with.
+    pub(crate) probe_over: &'a PointProbe<'t>,
+}
+
 /// A catalog that also answers one recursive CTE's queue.
 ///
 /// Everything else is delegated, so the step arm sees exactly the trees, the
@@ -58,29 +80,26 @@ use super::*;
 /// the expression evaluator into the store's cursor, and it is paid only by a
 /// vector query that carries a `WHERE`.
 ///
-/// @param plan - the planner's output, for the residual predicates
-/// @param catalog - where the index and the pool come from
-/// @param space - the joined column space the predicates are compiled over
-/// @param params - the bound parameters
-/// @param stage - the vector stage, for its tree's pool
+/// @param scan - what the rounds read, and what they are planned over
 /// @param index - the store's name
 /// @param wanted - the vector to measure against
 /// @param depth - the `LIMIT`, which is the first round's `k`
 /// @param limit - the statement's row limit, when it has a constant one
-/// @param probe_over - the probe the counting rounds read rows with
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn iterative_candidates(
-    plan: &PhysicalPlan,
-    catalog: &dyn TreeCatalog,
-    space: &Space<'_>,
-    params: &Params,
-    stage: &PreparedStage,
+    scan: &CandidateProbe<'_, '_>,
     index: &[u8],
     wanted: &Datum<'_>,
     depth: usize,
     limit: Option<usize>,
-    probe_over: &PointProbe<'_>,
 ) -> DbResult<Vec<i64>> {
+    let CandidateProbe {
+        plan,
+        catalog,
+        space,
+        params,
+        stage,
+        probe_over,
+    } = *scan;
     let ask = |k: usize| -> DbResult<Vec<i64>> {
         catalog.vector_candidates(index, wanted, k)?.ok_or_else(|| {
             misuse(format!(

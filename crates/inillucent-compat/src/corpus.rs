@@ -200,11 +200,11 @@ pub fn scan_database(pager: &mut Pager) -> DbResult<ScannedDatabase> {
         };
         match object.kind {
             SchemaKind::Table => {
-                let rows = scan_tree(pager, root, true, &limits, encoding)?;
+                let rows = scan_tree(pager, root, RootKind::Table, &limits, encoding)?;
                 tables.push((object.name.clone(), rows));
             }
             SchemaKind::Index => {
-                let rows = scan_tree(pager, root, false, &limits, encoding)?;
+                let rows = scan_tree(pager, root, RootKind::Index, &limits, encoding)?;
                 indexes.push((object.name.clone(), rows));
             }
             _ => {}
@@ -218,14 +218,34 @@ pub fn scan_database(pager: &mut Pager) -> DbResult<ScannedDatabase> {
     })
 }
 
+/// Which kind of B-tree a root page is expected to hold.
+///
+/// **An enum rather than `is_table: bool` (task-1962, A9).** `scan_tree(pager,
+/// root, true, &limits, encoding)` at a call site says nothing about what the
+/// `true` selects, and the two kinds are read by different cursors.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RootKind {
+    /// A table's tree, keyed by rowid.
+    Table,
+    /// An index's tree, keyed by the indexed record.
+    Index,
+}
+
 /// Scans one B-tree forwards, returning every entry.
+///
+/// @param pager - the pages to read through
+/// @param root - the tree's root page
+/// @param kind - which kind of tree it is
+/// @param limits - the limits the records are read under
+/// @param encoding - the database's text encoding
 pub fn scan_tree(
     pager: &mut Pager,
     root: PageId,
-    is_table: bool,
+    kind: RootKind,
     limits: &Limits,
     encoding: TextEncoding,
 ) -> DbResult<Vec<ScannedRow>> {
+    let is_table = kind == RootKind::Table;
     // A WITHOUT ROWID table's root is an index B-tree, so what a table cursor
     // can walk is decided by the root page's own type rather than by whether
     // the schema called the object a table.

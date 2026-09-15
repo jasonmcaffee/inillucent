@@ -780,18 +780,7 @@ fn main() -> Result<()> {
                 .map(str::to_string)
                 .collect();
             anyhow::ensure!(!names.is_empty(), "--fusions named no method");
-            let settings = tune::build_settings(
-                baseline,
-                &parse_floats(&coverages)?,
-                &parse_floats(&weights)?,
-                &parse_floats(&proximities)?,
-                &parse_bools(&prefixes)?,
-                &parse_bools(&tiers)?,
-                &parse_floats(&phrases)?,
-                &names,
-                &parse_floats(&mmrs)?,
-                &parse_adaptive(&adaptive)?,
-            );
+            let settings = tune::build_settings(baseline, &tune::Sweep { coverages: &parse_floats(&coverages)?, weights: &parse_floats(&weights)?, proximities: &parse_floats(&proximities)?, prefixes: &parse_bools(&prefixes)?, tiers: &parse_bools(&tiers)?, phrases: &parse_floats(&phrases)?, fusions: &names, mmrs: &parse_floats(&mmrs)?, adaptive: &parse_adaptive(&adaptive)? });
             let model = models::resolve_dir(std::path::Path::new(&dir), &model_file)?;
             tune::run(
                 &c,

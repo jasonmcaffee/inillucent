@@ -463,6 +463,54 @@ pub enum PragmaArgument {
     Value(BoundExpr),
 }
 
+/// Whether a `CREATE INDEX` declared `UNIQUE`.
+///
+/// **An enum rather than a `bool` beside another `bool` (task-1962, A9).**
+/// `bind_create_index` took `unique` and `if_not_exists` adjacent and
+/// positional; swapping them compiles and declares a unique index where the
+/// statement asked for `IF NOT EXISTS`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Uniqueness {
+    /// `CREATE UNIQUE INDEX`: two rows may not share a key.
+    Unique,
+    /// `CREATE INDEX`: a key may repeat.
+    Duplicates,
+}
+
+/// Whether a `CREATE` declared `IF NOT EXISTS`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IfNotExists {
+    /// The statement is a no-op when the object is already there.
+    Skip,
+    /// The statement fails when the object is already there.
+    Refuse,
+}
+
+/// Everything a `CREATE INDEX` statement names.
+///
+/// The grammar's own fields, gathered rather than passed as nine positional
+/// arguments of which two were adjacent booleans.
+pub struct CreateIndexSpec<'a> {
+    /// Whether the index refuses a repeated key.
+    pub unique: Uniqueness,
+    /// What to do when the index is already there.
+    pub if_not_exists: IfNotExists,
+    /// The schema the index is created in, when one was written.
+    pub database: Option<ast::NameId>,
+    /// The index's name.
+    pub name: ast::NameId,
+    /// The table it is over.
+    pub table: ast::NameId,
+    /// The module named by `USING`, for the extension index forms.
+    pub using: Option<ast::NameId>,
+    /// The indexed columns, in key order.
+    pub columns: &'a [ast::IndexedColumn],
+    /// The `WITH` settings, as written.
+    pub settings: &'a [Vec<u8>],
+    /// The `WHERE` of a partial index, as an expression of the statement.
+    pub filter: Option<ast::ExprId>,
+}
+
 /// The fields of a `CREATE TRIGGER`, passed as one argument.
 ///
 /// Ten parameters is past the point where their order is checkable by reading,
@@ -528,17 +576,25 @@ impl<'a> Binder<'a> {
                 columns,
                 settings,
                 filter,
-            } => self.bind_create_index(
-                *unique,
-                *if_not_exists,
-                *database,
-                *name,
-                *table,
-                *using,
+            } => self.bind_create_index(&CreateIndexSpec {
+                unique: if *unique {
+                    Uniqueness::Unique
+                } else {
+                    Uniqueness::Duplicates
+                },
+                if_not_exists: if *if_not_exists {
+                    IfNotExists::Skip
+                } else {
+                    IfNotExists::Refuse
+                },
+                database: *database,
+                name: *name,
+                table: *table,
+                using: *using,
                 columns,
                 settings,
-                *filter,
-            ),
+                filter: *filter,
+            }),
             ast::Statement::Analyze { database, name } => self.bind_analyze(*database, *name),
             ast::Statement::AlterTable {
                 database,
@@ -1708,22 +1764,19 @@ impl<'a> Binder<'a> {
 
     /// Binds a `CREATE INDEX`.
     ///
-    /// The parameters are the grammar's own fields, passed straight through
-    /// from the statement rather than bundled into a struct that would exist
-    /// only to have fewer of them.
-    #[allow(clippy::too_many_arguments)]
-    fn bind_create_index(
-        &mut self,
-        unique: bool,
-        if_not_exists: bool,
-        database: Option<ast::NameId>,
-        name: ast::NameId,
-        table: ast::NameId,
-        using: Option<ast::NameId>,
-        columns: &[ast::IndexedColumn],
-        settings: &[Vec<u8>],
-        _filter: Option<ast::ExprId>,
-    ) -> Result<Directive, ParseError> {
+    /// @param spec - what the statement named
+    fn bind_create_index(&mut self, spec: &CreateIndexSpec<'_>) -> Result<Directive, ParseError> {
+        let CreateIndexSpec {
+            database,
+            name,
+            table,
+            using,
+            columns,
+            settings,
+            ..
+        } = *spec;
+        let unique = spec.unique == Uniqueness::Unique;
+        let if_not_exists = spec.if_not_exists == IfNotExists::Skip;
         // **A `WHERE` is carried in the statement text, not in this
         // directive.** The engine re-parses the canonical SQL it stores -
         // `index_from_create_sql` already puts the predicate on

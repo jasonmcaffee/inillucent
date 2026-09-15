@@ -409,6 +409,10 @@ pub unsafe extern "C" fn inillucent_execute_batch(
 ///
 /// @param conn - the connection
 ///
+/// A connection that is already running a statement answers zero, which is what
+/// this returns for a null handle too: there is no number a reentrant read could
+/// give that would be true, and the C ABI has no room for a second one.
+///
 /// # Safety
 ///
 /// `conn` must be null or a live handle.
@@ -419,7 +423,8 @@ pub unsafe extern "C" fn inillucent_last_insert_rowid(conn: *mut inillucent_conn
             Some(database) => database
                 .database
                 .session_as(session_of(conn))
-                .last_insert_rowid(),
+                .last_insert_rowid()
+                .unwrap_or(0),
             None => 0,
         },
         0,
@@ -428,6 +433,10 @@ pub unsafe extern "C" fn inillucent_last_insert_rowid(conn: *mut inillucent_conn
 /// Returns how many rows every statement so far has changed.
 ///
 /// @param conn - the connection
+///
+/// A connection that is already running a statement answers zero, which is what
+/// this returns for a null handle too: there is no number a reentrant read could
+/// give that would be true, and the C ABI has no room for a second one.
 ///
 /// # Safety
 ///
@@ -439,7 +448,8 @@ pub unsafe extern "C" fn inillucent_total_changes(conn: *mut inillucent_conn) ->
             Some(database) => database
                 .database
                 .session_as(session_of(conn))
-                .total_changes(),
+                .total_changes()
+                .unwrap_or(0),
             None => 0,
         },
         0,
@@ -448,6 +458,10 @@ pub unsafe extern "C" fn inillucent_total_changes(conn: *mut inillucent_conn) ->
 /// Reports whether a transaction is open.
 ///
 /// @param conn - the connection
+///
+/// A connection that is already running a statement answers zero, which is what
+/// this returns for a null handle too: there is no number a reentrant read could
+/// give that would be true, and the C ABI has no room for a second one.
 ///
 /// # Safety
 ///
@@ -460,7 +474,8 @@ pub unsafe extern "C" fn inillucent_in_transaction(conn: *mut inillucent_conn) -
                 database
                     .database
                     .session_as(session_of(conn))
-                    .in_transaction(),
+                    .in_transaction()
+                    .unwrap_or(false),
             ),
             None => 0,
         },
@@ -470,6 +485,10 @@ pub unsafe extern "C" fn inillucent_in_transaction(conn: *mut inillucent_conn) -
 /// Returns the schema's generation.
 ///
 /// @param conn - the connection
+///
+/// A connection that is already running a statement answers zero, which is what
+/// this returns for a null handle too: there is no number a reentrant read could
+/// give that would be true, and the C ABI has no room for a second one.
 ///
 /// # Safety
 ///
@@ -481,7 +500,8 @@ pub unsafe extern "C" fn inillucent_schema_cookie(conn: *mut inillucent_conn) ->
             Some(database) => database
                 .database
                 .session_as(session_of(conn))
-                .schema_cookie(),
+                .schema_cookie()
+                .unwrap_or(0),
             None => 0,
         },
         0,

@@ -1531,18 +1531,15 @@ fn build_source<'t>(
             // only this can resolve. See `literal_value_in`.
             let wanted = literal_value_in(probe, params, Some(catalog))?;
             let probe_over = PointProbe::new(tree, projection);
-            let keys = iterative_candidates(
+            let scan = super::joins::CandidateProbe {
                 plan,
                 catalog,
                 space,
                 params,
                 stage,
-                index,
-                &wanted.borrow(),
-                *depth,
-                limit,
-                &probe_over,
-            )?;
+                probe_over: &probe_over,
+            };
+            let keys = iterative_candidates(&scan, index, &wanted.borrow(), *depth, limit)?;
             Ok(Source::Vector(probe_over, keys))
         }
         AccessKind::SeekUnion => {
@@ -1557,37 +1554,7 @@ fn build_source<'t>(
             Ok(Source::SeekUnion(probe_over, keys))
         }
         AccessKind::RangeUnion => {
-            let AccessPath::IndexSeekUnion {
-                table_root,
-                index_root,
-                index_name,
-                branches,
-                collations,
-                descending,
-                columns,
-                without_rowid,
-                key_entry_slots,
-                ..
-            } = path
-            else {
-                return Err(misuse("a range-union stage over a path that is not one"));
-            };
-            let scans = range_union_bounds(
-                tree,
-                projection,
-                *table_root,
-                *index_root,
-                index_name,
-                *without_rowid,
-                key_entry_slots,
-                branches,
-                collations,
-                descending,
-                columns,
-                table,
-                space,
-                params,
-            )?;
+            let scans = range_union_bounds(tree, projection, path, table, space, params)?;
             Ok(Source::RangeUnion(scans))
         }
         AccessKind::Nested => Err(misuse("a nested stage cannot drive a pipeline")),

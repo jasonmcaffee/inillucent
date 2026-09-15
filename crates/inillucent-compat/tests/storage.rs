@@ -138,7 +138,12 @@ fn a_backward_scan_is_a_forward_scan_reversed() {
                 continue;
             };
             let is_table = object.kind == SchemaKind::Table;
-            let forward = corpus::scan_tree(&mut pager, root, is_table, &limits, encoding).unwrap();
+            let kind = if is_table {
+                corpus::RootKind::Table
+            } else {
+                corpus::RootKind::Index
+            };
+            let forward = corpus::scan_tree(&mut pager, root, kind, &limits, encoding).unwrap();
             let backward =
                 corpus::scan_tree_backwards(&mut pager, root, is_table, &limits, encoding).unwrap();
             assert_eq!(
@@ -237,7 +242,9 @@ fn a_point_seek_agrees_with_a_scan() {
                 continue;
             }
             let encoding = pager.text_encoding();
-            let rows = corpus::scan_tree(&mut pager, root, true, &limits, encoding).unwrap();
+            let rows =
+                corpus::scan_tree(&mut pager, root, corpus::RootKind::Table, &limits, encoding)
+                    .unwrap();
             let present: BTreeSet<i64> = rows.iter().filter_map(|row| row.rowid).collect();
             for row in &rows {
                 let rowid = row.rowid.unwrap();
@@ -287,7 +294,8 @@ fn a_missed_seek_lands_where_the_bias_asks() {
     let object = schema::find_object(&mut pager, "many").unwrap().unwrap();
     let root = object.root_page.unwrap();
     let encoding = pager.text_encoding();
-    let rows = corpus::scan_tree(&mut pager, root, true, &limits, encoding).unwrap();
+    let rows =
+        corpus::scan_tree(&mut pager, root, corpus::RootKind::Table, &limits, encoding).unwrap();
     let rowids: Vec<i64> = rows.iter().filter_map(|row| row.rowid).collect();
     assert!(rowids.len() > 1_000);
 
@@ -340,7 +348,8 @@ fn an_index_seek_finds_its_keys_and_bounds_a_range() {
         .unwrap();
     let root = index.root_page.unwrap();
     let encoding = pager.text_encoding();
-    let entries = corpus::scan_tree(&mut pager, root, false, &limits, encoding).unwrap();
+    let entries =
+        corpus::scan_tree(&mut pager, root, corpus::RootKind::Index, &limits, encoding).unwrap();
     assert!(entries.len() > 1_000);
 
     let key = KeyInfo::binary(1);

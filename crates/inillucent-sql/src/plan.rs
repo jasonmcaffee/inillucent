@@ -2320,6 +2320,16 @@ fn index_path(
     levers: Levers,
 ) -> Option<AccessPath> {
     let table = &source.table;
+    let context = CandidateContext {
+        id,
+        position,
+        ids,
+        table,
+        terms,
+        consumed,
+        needed,
+        levers,
+    };
     let mut best: Option<(f64, AccessPath, Vec<usize>)> = None;
     for (at, index) in table.indexes.iter().enumerate() {
         // An index a module owns is not a b-tree: it has no root to seek into
@@ -2355,19 +2365,13 @@ fn index_path(
         // comparison. None of them rules another out - a statement can only
         // ever use one of them here, but which one is cheapest is a cost
         // question, so every one that matches is tried and the best kept.
-        if let Some((path, used)) = index_candidate(
-            id, position, ids, table, index, computed, usable, terms, consumed, needed, levers,
-        ) {
+        if let Some((path, used)) = index_candidate(&context, index, computed, usable) {
             consider_index_candidate(source, &mut best, path, used);
         }
-        if let Some((path, used)) = seek_union::in_list_union_path(
-            id, position, ids, table, index, usable, terms, consumed, needed, levers,
-        ) {
+        if let Some((path, used)) = seek_union::in_list_union_path(&context, index, usable) {
             consider_index_candidate(source, &mut best, path, used);
         }
-        if let Some((path, used)) = seek_union::keyset_range_union_path(
-            id, position, ids, table, index, usable, terms, consumed, needed, levers,
-        ) {
+        if let Some((path, used)) = seek_union::keyset_range_union_path(&context, index, usable) {
             consider_index_candidate(source, &mut best, path, used);
         }
     }
@@ -2378,6 +2382,33 @@ fn index_path(
         }
     }
     Some(path)
+}
+
+/// What every index candidate for one FROM term is chosen from.
+///
+/// **A type rather than ten arguments (task-1962, A9).** `index_candidate`,
+/// [`seek_union::in_list_union_path`] and [`seek_union::keyset_range_union_path`]
+/// each took the same ten, in the same order, and two of them carried
+/// `#[allow(clippy::too_many_arguments)]` to say so. Ten positional arguments of
+/// which three are slices of different things is a call nobody can read and a
+/// call site nobody can check.
+pub(crate) struct CandidateContext<'a> {
+    /// The FROM term being planned.
+    pub(crate) id: usize,
+    /// Its position in the FROM list; zero drives the pipeline.
+    pub(crate) position: usize,
+    /// Every FROM term's id, so a correlated reference can be recognised.
+    pub(crate) ids: &'a [usize],
+    /// The table the term reads.
+    pub(crate) table: &'a TableInfo,
+    /// The statement's `WHERE` terms, bound.
+    pub(crate) terms: &'a [BoundExpr],
+    /// Which of those an earlier path has already consumed.
+    pub(crate) consumed: &'a [bool],
+    /// What the statement reads of this term, which decides covering.
+    pub(crate) needed: &'a ColumnUse,
+    /// The planner's tuning knobs.
+    pub(crate) levers: Levers,
 }
 
 /// Folds one more index candidate into whichever is cheapest so far.
@@ -2409,18 +2440,21 @@ fn consider_index_candidate(
 /// Builds the best path over one index, or `None` if it cannot be used.
 #[allow(clippy::too_many_arguments)]
 fn index_candidate(
-    id: usize,
-    position: usize,
-    ids: &[usize],
-    table: &TableInfo,
+    context: &CandidateContext<'_>,
     index: &IndexInfo,
     computed: Option<&crate::dml::BoundIndexExprs>,
     usable: bool,
-    terms: &[BoundExpr],
-    consumed: &[bool],
-    needed: &ColumnUse,
-    levers: Levers,
 ) -> Option<(AccessPath, Vec<usize>)> {
+    let CandidateContext {
+        id,
+        position,
+        ids,
+        table,
+        terms,
+        consumed,
+        needed,
+        levers,
+    } = *context;
     let mut equalities = Vec::new();
     let mut used = Vec::new();
     let mut collations = Vec::new();

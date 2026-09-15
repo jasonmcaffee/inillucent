@@ -303,7 +303,7 @@ fn a_ledger_reads_the_same_after_a_reopen() {
             while insert.step().expect("the insert runs") {}
         }
         drop(insert);
-        assert_eq!(connection.total_changes(), 6);
+        assert_eq!(connection.total_changes().expect("the engine is free"), 6);
         before = ask(&connection, RUNNING_BALANCE);
     }
 

@@ -282,7 +282,7 @@ impl Connection {
     /// @param name - the name it was registered under
     /// @param arity - the arity it was registered for
     pub fn remove_function(&self, name: &str, arity: i32) -> bool {
-        self.open().remove_function(name, arity)
+        self.open().remove_function(name, arity).unwrap_or_default()
     }
 
     /// Registers a collating sequence an application defined.
@@ -299,14 +299,14 @@ impl Connection {
 
     /// Returns how many statements are compiled and held.
     pub fn cached_plan_count(&self) -> usize {
-        self.open().cached_plan_count()
+        self.open().cached_plan_count().unwrap_or_default()
     }
 
     /// Turns off one or more planner optimizations for this connection.
     ///
     /// @param mask - the levers to switch off
     pub fn disable_optimizations(&self, levers: inillucent_sql::plan::Levers) {
-        self.open().disable_optimizations(levers);
+        let _ = self.open().disable_optimizations(levers);
     }
 
     /// Rereads the schema from the file.
@@ -318,27 +318,27 @@ impl Connection {
     ///
     /// @param _database - which attached database, which this engine has one of
     pub fn schema_cookie(&self, _database: usize) -> DbResult<u64> {
-        Ok(self.open().schema_cookie())
+        self.open().schema_cookie()
     }
 
     /// Returns how many rows the last statement changed.
     pub fn changes(&self) -> i64 {
-        self.open().changes()
+        self.open().changes().unwrap_or_default()
     }
 
     /// Returns how many rows every statement so far has changed.
     pub fn total_changes(&self) -> i64 {
-        self.open().total_changes()
+        self.open().total_changes().unwrap_or_default()
     }
 
     /// Returns the rowid the last `INSERT` assigned.
     pub fn last_insert_rowid(&self) -> i64 {
-        self.open().last_insert_rowid()
+        self.open().last_insert_rowid().unwrap_or_default()
     }
 
     /// Returns whether every statement is its own transaction.
     pub fn autocommit(&self) -> bool {
-        self.open().autocommit()
+        self.open().autocommit().unwrap_or(true)
     }
 
     /// Makes everything written so far durable in the file.

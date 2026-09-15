@@ -2190,10 +2190,12 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 58] = [
         "run",
         218,
     ),
+    // 215 before task-1962 A9: the `trigger::fire` calls pass a
+    // `TriggerFiring` literal.
     (
         "crates/inillucent-exec/src/dml/update.rs",
         "update_at_cached",
-        215,
+        219,
     ),
     ("crates/inillucent-bench/src/synth.rs", "check", 214),
     ("crates/inillucent-model/tests/campaign.rs", "segment", 213),
@@ -2206,7 +2208,9 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 58] = [
     // orphaned-extent read into `encode_row_spilling_wide_values`,
     // `locate_and_read_previous` and `orphaned_extents`.
     ("crates/inillucent-tree/src/write.rs", "write_row", 137),
-    ("crates/inillucent-exec/src/dml/insert.rs", "insert_at", 205),
+    // 205 before task-1962 A9: the `write_one` and `upsert_row` calls pass a
+    // `WriteRequest` and an `Upsert`, written as literals.
+    ("crates/inillucent-exec/src/dml/insert.rs", "insert_at", 211),
     (
         "crates/inillucent-engine/src/ddl/index.rs",
         "create_index",
@@ -2220,10 +2224,12 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 58] = [
     ("crates/inillucent-remote/src/migrate.rs", "run", 191),
     ("crates/inillucent-sql/src/plan.rs", "plan_select_with", 189),
     ("crates/inillucent-migrate/src/lib.rs", "migrate", 189),
+    // 183 before task-1962 A9: `record` takes a `Timed` and the eight call
+    // sites are struct literals, which rustfmt writes one field per line.
     (
         "crates/inillucent-compat/src/bin/writeperf.rs",
         "measure_scale",
-        183,
+        197,
     ),
     ("crates/inillucent-storage/src/check.rs", "check_tree", 182),
     (
@@ -2257,7 +2263,8 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 58] = [
         "carry_tables",
         165,
     ),
-    ("crates/inillucent-sql/src/plan.rs", "index_candidate", 164),
+    // 164 before task-1962 A9: the destructure of the `CandidateContext` it now takes.
+    ("crates/inillucent-sql/src/plan.rs", "index_candidate", 167),
     ("crates/inillucent-compat/src/bin/testrun.rs", "report", 164),
     ("crates/inillucent-compat/src/bin/planperf.rs", "run", 163),
     ("crates/inillucent-bench/src/synth.rs", "build", 163),
@@ -2268,10 +2275,11 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 58] = [
     ),
     ("crates/inillucent-tree/src/write.rs", "merge_if_small", 157),
     ("crates/inillucent-scalar/src/builtin.rs", "call_with", 157),
+    // 154 before task-1962 A9: the destructure of the `CandidateContext` it now takes.
     (
         "crates/inillucent-sql/src/plan/seek_union.rs",
         "in_list_union_path",
-        154,
+        157,
     ),
     (
         "crates/inillucent-remote/src/tls/windows.rs",

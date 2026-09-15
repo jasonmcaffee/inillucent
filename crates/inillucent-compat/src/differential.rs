@@ -241,10 +241,10 @@ pub fn observe(connection: &Connection<'_>, sql: &str, query: bool) -> Observati
             observation.message = failure.message().to_string();
         }
     }
-    observation.changes = connection.changes();
-    observation.total_changes = connection.total_changes();
-    observation.last_insert_rowid = connection.last_insert_rowid();
-    observation.autocommit = connection.autocommit();
+    observation.changes = connection.changes().unwrap_or_default();
+    observation.total_changes = connection.total_changes().unwrap_or_default();
+    observation.last_insert_rowid = connection.last_insert_rowid().unwrap_or_default();
+    observation.autocommit = connection.autocommit().unwrap_or_default();
     observation
 }
 

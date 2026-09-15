@@ -266,15 +266,17 @@ pub fn update_at_cached(
         if trigger::fire(
             &statement.triggers,
             TriggerTime::Before,
-            trigger::TriggerRows {
-                old: Some(before.as_slice()),
-                new: Some(after.as_slice()),
-            },
-            &layout.slots,
-            layout.rowid,
             target,
-            params,
-            depth,
+            &trigger::TriggerFiring {
+                rows: trigger::TriggerRows {
+                    old: Some(before.as_slice()),
+                    new: Some(after.as_slice()),
+                },
+                slots: &layout.slots,
+                rowid: layout.rowid,
+                params,
+                depth,
+            },
         )? == trigger::Fired::SkipRow
         {
             continue;
@@ -320,15 +322,17 @@ pub fn update_at_cached(
         if trigger::fire(
             &statement.triggers,
             TriggerTime::After,
-            trigger::TriggerRows {
-                old: Some(before.as_slice()),
-                new: Some(after.as_slice()),
-            },
-            &layout.slots,
-            layout.rowid,
             target,
-            params,
-            depth,
+            &trigger::TriggerFiring {
+                rows: trigger::TriggerRows {
+                    old: Some(before.as_slice()),
+                    new: Some(after.as_slice()),
+                },
+                slots: &layout.slots,
+                rowid: layout.rowid,
+                params,
+                depth,
+            },
         )? == trigger::Fired::SkipRow
         {
             continue;
@@ -637,15 +641,17 @@ fn update_view(
         if trigger::fire(
             &statement.triggers,
             TriggerTime::InsteadOf,
-            trigger::TriggerRows {
-                old: Some(before.as_slice()),
-                new: Some(after.as_slice()),
-            },
-            &layout.slots,
-            layout.rowid,
             target,
-            params,
-            depth,
+            &trigger::TriggerFiring {
+                rows: trigger::TriggerRows {
+                    old: Some(before.as_slice()),
+                    new: Some(after.as_slice()),
+                },
+                slots: &layout.slots,
+                rowid: layout.rowid,
+                params,
+                depth,
+            },
         )? == trigger::Fired::SkipRow
         {
             continue;

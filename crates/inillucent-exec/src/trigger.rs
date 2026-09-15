@@ -82,6 +82,27 @@ pub struct TriggerRows<'a> {
     pub new: Option<&'a [OwnedDatum]>,
 }
 
+/// What one firing of a trigger sees, apart from the trigger itself.
+///
+/// **A type rather than seven of eight arguments (task-1962, A9).** [`fire`] and
+/// `run_body` took the same seven, in the same order, and both carried
+/// `#[allow(clippy::too_many_arguments)]` to say so. Two of them are
+/// `Option<usize>` and `Depth`, which a caller can swap without the compiler
+/// noticing.
+#[derive(Clone, Copy)]
+pub struct TriggerFiring<'a> {
+    /// The row images the body reads as `OLD` and `NEW`.
+    pub rows: TriggerRows<'a>,
+    /// Which record slot each of the table's columns is at.
+    pub slots: &'a [Option<usize>],
+    /// Which slot holds the rowid, when the row carries one.
+    pub rowid: Option<usize>,
+    /// The values bound to `?1`, `?2`, ...
+    pub params: &'a Params,
+    /// How deep this firing already is.
+    pub depth: Depth,
+}
+
 /// What a fired trigger asked the write to do next.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Fired {
@@ -203,23 +224,27 @@ fn substitution<'a>(
 /// @param slots - the fired table's declared-to-tree column map
 /// @param rowid - which tree column of that table holds the rowid
 /// @param target - the file and its trees
-/// @param params - the bound parameters
-/// @param depth - how deep this fire already is
-#[allow(clippy::too_many_arguments)]
+/// @param firing - the row, the slots and the depth this firing runs at
 pub fn fire(
     triggers: &[BoundTrigger],
     time: TriggerTime,
-    rows: TriggerRows<'_>,
-    slots: &[Option<usize>],
-    rowid: Option<usize>,
     target: &mut dyn WriteTarget,
-    params: &Params,
-    depth: Depth,
+    firing: &TriggerFiring<'_>,
 ) -> DbResult<Fired> {
     if triggers.is_empty() {
         return Ok(Fired::Continue);
     }
-    let deeper = depth.deeper();
+    let TriggerFiring {
+        rows,
+        slots,
+        rowid,
+        params,
+        depth,
+    } = *firing;
+    let deeper = TriggerFiring {
+        depth: depth.deeper(),
+        ..*firing
+    };
     for trigger in triggers {
         if trigger.time != time {
             continue;
@@ -235,9 +260,7 @@ pub fn fire(
             }
         }
         for statement in &trigger.body {
-            match run_body(
-                statement, trigger, rows, slots, rowid, target, params, deeper,
-            ) {
+            match run_body(statement, trigger, target, &deeper) {
                 Ok(()) => {}
                 Err(error) if is_ignore(&error) => return Ok(Fired::SkipRow),
                 Err(error) => return Err(named(error, trigger)),
@@ -357,13 +380,16 @@ fn run_select(
 fn run_body(
     statement: &BoundTriggerStatement,
     trigger: &BoundTrigger,
-    rows: TriggerRows<'_>,
-    slots: &[Option<usize>],
-    rowid: Option<usize>,
     target: &mut dyn WriteTarget,
-    params: &Params,
-    depth: Depth,
+    firing: &TriggerFiring<'_>,
 ) -> DbResult<()> {
+    let TriggerFiring {
+        rows,
+        slots,
+        rowid,
+        params,
+        depth,
+    } = *firing;
     // **`PRAGMA recursive_triggers` lives here, and it is one assignment.** A
     // trigger body is *inlined* by the binder, and a trigger already being
     // bound is skipped - which is what makes the inlining terminate, and is

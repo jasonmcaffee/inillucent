@@ -197,10 +197,21 @@ fn the_connection_reports_the_last_statement_s_changes() {
     connection
         .execute_batch("UPDATE item SET weight = 1 WHERE weight = 250")
         .expect("the update runs");
-    assert_eq!(connection.changes(), 2, "two rows had weight 250");
+    assert_eq!(
+        connection
+            .changes()
+            .expect("nothing is running on this connection"),
+        2,
+        "two rows had weight 250"
+    );
 
     connection
         .execute_batch("DELETE FROM item WHERE id = 1")
         .expect("the delete runs");
-    assert_eq!(connection.changes(), 1);
+    assert_eq!(
+        connection
+            .changes()
+            .expect("nothing is running on this connection"),
+        1
+    );
 }

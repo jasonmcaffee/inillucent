@@ -179,17 +179,42 @@ fn delta(before: PagerCounters, after: PagerCounters) -> PagerCounters {
 
 /// Records one measurement from a timed block and its counters.
 #[allow(clippy::too_many_arguments)]
-fn record(
-    into: &mut Vec<Measurement>,
-    workload: &str,
-    scale: &str,
+/// One timed run, as `record` turns it into a row.
+///
+/// **A type rather than eight of nine arguments (task-1962, A9).** Four of them
+/// were `u32`, `u64`, `u128` and `u64` in a row; a call site that gave the
+/// operation count where the elapsed time goes would publish a number three
+/// orders out and nothing would say so.
+struct Timed<'a> {
+    /// The workload's name, as the row carries it.
+    workload: &'a str,
+    /// Which fixture size it ran against.
+    scale: &'a str,
+    /// The page size it ran at.
     page_size: u32,
+    /// How many operations it performed.
     operations: u64,
+    /// How long they took, in nanoseconds.
     nanos: u128,
+    /// What the pager counted while they ran.
     counters: PagerCounters,
+    /// How many bytes of payload were written.
     payload_bytes: u64,
+    /// How large the page cache was at the end.
     cache_bytes: u64,
-) {
+}
+
+fn record(into: &mut Vec<Measurement>, timed: Timed<'_>) {
+    let Timed {
+        workload,
+        scale,
+        page_size,
+        operations,
+        nanos,
+        counters,
+        payload_bytes,
+        cache_bytes,
+    } = timed;
     let per = if operations == 0 {
         0.0
     } else {
@@ -267,14 +292,16 @@ fn measure_scale(into: &mut Vec<Measurement>, scale: &str, rows: i64) -> Result<
     let cache = pager.cache_counters().resident_bytes;
     record(
         into,
-        "insert-sequential",
-        scale,
-        PAGE_SIZE,
-        rows as u64,
-        elapsed,
-        counters,
-        payload_bytes,
-        cache,
+        Timed {
+            workload: "insert-sequential",
+            scale,
+            page_size: PAGE_SIZE,
+            operations: rows as u64,
+            nanos: elapsed,
+            counters,
+            payload_bytes,
+            cache_bytes: cache,
+        },
     );
 
     // The commit that follows, priced per dirty page.
@@ -286,14 +313,16 @@ fn measure_scale(into: &mut Vec<Measurement>, scale: &str, rows: i64) -> Result<
     let counters = delta(before, pager.counters());
     record(
         into,
-        "commit-per-dirty-page",
-        scale,
-        PAGE_SIZE,
-        dirty,
-        elapsed,
-        counters,
-        payload_bytes,
-        0,
+        Timed {
+            workload: "commit-per-dirty-page",
+            scale,
+            page_size: PAGE_SIZE,
+            operations: dirty,
+            nanos: elapsed,
+            counters,
+            payload_bytes,
+            cache_bytes: 0,
+        },
     );
 
     // Point seeks over the tree that was just built.
@@ -318,14 +347,16 @@ fn measure_scale(into: &mut Vec<Measurement>, scale: &str, rows: i64) -> Result<
     }
     record(
         into,
-        "seek-by-rowid",
-        scale,
-        PAGE_SIZE,
-        probes as u64,
-        elapsed,
-        counters,
-        0,
-        pager.cache_counters().resident_bytes,
+        Timed {
+            workload: "seek-by-rowid",
+            scale,
+            page_size: PAGE_SIZE,
+            operations: probes as u64,
+            nanos: elapsed,
+            counters,
+            payload_bytes: 0,
+            cache_bytes: pager.cache_counters().resident_bytes,
+        },
     );
 
     // Range scans of a hundred rows.
@@ -352,14 +383,16 @@ fn measure_scale(into: &mut Vec<Measurement>, scale: &str, rows: i64) -> Result<
     let counters = delta(before, pager.counters());
     record(
         into,
-        "range-scan-100-rows",
-        scale,
-        PAGE_SIZE,
-        scans as u64,
-        elapsed,
-        counters,
-        0,
-        pager.cache_counters().resident_bytes,
+        Timed {
+            workload: "range-scan-100-rows",
+            scale,
+            page_size: PAGE_SIZE,
+            operations: scans as u64,
+            nanos: elapsed,
+            counters,
+            payload_bytes: 0,
+            cache_bytes: pager.cache_counters().resident_bytes,
+        },
     );
 
     // Random insert into a tree that already exists, which is the shape that
@@ -378,14 +411,16 @@ fn measure_scale(into: &mut Vec<Measurement>, scale: &str, rows: i64) -> Result<
     let counters = delta(before, pager.counters());
     record(
         into,
-        "insert-random",
-        scale,
-        PAGE_SIZE,
-        scattered as u64,
-        elapsed,
-        counters,
-        (scattered as u64).saturating_mul(ROW_BYTES as u64),
-        pager.cache_counters().resident_bytes,
+        Timed {
+            workload: "insert-random",
+            scale,
+            page_size: PAGE_SIZE,
+            operations: scattered as u64,
+            nanos: elapsed,
+            counters,
+            payload_bytes: (scattered as u64).saturating_mul(ROW_BYTES as u64),
+            cache_bytes: pager.cache_counters().resident_bytes,
+        },
     );
 
     // Replacing a row, which frees what was there and writes what replaces it.
@@ -399,14 +434,16 @@ fn measure_scale(into: &mut Vec<Measurement>, scale: &str, rows: i64) -> Result<
     let counters = delta(before, pager.counters());
     record(
         into,
-        "replace",
-        scale,
-        PAGE_SIZE,
-        replaced as u64,
-        elapsed,
-        counters,
-        (replaced as u64).saturating_mul((ROW_BYTES * 2) as u64),
-        pager.cache_counters().resident_bytes,
+        Timed {
+            workload: "replace",
+            scale,
+            page_size: PAGE_SIZE,
+            operations: replaced as u64,
+            nanos: elapsed,
+            counters,
+            payload_bytes: (replaced as u64).saturating_mul((ROW_BYTES * 2) as u64),
+            cache_bytes: pager.cache_counters().resident_bytes,
+        },
     );
 
     // Deleting in key order, which is what empties pages and merges them.
@@ -420,14 +457,16 @@ fn measure_scale(into: &mut Vec<Measurement>, scale: &str, rows: i64) -> Result<
     let counters = delta(before, pager.counters());
     record(
         into,
-        "delete-sequential",
-        scale,
-        PAGE_SIZE,
-        deleted as u64,
-        elapsed,
-        counters,
-        0,
-        pager.cache_counters().resident_bytes,
+        Timed {
+            workload: "delete-sequential",
+            scale,
+            page_size: PAGE_SIZE,
+            operations: deleted as u64,
+            nanos: elapsed,
+            counters,
+            payload_bytes: 0,
+            cache_bytes: pager.cache_counters().resident_bytes,
+        },
     );
     pager.commit().map_err(text)?;
     Ok(())
@@ -457,14 +496,16 @@ fn measure_structure(into: &mut Vec<Measurement>) -> Result<(), String> {
         let counters = delta(before, pager.counters());
         record(
             into,
-            "insert-split-heavy",
-            "structure",
-            page_size,
-            rows as u64,
-            elapsed,
-            counters,
-            (rows as u64).saturating_mul(payload as u64),
-            pager.cache_counters().resident_bytes,
+            Timed {
+                workload: "insert-split-heavy",
+                scale: "structure",
+                page_size,
+                operations: rows as u64,
+                nanos: elapsed,
+                counters,
+                payload_bytes: (rows as u64).saturating_mul(payload as u64),
+                cache_bytes: pager.cache_counters().resident_bytes,
+            },
         );
 
         let before = pager.counters();
@@ -476,14 +517,16 @@ fn measure_structure(into: &mut Vec<Measurement>) -> Result<(), String> {
         let counters = delta(before, pager.counters());
         record(
             into,
-            "delete-merge-heavy",
-            "structure",
-            page_size,
-            rows as u64,
-            elapsed,
-            counters,
-            0,
-            pager.cache_counters().resident_bytes,
+            Timed {
+                workload: "delete-merge-heavy",
+                scale: "structure",
+                page_size,
+                operations: rows as u64,
+                nanos: elapsed,
+                counters,
+                payload_bytes: 0,
+                cache_bytes: pager.cache_counters().resident_bytes,
+            },
         );
         pager.commit().map_err(text)?;
     }
@@ -508,14 +551,16 @@ fn measure_overflow(into: &mut Vec<Measurement>) -> Result<(), String> {
         let counters = delta(before, pager.counters());
         record(
             into,
-            "insert-overflow",
-            &format!("{payload}-byte-payload"),
-            PAGE_SIZE,
-            rows as u64,
-            elapsed,
-            counters,
-            (rows as u64).saturating_mul(payload as u64),
-            pager.cache_counters().resident_bytes,
+            Timed {
+                workload: "insert-overflow",
+                scale: &format!("{payload}-byte-payload"),
+                page_size: PAGE_SIZE,
+                operations: rows as u64,
+                nanos: elapsed,
+                counters,
+                payload_bytes: (rows as u64).saturating_mul(payload as u64),
+                cache_bytes: pager.cache_counters().resident_bytes,
+            },
         );
 
         let limits = Limits::default();
@@ -533,14 +578,16 @@ fn measure_overflow(into: &mut Vec<Measurement>) -> Result<(), String> {
         let counters = delta(before, pager.counters());
         record(
             into,
-            "read-overflow",
-            &format!("{payload}-byte-payload"),
-            PAGE_SIZE,
-            read,
-            elapsed,
-            counters,
-            (read).saturating_mul(payload as u64),
-            pager.cache_counters().resident_bytes,
+            Timed {
+                workload: "read-overflow",
+                scale: &format!("{payload}-byte-payload"),
+                page_size: PAGE_SIZE,
+                operations: read,
+                nanos: elapsed,
+                counters,
+                payload_bytes: (read).saturating_mul(payload as u64),
+                cache_bytes: pager.cache_counters().resident_bytes,
+            },
         );
 
         let before = pager.counters();
@@ -552,14 +599,16 @@ fn measure_overflow(into: &mut Vec<Measurement>) -> Result<(), String> {
         let counters = delta(before, pager.counters());
         record(
             into,
-            "delete-overflow",
-            &format!("{payload}-byte-payload"),
-            PAGE_SIZE,
-            rows as u64,
-            elapsed,
-            counters,
-            0,
-            pager.cache_counters().resident_bytes,
+            Timed {
+                workload: "delete-overflow",
+                scale: &format!("{payload}-byte-payload"),
+                page_size: PAGE_SIZE,
+                operations: rows as u64,
+                nanos: elapsed,
+                counters,
+                payload_bytes: 0,
+                cache_bytes: pager.cache_counters().resident_bytes,
+            },
         );
         pager.commit().map_err(text)?;
     }
@@ -592,14 +641,16 @@ fn measure_vacuum(into: &mut Vec<Measurement>) -> Result<(), String> {
     let counters = delta(before, pager.counters());
     record(
         into,
-        "incremental-vacuum",
-        "40000-rows",
-        PAGE_SIZE,
-        u64::from(steps),
-        elapsed,
-        counters,
-        0,
-        pager.cache_counters().resident_bytes,
+        Timed {
+            workload: "incremental-vacuum",
+            scale: "40000-rows",
+            page_size: PAGE_SIZE,
+            operations: u64::from(steps),
+            nanos: elapsed,
+            counters,
+            payload_bytes: 0,
+            cache_bytes: pager.cache_counters().resident_bytes,
+        },
     );
     pager.commit().map_err(text)?;
 
@@ -615,14 +666,16 @@ fn measure_vacuum(into: &mut Vec<Measurement>) -> Result<(), String> {
     let _ = copied;
     record(
         into,
-        "vacuum-copy-tree",
-        "40000-rows",
-        PAGE_SIZE,
-        (rows / 2) as u64,
-        elapsed,
-        counters,
-        ((rows / 2) as u64).saturating_mul(ROW_BYTES as u64),
-        destination.cache_counters().resident_bytes,
+        Timed {
+            workload: "vacuum-copy-tree",
+            scale: "40000-rows",
+            page_size: PAGE_SIZE,
+            operations: (rows / 2) as u64,
+            nanos: elapsed,
+            counters,
+            payload_bytes: ((rows / 2) as u64).saturating_mul(ROW_BYTES as u64),
+            cache_bytes: destination.cache_counters().resident_bytes,
+        },
     );
     destination.commit().map_err(text)?;
     Ok(())
@@ -692,14 +745,16 @@ fn measure_cache_lookup(into: &mut Vec<Measurement>) -> Result<(), String> {
         }
         record(
             into,
-            "cache-lookup",
-            &format!("{resident}-pages-resident"),
-            512,
-            probes,
-            elapsed,
-            counters,
-            0,
-            pager.cache_counters().resident_bytes,
+            Timed {
+                workload: "cache-lookup",
+                scale: &format!("{resident}-pages-resident"),
+                page_size: 512,
+                operations: probes,
+                nanos: elapsed,
+                counters,
+                payload_bytes: 0,
+                cache_bytes: pager.cache_counters().resident_bytes,
+            },
         );
     }
     Ok(())

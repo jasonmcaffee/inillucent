@@ -19,6 +19,39 @@ use inillucent_tree::PagedTree;
 use super::*;
 use crate::*;
 
+/// What a `CREATE` found where it is about to write.
+///
+/// **An enum rather than two adjacent booleans (task-1962, A9).**
+/// `create_bodiless` took `exists: bool, if_not_exists: bool` positional and
+/// next to each other; a call site that gave them the other way round would
+/// refuse a statement that said `IF NOT EXISTS` and accept one that did not,
+/// and the compiler would say nothing. The pair also has three meanings rather
+/// than four - "nothing is there" does not care what the statement said.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Already {
+    /// Nothing of that name is there, so the object is created.
+    Absent,
+    /// Something is there and the statement said `IF NOT EXISTS`, so this is a
+    /// statement that does nothing.
+    Allowed,
+    /// Something is there and nothing said to allow it, so this is an error.
+    Refused,
+}
+
+impl Already {
+    /// Reads the pair of booleans a directive carries.
+    ///
+    /// @param exists - whether one of that name is already there
+    /// @param if_not_exists - whether the statement said `IF NOT EXISTS`
+    pub(crate) fn of(exists: bool, if_not_exists: bool) -> Already {
+        match (exists, if_not_exists) {
+            (false, _) => Already::Absent,
+            (true, true) => Already::Allowed,
+            (true, false) => Already::Refused,
+        }
+    }
+}
+
 impl crate::ImportedDatabase {
     /// Records a view or a trigger, which have text and no tree.
     ///
@@ -28,9 +61,7 @@ impl crate::ImportedDatabase {
     /// @param name_offset - where the object's name starts in it
     /// @param name - the object's name
     /// @param table - the table it belongs to, its own name for a view
-    /// @param exists - whether one of that name is already there
-    /// @param if_not_exists - whether the statement said so
-    #[allow(clippy::too_many_arguments)]
+    /// @param already - what is there of that name, and whether it is allowed
     pub(crate) fn create_bodiless(
         &mut self,
         keywords: &str,
@@ -39,21 +70,21 @@ impl crate::ImportedDatabase {
         name_offset: u32,
         name: &[u8],
         table: &[u8],
-        exists: bool,
-        if_not_exists: bool,
+        already: Already,
     ) -> DbResult<Outcome> {
-        if exists {
-            if if_not_exists {
-                return Ok(Outcome::empty());
+        match already {
+            Already::Absent => {}
+            Already::Allowed => return Ok(Outcome::empty()),
+            Already::Refused => {
+                return Err(refusal(format!(
+                    "{} {} already exists",
+                    match kind {
+                        ObjectKind::View => "view",
+                        _ => "trigger",
+                    },
+                    String::from_utf8_lossy(name)
+                )))
             }
-            return Err(refusal(format!(
-                "{} {} already exists",
-                match kind {
-                    ObjectKind::View => "view",
-                    _ => "trigger",
-                },
-                String::from_utf8_lossy(name)
-            )));
         }
         let sql = canonical_sql(keywords, source, name_offset, source.len() as u32);
         self.record(

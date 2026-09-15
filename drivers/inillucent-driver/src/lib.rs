@@ -831,26 +831,40 @@ impl Connection<'_> {
     }
 
     /// Returns the rowid the last `INSERT` on this database assigned.
-    pub fn last_insert_rowid(&self) -> i64 {
-        self.engine.last_insert_rowid()
+    ///
+    /// **It answers a `Result` because the engine can be busy (task-1962,
+    /// A11).** A function registered on this connection that asks while the
+    /// statement that called it is still running is refused rather than
+    /// aborting the process.
+    pub fn last_insert_rowid(&self) -> Result<i64> {
+        self.engine
+            .last_insert_rowid()
+            .map_err(|error| self.database.classify(&error))
     }
 
     /// Returns how many rows every statement so far has changed.
-    pub fn total_changes(&self) -> i64 {
-        self.engine.total_changes()
+    pub fn total_changes(&self) -> Result<i64> {
+        self.engine
+            .total_changes()
+            .map_err(|error| self.database.classify(&error))
     }
 
     /// Returns whether a transaction is open.
-    pub fn in_transaction(&self) -> bool {
-        !self.engine.autocommit()
+    pub fn in_transaction(&self) -> Result<bool> {
+        self.engine
+            .autocommit()
+            .map(|open| !open)
+            .map_err(|error| self.database.classify(&error))
     }
 
     /// Returns the schema's generation, which changes when the schema does.
     ///
     /// A consumer that caches a table's columns compares this to know whether
     /// the cache is stale, rather than re-reading the schema per statement.
-    pub fn schema_cookie(&self) -> u64 {
-        self.engine.schema_cookie()
+    pub fn schema_cookie(&self) -> Result<u64> {
+        self.engine
+            .schema_cookie()
+            .map_err(|error| self.database.classify(&error))
     }
 
     /// Asks another thread to stop a running statement.
@@ -926,8 +940,10 @@ impl Connection<'_> {
     ///
     /// @param name - the name it was registered under
     /// @param arity - the arity it was registered for
-    pub fn remove_function(&self, name: &str, arity: i32) -> bool {
-        self.engine.remove_function(name, arity)
+    pub fn remove_function(&self, name: &str, arity: i32) -> Result<bool> {
+        self.engine
+            .remove_function(name, arity)
+            .map_err(|error| self.database.classify(&error))
     }
 
     /// Registers a collating sequence an application wrote.

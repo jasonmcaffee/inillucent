@@ -38,7 +38,7 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use inillucent_cli::command::{self, Arguments, Command, Context, Failed, Kind};
+use inillucent_cli::command::{self, Arguments, Command, Context, Failed, Kind, OpenMode};
 use inillucent_cli::json::{self, Json};
 use inillucent_cli::mcp;
 
@@ -376,7 +376,11 @@ fn dispatch(command: &'static Command, invocation: &Invocation) -> ExitCode {
     } else {
         &invocation.database
     };
-    let mut context = match Context::open(database, invocation.readonly, invocation.root.clone()) {
+    let mut context = match Context::open(
+        database,
+        OpenMode::of(invocation.readonly),
+        invocation.root.clone(),
+    ) {
         Ok(context) => context,
         Err(failure) => return report(&failure, invocation.json, command.name),
     };

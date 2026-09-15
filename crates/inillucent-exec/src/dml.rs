@@ -78,7 +78,7 @@ pub use insert::{insert, insert_at};
 pub use keys::{keys_query, keys_query_joined, module_keys_query};
 pub(crate) use target::{
     count_row, count_view_row, highest_rowid, key_columns, layout_of, missing_tree, read_row,
-    row_exists, sources_for, Borrowed, Stored,
+    row_exists, sources_for, Borrowed, Stored, Upsert, WriteRequest,
 };
 pub use target::{view_layout, Changes, RowSpace, Trees, WriteTarget};
 pub(crate) use update::{difference, same_key, Difference};

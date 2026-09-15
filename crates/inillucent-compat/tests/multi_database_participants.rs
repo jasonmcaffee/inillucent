@@ -61,7 +61,9 @@ fn a_schema_change_on_one_database_does_not_enlist_it_in_the_next_commit() {
         .execute_batch("INSERT INTO main.t VALUES (1)")
         .expect("the insert commits");
     assert_eq!(
-        connection.decided_over(),
+        connection
+            .decided_over()
+            .expect("nothing is running on this connection"),
         1,
         "a statement that wrote one file was committed as though it had written two"
     );
@@ -110,7 +112,9 @@ fn a_two_file_transaction_leaves_nothing_behind() {
         ))
         .expect("the transaction commits");
     assert_eq!(
-        connection.decided_over(),
+        connection
+            .decided_over()
+            .expect("nothing is running on this connection"),
         2,
         "a transaction that wrote two files was not decided over both"
     );

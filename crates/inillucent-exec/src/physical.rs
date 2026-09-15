@@ -70,7 +70,6 @@ use inillucent_sql::plan::{AccessPath, BoundKind, IndexSeekBranch, RangeBound};
 use inillucent_tree::datum::OwnedDatum;
 use inillucent_tree::PagedTree;
 use inillucent_value::affinity::Affinity;
-use inillucent_value::collation::Collation;
 
 use crate::expr::Expr;
 use crate::paged::SpanScan;

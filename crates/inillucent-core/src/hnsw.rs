@@ -104,6 +104,22 @@ impl Default for HnswParams {
     }
 }
 
+/// How far a filtered walk may go, and whether it ran out.
+///
+/// **A type rather than the last three of nine arguments (task-1962, A9).**
+/// `ef` and `max_visits` are both `usize` and adjacent, so a call site that
+/// swapped them would ask for four thousand results out of a sixty-four visit
+/// budget - which returns a short list rather than an error. `exhausted` is the
+/// answer to "did the budget run out", and it belongs with the budget.
+struct VisitBudget<'a> {
+    /// How many passing results the walk is asked for.
+    ef: usize,
+    /// How many nodes it may expand before giving up.
+    max_visits: usize,
+    /// Set when the budget ran out before `ef` results were admitted.
+    exhausted: &'a mut bool,
+}
+
 /// A candidate ordered so that `BinaryHeap` yields the *nearest* first.
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct Nearest {
@@ -851,7 +867,6 @@ impl Hnsw {
     ///
     /// The stopping condition counts admitted results, so a selective predicate
     /// forces the walk to continue rather than returning a short list.
-    #[allow(clippy::too_many_arguments)]
     fn search_layer_filtered<S: Scorer + Sync>(
         &self,
         vectors: &S,
@@ -859,10 +874,10 @@ impl Hnsw {
         filter: &CompiledFilter,
         query: &[f32],
         entries: &[u32],
-        ef: usize,
-        max_visits: usize,
-        exhausted: &mut bool,
+        budget: &mut VisitBudget<'_>,
     ) -> Vec<Nearest> {
+        let (ef, max_visits) = (budget.ef, budget.max_visits);
+        let exhausted = &mut *budget.exhausted;
         let layer = 0;
         // Sized from the layer this search walks, so `visited[node]` is in
         // range for every node that layer holds; `seen` below says that to the
@@ -1012,9 +1027,11 @@ impl Hnsw {
                 filter,
                 query,
                 &starts,
-                ef,
-                max_visits,
-                &mut exhausted,
+                &mut VisitBudget {
+                    ef,
+                    max_visits,
+                    exhausted: &mut exhausted,
+                },
             )
         };
 

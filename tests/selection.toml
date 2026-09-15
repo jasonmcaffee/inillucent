@@ -389,6 +389,13 @@ covers = ["inillucent-engine", "inillucent-ext"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
+name = "reentrant_connection"
+tier = "engine"
+covers = ["inillucent-engine"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
 name = "hostile"
 tier = "engine"
 covers = ["inillucent-engine", "inillucent-ext"]

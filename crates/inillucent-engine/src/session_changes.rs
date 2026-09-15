@@ -34,6 +34,21 @@ impl SessionChanges {
     ///
     /// @param session - the session id `open_session` just minted
     /// @param changed_ever - `changed_ever`'s value at this instant
+    /// Records a session's baseline the first time that session runs anything.
+    ///
+    /// **The second and later calls do nothing**, because the baseline is what
+    /// `changed_ever` stood at when the connection opened and a connection that
+    /// has already run a statement has moved it.
+    ///
+    /// @param session - the connection
+    /// @param changed_ever - the shared counter's current value
+    pub(crate) fn record_open_once(&self, session: u64, changed_ever: i64) {
+        self.baseline
+            .borrow_mut()
+            .entry(session)
+            .or_insert(changed_ever);
+    }
+
     pub(crate) fn record_open(&self, session: u64, changed_ever: i64) {
         self.baseline.borrow_mut().insert(session, changed_ever);
     }

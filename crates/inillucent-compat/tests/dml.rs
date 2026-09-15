@@ -98,15 +98,30 @@ fn the_counters_report_what_a_statement_changed() {
     connection
         .execute_batch("UPDATE t SET b = 'x' WHERE a >= 2")
         .expect("updates");
-    assert_eq!(connection.changes(), 2);
+    assert_eq!(
+        connection
+            .changes()
+            .expect("nothing is running on this connection"),
+        2
+    );
     connection
         .execute_batch("DELETE FROM t WHERE a = 1")
         .expect("deletes");
-    assert_eq!(connection.changes(), 1);
+    assert_eq!(
+        connection
+            .changes()
+            .expect("nothing is running on this connection"),
+        1
+    );
     // The three inserts ran on the script's own connection, and
     // `total_changes` is per connection - so this one has only ever changed
     // the three rows the update and the delete touched.
-    assert_eq!(connection.total_changes(), 2 + 1);
+    assert_eq!(
+        connection
+            .total_changes()
+            .expect("nothing is running on this connection"),
+        2 + 1
+    );
     let rows = connection.query("SELECT count(*) FROM t").expect("counts");
     assert_eq!(integer(&rows, 0, 0), Some(2));
 }
@@ -125,11 +140,15 @@ fn a_rolled_back_transaction_changes_nothing() {
         .execute_batch("INSERT INTO t VALUES(2, 'gone'); DELETE FROM t WHERE a = 1;")
         .expect("writes");
     assert!(
-        !connection.autocommit(),
+        !connection
+            .autocommit()
+            .expect("nothing is running on this connection"),
         "an explicit BEGIN clears autocommit"
     );
     connection.execute_batch("ROLLBACK").expect("rolls back");
-    assert!(connection.autocommit());
+    assert!(connection
+        .autocommit()
+        .expect("nothing is running on this connection"));
     let rows = connection.query("SELECT a, b FROM t").expect("queries");
     assert_eq!(rows.len(), 1);
     assert_eq!(integer(&rows, 0, 0), Some(1));

@@ -347,15 +347,20 @@ pub(crate) fn conflicting_row(
 pub(crate) fn upsert_row(
     statement: &BoundInsert,
     table: &TableInfo,
-    layout: &SourceLayout,
     space: &RowSpace,
     plan: &InsertPlan,
     target: &mut dyn WriteTarget,
-    clash: &Conflict,
-    excluded: &[OwnedDatum],
-    indexes: IndexExprs<'_>,
-    arm: Option<usize>,
+    upsert: &Upsert<'_>,
+    request: WriteRequest<'_>,
 ) -> DbResult<Option<Row>> {
+    let WriteRequest {
+        layout, indexes, ..
+    } = request;
+    let Upsert {
+        clash,
+        excluded,
+        arm,
+    } = *upsert;
     // **The row that is there is read only when something needs it.** An upsert
     // that assigns every column but the key, over a table with no index, and
     // whose assignments read only `excluded`, is a row the statement already

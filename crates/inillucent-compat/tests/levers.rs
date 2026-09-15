@@ -126,11 +126,11 @@ fn the_covering_index_arm_changes_the_plan_and_not_the_answer() {
     let connection = database.session();
 
     for sql in COVERING_READS {
-        connection.disable_optimizations(Levers::all());
+        let _ = connection.disable_optimizations(Levers::all());
         let with_plan = plan(&connection, sql);
         let with = answer(&connection, sql);
 
-        connection.disable_optimizations(Levers::without(Levers::COVERING_INDEX));
+        let _ = connection.disable_optimizations(Levers::without(Levers::COVERING_INDEX));
         let without_plan = plan(&connection, sql);
         let without = answer(&connection, sql);
 
@@ -159,11 +159,11 @@ fn the_ordered_walk_arm_changes_the_plan_and_not_the_answer() {
     let connection = database.session();
 
     for sql in ORDERED_READS {
-        connection.disable_optimizations(Levers::all());
+        let _ = connection.disable_optimizations(Levers::all());
         let with_plan = plan(&connection, sql);
         let with = answer(&connection, sql);
 
-        connection.disable_optimizations(Levers::without(Levers::ORDERED_WALK));
+        let _ = connection.disable_optimizations(Levers::without(Levers::ORDERED_WALK));
         let without_plan = plan(&connection, sql);
         let without = answer(&connection, sql);
 
@@ -189,11 +189,11 @@ fn the_streaming_group_arm_changes_the_plan_and_not_the_answer() {
     let connection = database.session();
 
     for sql in STREAMED_GROUPS {
-        connection.disable_optimizations(Levers::all());
+        let _ = connection.disable_optimizations(Levers::all());
         let with_plan = plan(&connection, sql);
         let with = answer(&connection, sql);
 
-        connection.disable_optimizations(Levers::without(Levers::STREAMING_GROUP));
+        let _ = connection.disable_optimizations(Levers::without(Levers::STREAMING_GROUP));
         let without_plan = plan(&connection, sql);
         let without = answer(&connection, sql);
 
@@ -227,7 +227,7 @@ fn the_indexed_write_arm_changes_the_plan_and_not_the_outcome() {
     for (name, mask) in [("on", 0), ("off", Levers::INDEXED_WRITE)] {
         let database = fixture(&directory.join(format!("{name}.db")));
         let connection = database.session();
-        connection.disable_optimizations(Levers::without(mask));
+        let _ = connection.disable_optimizations(Levers::without(mask));
         let mut chains = Vec::new();
         for sql in INDEXED_WRITES {
             chains.push(plan(&connection, sql));
@@ -265,9 +265,9 @@ fn a_prepared_statement_keeps_the_arm_it_was_compiled_under() {
     let connection = database.session();
     let sql = COVERING_READS.first().copied().unwrap_or("SELECT 1");
 
-    connection.disable_optimizations(Levers::all());
+    let _ = connection.disable_optimizations(Levers::all());
     let mut early = connection.prepare(sql).expect("it prepares");
-    connection.disable_optimizations(Levers::without(Levers::COVERING_INDEX));
+    let _ = connection.disable_optimizations(Levers::without(Levers::COVERING_INDEX));
     let mut late = connection.prepare(sql).expect("it prepares");
 
     // Both statements still answer, and they still agree with each other: a

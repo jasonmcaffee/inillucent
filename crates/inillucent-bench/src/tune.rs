@@ -415,6 +415,55 @@ fn print_comparison(arms: &[ArmScores], stats_seed: u64) {
     println!();
 }
 
+/// The values each ranking dial is swept over.
+///
+/// **A type rather than nine slices in a row (task-1962, A9).** Five of the
+/// nine are `&[f32]`, so a call site that swapped the proximity weights and the
+/// phrase weights would compile and would sweep the wrong dial - and the sweep
+/// would report a winner for a setting nobody varied.
+pub struct Sweep<'a> {
+    /// Lexical coverage exponents.
+    pub coverages: &'a [f32],
+    /// Vector weights, for the score based fusions.
+    pub weights: &'a [f32],
+    /// Lexical proximity weights.
+    pub proximities: &'a [f32],
+    /// Whether a query term also matches the terms it prefixes.
+    pub prefixes: &'a [bool],
+    /// Whether the count of matched query terms outranks the score.
+    pub tiers: &'a [bool],
+    /// Ordered-phrase weights.
+    pub phrases: &'a [f32],
+    /// Fusion method names.
+    pub fusions: &'a [String],
+    /// Diversity lambdas.
+    pub mmrs: &'a [f32],
+    /// Adaptive weighting rules to try; empty sweeps fixed weighting only.
+    pub adaptive: &'a [AdaptiveWeights],
+}
+
+/// One arm of the sweep, as the label names it.
+struct Dials<'a> {
+    /// The lexical coverage exponent.
+    coverage: f32,
+    /// The lexical proximity weight.
+    proximity: f32,
+    /// Whether a query term also matches the terms it prefixes.
+    prefix: bool,
+    /// Whether the count of matched query terms outranks the score.
+    tier: bool,
+    /// The ordered-phrase weight.
+    phrase: f32,
+    /// The fusion method's name.
+    fusion: &'a str,
+    /// The vector weight.
+    weight: f32,
+    /// The diversity lambda.
+    mmr: f32,
+    /// The adaptive weighting rule, when this arm has one.
+    adaptive: &'a Option<AdaptiveWeights>,
+}
+
 /// The cross product of every axis the caller asked for, with the baseline arm
 /// first so the comparison table has something to compare against.
 ///
@@ -422,28 +471,19 @@ fn print_comparison(arms: &[ArmScores], stats_seed: u64) {
 /// sweep, because a sweep that does not happen to include the current defaults
 /// would otherwise silently compare its arms against one of themselves.
 /// @param baseline - the configuration currently shipped
-/// @param coverages - lexical coverage exponents
-/// @param weights - vector weights for the score based fusions
-/// @param proximities - lexical proximity weights
-/// @param prefixes - whether a query term also matches the terms it prefixes
-/// @param tiers - whether the count of matched query terms outranks the score
-/// @param phrases - ordered-phrase weights
-/// @param fusions - fusion method names
-/// @param mmrs - diversity lambdas
-/// @param adaptive - adaptive weighting rules to try, empty for fixed weighting
-#[allow(clippy::too_many_arguments)]
-pub fn build_settings(
-    baseline: Setting,
-    coverages: &[f32],
-    weights: &[f32],
-    proximities: &[f32],
-    prefixes: &[bool],
-    tiers: &[bool],
-    phrases: &[f32],
-    fusions: &[String],
-    mmrs: &[f32],
-    adaptive: &[AdaptiveWeights],
-) -> Vec<Setting> {
+/// @param sweep - the values each dial is swept over
+pub fn build_settings(baseline: Setting, sweep: &Sweep<'_>) -> Vec<Setting> {
+    let Sweep {
+        coverages,
+        weights,
+        proximities,
+        prefixes,
+        tiers,
+        phrases,
+        fusions,
+        mmrs,
+        adaptive,
+    } = *sweep;
     let mut out = vec![baseline];
     // No adaptive rule at all is always one of the options, so a sweep over the
     // gains still contains the arm that turns the mechanism off.
@@ -476,10 +516,17 @@ pub fn build_settings(
                                         }
                                         let rule = rule.map(|r| AdaptiveWeights { base: w, ..r });
                                         out.push(Setting {
-                                            label: label_for(
-                                                coverage, proximity, prefix, tier, phrase, name, w,
-                                                mmr, &rule,
-                                            ),
+                                            label: label_for(&Dials {
+                                                coverage,
+                                                proximity,
+                                                prefix,
+                                                tier,
+                                                phrase,
+                                                fusion: name,
+                                                weight: w,
+                                                mmr,
+                                                adaptive: &rule,
+                                            }),
                                             coverage,
                                             proximity,
                                             prefix,
@@ -515,17 +562,18 @@ pub fn fusion_named(name: &str, vector_weight: f32) -> Option<Fusion> {
 /// A label that names every setting the arm differs by, so a table row can be
 /// turned back into a command line.
 #[allow(clippy::too_many_arguments)]
-fn label_for(
-    coverage: f32,
-    proximity: f32,
-    prefix: bool,
-    tier: bool,
-    phrase: f32,
-    fusion: &str,
-    weight: f32,
-    mmr: f32,
-    adaptive: &Option<AdaptiveWeights>,
-) -> String {
+fn label_for(dials: &Dials<'_>) -> String {
+    let Dials {
+        coverage,
+        proximity,
+        prefix,
+        tier,
+        phrase,
+        fusion,
+        weight,
+        mmr,
+        adaptive,
+    } = *dials;
     let mut parts = vec![format!("cov {coverage:.2}"), format!("prox {proximity:.2}")];
     if prefix {
         parts.push("prefix".into());
@@ -573,18 +621,7 @@ mod tests {
 
     #[test]
     fn the_baseline_is_always_the_first_arm() {
-        let settings = build_settings(
-            baseline(),
-            &[3.0],
-            &[0.35, 0.5],
-            &[1.0],
-            &[false],
-            &[false],
-            &[0.0],
-            &["minmax".to_string()],
-            &[1.0],
-            &[],
-        );
+        let settings = build_settings(baseline(), &Sweep { coverages: &[3.0], weights: &[0.35, 0.5], proximities: &[1.0], prefixes: &[false], tiers: &[false], phrases: &[0.0], fusions: &["minmax".to_string()], mmrs: &[1.0], adaptive: &[] });
         assert_eq!(settings[0].label, "baseline");
         assert!(settings.len() > 1);
     }
@@ -594,18 +631,7 @@ mod tests {
     /// highest of the sweep.
     #[test]
     fn rank_fusion_is_not_repeated_once_per_weight() {
-        let settings = build_settings(
-            baseline(),
-            &[3.0],
-            &[0.2, 0.35, 0.5, 0.7],
-            &[1.0],
-            &[false],
-            &[false],
-            &[0.0],
-            &["rrf".to_string()],
-            &[1.0],
-            &[],
-        );
+        let settings = build_settings(baseline(), &Sweep { coverages: &[3.0], weights: &[0.2, 0.35, 0.5, 0.7], proximities: &[1.0], prefixes: &[false], tiers: &[false], phrases: &[0.0], fusions: &["rrf".to_string()], mmrs: &[1.0], adaptive: &[] });
         assert_eq!(settings.len(), 2, "the baseline plus one rank fusion arm");
     }
 
@@ -614,18 +640,7 @@ mod tests {
     #[test]
     fn an_adaptive_sweep_still_contains_the_fixed_weight_arm() {
         let rule = AdaptiveWeights { identifier_gain: 0.3, ..Default::default() };
-        let settings = build_settings(
-            baseline(),
-            &[3.0],
-            &[0.35],
-            &[1.0],
-            &[false],
-            &[false],
-            &[0.0],
-            &["minmax".to_string()],
-            &[1.0],
-            &[rule],
-        );
+        let settings = build_settings(baseline(), &Sweep { coverages: &[3.0], weights: &[0.35], proximities: &[1.0], prefixes: &[false], tiers: &[false], phrases: &[0.0], fusions: &["minmax".to_string()], mmrs: &[1.0], adaptive: &[rule] });
         assert!(settings.iter().any(|s| s.adaptive.is_none() && s.label != "baseline"));
         assert!(settings.iter().any(|s| s.adaptive.is_some()));
     }
@@ -635,18 +650,7 @@ mod tests {
     #[test]
     fn an_adaptive_arm_takes_its_base_from_the_weight_being_swept() {
         let rule = AdaptiveWeights { identifier_gain: 0.3, base: 0.0, ..Default::default() };
-        let settings = build_settings(
-            baseline(),
-            &[3.0],
-            &[0.6],
-            &[1.0],
-            &[false],
-            &[false],
-            &[0.0],
-            &["minmax".to_string()],
-            &[1.0],
-            &[rule],
-        );
+        let settings = build_settings(baseline(), &Sweep { coverages: &[3.0], weights: &[0.6], proximities: &[1.0], prefixes: &[false], tiers: &[false], phrases: &[0.0], fusions: &["minmax".to_string()], mmrs: &[1.0], adaptive: &[rule] });
         let adaptive = settings.iter().find(|s| s.adaptive.is_some()).unwrap();
         assert!((adaptive.adaptive.unwrap().base - 0.6).abs() < 1e-6);
     }
@@ -661,17 +665,20 @@ mod tests {
 
     #[test]
     fn a_label_names_every_setting_that_is_not_a_default() {
-        let label = label_for(
-            2.0,
-            0.5,
-            true,
-            true,
-            0.4,
-            "tmm",
-            0.42,
-            0.8,
-            &Some(AdaptiveWeights { identifier_gain: 0.3, ..Default::default() }),
-        );
+        let label = label_for(&Dials {
+            coverage: 2.0,
+            proximity: 0.5,
+            prefix: true,
+            tier: true,
+            phrase: 0.4,
+            fusion: "tmm",
+            weight: 0.42,
+            mmr: 0.8,
+            adaptive: &Some(AdaptiveWeights {
+                identifier_gain: 0.3,
+                ..Default::default()
+            }),
+        });
         assert!(label.contains("cov 2.00"));
         assert!(label.contains("prefix"));
         assert!(label.contains("tier"));

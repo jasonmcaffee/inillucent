@@ -428,8 +428,10 @@ fn re_preparing_is_cached_rather_than_recompiled() {
 
     let sql = "SELECT id FROM t WHERE email = ?1";
     let rounds = 200;
-    let before = connection.cached_plan_count();
-    let compiles_before = connection.compiled_statement_count();
+    let before = connection.cached_plan_count().expect("the engine is free");
+    let compiles_before = connection
+        .compiled_statement_count()
+        .expect("the engine is free");
     for _ in 0..rounds {
         let mut fresh = connection.prepare(sql).expect("the statement prepares");
         fresh
@@ -443,16 +445,21 @@ fn re_preparing_is_cached_rather_than_recompiled() {
     }
     let cached_compiles = connection
         .compiled_statement_count()
+        .expect("the engine is free")
         .saturating_sub(compiles_before);
-    let after = connection.cached_plan_count();
+    let after = connection.cached_plan_count().expect("the engine is free");
 
     // The same loop with the cache switched off, so this run contains a reading
     // of what "not cached" costs rather than a claim about it.
     let uncached_directory = scratch("prepare-uncached");
     let uncached_database = build(&uncached_directory.join("b.rdb"));
     let uncached = uncached_database.session();
-    uncached.disable_optimizations(Levers::without(Levers::PLAN_CACHE));
-    let uncached_before = uncached.compiled_statement_count();
+    uncached
+        .disable_optimizations(Levers::without(Levers::PLAN_CACHE))
+        .expect("the engine is free");
+    let uncached_before = uncached
+        .compiled_statement_count()
+        .expect("the engine is free");
     for _ in 0..rounds {
         let mut fresh = uncached.prepare(sql).expect("the statement prepares");
         fresh
@@ -462,6 +469,7 @@ fn re_preparing_is_cached_rather_than_recompiled() {
     }
     let uncached_compiles = uncached
         .compiled_statement_count()
+        .expect("the engine is free")
         .saturating_sub(uncached_before);
 
     assert_eq!(

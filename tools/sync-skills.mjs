@@ -5,7 +5,8 @@
 //   node tools/sync-skills.mjs --check  # report a difference and exit non-zero
 //
 // **Copies, not symlinks (task-1961, S1).** `agent-skills/README.md` used to
-// tell a person to run `ln -s` into `~/.claude/skills/` by hand, and nothing in
+// tell a person to run `ln -s` into their own user-level skills directory by
+// hand, and nothing in
 // the repository ran it - so every fresh clone started with the eight skills
 // invisible to Claude Code's own matcher, which reads a project's
 // `.claude/skills/`. A symlink is not the fix either: this repository is

@@ -173,15 +173,17 @@ pub fn insert_at(
         if trigger::fire(
             &statement.triggers,
             TriggerTime::Before,
-            trigger::TriggerRows {
-                old: None,
-                new: Some(image.as_slice()),
-            },
-            &layout.slots,
-            layout.rowid,
             target,
-            params,
-            depth,
+            &trigger::TriggerFiring {
+                rows: trigger::TriggerRows {
+                    old: None,
+                    new: Some(image.as_slice()),
+                },
+                slots: &layout.slots,
+                rowid: layout.rowid,
+                params,
+                depth,
+            },
         )? == trigger::Fired::SkipRow
         {
             continue;
@@ -207,14 +209,16 @@ pub fn insert_at(
         }
         let Some(stored) = write_one(
             statement,
-            &layout,
             &space,
             &plan,
             target,
             image,
-            params,
-            depth,
-            IndexExprs::new(&declarations, &space),
+            WriteRequest {
+                layout: &layout,
+                params,
+                depth,
+                indexes: IndexExprs::new(&declarations, &space),
+            },
         )?
         else {
             continue;
@@ -222,15 +226,17 @@ pub fn insert_at(
         if trigger::fire(
             &statement.triggers,
             TriggerTime::After,
-            trigger::TriggerRows {
-                old: None,
-                new: Some(stored.row()),
-            },
-            &layout.slots,
-            layout.rowid,
             target,
-            params,
-            depth,
+            &trigger::TriggerFiring {
+                rows: trigger::TriggerRows {
+                    old: None,
+                    new: Some(stored.row()),
+                },
+                slots: &layout.slots,
+                rowid: layout.rowid,
+                params,
+                depth,
+            },
         )? == trigger::Fired::SkipRow
         {
             continue;
@@ -319,15 +325,17 @@ fn insert_into_view(
         if trigger::fire(
             &statement.triggers,
             TriggerTime::InsteadOf,
-            trigger::TriggerRows {
-                old: None,
-                new: Some(image.as_slice()),
-            },
-            &layout.slots,
-            layout.rowid,
             target,
-            params,
-            depth,
+            &trigger::TriggerFiring {
+                rows: trigger::TriggerRows {
+                    old: None,
+                    new: Some(image.as_slice()),
+                },
+                slots: &layout.slots,
+                rowid: layout.rowid,
+                params,
+                depth,
+            },
         )? == trigger::Fired::SkipRow
         {
             continue;
@@ -356,15 +364,15 @@ fn insert_into_view(
 #[allow(clippy::too_many_arguments)]
 fn write_one(
     statement: &BoundInsert,
-    layout: &SourceLayout,
     space: &RowSpace,
     plan: &InsertPlan,
     target: &mut dyn WriteTarget,
     row: Row,
-    params: &Params,
-    depth: Depth,
-    indexes: IndexExprs<'_>,
+    request: WriteRequest<'_>,
 ) -> DbResult<Option<Stored>> {
+    let WriteRequest {
+        layout, indexes, ..
+    } = request;
     let table = &statement.table;
     // **The common insert asks the table once.**
     //
@@ -426,14 +434,11 @@ fn write_one(
                 // these separately and they are only the ones a key implies.
                 remove_with_triggers(
                     table,
-                    layout,
                     target,
                     &clash.key,
                     &held,
                     &statement.replace_triggers,
-                    params,
-                    depth,
-                    indexes,
+                    request,
                 )?;
                 continue;
             }
@@ -442,7 +447,17 @@ fn write_one(
                 // as it is and writes nothing - the same outcome as
                 // `DO NOTHING`, and not an error.
                 return Ok(upsert_row(
-                    statement, table, layout, space, plan, target, &clash, &row, indexes, arm,
+                    statement,
+                    table,
+                    space,
+                    plan,
+                    target,
+                    &Upsert {
+                        clash: &clash,
+                        excluded: &row,
+                        arm,
+                    },
+                    request,
                 )?
                 .map(Stored::Updated));
             }

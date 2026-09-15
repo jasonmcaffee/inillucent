@@ -324,13 +324,41 @@ pub struct Context {
     pub null: String,
 }
 
+/// Whether a command surface may write to the database it opens.
+///
+/// **An enum rather than a bare `bool` (task-1962, A9).** `Context::open(path,
+/// true, root)` at a call site says nothing about what the `true` decides, and
+/// the surface it opens is the one an operator reaches for when they want to be
+/// certain nothing is written.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OpenMode {
+    /// Statements that write are refused.
+    ReadOnly,
+    /// The ordinary surface.
+    ReadWrite,
+}
+
+impl OpenMode {
+    /// Reads the `--readonly` flag a command surface was invoked with.
+    ///
+    /// @param readonly - whether the flag was given
+    pub fn of(readonly: bool) -> OpenMode {
+        if readonly {
+            OpenMode::ReadOnly
+        } else {
+            OpenMode::ReadWrite
+        }
+    }
+}
+
 impl Context {
     /// Opens a context on a database.
     ///
     /// @param path - the file, or an in-memory name
     /// @param readonly - whether writes are refused
     /// @param root - the directory paths are confined to, if any
-    pub fn open(path: &str, readonly: bool, root: Option<PathBuf>) -> Result<Context, Failed> {
+    pub fn open(path: &str, mode: OpenMode, root: Option<PathBuf>) -> Result<Context, Failed> {
+        let readonly = mode == OpenMode::ReadOnly;
         // **The confinement is installed before the first file is opened.**
         // The database this surface starts on is a path like any other, and
         // installing the root afterwards would exempt exactly the one path an

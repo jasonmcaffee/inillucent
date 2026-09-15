@@ -92,14 +92,16 @@ pub fn delete_at(
         // delete, on the workload the gate measures two thousand of.
         if remove_with_triggers(
             table,
-            &layout,
             target,
             key,
             &row,
             &statement.triggers,
-            params,
-            depth,
-            IndexExprs::new(&declarations, &space),
+            WriteRequest {
+                layout: &layout,
+                params,
+                depth,
+                indexes: IndexExprs::new(&declarations, &space),
+            },
         )? {
             count_row(&mut changes, target, depth);
             if captured {
@@ -130,27 +132,32 @@ pub fn delete_at(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn remove_with_triggers(
     table: &TableInfo,
-    layout: &SourceLayout,
     target: &mut dyn WriteTarget,
     key: &[OwnedDatum],
     row: &[OwnedDatum],
     triggers: &[inillucent_sql::dml::BoundTrigger],
-    params: &Params,
-    depth: Depth,
-    indexes: IndexExprs<'_>,
+    request: WriteRequest<'_>,
 ) -> DbResult<bool> {
+    let WriteRequest {
+        layout,
+        params,
+        depth,
+        indexes,
+    } = request;
     if trigger::fire(
         triggers,
         TriggerTime::Before,
-        trigger::TriggerRows {
-            old: Some(row),
-            new: None,
-        },
-        &layout.slots,
-        layout.rowid,
         target,
-        params,
-        depth,
+        &trigger::TriggerFiring {
+            rows: trigger::TriggerRows {
+                old: Some(row),
+                new: None,
+            },
+            slots: &layout.slots,
+            rowid: layout.rowid,
+            params,
+            depth,
+        },
     )? == trigger::Fired::SkipRow
     {
         return Ok(false);
@@ -165,15 +172,17 @@ pub(crate) fn remove_with_triggers(
     trigger::fire(
         triggers,
         TriggerTime::After,
-        trigger::TriggerRows {
-            old: Some(row),
-            new: None,
-        },
-        &layout.slots,
-        layout.rowid,
         target,
-        params,
-        depth,
+        &trigger::TriggerFiring {
+            rows: trigger::TriggerRows {
+                old: Some(row),
+                new: None,
+            },
+            slots: &layout.slots,
+            rowid: layout.rowid,
+            params,
+            depth,
+        },
     )?;
     Ok(true)
 }
@@ -227,15 +236,17 @@ fn delete_view(
         if trigger::fire(
             &statement.triggers,
             TriggerTime::InsteadOf,
-            trigger::TriggerRows {
-                old: Some(before.as_slice()),
-                new: None,
-            },
-            &layout.slots,
-            layout.rowid,
             target,
-            params,
-            depth,
+            &trigger::TriggerFiring {
+                rows: trigger::TriggerRows {
+                    old: Some(before.as_slice()),
+                    new: None,
+                },
+                slots: &layout.slots,
+                rowid: layout.rowid,
+                params,
+                depth,
+            },
         )? == trigger::Fired::SkipRow
         {
             continue;

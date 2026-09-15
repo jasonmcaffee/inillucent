@@ -21,13 +21,13 @@
 //! 5. `capabilities` answers the same rows the driver's own checked table
 //!    holds, so the command cannot drift from the thing it reports.
 
-use inillucent_cli::command::{self, Context};
+use inillucent_cli::command::{self, Context, OpenMode};
 use inillucent_cli::json::Json;
 use inillucent_cli::mcp;
 
 /// Returns a scratch context for a command that has to run.
 fn context() -> Context {
-    Context::open(":memory:", false, None).expect("an in-memory database opens")
+    Context::open(":memory:", OpenMode::ReadWrite, None).expect("an in-memory database opens")
 }
 
 /// Every command carries the sentences a caller needs to use it.

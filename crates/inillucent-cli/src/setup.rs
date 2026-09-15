@@ -276,7 +276,20 @@ pub fn setup_embeddings(context: &mut Context, arguments: &Arguments) -> Result<
     let mut fields: Vec<(String, Json)> = Vec::new();
 
     if matches!(component, Component::All | Component::Runtime) {
-        let installed = install_runtime(&root, &version, gpu, force)?;
+        let installed = install_runtime(
+            &root,
+            &version,
+            if gpu {
+                Accelerator::Gpu
+            } else {
+                Accelerator::Cpu
+            },
+            if force {
+                Reinstall::Always
+            } else {
+                Reinstall::WhenMissing
+            },
+        )?;
         lines.push(format!(
             "ONNX Runtime {} -> {}{}",
             installed.version,
@@ -420,12 +433,38 @@ fn status(root: &Path) -> Outcome {
 /// @param version - the ONNX Runtime version
 /// @param gpu - whether to take the build carrying the CUDA execution provider
 /// @param force - install again even when it is already there
+/// Which build of the runtime `setup-embeddings` installs.
+///
+/// **An enum rather than a `bool` beside another `bool` (task-1962, A9).**
+/// `install_runtime` took `gpu` and `force` adjacent and positional, and the
+/// call site read `install_runtime(&root, &version, gpu, force)` - two words
+/// that say which is which only because they happen to be named after the
+/// parameters.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Accelerator {
+    /// The CPU build, which every machine can run.
+    Cpu,
+    /// The GPU build, which needs a supported card and its driver.
+    Gpu,
+}
+
+/// Whether an install replaces a runtime that is already there.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Reinstall {
+    /// Download and unpack even when the version is already installed.
+    Always,
+    /// Leave an installed version alone.
+    WhenMissing,
+}
+
 fn install_runtime(
     root: &Path,
     version: &str,
-    gpu: bool,
-    force: bool,
+    accelerator: Accelerator,
+    force: Reinstall,
 ) -> Result<InstalledRuntime, Failed> {
+    let gpu = accelerator == Accelerator::Gpu;
+    let force = force == Reinstall::Always;
     let archive_spec = pick_runtime(gpu)?;
     let asset = archive_spec.asset.replace("{version}", version);
     let directory = install::runtime_dir(root, version);
