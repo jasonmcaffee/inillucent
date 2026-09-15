@@ -1,6 +1,6 @@
 {
   "name": "inillucent",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Embedded SQL database with full-text and vector search, an MCP server, and a sqlite3-shaped shell. No native build step: the binaries ship as platform packages.",
   "keywords": [
     "database",
