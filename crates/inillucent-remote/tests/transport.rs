@@ -528,3 +528,70 @@ fn a_machine_with_no_tls_says_so_rather_than_falling_back() {
 /// A path is only a path; this keeps the unused import honest.
 #[allow(dead_code)]
 fn unused(_: &Path) {}
+
+/// A refusal names the host and carries no part of the URL that reached it.
+///
+/// **The one message an operator reads while deciding whether they are being
+/// attacked (task-1962, T4).** It is also the message that gets pasted into a
+/// ticket, a chat and a log aggregator, and the URL it came from carries the
+/// password. `tls::not_verified` is written to name the host and the platform's
+/// reason and nothing else; this is the assertion that it stays that way,
+/// because a later change adding `{url}` to the format string would be a
+/// credential leak that every other test in this file passes.
+///
+/// The host is asserted too. A message with everything redacted tells the
+/// operator nothing, and passing this test by saying less would be the wrong
+/// fix.
+#[test]
+fn a_refusal_names_the_host_and_not_the_password() {
+    let Some(python) = python() else {
+        skipping("transport: no python with an ssl module");
+        return;
+    };
+    let Some((_, certificate, key)) = certificates("127.0.0.1", "redaction") else {
+        skipping("transport: no openssl to generate certificates");
+        return;
+    };
+    let Some(mut server) = Server::start(&python, "accept", &certificate, &key) else {
+        skipping("transport: the fake server did not start");
+        return;
+    };
+    // The same untrusted certificate the case above uses, so this fails for a
+    // reason that is already understood and the only new question is the words.
+    let error =
+        PostgresSource::connect_over(&url(server.port, "sslmode=require"), Transport::VerifiedTls)
+            .err()
+            .expect("an untrusted certificate is refused");
+    server.stop();
+
+    // Every rendering a caller can reach: the detail, the message, and the
+    // `Display` a caller that does neither will print.
+    let renderings = [
+        error.detail().unwrap_or_default().to_string(),
+        error.message().to_string(),
+        format!("{error}"),
+    ];
+    for rendering in &renderings {
+        assert!(
+            !rendering.contains("secret"),
+            "the password reached the refusal: {rendering}"
+        );
+        assert!(
+            !rendering.contains("tester"),
+            "the user name reached the refusal: {rendering}"
+        );
+        assert!(
+            !rendering.contains("postgres://"),
+            "the URL reached the refusal, and it carries the password: {rendering}"
+        );
+    }
+    let detail = said(error);
+    assert!(
+        detail.contains("127.0.0.1"),
+        "the refusal should name the host whose certificate failed, or the          operator cannot tell which endpoint it was about: {detail}"
+    );
+    assert!(
+        detail.contains("did not verify"),
+        "and should say what went wrong: {detail}"
+    );
+}

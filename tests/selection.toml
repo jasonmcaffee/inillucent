@@ -741,6 +741,22 @@ kind = "test"
 name = "conformance"
 tier = "engine"
 
+# The two platform halves of the lock protocol. Each is behind a `#![cfg]` for
+# its own platform, so the other compiles to an empty binary and runs nothing -
+# which is correct rather than hollow: there is no lock protocol to test for a
+# platform this build does not target (task-1962, T4).
+[[target]]
+package = "inillucent-vfs"
+kind = "test"
+name = "windows_locks"
+tier = "engine"
+
+[[target]]
+package = "inillucent-vfs"
+kind = "test"
+name = "unix_locks"
+tier = "engine"
+
 # --- differential: graded against the pinned SQLite 3.53.4
 
 [[target]]
