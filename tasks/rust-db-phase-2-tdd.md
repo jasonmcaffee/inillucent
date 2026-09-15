@@ -3,14 +3,14 @@
 Technical design for the work that closes the distance between what inillucent measures today and the
 goal it was built for: a highly performant SQLite replacement with the same features, plus embedding
 search similar to pgvector. Written for task-1802 from the sprint's tickets (task-1760 to task-1837)
-and a code audit of the tree at commit `b94b8da`; every number names its source and none was
+and a code audit of the tree at commit `ec0d84f`; every number names its source and none was
 estimated. The implementation is a separate ticket for Opus.
 
 > **Phase 2 has been implemented.** task-1838 delivered its nine parts and task-1844 the ATTACH and
 > temporary-object work that Part 2 deferred. Everything from here to `## Sources` is the plan as it
 > was written, kept as the record of what was asked for; **the plan for the work that comes next is
 > [Phase 3](#phase-3-the-improvement-plan-from-the-second-review-task-1843) at the end of this
-> document**, written for task-1843 from measurements taken at commit `d885e91` rather than from what
+> document**, written for task-1843 from measurements taken at commit `2a8c633` rather than from what
 > the implementing tickets reported.
 
 ## Introduction
@@ -404,7 +404,7 @@ Functional and differential over unit, in this order for every part:
 - `_agent_output/task-1833-phase4/README.md` (`schema` and `extension` floors)
 - `_agent_output/task-1832-phase3/README.md` (writes, durability, MVCC)
 - `tasks/task-1816-rearchitecture-tdd.md` (goals, non-goals, contract, triage)
-- `_agent_output/task-1802-review/code-analysis.md` (the tree at `b94b8da`)
+- `_agent_output/task-1802-review/code-analysis.md` (the tree at `ec0d84f`)
 - `inillucent-scorecard.md`, `product-overview.md`, task-1774, task-1775, task-1779 (the retrieval engine and Nikaya)
 
 ---
@@ -413,13 +413,13 @@ Functional and differential over unit, in this order for every part:
 
 Everything above was written for task-1802 and implemented by **task-1838** (nine parts) and
 **task-1844** (ATTACH, DETACH and temporary objects). This section is what the second review found
-when it re-measured the tree at `d885e91` instead of reading what those tickets reported, and it is
+when it re-measured the tree at `2a8c633` instead of reading what those tickets reported, and it is
 the plan for the ticket that comes next. It replaces nothing above; the parts that are still open are
 named here rather than rewritten.
 
 ## What Phase 2 closed, so nobody re-does it
 
-| goal | state at `d885e91` |
+| goal | state at `2a8c633` |
 |---|---|
 | G1 no silent wrong answer | **Partly.** The `VIRTUAL` generated-column shift, unenforced foreign keys and unenforced `NOT NULL` are fixed. Four remain, and this review found three of them. |
 | G2 the SQL surface | **Met.** 47 of 50 inventoried constructs; outer joins, derived tables, recursive CTEs, correlated subqueries, triggers, foreign keys, `ATTACH`/`DETACH`, temporary objects. |
@@ -452,7 +452,7 @@ fixture in `compat/perf/contract.toml`.** task-1833's recommendation to re-exami
 **Ranked first because it costs minutes and because every other acceptance in this document is
 unverifiable by anyone else until it is done.**
 
-`1854f3d` added `drivers/inillucent-driver` and `drivers/inillucent-driver-capi` to `[workspace]
+`3969906` added `drivers/inillucent-driver` and `drivers/inillucent-driver-capi` to `[workspace]
 members` and to `[workspace.dependencies]`. `drivers/` is untracked and is not in `.gitignore`, so it
 exists on exactly one machine. Reproduced:
 
@@ -715,7 +715,7 @@ The Phase 2 strategy above still applies, with three additions this review's fin
 
 ## Sources for Phase 3
 
-- This ticket's own measurements, at `d885e91`, in
+- This ticket's own measurements, at `2a8c633`, in
   `_agent_output/task-1843-inillucent-review-2/`: `gate-20260906T231706/` (four medium runs, small,
   large, read gate, search gate, shell RSS, probe profile, vector probe, `medium-summary.txt`),
   `semantics/` (the 61-case differential probe and the hang narrowing), `ondisk.txt`, `opencost.txt`,

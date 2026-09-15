@@ -491,7 +491,7 @@ fn the_dependency_policy_covers_what_the_contract_allows() {
 /// its own flag as a path.** `inillucent --db app.rdb ...` with the flag in the
 /// wrong position creates a file literally named `--db`, plus its log segments,
 /// in whatever directory the command ran in. Two of those were committed in
-/// `654cc79` and stayed tracked through a whole release, because `.gitignore`
+/// `c9f82ea` and stayed tracked through a whole release, because `.gitignore`
 /// matches on `.rdb` and `.db` and a file called `--db` has no extension at all
 /// for a rule to match (task-1946, H8).
 ///

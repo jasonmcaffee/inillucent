@@ -25,7 +25,7 @@ Four programs come out of a build or an install:
 | | |
 |---|---|
 | `inillucent` | the command line: 30 commands, with `--output json` on all of them |
-| `inillucent-shell` | an interactive shell shaped like `sqlite3`, with 63 of its dot commands |
+| `inillucent-shell` | an interactive shell shaped like `sqlite3`, with 63 of its 65 dot commands |
 | `inillucent-mcp` | the same commands served to an agent over MCP |
 | `inillucent-migrate` | builds a database from a SQLite file, a PostgreSQL or MySQL server, or a legacy retrieval index |
 
@@ -66,11 +66,16 @@ inillucent help migrate         # one command, every parameter
 | how does the retrieval half work? | [`docs/architecture.md`](docs/architecture.md) |
 | how does the SQL half work? | [`docs/relational-architecture.md`](docs/relational-architecture.md) |
 | what is not built yet? | [`docs/roadmap.md`](docs/roadmap.md) |
+| what does that word mean? | [`docs/glossary.md`](docs/glossary.md) — B-tree, page, WAL, pragma, rowid, collation, HNSW, BM25, one sentence each |
+| how do the two engines fit together? | [`docs/architecture-overview.md`](docs/architecture-overview.md), both halves in one diagram |
 | where is everything? | [`docs/README.md`](docs/README.md), the documentation index |
 
 ---
 
 ## 2. Working on inillucent
+
+Words used below and not explained here - VFS, WAL, journal, B-tree, pragma, leaf, page - are in
+[`docs/glossary.md`](docs/glossary.md), one sentence each.
 
 ### The five contracts, and the test that enforces each
 

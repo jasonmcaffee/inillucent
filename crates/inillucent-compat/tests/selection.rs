@@ -483,7 +483,7 @@ fn a_change_to_the_transaction_crate_selects_the_segment_suites() {
 /// Every row in the timing ledger has to name a target that exists.
 ///
 /// **`inillucent-compat::capi` was in it, and its suite was deleted in
-/// `cb1dba5` (task-1932, M11).** The ledger is what the runner packs its
+/// `963dd80` (task-1932, M11).** The ledger is what the runner packs its
 /// parallel schedule from, so a row for a target nothing can run is a number
 /// that is read on every run and can never be used - and, worse, it reads as
 /// evidence that the suite is still being measured.

@@ -720,8 +720,8 @@ descriptions that an agent can match on and correct commands. The problem is pla
 
 `.claude/` exists at the root and is empty (`ls -la .claude`: nothing). The eight `SKILL.md` files are
 under `agent-skills/<name>/`. `agent-skills/README.md:28-44` tells a person to symlink them into
-`~/.claude/skills/` by hand; nothing in the repository does it, so every fresh clone starts with the
-skills invisible to Claude Code's own matcher.
+the agent's own skills directory by hand; nothing in the repository does it, so every fresh clone
+starts with the skills invisible to Claude Code's own matcher.
 
 Keep `agent-skills/` as the source of truth (it is the tool neutral copy the README describes) and
 commit generated copies where each agent looks:
@@ -779,7 +779,7 @@ Done in this ticket, recorded in `_agent_output/task-1961-code-review-part-4/his
 
 - `jasonmcaffee/inillucent`: 342 commits on every branch and tag rewritten with `git filter-repo`
   (mailmap plus a message callback). Every commit is authored and committed by
-  `Jason McAffee <jasonlmcaffee@gmail.com>`; the four Dependabot commits on their own branches keep the
+  `Jason McAffee <account address>`; the four Dependabot commits on their own branches keep the
   bot identity. 90 `Co-Authored-By: Claude ...` trailers, 89 `Claude-Session:` lines, one "Written by
   Fable 5.1." sentence and two "on opus[1m]" phrases are gone; a grep over every message for
   `co-authored|claude|anthropic|fable|opus|sonnet|noreply@anthropic` returns 0. Every tree is byte
@@ -791,7 +791,7 @@ Done in this ticket, recorded in `_agent_output/task-1961-code-review-part-4/his
   their assets. `Black-Rainbow-Labs/Inillucent` was already Jason only (ten squashed release commits
   built by `packaging/mirror-github.ps1`) and was not rewritten.
 - The main checkout is on the new history, clean, with repo local `user.name` set to `Jason McAffee`.
-  A full pre-rewrite mirror is at `C:/jason/dev/_task1961/inillucent-backup.git` (51 MB) with
+  A full pre-rewrite mirror is at `<machine path>/_task1961/inillucent-backup.git` (51 MB) with
   `commit-map.txt` (342 old to new pairs) beside it.
 
 Left for the implementation ticket, all of them edits to tracked files:
@@ -799,7 +799,7 @@ Left for the implementation ticket, all of them edits to tracked files:
 ### P1. Documents that cite pre-rewrite shas
 
 filter-repo remapped the hashes inside commit messages; it does not touch files. Using
-`C:/jason/dev/_task1961/commit-map.txt`:
+`<machine path>/_task1961/commit-map.txt`:
 
 | file | old | new |
 |---|---|---|
@@ -824,7 +824,7 @@ text changes with it. The `tools/doc-facts/check.mjs` rule that banned the word 
 findings verbatim: a machine path, a drive letter, an account address and a real looking test fixture
 address. They were findings then and they are now text in a public repository. Replace each quoted
 value with a placeholder of the same shape (`<machine path>`, `<account address>`,
-`user@360water.example`) and leave the finding's sense intact.
+`user@example.invalid`) and leave the finding's sense intact.
 
 ### P4. The Dependabot pull request refs
 
@@ -1023,11 +1023,11 @@ machine. Each lands as its own commit with its own roadmap paragraph updated to 
    2.00x in `contract.toml`, with the arithmetic in the file's comment, so the roadmap can stop
    listing two items that cannot close. This is decision 5 and not a finding because the bars were
    written before any measurement and only Jason can move them.
-6. **The three worktrees pinned to old commits.** `C:/jason/dev/_task1935-grade`,
-   `C:/jason/dev/ai-service/_agent_output/task-1933-review/inillucent-6bcbf10`,
-   `C:/jason/dev/inillucent-baseline`. They still work; they are on history origin no longer has.
+6. **The three worktrees pinned to old commits.** `<machine path>/_task1935-grade`,
+   `<machine path>/ai-service/_agent_output/task-1933-review/inillucent-6bcbf10`,
+   `<machine path>/inillucent-baseline`. They still work; they are on history origin no longer has.
    `git worktree remove <path>` for each when the tickets that made them are closed.
-7. **The pre-rewrite backup.** `C:/jason/dev/_task1961/inillucent-backup.git`, 51 MB. Delete when
+7. **The pre-rewrite backup.** `<machine path>/_task1961/inillucent-backup.git`, 51 MB. Delete when
    satisfied the rewrite is right.
 
 ## 11. Components and interfaces

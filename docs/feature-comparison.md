@@ -7,6 +7,9 @@ The project has two goals and this document is the scorecard for both:
 1. a **highly performant SQLite replacement offering the same features**, and
 2. an **embedding solution that matches pgvector**.
 
+Words used here and not explained here - pragma, collation, affinity, HNSW, BM25, recall - are
+in [the glossary](glossary.md), one sentence each.
+
 ## The top-line comparison
 
 **The whole scorecard in five rows.** Everything below this section is the evidence for one of
@@ -1223,7 +1226,7 @@ These cannot be probed with SQL. They are read from the tree and from the design
 | encryption at rest | SEE, a commercial add-on | none. `ATTACH ... KEY` refuses by name rather than parsing the key and ignoring it, which is what a build without an encryption extension does |
 | user-defined functions and collations | yes | **yes**, scalar and aggregate, through the driver |
 | virtual-table modules a program registers | `sqlite3_create_module` | **`Database::register_module`**, which is how the shell adds `fsdir` |
-| assurance | TH3, `testfixture`, ~600 tests per line of code | **the same four red binaries as `e4b4fea`**, all pre-existing and accounted for; a differential oracle against the pinned build; SQLLogicTest; a `BTreeMap` model reference; a fault-injecting VFS; 8 fuzz targets; 23 of 29 crates deny `unwrap`/`panic`/indexing and 22 of 29 forbid `unsafe` |
+| assurance | TH3, `testfixture`, ~600 tests per line of code | **the same four red binaries as `bd9fedf`**, all pre-existing and accounted for; a differential oracle against the pinned build; SQLLogicTest; a `BTreeMap` model reference; a fault-injecting VFS; 8 fuzz targets; 23 of 29 crates deny `unwrap`/`panic`/indexing and 22 of 29 forbid `unsafe` |
 
 ### The migration path
 

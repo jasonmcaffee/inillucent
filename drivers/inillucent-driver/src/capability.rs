@@ -120,7 +120,7 @@ pub struct Capability {
 
 /// Every capability, in the order an application reads them.
 ///
-/// Measured against the engine at `b94b8da`, and kept true by
+/// Measured against the engine at `ec0d84f`, and kept true by
 /// `tests/capability.rs` rather than by anybody remembering to look.
 pub static CAPABILITIES: &[Capability] = &[
     // —— what it does ——————————————————————————————————————————————

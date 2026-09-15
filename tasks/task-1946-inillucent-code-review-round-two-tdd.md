@@ -31,7 +31,7 @@ than an implementer's.
 **Goals.** The implementation ticket that follows this document is done when:
 
 1. Every finding in section 4 is fixed and has the test named beside it, and each new test fails on
-   `b179c43` and passes after the fix.
+   `6e84068` and passes after the fix.
 2. Every finding in section 5 is fixed, except the ones that name a file for Jason to delete; for
    those, the code that referenced the file is gone and the build no longer needs it.
 3. The greps in section 12 return nothing: no personal email address, no credential, no machine
@@ -172,7 +172,7 @@ every other directive does. Confirmed by reading the full path.
 
 **Test.** `analyze_same_session.rs`: create a table with 20 rows and an index, `ANALYZE` on the
 same connection, and assert `EXPLAIN QUERY PLAN` (or the binder's `analysed_rows`) reports 20 and
-not 1,048,576, with no reopen. Fails on `b179c43`.
+not 1,048,576, with no reopen. Fails on `6e84068`.
 
 ### H2. `VACUUM` reopens the connection on `OsVfs`, whatever VFS it was opened on
 
@@ -212,7 +212,7 @@ Confirmed by reading the full path.
 **Test.** `vacuum_on_vfs.rs`: open on `MemoryVfs`, insert, delete, `VACUUM`, assert no file exists
 on disk at the path string, assert a later `SELECT` still answers, and assert the connection's VFS
 is still the `MemoryVfs` instance. Then move `vacuum_crash.rs` off real files onto `SimVfs` and add
-one cut inside `rename`. Fails on `b179c43`.
+one cut inside `rename`. Fails on `6e84068`.
 
 ### H3. Trigger depth: 32 is enforced, 1000 is advertised, and the executor's check is unreachable
 
@@ -241,7 +241,7 @@ Confirmed by reading the full path.
 
 **Test.** A differential case in `dml_differential.rs` or a new `trigger_depth.rs` building the
 forty table chain against the oracle; and one asserting that `.limit trigger_depth 10` then an
-eleven deep chain is refused with a message naming 10. Fails on `b179c43`.
+eleven deep chain is refused with a message naming 10. Fails on `6e84068`.
 
 ### H4. `inillucent-core` search silently truncates a query of the wrong width and accepts NaN
 
@@ -277,7 +277,7 @@ today, so this is latent: one `dbg!`, one `#[derive(Debug)]` on a struct that ho
 the password. Confirmed by reading the full path.
 
 **Test.** `debug_redacts_the_password` beside the `Display` test, asserting `format!("{url:?}")`
-does not contain the password. Fails on `b179c43`.
+does not contain the password. Fails on `6e84068`.
 
 ### H6. The scorecard records an unredacted command line with a password and this machine's paths
 
@@ -286,7 +286,7 @@ returns it. The sibling field, the baseline database URL, goes through `redact` 
 which replaces the password with `***`. The command line does not, and `--database-url` is an
 argument. So the tracked `inillucent-scorecard.md:220` and `inillucent-scorecard.json` (one hit)
 carry `postgres://postgres:inillucent@127.0.0.1:5433/inillucent_synth` in clear, beside the
-redacted copy, and the same table (`scorecard.md:220-224`) carries `C:\jason\dev\inillucent\...` and
+redacted copy, and the same table (`scorecard.md:220-224`) carries `<machine path>\inillucent\...` and
 `J:/inillucent-embeddings/...`.
 
 The password is for a local synthetic corpus database and has been in the history since the
@@ -304,13 +304,13 @@ a `postgres://u:p@h/d` token and an absolute path produces neither `p` nor the d
 
 ### H7. Personal addresses, an account name and an incident story in tracked content
 
-Three places, all confirmed by grep at `b179c43`:
+Three places, all confirmed by grep at `6e84068`:
 
-- `packaging/PUBLISHING.md:264,341-393,560-582`: the npm username, `jasonlmcaffee@gmail.com`,
+- `packaging/PUBLISHING.md:264,341-393,560-582`: the npm username, `<account address>`,
   `the.black.rainbow.labs@gmail.com`, the account deletion story from task-1898, a live
   `npmjs.com/settings/<user>/tokens` URL, and references to `~/.claude/CLAUDE.md`.
-- `crates/inillucent-core/src/tokenize.rs`: `jasonlmcaffee@gmail.com` eight times and
-  `gordon@360water.com` at lines 184, 231, 232, 437, 441, 519, 520 as tokenizer fixtures. The same
+- `crates/inillucent-core/src/tokenize.rs`: `<account address>` eight times and
+  `gordon@example.invalid` at lines 184, 231, 232, 437, 441, 519, 520 as tokenizer fixtures. The same
   file already uses `jason@example.com` elsewhere.
 - `crates/inillucent-remote/src/lib.rs:8` and `url.rs:5`: `postgres://jason@127.0.0.1:5432/corpus`
   as the doc example, where every other example in the crate uses `user`.
@@ -318,8 +318,8 @@ Three places, all confirmed by grep at `b179c43`:
 **Fix.** Rewrite `PUBLISHING.md` to what a contributor needs (which registries exist, how an
 archive is built and verified, what a maintainer with the accounts does), with no account names,
 addresses or incident narrative. Replace every fixture address with an `example.com` one, keeping
-the byte layout the test depends on (the `360water` fixture exists because its domain holds a
-digit; `gordon@360water.example` keeps that property). Replace the two doc examples with `user`.
+the byte layout the test depends on (the `example-company` fixture exists because its domain holds a
+digit; `gordon@example-company.example` keeps that property). Replace the two doc examples with `user`.
 
 **Test.** The section 12 greps, run by `tools/doc-facts/check.mjs` as a new assertion so they stay
 empty.
@@ -327,7 +327,7 @@ empty.
 ### H8. Two binary files named `--db` are tracked under `crates/inillucent-compat`
 
 `crates/inillucent-compat/--db` (131,072 bytes, magic `RDB2`) and
-`crates/inillucent-compat/--db-wal.0000000001` (64 bytes), committed in `654cc79` with task-1932's
+`crates/inillucent-compat/--db-wal.0000000001` (64 bytes), committed in `c9f82ea` with task-1932's
 phase A. A smoke command read its own `--db` flag as the path. `.gitignore`'s comment says no
 `.rdb` has ever been tracked except the documented example, and it is right about `.rdb`; these two
 have no extension, which is why the ignore rule missed them.
@@ -367,7 +367,7 @@ This is the class of defect round one's H10 was about, one layer down.
 detector that a bare `return None;` or `return;` inside a test is an early return that must say
 why. Confirmed by reading.
 
-**Test.** The widened policy test itself, which fails on `b179c43` at the two sites; and
+**Test.** The widened policy test itself, which fails on `6e84068` at the two sites; and
 `cargo test -p inillucent-core --features onnx` on a machine with no model prints five skip lines.
 
 ## 5. Medium findings
@@ -505,7 +505,7 @@ agree on what green means.
 | where | says | is |
 |---|---|---|
 | `Cargo.toml:50`, the release profile comment | "eighteen crates" | 29 workspace members |
-| `docs/repository.md:98,107` | 149 targets, 2,646 tests | 165 targets, 2,777 tests at `d8f7f30`; re-measure at the implementation commit with `tools/doc-facts/check.mjs --run-tests` |
+| `docs/repository.md:98,107` | 149 targets, 2,646 tests | 165 targets, 2,777 tests at `51309f8`; re-measure at the implementation commit with `tools/doc-facts/check.mjs --run-tests` |
 | `tests/inillucent-testing-tdd.md:447,464` | 2,642 tests | the same re-measurement |
 | `crates/inillucent-wal/src/writer.rs:442`, `crates/inillucent-compat/tests/durability.rs:1192`, `free_map_checkpoint_crash.rs:557`, `tests/inillucent-testing-tdd.md:576` | credit a finding to "Codex Sol" or `codex exec review` | the house style credits a ticket number; write "the task-N review found" |
 | `tests/performance-history.tsv`, eight rows | machine `jason-25` | a personal hostname in shipped data; relabel at the next measurement and say in `docs/performance.md` what the label means |
@@ -571,10 +571,10 @@ None of these is an implementer's call, and an agent does not delete a file it d
 build, because an unreferenced `.rs` file is not compiled):
 
 ```sh
-git -C C:/jason/dev/inillucent rm crates/inillucent-compat/--db crates/inillucent-compat/--db-wal.0000000001
-git -C C:/jason/dev/inillucent rm crates/inillucent-transaction/src/state.rs
-git -C C:/jason/dev/inillucent rm crates/inillucent-storage/src/check.rs
-git -C C:/jason/dev/inillucent rm crates/inillucent-catalog/src/rebuild.rs
+git -C <machine path>/inillucent rm crates/inillucent-compat/--db crates/inillucent-compat/--db-wal.0000000001
+git -C <machine path>/inillucent rm crates/inillucent-transaction/src/state.rs
+git -C <machine path>/inillucent rm crates/inillucent-storage/src/check.rs
+git -C <machine path>/inillucent rm crates/inillucent-catalog/src/rebuild.rs
 ```
 
 **Decision 1. The git history.** 89 of the 327 commits on `main` carry a `Co-Authored-By: Claude`
@@ -681,7 +681,7 @@ compiler is the proof: if a deletion was wrong, the build fails, not a test.
 
 ## 10. Testing strategy
 
-Functional tests, registered in `tests/selection.toml`, each failing on `b179c43`:
+Functional tests, registered in `tests/selection.toml`, each failing on `6e84068`:
 
 | test | proves |
 |---|---|
@@ -718,9 +718,9 @@ closes.
 ## 12. Acceptance criteria for the implementation ticket
 
 1. Every test in section 10 exists, is in `tests/selection.toml`, and the commit message says which
-   fail on `b179c43`.
+   fail on `6e84068`.
 2. These greps over `git ls-files` return nothing: `jasonlmcaffee`, `black.rainbow.labs@`,
-   `360water`, `postgres:inillucent@`, `C:\jason`, `C:/jason`, `J:/inillucent`, `jason-25`,
+   `example-company`, `postgres:inillucent@`, `C:\jason`, `C:/jason`, `J:/inillucent`, `jason-25`,
    `Codex Sol`, `codex exec`, `npmjs.com/settings`, `~/.claude`, `opencode.json`, `aiservice-web`.
    `tools/doc-facts/check.mjs` runs them.
 3. `python -c "import inillucent; print(inillucent.__version__)"` prints 0.1.2, `NATIVE_VERSION` in

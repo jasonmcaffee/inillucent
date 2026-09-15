@@ -85,18 +85,23 @@ cannot do that yet" instead of "check your spelling".
 ## Versioning
 
 The module is in a subdirectory, so its import path carries that subdirectory
-and the git tag that releases it carries the same prefix: `packages/go/v0.1.0`.
+and the git tag that releases it carries the same prefix: `packages/go/v0.1.2`.
 That prefix is Go's own rule for a nested module, not a choice made here.
 
-The prefix belongs to the tag. The version you ask for is the plain version:
+The prefix belongs to the tag. The version you ask for is the plain version, and
+`@latest` is the one to write down because it cannot go stale and point at a
+release that has been superseded:
 
 ```sh
-go get github.com/Black-Rainbow-Labs/Inillucent/packages/go@v0.1.0
+go get github.com/Black-Rainbow-Labs/Inillucent/packages/go@latest
 ```
 
-`@packages/go/v0.1.0` is rejected - `invalid version: version
-"packages/go/v0.1.0" invalid: disallowed version string`. `@latest` works too
-and resolves to the newest prefixed tag.
+`@packages/go/v0.1.2` is rejected - `invalid version: version
+"packages/go/v0.1.2" invalid: disallowed version string`.
+
+**Do not install `@v0.1.0`.** Its command directory was `cmd/inillucent`, so it
+built a program that had to overwrite itself to finish its own job; `go.mod`
+carries the same warning.
 
 ## Running the tests
 
@@ -106,3 +111,29 @@ that never had it:
 ```sh
 go install ./cmd/inillucent-install && go test ./...
 ```
+
+## The API
+
+Every method this binding has. The worked example each one appears in is the link; nothing here is
+a summary of a method that does not exist, because
+`cargo test -p inillucent-compat --test documentation` reads this table and fails on a name the
+binding source does not declare.
+
+| what | one line |
+|---|---|
+| `Open(path)` | a `*DB` over a database file. |
+| `DB.Query(ctx, sql, params...)` | run one `SELECT` and return a `Result`. |
+| `DB.Exec(ctx, sql, params...)` | run one statement for its effect and return how many rows it changed. |
+| `DB.Batch(ctx, sql)` | run several statements separated by semicolons. |
+| `DB.Describe(ctx, table)` | one table's columns. |
+| `DB.Tables(ctx)` | every table in the database. |
+| `DB.Search(ctx, table, query, k)` | the k nearest rows of a retrieval index. |
+| `DB.Run(ctx, command, args)` | any command of the command line, for the ones the methods above do not wrap. |
+| `Result.Field(name, into)` | one column of the first row, decoded into a Go value. |
+| `Result.Maps()` | every row as a map, for a caller that would rather not name columns. |
+| `Version(ctx)` | the version of the program this package found. |
+| `Unsupported(err)` | whether the failure was "this engine has not built that" rather than "you typed it wrong". |
+| `Error` | one failure, with its status and its message. |
+| `Args` | the arguments a `Run` takes, as a map. |
+
+Every call goes through the command line, for the reason the npm package's table gives.

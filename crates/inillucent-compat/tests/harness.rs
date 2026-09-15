@@ -471,6 +471,31 @@ fn the_registers_match_the_engine() {
     }
 }
 
+/// `docs/pragmas.md` is what the register says, to the byte.
+///
+/// **The same arrangement the command table has had since it was written
+/// (task-1961, A16).** The engine recognises 85 pragma names and the
+/// documentation mentioned 40, which is what a hand-written feature list always
+/// comes to. Generated and checked, it cannot drift.
+#[test]
+fn the_pragma_page_matches_the_register() {
+    let path = workspace_root().join("docs/pragmas.md");
+    let found = std::fs::read_to_string(&path)
+        .unwrap_or_else(|_| {
+            panic!(
+                "{} is missing; run `cargo run -p inillucent-compat --bin inillucent-obligations`",
+                path.display()
+            )
+        })
+        .replace("\r\n", "\n");
+    assert_eq!(
+        found,
+        inillucent_compat::obligations::pragma_page(),
+        "{} is out of date; run `cargo run -p inillucent-compat --bin inillucent-obligations`",
+        path.display()
+    );
+}
+
 /// The registers have to be big enough to be describing the whole surface.
 ///
 /// A generator that silently produced nothing would agree with an empty file
@@ -526,7 +551,7 @@ fn the_workspace_obeys_the_dependency_contract() {
 
 /// Every path in `[workspace] members` must exist and hold a `Cargo.toml`.
 ///
-/// `1854f3d` added `drivers/inillucent-driver` and `drivers/inillucent-driver-capi`
+/// `3969906` added `drivers/inillucent-driver` and `drivers/inillucent-driver-capi`
 /// to the members list while `drivers/` was untracked and not ignored, so the
 /// directory existed on exactly one machine and `cargo metadata` on a fresh
 /// clone exited 101 before reading a line of Rust. Nothing in the suite noticed,

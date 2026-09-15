@@ -40,7 +40,7 @@ super-journal, which is SQLite's own multi-file commit adapted to a redo-only lo
 
 ## Problem statement
 
-Measured on the tree at `9796b16`, with the pinned SQLite 3.53.4 present:
+Measured on the tree at `644557c`, with the pinned SQLite 3.53.4 present:
 
 ```
 attach.rs        4 passed, 13 failed
@@ -88,7 +88,7 @@ Every one of the fourteen was run and its panic read; the per-test evidence is i
 So thirteen of the fourteen cannot pass while the oracle has to read an inillucent file, and the
 fourteenth cannot pass without a VDBE. **None of them is about `ATTACH` or `temp`.**
 
-The file-format half is the same class as the sixteen tests commit `a1ccfe1` moved to `_junk/` —
+The file-format half is the same class as the sixteen tests commit `f4b9059` moved to `_junk/` —
 "they failed because the promise was withdrawn, not because the engine was wrong". They are **not**
 touched by this work and cannot be made to pass by it. The recommendation is at the end of this document; no file is
 deleted or moved by this ticket.
@@ -555,9 +555,9 @@ which leaves inillucent at 42.2-44.9 ms against task-1838's 43.0-45.1 ms.
 ### `schema_forms.rs` — the recommendation
 
 Not a deletion and not a move; this ticket touches neither. Recorded for Jason's ruling, which is the
-same ruling `a1ccfe1` already made for the other sixteen:
+same ruling `f4b9059` already made for the other sixteen:
 
-- **Retire the thirteen to `_junk/schema_forms.rs`**, as `a1ccfe1` retired the other sixteen, and for
+- **Retire the thirteen to `_junk/schema_forms.rs`**, as `f4b9059` retired the other sixteen, and for
   the reason it gave: the promise they check was withdrawn, and deleting them would delete the record
   of what was once promised. The differential corpus already grades views, triggers, generated
   columns and `ALTER` on *logical* answers, which is what survives the withdrawal.

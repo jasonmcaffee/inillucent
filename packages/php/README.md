@@ -80,3 +80,23 @@ would be worse than not shipping one.
 `composer.json` is at the **repository root**, not in this directory, because
 Packagist reads a repository rather than a subdirectory. This directory holds
 the source it autoloads.
+
+## The API
+
+Every method this binding has. The worked example each one appears in is the link; nothing here is
+a summary of a method that does not exist, because
+`cargo test -p inillucent-compat --test documentation` reads this table and fails on a name the
+binding source does not declare.
+
+| what | one line |
+|---|---|
+| `new Inillucent(path)` | open a database. |
+| `Inillucent::run(command, arguments)` | run one command of the command line and return its parsed JSON. |
+| `Inillucent::query(sql, params, limit)` | run one `SELECT` and return its rows. |
+| `Inillucent::exec(sql, params)` | run one statement for its effect and return how many rows it changed. |
+| `Inillucent::batch(sql)` | run several statements separated by semicolons. |
+| `Inillucent::describe(table)` | one table's columns. |
+| `Inillucent::tables()` | every table in the database. |
+| `Error::isUnsupported()` | whether the failure was "this engine has not built that" rather than "you typed it wrong". |
+
+Every call goes through the command line, for the reason the npm package's table gives.

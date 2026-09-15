@@ -2,7 +2,7 @@
 
 ## Introduction
 
-`inillucent-testrun --strict` exited 1 at `00a76eb` on two targets, and neither failure was real.
+`inillucent-testrun --strict` exited 1 at `973b4c9` on two targets, and neither failure was real.
 `inillucent::budget` failed in the full run and passes 3 of 3 in about a second on its own;
 `inillucent-bench` was marked FAILED in the full run and exits 0 with 156 passing tests on its own.
 The box had four agents working on it at the time.
@@ -55,7 +55,7 @@ guarding.
 `inillucent-bench` loads the ONNX runtime and its CUDA provider, and the file's own comment already
 records this failure mode from task-1868: with `--nocapture` it "died at teardown with `0xC0000409`
 in two of three full runs while passing every one of its 156 tests". `--show-output` made it rarer,
-not impossible; the run at `00a76eb` hit it again with four agents on the box.
+not impossible; the run at `973b4c9` hit it again with four agents on the box.
 
 So the process printed `test result: ok. 156 passed; 0 failed` and then exited non-zero. The runner
 had that transcript in hand — the `Outcome::status` field's own doc comment describes exactly this

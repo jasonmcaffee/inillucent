@@ -21,6 +21,10 @@ Ordinary search matches words. If the page says "shipping a new version" and you
 
 Every term in this table appears later in the document. Nothing else is assumed.
 
+The storage and SQL words - page, B-tree, WAL, pragma, rowid, collation - are in
+[the glossary](glossary.md), which carries this table's terms too and is the one place to look up
+a word from either half of the engine.
+
 | Term | What it means |
 |---|---|
 | **Corpus** | The whole body of text being searched. Here: 186,781 pieces of text drawn from 39,366 documents, assembled from public sources by this repository so every measurement can be reproduced. |

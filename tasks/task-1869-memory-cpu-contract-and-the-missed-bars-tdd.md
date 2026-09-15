@@ -13,7 +13,7 @@ silently regress them, to close (or price) the three elapsed-time bars that have
 several tickets, and to fix the register-completeness and function-surface gaps the audit found.
 
 Everything measured below was taken on 2026-09-08 on this box, on the working tree at
-`a35932f` plus its uncommitted task-1860 remainder, with `--scale medium --page-size 32768`.
+`16db298` plus its uncommitted task-1860 remainder, with `--scale medium --page-size 32768`.
 
 ## Goals and Non-Goals
 

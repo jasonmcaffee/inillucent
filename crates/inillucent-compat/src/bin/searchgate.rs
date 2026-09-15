@@ -205,6 +205,22 @@ fn implausible(documents: usize, sql: &str, rows: &[Vec<String>]) -> Option<Stri
 /// @param documents - how many documents to index
 /// @param rounds - how many rounds to time
 fn run(documents: usize, rounds: usize) -> Result<bool, String> {
+    // **A corpus of nothing is a refusal, not a fast run (task-1961, T1).**
+    // Every check below passed on an empty corpus: `count(*)` answered `0`,
+    // which is exactly the number of documents there are, and every other
+    // query answered no rows, which is not more rows than the corpus holds. So
+    // `--documents 0` built an index with nothing in it, timed it, printed
+    // "one pass of every query: 0.004 ms" and exited zero. There is no number
+    // in that report about this engine.
+    if documents == 0 {
+        return Err(
+            "a corpus of 0 documents measures nothing; pass --documents with a positive number"
+                .to_string(),
+        );
+    }
+    if rounds == 0 {
+        return Err("0 rounds times nothing; pass --rounds with a positive number".to_string());
+    }
     let area = std::env::temp_dir().join("inillucent-searchgate");
     let _ = std::fs::create_dir_all(&area);
 
@@ -227,7 +243,7 @@ fn run(documents: usize, rounds: usize) -> Result<bool, String> {
     }
     let _ = std::fs::remove_file(&path);
     let database = Database::open(&path).map_err(|error| format!("open: {error}"))?;
-    let connection = database.connect();
+    let connection = database.session();
     let build_started = Instant::now();
     for statement in &statements {
         connection
@@ -242,6 +258,7 @@ fn run(documents: usize, rounds: usize) -> Result<bool, String> {
     println!();
     println!("## answers");
     let mut correct = true;
+    let mut found_any = false;
     for query in QUERIES {
         let rows = query_rows(&connection, query)?;
         let repeated = query_rows(&connection, query)?;
@@ -255,6 +272,7 @@ fn run(documents: usize, rounds: usize) -> Result<bool, String> {
             );
             correct = false;
         } else {
+            found_any = found_any || !rows.is_empty();
             println!("  {:<58} plausible  {} rows", query, rows.len());
         }
     }
@@ -262,6 +280,17 @@ fn run(documents: usize, rounds: usize) -> Result<bool, String> {
         println!();
         println!("## verdict: a query's answer was not the query's own to give");
         return Ok(false);
+    }
+    // **At least one query has to have found something.** A corpus that built
+    // but indexed nothing answers every query with no rows, and every one of
+    // those answers is plausible by the test above: no rows is not more rows
+    // than the corpus holds. The clock below would then time an index that
+    // holds nothing, which is the shape `crates/inillucent-compat/tests/
+    // gates_fail_closed.rs` exists to catch.
+    if !found_any {
+        return Err(format!(
+            "no query found a single row over {documents} documents, so the index holds nothing and there is nothing to time"
+        ));
     }
 
     // The clock.

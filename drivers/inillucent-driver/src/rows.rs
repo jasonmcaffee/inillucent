@@ -35,6 +35,32 @@ use std::time::Duration;
 use crate::value::{Column, Value};
 
 /// The result of one statement.
+///
+/// ```
+/// # use inillucent_driver::{Database, Result, Value};
+/// # fn main() -> Result<()> {
+/// # let directory = std::env::temp_dir().join(format!("inillucent-doc-rows-{}", std::process::id()));
+/// # std::fs::create_dir_all(&directory).ok();
+/// let database = Database::open(directory.join("app.rdb"))?;
+/// let connection = database.session();
+/// connection.execute_batch("CREATE TABLE note (id INTEGER PRIMARY KEY, body TEXT)")?;
+/// connection.execute("INSERT INTO note VALUES (1, 'hello')", &[])?;
+///
+/// let rows = connection.query("SELECT id, body FROM note", &[], 10)?;
+/// assert_eq!(rows.rows.len(), 1);
+/// // Columns are read by name rather than by position, so a `SELECT *` whose
+/// // column order moved does not silently read the wrong cell.
+/// let body = rows.column("body").expect("the column is there");
+/// assert_eq!(rows.value(0, body).and_then(Value::text), Some("hello"));
+/// // `total` is the count the statement would have produced, independent of
+/// // the limit the caller asked for.
+/// assert_eq!(rows.total, 1);
+/// # drop(connection);
+/// # drop(database);
+/// # std::fs::remove_dir_all(&directory).ok();
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Rows {
     /// The result columns, empty for a statement that returns none.

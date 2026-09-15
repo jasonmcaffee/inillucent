@@ -177,6 +177,24 @@ function probe() {
   return { total: rows.length, same: by.same || 0, refused: by.refused || 0, differ: by['wrong-answer'] || 0, oursOnly: by['ours-only'] || 0 };
 }
 
+/**
+ * Reads the pragma register's own count out of `compat/api/pragmas.toml`.
+ *
+ * **A checked fact rather than a number somebody typed (task-1961, D3).** The
+ * engine recognised 68 and two documents said 67, which is the 67 SQLite's
+ * `pragma_list` reports rather than the 68 the register holds - a real
+ * distinction that nothing wrote down, so the two numbers read as one being
+ * wrong. `docs/pragmas.md` is generated from the register and
+ * `cargo test -p inillucent-compat --test harness` fails when they differ;
+ * this fails when a prose document names a number that is neither.
+ */
+function pragmaRegisterCount() {
+  const file = path.join(ROOT, 'compat', 'api', 'pragmas.toml');
+  if (!fs.existsSync(file)) return null;
+  const found = fs.readFileSync(file, 'utf8').match(/^count = (\d+)$/m);
+  return found ? Number(found[1]) : null;
+}
+
 /** Reads the register audit, which is where the pragma and collation counts come from. */
 function registers() {
   const file = path.join(ROOT, '_agent_output', 'feature-probe', 'registers', 'registers.json');
@@ -700,6 +718,7 @@ const checks = [
   assertWritten('command line verbs', verbs, /\b(\d+)\s+(?:command line )?(?:verbs|commands)\b(?!\s+(?:over MCP|served|an agent|as MCP))/i, /(?:dot|reference's)\s+$/),
   assertWritten('MCP tools', tools, /(\d+)\s+(?:of the (?:same|CLI's) commands served|MCP tools|tools an agent can call|tools an AI agent can call|of those commands over MCP|of the CLI's commands as MCP tools|of the same commands served)/i),
   assertWritten('shell dot commands', dots, /(\d+)\s+of (?:its|`sqlite3`'s|SQLite's) 65 dot commands/i),
+  assertWritten('pragmas in the register', pragmaRegisterCount(), /(\d+) pragmas this engine recognises/i),
   assertWritten('shell command line options', options?.total, /all (\d+) of (?:its|`sqlite3`'s) command line options/i),
   assertWritten('function names in the register', functions?.names, /(\d+) built[ -]in function names/i),
   assertWritten('JSON function names', functions?.json, /all (\d+) function names/i),

@@ -41,17 +41,27 @@ them out of `vcvars64.bat` once and export them into the shell before `cargo bui
 
 | group | crates | non test lines |
 |---|---|---|
-| shared foundation | `inillucent-base`, `inillucent-vfs`, `inillucent-value`, `inillucent-sim` | 15,431 |
+| shared foundation | `inillucent-base`, `inillucent-vfs`, `inillucent-value`, `inillucent-alloc` (the counting allocator the memory bar is measured through), `inillucent-sim` | 15,431 |
 | shared SQL front end | `inillucent-sql` (lexer, parser, binder, planner), `inillucent-scalar` (functions, JSON, window frames), `inillucent-catalog`, `inillucent-ext` (registry, virtual table contract, FTS5, R-Tree) | 37,400 |
 | the engine | `inillucent-pool`, `inillucent-wal`, `inillucent-tree`, `inillucent-txn`, `inillucent-exec`, `inillucent-engine`, `inillucent-model` (a test oracle), `inillucent-sqlite-reader` (import only) | 54,341 |
 | kept for reading SQLite files | `inillucent-storage`, `inillucent-transaction` — the old engine's pager and transaction manager, kept because `inillucent-sqlite-reader` reads a SQLite file through them and migrating away from SQLite is what that reader is for | 18,764 |
 | retrieval | `inillucent-core` (the engine), `inillucent-search` (the virtual table), `inillucent-bench` (the grading harness) | 29,825 |
 | facade and tooling | `inillucent` (a re-export of the engine), `inillucent-compat` (the manifest, the oracle, the gates, 77 test files), `inillucent-cli`, `inillucent-migrate`, `inillucent-remote` | 32,031 |
 
-`inillucent-engine::connect::Database` is the entry point: `open` creates or opens and recovers,
-`import` reads a SQLite file, and `connect` gives a connection with `execute_batch`, `query`,
-`prepare_with_tail` and `explain`. `inillucent::Database` is a re-export of it — the two surfaces do
-not differ, so there is no wrapper.
+**`inillucent-driver` is the public Rust API, and `inillucent` is a name for it.** `cargo add
+inillucent` gives `pub use inillucent_driver::*;` and nothing else: `Database::open`,
+`Database::session`, `Connection::query`, `Connection::prepare`, `Connection::begin` and the
+`Transaction` that rolls back when it is dropped. There were two public surfaces over one engine
+until task-1962, with different `Value`, `Error` and `Statement` types and nothing saying which to
+depend on; the driver won because it has the transaction, the `Rows` type, the cancel flag and the
+capability table checked in both directions, and because the C ABI and the four language packages
+already reach the engine through it.
+
+`inillucent-engine::connect::Database` is what the driver is built on and what `inillucent-cli`
+drives directly: `open` creates or opens and recovers, `import` reads a SQLite file, and `session`
+gives a connection with `execute_batch`, `query`, `prepare_with_tail`, `explain` and `begin`. It is
+called `session` rather than `connect` because two of them share one transaction, which `connect`
+reads as denying.
 
 The old engine was the one that reached SQLite file format parity: 264 of 271 capabilities passed,
 with seven optional ones missing. It was measured between 30% and 95% slower than SQLite across the
@@ -130,8 +140,14 @@ already removed the cause and nobody re-ran it, which is recorded in
   recorded schedule must replay an identical trace event for event.
 - **Crash campaigns**, in which a crash on either side of a checkpoint or a log retirement has to
   recover the same database.
-- **Eight fuzz targets** over the codecs. Every codec is also exercised with hundreds of thousands of
-  seeded random inputs and must return an error rather than panic on any of them.
+- **Eight fuzz targets** over the codecs, and a seeded twin of every one of them that runs under
+  `cargo test` on the pinned compiler. libFuzzer needs a nightly toolchain and a scheduled job, so a
+  regression only a fuzz run finds is a regression that ships; the twins are in
+  `crates/inillucent-base/tests/fuzz_seeded.rs`, `inillucent-tree`'s, `inillucent-pool`'s and
+  `inillucent-wal`'s, and each sweeps twenty thousand deterministic inputs through the decoder and
+  counts how many reached it, so a sweep that only ever exercised a refusal fails. The four
+  non-codec targets - `json`, `mysql`, `postgres`, `store` - have had theirs beside the code since
+  they were written.
 - **The locking protocol across two real processes**, not two handles in one, because advisory locks
   are per process and a same process test would pass against a broken implementation. A dead process
   must release its locks.

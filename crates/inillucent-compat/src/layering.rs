@@ -178,7 +178,7 @@ pub struct CrateManifest {
 /// This is the list `cargo` itself resolves before it compiles a line, so a
 /// member naming a directory that is not in the repository is not a slow build
 /// or a missing feature - it is `cargo metadata` exiting 101 on a fresh clone,
-/// which is what `1854f3d` did when it added `drivers/` without committing it.
+/// which is what `3969906` did when it added `drivers/` without committing it.
 /// The list is read by hand rather than through `cargo metadata` for the same
 /// reason `read_workspace` parses manifests: the check has to be able to run
 /// when the workspace does *not* resolve, which is precisely the case it exists

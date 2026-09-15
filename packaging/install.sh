@@ -16,10 +16,15 @@
 #   --bin-dir DIR     link the programs somewhere else (default ~/.local/bin)
 #   --uninstall       remove what this installed
 #
-# It downloads from inillucent.com rather than from GitHub, because the
-# repository is private and a private repository's release assets are private
-# too: an unauthenticated request for one answers 404. The site is public and
-# serves the same bytes and the same SHA256SUMS.
+# It downloads from inillucent.com rather than from GitHub. That was originally
+# because the repository was private and a private repository's release assets
+# are private too - an unauthenticated request for one answered 404 - and both
+# repositories are public as of task-1961. The site stays the download because
+# it is the one URL every installer on every platform reads: install.ps1, the
+# Homebrew formula, the Go cmd/inillucent-install and the PHP
+# bin/inillucent-install all read inillucent.com/downloads and check the SHA-256
+# against the published SHA256SUMS. One place to publish is one place to get
+# wrong.
 #
 # On macOS this needs no Apple account and no notarisation on the reader's side,
 # because a file fetched with curl carries no quarantine attribute. The signed
@@ -91,10 +96,12 @@ verify() {
   archive="$1"
   sums="$2"
   name="$(basename "$archive")"
-  # tr -d '' because a SHA256SUMS written on Windows arrives with CRLF, and
+  # tr -d '
+' because a SHA256SUMS written on Windows arrives with CRLF, and
   # awk on Linux keeps the carriage return in $NF - so the name never matches
   # and a correct download is reported as unpublished.
-  expected="$(tr -d '' < "$sums" | awk -v want="$name" '$NF == want { print $1 }' | head -1)"
+  expected="$(tr -d '
+' < "$sums" | awk -v want="$name" '$NF == want { print $1 }' | head -1)"
   if [ -z "$expected" ]; then
     echo "SHA256SUMS does not list $name" >&2
     exit 1

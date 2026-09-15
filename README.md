@@ -50,25 +50,24 @@ runs, and so does Ubuntu 24.04. **macOS has no prebuilt archive yet**, so the
 second command works on Linux today and reports that there is no release for
 Darwin; building it needs a Mac.
 
-Building from source needs the repository, and **the repository is private**, so
-there is no macOS route today. `git clone https://github.com/Black-Rainbow-Labs/Inillucent`
-answers 404 to everybody who is not the owner.
+Building from source is the macOS route until there is an archive:
 
-### From Go - not installable yet
+```sh
+git clone https://github.com/Black-Rainbow-Labs/Inillucent
+cargo install --path Inillucent/crates/inillucent-cli
+```
+
+### From Go
 
 ```sh
 go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent-install@latest
 inillucent-install
 ```
 
-That is the command, and it does not work yet. `go install` resolves a module
-through `proxy.golang.org`, which clones the repository with no credential, and
-the repository is private:
-
-```
-404  not found: module github.com/Black-Rainbow-Labs/Inillucent/packages/go:
-     git ls-remote ... fatal: could not read Username
-```
+`go install` resolves a module through `proxy.golang.org`, which clones the
+repository with no credential. The proxy serves it: `@latest` and `@v/list` both
+answer 200 to a signed-out caller, which `tools/check-public-urls.mjs` checks on
+every `tools/validate` run.
 
 The module and its tags are correct and the command starts working the day the
 repository is public. What it does then: `go install` builds a small program that
@@ -170,9 +169,8 @@ What exists today, and is installed by every route in [Install](#install):
   [The driver](drivers/README.md) documents it.
 - **A reference Python binding** at `drivers/bindings/python/inillucent.py`, which the `pip` package
   ships as its in process driver.
-- **The Go module** at `packages/go`. Its tags are pushed, and `go install`
-  cannot reach it while the repository is private - see
-  [From Go](#from-go---not-installable-yet).
+- **The Go module** at `packages/go`. Its tags are pushed and `proxy.golang.org`
+  serves it - see [From Go](#from-go).
 
 ```ts
 import { connect } from 'inillucent-client';
@@ -204,7 +202,8 @@ engine. [The driver](drivers/README.md) is the C ABI underneath, for anybody wri
 
 **SQLite's SQL, on its own storage.** Joins, common table expressions including recursive ones,
 triggers, foreign keys with all five referential actions, `ATTACH`, partial and expression indexes,
-`RETURNING`, `ON CONFLICT DO UPDATE`, 190 built in function names, 67 pragmas. 416 cases were run
+`RETURNING`, `ON CONFLICT DO UPDATE`, 190 built in function names,
+the 68 pragmas this engine recognises. 416 cases were run
 through this engine and through a pinned `sqlite3` 3.53.4 over a fresh database each, and every byte
 of both streams compared: **403 produce SQLite's exact bytes, none are refused and 7 answer
 differently**. Window functions were the last twelve to close: `OVER (...)`, `PARTITION BY`, the
@@ -314,17 +313,22 @@ each cost and how each was fixed:
 | | |
 |---|---|
 | [Product overview](docs/product-overview.md) | what inillucent is, who it is for, and the case for it against PostgreSQL with pgvector |
+| [Glossary](docs/glossary.md) | every word this documentation uses that a general programmer would not know, one sentence each |
 | [Getting started](docs/getting-started.md) | install, the four programs, a first database, the exit codes |
+| [Architecture in one page](docs/architecture-overview.md) | both engines in one diagram, one query across both halves, where the bytes live |
 | [SQL support](docs/sql.md) | what runs, what differs from SQLite, and what is refused by name |
+| [Pragmas](docs/pragmas.md) | every pragma this engine recognises, generated from the register |
 | [Vector search](docs/vector-search.md) | `VECTOR(N)` columns, HNSW indexes, `inillucent_search`, hybrid ranking |
 | [Embeddings](docs/embeddings.md) | the embedding pipeline, running it on GPUs, comparing models |
 | [Migrating](docs/migrating.md) | from a SQLite file, a PostgreSQL server or a MySQL server |
-| [Architecture](docs/architecture.md) | how the retrieval engine works, from first principles |
+| [The retrieval engine](docs/architecture.md) | how searching by meaning works, from first principles |
+| [The relational engine](docs/relational-architecture.md) | the SQL half: storage, transactions, the log, recovery, backup, budgets |
 | [Performance](docs/performance.md) | against SQLite: speed, processor time, memory, disk |
 | [Feature comparison](docs/feature-comparison.md) | the full 416-case probe, feature by feature |
 | [Retrieval quality](docs/retrieval-quality.md) | against pgvector, and how the grading decides a verdict |
 | [Where the vectors live](docs/vector-residency.md) | held in memory or read from the file, and what each costs |
 | [Roadmap](docs/roadmap.md) | what is not there yet, in the order it is being worked |
+| [Closed items](docs/closed-items.md) | what came off the roadmap, with the measurement that closed each |
 | [Repository](docs/repository.md) | the crates, building it, and running the tests |
 | [Dependency policy](docs/dependency-policy.md) | what a production crate may link, and why the list is short |
 | [Synthetic corpus](tests/synthetic-corpus.md) | building the public corpus every retrieval number is measured on |

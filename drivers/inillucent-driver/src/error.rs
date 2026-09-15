@@ -97,6 +97,30 @@ impl Status {
 }
 
 /// One failure.
+///
+/// ```
+/// # use inillucent_driver::{Database, Status, Value};
+/// # let directory = std::env::temp_dir().join(format!("inillucent-doc-error-{}", std::process::id()));
+/// # std::fs::create_dir_all(&directory).ok();
+/// let database = Database::open(directory.join("app.rdb")).expect("it opens");
+/// let connection = database.session();
+///
+/// // A statement about a table that is not there is a refusal a caller can
+/// // read, and the connection is still usable afterwards.
+/// let failure = connection
+///     .query("SELECT * FROM nothing_of_the_sort", &[], 1)
+///     .expect_err("a missing table is an error");
+/// assert!(!failure.message.is_empty());
+/// assert!(connection.query("SELECT 1", &[], 1).is_ok());
+///
+/// // `Unsupported` is a different answer from `Syntax`, which is the whole
+/// // point of the driver: one says "this engine has not built that", the
+/// // other says "you typed it wrong".
+/// assert_ne!(Status::Unsupported, Status::Syntax);
+/// # drop(connection);
+/// # drop(database);
+/// # std::fs::remove_dir_all(&directory).ok();
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Error {
     /// What kind of failure it is.

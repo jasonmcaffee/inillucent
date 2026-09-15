@@ -92,7 +92,7 @@ never reads `IndexInfo::conflict`.
   defect that happens to be reachable through conflict handling, not the missing statement boundary
   this ticket is about. Filed as its own high-priority ticket with the `CHECK ... ON CONFLICT` parse
   error and the `OR REPLACE` default substitution above, and the probe harness goes with it.
-- The pre-existing red binaries in the workspace suite (4 of 196 at `8894378`).
+- The pre-existing red binaries in the workspace suite (4 of 196 at `baa7252`).
 
 ## Design
 
@@ -253,7 +253,7 @@ both directions.
 
 | | agreed | differed |
 |---|---|---|
-| before (`8894378`) | 20 | 34 |
+| before (`baa7252`) | 20 | 34 |
 | the statement boundary alone | 32 | 22 |
 | plus the `FAIL`/`ROLLBACK`/`RAISE` tags | 46 | 8 |
 | plus the three transaction-statement refusals | **48** | **6** |
@@ -288,7 +288,7 @@ column, and a row whose value is large enough to be stored out of line.
   row, so the counter keeps a rowid the statement assigned and then undid.
 - **A `DESC` index inverts its own range bounds** — `SELECT count(*) FROM t WHERE c >= 10` answers 1
   of 3 rows. Reproduced on a script with no failure, no conflict and no transaction in it, and
-  identical on the release shells built at `8894378` and here, so it predates this ticket entirely.
+  identical on the release shells built at `baa7252` and here, so it predates this ticket entirely.
   It is the read-path defect task-1849 named and closed for *imported* indexes by dropping them;
   `CREATE INDEX ... DESC` in this engine builds one anyway and the planner then reads its direction
   off a catalog the tree disagrees with. Filed as **task-1855**.
@@ -301,10 +301,10 @@ probe reads its length and prefix back to say so.
 ### The tests fail without the fix
 
 Seven tests added to `new_engine_writes.rs`. Proved rather than assumed: `git worktree add --detach`
-at `8894378`, the test file copied in and nothing else, and the run is **14 passed, 7 failed** — one
+at `baa7252`, the test file copied in and nothing else, and the run is **14 passed, 7 failed** — one
 failure per new test. On the working tree it is **21 passed, 0 failed**. The release binaries say the
 same thing directly: the ticket's first repro answers `11|1  2|2  12|3` from the release shell built
-at `8894378` and `1|1  2|2  12|3` from the one built here, which is SQLite's answer.
+at `baa7252` and `1|1  2|2  12|3` from the one built here, which is SQLite's answer.
 
 ### The gate
 

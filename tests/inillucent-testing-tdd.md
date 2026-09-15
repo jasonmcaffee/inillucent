@@ -475,6 +475,41 @@ a full run because of the same contention. **They are the floor of a full
 parallel run**: no scheduling improves on the longest single binary. Everything
 else finishes in the time they take.
 
+### 6.1.1 What the hardware has to be, and what contention means
+
+**Every figure in this section is from one machine**: Windows 11, a 24-core
+processor, 127.5 GB of memory, an NVMe disk, and an RTX 5090. The parallel
+runner uses all 24 cores, so a machine with fewer scales the wall clock roughly
+by the ratio while the processor-time total stays where it is.
+
+Two tiers want hardware the others do not, and until task-1961 the table above
+did not say so:
+
+| tier | what it needs | without it |
+|---|---|---|
+| `retrieval` | **a CUDA GPU for the embedding arm** - the figures here are an RTX 5090 - and ONNX Runtime plus the model weights, which `inillucent setup-embeddings` installs | `inillucent-core::lib` and `inillucent-bench` report success having embedded nothing. `--strict` counts them and names them, which is the only reason a green run on a machine without a GPU is not mistaken for a green run on one with it. |
+| `retrieval` | **the disk**, for the index store: the 600,589-chunk corpus is 3.1 GB on disk and the suite writes and re-reads it | the corpus-backed targets skip; the smaller ones run from a generated corpus and are disk-bound rather than GPU-bound |
+| fuzzing | **a nightly toolchain**, because libFuzzer needs one, and hours rather than seconds | nothing runs. `rust-toolchain.toml` pins stable, so `cargo fuzz` is a deliberate, separate step on a machine that has installed a nightly beside the pin. The seeded twins in `crates/*/tests/fuzz_seeded.rs` are what runs under the pinned compiler, in under a second each. |
+
+**"Under contention" means other processes on the same machine**, and in this
+repository that is nearly always other agent terminals building or testing in
+the same tree. It is not contention between the runner's own 24 jobs, which is
+what the phrase reads as: the runner schedules one binary per core and the
+binaries do not share a file. A quiet box and a busy one differ by about a
+factor of three on the two longest targets:
+
+| target | quiet box | busy box |
+|---|---:|---:|
+| `inillucent-core::lib` | ~110 s | 261 s |
+| `inillucent-bench::inillucent-bench` | ~105 s | 249 s |
+| `inillucent-testrun` (everything) | ~300 s | 771 s |
+
+The quiet-box figures are what to expect from a checkout on an idle machine;
+the busy-box column is §6.3's table, taken while several agents were working in
+this tree. **A timing read on a busy box is not a defect and is not worth
+chasing**, which is why §1.7 says a count is the thing to assert on and a
+duration is not.
+
 ### 6.2 Tier by tier
 
 Each tier run in isolation (`--tier <name>` alone), not carved out of the full

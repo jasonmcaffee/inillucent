@@ -699,6 +699,35 @@ kind = "test"
 name = "value_round_trip"
 tier = "unit"
 
+# The stable-toolchain twins of the eight codec fuzz targets (task-1961, T5).
+# `docs/repository.md` said every codec was exercised with hundreds of thousands
+# of seeded inputs; before these four files that was true of `json`, `mysql`,
+# `postgres` and `store`, and of none of the eight codecs the sentence is about.
+# In the unit tier: no file is opened and each sweep is under a second.
+[[target]]
+package = "inillucent-base"
+kind = "test"
+name = "fuzz_seeded"
+tier = "unit"
+
+[[target]]
+package = "inillucent-tree"
+kind = "test"
+name = "fuzz_seeded"
+tier = "unit"
+
+[[target]]
+package = "inillucent-pool"
+kind = "test"
+name = "fuzz_seeded"
+tier = "unit"
+
+[[target]]
+package = "inillucent-wal"
+kind = "test"
+name = "fuzz_seeded"
+tier = "unit"
+
 [[target]]
 package = "inillucent-vfs"
 kind = "test"
@@ -1317,6 +1346,16 @@ covers = ["inillucent-alloc"]
 
 # The one command table against the two surfaces it generates. Also arrived with
 # the command surface without a row.
+# The gate programs refuse when their prerequisite is absent, and measure when
+# it is not. In the tooling tier because it drives the built gate binaries
+# rather than the engine, and because one case per gate takes a real, if small,
+# measurement.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "gates_fail_closed"
+tier = "tooling"
+
 [[target]]
 package = "inillucent-compat"
 kind = "test"

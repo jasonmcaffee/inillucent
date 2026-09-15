@@ -50,7 +50,7 @@ which are in scope because both are the reason the anomaly looked like one.
 
 ### One `.rdb`, measured today, tree by tree
 
-`dbstat` over a **freshly imported** medium fixture at 32 KiB pages, on `8fc775d`:
+`dbstat` over a **freshly imported** medium fixture at 32 KiB pages, on `229b9b7`:
 
 | tree | pages | MiB | entries | entries/page | bytes/entry |
 |---|---|---|---|---|---|

@@ -245,7 +245,7 @@ records the one time a wrong answer got as far as being stored (a trigger
 written to the schema and never fired) as a defect that was fixed by refusing.
 
 But **a refusal is only useful to an application that can recognise one**, and
-today it cannot. Measured in the tree at `b94b8da`:
+today it cannot. Measured in the tree at `ec0d84f`:
 
 - `inillucent-exec/src/physical.rs:703` is one helper behind all 37 of that
   crate's refusals:
@@ -268,10 +268,10 @@ rather than "check your spelling", would have to match on the sentence. Matching
 on a sentence is the failure mode this repository has a name for: it works until
 somebody improves the wording.
 
-#### 4.2 What the engine cannot do, as of `b94b8da`
+#### 4.2 What the engine cannot do, as of `ec0d84f`
 
 > **Read as a dated snapshot, and it has already moved.** This table was taken
-> at `b94b8da` and is left as it was written, because §4.4's whole argument is
+> at `ec0d84f` and is left as it was written, because §4.4's whole argument is
 > that a capability list decays and the instrument is what catches it - so a
 > table quietly edited later would be the thing this section warns against.
 >

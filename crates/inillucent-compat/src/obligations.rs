@@ -85,6 +85,80 @@ fn pragmas() -> String {
     out
 }
 
+/// Returns `docs/pragmas.md`, the pragma table as a page a person reads.
+///
+/// **Generated for the same reason the command table is (task-1961, A16).**
+/// `crates/inillucent-engine/src/pragma.rs` recognises 85 names and the
+/// documentation mentioned 40, which is the shape of every hand-written feature
+/// list: it is right on the day it is written and nobody notices when it stops
+/// being. The command table has been generated from
+/// `crates/inillucent-cli/src/command/registry.rs` and checked by
+/// `--test command_parity` since it was written; this is the same arrangement
+/// for pragmas.
+///
+/// The register is the *structural* half - the name, the columns the answer
+/// has, whether it takes an argument - and deliberately says nothing about what
+/// each pragma does. A sentence per pragma would be prose in a generated file,
+/// which is the thing that goes stale; the page points at `docs/sql.md` for
+/// behaviour.
+pub fn pragma_page() -> String {
+    let mut entries: Vec<&inillucent_sql::pragma_register::PragmaSpec> =
+        inillucent_sql::pragma_register::REGISTER.iter().collect();
+    entries.sort_by(|left, right| left.name.cmp(right.name));
+    let taking = entries.iter().filter(|entry| entry.takes_argument).count();
+
+    let mut out = String::new();
+    out.push_str("# Pragmas\n\n");
+    out.push_str("Every `PRAGMA` this engine recognises. **Generated** from\n");
+    out.push_str("`inillucent_sql::pragma_register::REGISTER` by\n");
+    out.push_str("`cargo run -p inillucent-compat --bin inillucent-obligations`, and checked by\n");
+    out.push_str(
+        "`cargo test -p inillucent-compat --test harness`, which fails when this page and\n",
+    );
+    out.push_str("the register disagree. Do not edit it by hand.\n\n");
+    out.push_str(&format!(
+        "**{} pragmas**, {} of which take an argument in parentheses.\n\n",
+        entries.len(),
+        taking
+    ));
+    out.push_str(
+        "A pragma this table does not list is not recognised, and answers no rows rather\n",
+    );
+    out.push_str(
+        "than an error - which is SQLite's own behaviour, and is why asking for one is not\n",
+    );
+    out.push_str("a way to find out whether it exists. What each one *does* is\n");
+    out.push_str(
+        "[SQL support](sql.md); what is below is what a caller has to know before writing\n",
+    );
+    out.push_str(
+        "one: its name, the columns its answer has, and whether it takes an argument.\n\n",
+    );
+    out.push_str("| pragma | takes an argument | columns of its answer |\n");
+    out.push_str("|---|---|---|\n");
+    for entry in entries {
+        let columns = if entry.columns.is_empty() {
+            "one unnamed column".to_string()
+        } else {
+            entry
+                .columns
+                .iter()
+                .map(|name| format!("`{name}`"))
+                .collect::<Vec<String>>()
+                .join(", ")
+        };
+        out.push_str(&format!(
+            "| `{}` | {} | {} |\n",
+            entry.name,
+            if entry.takes_argument { "yes" } else { "no" },
+            columns
+        ));
+    }
+    out.push_str("\n`compat/api/pragmas.toml` is the same register in the form a program reads,\n");
+    out.push_str("and `docs/README.md` lists this page in its reading order.\n");
+    out
+}
+
 /// Returns the C ABI symbol register, read out of the crate's own source.
 ///
 /// Reading the source is the honest way to do this. A list kept beside the code

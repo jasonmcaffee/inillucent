@@ -53,7 +53,12 @@ impl PageId {
 pub struct PageSize(u32);
 
 impl PageSize {
-    /// The default until the Phase 1 sweep replaces it.
+    /// 32 KiB, chosen by the measurement in this type's own documentation.
+    ///
+    /// It used to say "until the Phase 1 sweep replaces it". There is no such
+    /// sweep anywhere in the repository and there never was one after the
+    /// measurement above; a comment may only claim what its test proves, and
+    /// that clause claimed a piece of work that does not exist (task-1961, D4).
     pub const DEFAULT: PageSize = PageSize(32_768);
 
     /// Returns the page size for a byte count, if it is one of the four legal

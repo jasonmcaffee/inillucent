@@ -1,6 +1,6 @@
 # task-1920 — inillucent code review: what to fix, and the order to fix it in
 
-**Reviewed at commit `57c202b4865ac3ab5795c4a9c523d37da5080022`** (task-1911's last commit). Every
+**Reviewed at commit `593505f290d481e15fc0cb34ee82064e6bf75657`** (task-1911's last commit). Every
 file and line number below is at that revision. task-1925 was editing documentation in the same
 checkout while this review ran; the working tree held no changes to any file cited here when the
 document was written, and each document finding in §5.9 was re-read at the pinned commit with
@@ -636,7 +636,7 @@ fails before the change and passes after it. Test placement follows `tests/inill
   predicate as an indexed query and as a full scan with the predicate applied in the executor, asserting
   equal counts. Both catch optimiser defects the oracle comparison cannot, because SQLite shares none
   of this engine's planner.
-- **`tests/timings.toml:59-61`** names `inillucent-compat::capi`, deleted in `cb1dba5`.
+- **`tests/timings.toml:59-61`** names `inillucent-compat::capi`, deleted in `963dd80`.
   `tests/selection.toml:1143-1155` tags `inillucent-model::campaign` and `::minimal` with
   `requires = ["onnx"]`, which they do not need. Add a check that every timing row names a live target.
 

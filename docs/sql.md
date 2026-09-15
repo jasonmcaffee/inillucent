@@ -8,6 +8,9 @@ vector search features SQLite has no equivalent for. None of the thirteen is sil
 and each reports something a caller can read. [Feature comparison](feature-comparison.md) is the same
 material in full, table by table.
 
+Words used here and not explained here - pragma, collation, affinity, rowid, storage class - are
+in [the glossary](glossary.md), one sentence each. Every pragma is in [Pragmas](pragmas.md).
+
 ## How this was measured
 
 416 SQL scripts were run through `inillucent-shell` and through a pinned `sqlite3` 3.53.4, each over
@@ -29,6 +32,12 @@ Counted against SQLite's own enumerations rather than against a case list: **172
 names the pinned SQLite library answers**, **67 pragmas of 67**, **63 dot commands of 65**, **5
 collations of 5**. [The function register](#the-function-register) says where 177 comes from and names
 the five.
+
+**Two pragma counts, and they are different questions.** 67 is what SQLite's own `pragma_list`
+reports, and this engine answers every one of them.
+The register holds the **68 pragmas this engine recognises**, the extra being `defensive`, which
+SQLite exposes through `sqlite3_db_config` rather than as a pragma. [Pragmas](pragmas.md) is the whole table, generated from the register, and
+`tools/doc-facts/check.mjs` fails when a document names a different number.
 
 ### The function register
 

@@ -5,7 +5,7 @@ shell, and by a program that links a C library, and by nothing in between — so
 in-between (a verb-shaped CLI and an MCP server over the same command table), and then makes the
 result something you can *install* rather than something you have to build.
 
-Written 2026-09-08 from measurements taken that day at commit `dbe8b29`, and **updated the same
+Written 2026-09-08 from measurements taken that day at commit `f1f4f7d`, and **updated the same
 day from the implementation** - every place the build disagreed with the design is marked
 *changed in build* and says what the design got wrong. Every count in §2 came from
 running the two shells side by side; none of them is an estimate.

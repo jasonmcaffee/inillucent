@@ -19,19 +19,18 @@ irm https://inillucent.com/downloads/install.ps1 | iex
 curl -fsSL https://inillucent.com/downloads/install.sh | sh
 ```
 
-Or from Go, which is tagged and **not installable yet**:
+Or from Go:
 
 ```sh
 go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent-install@latest
 inillucent-install
 ```
 
-The repository is private, so `proxy.golang.org` cannot clone it and answers
-`404 ... fatal: could not read Username`. Setting `GOPRIVATE=github.com/Black-Rainbow-Labs/*` moves
-the clone from the proxy to your own git, which changes who has to hold the credential rather than
-removing the need for one: it works for somebody with read access to the repository and for nobody
-else. The module and its three tags are correct, and the command starts working for everybody the
-day the repository is public. `packaging/PUBLISHING.md` has that decision.
+`go install` resolves the module through `proxy.golang.org`, which clones the repository with no
+credential. The proxy serves it: both `@latest` and `@v/list` answer 200 to a signed-out caller, and
+`tools/check-public-urls.mjs` checks that on every `tools/validate` run. It answered 404 until
+task-1961 made the repository public, which is why `packaging/PUBLISHING.md` carried the route as
+tagged and uninstallable for three releases.
 
 The other five package managers are not published yet. This is what each will be, and
 `packaging/PUBLISHING.md` says what each is waiting on:

@@ -37,7 +37,7 @@ carries a delta entry or a tombstone. The same statement measured **26.3 ms** on
 on the other, and the difference was entirely in a stage `indexprofile` could not see. `fullgate` now
 prints the stage breakdown for its own `schema.index` round.
 
-| stage | at `9ef6aee` | now (in the gate) |
+| stage | at `ea608dd` | now (in the gate) |
 |---|---:|---:|
 | scan | 13.3 | **3.8** |
 | sort | 5.3 | 4.9 |
@@ -243,7 +243,7 @@ not exist, and a wrong answer now that one can.
    predicted.
 5. **`cargo test --workspace`**: four failing binaries of 196 - `harness` (1), `ordering` (1),
    `planner` (2), `schema_forms` (14) - every one of those 18 tests in the set task-1845 recorded at
-   `9ef6aee`. `policy` is green where the baseline had its format check red.
+   `ea608dd`. `policy` is green where the baseline had its format check red.
 
 ## Non-goals, unchanged
 
@@ -253,7 +253,7 @@ Multi-process and multi-thread access stay out of scope.
 ## Found and not fixed here
 
 - An `UPDATE` that violates a **secondary `UNIQUE` index** without moving the table's own key was
-  accepted silently. It reproduced on the `9ef6aee` binary, so it predated this ticket and was not
+  accepted silently. It reproduced on the `ea608dd` binary, so it predated this ticket and was not
   one of A-D. Filed as **task-1849**, fixed there, and merged back into this branch - the interaction
   between its fix and this ticket's partial indexes is the five cases above, which neither ticket
   could have tested alone: before 1846 the index cannot be created, and before 1849 the check is

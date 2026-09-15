@@ -26,6 +26,19 @@ use inillucent_engine::Value as EngineValue;
 /// and every layer above that draws them the same is a layer nobody can trust:
 /// a column never filled in and one filled in with nothing are not the same
 /// fact about a row.
+///
+/// ```
+/// # use inillucent_driver::{Value, ValueKind};
+/// let text = Value::Text("hello".to_string());
+/// assert_eq!(text.kind(), ValueKind::Text);
+/// assert_eq!(text.text(), Some("hello"));
+/// assert_eq!(text.bytes(), Some(&b"hello"[..]));
+///
+/// // An empty string is a value, and NULL is not it.
+/// assert!(!Value::Text(String::new()).is_null());
+/// assert!(Value::Null.is_null());
+/// assert_eq!(Value::Null.text(), None);
+/// ```
 #[derive(Clone, Debug, PartialEq, Default)]
 pub enum Value {
     /// SQL NULL.

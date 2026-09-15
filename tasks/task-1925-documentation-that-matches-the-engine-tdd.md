@@ -1,7 +1,7 @@
 # Documentation that matches the engine, and a check that keeps it matching
 
 task-1925. The repository documentation, `AGENTS.md`, the agent skills, the packaging pages and
-inillucent.com are audited against the engine built from `57c202b`, corrected, and given an
+inillucent.com are audited against the engine built from `593505f`, corrected, and given an
 automated check so the same drift cannot return silently.
 
 ## Introduction
@@ -48,7 +48,7 @@ grading run.
 
 ### What the engine reports, against what the documentation says
 
-Every measured figure below came from the binaries built from `57c202b`, or from the probe and the
+Every measured figure below came from the binaries built from `593505f`, or from the probe and the
 test runner run for this ticket.
 
 | claim | where it is written | documented | measured |

@@ -24,6 +24,8 @@
 param(
     # Skips the long test tiers, for a check before pushing.
     [switch] $Quick,
+    # Also measures coverage, which rebuilds the workspace instrumented.
+    [switch] $Coverage,
     # Runs one stage by name and stops.
     [string] $Stage = ''
 )
@@ -105,6 +107,20 @@ Invoke-Stage -Name 'lint' -Because 'the strict lint set, which the pinned compil
     cargo clippy --manifest-path "$root/Cargo.toml" --workspace --all-targets --all-features --locked -- -D warnings
 }
 
+# **The configuration a `cargo install` produces, which nothing built until
+# task-1961 (A14).** Every stage above and every CI job passes `--all-features`,
+# so the feature set a user gets by default was never compiled anywhere, and
+# `inillucent-storage`'s two independent features were never built crossed.
+Invoke-Stage -Name 'defaults' -Because 'the feature set a cargo install produces, which --all-features never builds' -Body {
+    cargo check --manifest-path "$root/Cargo.toml" --workspace --all-targets --locked
+    if ($LASTEXITCODE -ne 0) { return }
+    cargo check --manifest-path "$root/Cargo.toml" -p inillucent-storage --features check --locked
+    if ($LASTEXITCODE -ne 0) { return }
+    cargo check --manifest-path "$root/Cargo.toml" -p inillucent-storage --features opcode-probe --locked
+    if ($LASTEXITCODE -ne 0) { return }
+    cargo check --manifest-path "$root/Cargo.toml" -p inillucent-storage --features check,opcode-probe --locked
+}
+
 # **What a declared dependency drags in behind it, and under what licence.**
 # `policy.rs` checks the edges a manifest names; nothing looked at the resolved
 # graph, so a crate with a published advisory or a licence this repository cannot
@@ -167,6 +183,20 @@ Invoke-Stage -Name 'fixtures' -Because 'the log-lead durability tests read a fix
 # The four contracts `AGENTS.md` names, plus the selection map. Each of them
 # fails a build rather than producing a review comment, which is the point of
 # having them.
+# **The examples on the crate a user depends on (task-1961, T6).** A doctest is
+# the one kind of example that cannot rot: it is compiled and run.
+Invoke-Stage -Name 'doctests' -Because 'the examples a cargo add reader depends on, compiled and run' -Body {
+    cargo test --manifest-path "$root/Cargo.toml" --doc -p inillucent-driver
+    if ($LASTEXITCODE -ne 0) { return }
+    cargo test --manifest-path "$root/Cargo.toml" --doc -p inillucent
+}
+
+# **The public URLs every shipped package names, fetched with no credential.**
+# Wired in now that both repositories are public (task-1961, S4).
+Invoke-Stage -Name 'urls' -Because 'a URL a shipped package names has to resolve for somebody with no credential' -Body {
+    node "$root/tools/check-public-urls.mjs"
+}
+
 Invoke-Stage -Name 'contracts' -Because 'dependencies, layering, the command table and the test map' -Body {
     cargo test --manifest-path "$root/Cargo.toml" -p inillucent-compat --test policy --test selection --test command_parity --test harness
 }
@@ -224,6 +254,16 @@ Invoke-Stage -Name 'security' -Because 'root confinement, the C ABI lifetimes, a
 # installed reads the same as a green on one with everything.
 Invoke-Stage -Name 'tests' -Because 'every selected suite, with missing prerequisites named' -Body {
     & "$root/target/debug/inillucent-testrun" --strict
+}
+
+# **Coverage, behind a switch, so the published number can be re-measured
+# (task-1961, T2).** Not `--branch`: that needs a nightly option and
+# `rust-toolchain.toml` pins the compiler to stable.
+if ($Coverage) {
+    Invoke-Stage -Name 'coverage' -Because 'the coverage number docs/repository.md publishes, re-measured' -Body {
+        cargo llvm-cov --manifest-path "$root/Cargo.toml" --workspace --release --summary-only `
+            --exclude inillucent-bench --exclude inillucent-core --exclude inillucent-model
+    }
 }
 
 Write-Host ''

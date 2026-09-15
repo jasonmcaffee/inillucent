@@ -12,6 +12,11 @@ intended.
 
 ---
 
+Words used here and not explained here - page, frame, pin, B+tree, leaf, WAL, LSN, checkpoint,
+affinity, collation - are in [the glossary](glossary.md), one sentence each.
+[Architecture in one page](architecture-overview.md) is the shorter version of this document with
+the retrieval half beside it.
+
 ## 1. How the parts fit together
 
 ```mermaid

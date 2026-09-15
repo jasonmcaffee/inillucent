@@ -1,6 +1,6 @@
 # task-1849 — An `UPDATE` that violates a secondary `UNIQUE` index is accepted, silently
 
-> **Implemented and pushed as `5f77e5f`.** The plan below is what was built, with three additions the
+> **Implemented and pushed as `f7cb0ee`.** The plan below is what was built, with three additions the
 > work turned up and a section at the end recording what was measured. The additions: a **third
 > defect** in index-check *order* (we named the first-declared unique index where SQLite names the
 > last, on `INSERT` as well as `UPDATE`); a **fourth** in `upsert_row`, whose unread path moved the
@@ -66,7 +66,7 @@ already probes the table key **and** every `unique_indexes(table)`, so the guard
 `UPDATE` that leaves the rowid alone never reaches the index probes at all, and one that moves the
 rowid reaches them with no way to recognise the row it is moving.
 
-Measured on `main` at `9d17ec0` against SQLite 3.53.4, whole scripts through both shells:
+Measured on `main` at `59ccf91` against SQLite 3.53.4, whole scripts through both shells:
 
 | shape | SQLite | inillucent |
 |---|---|---|
@@ -224,7 +224,7 @@ moving *from*, which is all a removal needs, and that path has no index to maint
 
 ### The partial-index interaction, which is nobody's ticket alone
 
-At `9ef6aee`/`9d17ec0` a partial index cannot be created — `CREATE INDEX ... WHERE` is refused by the
+At `ea608dd`/`59ccf91` a partial index cannot be created — `CREATE INDEX ... WHERE` is refused by the
 parser — so the boundary cases cannot be written from this commit at all. task-1846 **adds** the
 partial forms. The interaction therefore exists only after the merge, and neither ticket can test it:
 

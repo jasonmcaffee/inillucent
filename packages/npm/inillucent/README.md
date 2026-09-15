@@ -80,3 +80,23 @@ never drift. `--readonly` refuses every statement that changes something, and
 ## Licence
 
 MIT. Source: <https://github.com/Black-Rainbow-Labs/Inillucent>
+
+## The API
+
+Every method this binding has. The worked example each one appears in is the link; nothing here is
+a summary of a method that does not exist, because
+`cargo test -p inillucent-compat --test documentation` reads this table and fails on a name the
+binding source does not declare.
+
+| what | one line |
+|---|---|
+| `inillucent(command, options)` | run one command of the command line and return its parsed JSON. `options.db` names the file, `options.args` the rest. |
+| `query(sql, options)` | run one `SELECT` and return its rows. `options.params` binds `?1`, `?2`; `options.limit` caps the rows kept. |
+| `resolveBinary(program)` | the path to one of the four programs on this platform, from the platform package npm installed. |
+| `platformPackage()` | the name of the platform package this machine needs, which is what an install failure should name. |
+| `PROGRAMS` | the four programs and what each is for, as an object. |
+
+Every call goes through the command line rather than through the C ABI: the four programs are what
+the platform package ships, and `--output json` is the same object every other binding sees. That
+is why there is no `Connection` here and no transaction - a command is one process, and a
+transaction that spanned two of them would be a transaction nothing held open.

@@ -1,0 +1,7 @@
+---
+description: Working with inillucent, an embedded SQL database in Rust with a retrieval engine in the same file.
+globs:
+alwaysApply: true
+---
+
+@AGENTS.md

@@ -191,6 +191,21 @@ impl Default for OpenOptions {
 ///
 /// Neither `Send` nor `Sync`, by construction: it holds the engine, which holds
 /// one buffer pool over one file.
+///
+/// ```
+/// # use inillucent_driver::{Database, Result};
+/// # fn main() -> Result<()> {
+/// # let directory = std::env::temp_dir().join(format!("inillucent-doc-database-{}", std::process::id()));
+/// # std::fs::create_dir_all(&directory).ok();
+/// # let path = directory.join("app.rdb");
+/// let database = Database::open(&path)?;
+/// assert_eq!(database.path(), path.as_path());
+/// database.integrity_check()?;
+/// # drop(database);
+/// # std::fs::remove_dir_all(&directory).ok();
+/// # Ok(())
+/// # }
+/// ```
 pub struct Database {
     engine: EngineDatabase,
     path: PathBuf,
@@ -420,6 +435,30 @@ impl Database {
 ///
 /// It borrows the database rather than owning a handle of its own, because one
 /// file is one pool.
+///
+/// ```
+/// # use inillucent_driver::{Database, Result, Value};
+/// # fn main() -> Result<()> {
+/// # let directory = std::env::temp_dir().join(format!("inillucent-doc-connection-{}", std::process::id()));
+/// # std::fs::create_dir_all(&directory).ok();
+/// let database = Database::open(directory.join("app.rdb"))?;
+/// let connection = database.session();
+/// connection.execute_batch("CREATE TABLE note (id INTEGER PRIMARY KEY, body TEXT)")?;
+///
+/// let written = connection.execute(
+///     "INSERT INTO note (body) VALUES (?1)",
+///     &[Value::Text("hello".to_string())],
+/// )?;
+/// assert_eq!(written, 1);
+///
+/// let rows = connection.query("SELECT body FROM note", &[], 10)?;
+/// assert_eq!(rows.value(0, 0).and_then(Value::text), Some("hello"));
+/// # drop(connection);
+/// # drop(database);
+/// # std::fs::remove_dir_all(&directory).ok();
+/// # Ok(())
+/// # }
+/// ```
 pub struct Connection<'d> {
     database: &'d Database,
     engine: inillucent_engine::connect::Connection<'d>,
@@ -1041,19 +1080,36 @@ impl Connection<'_> {
 /// A `?` inside the block, a `return`, a panic: all three leave the database as
 /// it was. `commit()` is the one thing that does not.
 ///
-/// ```no_run
-/// # use inillucent_driver::{Database, Value, Result};
+/// ```
+/// # use inillucent_driver::{Database, Result, Value};
 /// # fn main() -> Result<()> {
-/// let database = Database::open("app.rdb")?;
+/// # let directory = std::env::temp_dir().join(format!("inillucent-doc-transaction-{}", std::process::id()));
+/// # std::fs::create_dir_all(&directory).ok();
+/// let database = Database::open(directory.join("app.rdb"))?;
 /// let connection = database.session();
-/// let transaction = connection.begin()?;
-/// transaction.execute("UPDATE account SET balance = balance - ?1 WHERE id = ?2", &[Value::Integer(50), Value::Integer(1)])?;
-/// let moved = transaction.query("SELECT balance FROM account WHERE id = ?1", &[Value::Integer(1)], 1)?;
-/// if moved.rows.first().and_then(|row| row.first()) == Some(&Value::Integer(0)) {
-///     // Dropped without a commit: nothing above is kept.
-///     return Ok(());
+/// connection.execute_batch("CREATE TABLE account (id INTEGER PRIMARY KEY, balance INTEGER)")?;
+/// connection.execute("INSERT INTO account VALUES (1, 100)", &[])?;
+///
+/// // Dropped without a commit: the write is gone.
+/// {
+///     let transaction = connection.begin()?;
+///     transaction.execute("UPDATE account SET balance = 0 WHERE id = 1", &[])?;
 /// }
+/// let after = connection.query("SELECT balance FROM account WHERE id = 1", &[], 1)?;
+/// assert_eq!(after.value(0, 0), Some(&Value::Integer(100)));
+///
+/// // Committed: the write is kept.
+/// let transaction = connection.begin()?;
+/// transaction.execute(
+///     "UPDATE account SET balance = balance - ?1 WHERE id = ?2",
+///     &[Value::Integer(50), Value::Integer(1)],
+/// )?;
 /// transaction.commit()?;
+/// let after = connection.query("SELECT balance FROM account WHERE id = 1", &[], 1)?;
+/// assert_eq!(after.value(0, 0), Some(&Value::Integer(50)));
+/// # drop(connection);
+/// # drop(database);
+/// # std::fs::remove_dir_all(&directory).ok();
 /// # Ok(())
 /// # }
 /// ```
@@ -1194,6 +1250,31 @@ impl Drop for Transaction<'_> {
 }
 
 /// A statement compiled once and run more than once.
+///
+/// ```
+/// # use inillucent_driver::{Database, Result, Value};
+/// # fn main() -> Result<()> {
+/// # let directory = std::env::temp_dir().join(format!("inillucent-doc-statement-{}", std::process::id()));
+/// # std::fs::create_dir_all(&directory).ok();
+/// let database = Database::open(directory.join("app.rdb"))?;
+/// let connection = database.session();
+/// connection.execute_batch("CREATE TABLE k (id INTEGER PRIMARY KEY, label TEXT)")?;
+///
+/// let mut insert = connection.prepare("INSERT INTO k VALUES (?1, ?2)")?;
+/// for (id, label) in [(1i64, "one"), (2, "two")] {
+///     insert.query(&[Value::Integer(id), Value::Text(label.to_string())], 0)?;
+/// }
+/// assert_eq!(insert.sql(), "INSERT INTO k VALUES (?1, ?2)");
+///
+/// let counted = connection.query("SELECT count(*) FROM k", &[], 1)?;
+/// assert_eq!(counted.value(0, 0), Some(&Value::Integer(2)));
+/// # drop(insert);
+/// # drop(connection);
+/// # drop(database);
+/// # std::fs::remove_dir_all(&directory).ok();
+/// # Ok(())
+/// # }
+/// ```
 pub struct Statement<'c> {
     connection: &'c Connection<'c>,
     engine: EngineStatement<'c>,

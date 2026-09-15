@@ -230,13 +230,13 @@ sha256 = "6784023d2abb05e4d0a5ddf644c92aaf0656a03f937b82fdbb058f52bd30da8f"
 
 [[amendment]]
 path = "inillucent-scorecard.json"
-ticket = "task-1953"
-reason = "task-1946 H6: the card is regenerated from the same run data. Every measurement is byte-identical; the command row is the redacted one the new command_line() produces for that argv, and the four path rows name each file rather than the two disks. No grading run was repeated, so no number moved."
-sha256 = "171984a6429e80fba0306dd38f71fa27f7dc28ee9f986a68bdfd7769b658afd6"
+ticket = "task-1961"
+reason = "task-1961 P1: the commit the card records was rewritten when the history was rewritten, so `0c14f71d` is a sha nothing answers to any more and the same tree is `db29cb97`. Four occurrences in each file, the abbreviated form and the full one. No grading run was repeated and no measurement moved: `git diff` on both files is eight lines, and every one of them is that sha."
+sha256 = "69d2a497981a47f52d836b121ec20f81e2c4bd9a8f64fd7dead8791f5aa8afde"
 
 [[amendment]]
 path = "inillucent-scorecard.md"
-ticket = "task-1953"
-reason = "task-1946 H6: the card is regenerated from the same run data. Every measurement is byte-identical; the command row is the redacted one the new command_line() produces for that argv, and the four path rows name each file rather than the two disks. No grading run was repeated, so no number moved."
-sha256 = "1b7cc3f725f9a717f21637f77a8c0d69dba2bcf2626358960aeb85b78d25ea7f"
+ticket = "task-1961"
+reason = "task-1961 P1: the commit the card records was rewritten when the history was rewritten, so `0c14f71d` is a sha nothing answers to any more and the same tree is `db29cb97`. Four occurrences in each file, the abbreviated form and the full one. No grading run was repeated and no measurement moved: `git diff` on both files is eight lines, and every one of them is that sha."
+sha256 = "3a3bf8134301326084a7873f023c0e72e9744078ffb1a78bab54adab9c1526a5"
 

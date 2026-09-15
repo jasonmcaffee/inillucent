@@ -18,7 +18,7 @@
 
     It turns out they always did. `v0.1.1` on the mirror and `v0.1.1` in the
     development repository have the same tree, 97e516e8, and the mirror's `main`
-    carries the tree of development commit 8afa290 exactly. The mirror was built
+    carries the tree of development commit fe5a101 exactly. The mirror was built
     by copying a whole tree and committing it as one commit, which is the right
     thing; it was just done by hand and never written down.
 

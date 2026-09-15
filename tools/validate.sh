@@ -9,6 +9,7 @@
 #
 #   tools/validate.sh                # everything
 #   tools/validate.sh --quick        # fmt, lint, contracts and smoke only
+#   tools/validate.sh --coverage     # everything, plus the coverage measurement
 #   tools/validate.sh --stage lint   # one stage by name
 
 set -u
@@ -16,11 +17,13 @@ set -u
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 quick=0
 only=''
+coverage=0
 failed=()
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --quick) quick=1 ;;
+        --coverage) coverage=1 ;;
         --stage) only="${2:-}"; shift ;;
         *) echo "unknown option: $1" >&2; exit 2 ;;
     esac
@@ -108,6 +111,21 @@ dependencies() {
 }
 stage dependencies 'advisories, licences and the resolved graph, which the manifest checks cannot see' dependencies
 
+# **The configuration a `cargo install` produces, which nothing built until
+# task-1961 (A14).** Every stage above and every CI job passes `--all-features`,
+# and `grep -rn 'no-default-features'` over every workflow, script and manifest
+# returned nothing, so the feature set a user gets by default was never compiled
+# anywhere. `inillucent-storage` has two independent features, `opcode-probe`
+# and `check`, with fifteen `cfg(feature)` sites between them, and no job built
+# them crossed.
+defaults() {
+    cargo check --manifest-path "$root/Cargo.toml" --workspace --all-targets --locked || return 1
+    cargo check --manifest-path "$root/Cargo.toml" -p inillucent-storage --features check --locked || return 1
+    cargo check --manifest-path "$root/Cargo.toml" -p inillucent-storage --features opcode-probe --locked || return 1
+    cargo check --manifest-path "$root/Cargo.toml" -p inillucent-storage --features check,opcode-probe --locked
+}
+stage defaults 'the feature set a cargo install produces, which --all-features never builds' defaults
+
 # **A broken intra-doc link is a build failure here rather than a hole in the
 # published documentation.**
 documentation() {
@@ -150,6 +168,25 @@ stage oracle 'the sixty-nine differential suites have nothing to compare against
 stage fixtures 'the log-lead durability tests read a fixture that is not checked in' \
     bash "$root/tools/build-gate-fixtures.sh" "$root/_agent_output/fixtures"
 
+# **The examples on the crate a user depends on (task-1961, T6).** There were
+# four executable doctests in about 270,000 lines and none of them on the public
+# API. Every public type on the driver's front page now carries one that opens a
+# real file, and a doctest is the one kind of example that cannot rot: it is
+# compiled and run.
+doctests() {
+    cargo test --manifest-path "$root/Cargo.toml" --doc -p inillucent-driver || return 1
+    cargo test --manifest-path "$root/Cargo.toml" --doc -p inillucent
+}
+stage doctests 'the examples a cargo add reader depends on, compiled and run' doctests
+
+# **The public URLs every shipped package names, fetched with no credential.**
+# Wired in now that both repositories are public (task-1961, S4). It was written
+# in task-1946 and deliberately left out of this script while it was red -
+# commit 12964ab's message says so - and a check that is red for a reason nobody
+# intends to fix teaches people to ignore the script it is in.
+stage urls 'a URL a shipped package names has to resolve for somebody with no credential' \
+    node "$root/tools/check-public-urls.mjs"
+
 stage contracts 'dependencies, layering, the command table and the test map' \
     cargo test --manifest-path "$root/Cargo.toml" -p inillucent-compat \
     --test policy --test selection --test command_parity --test harness
@@ -175,6 +212,28 @@ smoke() {
         && "$root/target/debug/inillucent-testrun" --tier smoke
 }
 stage smoke 'a real file opened, written, reopened, read' smoke
+
+# **Coverage, behind a flag, so the published number can be re-measured
+# (task-1961, T2).** The only numbers on record before this named `rustdb-vm`, a
+# crate that no longer exists. Behind a flag because it rebuilds the whole
+# workspace instrumented and runs every suite again, which is tens of minutes.
+#
+# **Not `--branch`.** That needs `-Z coverage-options=branch`, a nightly option,
+# and `rust-toolchain.toml` pins the compiler to stable 1.95.0 for the reason
+# written beside the pin. Region and line coverage are what a pinned toolchain
+# can measure and are what `docs/repository.md` publishes.
+#
+# The three excluded crates are the retrieval tier, which `tests/selection.toml`
+# already excludes from the fast run: they need ONNX and a corpus, and on a
+# machine without either they contribute uninstrumented zeros rather than a
+# number.
+coverage_run() {
+    cargo llvm-cov --manifest-path "$root/Cargo.toml" --workspace --release --summary-only \
+        --exclude inillucent-bench --exclude inillucent-core --exclude inillucent-model
+}
+if [ "$coverage" -eq 1 ]; then
+    stage coverage 'the coverage number docs/repository.md publishes, re-measured' coverage_run
+fi
 
 if [ "$quick" -eq 1 ]; then
     if [ "${#failed[@]}" -gt 0 ]; then

@@ -27,18 +27,41 @@ door and it splits the two audiences: using inillucent, and changing it.
 
 ## Installing these as skills
 
-They are plain directories, so they work wherever a `SKILL.md` tree does. For Claude Code:
+**They are already where your agent looks.** A clone of this repository carries the same eight
+skills in three places:
 
-```sh
-# one skill
-ln -s "$PWD/agent-skills/inillucent-migrate" ~/.claude/skills/inillucent-migrate
+| where | who reads it |
+|---|---|
+| `agent-skills/<name>/SKILL.md` | the source of truth, and the tool-neutral copy to point anything else at |
+| `.claude/skills/<name>/SKILL.md` | Claude Code, which reads a project's own `.claude/skills/` |
+| `.agents/skills/<name>/SKILL.md` | Codex and the other adopters of the Agent Skills layout |
 
-# or all of them
-for skill in agent-skills/*/; do
-  ln -s "$PWD/$skill" ~/.claude/skills/"$(basename "$skill")"
-done
-```
+The last two are **generated copies**, written by `node tools/sync-skills.mjs` and checked byte for
+byte by `cargo test -p inillucent-compat --test documentation`. Edit `agent-skills/` and run the
+script; a copy that has drifted fails a build.
 
-On Windows, `New-Item -ItemType Junction`. For anything else, point your agent's skill or
-instruction loader at this directory — nothing here is tool-specific, and every page is readable on
-its own as Markdown.
+Copies rather than symlinks, and that is a Windows decision rather than a preference: this
+repository is developed on Windows, and a checkout without `core.symlinks` turns a symlink into a
+text file containing a path, which no agent follows.
+
+`.agents/skills/` was the project-local path in Codex's Agent Skills documentation when this was
+written, on **2026-09-14**. It is somebody else's product and it can move; if your agent reads a
+different path, add it to `TARGETS` in `tools/sync-skills.mjs` and record the date you checked.
+
+For anything else, point your agent's skill or instruction loader at `agent-skills/` — nothing there
+is tool-specific, and every page is readable on its own as Markdown.
+
+## The instruction file each agent reads
+
+One document, `AGENTS.md`, and a pointer in each place an agent looks for one:
+
+| file | who reads it |
+|---|---|
+| [`AGENTS.md`](../AGENTS.md) | the document. Codex reads it directly. |
+| `CLAUDE.md` | Claude Code. One line: `@AGENTS.md`. |
+| `GEMINI.md` | Gemini CLI. The same line. |
+| `.cursor/rules/inillucent.mdc` | Cursor. Frontmatter and the same line. |
+
+No content is duplicated, and `documentation.rs` fails on a pointer file that grows past twenty
+lines or stops naming `AGENTS.md` - because a second copy of an instruction document is the one that
+goes stale.
