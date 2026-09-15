@@ -266,10 +266,14 @@ kind = "production"
 layer = 4
 may_depend_on = ["inillucent-base", "inillucent-value"]
 
-# The catalog reads `sqlite_schema` through the pager. Phase 7 introduces
-# `inillucent-transaction` between them; until it exists, a read transaction is a
-# pager read transaction, and the edge to storage is the same downward edge the
-# transaction crate will later carry.
+# The catalog reads `sqlite_schema` through the pager. A read transaction is a
+# pager read transaction, and the edge to storage carries it.
+#
+# The `inillucent-transaction` row that sat here was removed in task-1962 (A13):
+# it was written for a crate Phase 7 was going to introduce between the catalog
+# and the pager, that crate is `inillucent-txn` and the catalog does not depend
+# on it, and until A13 the check reported an edge the contract forbids but never
+# an allowance nobody uses.
 [[crate]]
 name = "inillucent-catalog"
 kind = "production"
@@ -278,7 +282,6 @@ may_depend_on = [
   "inillucent-base",
   "inillucent-value",
   "inillucent-storage",
-  "inillucent-transaction",
   "inillucent-sql",
   "inillucent-pool",
   "inillucent-tree",

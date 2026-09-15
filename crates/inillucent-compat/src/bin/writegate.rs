@@ -54,7 +54,8 @@ use std::process::{Command, ExitCode};
 use std::time::Instant;
 
 use inillucent_compat::newengine::ImportedDatabase;
-use inillucent_compat::perf::{plan_for, Bind, Grouping, Paired, Sample, Workload};
+use inillucent_compat::perf::bind_value;
+use inillucent_compat::perf::{plan_for, Grouping, Paired, Sample, Workload};
 use inillucent_compat::workspace_root;
 use inillucent_exec::physical::Params;
 use inillucent_tree::datum::OwnedDatum;
@@ -639,42 +640,6 @@ fn time_one(
         rows: changed,
         digest: 0,
     })
-}
-
-/// Returns the value one bind kind produces for one iteration.
-///
-/// The formulas are `compat/oracle/sqlite_bench.c`'s `bind_one`, transcribed -
-/// the same transcription the read gate carries, and for the same reason: a
-/// benchmark whose two arms write different rows is not a comparison.
-///
-/// @param bind - the bind kind
-/// @param iteration - which iteration, from zero
-/// @param rows - how many rows the base table holds
-fn bind_value(bind: Bind, iteration: u32, rows: u32) -> OwnedDatum {
-    let iteration = u64::from(iteration);
-    let rows64 = u64::from(rows);
-    match bind {
-        Bind::Rowid => OwnedDatum::Int(if rows > 0 {
-            1 + (iteration % rows64) as i64
-        } else {
-            1
-        }),
-        Bind::Scatter => OwnedDatum::Int(if rows > 0 {
-            1 + (iteration.wrapping_mul(2_654_435_761) % rows64) as i64
-        } else {
-            1
-        }),
-        Bind::Counter => OwnedDatum::Int((rows64 + 1 + iteration) as i64),
-        Bind::Int => OwnedDatum::Int(
-            (iteration.wrapping_mul(1_103_515_245).wrapping_add(12_345) & 0x7fff_ffff) as i64,
-        ),
-        Bind::Text => OwnedDatum::Text(
-            format!("row {iteration} lorem ipsum dolor sit amet consectetur").into_bytes(),
-        ),
-        Bind::Blob => {
-            OwnedDatum::Blob((0..64u64).map(|j| ((iteration + j) & 0xff) as u8).collect())
-        }
-    }
 }
 
 /// Times every workload on SQLite, over its own fresh copy.

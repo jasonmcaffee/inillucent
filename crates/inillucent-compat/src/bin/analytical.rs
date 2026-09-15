@@ -47,6 +47,7 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use inillucent_compat::newengine::ImportedDatabase;
+use inillucent_compat::perf::{eat_borrowed, run_sqlite};
 use inillucent_compat::perf::{Digest, Paired, Sample};
 use inillucent_compat::workspace_root;
 use inillucent_exec::physical::Params;
@@ -414,38 +415,6 @@ impl inillucent_exec::Sink for DigestRows {
     }
 }
 
-/// Adds one borrowed value to the digest, tagged the way the reference tags it.
-///
-/// The tagging is `sqlite_bench.c`'s, value for value. A digest is only a
-/// correctness gate if both engines compute it the same way.
-///
-/// @param digest - the running digest
-/// @param value - the value to fold in
-fn eat_borrowed(digest: &mut Digest, value: &inillucent_tree::datum::Datum<'_>) {
-    use inillucent_tree::datum::Datum;
-    match value {
-        Datum::Null => digest.tag(0),
-        Datum::Int(number) => {
-            digest.tag(1);
-            digest.word(*number as u64);
-        }
-        Datum::Real(number) => {
-            digest.tag(2);
-            digest.word(number.to_bits());
-        }
-        Datum::Text(bytes) => {
-            digest.tag(3);
-            digest.word(bytes.len() as u64);
-            digest.bytes(bytes);
-        }
-        Datum::Blob(bytes) => {
-            digest.tag(4);
-            digest.word(bytes.len() as u64);
-            digest.bytes(bytes);
-        }
-    }
-}
-
 /// Runs every workload through the new engine and returns timed samples.
 ///
 /// The timed region is the one the scorecard times on the old engine: the
@@ -530,30 +499,6 @@ fn time_stage(
         body()?;
     }
     Ok(started.elapsed().as_secs_f64() * 1e9 / f64::from(iterations))
-}
-
-/// Runs the SQLite arm and parses its samples.
-///
-/// @param bench - the sqlite-bench executable
-/// @param plan - the plan file both engines read
-/// @param database - the fixture
-fn run_sqlite(bench: &Path, plan: &Path, database: &Path) -> Result<Vec<Sample>, String> {
-    let output = Command::new(bench)
-        .arg("run")
-        .arg(plan)
-        .arg(database)
-        .output()
-        .map_err(|error| format!("sqlite-bench did not start: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "sqlite-bench failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(Sample::parse)
-        .collect())
 }
 
 /// Returns SQLite's own plan for a query, so the two can be compared.

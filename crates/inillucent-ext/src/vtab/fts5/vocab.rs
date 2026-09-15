@@ -24,7 +24,8 @@
 //! `doc` counts documents in the first two and *is* a document's rowid in the
 //! third, which is SQLite's naming and is worth reading twice.
 
-use inillucent_base::{varint, DbResult};
+use super::doclist::read_varint;
+use inillucent_base::DbResult;
 use inillucent_value::Value;
 
 use super::super::{
@@ -403,20 +404,4 @@ impl VocabCursor {
 /// Returns a text value over some bytes.
 fn text(bytes: &[u8]) -> Value<'static> {
     Value::owned_text(bytes).unwrap_or(Value::Null)
-}
-
-/// Reads one varint, advancing the cursor.
-///
-/// The same decoding the index's own reader does; a malformed run stops the
-/// walk rather than looping, which is what the cursor jump to the end is for.
-fn read_varint(bytes: &[u8], at: &mut usize) -> u64 {
-    let Some(rest) = bytes.get(*at..) else {
-        return 0;
-    };
-    let Ok(decoded) = varint::decode(rest) else {
-        *at = bytes.len();
-        return 0;
-    };
-    *at = at.saturating_add(decoded.len);
-    decoded.value
 }

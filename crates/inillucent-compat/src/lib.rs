@@ -48,6 +48,7 @@ pub mod obligations;
 pub mod oracle;
 pub mod perf;
 pub mod procstat;
+pub mod rendering;
 pub mod report;
 pub mod results;
 pub mod selection;

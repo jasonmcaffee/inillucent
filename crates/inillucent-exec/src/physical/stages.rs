@@ -19,7 +19,7 @@ use inillucent_pool::Pool;
 use inillucent_sql::bind::{BoundExpr, BoundSelect};
 use inillucent_sql::catalog_view::TableInfo;
 use inillucent_sql::function::AggregateFunc;
-use inillucent_sql::plan::{AccessPath, PhysicalPlan};
+use inillucent_sql::plan::{AccessPath, PhysicalPlan, PlannedSource};
 use inillucent_tree::datum::{Datum, OwnedDatum};
 use inillucent_value::collation::Collation;
 
@@ -577,7 +577,88 @@ fn dummy_sink() -> Box<dyn Sink> {
         Vec::new(),
     ))))
 }
+/// One FROM term, and everything that decides what stage it becomes.
+///
+/// **A gathered context rather than a seven argument call (task-1962, A8).**
+/// Every function the `plan_stages` split produced reads the same six things,
+/// and four of them are `usize`, `bool` and `Option<u32>` - the shape a caller
+/// gets wrong silently.
+struct Term<'a> {
+    /// The planner's output.
+    plan: &'a PhysicalPlan,
+    /// Where the trees and layouts come from.
+    catalog: &'a dyn TreeCatalog,
+    /// The term itself.
+    source: &'a PlannedSource,
+    /// Which FROM term it is.
+    position: usize,
+    /// A covering index to read instead of the outermost table.
+    override_root: Option<u32>,
+    /// Whether the statement's answer depends on the order rows arrive in.
+    sensitive: bool,
+}
+
+impl Term<'_> {
+    /// Whether this term drives the pipeline rather than being joined into it.
+    fn outermost(&self) -> bool {
+        self.position == 0
+    }
+
+    /// A request to read one tree for this term.
+    ///
+    /// @param root - the tree to read
+    /// @param kind - how to read it
+    fn reads(&self, root: u32, kind: AccessKind) -> StageRequest {
+        StageRequest {
+            root,
+            kind,
+            source: self.source.id,
+            term: self.position,
+            is_lookup: false,
+        }
+    }
+
+    /// A request for the table fetch behind an index read.
+    ///
+    /// @param root - the table's own tree
+    fn looks_up(&self, root: u32) -> StageRequest {
+        StageRequest {
+            root,
+            kind: AccessKind::Nested,
+            source: self.source.id,
+            term: self.position,
+            is_lookup: true,
+        }
+    }
+}
+
+/// One stage to add: which tree, read how, for which FROM term.
+///
+/// **A request struct rather than eight positional arguments (task-1962, A8 and
+/// A9).** `push_stage` took `(stages, catalog, root, kind, source, term,
+/// is_lookup, offset)` and carried `#[allow(clippy::too_many_arguments)]` to say
+/// so. Three of those were a `u32` and two `usize` in a row, which is the shape
+/// a caller gets wrong without the compiler noticing.
+struct StageRequest {
+    /// The tree this stage reads.
+    root: u32,
+    /// How it reads it.
+    kind: AccessKind,
+    /// Which planner FROM term it belongs to.
+    source: usize,
+    /// That term's position in the FROM list.
+    term: usize,
+    /// Whether it is the table fetch behind an index seek.
+    is_lookup: bool,
+}
+
 /// Turns the planner's FROM terms into stages.
+///
+/// A query with no FROM term produces no stages at all, and that is a legal
+/// plan rather than a refusal: `SELECT 1` reads no tree, so there is nothing
+/// for a stage to describe. Every function below already loops over the stages
+/// rather than indexing the first, except the two that build the source and the
+/// space - and both have an empty case.
 ///
 /// @param plan - the planner's output
 /// @param catalog - where the trees and layouts come from
@@ -591,360 +672,375 @@ fn plan_stages(
     if !plan.compounds.is_empty() {
         return unsupported("a compound query");
     }
-    // A query with no FROM term produces no stages at all, and that is a legal
-    // plan rather than a refusal: `SELECT 1` reads no tree, so there is nothing
-    // for a stage to describe. Every function below already loops over the
-    // stages rather than indexing the first, except the two that build the
-    // source and the space - and both now have an empty case.
     let mut stages: Vec<PreparedStage> = Vec::new();
     let mut offset = 0usize;
     let sensitive = order_sensitive(&plan.select);
     for (position, source) in plan.sources.iter().enumerate() {
-        let outermost = position == 0;
-        // **An outer join is answered by materialising the inner side.**
-        //
-        // It used to be refused, and the refusal was right while it stood: the
-        // physical pass never looked at the join kind and always built
-        // `JoinKind::Inner`, so a `LEFT JOIN` silently dropped the outer rows
-        // that matched nothing - `SELECT people.team FROM people LEFT JOIN
-        // teams ON ...` answered six rows as four nulls.
-        //
-        // What it needs that an index nested loop cannot give is the `ON`
-        // condition evaluated per candidate *pair*: an index probe assumes the
-        // key equality **is** the condition, and an outer join has to know that
-        // a pair failed the condition in order to null-extend instead. So the
-        // inner side is read once into a buffer and `NestedLoopJoin` evaluates
-        // the condition over each pair - which also gives `RIGHT` and `FULL`,
-        // because a materialised build side is the only thing that can remember
-        // which of its rows matched (see `build_nested`).
-        match &source.path {
-            AccessPath::TableScan { root } => {
-                let root = if outermost {
-                    override_root.unwrap_or(*root)
-                } else {
-                    *root
-                };
-                push_stage(
-                    &mut stages,
-                    catalog,
-                    root,
-                    if outermost {
-                        AccessKind::Full
-                    } else {
-                        // An inner term with no usable index is a cross
-                        // product: every inner row pairs with every outer one,
-                        // and any predicate over the pair is a residual. Phase 2
-                        // refused it because the read families never produce
-                        // one; the corpora do - `SELECT count(*) FROM people
-                        // CROSS JOIN teams` - and refusing a shape the engine
-                        // can answer is a gap rather than a policy.
-                        AccessKind::Nested
-                    },
-                    source.id,
-                    position,
-                    false,
-                    &mut offset,
-                )?;
-            }
-            AccessPath::RowidSeek { root, .. } => {
-                push_stage(
-                    &mut stages,
-                    catalog,
-                    *root,
-                    if outermost {
-                        AccessKind::Point
-                    } else {
-                        AccessKind::Nested
-                    },
-                    source.id,
-                    position,
-                    false,
-                    &mut offset,
-                )?;
-            }
-            AccessPath::RowidRange { root, .. } => {
-                let kind = if !outermost {
-                    return unsupported("a rowid range as an inner join term");
-                } else if plan.reverse {
-                    AccessKind::Reverse
-                } else {
-                    AccessKind::Span
-                };
-                push_stage(
-                    &mut stages,
-                    catalog,
-                    *root,
-                    kind,
-                    source.id,
-                    position,
-                    false,
-                    &mut offset,
-                )?;
-            }
-            // A union of probes composes with a per-row nested loop exactly
-            // as a lone probe does - one more of the same thing, at every
-            // level - but this engine has no join operator that drives one
-            // yet, so it is offered only where it drives the whole pipeline.
-            // The bytecode engine does not share this limit: it compiles a
-            // union's branches the same way at any level, one loop per
-            // branch, which is why the same SQL runs on both engines while
-            // only one of them takes the fast path everywhere the planner
-            // found one.
-            AccessPath::RowidSeekUnion { root, .. } => {
-                if !outermost {
-                    return unsupported("a seek union as an inner join term");
-                }
-                push_stage(
-                    &mut stages,
-                    catalog,
-                    *root,
-                    AccessKind::SeekUnion,
-                    source.id,
-                    position,
-                    false,
-                    &mut offset,
-                )?;
-            }
-            AccessPath::IndexSeekUnion {
-                table_root,
-                index_root,
-                index_name,
-                covering,
-                branches,
-                ..
-            } => {
-                if !outermost {
-                    return unsupported("a seek union as an inner join term");
-                }
-                // The branches of an `IN` list are bare equalities and probed
-                // like `RowidSeekUnion`'s; the branches of a keyset page are
-                // ranges, and reconstructing the page's order depends on
-                // walking each one and running them in the order they were
-                // built in - two different sources for what is, at the plan
-                // level, one shape.
-                let kind = if probes_one_entry_each(
-                    &source.table,
-                    index_name,
-                    *index_root,
-                    *table_root,
-                    branches,
-                ) {
-                    AccessKind::SeekUnion
-                } else {
-                    AccessKind::RangeUnion
-                };
-                push_stage(
-                    &mut stages,
-                    catalog,
-                    *index_root,
-                    kind,
-                    source.id,
-                    position,
-                    false,
-                    &mut offset,
-                )?;
-                let is_the_table = *index_root == *table_root;
-                if covering.is_none() && !is_the_table {
-                    push_stage(
-                        &mut stages,
-                        catalog,
-                        *table_root,
-                        AccessKind::Nested,
-                        source.id,
-                        position,
-                        true,
-                        &mut offset,
-                    )?;
-                }
-            }
-            AccessPath::IndexSeek {
-                table_root,
-                index_root,
-                covering,
-                equalities,
-                low,
-                high,
-                ..
-            } => {
-                // An index seek with no equality and no bound is a *scan* of
-                // the index, not a range over it. The distinction is not
-                // cosmetic: the covering rule and the skip-scan rule both key
-                // on `Full`, and calling this a range left `scan.distinct`
-                // reading every row of the index where SQLite seeks 64 times.
-                let unbounded = equalities.is_empty() && low.is_none() && high.is_none();
-                // The planner's *own* covering choice is subject to the same
-                // rule the physical pass's covering rule is: reading fewer
-                // bytes out of an index changes the order the rows reach an
-                // aggregate in, and a floating-point sum is not associative.
-                // `SELECT sum(score) FROM people` over `people_by_score` is
-                // 0.0 where the table gives 124.25, because the corpus holds
-                // `-1e300` and `+1e300` and the small values vanish between
-                // them. SQLite reads the table here, and so must this.
-                if unbounded && covering.is_some() && outermost && sensitive {
-                    push_stage(
-                        &mut stages,
-                        catalog,
-                        *table_root,
-                        AccessKind::Full,
-                        source.id,
-                        position,
-                        false,
-                        &mut offset,
-                    )?;
-                    continue;
-                }
-                let kind = if outermost {
-                    if plan.reverse {
-                        AccessKind::Reverse
-                    } else if unbounded {
-                        AccessKind::Full
-                    } else {
-                        AccessKind::Span
-                    }
-                } else {
-                    AccessKind::Nested
-                };
-                push_stage(
-                    &mut stages,
-                    catalog,
-                    *index_root,
-                    kind,
-                    source.id,
-                    position,
-                    false,
-                    &mut offset,
-                )?;
-                // A `WITHOUT ROWID` table's primary-key index *is* the table:
-                // one b-tree, reported at the table's own root page. So it
-                // carries every column by construction and there is no rowid to
-                // look anything up by - which is exactly what the lookup stage
-                // below tried to do, five times over in the differential
-                // corpus, with "the index entry carries no rowid".
-                let is_the_table = *index_root == *table_root;
-                if covering.is_none() && !is_the_table {
-                    // The index does not carry every column the query reads, so
-                    // the row is fetched from the table by rowid. That is the
-                    // TDD's `RowidLookup`, expressed as what it is: a nested
-                    // loop into the table tree keyed on the entry's rowid.
-                    push_stage(
-                        &mut stages,
-                        catalog,
-                        *table_root,
-                        AccessKind::Nested,
-                        source.id,
-                        position,
-                        true,
-                        &mut offset,
-                    )?;
-                }
-            }
-            AccessPath::Subquery {
-                width, correlated, ..
-            } => {
-                // An inner subquery is a nested loop over a materialised
-                // buffer rather than over a tree, which is exactly what
-                // `build_nested` builds for it. The rows are read once rather
-                // than once per outer row: a derived table is a query with no
-                // free variables, so re-running it would answer the same thing.
-                if *correlated && outermost {
-                    // A correlated subquery reads a FROM term outside itself,
-                    // and the outermost term has nothing outside it - so this
-                    // is a plan that should not exist rather than one to run.
-                    return unsupported("a correlated subquery as the outermost term");
-                }
-                push_materialised(&mut stages, source.id, position, *width, &mut offset);
-            }
-            // A recursive CTE and the reference to the one being filled are
-            // both *materialised* stages: the first is the fill loop's answer
-            // and the second is the queue it is currently on, and neither is a
-            // tree. `source_for` and `materialise_stage` produce the rows.
-            AccessPath::Recursive { width, .. } => {
-                push_materialised(&mut stages, source.id, position, *width, &mut offset);
-            }
-            AccessPath::RecursiveSelf { .. } => {
-                let width = source.table.columns.len().max(1);
-                push_materialised(&mut stages, source.id, position, width, &mut offset);
-            }
-            // A virtual table is a *materialised* stage: the module produces
-            // its rows on the caller's side and the pipeline reads them, which
-            // is the same shape a subquery already has.
-            // The candidates come from the module, and the rows come out of
-            // the table's own tree by rowid - so this is a table stage with an
-            // unusual source rather than a materialised one.
-            AccessPath::VectorProbe { root, .. } => {
-                push_stage(
-                    &mut stages,
-                    catalog,
-                    *root,
-                    AccessKind::Vector,
-                    source.id,
-                    position,
-                    false,
-                    &mut offset,
-                )?;
-            }
-            AccessPath::VirtualScan { .. } => {
-                // A module is asked once, whether it is the outermost term or
-                // an inner one: the plan it chose was chosen for one set of
-                // constraints, and asking it again per outer row would be
-                // asking a different question than the one it costed. As an
-                // inner term its rows drive a `NestedLoopJoin`, like a
-                // subquery's.
-                let declared = source.table.columns.len().max(1);
-                // **A module's row carries its rowid when the query asks for
-                // one.** `SELECT rowid FROM t WHERE t MATCH ...` is the shape
-                // every search adapter is written in - the rowid is the answer,
-                // and the columns are what was searched - and it used to be
-                // refused with "the tree read does not carry a rowid". The
-                // module has always had it: `VirtualCursor::rowid` is on the
-                // trait. It is appended after the declared columns rather than
-                // put first, so every column keeps the slot it already had.
-                let read = plan.select.columns_read(source.id);
-                let carries_rowid = read.rowid;
-                let functions = read.functions.clone();
-                let width = declared
-                    .saturating_add(usize::from(carries_rowid))
-                    .saturating_add(functions.len());
-                stages.push(PreparedStage {
-                    functions: functions.clone(),
-                    root: 0,
-                    kind: AccessKind::Materialised,
-                    source: source.id,
-                    term: position,
-                    is_lookup: false,
-                    offset,
-                    width,
-                    // A module's row is its own record, exactly as a
-                    // materialised subquery's is: slot `i` is column `i`, and
-                    // nothing is known about the order.
-                    layout: Some(std::rc::Rc::new(SourceLayout {
-                        tree_key: 0,
-                        slots: (0..declared).map(Some).collect(),
-                        rowid: carries_rowid.then_some(declared),
-                        // A module's rows are not a table's rows: there is
-                        // nothing to probe a table with.
-                        identity: Vec::new(),
-                        types: vec![StaticType::Unknown; width],
-                        width,
-                        key_columns: Vec::new(),
-                    })),
-                });
-                offset = offset.saturating_add(width);
-            }
-        }
+        let term = Term {
+            plan,
+            catalog,
+            source,
+            position,
+            override_root,
+            sensitive,
+        };
+        stage_for_term(&term, &mut stages, &mut offset)?;
     }
     Ok(stages)
 }
-/// Adds one stage and advances the column offset.
+
+/// Builds the stages one FROM term becomes.
 ///
+/// **An outer join is answered by materialising the inner side.**
+///
+/// It used to be refused, and the refusal was right while it stood: the
+/// physical pass never looked at the join kind and always built
+/// `JoinKind::Inner`, so a `LEFT JOIN` silently dropped the outer rows that
+/// matched nothing - `SELECT people.team FROM people LEFT JOIN teams ON ...`
+/// answered six rows as four nulls.
+///
+/// What it needs that an index nested loop cannot give is the `ON` condition
+/// evaluated per candidate *pair*: an index probe assumes the key equality
+/// **is** the condition, and an outer join has to know that a pair failed the
+/// condition in order to null-extend instead. So the inner side is read once
+/// into a buffer and `NestedLoopJoin` evaluates the condition over each pair -
+/// which also gives `RIGHT` and `FULL`, because a materialised build side is
+/// the only thing that can remember which of its rows matched (see
+/// `build_nested`).
+///
+/// @param term - the FROM term
 /// @param stages - the stages built so far
-/// @param catalog - where the layouts come from
-/// @param root - the tree this stage reads
-/// @param kind - how it reads it
-/// @param source - which planner FROM term it belongs to
-/// @param is_lookup - whether it is the table fetch behind an index seek
 /// @param offset - the next free column index, advanced
-#[allow(clippy::too_many_arguments)]
+fn stage_for_term(
+    term: &Term<'_>,
+    stages: &mut Vec<PreparedStage>,
+    offset: &mut usize,
+) -> DbResult<()> {
+    if walk_stages(term, stages, offset)?
+        || index_stages(term, stages, offset)?
+        || materialised_stages(term, stages, offset)?
+    {
+        return Ok(());
+    }
+    unsupported("an access path the physical pass builds no stage for")
+}
+
+/// Builds the stage for a term that reads one tree and nothing else.
+///
+/// A scan, a rowid probe, a rowid range, a union of rowid probes and a vector
+/// probe. `false` means this term is none of them.
+///
+/// @param term - the FROM term
+/// @param stages - the stages built so far
+/// @param offset - the next free column index, advanced
+fn walk_stages(
+    term: &Term<'_>,
+    stages: &mut Vec<PreparedStage>,
+    offset: &mut usize,
+) -> DbResult<bool> {
+    match &term.source.path {
+        AccessPath::TableScan { root } => {
+            let root = if term.outermost() {
+                term.override_root.unwrap_or(*root)
+            } else {
+                *root
+            };
+            let kind = if term.outermost() {
+                AccessKind::Full
+            } else {
+                // An inner term with no usable index is a cross product: every
+                // inner row pairs with every outer one, and any predicate over
+                // the pair is a residual. Phase 2 refused it because the read
+                // families never produce one; the corpora do - `SELECT count(*)
+                // FROM people CROSS JOIN teams` - and refusing a shape the
+                // engine can answer is a gap rather than a policy.
+                AccessKind::Nested
+            };
+            push_stage(stages, term.catalog, term.reads(root, kind), offset)?;
+        }
+        AccessPath::RowidSeek { root, .. } => {
+            let kind = if term.outermost() {
+                AccessKind::Point
+            } else {
+                AccessKind::Nested
+            };
+            push_stage(stages, term.catalog, term.reads(*root, kind), offset)?;
+        }
+        AccessPath::RowidRange { root, .. } => {
+            let kind = if !term.outermost() {
+                return unsupported("a rowid range as an inner join term");
+            } else if term.plan.reverse {
+                AccessKind::Reverse
+            } else {
+                AccessKind::Span
+            };
+            push_stage(stages, term.catalog, term.reads(*root, kind), offset)?;
+        }
+        // A union of probes composes with a per-row nested loop exactly as a
+        // lone probe does - one more of the same thing, at every level - but
+        // this engine has no join operator that drives one yet, so it is
+        // offered only where it drives the whole pipeline. The bytecode engine
+        // does not share this limit: it compiles a union's branches the same
+        // way at any level, one loop per branch, which is why the same SQL runs
+        // on both engines while only one of them takes the fast path
+        // everywhere the planner found one.
+        AccessPath::RowidSeekUnion { root, .. } => {
+            if !term.outermost() {
+                return unsupported("a seek union as an inner join term");
+            }
+            let request = term.reads(*root, AccessKind::SeekUnion);
+            push_stage(stages, term.catalog, request, offset)?;
+        }
+        // The candidates come from the module, and the rows come out of the
+        // table's own tree by rowid - so this is a table stage with an unusual
+        // source rather than a materialised one.
+        AccessPath::VectorProbe { root, .. } => {
+            let request = term.reads(*root, AccessKind::Vector);
+            push_stage(stages, term.catalog, request, offset)?;
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+/// Builds the stages for a term that reads an index, and maybe the table.
+///
+/// `false` means this term reads no index.
+///
+/// @param term - the FROM term
+/// @param stages - the stages built so far
+/// @param offset - the next free column index, advanced
+fn index_stages(
+    term: &Term<'_>,
+    stages: &mut Vec<PreparedStage>,
+    offset: &mut usize,
+) -> DbResult<bool> {
+    match &term.source.path {
+        AccessPath::IndexSeekUnion {
+            table_root,
+            index_root,
+            index_name,
+            covering,
+            branches,
+            ..
+        } => {
+            if !term.outermost() {
+                return unsupported("a seek union as an inner join term");
+            }
+            // The branches of an `IN` list are bare equalities and probed like
+            // `RowidSeekUnion`'s; the branches of a keyset page are ranges, and
+            // reconstructing the page's order depends on walking each one and
+            // running them in the order they were built in - two different
+            // sources for what is, at the plan level, one shape.
+            let kind = if probes_one_entry_each(
+                &term.source.table,
+                index_name,
+                *index_root,
+                *table_root,
+                branches,
+            ) {
+                AccessKind::SeekUnion
+            } else {
+                AccessKind::RangeUnion
+            };
+            push_stage(stages, term.catalog, term.reads(*index_root, kind), offset)?;
+            push_lookup(
+                term,
+                *index_root,
+                *table_root,
+                covering.is_none(),
+                stages,
+                offset,
+            )?;
+        }
+        AccessPath::IndexSeek {
+            table_root,
+            index_root,
+            covering,
+            equalities,
+            low,
+            high,
+            ..
+        } => {
+            // An index seek with no equality and no bound is a *scan* of the
+            // index, not a range over it. The distinction is not cosmetic: the
+            // covering rule and the skip-scan rule both key on `Full`, and
+            // calling this a range left `scan.distinct` reading every row of
+            // the index where SQLite seeks 64 times.
+            let unbounded = equalities.is_empty() && low.is_none() && high.is_none();
+            // The planner's *own* covering choice is subject to the same rule
+            // the physical pass's covering rule is: reading fewer bytes out of
+            // an index changes the order the rows reach an aggregate in, and a
+            // floating-point sum is not associative. `SELECT sum(score) FROM
+            // people` over `people_by_score` is 0.0 where the table gives
+            // 124.25, because the corpus holds `-1e300` and `+1e300` and the
+            // small values vanish between them. SQLite reads the table here,
+            // and so must this.
+            if unbounded && covering.is_some() && term.outermost() && term.sensitive {
+                let request = term.reads(*table_root, AccessKind::Full);
+                push_stage(stages, term.catalog, request, offset)?;
+                return Ok(true);
+            }
+            let kind = if term.outermost() {
+                if term.plan.reverse {
+                    AccessKind::Reverse
+                } else if unbounded {
+                    AccessKind::Full
+                } else {
+                    AccessKind::Span
+                }
+            } else {
+                AccessKind::Nested
+            };
+            push_stage(stages, term.catalog, term.reads(*index_root, kind), offset)?;
+            push_lookup(
+                term,
+                *index_root,
+                *table_root,
+                covering.is_none(),
+                stages,
+                offset,
+            )?;
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+/// Adds the table fetch behind an index read, when the index is not enough.
+///
+/// The index does not carry every column the query reads, so the row is
+/// fetched from the table by rowid. That is the TDD's `RowidLookup`, expressed
+/// as what it is: a nested loop into the table tree keyed on the entry's rowid.
+///
+/// A `WITHOUT ROWID` table's primary-key index *is* the table: one b-tree,
+/// reported at the table's own root page. So it carries every column by
+/// construction and there is no rowid to look anything up by - which is exactly
+/// what this stage used to try, five times over in the differential corpus,
+/// with "the index entry carries no rowid".
+///
+/// @param term - the FROM term
+/// @param index_root - the index's tree
+/// @param table_root - the table's own tree
+/// @param wanted - whether the index is missing a column the query reads
+/// @param stages - the stages built so far
+/// @param offset - the next free column index, advanced
+fn push_lookup(
+    term: &Term<'_>,
+    index_root: u32,
+    table_root: u32,
+    wanted: bool,
+    stages: &mut Vec<PreparedStage>,
+    offset: &mut usize,
+) -> DbResult<()> {
+    if !wanted || index_root == table_root {
+        return Ok(());
+    }
+    push_stage(stages, term.catalog, term.looks_up(table_root), offset)
+}
+
+/// Builds the stage for a term whose rows are produced rather than walked.
+///
+/// A derived table, a recursive CTE and the reference to the one being filled,
+/// and a virtual table. `false` means this term reads a tree.
+///
+/// @param term - the FROM term
+/// @param stages - the stages built so far
+/// @param offset - the next free column index, advanced
+fn materialised_stages(
+    term: &Term<'_>,
+    stages: &mut Vec<PreparedStage>,
+    offset: &mut usize,
+) -> DbResult<bool> {
+    match &term.source.path {
+        AccessPath::Subquery {
+            width, correlated, ..
+        } => {
+            // An inner subquery is a nested loop over a materialised buffer
+            // rather than over a tree, which is exactly what `build_nested`
+            // builds for it. The rows are read once rather than once per outer
+            // row: a derived table is a query with no free variables, so
+            // re-running it would answer the same thing.
+            if *correlated && term.outermost() {
+                // A correlated subquery reads a FROM term outside itself, and
+                // the outermost term has nothing outside it - so this is a plan
+                // that should not exist rather than one to run.
+                return unsupported("a correlated subquery as the outermost term");
+            }
+            push_materialised(stages, term.source.id, term.position, *width, offset);
+        }
+        // A recursive CTE and the reference to the one being filled are both
+        // *materialised* stages: the first is the fill loop's answer and the
+        // second is the queue it is currently on, and neither is a tree.
+        // `source_for` and `materialise_stage` produce the rows.
+        AccessPath::Recursive { width, .. } => {
+            push_materialised(stages, term.source.id, term.position, *width, offset);
+        }
+        AccessPath::RecursiveSelf { .. } => {
+            let width = term.source.table.columns.len().max(1);
+            push_materialised(stages, term.source.id, term.position, width, offset);
+        }
+        AccessPath::VirtualScan { .. } => virtual_scan_stage(term, stages, offset),
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+/// Builds the stage a virtual table becomes.
+///
+/// A virtual table is a *materialised* stage: the module produces its rows on
+/// the caller's side and the pipeline reads them, which is the same shape a
+/// subquery already has. A module is asked once, whether it is the outermost
+/// term or an inner one: the plan it chose was chosen for one set of
+/// constraints, and asking it again per outer row would be asking a different
+/// question than the one it costed. As an inner term its rows drive a
+/// `NestedLoopJoin`, like a subquery's.
+///
+/// **A module's row carries its rowid when the query asks for one.** `SELECT
+/// rowid FROM t WHERE t MATCH ...` is the shape every search adapter is written
+/// in - the rowid is the answer, and the columns are what was searched - and it
+/// used to be refused with "the tree read does not carry a rowid". The module
+/// has always had it: `VirtualCursor::rowid` is on the trait. It is appended
+/// after the declared columns rather than put first, so every column keeps the
+/// slot it already had.
+///
+/// @param term - the FROM term
+/// @param stages - the stages built so far
+/// @param offset - the next free column index, advanced
+fn virtual_scan_stage(term: &Term<'_>, stages: &mut Vec<PreparedStage>, offset: &mut usize) {
+    let declared = term.source.table.columns.len().max(1);
+    let read = term.plan.select.columns_read(term.source.id);
+    let carries_rowid = read.rowid;
+    let functions = read.functions.clone();
+    let width = declared
+        .saturating_add(usize::from(carries_rowid))
+        .saturating_add(functions.len());
+    stages.push(PreparedStage {
+        functions: functions.clone(),
+        root: 0,
+        kind: AccessKind::Materialised,
+        source: term.source.id,
+        term: term.position,
+        is_lookup: false,
+        offset: *offset,
+        width,
+        // A module's row is its own record, exactly as a materialised
+        // subquery's is: slot `i` is column `i`, and nothing is known about the
+        // order.
+        layout: Some(std::rc::Rc::new(SourceLayout {
+            tree_key: 0,
+            slots: (0..declared).map(Some).collect(),
+            rowid: carries_rowid.then_some(declared),
+            // A module's rows are not a table's rows: there is nothing to probe
+            // a table with.
+            identity: Vec::new(),
+            types: vec![StaticType::Unknown; width],
+            width,
+            key_columns: Vec::new(),
+        })),
+    });
+    *offset = offset.saturating_add(width);
+}
 /// Reports whether every branch of a seek union finds at most one entry.
 ///
 /// **A point probe is only right when one entry per key is all there can be
@@ -989,26 +1085,28 @@ fn probes_one_entry_each(
             });
     bare && one_per_key
 }
+/// Adds one stage and advances the column offset.
+///
+/// @param stages - the stages built so far
+/// @param catalog - where the layouts come from
+/// @param request - which tree to read, and how
+/// @param offset - the next free column index, advanced
 fn push_stage(
     stages: &mut Vec<PreparedStage>,
     catalog: &dyn TreeCatalog,
-    root: u32,
-    kind: AccessKind,
-    source: usize,
-    term: usize,
-    is_lookup: bool,
+    request: StageRequest,
     offset: &mut usize,
 ) -> DbResult<()> {
     let layout = catalog
-        .layout(root)
-        .ok_or_else(|| misuse(format!("no layout imported for root page {root}")))?;
+        .layout(request.root)
+        .ok_or_else(|| misuse(format!("no layout imported for root page {}", request.root)))?;
     stages.push(PreparedStage {
         functions: Vec::new(),
-        root,
-        kind,
-        source,
-        term,
-        is_lookup,
+        root: request.root,
+        kind: request.kind,
+        source: request.source,
+        term: request.term,
+        is_lookup: request.is_lookup,
         offset: *offset,
         width: layout.width,
         layout: None,

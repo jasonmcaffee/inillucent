@@ -425,10 +425,75 @@ pub fn check(contract: &Contract, manifests: &[CrateManifest]) -> Vec<String> {
                     rule.name
                 ));
             }
+            check_development_edge(rule, target, &mut violations);
         }
+        unused_allowances(rule, manifest, &mut violations);
     }
     violations.extend(find_cycles(contract));
     violations
+}
+
+/// Reports an allowance the crate does not use.
+///
+/// **A contract that over-describes is not true (task-1962, A13).** The check
+/// reported an edge the contract forbids and never an edge the contract allows
+/// that nobody takes, so `inillucent-catalog`'s rule could name
+/// `inillucent-transaction` - a dependency it does not have - and the file still
+/// read as a description of the workspace. A reader deciding whether a new call
+/// is allowed reads the rule, not the manifest, so a row that is there for no
+/// reason is a row that permits something nobody decided to permit.
+///
+/// A crate's own name is skipped: a rule naming itself is how a crate with no
+/// first-party dependencies is written.
+///
+/// @param rule - the crate's layering rule
+/// @param manifest - what its `Cargo.toml` actually declares
+/// @param violations - where a finding is recorded
+fn unused_allowances(rule: &CrateRule, manifest: &CrateManifest, violations: &mut Vec<String>) {
+    for allowed in &rule.may_depend_on {
+        if allowed == &rule.name
+            || manifest.normal.contains(allowed)
+            || manifest.development.contains(allowed)
+        {
+            continue;
+        }
+        violations.push(format!(
+            "crate `{}` is allowed to depend on `{allowed}` and does not, so remove the row from docs/invariants/layering.toml",
+            rule.name
+        ));
+    }
+}
+
+/// Checks one dev-dependency edge between two first-party crates.
+///
+/// **The layer rule is relaxed and the direction rule is kept (task-1962,
+/// A13).** A test may reach for a crate its production code does not, which is
+/// why a dev edge is not held to `may_depend_on` - `inillucent-exec` and
+/// `inillucent-tree` each build a database over `inillucent-vfs` in a test and
+/// neither depends on it otherwise. What it may not do is reach *upward*: a
+/// crate whose tests depend on one above it is a cycle in everything but the
+/// production graph, and it makes the lower crate impossible to test in
+/// isolation, which is the property the layering exists for.
+///
+/// A test-only crate is skipped: it is not in the production graph at all, so
+/// the layer numbers do not order it against a production crate, and the edge
+/// to one is what `may_test_with` above governs. `inillucent-pool`,
+/// `inillucent-txn` and `inillucent-wal` each drive `inillucent-sim` in a test
+/// for exactly that reason.
+///
+/// @param rule - the depending crate's layering rule
+/// @param target - the rule of the crate it depends on
+/// @param violations - where a finding is recorded
+fn check_development_edge(rule: &CrateRule, target: &CrateRule, violations: &mut Vec<String>) {
+    if target.kind == CrateKind::TestOnly {
+        return;
+    }
+    if target.layer >= rule.layer && rule.name != target.name {
+        violations.push(format!(
+            "crate `{}` (layer {}) has a dev-dependency on `{}` (layer {}), which is not below it",
+            rule.name, rule.layer, target.name, target.layer
+        ));
+    }
 }
 
 /// Checks one edge between two first-party crates.

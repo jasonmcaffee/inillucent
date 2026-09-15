@@ -15,31 +15,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use inillucent_compat::facade::Database;
+use inillucent_compat::interchange::reference_shell as pinned_shell;
+use inillucent_compat::rendering::shell_text as render;
 use inillucent_compat::workspace_root;
-use inillucent_value::Value;
-
-/// Returns the pinned SQLite shell, or `None` when it has not been downloaded.
-fn pinned_shell() -> Option<PathBuf> {
-    if let Ok(explicit) = std::env::var("INILLUCENT_SQLITE_SHELL") {
-        let path = PathBuf::from(explicit);
-        if path.is_file() {
-            return Some(path);
-        }
-    }
-    let directory = workspace_root().join(".sqlite-ref/3.53.4/shell");
-    let names: [&str; 2] = if cfg!(windows) {
-        ["sqlite3.exe", "sqlite3"]
-    } else {
-        ["sqlite3", "sqlite3.exe"]
-    };
-    for name in names {
-        let path = directory.join(name);
-        if path.is_file() {
-            return Some(path);
-        }
-    }
-    None
-}
 
 /// Returns a fresh scratch path, with every companion file removed.
 fn scratch(name: &str) -> PathBuf {
@@ -123,17 +101,6 @@ fn run(connection: &inillucent_compat::facade::Connection, script: &str) -> Stri
         rest = tail;
     }
     out
-}
-
-/// Renders one value the way the shell prints it.
-fn render(value: &Value<'_>) -> String {
-    match value {
-        Value::Null => String::new(),
-        Value::Integer(number) => number.to_string(),
-        Value::Real(number) => format!("{number}"),
-        Value::Text(text) => String::from_utf8_lossy(&text.utf8_bytes()).to_string(),
-        Value::Blob(bytes) => String::from_utf8_lossy(bytes.raw()).to_string(),
-    }
 }
 
 /// Runs one script against both engines and requires the same report.

@@ -608,6 +608,11 @@ fn verify_against(certificate: *mut CERT_CONTEXT, host: &str, root: &[u8]) -> Db
         ));
     }
 
+    // SAFETY: `CERT_CHAIN_PARA` is a plain C structure of integers, pointers
+    // and nested plain structures, and all-zero is a valid value for every one
+    // of them - which is what the API asks for: the caller zeroes it, sets
+    // `cbSize`, and sets only the fields it means to use. The line below sets
+    // `cbSize` before anything reads it.
     let mut parameters: CERT_CHAIN_PARA = unsafe { std::mem::zeroed() };
     parameters.cbSize = size_of::<CERT_CHAIN_PARA>() as u32;
     let mut chain: *mut CERT_CHAIN_CONTEXT = null_mut();
@@ -640,6 +645,19 @@ fn verify_against(certificate: *mut CERT_CONTEXT, host: &str, root: &[u8]) -> Db
         ));
     }
 
+    ssl_policy_says(chain, host)
+}
+
+/// Asks the SSL chain policy whether this chain is one `host` may present.
+///
+/// **Split out of `verify_against` (task-1962, A14).** Building a chain to the
+/// named authority and deciding whether that chain belongs to this host are two
+/// questions, and only the second one is about the host name. The chain is
+/// released here whichever way the answer goes.
+///
+/// @param chain - the chain `CertGetCertificateChain` built, which this releases
+/// @param host - the name the certificate has to be valid for
+fn ssl_policy_says(chain: *mut CERT_CHAIN_CONTEXT, host: &str) -> DbResult<String> {
     let mut name: Vec<u16> = host.encode_utf16().collect();
     name.push(0);
     // SAFETY: `HTTPSPolicyCallbackData` is a plain C structure of integers, unions and raw

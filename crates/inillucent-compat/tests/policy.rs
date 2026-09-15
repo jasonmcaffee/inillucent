@@ -1037,8 +1037,21 @@ const CEILINGS: [(&str, usize); 11] = [
     // Nothing of task-1913's was reverted: only this number, and it goes
     // back to 5,111 when the extraction beside it lands.
     ("crates/inillucent-sql/src/bind.rs", 5_315),
-    ("crates/inillucent-tree/src/leaf.rs", 5_175),
-    ("crates/inillucent-tree/src/paged.rs", 3_570),
+    // **Lowered to 2,200 in task-1962 (A8).** 5,026 lines, the largest file
+    // in the workspace, became four modules under `leaf/` beside the `delta.rs`
+    // that was already there: `layout` (where a value goes in the page),
+    // `encode` (building one out of rows), `read` (taking a value back out) and
+    // `compare` (ordering two rows, and searching a page with that order).
+    // `impl LeafRef` alone was 1,470 lines; `read` and `compare` hold half of
+    // it each and reopen it, so no signature changed.
+    ("crates/inillucent-tree/src/leaf.rs", 2_200),
+    // **Lowered to 2,450 in task-1962 (A8).** The 2,124 line `impl PagedTree`
+    // block became three modules under `paged/`: `descent` (root to leaf),
+    // `cursor` (walking leaves between two bounds, in either direction) and
+    // `skip` (the distinct prefix walk). What is left here is the tree itself:
+    // its fields, its statistics, its key encoding, the extent store and the
+    // integrity check.
+    ("crates/inillucent-tree/src/paged.rs", 2_450),
     // **Lowered to 200 in task-1962 (A7).** 3,003 lines holding the write
     // target, the key search and the four statements became six modules under
     // `dml/`, beside the `index.rs` that was already there: `target` (where a
@@ -1046,7 +1059,12 @@ const CEILINGS: [(&str, usize); 11] = [
     // `insert`, `conflict`, `update` and `delete`. What is left here is the
     // module list and the re-exports.
     ("crates/inillucent-exec/src/dml.rs", 200),
-    ("crates/inillucent-ext/src/vtab/fts5/mod.rs", 2_935),
+    // **Lowered to 1,100 in task-1962 (A8).** 2,933 lines with `Fts5Table`'s
+    // two `impl` blocks nine hundred lines apart became three modules beside
+    // the five that were already there: `index` (the pending buffer, the
+    // doclists and the totals), `merge` (what a write does to the index) and
+    // `query` (the cursor a scan reads).
+    ("crates/inillucent-ext/src/vtab/fts5/mod.rs", 1_100),
     // **Lowered to 800 in task-1962 (A1 step 1).** 2,753 lines in one `impl`
     // block became five modules under `ddl/`, beside the `reindex.rs` that was
     // already there: `catalog` (the rows a statement writes and the view the
@@ -2119,55 +2137,27 @@ fn every_fuzz_target_is_in_the_scheduled_workflow() {
 /// function to the first line that is exactly its indentation and a closing
 /// brace. That is a lexical rule rather than a parse, and it is the same rule
 /// for every entry, which is what a ratchet needs.
-const FUNCTION_CEILINGS: [(&str, &str, usize); 65] = [
+/// A function that falls under 150 lines loses its row rather than keeping a
+/// lowered one: the list is what is over the threshold, and a row on a short
+/// function is a hole the width of its old number. Seven left in task-1962 A8.
+const FUNCTION_CEILINGS: [(&str, &str, usize); 58] = [
     // 531 before task-1946 H6 moved the card's four path rows into
     // `runs::note_inputs` and `runs::note_run_files`.
     ("crates/inillucent-bench/src/gradeembed.rs", "run", 527),
-    (
-        "crates/inillucent-exec/src/physical/translate.rs",
-        "translate",
-        494,
-    ),
     ("crates/inillucent-bench/src/main.rs", "main", 488),
     ("crates/inillucent-compat/src/perf.rs", "plan_for", 450),
     ("crates/inillucent-bench/src/scenarios.rs", "grade", 445),
-    (
-        "crates/inillucent-compat/tests/policy.rs",
-        "no_module_grows_past_the_size_it_is_recorded_at",
-        393,
-    ),
     ("crates/inillucent-compat/src/bin/fullgate.rs", "run", 389),
-    (
-        "crates/inillucent-exec/src/physical/chain.rs",
-        "build_upper",
-        383,
-    ),
     ("crates/inillucent-compat/src/bin/readgate.rs", "run", 370),
-    ("crates/inillucent-exec/src/join/loops.rs", "push", 362),
-    (
-        "crates/inillucent-exec/src/physical/stages.rs",
-        "plan_stages",
-        353,
-    ),
-    (
-        "crates/inillucent-engine/src/engine/rowshape.rs",
-        "load_schema",
-        329,
-    ),
     ("crates/inillucent-compat/src/bin/writegate.rs", "run", 318),
-    (
-        "crates/inillucent-engine/src/vtab.rs",
-        "rows_of_module",
-        313,
-    ),
     ("crates/inillucent-sql/src/bind.rs", "bind_expr", 303),
     ("crates/inillucent-engine/src/ddl.rs", "run_directive", 273),
-    ("crates/inillucent-tree/src/paged.rs", "skip_scan", 249),
+    ("crates/inillucent-tree/src/paged/skip.rs", "skip_scan", 249),
     ("crates/inillucent-sql/src/bind.rs", "bind_call_with", 248),
     ("crates/inillucent-bench/src/synth.rs", "build_source", 243),
     ("crates/inillucent-exec/src/expr/tree.rs", "compile", 242),
     (
-        "crates/inillucent-tree/src/leaf.rs",
+        "crates/inillucent-tree/src/leaf/encode.rs",
         "encode_rows_with",
         239,
     ),
@@ -2304,10 +2294,12 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 65] = [
         153,
     ),
     ("crates/inillucent-core/src/filter.rs", "compile", 153),
+    // 151 before task-1962 A14 moved the SSL policy check into
+    // `ssl_policy_says`, which is the half the host name is for.
     (
         "crates/inillucent-remote/src/tls/windows.rs",
         "verify_against",
-        151,
+        109,
     ),
     (
         "crates/inillucent-compat/src/bin/fullgate.rs",

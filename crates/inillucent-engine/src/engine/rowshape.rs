@@ -814,7 +814,470 @@ pub(crate) struct LoadedSchema {
     pub(crate) highest_identifier: u32,
 }
 
+/// Everything one schema's load accumulates while it is being loaded.
+///
+/// **The nine locals `load_schema` carried, named once (task-1962, A8).** Five
+/// passes over the catalog rows each wrote into some of them, which is what
+/// made the function 329 lines: no pass could be read without the other four in
+/// view. Each pass is a method now and this is what they share.
+struct Loading<'a> {
+    /// The file being loaded.
+    database: &'a Database,
+    /// Which schema this is, as the binder numbers them.
+    index: usize,
+    /// The catalog rows as they are stored, with the rowid of each.
+    stored_rows: Vec<(i64, SchemaEntry)>,
+    /// The trees, by the handle each is registered under.
+    trees: HashMap<u32, PagedTree>,
+    /// The layout of each tree's rows.
+    layouts: HashMap<u32, std::rc::Rc<SourceLayout>>,
+    /// For each table's handle, its covering index handles.
+    covering: HashMap<u32, Vec<u32>>,
+    /// The catalog rows kept, each with the rowid it is stored under.
+    entries: Vec<(i64, SchemaEntry)>,
+    /// The handle each kept row's tree is registered under, parallel to
+    /// `entries`.
+    identifiers: Vec<u32>,
+    /// The objects whose `CREATE` text this engine could not re-read.
+    skipped: Vec<String>,
+    /// The handle each of this file's local tree identifiers is registered
+    /// under.
+    handles: HashMap<u64, u32>,
+    /// Every table by folded name, because an index's shape is derived against
+    /// its table's declaration and the catalog does not order tables before
+    /// their indexes.
+    infos: HashMap<Vec<u8>, (u32, TableInfo)>,
+    /// The largest local identifier the file holds, so the next one is past it.
+    highest_identifier: u32,
+}
+
+impl<'a> Loading<'a> {
+    /// Starts a load over one file's catalog rows.
+    ///
+    /// @param database - the file
+    /// @param index - which schema this is, as the binder numbers them
+    /// @param stored_rows - the catalog rows, with the rowid of each
+    fn over(
+        database: &'a Database,
+        index: usize,
+        stored_rows: Vec<(i64, SchemaEntry)>,
+    ) -> Loading<'a> {
+        Loading {
+            database,
+            index,
+            stored_rows,
+            trees: HashMap::new(),
+            layouts: HashMap::new(),
+            covering: HashMap::new(),
+            entries: Vec::new(),
+            identifiers: Vec::new(),
+            skipped: Vec::new(),
+            handles: HashMap::new(),
+            infos: HashMap::new(),
+            highest_identifier: 0,
+        }
+    }
+
+    /// Records one catalog row, with the handle its tree is registered under.
+    ///
+    /// **`entries` and `identifiers` are zipped into `Recorded` at the end, so
+    /// a row pushed to one has to be pushed to the other.** Pushing only the
+    /// entry shifted every later object onto the previous one's tree - which
+    /// read as a table whose covering index answered another table's rows, and
+    /// cost an afternoon to find. Zero is what `Recorded.root` documents for an
+    /// object with no tree, which is a virtual table, a view and a trigger.
+    ///
+    /// **The rowid is the one the row is stored under, not its position here.**
+    /// The passes below visit the tables and then the indexes, which is not the
+    /// order the catalog holds them in - a schema that creates a table, an
+    /// index, another table interleaves the two. The rowid used to be
+    /// reconstructed from the position in this reordered list, so every object
+    /// after the first index was numbered as some other object. The number is
+    /// what `seal` and every later `DROP` write by, so the next catalog write
+    /// landed on the wrong row: rows came back duplicated and rows came back
+    /// missing.
+    ///
+    /// @param entry - the catalog row
+    /// @param identifier - the handle its tree is registered under, or zero
+    fn keep(&mut self, entry: &SchemaEntry, identifier: u32) {
+        let rowid = self
+            .stored_rows
+            .iter()
+            .find(|(_, held)| held.name == entry.name && held.kind == entry.kind)
+            .map(|(rowid, _)| *rowid)
+            .unwrap_or_default();
+        self.entries.push((rowid, entry.clone()));
+        self.identifiers.push(identifier);
+    }
+
+    /// Records an object whose `CREATE` text this engine could not re-read.
+    ///
+    /// @param entry - the catalog row
+    fn skip(&mut self, entry: &SchemaEntry) {
+        self.skipped
+            .push(String::from_utf8_lossy(&entry.name).into_owned());
+    }
+
+    /// Hands out this connection's handle for a file's own tree identifier.
+    ///
+    /// **The identifier comes out of the catalog row, not out of a counter.**
+    /// It used to be handed out in catalog order, on the reasoning that it was
+    /// this process's own bookkeeping. It is not: every logical row record in
+    /// the log carries it, so a reader that numbered trees differently from the
+    /// writer would hand recovery's records to the wrong tree - a wrong answer
+    /// rather than a refusal. The identifier is stored in the catalog now; this
+    /// reads it back, and `highest_identifier` is kept so a `CREATE TABLE`
+    /// after this open cannot collide with one already in the file, which a
+    /// counter that restarted at every open could and did.
+    ///
+    /// @param entry - the catalog row
+    /// @param allocate - hands out the connection's handle
+    fn register(
+        &mut self,
+        entry: &SchemaEntry,
+        allocate: &mut dyn FnMut(u32) -> u32,
+    ) -> DbResult<(u32, u32)> {
+        let local = crate::recovery::identifier_of(entry)?;
+        self.highest_identifier = self.highest_identifier.max(local);
+        let identifier = allocate(local);
+        self.handles.insert(u64::from(local), identifier);
+        Ok((local, identifier))
+    }
+
+    /// Attaches the tree one catalog row names.
+    ///
+    /// **The tree keeps the identifier its own file numbered it with.** Every
+    /// log record it writes carries this number and the log outlives the
+    /// process, so it is the file's business. The map key beside it is the
+    /// connection's handle, which is not.
+    ///
+    /// @param local - the file's own identifier for the tree
+    /// @param entry - the catalog row
+    /// @param columns - the columns one of its rows has
+    /// @param key_columns - how many of those are the key
+    fn attach_tree(
+        &self,
+        local: u32,
+        entry: &SchemaEntry,
+        columns: Vec<ColumnSpec>,
+        key_columns: usize,
+    ) -> DbResult<PagedTree> {
+        PagedTree::attach(
+            self.database.pool(),
+            u64::from(local),
+            entry.root,
+            columns,
+            key_columns,
+            entry.stats.leaf_count,
+            entry.stats.row_count,
+        )
+    }
+
+    /// Loads every table the catalog declares.
+    ///
+    /// @param stored - the catalog rows
+    /// @param allocate - hands out the connection's handle for a tree
+    fn tables_from(
+        &mut self,
+        stored: &[SchemaEntry],
+        allocate: &mut dyn FnMut(u32) -> u32,
+    ) -> DbResult<()> {
+        for entry in stored {
+            if entry.kind != ObjectKind::Table {
+                continue;
+            }
+            // A virtual table has **no tree of its own**. Its rows live in the
+            // shadow tables the module declared, which are ordinary tables in
+            // this same catalog and are loaded by this same loop. So its row
+            // carries no tree identifier, and asking for one refused to open
+            // every database holding a search table - which is how this was
+            // found, by moving `inillucent-migrate` onto the engine.
+            //
+            // The kind is learned from a throwaway parse rather than from the
+            // parse below, because that one is given the identifier and every
+            // shape it derives is derived against it. Parsing once with a
+            // placeholder root and patching `info.root` afterwards looked like
+            // the same thing and was not: it left the *derived* shapes pointing
+            // at the placeholder, and every table then scanned the same tree -
+            // `count(*)` answered the same number for every table in the file.
+            if matches!(
+                table_from_create_sql(&entry.sql, self.index, 0).map(|info| info.kind),
+                Ok(inillucent_sql::catalog_view::TableKind::Virtual)
+            ) {
+                self.keep(entry, 0);
+                continue;
+            }
+            let (local, identifier) = self.register(entry, allocate)?;
+            let mut info = match table_from_create_sql(&entry.sql, self.index, identifier) {
+                Ok(info) => info,
+                Err(_) => {
+                    self.skip(entry);
+                    continue;
+                }
+            };
+            info.root = identifier;
+            let (columns, key_columns, layout) = if info.without_rowid {
+                match keyed_table_shape(&info) {
+                    Ok((columns, key_columns, layout)) => (columns, key_columns, layout),
+                    Err(_) => {
+                        self.skip(entry);
+                        continue;
+                    }
+                }
+            } else {
+                let (columns, layout) = table_shape(&info);
+                (columns, 1, layout)
+            };
+            let tree = self.attach_tree(local, entry, columns, key_columns)?;
+            self.trees.insert(identifier, tree);
+            self.layouts.insert(identifier, std::rc::Rc::new(layout));
+            self.infos
+                .insert(info.folded.clone(), (identifier, info.clone()));
+            self.keep(entry, identifier);
+        }
+        Ok(())
+    }
+
+    /// Loads every index the catalog declares, against its table.
+    ///
+    /// @param stored - the catalog rows
+    /// @param allocate - hands out the connection's handle for a tree
+    fn indexes_from(
+        &mut self,
+        stored: &[SchemaEntry],
+        allocate: &mut dyn FnMut(u32) -> u32,
+    ) -> DbResult<()> {
+        for entry in stored {
+            if entry.kind != ObjectKind::Index {
+                continue;
+            }
+            let folded = entry.table.to_ascii_lowercase();
+            let Some((table_root, table_info)) = self.infos.get(&folded).cloned() else {
+                self.skip(entry);
+                continue;
+            };
+            let (local, identifier) = self.register(entry, allocate)?;
+            let Some(index) = self.declaration_of(entry, &table_info, identifier) else {
+                self.skip(entry);
+                continue;
+            };
+            let (columns, layout) = index_shape(&table_info, &index, identifier);
+            let key_columns = columns.len();
+            let tree = self.attach_tree(local, entry, columns, key_columns)?;
+            self.trees.insert(identifier, tree);
+            self.layouts.insert(identifier, std::rc::Rc::new(layout));
+            if covers_every_row(&index) {
+                self.covering
+                    .entry(table_root)
+                    .or_default()
+                    .push(identifier);
+            }
+            // The index joins its table's declaration, so the binder offers it
+            // to the planner exactly as the import does. An automatic one is
+            // already there - the table's own text declared it - so its root is
+            // filled in rather than a second copy pushed.
+            if let Some((_, info)) = self.infos.get_mut(&folded) {
+                match info
+                    .indexes
+                    .iter_mut()
+                    .find(|held| held.folded == index.folded)
+                {
+                    Some(held) => held.root = identifier,
+                    None => info.indexes.push(index),
+                }
+            }
+            self.keep(entry, identifier);
+        }
+        Ok(())
+    }
+
+    /// Reads one index's declaration out of the catalog, or out of its table.
+    ///
+    /// **An automatic index is declared by the *table's* text**, and the
+    /// catalog stores an empty statement for it - which is what SQLite writes
+    /// for `sqlite_autoindex_t_1`. Parsing that empty text as a `CREATE INDEX`
+    /// fails, and this used to skip the index: no tree was attached, no row
+    /// joined `entries`, and the declaration the planner reads kept the root of
+    /// zero it was parsed with. The visible result was that **any query using a
+    /// non-`INTEGER PRIMARY KEY` failed after a reopen** - `EXPLAIN QUERY PLAN`
+    /// named the index and the statement answered `no layout imported for root
+    /// page 0`. It is the same rule `tables_from_entries` and `shape_of`
+    /// already apply.
+    ///
+    /// @param entry - the index's catalog row
+    /// @param table_info - the table it is declared against
+    /// @param identifier - the handle its tree is registered under
+    fn declaration_of(
+        &self,
+        entry: &SchemaEntry,
+        table_info: &TableInfo,
+        identifier: u32,
+    ) -> Option<IndexInfo> {
+        if entry.sql.is_empty() {
+            let wanted = entry.name.to_ascii_lowercase();
+            let mut index = table_info
+                .indexes
+                .iter()
+                .find(|index| index.folded == wanted)
+                .cloned()?;
+            index.root = identifier;
+            return Some(index);
+        }
+        inillucent_catalog::load::index_from_create_sql(&entry.sql, table_info, identifier).ok()
+    }
+
+    /// Records every view the catalog declares.
+    ///
+    /// **A view is a row and nothing else, and this pass was missing.** The
+    /// catalog carried it - `SELECT type, name FROM sqlite_schema` listed
+    /// `view|v` - but nothing put it into `entries`, so `tables_from_entries`
+    /// never saw it and the binder never learned the name. `SELECT * FROM v`
+    /// answered `no such table: v` against a schema that says the view is
+    /// there, which is worse than a schema that dropped it: the object is
+    /// listed and unreadable.
+    ///
+    /// It was not only the migration path. A view created by `CREATE VIEW`,
+    /// queried, and then read again after a close and reopen was gone the same
+    /// way, because this is the function every open goes through.
+    ///
+    /// It runs before the triggers, so an `INSTEAD OF` trigger finds the view
+    /// it is attached to.
+    ///
+    /// @param stored - the catalog rows
+    fn views_from(&mut self, stored: &[SchemaEntry]) {
+        for entry in stored {
+            if entry.kind != ObjectKind::View {
+                continue;
+            }
+            self.keep(entry, 0);
+        }
+    }
+
+    /// Loads every written trigger onto its table's declaration.
+    ///
+    /// **The triggers, then the keys, and in that order.** A written trigger is
+    /// a catalog row like a table or an index and joins its table's
+    /// declaration; a foreign key is a trigger the binder writes, and
+    /// `plan_schema` can only write it once every table is in hand, because a
+    /// key records only the child's side and the parent's has to be found by
+    /// asking every table what it points at.
+    ///
+    /// Neither was done here until task-1932, which is the whole reason foreign
+    /// keys were unenforced: the binder fills a statement's `triggers` from
+    /// exactly these two places, and both were empty on this engine.
+    ///
+    /// @param stored - the catalog rows
+    fn triggers_from(&mut self, stored: &[SchemaEntry]) {
+        for entry in stored {
+            if entry.kind != ObjectKind::Trigger {
+                continue;
+            }
+            let folded = entry.table.to_ascii_lowercase();
+            let held = inillucent_catalog::load::trigger_from_create_sql(&entry.sql).ok();
+            match (self.infos.get_mut(&folded), held) {
+                (None, _) => {
+                    self.skip(entry);
+                    continue;
+                }
+                // Newest first, which is SQLite's own order: it pushes each
+                // trigger onto the front of the table's list as it reads the
+                // schema, so the most recently created one fires first.
+                (Some((_, info)), Some(trigger)) => info.triggers.insert(0, trigger),
+                (Some(_), None) => self.skip(entry),
+            }
+            self.keep(entry, 0);
+        }
+    }
+
+    /// Writes each table's foreign keys as the triggers that enforce them.
+    ///
+    /// @param name - the schema's name, which the foreign-key planner qualifies
+    ///   with
+    fn foreign_keys_from(&mut self, name: &[u8]) {
+        let mut planned: Vec<TableInfo> =
+            self.infos.values().map(|(_, info)| info.clone()).collect();
+        inillucent_sql::foreign_key::plan_schema(&mut planned, name, &Limits::default());
+        for info in planned {
+            if let Some((_, held)) = self.infos.get_mut(&info.folded) {
+                held.foreign_key_triggers = info.foreign_key_triggers.clone();
+            }
+        }
+    }
+
+    /// Adds the catalog's own layout, and hands back everything loaded.
+    ///
+    /// `sqlite_schema` is read over the catalog tree exactly as the import
+    /// builds it: one root number no object can have, and the ordinary scan
+    /// path.
+    ///
+    /// @param catalog_tree - the file's catalog tree
+    /// @param catalog_handle - the handle it is read through
+    fn layouts_from(
+        mut self,
+        catalog_tree: PagedTree,
+        catalog_handle: u32,
+    ) -> DbResult<LoadedSchema> {
+        let schema_root = catalog_handle;
+        let schema_info = table_from_create_sql(schema_create_sql(), self.index, schema_root)?;
+        self.layouts.insert(
+            schema_root,
+            std::rc::Rc::new(SourceLayout {
+                tree_key: schema_root,
+                slots: (1..=5).map(Some).collect(),
+                rowid: Some(0),
+                identity: vec![0],
+                types: vec![
+                    StaticType::Int,
+                    StaticType::Text,
+                    StaticType::Text,
+                    StaticType::Text,
+                    StaticType::Int,
+                    StaticType::Text,
+                ],
+                width: 6,
+                key_columns: vec![0],
+            }),
+        );
+        self.trees.insert(schema_root, catalog_tree);
+        let trees = self.trees;
+        for roots in self.covering.values_mut() {
+            roots.sort_by_key(|root| {
+                trees
+                    .get(root)
+                    .map(PagedTree::byte_size)
+                    .unwrap_or(usize::MAX)
+            });
+        }
+        let mut tables: Vec<TableInfo> = self.infos.into_values().map(|(_, info)| info).collect();
+        tables.sort_by(|one, two| one.folded.cmp(&two.folded));
+        analyze::attach_statistics(self.database.pool(), &trees, &mut tables);
+        Ok(LoadedSchema {
+            trees,
+            layouts: self.layouts,
+            covering: self.covering,
+            entries: self
+                .entries
+                .into_iter()
+                .zip(self.identifiers)
+                .map(|((rowid, entry), root)| Recorded { rowid, root, entry })
+                .collect(),
+            tables,
+            schema_info,
+            handles: self.handles,
+            skipped: self.skipped,
+            highest_identifier: self.highest_identifier,
+        })
+    }
+}
+
 /// Reads one file's catalog tree and derives everything needed to plan on it.
+///
+/// **The five passes, in order (task-1962, A8).** It was 329 lines carrying
+/// nine accumulators; each pass is a [`Loading`] method now. The order is not
+/// arbitrary: an index's shape is derived against its table's declaration, a
+/// trigger joins a table that has to already be there, a view has to be there
+/// before an `INSTEAD OF` trigger looks for it, and a foreign key is a trigger
+/// the binder can only write once every table is in hand.
 ///
 /// @param database - the file
 /// @param catalog_tree - its catalog tree, already attached from the meta page
@@ -830,324 +1293,13 @@ pub(crate) fn load_schema(
     catalog_handle: u32,
     allocate: &mut dyn FnMut(u32) -> u32,
 ) -> DbResult<LoadedSchema> {
-    let mut trees: HashMap<u32, PagedTree> = HashMap::new();
-    let mut layouts: HashMap<u32, std::rc::Rc<SourceLayout>> = HashMap::new();
-    let mut covering: HashMap<u32, Vec<u32>> = HashMap::new();
-    let mut entries: Vec<(i64, SchemaEntry)> = Vec::new();
-    let mut identifiers: Vec<u32> = Vec::new();
-    let mut skipped: Vec<String> = Vec::new();
-    let mut handles: HashMap<u64, u32> = HashMap::new();
-    // **Read with the rowid each row is stored under, not without it.**
-    // The two loops below visit the tables and then the indexes, which is
-    // not the order the catalog holds them in - a schema that creates a
-    // table, an index, another table interleaves the two. The rowid used to
-    // be reconstructed from the position in *this* reordered list, so every
-    // object after the first index was numbered as some other object. The
-    // number is what `seal` and every later `DROP` write by, so the next
-    // catalog write landed on the wrong row: rows came back duplicated and
-    // rows came back missing.
     let stored_rows = inillucent_catalog::paged::read_catalog_rows(database.pool(), &catalog_tree)?;
     let stored: Vec<SchemaEntry> = stored_rows.iter().map(|(_, entry)| entry.clone()).collect();
-    let rowid_of_name = |entry: &SchemaEntry| -> i64 {
-        stored_rows
-            .iter()
-            .find(|(_, held)| held.name == entry.name && held.kind == entry.kind)
-            .map(|(rowid, _)| *rowid)
-            .unwrap_or_default()
-    };
-
-    // **The identifier comes out of the catalog row, not out of a counter.**
-    // It used to be handed out here in catalog order, on the reasoning that
-    // it was this process's own bookkeeping. It is not: every logical row
-    // record in the log carries it, so a reader that numbered trees
-    // differently from the writer would hand recovery's records to the wrong
-    // tree - a wrong answer rather than a refusal. The identifier is stored in
-    // the catalog now; this reads it back.
-    //
-    // `next_root` is set past the largest so a `CREATE TABLE` after this
-    // open cannot collide with one already in the file, which a counter that
-    // restarted at every open could and did.
-    let mut highest_identifier = 0u32;
-    // Every table by folded name, because an index's shape is derived
-    // against its table's declaration and the catalog does not order tables
-    // before their indexes.
-    let mut infos: HashMap<Vec<u8>, (u32, TableInfo)> = HashMap::new();
-
-    for entry in &stored {
-        if entry.kind != ObjectKind::Table {
-            continue;
-        }
-        // A virtual table has **no tree of its own**. Its rows live in the
-        // shadow tables the module declared, which are ordinary tables in
-        // this same catalog and are loaded by this same loop. So its row
-        // carries no tree identifier, and asking for one refused to open
-        // every database holding a search table - which is how this was
-        // found, by moving `inillucent-migrate` onto the engine.
-        //
-        // The kind is learned from a throwaway parse rather than from the
-        // parse below, because that one is given the identifier and every
-        // shape it derives is derived against it. Parsing once with a
-        // placeholder root and patching `info.root` afterwards looked like
-        // the same thing and was not: it left the *derived* shapes pointing
-        // at the placeholder, and every table then scanned the same tree -
-        // `count(*)` answered the same number for every table in the file.
-        if matches!(
-            table_from_create_sql(&entry.sql, index, 0).map(|info| info.kind),
-            Ok(inillucent_sql::catalog_view::TableKind::Virtual)
-        ) {
-            // `entries` and `identifiers` are zipped into `Recorded` below,
-            // so they are parallel and a row pushed to one has to be pushed
-            // to the other. Pushing only the entry shifted every later
-            // object onto the previous one's tree - which read as a table
-            // whose covering index answered another table's rows, and cost
-            // an afternoon to find. Zero is what `Recorded.root` documents
-            // for an object with no tree.
-            entries.push((rowid_of_name(entry), entry.clone()));
-            identifiers.push(0);
-            continue;
-        }
-        let local = crate::recovery::identifier_of(entry)?;
-        highest_identifier = highest_identifier.max(local);
-        let identifier = allocate(local);
-        handles.insert(u64::from(local), identifier);
-        let mut info = match table_from_create_sql(&entry.sql, index, identifier) {
-            Ok(info) => info,
-            Err(_) => {
-                skipped.push(String::from_utf8_lossy(&entry.name).into_owned());
-                continue;
-            }
-        };
-        info.root = identifier;
-        let (columns, key_columns, layout) = if info.without_rowid {
-            match keyed_table_shape(&info) {
-                Ok((columns, key_columns, layout)) => (columns, key_columns, layout),
-                Err(_) => {
-                    skipped.push(String::from_utf8_lossy(&entry.name).into_owned());
-                    continue;
-                }
-            }
-        } else {
-            let (columns, layout) = table_shape(&info);
-            (columns, 1, layout)
-        };
-        let tree = PagedTree::attach(
-            database.pool(),
-            // **The tree keeps the identifier its own file numbered it with.**
-            // Every log record it writes carries this number and the log
-            // outlives the process, so it is the file's business. The map key
-            // beside it is the connection's handle, which is not.
-            u64::from(local),
-            entry.root,
-            columns,
-            key_columns,
-            entry.stats.leaf_count,
-            entry.stats.row_count,
-        )?;
-        trees.insert(identifier, tree);
-        layouts.insert(identifier, std::rc::Rc::new(layout));
-        infos.insert(info.folded.clone(), (identifier, info.clone()));
-        entries.push((rowid_of_name(entry), entry.clone()));
-        identifiers.push(identifier);
-    }
-
-    for entry in &stored {
-        if entry.kind != ObjectKind::Index {
-            continue;
-        }
-        let folded = entry.table.to_ascii_lowercase();
-        let Some((table_root, table_info)) = infos.get(&folded).cloned() else {
-            skipped.push(String::from_utf8_lossy(&entry.name).into_owned());
-            continue;
-        };
-        let local = crate::recovery::identifier_of(entry)?;
-        highest_identifier = highest_identifier.max(local);
-        let identifier = allocate(local);
-        handles.insert(u64::from(local), identifier);
-        // **An automatic index is declared by the *table's* text**, and the
-        // catalog stores an empty statement for it - which is what SQLite
-        // writes for `sqlite_autoindex_t_1`. Parsing that empty text as a
-        // `CREATE INDEX` fails, and the arm below used to skip the index: no
-        // tree was attached, no row joined `entries`, and the declaration the
-        // planner reads kept the root of zero it was parsed with. The visible
-        // result was that **any query using a non-`INTEGER PRIMARY KEY` failed
-        // after a reopen** - `EXPLAIN QUERY PLAN` named the index and the
-        // statement answered `no layout imported for root page 0`. It is the
-        // same rule `tables_from_entries` and `shape_of` already apply.
-        let index = if entry.sql.is_empty() {
-            let wanted = entry.name.to_ascii_lowercase();
-            match table_info
-                .indexes
-                .iter()
-                .find(|index| index.folded == wanted)
-            {
-                Some(index) => {
-                    let mut index = index.clone();
-                    index.root = identifier;
-                    index
-                }
-                None => {
-                    skipped.push(String::from_utf8_lossy(&entry.name).into_owned());
-                    continue;
-                }
-            }
-        } else {
-            match inillucent_catalog::load::index_from_create_sql(
-                &entry.sql,
-                &table_info,
-                identifier,
-            ) {
-                Ok(index) => index,
-                Err(_) => {
-                    skipped.push(String::from_utf8_lossy(&entry.name).into_owned());
-                    continue;
-                }
-            }
-        };
-        let (columns, layout) = index_shape(&table_info, &index, identifier);
-        let key_columns = columns.len();
-        let tree = PagedTree::attach(
-            database.pool(),
-            // **The tree keeps the identifier its own file numbered it with.**
-            // Every log record it writes carries this number and the log
-            // outlives the process, so it is the file's business. The map key
-            // beside it is the connection's handle, which is not.
-            u64::from(local),
-            entry.root,
-            columns,
-            key_columns,
-            entry.stats.leaf_count,
-            entry.stats.row_count,
-        )?;
-        trees.insert(identifier, tree);
-        layouts.insert(identifier, std::rc::Rc::new(layout));
-        if covers_every_row(&index) {
-            covering.entry(table_root).or_default().push(identifier);
-        }
-        // The index joins its table's declaration, so the binder offers it
-        // to the planner exactly as the import does. An automatic one is
-        // already there - the table's own text declared it - so its root is
-        // filled in rather than a second copy pushed.
-        if let Some((_, info)) = infos.get_mut(&folded) {
-            match info
-                .indexes
-                .iter_mut()
-                .find(|held| held.folded == index.folded)
-            {
-                Some(held) => held.root = identifier,
-                None => info.indexes.push(index),
-            }
-        }
-        entries.push((rowid_of_name(entry), entry.clone()));
-        identifiers.push(identifier);
-    }
-
-    // **The triggers, then the keys, and in that order.** A written
-    // trigger is a catalog row like a table or an index and joins its
-    // table's declaration; a foreign key is a trigger the binder writes,
-    // and `plan_schema` can only write it once every table is in hand,
-    // because a key records only the child's side and the parent's has to
-    // be found by asking every table what it points at.
-    //
-    // Neither was done here until now, which is the whole reason foreign
-    // keys were unenforced: the binder fills a statement's `triggers` from
-    // exactly these two places, and both were empty on this engine.
-    // **A view is a row and nothing else, and this loop was missing.** The
-    // catalog carried it - `SELECT type, name FROM sqlite_schema` listed
-    // `view|v` - but nothing put it into `entries`, so `tables_from_entries`
-    // never saw it and the binder never learned the name. `SELECT * FROM v`
-    // answered `no such table: v` against a schema that says the view is
-    // there, which is worse than a schema that dropped it: the object is
-    // listed and unreadable.
-    //
-    // It was not only the migration path. A view created by `CREATE VIEW`,
-    // queried, and then read again after a close and reopen was gone the same
-    // way, because this is the function every open goes through.
-    //
-    // Before the triggers, so an `INSTEAD OF` trigger finds the view it is
-    // attached to.
-    for entry in &stored {
-        if entry.kind != ObjectKind::View {
-            continue;
-        }
-        entries.push((rowid_of_name(entry), entry.clone()));
-        identifiers.push(0);
-    }
-    for entry in &stored {
-        if entry.kind != ObjectKind::Trigger {
-            continue;
-        }
-        let folded = entry.table.to_ascii_lowercase();
-        let Some((_, info)) = infos.get_mut(&folded) else {
-            skipped.push(String::from_utf8_lossy(&entry.name).into_owned());
-            continue;
-        };
-        match inillucent_catalog::load::trigger_from_create_sql(&entry.sql) {
-            // Newest first, which is SQLite's own order: it pushes each
-            // trigger onto the front of the table's list as it reads the
-            // schema, so the most recently created one fires first.
-            Ok(trigger) => info.triggers.insert(0, trigger),
-            Err(_) => skipped.push(String::from_utf8_lossy(&entry.name).into_owned()),
-        }
-        entries.push((rowid_of_name(entry), entry.clone()));
-        identifiers.push(0);
-    }
-
-    let mut planned: Vec<TableInfo> = infos.values().map(|(_, info)| info.clone()).collect();
-    inillucent_sql::foreign_key::plan_schema(&mut planned, name, &Limits::default());
-    for info in planned {
-        if let Some((_, held)) = infos.get_mut(&info.folded) {
-            held.foreign_key_triggers = info.foreign_key_triggers.clone();
-        }
-    }
-
-    // `sqlite_schema` over the catalog tree, exactly as the import builds
-    // it: one root number no object can have, and the ordinary scan path.
-    let schema_root = catalog_handle;
-    let schema_info = table_from_create_sql(schema_create_sql(), index, schema_root)?;
-    layouts.insert(
-        schema_root,
-        std::rc::Rc::new(SourceLayout {
-            tree_key: schema_root,
-            slots: (1..=5).map(Some).collect(),
-            rowid: Some(0),
-            identity: vec![0],
-            types: vec![
-                StaticType::Int,
-                StaticType::Text,
-                StaticType::Text,
-                StaticType::Text,
-                StaticType::Int,
-                StaticType::Text,
-            ],
-            width: 6,
-            key_columns: vec![0],
-        }),
-    );
-    trees.insert(schema_root, catalog_tree);
-    for roots in covering.values_mut() {
-        roots.sort_by_key(|root| {
-            trees
-                .get(root)
-                .map(PagedTree::byte_size)
-                .unwrap_or(usize::MAX)
-        });
-    }
-    let mut tables: Vec<TableInfo> = infos.into_values().map(|(_, info)| info).collect();
-    tables.sort_by(|one, two| one.folded.cmp(&two.folded));
-    analyze::attach_statistics(database.pool(), &trees, &mut tables);
-    Ok(LoadedSchema {
-        trees,
-        layouts,
-        covering,
-        entries: entries
-            .into_iter()
-            .zip(identifiers)
-            .map(|((rowid, entry), root)| Recorded { rowid, root, entry })
-            .collect(),
-        tables,
-        schema_info,
-        handles,
-        skipped,
-        highest_identifier,
-    })
+    let mut loading = Loading::over(database, index, stored_rows);
+    loading.tables_from(&stored, allocate)?;
+    loading.indexes_from(&stored, allocate)?;
+    loading.views_from(&stored);
+    loading.triggers_from(&stored);
+    loading.foreign_keys_from(name);
+    loading.layouts_from(catalog_tree, catalog_handle)
 }

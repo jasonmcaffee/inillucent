@@ -375,6 +375,15 @@ pub(crate) struct Upper {
 /// block or a lateral module - every place that would hold onto the borrow -
 /// is built by [`build_chain`] instead, over what this returns.
 ///
+/// **The ordered list of the operators it may insert (task-1962, A8).** It was
+/// 383 lines, one inline block per operator, each reading a different part of
+/// the same forty line setup. Each operator is a `push_*` function now and the
+/// setup is [`correlated_columns`], [`plan_outputs`], [`grouping_of`] and
+/// [`already_sorted`], gathered into an [`Upward`] the pushes borrow. There is
+/// no `push_window`: a windowed query never reaches this builder, because
+/// `run_any` routes it to `crate::windowpass::run_windowed` and
+/// [`refuse_unhandled`] refuses one that arrives anyway.
+///
 /// @param plan - the planner's output
 /// @param catalog - where a registered function's body comes from, borrowed
 ///   only for this call
@@ -382,23 +391,119 @@ pub(crate) struct Upper {
 /// @param space - the joined column space
 /// @param params - the values bound to `?1`, `?2`, ...
 /// @param sink - the end of the pipeline
-pub(crate) fn build_upper(
+/// The result columns and the sort keys, translated once.
+///
+/// **What every operator above the source reads (task-1962, A8).** The
+/// projection, the sorter, the trim and the `DISTINCT` each need some part of
+/// this, and while they were written inline they each reached into the same
+/// forty lines of locals. It is one value now, computed before the first
+/// operator is pushed.
+struct Outputs {
+    /// The result columns, followed by any `ORDER BY` term that is not one.
+    projected: Vec<Expr>,
+    /// How many of `projected` the caller asked for. The rest are carried
+    /// through the sort and trimmed afterwards.
+    result_width: usize,
+    /// The sort keys, as positions into `projected`.
+    sort_keys: Vec<SortKey>,
+    /// Whether `projected` grew past `result_width`, so the trim is needed.
+    needs_trim: bool,
+}
+
+/// Everything the `push_*` functions read.
+///
+/// **A gathered context rather than a fifteen argument call (task-1962, A8).**
+/// Each `push_*` function needs a different four or five of these, and passing
+/// them positionally would have put the longest parameter lists in the crate
+/// next to the function the split was meant to make readable. The struct is
+/// built once by [`build_upper`] and borrowed by each push.
+struct Upward<'a> {
+    /// The planner's output.
+    plan: &'a PhysicalPlan,
+    /// The structural choices `prepare` made.
+    prepared: &'a Prepared,
+    /// The joined column space, widened for any correlated block.
+    space: &'a Space<'a>,
+    /// The values bound to `?1`, `?2`, ...
+    params: &'a Params,
+    /// The column types a row has as the source produces it.
+    scan_types: &'a [StaticType],
+    /// The column groups the walk already orders rows by.
+    scan_order: Vec<Vec<usize>>,
+    /// The column types a row has where the projection reads it, which is the
+    /// aggregate's output rather than the scan's when there is one.
+    projection_types: Vec<StaticType>,
+    /// The `GROUP BY` terms, translated.
+    group_exprs: Vec<Expr>,
+    /// The collation each `GROUP BY` term compares under.
+    group_collations: Vec<Collation>,
+    /// How many `GROUP BY` terms there are, which is how wide the key half of
+    /// an aggregated row is.
+    group_width: usize,
+    /// Whether the walk already brings each group's rows together.
+    grouped_walk: bool,
+    /// Whether the source is a skip scan.
+    skipping: bool,
+    /// Whether the rows already arrive in the order `ORDER BY` asks for.
+    sorted_already: bool,
+    /// The statement's constant `LIMIT`, if it has one.
+    limit: Option<usize>,
+    /// The statement's constant `OFFSET`, zero when it has none.
+    offset: usize,
+    /// The result columns and the sort keys.
+    outputs: Outputs,
+}
+
+/// Whether the source walks its tree backwards.
+///
+/// @param prepared - the structural choices `prepare` made
+fn is_reverse_scan(prepared: &Prepared) -> bool {
+    prepared
+        .stages
+        .first()
+        .map(|stage| stage.kind == AccessKind::Reverse)
+        .unwrap_or(false)
+}
+
+/// Whether the source is a skip scan over a leading index prefix.
+///
+/// @param prepared - the structural choices `prepare` made
+fn is_skip_scan(prepared: &Prepared) -> bool {
+    prepared
+        .stages
+        .first()
+        .map(|stage| stage.kind == AccessKind::Skip)
+        .unwrap_or(false)
+}
+
+/// The statement's correlated blocks, and the columns they are answered in.
+///
+/// **A correlated block is answered beside the row, not inside an
+/// expression.** Each one becomes a column appended to the joined row, and
+/// `crate::correlate` is the operator that fills it - so the `WHERE` and the
+/// projection read a column rather than reaching for a catalog that
+/// `expr::Eval`'s `Send + Sync` bound puts out of reach. `correlations_of`
+/// returns nothing for a statement with none, which is nearly all of them, and
+/// the operator is then never built.
+///
+/// The third value is the widened column types, and it is empty for a
+/// statement with no correlated block: **only widened when there is something
+/// to widen.** `prepare.trivial` is 1,337 ns end to end and a `Vec` per
+/// prepare is a measurable share of it, so the common case keeps borrowing the
+/// space's own types.
+///
+/// @param plan - the planner's output
+/// @param catalog - where the trees and layouts come from
+/// @param space - the joined column space before any widening
+fn correlated_columns(
     plan: &PhysicalPlan,
     catalog: &dyn TreeCatalog,
-    prepared: &Prepared,
     space: &Space<'_>,
-    params: &Params,
-    sink: Box<dyn Sink>,
-) -> DbResult<Upper> {
-    let select = &plan.select;
-    refuse_unhandled(select)?;
-    // **A correlated block is answered beside the row, not inside an
-    // expression.** Each one becomes a column appended to the joined row, and
-    // `crate::correlate` is the operator that fills it - so the `WHERE` and the
-    // projection read a column rather than reaching for a catalog that
-    // `expr::Eval`'s `Send + Sync` bound puts out of reach. `correlations_of`
-    // returns nothing for a statement with none, which is nearly all of them,
-    // and the operator is then never built.
+) -> DbResult<(
+    Vec<crate::correlate::Correlation>,
+    Vec<(usize, usize)>,
+    Vec<StaticType>,
+)> {
     let outer = Space {
         stages: space.stages,
         layouts: space.layouts,
@@ -413,15 +518,11 @@ pub(crate) fn build_upper(
         _ => None,
     })?;
     let joined_width = space.types.len();
-    let correlation_columns: Vec<(usize, usize)> = correlations
+    let columns: Vec<(usize, usize)> = correlations
         .iter()
         .enumerate()
         .map(|(position, correlation)| (correlation.id, joined_width.saturating_add(position)))
         .collect();
-    // **Only widened when there is something to widen.** A correlated block adds
-    // a column and every other statement adds none, so the common case borrows
-    // the space's own types rather than copying them - `prepare.trivial` is
-    // 1,337 ns end to end and a `Vec` per prepare is a measurable share of it.
     let widened_types: Vec<StaticType> = if correlations.is_empty() {
         Vec::new()
     } else {
@@ -429,29 +530,22 @@ pub(crate) fn build_upper(
         widened.extend(std::iter::repeat_n(StaticType::Unknown, correlations.len()));
         widened
     };
-    let scan_types: &[StaticType] = if correlations.is_empty() {
-        space.types
-    } else {
-        &widened_types
-    };
-    let space = &Space {
-        stages: space.stages,
-        layouts: space.layouts,
-        types: scan_types,
-        order: space.order,
-        catalog: Some(catalog),
-        correlations: &correlation_columns,
-    };
-    let group_width = select.group_by.len();
-    let skipping = prepared
-        .stages
-        .first()
-        .map(|stage| stage.kind == AccessKind::Skip)
-        .unwrap_or(false);
+    Ok((correlations, columns, widened_types))
+}
 
-    // Result columns and ORDER BY terms, in the space that exists after any
-    // aggregation. Terms that are not already result columns are carried
-    // through the sort as extra columns and trimmed afterwards.
+/// Translates the result columns and the `ORDER BY` terms.
+///
+/// Both are read in the space that exists *after* any aggregation, which is
+/// what `translate_post` means by post. A term that is not already a result
+/// column is appended to the projection, carried through the sort as an extra
+/// column, and trimmed afterwards.
+///
+/// @param plan - the planner's output
+/// @param space - the joined column space
+/// @param params - the values bound to `?1`, `?2`, ...
+fn plan_outputs(plan: &PhysicalPlan, space: &Space<'_>, params: &Params) -> DbResult<Outputs> {
+    let select = &plan.select;
+    let group_width = select.group_by.len();
     let mut projected: Vec<Expr> = Vec::with_capacity(select.columns.len());
     for column in &select.columns {
         projected.push(translate_post(
@@ -483,10 +577,9 @@ pub(crate) fn build_upper(
                 projected.len().saturating_sub(1)
             }
         };
-        let descending = term.order == SortOrder::Descending;
         sort_keys.push(SortKey {
             column,
-            descending,
+            descending: term.order == SortOrder::Descending,
             collation: term.collation,
             // SQLite's default is NULLS FIRST ascending and NULLS LAST
             // descending, which is what reversing an ordering that puts NULL
@@ -499,8 +592,42 @@ pub(crate) fn build_upper(
         });
     }
     let needs_trim = projected.len() > result_width;
+    Ok(Outputs {
+        projected,
+        result_width,
+        sort_keys,
+        needs_trim,
+    })
+}
 
-    let scan_order = &order_equivalents(space.stages, space.layouts, space.order);
+/// The `GROUP BY` terms, their collations, and whether the walk already groups.
+///
+/// **Adjacency has no direction, and `space.order` deliberately does.** A
+/// reverse walk brings each group's rows together exactly as a forward one
+/// does, but `space_of` empties `order` for a reverse scan - correctly, since
+/// the rows arrive in the *reverse* of that order and no rule reading it may
+/// assume otherwise. Asking `is_scan_prefix` alone therefore said "not grouped
+/// by the walk", the aggregate became a hash one, and it emitted its groups in
+/// key order: `SELECT k, count(*) FROM t GROUP BY k ORDER BY k DESC` came back
+/// *ascending*, with the planner having already skipped the sorter because the
+/// walk was supposed to answer the ordering.
+///
+/// So the adjacency question is asked of the planner for a reverse walk, which
+/// decided it from the access path rather than from the direction.
+///
+/// @param plan - the planner's output
+/// @param prepared - the structural choices `prepare` made
+/// @param space - the joined column space
+/// @param params - the values bound to `?1`, `?2`, ...
+/// @param scan_order - the column groups the walk already orders rows by
+fn grouping_of(
+    plan: &PhysicalPlan,
+    prepared: &Prepared,
+    space: &Space<'_>,
+    params: &Params,
+    scan_order: &[Vec<usize>],
+) -> DbResult<(Vec<Expr>, Vec<Collation>, bool)> {
+    let select = &plan.select;
     let group_exprs = select
         .group_by
         .iter()
@@ -511,35 +638,56 @@ pub(crate) fn build_upper(
     // rather than merely differently ordered.
     let group_collations: Vec<Collation> =
         select.group_by.iter().map(expression_collation).collect();
-    // Whether the projected rows arrive in the order the ORDER BY asks for.
-    let reversed = prepared
-        .stages
-        .first()
-        .map(|stage| stage.kind == AccessKind::Reverse)
-        .unwrap_or(false);
-    // **Adjacency has no direction, and `space.order` deliberately does.** A
-    // reverse walk brings each group's rows together exactly as a forward one
-    // does, but `space_of` empties `order` for a reverse scan - correctly, since
-    // the rows arrive in the *reverse* of that order and no rule reading it may
-    // assume otherwise. Asking `is_scan_prefix` alone therefore said "not
-    // grouped by the walk", the aggregate became a hash one, and it emitted its
-    // groups in key order: `SELECT k, count(*) FROM t GROUP BY k ORDER BY k
-    // DESC` came back *ascending*, with the planner having already skipped the
-    // sorter because the walk was supposed to answer the ordering.
-    //
-    // So the adjacency question is asked of the planner for a reverse walk,
-    // which decided it from the access path rather than from the direction.
     let grouped_walk = plan.aggregation == AggregationMode::Grouped
         && !prepared.forced.hash_group
-        && (is_scan_prefix(&group_exprs, scan_order) || (reversed && plan.grouped_walk));
+        && (is_scan_prefix(&group_exprs, scan_order)
+            || (is_reverse_scan(prepared) && plan.grouped_walk));
+    Ok((group_exprs, group_collations, grouped_walk))
+}
+
+/// Whether the rows already arrive in the order the `ORDER BY` asks for.
+///
+/// **A skip scan produces the distinct prefix in *ascending* order**, which
+/// answers an ascending `ORDER BY` over that prefix and nothing else. The skip
+/// scan branch used to say only "skipping", and `SELECT k, count(*) FROM t
+/// GROUP BY k ORDER BY k DESC` therefore skipped its sorter and came back
+/// ascending - a wrong answer rather than a slow one, and one no
+/// single-direction test could see. It asks the same two conditions the
+/// forward walk asks, because it is the same claim about the same walk.
+///
+/// @param plan - the planner's output
+/// @param prepared - the structural choices `prepare` made
+/// @param outputs - the result columns and the sort keys
+/// @param scan_order - the column groups the walk already orders rows by
+/// @param grouped_walk - whether the walk already brings each group together
+fn already_sorted(
+    plan: &PhysicalPlan,
+    prepared: &Prepared,
+    outputs: &Outputs,
+    scan_order: &[Vec<usize>],
+    grouped_walk: bool,
+) -> bool {
+    let sort_keys = &outputs.sort_keys;
+    // The one condition the forward walk and the skip scan both ask.
+    let ascending = || {
+        !sort_keys.is_empty()
+            && sort_keys.iter().all(|term| !term.descending)
+            && output_is_sorted_by(
+                sort_keys,
+                &outputs.projected,
+                plan,
+                scan_order,
+                grouped_walk,
+            )
+    };
     // A non-default NULL placement is a real ordering requirement, and no scan
     // order satisfies it by accident.
     let default_nulls = sort_keys
         .iter()
         .all(|term| term.nulls_first != term.descending);
-    let sorted_already = if !default_nulls {
+    let answered_by_the_walk = if !default_nulls {
         false
-    } else if reversed {
+    } else if is_reverse_scan(prepared) {
         // A reverse scan produces descending key order, so a descending
         // ORDER BY over the key is satisfied by the direction rather than by a
         // sorter. `plan.reverse` is only ever set when the planner already
@@ -547,221 +695,365 @@ pub(crate) fn build_upper(
         // rather than a second derivation of it.
         !sort_keys.is_empty() && !plan.needs_sort
     } else {
-        !sort_keys.is_empty()
-            && sort_keys.iter().all(|term| !term.descending)
-            && output_is_sorted_by(&sort_keys, &projected, plan, scan_order, grouped_walk)
+        ascending()
     };
-    // **A skip scan produces the distinct prefix in *ascending* order**, which
-    // answers an ascending `ORDER BY` over that prefix and nothing else. This
-    // line used to say only "skipping", and `SELECT k, count(*) FROM t GROUP BY
-    // k ORDER BY k DESC` therefore skipped its sorter and came back ascending -
-    // a wrong answer rather than a slow one, and one no single-direction test
-    // could see. The same two conditions the forward branch above applies are
-    // applied here, because it is the same claim about the same walk.
-    // **A skip scan produces the distinct prefix in *ascending* order**, which
-    // answers an ascending `ORDER BY` over that prefix and nothing else. This
-    // line used to say only "skipping", and `SELECT k, count(*) FROM t GROUP BY
-    // k ORDER BY k DESC` therefore skipped its sorter and came back ascending -
-    // a wrong answer rather than a slow one, and one no single-direction test
-    // could see. The same two conditions the forward branch above applies are
-    // applied here, because it is the same claim about the same walk.
-    let sorted_already = sorted_already
-        || (skipping
-            && !sort_keys.is_empty()
-            && sort_keys.iter().all(|term| !term.descending)
-            && output_is_sorted_by(&sort_keys, &projected, plan, scan_order, grouped_walk));
+    answered_by_the_walk || (is_skip_scan(prepared) && ascending())
+}
+
+/// What the *source* may stop after, which is not the statement's LIMIT.
+///
+/// A source that stops early is only right when nothing between it and the
+/// `Limit` operator changes how many rows there are: a residual filter drops
+/// some, a join multiplies them, `DISTINCT` and an aggregate collapse them,
+/// and an `OFFSET` throws the first ones away - so `LIMIT 2 OFFSET 1` needs
+/// three rows read and returns one.
+///
+/// It was the bare `LIMIT`, which made `WHERE id <= 5 ORDER BY id DESC LIMIT 2
+/// OFFSET 1` answer one row instead of two.
+///
+/// @param plan - the planner's output
+/// @param prepared - the structural choices `prepare` made
+/// @param limit - the statement's own constant `LIMIT`
+fn source_limit_of(
+    plan: &PhysicalPlan,
+    prepared: &Prepared,
+    limit: Option<usize>,
+) -> Option<usize> {
+    limit.filter(|_| {
+        plan.residuals.iter().all(Option::is_none)
+            && plan.constant_filter.is_none()
+            && prepared.stages.len() == 1
+            && !plan.select.distinct
+            && plan.aggregation == AggregationMode::None
+            && plan.select.windows.is_empty()
+    })
+}
+
+/// Puts the `Limit` operator on, and records it in the description.
+///
+/// @param chain - what it will push into
+/// @param operators - the description, collected sink first
+/// @param limit - how many rows to pass on
+/// @param offset - how many to throw away first
+fn push_limit(
+    chain: Box<dyn Sink>,
+    operators: &mut Vec<String>,
+    limit: usize,
+    offset: usize,
+) -> Box<dyn Sink> {
+    operators.push(format!("LIMIT {limit} OFFSET {offset}"));
+    Box::new(Limit::new(limit, offset, chain))
+}
+
+/// Puts the projection that drops the carried sort columns on, if there are any.
+///
+/// @param chain - what it will push into
+/// @param operators - the description, collected sink first
+/// @param up - everything the operators are built from
+fn push_trim(
+    chain: Box<dyn Sink>,
+    operators: &mut Vec<String>,
+    up: &Upward<'_>,
+) -> DbResult<Box<dyn Sink>> {
+    if !up.outputs.needs_trim {
+        return Ok(chain);
+    }
+    operators.push("TRIM".to_string());
+    Ok(Box::new(Project::new(
+        trim(up.outputs.result_width, up.scan_types)?,
+        chain,
+    )))
+}
+
+/// Puts the sorter and the `LIMIT` on, in whichever arrangement is right.
+///
+/// The two are decided together because `TopN` fuses them: a bounded sort keeps
+/// `limit + offset` rows and never holds the whole input, which is why a
+/// separate `push_limit` above a separate sorter would be the slower shape
+/// rather than a tidier one. `prepared.forced.full_sort` is how a test asks for
+/// the unfused pair anyway.
+///
+/// The trim goes *below* the sorter when there is one, because the columns it
+/// drops are the ones the sort keys read.
+///
+/// @param chain - what it will push into
+/// @param operators - the description, collected sink first
+/// @param up - everything the operators are built from
+fn push_sort(
+    chain: Box<dyn Sink>,
+    operators: &mut Vec<String>,
+    up: &Upward<'_>,
+) -> DbResult<Box<dyn Sink>> {
+    let sort_keys = &up.outputs.sort_keys;
+    if sort_keys.is_empty() || up.sorted_already {
+        let chain = match up.limit {
+            Some(limit) => push_limit(chain, operators, limit, up.offset),
+            None => chain,
+        };
+        return push_trim(chain, operators, up);
+    }
+    let chain = push_trim(chain, operators, up)?;
+    let Some(limit) = up.limit else {
+        operators.push("SORT".to_string());
+        return Ok(Box::new(Sort::new(sort_keys.clone(), chain)));
+    };
+    let bounded = limit.saturating_add(up.offset);
+    if bounded > TopN::MAX_LIMIT || up.prepared.forced.full_sort {
+        let chain = push_limit(chain, operators, limit, up.offset);
+        operators.push("SORT".to_string());
+        return Ok(Box::new(Sort::new(sort_keys.clone(), chain)));
+    }
+    let chain = if up.offset > 0 {
+        push_limit(chain, operators, limit, up.offset)
+    } else {
+        chain
+    };
+    operators.push(format!("TOP {bounded}"));
+    Ok(Box::new(TopN::new(sort_keys.clone(), bounded, chain)))
+}
+
+/// Puts the `DISTINCT` operator on, if the statement asks for one.
+///
+/// A skip scan has already produced distinct rows, so it gets none.
+///
+/// @param chain - what it will push into
+/// @param operators - the description, collected sink first
+/// @param up - everything the operators are built from
+fn push_distinct(
+    chain: Box<dyn Sink>,
+    operators: &mut Vec<String>,
+    up: &Upward<'_>,
+) -> Box<dyn Sink> {
+    let select = &up.plan.select;
+    if !select.distinct || up.skipping {
+        return chain;
+    }
+    // The collation of each output column. A `DISTINCT` over a `COLLATE
+    // NOCASE` column keeps one of `blue` and `Blue`, and one that compared
+    // bytes keeps both.
+    let collations: Vec<Collation> = select
+        .columns
+        .iter()
+        .map(|column| expression_collation(&column.expr))
+        .collect();
+    let width = up.outputs.result_width;
+    if up.plan.aggregation == AggregationMode::None
+        && !up.prepared.forced.hash_distinct
+        && is_scan_prefix(&up.outputs.projected, &up.scan_order)
+    {
+        operators.push("DISTINCT ADJACENT".to_string());
+        return Box::new(AdjacentDistinct::over(collations, width, chain));
+    }
+    operators.push("DISTINCT HASH".to_string());
+    Box::new(Distinct::over(collations, width, chain))
+}
+
+/// Puts the projection on.
+///
+/// @param chain - what it will push into
+/// @param operators - the description, collected sink first
+/// @param up - everything the operators are built from
+fn push_projection(
+    chain: Box<dyn Sink>,
+    operators: &mut Vec<String>,
+    up: &Upward<'_>,
+) -> DbResult<Box<dyn Sink>> {
+    // A skip scan hands up exactly the projected key columns, already in
+    // output order, so the projection over it reads column i for column i.
+    let compiled = if up.skipping {
+        (0..up.outputs.projected.len())
+            .map(|index| compile(&Expr::Column(index), &up.projection_types))
+            .collect::<DbResult<Vec<_>>>()?
+    } else {
+        up.outputs
+            .projected
+            .iter()
+            .map(|expr| compile(expr, &up.projection_types))
+            .collect::<DbResult<Vec<_>>>()?
+    };
+    operators.push("PROJECT".to_string());
+    Ok(Box::new(Project::new(compiled, chain)))
+}
+
+/// Puts the `HAVING` filter on, if the statement has one.
+///
+/// `HAVING` filters *groups*, so it sits between the aggregate and the
+/// projection: it reads accumulators and `GROUP BY` keys, which is the same
+/// space a result column reads, and it runs before the projection throws away
+/// the columns it needs. Building it here rather than beside the `WHERE`
+/// filters is the whole of the difference between the two clauses.
+///
+/// @param chain - what it will push into
+/// @param operators - the description, collected sink first
+/// @param up - everything the operators are built from
+fn push_having(
+    chain: Box<dyn Sink>,
+    operators: &mut Vec<String>,
+    up: &Upward<'_>,
+) -> DbResult<Box<dyn Sink>> {
+    let select = &up.plan.select;
+    let Some(having) = &select.having else {
+        return Ok(chain);
+    };
+    let translated = translate_post(having, select, up.space, up.params, up.group_width)?;
+    operators.push("FILTER HAVING".to_string());
+    Ok(Box::new(Filter::new(
+        compile(&translated, &up.projection_types)?,
+        chain,
+    )))
+}
+
+/// Puts the aggregate on, if the statement aggregates.
+///
+/// @param chain - what it will push into
+/// @param operators - the description, collected sink first
+/// @param up - everything the operators are built from
+fn push_aggregate(
+    chain: Box<dyn Sink>,
+    operators: &mut Vec<String>,
+    up: &Upward<'_>,
+) -> DbResult<Box<dyn Sink>> {
+    let select = &up.plan.select;
+    match up.plan.aggregation {
+        AggregationMode::None => Ok(chain),
+        AggregationMode::Whole => {
+            operators.push("AGGREGATE".to_string());
+            Ok(Box::new(SimpleAggregate::new(
+                aggregate_specs(select, up.space, up.params, up.scan_types)?,
+                chain,
+            )))
+        }
+        AggregationMode::Grouped => {
+            let keys = up
+                .group_exprs
+                .iter()
+                .map(|expr| compile(expr, up.scan_types))
+                .collect::<DbResult<Vec<_>>>()?;
+            let specs = aggregate_specs(select, up.space, up.params, up.scan_types)?;
+            let collations = up.group_collations.clone();
+            if up.grouped_walk {
+                operators.push("GROUP STREAM".to_string());
+                Ok(Box::new(StreamAggregate::new(
+                    keys, collations, specs, chain,
+                )))
+            } else {
+                operators.push("GROUP HASH".to_string());
+                Ok(Box::new(HashAggregate::new(keys, collations, specs, chain)))
+            }
+        }
+    }
+}
+
+/// Puts the predicates the access paths did not consume on.
+///
+/// `select.filter` is the *whole* `WHERE`, and `plan.residuals` is what the
+/// access paths did not consume. Testing both re-tests every predicate the
+/// planner turned into a seek or a range - `WHERE key BETWEEN ?1 AND ?1+200`
+/// was evaluated once per row of a range whose bounds already excluded
+/// everything outside it - so only the residuals are tested here. That is also
+/// what the bytecode VM does, and it is not merely a speed question: a
+/// predicate with `random()` in it would answer differently the second time.
+///
+/// The operator chain in `Shape::operators` is what showed this: it printed
+/// `RANGE tree 3 -> FILTER -> AGGREGATE` and the `FILTER` had nothing to do.
+///
+/// @param chain - what it will push into
+/// @param operators - the description, collected sink first
+/// @param up - everything the operators are built from
+fn push_filters(
+    chain: Box<dyn Sink>,
+    operators: &mut Vec<String>,
+    up: &Upward<'_>,
+) -> DbResult<Box<dyn Sink>> {
+    let mut chain = chain;
+    if let Some(constant) = &up.plan.constant_filter {
+        let translated = translate_scan(constant, up.space, up.params)?;
+        chain = Box::new(Filter::new(compile(&translated, up.scan_types)?, chain));
+        operators.push("FILTER CONSTANT".to_string());
+    }
+    for residual in up.plan.residuals.iter().flatten() {
+        let translated = translate_scan(residual, up.space, up.params)?;
+        chain = Box::new(Filter::new(compile(&translated, up.scan_types)?, chain));
+        operators.push("FILTER RESIDUAL".to_string());
+    }
+    Ok(chain)
+}
+
+pub(crate) fn build_upper(
+    plan: &PhysicalPlan,
+    catalog: &dyn TreeCatalog,
+    prepared: &Prepared,
+    space: &Space<'_>,
+    params: &Params,
+    sink: Box<dyn Sink>,
+) -> DbResult<Upper> {
+    let select = &plan.select;
+    refuse_unhandled(select)?;
+    let (correlations, correlation_columns, widened_types) =
+        correlated_columns(plan, catalog, space)?;
+    let scan_types: &[StaticType] = if correlations.is_empty() {
+        space.types
+    } else {
+        &widened_types
+    };
+    let space = &Space {
+        stages: space.stages,
+        layouts: space.layouts,
+        types: scan_types,
+        order: space.order,
+        catalog: Some(catalog),
+        correlations: &correlation_columns,
+    };
+    let outputs = plan_outputs(plan, space, params)?;
+    let scan_order = order_equivalents(space.stages, space.layouts, space.order);
+    let (group_exprs, group_collations, grouped_walk) =
+        grouping_of(plan, prepared, space, params, &scan_order)?;
+    let limit = constant_limit(select, params)?;
+    let up = Upward {
+        sorted_already: already_sorted(plan, prepared, &outputs, &scan_order, grouped_walk),
+        skipping: is_skip_scan(prepared),
+        projection_types: if plan.aggregation == AggregationMode::None {
+            scan_types.to_vec()
+        } else {
+            aggregate_output_types(select, space, params)?
+        },
+        group_width: select.group_by.len(),
+        offset: constant_offset(select, params)?.unwrap_or(0),
+        plan,
+        prepared,
+        space,
+        params,
+        scan_types,
+        scan_order,
+        group_exprs,
+        group_collations,
+        grouped_walk,
+        limit,
+        outputs,
+    };
 
     // Built bottom-up, because each operator owns the one below it. The
     // description is collected in the same order and reversed at the end, so it
     // reads source-first the way a plan should.
     let mut operators: Vec<String> = Vec::new();
     let mut chain: Box<dyn Sink> = sink;
-
-    let limit = constant_limit(select, params)?;
-    let offset = constant_offset(select, params)?.unwrap_or(0);
-    // **What the *source* may stop after, which is not the statement's LIMIT.**
-    // A source that stops early is only right when nothing between it and the
-    // `Limit` operator changes how many rows there are: a residual filter drops
-    // some, a join multiplies them, `DISTINCT` and an aggregate collapse them,
-    // and an `OFFSET` throws the first ones away - so `LIMIT 2 OFFSET 1` needs
-    // three rows read and returned one.
-    //
-    // It was the bare `LIMIT`, which made `WHERE id <= 5 ORDER BY id DESC LIMIT
-    // 2 OFFSET 1` answer one row instead of two.
-    let source_limit = limit.filter(|_| {
-        plan.residuals.iter().all(Option::is_none)
-            && plan.constant_filter.is_none()
-            && prepared.stages.len() == 1
-            && !select.distinct
-            && plan.aggregation == AggregationMode::None
-            && select.windows.is_empty()
-    });
-    if sort_keys.is_empty() || sorted_already {
-        if let Some(limit) = limit {
-            chain = Box::new(Limit::new(limit, offset, chain));
-            operators.push(format!("LIMIT {limit} OFFSET {offset}"));
-        }
-        if needs_trim {
-            chain = Box::new(Project::new(trim(result_width, scan_types)?, chain));
-            operators.push("TRIM".to_string());
-        }
-    } else if let Some(limit) = limit {
-        if needs_trim {
-            chain = Box::new(Project::new(trim(result_width, scan_types)?, chain));
-            operators.push("TRIM".to_string());
-        }
-        let bounded = limit.saturating_add(offset);
-        if bounded <= TopN::MAX_LIMIT && !prepared.forced.full_sort {
-            if offset > 0 {
-                chain = Box::new(Limit::new(limit, offset, chain));
-                operators.push(format!("LIMIT {limit} OFFSET {offset}"));
-            }
-            chain = Box::new(TopN::new(sort_keys.clone(), bounded, chain));
-            operators.push(format!("TOP {bounded}"));
-        } else {
-            chain = Box::new(Limit::new(limit, offset, chain));
-            chain = Box::new(Sort::new(sort_keys.clone(), chain));
-            operators.push(format!("LIMIT {limit} OFFSET {offset}"));
-            operators.push("SORT".to_string());
-        }
-    } else {
-        if needs_trim {
-            chain = Box::new(Project::new(trim(result_width, scan_types)?, chain));
-            operators.push("TRIM".to_string());
-        }
-        chain = Box::new(Sort::new(sort_keys.clone(), chain));
-        operators.push("SORT".to_string());
-    }
-
-    // The collation of each output column, for `DISTINCT`. A `DISTINCT` over a
-    // `COLLATE NOCASE` column keeps one of `blue` and `Blue`, and one that
-    // compared bytes keeps both.
-    let output_collations: Vec<Collation> = select
-        .columns
-        .iter()
-        .map(|column| expression_collation(&column.expr))
-        .collect();
-    if select.distinct && !skipping {
-        if plan.aggregation == AggregationMode::None
-            && !prepared.forced.hash_distinct
-            && is_scan_prefix(&projected, scan_order)
-        {
-            chain = Box::new(AdjacentDistinct::over(
-                output_collations.clone(),
-                result_width,
-                chain,
-            ));
-            operators.push("DISTINCT ADJACENT".to_string());
-        } else {
-            chain = Box::new(Distinct::over(
-                output_collations.clone(),
-                result_width,
-                chain,
-            ));
-            operators.push("DISTINCT HASH".to_string());
-        }
-    }
-
-    let projection_input_types = if plan.aggregation == AggregationMode::None {
-        scan_types.to_vec()
-    } else {
-        aggregate_output_types(select, space, params)?
-    };
-    // A skip scan hands up exactly the projected key columns, already in
-    // output order, so the projection over it reads column i for column i.
-    let projected = if skipping {
-        (0..projected.len()).map(Expr::Column).collect()
-    } else {
-        projected
-    };
-    let compiled_projection = projected
-        .iter()
-        .map(|expr| compile(expr, &projection_input_types))
-        .collect::<DbResult<Vec<_>>>()?;
-    chain = Box::new(Project::new(compiled_projection, chain));
-    operators.push("PROJECT".to_string());
-
-    // `HAVING` filters *groups*, so it sits between the aggregate and the
-    // projection: it reads accumulators and `GROUP BY` keys, which is the same
-    // space a result column reads, and it runs before the projection throws
-    // away the columns it needs. Building it here rather than beside the
-    // `WHERE` filters is the whole of the difference between the two clauses.
-    if let Some(having) = &select.having {
-        let translated = translate_post(having, select, space, params, group_width)?;
-        chain = Box::new(Filter::new(
-            compile(&translated, &projection_input_types)?,
-            chain,
-        ));
-        operators.push("FILTER HAVING".to_string());
-    }
-
-    match plan.aggregation {
-        AggregationMode::None => {}
-        AggregationMode::Whole => {
-            chain = Box::new(SimpleAggregate::new(
-                aggregate_specs(select, space, params, scan_types)?,
-                chain,
-            ));
-            operators.push("AGGREGATE".to_string());
-        }
-        AggregationMode::Grouped => {
-            let keys = group_exprs
-                .iter()
-                .map(|expr| compile(expr, scan_types))
-                .collect::<DbResult<Vec<_>>>()?;
-            let specs = aggregate_specs(select, space, params, scan_types)?;
-            chain = if grouped_walk {
-                operators.push("GROUP STREAM".to_string());
-                Box::new(StreamAggregate::new(
-                    keys,
-                    group_collations.clone(),
-                    specs,
-                    chain,
-                ))
-            } else {
-                operators.push("GROUP HASH".to_string());
-                Box::new(HashAggregate::new(
-                    keys,
-                    group_collations.clone(),
-                    specs,
-                    chain,
-                ))
-            };
-        }
-    }
-
-    // `select.filter` is the *whole* `WHERE`, and `plan.residuals` is what the
-    // access paths did not consume. Testing both re-tests every predicate the
-    // planner turned into a seek or a range - `WHERE key BETWEEN ?1 AND ?1+200`
-    // was evaluated once per row of a range whose bounds already excluded
-    // everything outside it - so only the residuals are tested here. That is
-    // also what the bytecode VM does, and it is not merely a speed question: a
-    // predicate with `random()` in it would answer differently the second time.
-    //
-    // The operator chain in `Shape::operators` is what showed this: it printed
-    // `RANGE tree 3 -> FILTER -> AGGREGATE` and the `FILTER` had nothing to do.
-    if let Some(constant) = &plan.constant_filter {
-        let translated = translate_scan(constant, space, params)?;
-        chain = Box::new(Filter::new(compile(&translated, scan_types)?, chain));
-        operators.push("FILTER CONSTANT".to_string());
-    }
-    for residual in plan.residuals.iter().flatten() {
-        let translated = translate_scan(residual, space, params)?;
-        chain = Box::new(Filter::new(compile(&translated, scan_types)?, chain));
-        operators.push("FILTER RESIDUAL".to_string());
-    }
+    chain = push_sort(chain, &mut operators, &up)?;
+    chain = push_distinct(chain, &mut operators, &up);
+    chain = push_projection(chain, &mut operators, &up)?;
+    chain = push_having(chain, &mut operators, &up)?;
+    chain = push_aggregate(chain, &mut operators, &up)?;
+    chain = push_filters(chain, &mut operators, &up)?;
 
     let names = select
         .columns
         .iter()
         .map(|column| column.name.clone())
         .collect();
-
     Ok(Upper {
         head: chain,
         operators,
         names,
-        limit: source_limit.map(|limit| limit.saturating_add(offset)),
+        limit: source_limit_of(plan, prepared, limit).map(|limit| limit.saturating_add(up.offset)),
         correlations,
     })
 }

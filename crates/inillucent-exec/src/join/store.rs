@@ -15,7 +15,7 @@ use crate::ops::{emit_rows, Flow, Sink};
 /// A buffer of materialised rows, emitted as batches.
 ///
 /// The shared machinery under [`Materialize`], the build side of
-/// [`HashJoin`] and the output of every nested loop.
+/// [`super::hash::HashJoin`] and the output of every nested loop.
 #[derive(Default)]
 pub struct RowStore {
     rows: Vec<Vec<OwnedDatum>>,

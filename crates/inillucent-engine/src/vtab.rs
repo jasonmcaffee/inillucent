@@ -329,6 +329,35 @@ impl ImportedDatabase {
         table.integrity(&mut context).map(ModuleIntegrity::of)
     }
 
+    /// Produces the rows one virtual table's scan answers with.
+    ///
+    /// **The five decisions, then the scan (task-1962, A8).** It was 313 lines
+    /// with no doc comment: which connection answers, what `best_index` chose,
+    /// which columns are worth materialising, which predicates the module did
+    /// not promise to apply, and the loop over the cursor. `false` means this
+    /// path is not a virtual scan, or names a module nothing can connect.
+    ///
+    /// **The constraints are pushed down, and they have to be.** A residual the
+    /// engine can test itself is a choice; `documents MATCH 'lorem'` is not
+    /// one, because `MATCH` is the *module's* operator and the engine has no way
+    /// to evaluate it. A scan that answered with every row and left the
+    /// predicate to the pipeline returned every document rather than the two
+    /// that matched - which is what this did until the probe asked it.
+    ///
+    /// So the offer goes to `best_index`, the module says which constraints it
+    /// will use and in what argument order, and `filter` is given their values.
+    /// What the module did *not* take stays in the plan's residual and the
+    /// pipeline tests it, which is the contract's whole point: a constraint is
+    /// dropped from the residual only when the module promises `omit`, and
+    /// `omit` is the module promising rather than the engine assuming.
+    ///
+    /// @param table - the table's catalog entry
+    /// @param path - the access path the planner chose for it
+    /// @param params - the values bound to `?1`, `?2`, ...
+    /// @param needed - what the bound statement reads of this term
+    /// @param supplied - a lateral join's per-row constraint values, empty for
+    ///   an ordinary scan
+    /// @param downstream - what to push the produced rows into
     pub(super) fn rows_of_module(
         &self,
         table: &inillucent_sql::catalog_view::TableInfo,
@@ -338,73 +367,14 @@ impl ImportedDatabase {
         supplied: &[inillucent_tree::datum::OwnedDatum],
         downstream: &mut dyn inillucent_exec::ops::Sink,
     ) -> DbResult<bool> {
-        // **The constraints are pushed down, and they have to be.** A residual
-        // the engine can test itself is a choice; `documents MATCH 'lorem'` is
-        // not one, because `MATCH` is the *module's* operator and the engine has
-        // no way to evaluate it. A scan that answered with every row and left
-        // the predicate to the pipeline returned every document rather than the
-        // two that matched - which is what this did until the probe asked it.
-        //
-        // So the offer goes to `best_index`, the module says which constraints
-        // it will use and in what argument order, and `filter` is given their
-        // values. What the module did *not* take stays in the plan's residual
-        // and the pipeline tests it, which is the contract's whole point: a
-        // constraint is dropped from the residual only when the module promises
-        // `omit`, and `omit` is the module promising rather than the engine
-        // assuming.
         let AccessPath::VirtualScan {
             offer, order_by, ..
         } = path
         else {
             return Ok(false);
         };
-        // **A `pragma_*` function is answered by the connection, not a module.**
-        // Its rows come from `pragma_rows` - the same function `PRAGMA
-        // table_info(t)` runs - because a pragma reads the connection, and a
-        // `Module` reaches its storage through a `Context` that has no way to
-        // ask one. One implementation, two spellings.
-        if table.folded.starts_with(b"pragma_") {
-            return self.pragma_function_rows(table, offer, params, downstream);
-        }
-        // The same arrangement for the four that describe statements; see
-        // `crate::introspect`. Each takes its argument as an `Eq` constraint on
-        // its hidden column, which is what makes `bytecode('SELECT 1')` a
-        // table-valued function rather than a special form.
-        if matches!(
-            table.folded.as_slice(),
-            b"bytecode" | b"tables_used" | b"sqlite_stmt" | b"completion"
-        ) {
-            let argument = self.eponymous_argument(offer, params, table)?;
-            let rows = match table.folded.as_slice() {
-                b"bytecode" => self.bytecode_rows(&argument)?,
-                b"tables_used" => self.tables_used_rows(&argument)?,
-                b"sqlite_stmt" => self.stmt_rows()?,
-                _ => self.completion_rows(&argument)?,
-            };
-            // The argument came out of an `Eq` on the first hidden column and
-            // is the only constraint this answer applied; everything else the
-            // planner took out of the residual has to be tested here.
-            self.emit_filtered(rows, offer, params, &hidden_columns(table), downstream)?;
-            return Ok(true);
-        }
-        // The same arrangement for the two tables that describe the file; see
-        // `crate::inspect`.
-        if table.folded == b"dbstat" || table.folded == b"sqlite_dbpage" {
-            let mut rows = if table.folded == b"dbstat" {
-                self.dbstat_rows()?
-            } else {
-                self.dbpage_rows()?
-            };
-            // The hidden `schema` column, which every row of an eponymous
-            // table carries and no `SELECT *` reads.
-            for row in &mut rows {
-                row.push(OwnedDatum::Text(b"main".to_vec()));
-            }
-            // Nothing here consumed a constraint - the schema qualifier is
-            // always `main` and the rows are the whole file - so every offered
-            // predicate is the engine's to test.
-            self.emit_filtered(rows, offer, params, &[], downstream)?;
-            return Ok(true);
+        if let Some(answered) = self.eponymous_rows(table, offer, params, downstream)? {
+            return Ok(answered);
         }
         // **An eponymous module has nothing in `virtual_tables`**, because
         // nothing ever created it: the name is the table. It is connected here,
@@ -429,31 +399,22 @@ impl ImportedDatabase {
             offer.iter().map(|held| held.spec).collect();
         let mut query = IndexQuery::new(specs, order_by.clone());
         connected.table.best_index(&mut query)?;
-        // **The caller's arguments win when it has any.** A lateral join has
-        // already evaluated them against the outer row - which is the only
-        // place they *can* be evaluated - and folding them again here would
-        // fold an expression reading a column that is not in scope. See
-        // `inillucent_exec::lateral`.
-        let mut arguments: Vec<Value<'static>> = Vec::new();
-        if supplied.is_empty() {
-            for position in query.argument_order() {
-                let Some(constraint) = offer.get(position) else {
-                    continue;
-                };
-                arguments.push(owned_value(&inillucent_exec::physical::literal_value(
-                    &constraint.value,
-                    params,
-                )?)?);
-            }
-        } else {
-            for value in supplied {
-                arguments.push(owned_value(value)?);
-            }
-        }
         let plan = FilterPlan {
             index_number: query.index_number,
             index_string: query.index_string.clone(),
-            arguments,
+            arguments: filter_arguments(&query, offer, params, supplied)?,
+        };
+        let width = connected.table.declaration().columns.len();
+        let shape = RowShape {
+            width,
+            wanted: columns_wanted(width, needed, offer, &query),
+            // Asked of the cursor when the query reads it, or when an
+            // unpromised rowid constraint needs it to recheck against, so a
+            // module whose rowid is expensive is not asked for one nobody
+            // wanted otherwise.
+            carries_rowid: needed.rowid || rowid_recheck_needed(offer, &query),
+            needed,
+            rechecks: rechecks_of(connected, offer, &query, supplied, params)?,
         };
         let mut cursor = connected.table.open()?;
         let store = ReadStore {
@@ -467,158 +428,115 @@ impl ImportedDatabase {
             limits: &self.limits,
             catalog: Some(&self.catalog),
         };
-        let width = connected.table.declaration().columns.len();
-        // **A rowid constraint the module did not promise still needs the
-        // rowid in the row, so the recheck below has something to test.** A
-        // negative `constraint.spec.column` names the rowid, which is never
-        // one of the module's declared columns - `WHERE rowid > 2` on an FTS5
-        // table, or `docs.rowid` in a join's `ON`, both offer one. Forcing the
-        // rowid into the row here is what lets the recheck loop below test it
-        // at `width`, the slot it is appended at, instead of refusing outright
-        // because "a produced row does not carry it".
-        let rowid_recheck_needed = offer.iter().enumerate().any(|(position, constraint)| {
-            let promised = query
-                .usage
-                .get(position)
-                .map(|usage| usage.omit)
-                .unwrap_or(false);
-            !promised && constraint.spec.column < 0
-        });
-        // **Only the columns something reads.** `needed` is what the bound
-        // statement reads of this term - the same answer a covering index is
-        // chosen by - plus the columns the recheck below tests, which were
-        // taken out of the residual on the module's behalf and so may not be
-        // read anywhere else. An opaque answer means the reads could not be
-        // enumerated, and then every column is materialised.
-        let mut wanted = vec![needed.opaque; width];
-        for slot in &needed.columns {
-            if let Some(flag) = wanted.get_mut(usize::from(*slot)) {
-                *flag = true;
-            }
+        self.drive_cursor(
+            cursor.as_mut(),
+            &mut context,
+            &plan,
+            &shape,
+            params,
+            downstream,
+        )?;
+        Ok(true)
+    }
+
+    /// Answers the tables whose rows this connection produces itself.
+    ///
+    /// A `pragma_*` function, the four that describe statements, and the two
+    /// that describe the file. `None` means the table belongs to a module.
+    ///
+    /// @param table - the table's catalog entry
+    /// @param offer - the constraints the planner offered
+    /// @param params - the values bound to `?1`, `?2`, ...
+    /// @param downstream - what to push the produced rows into
+    fn eponymous_rows(
+        &self,
+        table: &inillucent_sql::catalog_view::TableInfo,
+        offer: &[inillucent_sql::plan::VirtualConstraint],
+        params: &inillucent_exec::physical::Params,
+        downstream: &mut dyn inillucent_exec::ops::Sink,
+    ) -> DbResult<Option<bool>> {
+        // **A `pragma_*` function is answered by the connection, not a module.**
+        // Its rows come from `pragma_rows` - the same function `PRAGMA
+        // table_info(t)` runs - because a pragma reads the connection, and a
+        // `Module` reaches its storage through a `Context` that has no way to
+        // ask one. One implementation, two spellings.
+        if table.folded.starts_with(b"pragma_") {
+            return self
+                .pragma_function_rows(table, offer, params, downstream)
+                .map(Some);
         }
-        for (position, constraint) in offer.iter().enumerate() {
-            let promised = query
-                .usage
-                .get(position)
-                .map(|usage| usage.omit)
-                .unwrap_or(false);
-            if promised {
-                continue;
-            }
-            if let Ok(column) = usize::try_from(constraint.spec.column) {
-                if let Some(flag) = wanted.get_mut(column) {
-                    *flag = true;
-                }
-            }
-        }
-        // **Everything the module did not promise is tested here, per row.**
-        //
-        // The planner takes every offered predicate out of the residual on the
-        // optimistic assumption that a later pass puts back the ones the module
-        // did not promise to apply - which is what `VirtualChoice::recheck`
-        // exists for. There is no such pass on this path, so the recheck happens
-        // where the rows are: `omit` is the module promising, and anything else
-        // is the engine's to test.
-        //
-        // It is not a tidiness point. The R-Tree takes the constraints it can
-        // use to prune its own tree and leaves the rest; without this,
-        // `WHERE minX > 0 AND maxX < 100000` answered with all three boxes
-        // instead of the one that matches.
-        //
-        // It is built before the scan rather than applied after it, because the
-        // scan no longer produces a `Vec` there is an "after" for.
-        let mut rechecks: Vec<(
-            usize,
-            inillucent_sql::vtab::ConstraintOp,
-            OwnedDatum,
-            inillucent_value::collation::Collation,
-        )> = Vec::new();
-        for (position, constraint) in offer.iter().enumerate() {
-            let promised = query
-                .usage
-                .get(position)
-                .map(|usage| usage.omit)
-                .unwrap_or(false);
-            if promised {
-                continue;
-            }
-            // A negative column is the rowid. It is not one of the module's
-            // declared columns, so it is not in `row` at its own position -
-            // `rowid_recheck_needed` above forced it into `row` at `width`
-            // instead, appended the same way `needed.rowid` does for a `SELECT`
-            // that reads it, and `Collation::Binary` is what a rowid - always
-            // an integer - compares under.
-            let column = match usize::try_from(constraint.spec.column) {
-                Ok(column) => column,
-                Err(_) => {
-                    rechecks.push((
-                        width,
-                        constraint.spec.op,
-                        recheck_value(constraint, position, supplied, params)?,
-                        inillucent_value::collation::Collation::Binary,
-                    ));
-                    continue;
-                }
+        // The same arrangement for the four that describe statements; see
+        // `crate::introspect`. Each takes its argument as an `Eq` constraint on
+        // its hidden column, which is what makes `bytecode('SELECT 1')` a
+        // table-valued function rather than a special form.
+        if matches!(
+            table.folded.as_slice(),
+            b"bytecode" | b"tables_used" | b"sqlite_stmt" | b"completion"
+        ) {
+            let argument = self.eponymous_argument(offer, params, table)?;
+            let rows = match table.folded.as_slice() {
+                b"bytecode" => self.bytecode_rows(&argument)?,
+                b"tables_used" => self.tables_used_rows(&argument)?,
+                b"sqlite_stmt" => self.stmt_rows()?,
+                _ => self.completion_rows(&argument)?,
             };
-            rechecks.push((
-                column,
-                constraint.spec.op,
-                recheck_value(constraint, position, supplied, params)?,
-                connected.table.collation(column),
-            ));
+            // The argument came out of an `Eq` on the first hidden column and
+            // is the only constraint this answer applied; everything else the
+            // planner took out of the residual has to be tested here.
+            self.emit_filtered(rows, offer, params, &hidden_columns(table), downstream)?;
+            return Ok(Some(true));
         }
-        // **A batch at a time, and abandoned when the pipeline says stop.** The
-        // buffer is one batch rather than the whole answer, which is what makes
-        // `SELECT value FROM generate_series(1,10) LIMIT 3` return: without it
-        // the scan ran to 4,294,967,295 rows before the `LIMIT` above it saw a
-        // single one.
+        // The same arrangement for the two tables that describe the file; see
+        // `crate::inspect`.
+        if table.folded == b"dbstat" || table.folded == b"sqlite_dbpage" {
+            let mut rows = if table.folded == b"dbstat" {
+                self.dbstat_rows()?
+            } else {
+                self.dbpage_rows()?
+            };
+            // The hidden `schema` column, which every row of an eponymous
+            // table carries and no `SELECT *` reads.
+            for row in &mut rows {
+                row.push(OwnedDatum::Text(b"main".to_vec()));
+            }
+            // Nothing here consumed a constraint - the schema qualifier is
+            // always `main` and the rows are the whole file - so every offered
+            // predicate is the engine's to test.
+            self.emit_filtered(rows, offer, params, &[], downstream)?;
+            return Ok(Some(true));
+        }
+        Ok(None)
+    }
+
+    /// Walks the cursor, collecting rows and emitting them a batch at a time.
+    ///
+    /// **A batch at a time, and abandoned when the pipeline says stop.** The
+    /// buffer is one batch rather than the whole answer, which is what makes
+    /// `SELECT value FROM generate_series(1,10) LIMIT 3` return: without it the
+    /// scan ran to 4,294,967,295 rows before the `LIMIT` above it saw a single
+    /// one.
+    ///
+    /// @param cursor - the module's cursor, not yet filtered
+    /// @param context - what the module reaches its storage through
+    /// @param plan - what `best_index` chose, and the argument values
+    /// @param shape - what each row has to carry, and what it is tested against
+    /// @param params - the values bound to `?1`, `?2`, ...
+    /// @param downstream - what to push the produced rows into
+    fn drive_cursor(
+        &self,
+        cursor: &mut dyn inillucent_ext::vtab::VirtualCursor,
+        context: &mut Context<'_>,
+        plan: &FilterPlan,
+        shape: &RowShape<'_>,
+        params: &inillucent_exec::physical::Params,
+        downstream: &mut dyn inillucent_exec::ops::Sink,
+    ) -> DbResult<()> {
         let mut rows: Vec<Vec<OwnedDatum>> = Vec::with_capacity(inillucent_exec::batch::BATCH_ROWS);
-        let mut stopped = false;
-        cursor.filter(&mut context, &plan)?;
+        cursor.filter(context, plan)?;
         while !cursor.eof() {
-            let mut row = Vec::with_capacity(width);
-            for column in 0..width {
-                if !wanted.get(column).copied().unwrap_or(true) {
-                    row.push(OwnedDatum::Null);
-                    continue;
-                }
-                row.push(OwnedDatum::from(cursor.column(&mut context, column)?));
-            }
-            // Appended after the declared columns, which is where
-            // `plan_stages` puts the rowid slot for a materialised virtual
-            // scan. Asked of the cursor when the query reads it, or when an
-            // unpromised rowid constraint needs it to recheck against - see
-            // `rowid_recheck_needed` - so a module whose rowid is expensive is
-            // not asked for one nobody wanted otherwise.
-            if needed.rowid || rowid_recheck_needed {
-                row.push(OwnedDatum::Int(cursor.rowid()?));
-            }
-            // The module's auxiliary functions, in the order `plan_stages`
-            // allocated their slots. `bm25(docs)` is the whole reason the
-            // mechanism exists, and it reads the cursor rather than a column -
-            // so it can only be answered here, while the cursor is still on the
-            // row. The arguments after the table are constants of the
-            // statement; a call whose arguments varied per row would be a
-            // different feature and is not one the modules declare.
-            //
-            // **They are passed.** An empty list used to go down here, so
-            // `bm25(t, 10.0)` ignored its weights and
-            // `highlight(t, 0, '[', ']')` could not be written at all.
-            for (name, arguments) in &needed.functions {
-                let mut values: Vec<Value<'static>> = Vec::with_capacity(arguments.len());
-                for argument in arguments {
-                    values.push(owned_value(&inillucent_exec::physical::literal_value(
-                        argument, params,
-                    )?)?);
-                }
-                row.push(OwnedDatum::from(cursor.auxiliary(
-                    &mut context,
-                    name,
-                    &values,
-                )?));
-            }
-            if !passes_rechecks(&row, &rechecks, self.case_sensitive_like)? {
-                cursor.next(&mut context)?;
+            let row = read_row(cursor, context, shape, params)?;
+            if !passes_rechecks(&row, &shape.rechecks, self.case_sensitive_like)? {
+                cursor.next(context)?;
                 continue;
             }
             rows.push(row);
@@ -626,21 +544,248 @@ impl ImportedDatabase {
                 if inillucent_exec::ops::emit_rows(&rows, downstream)?
                     == inillucent_exec::ops::Flow::Stop
                 {
-                    stopped = true;
-                    break;
+                    return Ok(());
                 }
                 rows.clear();
             }
-            cursor.next(&mut context)?;
+            cursor.next(context)?;
         }
-        // `context` borrows the connection for the length of the scan; this
-        // ends the borrow so the emit below may take it again.
-        let _ = context;
-        if !stopped && !rows.is_empty() {
+        if !rows.is_empty() {
             inillucent_exec::ops::emit_rows(&rows, downstream)?;
         }
-        Ok(true)
+        Ok(())
     }
+}
+
+/// What each row of a virtual scan has to carry, decided before it starts.
+///
+/// **The five values the scan loop reads, named once (task-1962, A8).** Each
+/// was computed inline in `rows_of_module` and then read once per row, which is
+/// what made the loop unreadable: the loop's own shape was thirty lines of
+/// decisions that had already been made.
+struct RowShape<'a> {
+    /// How many columns the module declared.
+    width: usize,
+    /// Which of them something downstream reads. The rest go down as NULL.
+    wanted: Vec<bool>,
+    /// Whether the row carries the module's rowid, appended after the declared
+    /// columns - which is where `plan_stages` puts the slot for a materialised
+    /// virtual scan.
+    carries_rowid: bool,
+    /// What the bound statement reads of this term, for the auxiliary
+    /// functions it asks for.
+    needed: &'a inillucent_sql::bind::ColumnUse,
+    /// The predicates the module did not promise to apply.
+    rechecks: Vec<Recheck>,
+}
+
+/// Collects one row off the cursor, in the shape the pipeline above expects.
+///
+/// @param cursor - the module's cursor, on the row
+/// @param context - what the module reaches its storage through
+/// @param shape - what the row has to carry
+/// @param params - the values bound to `?1`, `?2`, ...
+fn read_row(
+    cursor: &mut dyn inillucent_ext::vtab::VirtualCursor,
+    context: &mut Context<'_>,
+    shape: &RowShape<'_>,
+    params: &inillucent_exec::physical::Params,
+) -> DbResult<Vec<OwnedDatum>> {
+    let mut row = Vec::with_capacity(shape.width);
+    for column in 0..shape.width {
+        if !shape.wanted.get(column).copied().unwrap_or(true) {
+            row.push(OwnedDatum::Null);
+            continue;
+        }
+        row.push(OwnedDatum::from(cursor.column(context, column)?));
+    }
+    if shape.carries_rowid {
+        row.push(OwnedDatum::Int(cursor.rowid()?));
+    }
+    // The module's auxiliary functions, in the order `plan_stages` allocated
+    // their slots. `bm25(docs)` is the whole reason the mechanism exists, and
+    // it reads the cursor rather than a column - so it can only be answered
+    // here, while the cursor is still on the row. The arguments after the table
+    // are constants of the statement; a call whose arguments varied per row
+    // would be a different feature and is not one the modules declare.
+    //
+    // **They are passed.** An empty list used to go down here, so
+    // `bm25(t, 10.0)` ignored its weights and `highlight(t, 0, '[', ']')` could
+    // not be written at all.
+    for (name, arguments) in &shape.needed.functions {
+        let mut values: Vec<Value<'static>> = Vec::with_capacity(arguments.len());
+        for argument in arguments {
+            values.push(owned_value(&inillucent_exec::physical::literal_value(
+                argument, params,
+            )?)?);
+        }
+        row.push(OwnedDatum::from(cursor.auxiliary(context, name, &values)?));
+    }
+    Ok(row)
+}
+
+/// The values `filter` is given, in the order the module asked for them.
+///
+/// **The caller's arguments win when it has any.** A lateral join has already
+/// evaluated them against the outer row - which is the only place they *can* be
+/// evaluated - and folding them again here would fold an expression reading a
+/// column that is not in scope. See `inillucent_exec::lateral`.
+///
+/// @param query - what `best_index` answered
+/// @param offer - the constraints the planner offered
+/// @param params - the values bound to `?1`, `?2`, ...
+/// @param supplied - a lateral join's per-row values, empty for an ordinary scan
+fn filter_arguments(
+    query: &IndexQuery,
+    offer: &[inillucent_sql::plan::VirtualConstraint],
+    params: &inillucent_exec::physical::Params,
+    supplied: &[OwnedDatum],
+) -> DbResult<Vec<Value<'static>>> {
+    let mut arguments: Vec<Value<'static>> = Vec::new();
+    if supplied.is_empty() {
+        for position in query.argument_order() {
+            let Some(constraint) = offer.get(position) else {
+                continue;
+            };
+            arguments.push(owned_value(&inillucent_exec::physical::literal_value(
+                &constraint.value,
+                params,
+            )?)?);
+        }
+    } else {
+        for value in supplied {
+            arguments.push(owned_value(value)?);
+        }
+    }
+    Ok(arguments)
+}
+
+/// Whether the module promised to apply the constraint at `position`.
+///
+/// @param query - what `best_index` answered
+/// @param position - the constraint's position in the offer
+fn promised(query: &IndexQuery, position: usize) -> bool {
+    query
+        .usage
+        .get(position)
+        .map(|usage| usage.omit)
+        .unwrap_or(false)
+}
+
+/// Whether a row has to carry its rowid for the rechecks to have something to
+/// test.
+///
+/// **A rowid constraint the module did not promise still needs the rowid in the
+/// row.** A negative `constraint.spec.column` names the rowid, which is never
+/// one of the module's declared columns - `WHERE rowid > 2` on an FTS5 table,
+/// or `docs.rowid` in a join's `ON`, both offer one. Forcing the rowid into the
+/// row is what lets the recheck test it at `width`, the slot it is appended at,
+/// instead of refusing outright because "a produced row does not carry it".
+///
+/// @param offer - the constraints the planner offered
+/// @param query - what `best_index` answered
+fn rowid_recheck_needed(
+    offer: &[inillucent_sql::plan::VirtualConstraint],
+    query: &IndexQuery,
+) -> bool {
+    offer
+        .iter()
+        .enumerate()
+        .any(|(position, constraint)| !promised(query, position) && constraint.spec.column < 0)
+}
+
+/// Which of a module's declared columns are worth asking the cursor for.
+///
+/// **Only the columns something reads.** `needed` is what the bound statement
+/// reads of this term - the same answer a covering index is chosen by - plus
+/// the columns the rechecks test, which were taken out of the residual on the
+/// module's behalf and so may not be read anywhere else. An opaque answer means
+/// the reads could not be enumerated, and then every column is materialised.
+///
+/// @param width - how many columns the module declared
+/// @param needed - what the bound statement reads of this term
+/// @param offer - the constraints the planner offered
+/// @param query - what `best_index` answered
+fn columns_wanted(
+    width: usize,
+    needed: &inillucent_sql::bind::ColumnUse,
+    offer: &[inillucent_sql::plan::VirtualConstraint],
+    query: &IndexQuery,
+) -> Vec<bool> {
+    let mut wanted = vec![needed.opaque; width];
+    for slot in &needed.columns {
+        if let Some(flag) = wanted.get_mut(usize::from(*slot)) {
+            *flag = true;
+        }
+    }
+    for (position, constraint) in offer.iter().enumerate() {
+        if promised(query, position) {
+            continue;
+        }
+        if let Ok(column) = usize::try_from(constraint.spec.column) {
+            if let Some(flag) = wanted.get_mut(column) {
+                *flag = true;
+            }
+        }
+    }
+    wanted
+}
+
+/// The predicates the module did not promise to apply, which the engine tests.
+///
+/// **Everything the module did not promise is tested here, per row.**
+///
+/// The planner takes every offered predicate out of the residual on the
+/// optimistic assumption that a later pass puts back the ones the module did
+/// not promise to apply - which is what `VirtualChoice::recheck` exists for.
+/// There is no such pass on this path, so the recheck happens where the rows
+/// are: `omit` is the module promising, and anything else is the engine's to
+/// test.
+///
+/// It is not a tidiness point. The R-Tree takes the constraints it can use to
+/// prune its own tree and leaves the rest; without this, `WHERE minX > 0 AND
+/// maxX < 100000` answered with all three boxes instead of the one that
+/// matches.
+///
+/// It is built before the scan rather than applied after it, because the scan
+/// no longer produces a `Vec` there is an "after" for.
+///
+/// @param connected - the module's connection, for each column's collation
+/// @param offer - the constraints the planner offered
+/// @param query - what `best_index` answered
+/// @param supplied - a lateral join's per-row values, empty for an ordinary scan
+/// @param params - the values bound to `?1`, `?2`, ...
+fn rechecks_of(
+    connected: &Connected,
+    offer: &[inillucent_sql::plan::VirtualConstraint],
+    query: &IndexQuery,
+    supplied: &[OwnedDatum],
+    params: &inillucent_exec::physical::Params,
+) -> DbResult<Vec<Recheck>> {
+    let width = connected.table.declaration().columns.len();
+    let mut rechecks: Vec<Recheck> = Vec::new();
+    for (position, constraint) in offer.iter().enumerate() {
+        if promised(query, position) {
+            continue;
+        }
+        // A negative column is the rowid. It is not one of the module's
+        // declared columns, so it is not in the row at its own position -
+        // `rowid_recheck_needed` forces it into the row at `width` instead,
+        // appended the same way `needed.rowid` does for a `SELECT` that reads
+        // it, and `Collation::Binary` is what a rowid - always an integer -
+        // compares under.
+        let (column, collation) = match usize::try_from(constraint.spec.column) {
+            Ok(column) => (column, connected.table.collation(column)),
+            Err(_) => (width, inillucent_value::collation::Collation::Binary),
+        };
+        rechecks.push((
+            column,
+            constraint.spec.op,
+            recheck_value(constraint, position, supplied, params)?,
+            collation,
+        ));
+    }
+    Ok(rechecks)
 }
 
 /// One constraint the engine has to test for itself: which column, which

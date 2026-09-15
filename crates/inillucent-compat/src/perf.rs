@@ -1179,6 +1179,106 @@ pub fn plan_for(scale: &str) -> Plan {
     }
 }
 
+/// Feeds one borrowed value into a result digest.
+///
+/// **The same bytes `eat` feeds for an owned value.** A gate that digested a
+/// borrowed row differently from an owned one would report a difference between
+/// two runs of the same query, so the tag and the length are written here
+/// exactly as they are there.
+///
+/// @param digest - the digest being built
+/// @param value - the value to feed it
+pub fn eat_borrowed(digest: &mut Digest, value: &inillucent_tree::datum::Datum<'_>) {
+    use inillucent_tree::datum::Datum;
+    match value {
+        Datum::Null => digest.tag(0),
+        Datum::Int(number) => {
+            digest.tag(1);
+            digest.word(*number as u64);
+        }
+        Datum::Real(number) => {
+            digest.tag(2);
+            digest.word(number.to_bits());
+        }
+        Datum::Text(bytes) => {
+            digest.tag(3);
+            digest.word(bytes.len() as u64);
+            digest.bytes(bytes);
+        }
+        Datum::Blob(bytes) => {
+            digest.tag(4);
+            digest.word(bytes.len() as u64);
+            digest.bytes(bytes);
+        }
+    }
+}
+
+/// Runs the SQLite side of a plan and parses what it printed.
+///
+/// @param bench - the `sqlite-bench` binary
+/// @param plan - the plan file both engines run
+/// @param database - the SQLite database it runs against
+pub fn run_sqlite(
+    bench: &std::path::Path,
+    plan: &std::path::Path,
+    database: &std::path::Path,
+) -> Result<Vec<Sample>, String> {
+    let output = std::process::Command::new(bench)
+        .arg("run")
+        .arg(plan)
+        .arg(database)
+        .output()
+        .map_err(|error| format!("sqlite-bench did not start: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "sqlite-bench failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter_map(Sample::parse)
+        .collect())
+}
+
+/// Builds the value one iteration binds, for a plan's declared bind kind.
+///
+/// **Deterministic, and the same on both engines.** Every number here comes out
+/// of the iteration counter rather than a random source, so the two engines bind
+/// the same values in the same order and a difference in the result digest is a
+/// difference in the engines.
+///
+/// @param bind - what the plan asked to be bound
+/// @param iteration - which iteration is binding
+/// @param rows - how many rows the fixture holds, for the kinds that key on one
+pub fn bind_value(bind: Bind, iteration: u32, rows: u32) -> inillucent_tree::datum::OwnedDatum {
+    use inillucent_tree::datum::OwnedDatum;
+    let iteration = u64::from(iteration);
+    let rows64 = u64::from(rows);
+    match bind {
+        Bind::Rowid => OwnedDatum::Int(if rows > 0 {
+            1 + (iteration % rows64) as i64
+        } else {
+            1
+        }),
+        Bind::Scatter => OwnedDatum::Int(if rows > 0 {
+            1 + (iteration.wrapping_mul(2_654_435_761) % rows64) as i64
+        } else {
+            1
+        }),
+        Bind::Counter => OwnedDatum::Int((rows64 + 1 + iteration) as i64),
+        Bind::Int => OwnedDatum::Int(
+            (iteration.wrapping_mul(1_103_515_245).wrapping_add(12_345) & 0x7fff_ffff) as i64,
+        ),
+        Bind::Text => OwnedDatum::Text(
+            format!("row {iteration} lorem ipsum dolor sit amet consectetur").into_bytes(),
+        ),
+        Bind::Blob => {
+            OwnedDatum::Blob((0..64u64).map(|j| ((iteration + j) & 0xff) as u8).collect())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

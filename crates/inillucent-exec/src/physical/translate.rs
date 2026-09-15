@@ -64,27 +64,80 @@ pub(crate) fn translate_scan(
 ) -> DbResult<Expr> {
     translate(expr, space, params, Frame::Scan)
 }
+/// Turns one bound expression into the closure the executor evaluates.
+///
+/// **A dispatcher over six named groups (task-1962, A8).** It was 494 lines of
+/// one `match` with about thirty arms and no doc comment - the longest function
+/// in the workspace, and the one a contributor reading the executor has to read
+/// first. The arms were already grouped by what kind of expression they are
+/// about; each group is a function now, and this is the ordered list of them.
+///
+/// The order matters in one place only: `resolve_in_frame` runs first, because
+/// a window or post-aggregation pass answers some expressions out of what an
+/// earlier pass computed rather than by translating them again. Every group
+/// after it is disjoint, so the rest of the order is the one a reader would
+/// want.
+///
+/// @param expr - the bound expression
+/// @param space - the joined column space, which carries the catalog
+/// @param params - the statement's bound values
+/// @param frame - which pass is translating, which decides how a leaf resolves
 pub(crate) fn translate(
     expr: &BoundExpr,
     space: &Space<'_>,
     params: &Params,
     frame: Frame<'_>,
 ) -> DbResult<Expr> {
-    // The leaves, which are the only thing the two frames disagree about. Every
-    // node below this point recurses with the same frame, which is what makes
-    // this one traversal rather than two that have to be kept in step - and
-    // keeping them in step is exactly what failed: the post-aggregation copy
-    // handled six node kinds and refused the rest, so `length(group_concat(x))`
-    // was "a function call outside an aggregate" and `HAVING` had nowhere to be
-    // translated at all.
+    if let Some(found) = resolve_in_frame(expr, frame)? {
+        return Ok(found);
+    }
+    if let Some(found) = translate_literal(expr, params)? {
+        return Ok(found);
+    }
+    if let Some(found) = translate_reference(expr, space, params, frame)? {
+        return Ok(found);
+    }
+    if let Some(found) = translate_logical(expr, space, params, frame)? {
+        return Ok(found);
+    }
+    if let Some(found) = translate_comparison(expr, space, params, frame)? {
+        return Ok(found);
+    }
+    if let Some(found) = translate_pattern(expr, space, params, frame)? {
+        return Ok(found);
+    }
+    match translate_call(expr, space, params, frame)? {
+        Some(found) => Ok(found),
+        // `translate_call` ends in the refusal, so an expression that reached
+        // it either translated or produced an error. This arm is here for the
+        // type and is not a case.
+        None => unsupported(&format!("the expression {}", name_of(expr))),
+    }
+}
+
+/// Answers an expression an earlier pass already computed, if this is one.
+///
+/// **The two early returns the frame decides (task-1962, A8).** A window pass
+/// and a post-aggregation pass each run over the rows a previous pass produced,
+/// so some expressions are answered by naming the column that holds the result
+/// rather than by translating them again. Every node below this point recurses
+/// with the same frame, which is what makes `translate` one traversal rather
+/// than two that have to be kept in step - and keeping them in step is exactly
+/// what failed before: the post-aggregation copy handled six node kinds and
+/// refused the rest, so `length(group_concat(x))` was "a function call outside
+/// an aggregate" and `HAVING` had nowhere to be translated at all.
+///
+/// @param expr - the bound expression
+/// @param frame - which pass is translating
+fn resolve_in_frame(expr: &BoundExpr, frame: Frame<'_>) -> DbResult<Option<Expr>> {
     if let Frame::Window { pre, width } = frame {
         if let BoundExpr::WindowRef { slot } = expr {
-            return Ok(Expr::Column(width.saturating_add(*slot)));
+            return Ok(Some(Expr::Column(width.saturating_add(*slot))));
         }
         // A whole sub-expression the pass already computed, which is how a
         // window's own argument resolves without being recomputed.
         if let Some(position) = pre.iter().position(|held| held == expr) {
-            return Ok(Expr::Column(position));
+            return Ok(Some(Expr::Column(position)));
         }
         if matches!(expr, BoundExpr::Column { .. } | BoundExpr::Rowid { .. }) {
             return unsupported("a column a window pass did not carry");
@@ -96,10 +149,10 @@ pub(crate) fn translate(
     } = frame
     {
         if let BoundExpr::Aggregate { slot } = expr {
-            return Ok(Expr::Column(group_width.saturating_add(*slot)));
+            return Ok(Some(Expr::Column(group_width.saturating_add(*slot))));
         }
         if let Some(position) = select.group_by.iter().position(|key| key == expr) {
-            return Ok(Expr::Column(position));
+            return Ok(Some(Expr::Column(position)));
         }
         // **A bare column is one SQLite answers, by a rule rather than by
         // luck.** `SELECT id, max(a) FROM t` gives the `id` of the row that
@@ -117,14 +170,26 @@ pub(crate) fn translate(
                     name_of(expr)
                 ));
             };
-            return Ok(Expr::Column(
+            return Ok(Some(Expr::Column(
                 group_width
                     .saturating_add(select.aggregates.len())
                     .saturating_add(at),
-            ));
+            )));
         }
     }
-    Ok(match expr {
+    Ok(None)
+}
+
+/// Translates a literal, a bound parameter and `RAISE`.
+///
+/// The expressions that read nothing: no column, no row, no catalog. They are
+/// together because that is what a reader looking for one of them is looking
+/// for, and because every one of them is a constant of the statement.
+///
+/// @param expr - the bound expression
+/// @param params - the statement's bound values, for a parameter's own type
+fn translate_literal(expr: &BoundExpr, params: &Params) -> DbResult<Option<Expr>> {
+    let found = match expr {
         BoundExpr::Null => Expr::Literal(OwnedDatum::Null),
         BoundExpr::Integer(number) => Expr::Literal(OwnedDatum::Int(*number)),
         BoundExpr::Real(number) => Expr::Literal(OwnedDatum::Real(*number)),
@@ -174,6 +239,29 @@ pub(crate) fn translate(
         },
         // A call to a scalar an application registered. The body is resolved
         // here, once, and carried by the compiled node - see `user_scalar`.
+        _ => return Ok(None),
+    };
+    Ok(Some(found))
+}
+
+/// Translates the expressions that name something the row or the catalog has.
+///
+/// A column, a rowid, a call to a registered scalar, a virtual table's own
+/// function, and the sorter's column. Each resolves against the space the
+/// statement was planned over, which is what makes them different from a
+/// literal.
+///
+/// @param expr - the bound expression
+/// @param space - the joined column space, which carries the catalog
+/// @param params - the statement's bound values
+/// @param frame - which pass is translating, for a nested call
+fn translate_reference(
+    expr: &BoundExpr,
+    space: &Space<'_>,
+    params: &Params,
+    frame: Frame<'_>,
+) -> DbResult<Option<Expr>> {
+    let found = match expr {
         BoundExpr::External { name, arguments } => {
             let Some(catalog) = space.catalog else {
                 return unsupported(&format!(
@@ -217,7 +305,9 @@ pub(crate) fn translate(
                     body,
                     arguments: translated_arguments,
                 };
-                return Ok(Expr::Literal(crate::constant::evaluated_constant(&folded)?));
+                return Ok(Some(Expr::Literal(crate::constant::evaluated_constant(
+                    &folded,
+                )?)));
             }
             Expr::External {
                 body,
@@ -261,6 +351,28 @@ pub(crate) fn translate(
         // ordinal. It is already an index rather than a name, so there is
         // nothing to resolve.
         BoundExpr::SorterColumn { column } => Expr::Column(usize::from(*column)),
+        _ => return Ok(None),
+    };
+    Ok(Some(found))
+}
+
+/// Translates `NOT`, `IS NULL`, `AND` and `OR`.
+///
+/// Three-valued logic, and the four nodes that implement it. The thing worth
+/// knowing about all four is the same: a NULL operand is not false, and
+/// `FALSE AND NULL` is false where `TRUE AND NULL` is NULL.
+///
+/// @param expr - the bound expression
+/// @param space - the joined column space
+/// @param params - the statement's bound values
+/// @param frame - which pass is translating
+fn translate_logical(
+    expr: &BoundExpr,
+    space: &Space<'_>,
+    params: &Params,
+    frame: Frame<'_>,
+) -> DbResult<Option<Expr>> {
+    let found = match expr {
         BoundExpr::Not(operand) => Expr::Not(Box::new(translate(operand, space, params, frame)?)),
         BoundExpr::IsNull { operand, negated } => {
             let inner = Box::new(translate(operand, space, params, frame)?);
@@ -278,6 +390,29 @@ pub(crate) fn translate(
             Box::new(translate(left, space, params, frame)?),
             Box::new(translate(right, space, params, frame)?),
         ),
+        _ => return Ok(None),
+    };
+    Ok(Some(found))
+}
+
+/// Translates arithmetic, comparison, `CAST`, `BETWEEN`, `IN` and `CASE`.
+///
+/// Everything that compares or converts two values. The collation and the
+/// affinity a comparison runs under are decided here, once, rather than per
+/// row - which is what makes `ORDER BY team COLLATE NOCASE` a different
+/// compiled node rather than a different runtime branch.
+///
+/// @param expr - the bound expression
+/// @param space - the joined column space
+/// @param params - the statement's bound values
+/// @param frame - which pass is translating
+fn translate_comparison(
+    expr: &BoundExpr,
+    space: &Space<'_>,
+    params: &Params,
+    frame: Frame<'_>,
+) -> DbResult<Option<Expr>> {
+    let found = match expr {
         BoundExpr::Arithmetic { op, left, right } => {
             let left = Box::new(translate(left, space, params, frame)?);
             let right = Box::new(translate(right, space, params, frame)?);
@@ -399,6 +534,29 @@ pub(crate) fn translate(
                 collation: *collation,
             }
         }
+        _ => return Ok(None),
+    };
+    Ok(Some(found))
+}
+
+/// Translates `LIKE`, `GLOB`, `REGEXP` and `MATCH`.
+///
+/// One arm, and its own function because the pattern operators are the one
+/// place a comparison's shape is decided by a pragma: `case_sensitive_like`
+/// changes which matcher is compiled in, and it is read here rather than
+/// consulted per row.
+///
+/// @param expr - the bound expression
+/// @param space - the joined column space
+/// @param params - the statement's bound values
+/// @param frame - which pass is translating
+fn translate_pattern(
+    expr: &BoundExpr,
+    space: &Space<'_>,
+    params: &Params,
+    frame: Frame<'_>,
+) -> DbResult<Option<Expr>> {
+    let found = match expr {
         BoundExpr::Pattern {
             negated,
             op,
@@ -433,6 +591,29 @@ pub(crate) fn translate(
                     .is_some_and(inillucent_exec_like_case_sensitive),
             }
         }
+        _ => return Ok(None),
+    };
+    Ok(Some(found))
+}
+
+/// Translates a function call, and refuses what is left.
+///
+/// The built-in families - JSON, the scalar functions, the maths ones, the date
+/// and time ones - and a scalar subquery. It ends with the refusal, so an
+/// expression no group above claimed is named in the error rather than falling
+/// through to a wrong answer.
+///
+/// @param expr - the bound expression
+/// @param space - the joined column space
+/// @param params - the statement's bound values
+/// @param frame - which pass is translating
+fn translate_call(
+    expr: &BoundExpr,
+    space: &Space<'_>,
+    params: &Params,
+    frame: Frame<'_>,
+) -> DbResult<Option<Expr>> {
+    let found = match expr {
         BoundExpr::Json { func, arguments } => Expr::Json {
             func: *func,
             arguments: arguments
@@ -457,11 +638,11 @@ pub(crate) fn translate(
             // than about a value; the map from rowid to page is built once for
             // the statement, out of the leaf boundaries.
             if *func == ScalarFunc::Offset {
-                return row_offset(arguments, space, params, frame);
+                return row_offset(arguments, space, params, frame).map(Some);
             }
             // **Folded here, where the catalog is.** See `ScalarFunc::RTreeCheck`.
             if *func == ScalarFunc::RTreeCheck {
-                return Ok(Expr::Literal(rtree_check(arguments, space)?));
+                return Ok(Some(Expr::Literal(rtree_check(arguments, space)?)));
             }
             if *func == ScalarFunc::Length && translated.len() == 1 {
                 match translated.into_iter().next() {
@@ -517,12 +698,12 @@ pub(crate) fn translate(
             // already applied, because the operator is the only thing that
             // knows whether the block produced anything.
             if let Some(column) = space.correlated(*id) {
-                return Ok(match kind {
+                return Ok(Some(match kind {
                     SubqueryKind::Exists | SubqueryKind::Scalar => Expr::Column(column),
                     SubqueryKind::In => {
                         return unsupported("a correlated IN subquery");
                     }
-                });
+                }));
             }
             // Folded before the chain was built, by `subquery::fold`. A slot
             // that is empty is a correlated subquery whose column this pass was
@@ -556,8 +737,10 @@ pub(crate) fn translate(
             }
         }
         other => return unsupported(&format!("the expression {}", name_of(other))),
-    })
+    };
+    Ok(Some(found))
 }
+
 /// Translates a bound expression in the space after aggregation.
 ///
 /// A result column of an aggregating query reads either a `GROUP BY` key or an

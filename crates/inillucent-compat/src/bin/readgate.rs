@@ -55,6 +55,7 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use inillucent_compat::newengine::ImportedDatabase;
+use inillucent_compat::perf::{bind_value, eat_borrowed, run_sqlite};
 use inillucent_compat::perf::{plan_for, Bind, Digest, Paired, Sample, Workload};
 use inillucent_compat::workspace_root;
 use inillucent_exec::physical::{Params, Prepared};
@@ -593,40 +594,6 @@ impl Prepared_ {
     }
 }
 
-/// Returns the value one bind kind produces for one iteration.
-///
-/// The formulas are `compat/oracle/sqlite_bench.c`'s `bind_one`, transcribed.
-///
-/// @param bind - the bind kind
-/// @param iteration - which iteration, from zero
-/// @param rows - how many rows the base table holds
-fn bind_value(bind: Bind, iteration: u32, rows: u32) -> OwnedDatum {
-    let iteration = u64::from(iteration);
-    let rows64 = u64::from(rows);
-    match bind {
-        Bind::Rowid => OwnedDatum::Int(if rows > 0 {
-            1 + (iteration % rows64) as i64
-        } else {
-            1
-        }),
-        Bind::Scatter => OwnedDatum::Int(if rows > 0 {
-            1 + (iteration.wrapping_mul(2_654_435_761) % rows64) as i64
-        } else {
-            1
-        }),
-        Bind::Counter => OwnedDatum::Int((rows64 + 1 + iteration) as i64),
-        Bind::Int => OwnedDatum::Int(
-            (iteration.wrapping_mul(1_103_515_245).wrapping_add(12_345) & 0x7fff_ffff) as i64,
-        ),
-        Bind::Text => OwnedDatum::Text(
-            format!("row {iteration} lorem ipsum dolor sit amet consectetur").into_bytes(),
-        ),
-        Bind::Blob => {
-            OwnedDatum::Blob((0..64u64).map(|j| ((iteration + j) & 0xff) as u8).collect())
-        }
-    }
-}
-
 /// Plans and prepares one workload, or says why the physical pass refused it.
 ///
 /// @param database - the imported trees
@@ -706,35 +673,6 @@ impl inillucent_exec::Sink for CountRows {
     /// Returns the sink to its pre-input state; it keeps no rows to forget.
     fn reset(&mut self) -> inillucent_base::DbResult<()> {
         Ok(())
-    }
-}
-
-/// Adds one borrowed value to the digest, tagged the way the reference tags it.
-///
-/// @param digest - the running digest
-/// @param value - the value to fold in
-fn eat_borrowed(digest: &mut Digest, value: &inillucent_tree::datum::Datum<'_>) {
-    use inillucent_tree::datum::Datum;
-    match value {
-        Datum::Null => digest.tag(0),
-        Datum::Int(number) => {
-            digest.tag(1);
-            digest.word(*number as u64);
-        }
-        Datum::Real(number) => {
-            digest.tag(2);
-            digest.word(number.to_bits());
-        }
-        Datum::Text(bytes) => {
-            digest.tag(3);
-            digest.word(bytes.len() as u64);
-            digest.bytes(bytes);
-        }
-        Datum::Blob(bytes) => {
-            digest.tag(4);
-            digest.word(bytes.len() as u64);
-            digest.bytes(bytes);
-        }
     }
 }
 
@@ -1018,30 +956,6 @@ fn time_stage(
         body()?;
     }
     Ok(started.elapsed().as_secs_f64() * 1e9 / f64::from(iterations))
-}
-
-/// Runs the SQLite arm and parses its samples.
-///
-/// @param bench - the sqlite-bench executable
-/// @param plan - the plan file both engines read
-/// @param database - the fixture
-fn run_sqlite(bench: &Path, plan: &Path, database: &Path) -> Result<Vec<Sample>, String> {
-    let output = Command::new(bench)
-        .arg("run")
-        .arg(plan)
-        .arg(database)
-        .output()
-        .map_err(|error| format!("sqlite-bench did not start: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "sqlite-bench failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(Sample::parse)
-        .collect())
 }
 
 /// Returns SQLite's own plan for a query, so the two can be compared.

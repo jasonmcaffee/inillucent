@@ -177,7 +177,26 @@ Invoke-Stage -Name 'oracle' -Because 'the sixty-nine differential suites have no
 # reported green having asserted nothing on every machine that had not built
 # the file by hand. Eight seconds buys two durability tests that actually run.
 Invoke-Stage -Name 'fixtures' -Because 'the log-lead durability tests read a fixture that is not checked in' -Body {
-    & bash "$root/tools/build-gate-fixtures.sh" "$root/_agent_output/fixtures"
+    # **Git Bash, and forward slashes (task-1962).** This stage failed on every
+    # Windows run, for two reasons at once, and the two durability tests the
+    # fixture exists for skipped every time - which is the failure the stage was
+    # added to stop.
+    #
+    # `$root` is `C:\jason\dev\inillucent` here and bash reads a backslash as an
+    # escape, so the argument arrived as `C:jasondevinillucent/tools/...`. And
+    # `bash` on PATH is `C:\Windows\system32\bash.exe`, which is the WSL
+    # launcher: it runs a Linux filesystem where `C:/jason/...` is not a path,
+    # and it answers "No such file or directory" for a script that is right
+    # there. Git for Windows ships the bash every script in this repository is
+    # written for.
+    $posix = $root -replace '\\', '/'
+    $shell = @(
+        "$env:ProgramFiles/Git/bin/bash.exe",
+        "${env:ProgramFiles(x86)}/Git/bin/bash.exe",
+        "$env:LOCALAPPDATA/Programs/Git/bin/bash.exe"
+    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $shell) { $shell = 'bash' }
+    & $shell "$posix/tools/build-gate-fixtures.sh" "$posix/_agent_output/fixtures"
 }
 
 # The four contracts `AGENTS.md` names, plus the selection map. Each of them
@@ -260,14 +279,9 @@ Invoke-Stage -Name 'tests' -Because 'every selected suite, with missing prerequi
 # (task-1961, T2).** Not `--branch`: that needs a nightly option and
 # `rust-toolchain.toml` pins the compiler to stable.
 if ($Coverage) {
-    # The shell is built into the coverage run's own target directory first;
-    # `our_shell` looks beside the test executable, which is not where an
-    # ordinary build puts it. See the note in tools/validate.sh.
+    # The shell the `schema_forms` cases need is built by `our_shell`, into this
+    # run's own target directory. See the note in tools/validate.sh.
     Invoke-Stage -Name 'coverage' -Because 'the coverage number docs/repository.md publishes, re-measured' -Body {
-        $env:CARGO_TARGET_DIR = "$root/target/llvm-cov-target"
-        cargo build --manifest-path "$root/Cargo.toml" --release -p inillucent-cli
-        Remove-Item Env:\CARGO_TARGET_DIR
-        if ($LASTEXITCODE -ne 0) { return }
         cargo llvm-cov --manifest-path "$root/Cargo.toml" --workspace --release --summary-only `
             --exclude inillucent-bench --exclude inillucent-core --exclude inillucent-model
     }

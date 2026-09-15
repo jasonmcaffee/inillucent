@@ -25,31 +25,72 @@ use std::process::Command;
 
 /// Returns the workspace's own shell, building it first.
 ///
+/// **Built into the directory the calling test's own binary lives in
+/// (task-1962).** The shell is looked for beside that binary - `target/debug/`
+/// for an ordinary `cargo test`, `target/release/` for a release one, and
+/// `target/llvm-cov-target/release/` under `cargo llvm-cov` - and the build
+/// used to go to the default target directory whatever the caller's was. Under
+/// coverage that built a shell into `target/debug/` and then looked for one in
+/// `target/llvm-cov-target/release/`, so twelve `schema_forms` cases failed
+/// with "the workspace shell is not built" and a coverage run that cannot
+/// finish reports no number at all.
+///
 /// `None` when the build fails or the binary is not where cargo puts it, which
 /// a caller reports rather than works around.
 pub fn our_shell() -> Option<PathBuf> {
+    let mut directory = std::env::current_exe().ok()?;
+    directory.pop();
+    directory.pop();
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let status = Command::new(cargo)
+    let mut build = Command::new(cargo);
+    build
         .current_dir(crate::workspace_root())
-        .args(["build", "-p", "inillucent-cli"])
-        .status()
-        .ok()?;
-    if !status.success() {
+        .args(["build", "-p", "inillucent-cli"]);
+    // The profile and the target directory are read back off the path rather
+    // than guessed: the last component names the profile, and its parent is
+    // what cargo was given as `--target-dir`.
+    let profile = directory
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "debug".to_string());
+    if profile != "debug" {
+        build.args(["--profile", &profile]);
+    }
+    if let Some(target) = directory.parent() {
+        build.arg("--target-dir").arg(target);
+    }
+    if !build.status().ok()?.success() {
         return None;
     }
-    let mut directory = std::env::current_exe().unwrap_or_default();
-    directory.pop();
-    directory.pop();
     let path = directory.join(format!("inillucent-shell{}", std::env::consts::EXE_SUFFIX));
     path.is_file().then_some(path)
 }
 
 /// Returns the pinned reference shell, when it has been downloaded.
 pub fn reference_shell() -> Option<PathBuf> {
-    let path = crate::workspace_root()
-        .join(".sqlite-ref/3.53.4/shell")
-        .join(format!("sqlite3{}", std::env::consts::EXE_SUFFIX));
-    path.is_file().then_some(path)
+    // **`INILLUCENT_SQLITE_SHELL` wins (task-1962, A12).** Four suites carried
+    // their own `pinned_shell` with this override in it while this function had
+    // none, so setting the variable moved some of the comparison onto a
+    // different shell and left the rest on the downloaded one - which is worse
+    // than either, because the run would not say so.
+    if let Ok(explicit) = std::env::var("INILLUCENT_SQLITE_SHELL") {
+        let path = PathBuf::from(explicit);
+        if path.is_file() {
+            return Some(path);
+        }
+    }
+    let directory = crate::workspace_root().join(".sqlite-ref/3.53.4/shell");
+    // Both spellings, because a shell copied onto Windows from a release
+    // archive is `sqlite3.exe` and one built there by hand is often `sqlite3`.
+    let names: [&str; 2] = if cfg!(windows) {
+        ["sqlite3.exe", "sqlite3"]
+    } else {
+        ["sqlite3", "sqlite3.exe"]
+    };
+    names
+        .into_iter()
+        .map(|name| directory.join(name))
+        .find(|path| path.is_file())
 }
 
 /// Returns the SQL that rebuilds an inillucent database.

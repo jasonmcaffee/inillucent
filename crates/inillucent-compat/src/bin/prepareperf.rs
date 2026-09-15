@@ -29,9 +29,10 @@
 //! Usage: inillucent-prepareperf `<sqlite fixture>` `rounds`
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::ExitCode;
 use std::time::Instant;
 
+use inillucent_compat::perf::run_sqlite;
 use inillucent_compat::perf::{bootstrap, median, Digest, Sample};
 use inillucent_compat::workspace_root;
 use inillucent_engine::connect::Database;
@@ -411,30 +412,6 @@ fn eat(digest: &mut Digest, value: &OwnedDatum) {
             digest.bytes(bytes);
         }
     }
-}
-
-/// Runs the SQLite arm and parses its samples.
-///
-/// @param bench - the sqlite-bench executable
-/// @param plan - the plan file
-/// @param database - the fixture
-fn run_sqlite(bench: &Path, plan: &Path, database: &Path) -> Result<Vec<Sample>, String> {
-    let output = Command::new(bench)
-        .arg("run")
-        .arg(plan)
-        .arg(database)
-        .output()
-        .map_err(|error| format!("sqlite-bench did not start: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "sqlite-bench failed: {}",
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter_map(Sample::parse)
-        .collect())
 }
 
 /// Renders the plan file `sqlite-bench` reads.

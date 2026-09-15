@@ -61,9 +61,10 @@ use std::rc::Rc;
 use std::time::Instant;
 
 use inillucent_compat::newengine::ImportedDatabase;
+use inillucent_compat::perf::{bind_value, eat_borrowed};
 use inillucent_compat::perf::{
-    plan_for, qualified_rounds, weighted_headline, Bind, Contract, Digest, Grouping, Paired,
-    Sample, Workload,
+    plan_for, qualified_rounds, weighted_headline, Contract, Digest, Grouping, Paired, Sample,
+    Workload,
 };
 use inillucent_compat::procstat::ProcessCost;
 use inillucent_compat::workspace_root;
@@ -1505,42 +1506,6 @@ fn render_row(rows: &[Vec<OwnedDatum>]) -> String {
         .join(";")
 }
 
-/// Returns the value one bind kind produces for one iteration.
-///
-/// The formulas are `compat/oracle/sqlite_bench.c`'s `bind_one`, transcribed -
-/// the same transcription both other gates carry, and for the same reason: a
-/// benchmark whose two arms read different rows is not a comparison.
-///
-/// @param bind - the bind kind
-/// @param iteration - which iteration, from zero
-/// @param rows - how many rows the base table holds
-fn bind_value(bind: Bind, iteration: u32, rows: u32) -> OwnedDatum {
-    let iteration = u64::from(iteration);
-    let rows64 = u64::from(rows);
-    match bind {
-        Bind::Rowid => OwnedDatum::Int(if rows > 0 {
-            1 + (iteration % rows64) as i64
-        } else {
-            1
-        }),
-        Bind::Scatter => OwnedDatum::Int(if rows > 0 {
-            1 + (iteration.wrapping_mul(2_654_435_761) % rows64) as i64
-        } else {
-            1
-        }),
-        Bind::Counter => OwnedDatum::Int((rows64 + 1 + iteration) as i64),
-        Bind::Int => OwnedDatum::Int(
-            (iteration.wrapping_mul(1_103_515_245).wrapping_add(12_345) & 0x7fff_ffff) as i64,
-        ),
-        Bind::Text => OwnedDatum::Text(
-            format!("row {iteration} lorem ipsum dolor sit amet consectetur").into_bytes(),
-        ),
-        Bind::Blob => {
-            OwnedDatum::Blob((0..64u64).map(|j| ((iteration + j) & 0xff) as u8).collect())
-        }
-    }
-}
-
 /// Times every workload on SQLite, over its own fresh copy.
 ///
 /// @param bench - the pinned driver
@@ -1684,35 +1649,6 @@ impl inillucent_exec::Sink for DigestRows {
     /// Returns the sink to its pre-input state; it keeps no rows to forget.
     fn reset(&mut self) -> inillucent_base::DbResult<()> {
         Ok(())
-    }
-}
-
-/// Adds one borrowed value to the digest, tagged the way the reference tags it.
-///
-/// @param digest - the running digest
-/// @param value - the value to fold in
-fn eat_borrowed(digest: &mut Digest, value: &inillucent_tree::datum::Datum<'_>) {
-    use inillucent_tree::datum::Datum;
-    match value {
-        Datum::Null => digest.tag(0),
-        Datum::Int(number) => {
-            digest.tag(1);
-            digest.word(*number as u64);
-        }
-        Datum::Real(number) => {
-            digest.tag(2);
-            digest.word(number.to_bits());
-        }
-        Datum::Text(bytes) => {
-            digest.tag(3);
-            digest.word(bytes.len() as u64);
-            digest.bytes(bytes);
-        }
-        Datum::Blob(bytes) => {
-            digest.tag(4);
-            digest.word(bytes.len() as u64);
-            digest.bytes(bytes);
-        }
     }
 }
 

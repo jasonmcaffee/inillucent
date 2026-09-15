@@ -2,7 +2,7 @@
 //!
 //! Three files describe this ABI and each is written by hand:
 //! `include/inillucent_driver.h` is what a binding compiles against,
-//! `drivers/abi.toml` is what each symbol promises, and `src/lib.rs` is what
+//! `drivers/abi.toml` is what each symbol promises, and this crate's sources are what
 //! actually exists. Any two of them can drift from the third, and each way of
 //! drifting fails somewhere unhelpful:
 //!
@@ -102,7 +102,7 @@ fn strip_block_comments(text: &str) -> String {
 /// is the *declaration*: a symbol the compiler emitted for some other reason is
 /// not a promise this ABI made.
 ///
-/// @param source - the crate's `lib.rs`
+/// @param source - every Rust source of the crate, concatenated
 fn exported(source: &str) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     let mut marked = false;
@@ -211,11 +211,46 @@ fn read(relative: &str) -> String {
         .unwrap_or_else(|error| panic!("cannot read {}: {error}", path.display()))
 }
 
+/// Returns every Rust source of this crate, concatenated.
+///
+/// **The whole crate, not `lib.rs` (task-1962, A8).** The fifty entry points
+/// were in one file when these checks were written and are in four modules
+/// under `capi/` now. Walking the tree is what keeps the checks true the next
+/// time one moves.
+///
+/// Each file is separated by a newline, so a scan that walks lines cannot run
+/// the last line of one file into the first line of the next.
+fn crate_sources() -> String {
+    let mut out = String::new();
+    let mut pending = vec![std::path::PathBuf::from("src")];
+    let mut paths: Vec<std::path::PathBuf> = Vec::new();
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|held| held == "rs") {
+                paths.push(path);
+            }
+        }
+    }
+    // Sorted, so a line number this reports is the same on every machine.
+    paths.sort();
+    for path in paths {
+        out.push_str(&read(&path.to_string_lossy()));
+        out.push('\n');
+    }
+    out
+}
+
 /// Every symbol is in the header, the manifest and the implementation.
 #[test]
 fn the_header_the_manifest_and_the_implementation_agree() {
     let header = declared(&read("include/inillucent_driver.h"));
-    let source = exported(&read("src/lib.rs"));
+    let source = exported(&crate_sources());
     let manifest = promised(&read("../abi.toml"));
     let manifest_names: BTreeSet<String> = manifest.keys().cloned().collect();
 
@@ -471,7 +506,7 @@ fn no_note_calls_a_symbol_unsupported_that_the_capability_table_says_works() {
 /// the guard fails here on the day it is written.
 #[test]
 fn every_exported_entry_point_catches_a_panic() {
-    let source = read("src/lib.rs");
+    let source = crate_sources();
     let lines: Vec<&str> = source.lines().collect();
     let mut unguarded: Vec<String> = Vec::new();
     let mut checked = 0usize;
@@ -501,7 +536,7 @@ fn every_exported_entry_point_catches_a_panic() {
             .unwrap_or(lines.len());
         let body = lines.get(at..end).unwrap_or_default().join("\n");
         if !body.contains("guarded(") && !body.contains("guarded_value(") {
-            unguarded.push(format!("{}:{}: {name}", "lib.rs", at.saturating_add(1)));
+            unguarded.push(format!("line {}: {name}", at.saturating_add(1)));
         }
     }
 

@@ -16,8 +16,8 @@
 //! SQLite has no equivalent of this module.
 
 use inillucent_compat::differential::{scratch, start_inillucent};
+use inillucent_compat::rendering::datum_text as render;
 use inillucent_engine::connect::{Connection, Database};
-use inillucent_tree::datum::OwnedDatum;
 
 /// Where this suite's scratch databases live.
 const AREA: &str = "segmented-generations";
@@ -74,17 +74,6 @@ fn stored_segment_count(connection: &Connection<'_>, table: &str) -> usize {
     .first()
     .and_then(|text| text.parse::<usize>().ok())
     .unwrap_or(0)
-}
-
-/// Renders one value as text.
-fn render(value: &OwnedDatum) -> String {
-    match value {
-        OwnedDatum::Null => "NULL".to_string(),
-        OwnedDatum::Int(number) => number.to_string(),
-        OwnedDatum::Real(number) => format!("{number:.6}"),
-        OwnedDatum::Text(bytes) => String::from_utf8_lossy(bytes).into_owned(),
-        OwnedDatum::Blob(bytes) => format!("blob:{}", bytes.len()),
-    }
 }
 
 /// Returns a deterministic, well separated unit-ish vector for one id, so an

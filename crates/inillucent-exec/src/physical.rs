@@ -13,9 +13,10 @@
 //! `inillucent-sql`'s lexer, parser, binder and planner survive the rearchitecture
 //! unchanged - the TDD's component triage says so, and they are the part of the
 //! old engine that was never the problem. What they produce is a
-//! [`PhysicalPlan`]: FROM terms with access paths, residual predicates, an
-//! aggregation mode, and a bound result list. This module turns that into the
-//! operator chain in [`crate::ops`], [`crate::paged`] and [`crate::join`].
+//! [`inillucent_sql::plan::PhysicalPlan`]: FROM terms with access paths,
+//! residual predicates, an aggregation mode, and a bound result list. This
+//! module turns that into the operator chain in [`crate::ops`],
+//! [`crate::paged`] and [`crate::join`].
 //!
 //! ## Stages, and why a FROM term can be two of them
 //!
