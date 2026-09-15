@@ -8,7 +8,8 @@ pgvector and an embedding server.**
 [inillucent.com](https://inillucent.com) &nbsp;·&nbsp;
 [Documentation](https://inillucent.com/docs) &nbsp;·&nbsp;
 [Install](#install) &nbsp;·&nbsp;
-[Docs in this repository](docs/README.md)
+[Docs in this repository](docs/README.md) &nbsp;·&nbsp;
+[Client libraries](https://github.com/Black-Rainbow-Labs/inillucent-clients)
 
 It is one library and one file. There is no server to start, no port to configure, no connection
 string, and no network hop between your application and its index. One `.rdb` file holds ordinary
@@ -144,9 +145,12 @@ cargo build --release -p inillucent-cli --features inillucent-cli/embed
 
 ## Client libraries
 
-An application calls the engine in its own process through the C ABI. **The eight client libraries
-are not published**: there is no `inillucent-clients` repository and none of the eight packages below
-exists on its registry, so none of these lines works today. They are what the packages will be named.
+An application calls the engine in its own process through the C ABI. The eight client libraries have
+their own repository,
+[**Black-Rainbow-Labs/inillucent-clients**](https://github.com/Black-Rainbow-Labs/inillucent-clients),
+which is public and holds the source for all eight beside the conformance suite each one is graded
+against. **None of the eight packages below is on a registry yet**, so none of these install lines
+works today. They are what the packages will be named.
 
 The Rust row is the exception, and it names something that exists: the crate is
 `drivers/inillucent-driver` in this repository and it would publish under that
