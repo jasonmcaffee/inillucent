@@ -637,6 +637,7 @@ dependencies = [
  "inillucent-base",
  "inillucent-catalog",
  "inillucent-cli",
+ "inillucent-core",
  "inillucent-driver",
  "inillucent-engine",
  "inillucent-exec",
