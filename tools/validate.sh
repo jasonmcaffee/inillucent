@@ -227,7 +227,16 @@ stage smoke 'a real file opened, written, reopened, read' smoke
 # already excludes from the fast run: they need ONNX and a corpus, and on a
 # machine without either they contribute uninstrumented zeros rather than a
 # number.
+# **The shell is built into the coverage run's own target directory first.**
+# `inillucent_compat::interchange::our_shell` looks two directories up from the
+# test executable, which is `target/debug/` for an ordinary `cargo test` and
+# `target/llvm-cov-target/release/` here. Without this the twelve
+# `schema_forms` cases that round-trip a database through the shell fail with
+# "the workspace shell is not built", and a coverage run that cannot finish
+# reports no number at all.
 coverage_run() {
+    CARGO_TARGET_DIR="$root/target/llvm-cov-target" \
+        cargo build --manifest-path "$root/Cargo.toml" --release -p inillucent-cli || return 1
     cargo llvm-cov --manifest-path "$root/Cargo.toml" --workspace --release --summary-only \
         --exclude inillucent-bench --exclude inillucent-core --exclude inillucent-model
 }

@@ -1039,9 +1039,20 @@ const CEILINGS: [(&str, usize); 11] = [
     ("crates/inillucent-sql/src/bind.rs", 5_315),
     ("crates/inillucent-tree/src/leaf.rs", 5_175),
     ("crates/inillucent-tree/src/paged.rs", 3_570),
-    ("crates/inillucent-exec/src/dml.rs", 3_122),
+    // **Lowered to 200 in task-1962 (A7).** 3,003 lines holding the write
+    // target, the key search and the four statements became six modules under
+    // `dml/`, beside the `index.rs` that was already there: `target` (where a
+    // row goes and what a write counts), `keys` (finding the rows to change),
+    // `insert`, `conflict`, `update` and `delete`. What is left here is the
+    // module list and the re-exports.
+    ("crates/inillucent-exec/src/dml.rs", 200),
     ("crates/inillucent-ext/src/vtab/fts5/mod.rs", 2_935),
-    ("crates/inillucent-engine/src/ddl.rs", 2_920),
+    // **Lowered to 800 in task-1962 (A1 step 1).** 2,753 lines in one `impl`
+    // block became five modules under `ddl/`, beside the `reindex.rs` that was
+    // already there: `catalog` (the rows a statement writes and the view the
+    // binder reads), `tree` (building one for a new object), `table`, `index`
+    // and `alter`. What is left here is the directive dispatcher.
+    ("crates/inillucent-engine/src/ddl.rs", 800),
     // Lowered from 2,925 in task-1932. M7 added three functions for the
     // anchored `LIKE` and `GLOB` range and a walk of an equality prefix
     // ahead of an `IN` list, and the ratchet asks for an extraction rather
@@ -2132,7 +2143,7 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 65] = [
         383,
     ),
     ("crates/inillucent-compat/src/bin/readgate.rs", "run", 370),
-    ("crates/inillucent-exec/src/join.rs", "push", 362),
+    ("crates/inillucent-exec/src/join/loops.rs", "push", 362),
     (
         "crates/inillucent-exec/src/physical/stages.rs",
         "plan_stages",
@@ -2154,7 +2165,7 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 65] = [
     ("crates/inillucent-tree/src/paged.rs", "skip_scan", 249),
     ("crates/inillucent-sql/src/bind.rs", "bind_call_with", 248),
     ("crates/inillucent-bench/src/synth.rs", "build_source", 243),
-    ("crates/inillucent-exec/src/expr.rs", "compile", 242),
+    ("crates/inillucent-exec/src/expr/tree.rs", "compile", 242),
     (
         "crates/inillucent-tree/src/leaf.rs",
         "encode_rows_with",
@@ -2189,7 +2200,11 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 65] = [
         "run",
         218,
     ),
-    ("crates/inillucent-exec/src/dml.rs", "update_at_cached", 215),
+    (
+        "crates/inillucent-exec/src/dml/update.rs",
+        "update_at_cached",
+        215,
+    ),
     ("crates/inillucent-bench/src/synth.rs", "check", 214),
     ("crates/inillucent-model/tests/campaign.rs", "segment", 213),
     (
@@ -2201,8 +2216,12 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 65] = [
     // orphaned-extent read into `encode_row_spilling_wide_values`,
     // `locate_and_read_previous` and `orphaned_extents`.
     ("crates/inillucent-tree/src/write.rs", "write_row", 137),
-    ("crates/inillucent-exec/src/dml.rs", "insert_at", 205),
-    ("crates/inillucent-engine/src/ddl.rs", "create_index", 192),
+    ("crates/inillucent-exec/src/dml/insert.rs", "insert_at", 205),
+    (
+        "crates/inillucent-engine/src/ddl/index.rs",
+        "create_index",
+        192,
+    ),
     (
         "crates/inillucent-compat/src/fixtures.rs",
         "malformed_fixtures",

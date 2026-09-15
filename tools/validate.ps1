@@ -260,7 +260,14 @@ Invoke-Stage -Name 'tests' -Because 'every selected suite, with missing prerequi
 # (task-1961, T2).** Not `--branch`: that needs a nightly option and
 # `rust-toolchain.toml` pins the compiler to stable.
 if ($Coverage) {
+    # The shell is built into the coverage run's own target directory first;
+    # `our_shell` looks beside the test executable, which is not where an
+    # ordinary build puts it. See the note in tools/validate.sh.
     Invoke-Stage -Name 'coverage' -Because 'the coverage number docs/repository.md publishes, re-measured' -Body {
+        $env:CARGO_TARGET_DIR = "$root/target/llvm-cov-target"
+        cargo build --manifest-path "$root/Cargo.toml" --release -p inillucent-cli
+        Remove-Item Env:\CARGO_TARGET_DIR
+        if ($LASTEXITCODE -ne 0) { return }
         cargo llvm-cov --manifest-path "$root/Cargo.toml" --workspace --release --summary-only `
             --exclude inillucent-bench --exclude inillucent-core --exclude inillucent-model
     }
