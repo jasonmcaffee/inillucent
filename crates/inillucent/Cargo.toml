@@ -5,14 +5,22 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Stable public Rust facade: Database, Connection, Statement, Row."
+description = "Embedded SQL database with vector and keyword retrieval: the Rust API."
 
 [dependencies]
-inillucent-base = { workspace = true }
+inillucent-driver = { workspace = true }
+
+# The engine's own connection surface, which four end-to-end suites here drive
+# directly. They are not tests of this crate's re-export - `smoke.rs` is that -
+# they are tests of the engine behind it: the budget counters, the log after a
+# crash, and the edges of the statement surface the driver deliberately does not
+# expose. They live here because that is where they have always lived and every
+# comment in the tree that cites them cites this path.
+[dev-dependencies]
 inillucent-engine = { workspace = true }
-inillucent-value = { workspace = true }
-inillucent-tree = { workspace = true }
 inillucent-sql = { workspace = true }
+inillucent-tree = { workspace = true }
+inillucent-base = { workspace = true }
 
 # The workspace's lint table; see the note beside it in the root manifest.
 [lints]

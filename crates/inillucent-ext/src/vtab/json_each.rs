@@ -284,7 +284,7 @@ impl VirtualCursor for JsonWalkCursor {
         };
         Ok(match index {
             KEY => row.key.clone().unwrap_or(Value::Null),
-            VALUE => crate::json::value_of(&row.node)?.value,
+            VALUE => crate::json::sql_of(&row.node)?.value,
             TYPE => Value::owned_text(row.node.type_name().as_bytes())?,
             // `atom` is the value for a leaf and NULL for a container, which is
             // the difference between "there is a value here" and "there is more
@@ -293,7 +293,7 @@ impl VirtualCursor for JsonWalkCursor {
                 if row.node.is_container() {
                     Value::Null
                 } else {
-                    crate::json::value_of(&row.node)?.value
+                    crate::json::sql_of(&row.node)?.value
                 }
             }
             ID => Value::Integer(row.id),

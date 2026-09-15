@@ -42,7 +42,7 @@ fn open(name: &str, setup: &[&str]) -> Database {
     // not inherit the first one's schema and nothing has to be removed.
     let database =
         Database::open_with_busy_timeout(&path, std::time::Duration::from_secs(5)).expect("open");
-    let connection = database.connect().expect("connect");
+    let connection = database.session().expect("connect");
     // **No `journal_mode = delete`.** The old facade accepted it and this
     // engine is WAL-only by design - `PRAGMA journal_mode` refuses anything
     // else rather than reporting a mode it does not have. Nothing in this file
@@ -99,7 +99,7 @@ fn preparing_the_same_statement_twice_keeps_one_program() {
             "INSERT INTO t VALUES (1, 'one'), (2, 'two')",
         ],
     );
-    let connection = database.connect().expect("connect");
+    let connection = database.session().expect("connect");
     assert_eq!(connection.cached_plan_count(), 0);
     let first = rows(&connection, "SELECT a, b FROM t ORDER BY a");
     let held = connection.cached_plan_count();
@@ -128,7 +128,7 @@ fn a_schema_change_is_not_answered_from_the_cache() {
             "INSERT INTO t VALUES (1, 'one')",
         ],
     );
-    let connection = database.connect().expect("connect");
+    let connection = database.session().expect("connect");
     assert_eq!(rows(&connection, "SELECT * FROM t"), vec!["1|one"]);
     connection
         .execute_batch("ALTER TABLE t ADD COLUMN c INTEGER DEFAULT 9")
@@ -146,7 +146,7 @@ fn a_recreated_table_is_not_answered_from_the_cache() {
         "recreated_table",
         &["CREATE TABLE t(a INTEGER)", "INSERT INTO t VALUES (1)"],
     );
-    let connection = database.connect().expect("connect");
+    let connection = database.session().expect("connect");
     assert_eq!(rows(&connection, "SELECT * FROM t"), vec!["1"]);
     connection
         .execute_batch(
@@ -169,7 +169,7 @@ fn registering_a_function_drops_the_cached_programs() {
         "function_registration",
         &["CREATE TABLE t(a INTEGER)", "INSERT INTO t VALUES (21)"],
     );
-    let connection = database.connect().expect("connect");
+    let connection = database.session().expect("connect");
     // Warm the cache with something that binds today.
     assert_eq!(rows(&connection, "SELECT a FROM t"), vec!["21"]);
     assert!(connection.cached_plan_count() > 0);
@@ -179,7 +179,7 @@ fn registering_a_function_drops_the_cached_programs() {
         .create_scalar_function(
             "twice",
             1,
-            inillucent::extensions::FunctionFlags::default(),
+            inillucent_engine::extensions::FunctionFlags::default(),
             std::sync::Arc::new(|arguments: &[Value<'_>]| {
                 let value = arguments.first().and_then(|value| match value {
                     Value::Integer(number) => Some(*number),
@@ -208,7 +208,7 @@ fn defining_a_collation_drops_the_cached_programs() {
             "INSERT INTO t VALUES ('b'), ('A'), ('a')",
         ],
     );
-    let connection = database.connect().expect("connect");
+    let connection = database.session().expect("connect");
     assert_eq!(
         rows(&connection, "SELECT a FROM t ORDER BY a"),
         vec!["A", "a", "b"]
@@ -252,10 +252,12 @@ fn a_lever_change_is_cached_separately() {
             "INSERT INTO t VALUES (1, 10), (2, 20)",
         ],
     );
-    let connection = database.connect().expect("connect");
+    let connection = database.session().expect("connect");
     let with = rows(&connection, "SELECT a, b FROM t ORDER BY a");
     assert_eq!(connection.cached_plan_count(), 1);
-    connection.disable_optimizations(inillucent_sql::plan::Levers::COVERING_INDEX);
+    connection.disable_optimizations(inillucent_sql::plan::Levers::without(
+        inillucent_sql::plan::Levers::COVERING_INDEX,
+    ));
     let without = rows(&connection, "SELECT a, b FROM t ORDER BY a");
     assert_eq!(
         connection.cached_plan_count(),
@@ -263,7 +265,7 @@ fn a_lever_change_is_cached_separately() {
         "the same SQL under different levers must not hit the same entry"
     );
     assert_eq!(with, without, "the levers change the plan, not the answer");
-    connection.disable_optimizations(0);
+    connection.disable_optimizations(inillucent_sql::plan::Levers::all());
     let again = rows(&connection, "SELECT a, b FROM t ORDER BY a");
     assert_eq!(
         connection.cached_plan_count(),
@@ -295,8 +297,8 @@ fn the_cache_changes_no_answer() {
                 "INSERT INTO t VALUES (1, 'one'), (2, 'two'), (3, 'two')",
             ],
         );
-        let connection = database.connect().expect("connect");
-        connection.disable_optimizations(disabled);
+        let connection = database.session().expect("connect");
+        connection.disable_optimizations(inillucent_sql::plan::Levers::without(disabled));
         let mut held = Vec::new();
         // Twice through, so the second pass is the cached one where the cache
         // is on and is a fresh compile where it is off.

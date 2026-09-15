@@ -31,7 +31,8 @@
 
 use std::path::PathBuf;
 
-use inillucent::{Database, OwnedDatum};
+use inillucent_engine::connect::Database;
+use inillucent_tree::datum::OwnedDatum;
 
 /// Returns a fresh, empty directory for one test's files.
 ///
@@ -66,7 +67,7 @@ fn count(rows: &[Vec<OwnedDatum>]) -> i64 {
 fn rows_after_reopen(path: &PathBuf) -> i64 {
     let database = Database::open(path).expect("the database reopens");
     database.check().expect("the file is sound");
-    let connection = database.connect();
+    let connection = database.session();
     count(&connection.query("SELECT count(*) FROM t").expect("counted"))
 }
 
@@ -77,7 +78,7 @@ fn a_commit_survives() {
     let path = directory.join("d.rdb");
     {
         let database = Database::open(&path).expect("the database opens");
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY)")
             .expect("the table is created");
@@ -104,7 +105,7 @@ fn a_commit_survives_without_a_checkpoint() {
     let path = directory.join("d.rdb");
     {
         let database = Database::open(&path).expect("the database opens");
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
             .expect("the table is created");
@@ -131,7 +132,7 @@ fn an_abandoned_transaction_leaves_nothing() {
     let path = directory.join("d.rdb");
     {
         let database = Database::open(&path).expect("the database opens");
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY); INSERT INTO t VALUES (1)")
             .expect("the table is created with one row");
@@ -157,7 +158,7 @@ fn a_savepoint_unwinds_to_where_it_was_taken() {
     let path = directory.join("d.rdb");
     {
         let database = Database::open(&path).expect("the database opens");
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY)")
             .expect("the table is created");
@@ -188,7 +189,7 @@ fn a_savepoint_unwinds_to_where_it_was_taken() {
     }
     let database = Database::open(&path).expect("the database reopens");
     database.check().expect("the file is sound");
-    let connection = database.connect();
+    let connection = database.session();
     let rows = connection
         .query("SELECT id FROM t ORDER BY id")
         .expect("the rows are read");
@@ -212,7 +213,7 @@ fn a_rolled_back_schema_change_leaves_no_table() {
     let path = directory.join("d.rdb");
     {
         let database = Database::open(&path).expect("the database opens");
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY)")
             .expect("the first table");
@@ -235,7 +236,7 @@ fn a_rolled_back_schema_change_leaves_no_table() {
     }
     let database = Database::open(&path).expect("the database reopens");
     database.check().expect("the file is sound");
-    let connection = database.connect();
+    let connection = database.session();
     assert!(
         connection.query("SELECT count(*) FROM gone").is_err(),
         "the rolled-back table came back after a reopen"
@@ -262,7 +263,7 @@ fn a_transaction_larger_than_the_pool_commits() {
     let path = directory.join("d.rdb");
     {
         let database = Database::open(&path).expect("the database opens");
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, payload TEXT)")
             .expect("the table is created");
@@ -296,7 +297,7 @@ fn churn_leaves_the_index_agreeing_with_the_table() {
     let path = directory.join("d.rdb");
     {
         let database = Database::open(&path).expect("the database opens");
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch(
                 "CREATE TABLE t (id INTEGER PRIMARY KEY, bucket INTEGER NOT NULL, tag TEXT);\
@@ -333,7 +334,7 @@ fn churn_leaves_the_index_agreeing_with_the_table() {
     }
     let database = Database::open(&path).expect("the database reopens");
     database.check().expect("the file is sound after churn");
-    let connection = database.connect();
+    let connection = database.session();
 
     // The same question asked two ways: once the planner answers from the
     // table, once from the index. A difference is an index that has drifted,
@@ -382,7 +383,7 @@ fn recovery_is_idempotent() {
     let path = directory.join("d.rdb");
     {
         let database = Database::open(&path).expect("the database opens");
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER)")
             .expect("the table is created");
@@ -412,7 +413,7 @@ fn a_checkpoint_changes_nothing_a_reader_can_see() {
     let before;
     {
         let database = Database::open(&path).expect("the database opens");
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
             .expect("the table is created");
@@ -432,7 +433,7 @@ fn a_checkpoint_changes_nothing_a_reader_can_see() {
     }
     let database = Database::open(&path).expect("the database reopens");
     database.check().expect("the file is sound");
-    let connection = database.connect();
+    let connection = database.session();
     let after_reopen = connection
         .query("SELECT id, v FROM t ORDER BY id")
         .expect("read after the reopen");

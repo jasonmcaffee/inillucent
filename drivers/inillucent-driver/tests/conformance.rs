@@ -326,7 +326,7 @@ fn scratch(name: &str) -> PathBuf {
 /// `Null` variant.
 ///
 /// @param value - the suite's value
-fn value_of(value: &Json) -> Result<Value, String> {
+fn value_from_json(value: &Json) -> Result<Value, String> {
     if value.get("null").is_some() {
         return Ok(Value::Null);
     }
@@ -421,7 +421,7 @@ fn check_success(step: &Json, outcome: &Rows, wrong: &mut Vec<String>) {
                     continue;
                 }
                 for (column, cell) in cells.iter().enumerate() {
-                    let Ok(want_value) = value_of(cell) else {
+                    let Ok(want_value) = value_from_json(cell) else {
                         wrong.push(format!("row {nth} column {column} names no value kind"));
                         continue;
                     };
@@ -539,8 +539,8 @@ fn the_conformance_suite_passes() {
             .get("connection")
             .and_then(Json::text)
             .is_some_and(|how| how == "per_call");
-        let session = database.connect().session();
-        let hold = (!per_call).then(|| database.connect_as(session));
+        let session = database.session().session();
+        let hold = (!per_call).then(|| database.session_as(session));
         let mut wrong: Vec<String> = Vec::new();
 
         for statement in case.get("setup").map(Json::items).unwrap_or_default() {
@@ -552,7 +552,7 @@ fn the_conformance_suite_passes() {
             let connection = match &hold {
                 Some(open) => open,
                 None => {
-                    held = database.connect_as(session);
+                    held = database.session_as(session);
                     &held
                 }
             };
@@ -569,7 +569,7 @@ fn the_conformance_suite_passes() {
                 };
                 let mut params: Vec<Value> = Vec::new();
                 for value in step.get("params").map(Json::items).unwrap_or_default() {
-                    match value_of(value) {
+                    match value_from_json(value) {
                         Ok(value) => params.push(value),
                         Err(why) => wrong.push(format!("`{sql}`: {why}")),
                     }
@@ -583,7 +583,7 @@ fn the_conformance_suite_passes() {
                 let connection = match &hold {
                     Some(open) => open,
                     None => {
-                        held = database.connect_as(session);
+                        held = database.session_as(session);
                         &held
                     }
                 };

@@ -516,7 +516,7 @@ fn a_table_with_no_merge_in_flight_still_opens_and_answers() {
     let path = scratch(AREA, "no-merge-in-flight", "inillucent");
     {
         let database = Database::open(&path).expect("it opens");
-        let connection = database.connect();
+        let connection = database.session();
         exec(
             &connection,
             &format!(
@@ -535,7 +535,7 @@ fn a_table_with_no_merge_in_flight_still_opens_and_answers() {
     }
 
     let database = Database::open(&path).expect("it reopens");
-    let connection = database.connect();
+    let connection = database.session();
     let found = column(&connection, "SELECT rowid FROM docs ORDER BY rowid");
     assert_eq!(
         found,

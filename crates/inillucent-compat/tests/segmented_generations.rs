@@ -434,7 +434,7 @@ fn a_pre_segment_file_still_answers() {
     let path = scratch(AREA, "legacy-shape", "inillucent");
     {
         let database = Database::open(&path).expect("it opens");
-        let connection = database.connect();
+        let connection = database.session();
         exec(
             &connection,
             &format!(
@@ -454,7 +454,7 @@ fn a_pre_segment_file_still_answers() {
     }
 
     let database = Database::open(&path).expect("it reopens");
-    let connection = database.connect();
+    let connection = database.session();
     let found = column(&connection, "SELECT rowid FROM docs ORDER BY rowid");
     assert_eq!(
         found,

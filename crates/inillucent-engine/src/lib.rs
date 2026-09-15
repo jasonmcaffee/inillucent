@@ -2,10 +2,11 @@
 //!
 //! Invariant: **this crate is the engine, and nothing above it is.** It owns
 //! the buffer pool, the trees, the log, the catalog, DDL, the pragma set, the
-//! statement path and the virtual-table host, and it depends on none of the
-//! old engine - not `inillucent-storage`, not `inillucent-transaction`, not
-//! `inillucent-vm`. A caller reaches the new engine by depending on this and
-//! on nothing else.
+//! statement path and the virtual-table host. The one thing it takes from the
+//! retired SQLite file stack is `inillucent-sqlite-reader`, so that
+//! `Database::import` can read a `.db` file; nothing on the statement path
+//! reaches it. A caller reaches this engine by depending on this crate and on
+//! nothing else.
 //!
 //! It was `inillucent_compat::newengine` through Phases 1 to 4, which built and
 //! measured it inside the test-and-bench crate, because until
@@ -616,7 +617,7 @@ pub struct ImportedDatabase {
     /// test-only crate, and nothing in the engine consults it - the same shape
     /// as the write path's `execute_timed`, and for the same reason: `schema`
     /// is a gate this project has already been wrong about the cause of once.
-    index_stages: std::cell::Cell<(u128, u128, u128, u128, u128, u128, u128)>,
+    index_stages: std::cell::Cell<StageTimings>,
     /// How many times the catalog has changed.
     ///
     /// A plan compiled at one generation is not run at another: `execute_ddl`
@@ -1196,7 +1197,10 @@ impl TreeCatalog for ImportedDatabase {
     /// difference from `virtual_cursor` is entirely in where the arguments came
     /// from: an ordinary scan folds them out of the statement, and a lateral one
     /// reads them out of the outer row it is being driven for.
-    fn module_integrity(&self, name: &[u8]) -> DbResult<Option<Option<String>>> {
+    fn module_integrity(
+        &self,
+        name: &[u8],
+    ) -> DbResult<inillucent_exec::physical::ModuleIntegrity> {
         self.module_integrity(name)
     }
 
@@ -1321,6 +1325,36 @@ impl VectorIndex {
             declared: 0,
         }
     }
+}
+
+/// Where one `CREATE INDEX` spent its time, in nanoseconds per stage.
+///
+/// **Seven named fields rather than a seven-wide tuple (task-1961, A10).**
+/// `build_stage_nanos` used to answer `(u128, u128, u128, u128, u128, u128,
+/// u128)`, so every caller had to get the order right from a doc comment and
+/// nothing would have caught a report that swapped `pack` and `catalog` - the
+/// numbers would still add up to the total.
+///
+/// `flatten` is the arena being read out into the run of `Datum`s the bulk
+/// builder walks. It is separate from `pack` because the two are different
+/// claims - one is a copy that could still be removed, the other is the tree
+/// being written - and folding them together is how the copy hid.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct StageTimings {
+    /// Reading the table tree.
+    pub scan: u128,
+    /// Sorting the entries.
+    pub sort: u128,
+    /// The uniqueness check, for a `UNIQUE` index.
+    pub unique: u128,
+    /// Reading the arena out into the run the bulk builder walks.
+    pub flatten: u128,
+    /// Writing the tree.
+    pub pack: u128,
+    /// Recording the index and rebuilding the catalog.
+    pub catalog: u128,
+    /// The log commit and the sync at the end.
+    pub seal: u128,
 }
 
 impl ImportedDatabase {
@@ -1566,7 +1600,7 @@ impl ImportedDatabase {
             eponymous: Vec::new(),
             virtual_tables: HashMap::new(),
             vector_indexes: HashMap::new(),
-            index_stages: std::cell::Cell::new((0, 0, 0, 0, 0, 0, 0)),
+            index_stages: std::cell::Cell::new(StageTimings::default()),
             catalog_generation: 0,
             attached: Vec::new(),
             temps: Vec::new(),
@@ -1844,7 +1878,7 @@ impl ImportedDatabase {
             eponymous: Vec::new(),
             virtual_tables: HashMap::new(),
             vector_indexes: HashMap::new(),
-            index_stages: std::cell::Cell::new((0, 0, 0, 0, 0, 0, 0)),
+            index_stages: std::cell::Cell::new(StageTimings::default()),
             catalog_generation: 0,
         };
         opened.settle_journal()?;
@@ -2239,16 +2273,16 @@ impl ImportedDatabase {
     ///
     /// Milliseconds per stage, rendered for a report.
     pub fn build_stages(&self) -> String {
-        let (scan, sort, unique, flatten, pack, catalog, seal) = self.index_stages.get();
+        let timings = self.index_stages.get();
         format!(
             "scan {:.1} ms, sort {:.1} ms, unique {:.1} ms, flatten {:.1} ms, pack {:.1} ms, catalog {:.1} ms, seal {:.1} ms",
-            scan as f64 / 1e6,
-            sort as f64 / 1e6,
-            unique as f64 / 1e6,
-            flatten as f64 / 1e6,
-            pack as f64 / 1e6,
-            catalog as f64 / 1e6,
-            seal as f64 / 1e6
+            timings.scan as f64 / 1e6,
+            timings.sort as f64 / 1e6,
+            timings.unique as f64 / 1e6,
+            timings.flatten as f64 / 1e6,
+            timings.pack as f64 / 1e6,
+            timings.catalog as f64 / 1e6,
+            timings.seal as f64 / 1e6
         )
     }
 
@@ -2260,13 +2294,7 @@ impl ImportedDatabase {
     /// milliseconds - enough that reading the stages off one round and the
     /// total off thirty says the two do not add up when they do.
     ///
-    /// Scan, sort, uniqueness check, flatten, pack, catalog, seal.
-    ///
-    /// `flatten` is the arena being read out into the run of `Datum`s the bulk
-    /// builder walks. It is separate from `pack` because the two are different
-    /// claims - one is a copy this ticket could still remove, the other is the
-    /// tree being written - and folding them together is how the copy hid.
-    pub fn build_stage_nanos(&self) -> (u128, u128, u128, u128, u128, u128, u128) {
+    pub fn build_stage_nanos(&self) -> StageTimings {
         self.index_stages.get()
     }
 
@@ -3947,15 +3975,21 @@ impl ImportedDatabase {
     /// measure the old choice while reporting the new one - which is the whole
     /// thing a lever exists to compare.
     ///
-    /// @param mask - exactly the levers that should be off; every other lever
-    ///   this build has is on, whatever was disabled before this call
-    pub fn disable_optimizations(&mut self, mask: u32) {
+    /// **It takes `Levers`, the type this workspace already has for exactly
+    /// this (task-1961, A10).** It used to take a bare `u32`, so a caller had
+    /// to know that the number meant "disabled" and not "enabled", and nothing
+    /// stopped a lever constant from one build being passed to another. The
+    /// bare mask is now built once, by [`Levers::without`], where the meaning
+    /// is written down.
+    ///
+    /// @param levers - exactly the configuration this connection should have
+    pub fn disable_optimizations(&mut self, levers: Levers) {
         // **The cache is keyed by the levers rather than cleared by them.** A
         // plan built under a lever is that lever's answer, so the same SQL under
         // two settings is two entries; clearing would make the second arm's
         // first execution pay a compile the first arm's did not, and that
         // difference is the size of the thing such a measurement looks for.
-        self.levers = Levers::without(mask);
+        self.levers = levers;
     }
 
     /// Returns which planner optimizations this connection has on.
@@ -4407,9 +4441,9 @@ impl ImportedDatabase {
                     let Some(rowid) = key.first() else { continue };
                     self.change_module(
                         &statement.table.name,
-                        &inillucent_sql::vtab::Change::Delete(inillucent_exec::scalar::to_value(
-                            rowid.borrow(),
-                        )),
+                        &inillucent_sql::vtab::Change::Delete(
+                            inillucent_value::Value::from(&rowid.borrow()).into_owned()?,
+                        ),
                     )?;
                     changed = changed.saturating_add(1);
                 }
@@ -6021,10 +6055,10 @@ fn schema_named(schema: &TableInfo, name: &[u8]) -> TableInfo {
 /// lives two layers above `inillucent-ext` and registering it there would drag a
 /// vector index into every database that only wanted SQL.
 ///
-/// The old engine adds it at the connection for exactly that reason
-/// (`inillucent-session`'s `connect`), and this is the same decision at the same
-/// place in the new one: a database is the first thing that both builds a
-/// registry and is allowed to know the retrieval engine exists.
+/// The old engine added it at the connection for exactly that reason, and this
+/// is the same decision at the same place in this one: a database is the first
+/// thing that both builds a registry and is allowed to know the retrieval
+/// engine exists.
 fn modules() -> inillucent_ext::registry::Registry {
     let mut registry = inillucent_ext::registry::Registry::with_builtins();
     inillucent_search::register(&mut registry);

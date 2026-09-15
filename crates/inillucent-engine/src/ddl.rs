@@ -1795,15 +1795,15 @@ impl ImportedDatabase {
         // number nobody could act on.
         let sealed = std::time::Instant::now();
         self.seal()?;
-        self.index_stages.set((
+        self.index_stages.set(crate::StageTimings {
             scan,
             sort,
-            uniqueness,
+            unique: uniqueness,
             flatten,
             pack,
             catalog,
-            sealed.elapsed().as_nanos(),
-        ));
+            seal: sealed.elapsed().as_nanos(),
+        });
         Ok(Outcome::empty())
     }
 

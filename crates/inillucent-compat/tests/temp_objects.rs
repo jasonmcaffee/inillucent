@@ -61,7 +61,7 @@ fn shell(path: &Path, script: &str) -> Option<String> {
 /// Runs a script through inillucent on one connection, statement by statement.
 fn run(path: &Path, script: &str) -> String {
     let database = Database::open(path).expect("the database opens");
-    let connection = database.connect().expect("the connection opens");
+    let connection = database.session().expect("the connection opens");
     report(&connection, script)
 }
 
@@ -209,7 +209,7 @@ fn a_temporary_table_does_not_survive_the_connection() {
     let path = scratch("lifetime");
     {
         let database = Database::open(&path).expect("the database opens");
-        let connection = database.connect().expect("the connection opens");
+        let connection = database.session().expect("the connection opens");
         connection
             .execute_batch("CREATE TEMP TABLE scratch(a); INSERT INTO scratch VALUES (1)")
             .expect("the temporary table is written");
@@ -224,7 +224,7 @@ fn a_temporary_table_does_not_survive_the_connection() {
         );
     }
     let database = Database::open(&path).expect("the database reopens");
-    let connection = database.connect().expect("the connection opens");
+    let connection = database.session().expect("the connection opens");
     assert!(
         connection.query("SELECT count(*) FROM scratch").is_err(),
         "the temporary table outlived its connection"
@@ -236,8 +236,8 @@ fn a_temporary_table_does_not_survive_the_connection() {
 fn each_connection_has_its_own_temporary_database() {
     let path = scratch("per-connection");
     let database = Database::open(&path).expect("the database opens");
-    let first = database.connect().expect("the first connection opens");
-    let second = database.connect().expect("the second connection opens");
+    let first = database.session().expect("the first connection opens");
+    let second = database.session().expect("the second connection opens");
     first
         .execute_batch("CREATE TEMP TABLE scratch(a); INSERT INTO scratch VALUES (1)")
         .expect("the first writes its own");

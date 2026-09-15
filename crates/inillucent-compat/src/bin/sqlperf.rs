@@ -215,7 +215,7 @@ fn run(root: &Path) -> Result<usize, String> {
     // new engine reads SQLite's file format at all: imported into a `.rdb`
     // rather than opened directly.
     let database = Database::import(&path).map_err(|failure| failure.to_string())?;
-    let connection = database.connect();
+    let connection = database.session();
     let limits = Limits::default();
     let mut measurements = Vec::new();
 
@@ -271,7 +271,7 @@ fn run(root: &Path) -> Result<usize, String> {
     // match; the timing and allocation counters around it still measure the
     // real cost of opening a session.
     measurements.push(measure("schema-load", "104-objects", 200, || {
-        let _connection = database.connect();
+        let _connection = database.session();
         1
     }));
 

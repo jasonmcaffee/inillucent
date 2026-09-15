@@ -116,7 +116,7 @@ fn scratch(name: &str) -> PathBuf {
 /// @param sql - the statements to run
 fn write_and_abandon(path: &Path, sql: &str) {
     let database = Database::open(path).expect("the database opens");
-    let connection = database.connect().expect("the connection opens");
+    let connection = database.session().expect("the connection opens");
     connection
         .execute_batch(&format!("{sql}\nPRAGMA locking_mode = NORMAL;"))
         .expect("the statements run");
@@ -130,7 +130,7 @@ fn write_and_abandon(path: &Path, sql: &str) {
 /// @param sql - the query
 fn read_back(path: &Path, sql: &str) -> Vec<Vec<Value<'static>>> {
     let database = Database::open(path).expect("the database reopens");
-    let connection = database.connect().expect("the connection opens");
+    let connection = database.session().expect("the connection opens");
     connection.query(sql).expect("the query runs")
 }
 
@@ -231,7 +231,7 @@ fn analyze_alone_in_the_log_survives_a_reopen() {
     // Built and closed tidily, so this half is folded into the file and out of the log.
     {
         let database = Database::open(&path).expect("the database opens");
-        let connection = database.connect().expect("the connection opens");
+        let connection = database.session().expect("the connection opens");
         let mut sql = String::new();
         for table in 0..24 {
             sql.push_str(&format!(
@@ -274,7 +274,7 @@ fn analyze_survives_a_reopen_with_an_autoincrement_table() {
     let path = directory.join("stats.db");
     {
         let database = Database::open(&path).expect("the database opens");
-        let connection = database.connect().expect("the connection opens");
+        let connection = database.session().expect("the connection opens");
         let mut sql = String::from(
             "CREATE TABLE job(id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT);
              INSERT INTO job(kind) VALUES ('one'), ('two');
@@ -385,7 +385,7 @@ fn stamp_page(path: &Path, page: u64, page_size: usize, lsn: u64) {
 /// @param path - the database file
 fn build_and_close(path: &Path) {
     let database = Database::open(path).expect("the database opens");
-    let connection = database.connect().expect("the connection opens");
+    let connection = database.session().expect("the connection opens");
     let mut sql = String::new();
     for table in 0..8 {
         sql.push_str(&format!(
@@ -433,7 +433,7 @@ fn a_page_stamped_above_the_logs_end_refuses_the_open() {
 
     let error = match Database::open(&path) {
         Ok(database) => {
-            let connection = database.connect().expect("the connection opens");
+            let connection = database.session().expect("the connection opens");
             let rows = connection.query("SELECT count(*) FROM later");
             panic!(
                 "the open accepted a file stamped by a stream it does not have, and the \

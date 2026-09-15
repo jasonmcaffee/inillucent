@@ -147,7 +147,7 @@ fn a_split_tree_answers_every_query() {
     );
     {
         let database = open_existing(&path);
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch("DELETE FROM spots WHERE id > 200")
             .expect("deletes");
@@ -165,7 +165,7 @@ fn a_split_tree_answers_every_query() {
 /// Builds a tree with inillucent, from nothing.
 fn build_with_inillucent(path: &PathBuf, rows: usize) {
     let database = Database::open(path).expect("inillucent opens");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch("CREATE VIRTUAL TABLE spots USING rtree(id, minX, maxX, minY, maxY)")
         .expect("the table is made");
@@ -189,7 +189,7 @@ fn open_existing(path: &PathBuf) -> Database {
 /// Runs one query with inillucent and returns its first column as text.
 fn query_with_inillucent(path: &PathBuf, sql: &str) -> Vec<String> {
     let database = open_existing(path);
-    let connection = database.connect();
+    let connection = database.session();
     let mut statement = connection.prepare(sql).expect("it prepares");
     let mut rows = Vec::new();
     while statement.step().expect("it steps") {

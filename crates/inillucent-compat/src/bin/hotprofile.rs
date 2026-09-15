@@ -122,7 +122,7 @@ fn run(root: &Path) -> Result<(), String> {
     std::fs::create_dir_all(root).map_err(|failure| failure.to_string())?;
     let path = build_database(root)?;
     let database = Database::open(&path).map_err(|failure| failure.to_string())?;
-    let connection = database.connect();
+    let connection = database.session();
 
     let workloads: Vec<(&'static str, &'static str, u64)> = vec![
         (
@@ -286,7 +286,7 @@ fn build_database(root: &Path) -> Result<PathBuf, String> {
         std::fs::remove_file(&path).map_err(|failure| failure.to_string())?;
     }
     let database = Database::open(&path).map_err(|failure| failure.to_string())?;
-    let connection = database.connect();
+    let connection = database.session();
     let setup = [
         "CREATE TABLE main_table(id INTEGER PRIMARY KEY, key INTEGER NOT NULL, \
          category INTEGER NOT NULL, label TEXT NOT NULL, payload BLOB)",

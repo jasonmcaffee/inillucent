@@ -1,7 +1,7 @@
 //! Whole applications, in miniature, against a file on disk.
 //!
 //! Invariant: **each test here is a story an application actually tells, run
-//! end to end through `inillucent::Database`, and it reopens the file part way
+//! end to end through `inillucent_engine::connect::Database`, and it reopens the file part way
 //! through.** Not a feature exercised in isolation - a schema built, written
 //! to, queried the way a screen would query it, closed, and opened again.
 //!
@@ -38,7 +38,8 @@
 
 use std::path::PathBuf;
 
-use inillucent::{Database, OwnedDatum};
+use inillucent_engine::connect::Database;
+use inillucent_tree::datum::OwnedDatum;
 
 /// Returns a fresh, empty directory for one test's files.
 ///
@@ -85,7 +86,7 @@ fn table(rows: &[Vec<OwnedDatum>]) -> String {
 ///
 /// @param connection - the connection to ask
 /// @param sql - the query
-fn ask(connection: &inillucent::Connection<'_>, sql: &str) -> String {
+fn ask(connection: &inillucent_engine::connect::Connection<'_>, sql: &str) -> String {
     match connection.query(sql) {
         Ok(rows) => table(&rows),
         Err(why) => panic!("`{sql}` failed: {} ({:?})", why.message(), why.code()),
@@ -98,7 +99,7 @@ fn ask(connection: &inillucent::Connection<'_>, sql: &str) -> String {
 fn reopen_and_check(path: &PathBuf) -> Database {
     let database = Database::open(path).expect("the database reopens");
     database.check().expect("the file is sound after a reopen");
-    let connection = database.connect();
+    let connection = database.session();
     assert_eq!(
         ask(&connection, "PRAGMA integrity_check"),
         "ok",
@@ -121,7 +122,7 @@ fn an_order_book_keeps_its_references() {
     let path = directory.join("shop.rdb");
     {
         let database = Database::open(&path).expect("the database opens");
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch(
                 "PRAGMA foreign_keys = ON;\
@@ -167,7 +168,7 @@ fn an_order_book_keeps_its_references() {
             .expect_err("a line with no order is refused");
         assert_eq!(
             orphan.code(),
-            inillucent::PrimaryCode::Constraint,
+            inillucent_base::PrimaryCode::Constraint,
             "expected a constraint failure, got {}",
             orphan.message()
         );
@@ -176,17 +177,23 @@ fn an_order_book_keeps_its_references() {
         let bad_quantity = connection
             .execute("INSERT INTO lines VALUES (10, 'CLIP', 0, 10)")
             .expect_err("a zero quantity is refused");
-        assert_eq!(bad_quantity.code(), inillucent::PrimaryCode::Constraint);
+        assert_eq!(
+            bad_quantity.code(),
+            inillucent_base::PrimaryCode::Constraint
+        );
 
         // And a customer who still has orders.
         let busy_customer = connection
             .execute("DELETE FROM customers WHERE id = 1")
             .expect_err("a customer with orders cannot be removed");
-        assert_eq!(busy_customer.code(), inillucent::PrimaryCode::Constraint);
+        assert_eq!(
+            busy_customer.code(),
+            inillucent_base::PrimaryCode::Constraint
+        );
     }
 
     let database = reopen_and_check(&path);
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch("PRAGMA foreign_keys = ON")
         .expect("the pragma is set on the new connection");
@@ -265,7 +272,7 @@ fn a_ledger_reads_the_same_after_a_reopen() {
     let before;
     {
         let database = Database::open(&path).expect("the database opens");
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch(
                 "CREATE TABLE entries (\
@@ -301,7 +308,7 @@ fn a_ledger_reads_the_same_after_a_reopen() {
     }
 
     let database = reopen_and_check(&path);
-    let connection = database.connect();
+    let connection = database.session();
     let after = ask(&connection, RUNNING_BALANCE);
     assert_eq!(before, after, "the running balance changed across a reopen");
     assert_eq!(
@@ -335,7 +342,7 @@ fn a_document_store_indexes_an_extracted_field() {
     let path = directory.join("documents.rdb");
     {
         let database = Database::open(&path).expect("the database opens");
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch(
                 "CREATE TABLE documents (\
@@ -358,11 +365,11 @@ fn a_document_store_indexes_an_extracted_field() {
         let malformed = connection
             .execute("INSERT INTO documents VALUES (4, '{not json')")
             .expect_err("malformed JSON is refused");
-        assert_eq!(malformed.code(), inillucent::PrimaryCode::Constraint);
+        assert_eq!(malformed.code(), inillucent_base::PrimaryCode::Constraint);
     }
 
     let database = reopen_and_check(&path);
-    let connection = database.connect();
+    let connection = database.session();
     assert_eq!(
         ask(
             &connection,
@@ -429,7 +436,7 @@ fn a_virtual_table_rolls_back_with_its_transaction() {
     let path = directory.join("catalogue.rdb");
     {
         let database = Database::open(&path).expect("the database opens");
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch(
                 "CREATE VIRTUAL TABLE pages USING fts5 (title, body);\
@@ -525,7 +532,7 @@ fn a_virtual_table_rolls_back_with_its_transaction() {
     // And the file agrees with what the connection was saying, which is the
     // half that used to be false.
     let database = reopen_and_check(&path);
-    let connection = database.connect();
+    let connection = database.session();
     assert_eq!(
         ask(&connection, "SELECT title FROM pages ORDER BY rowid"),
         "storage\nlogging\nkept",
@@ -566,7 +573,7 @@ fn rolling_back_to_an_outer_savepoint_discards_the_inner_one() {
     let path = directory.join("nested.rdb");
     {
         let database = Database::open(&path).expect("the database opens");
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch(
                 "CREATE VIRTUAL TABLE pages USING fts5 (title, body);\
@@ -609,7 +616,7 @@ fn rolling_back_to_an_outer_savepoint_discards_the_inner_one() {
             .expect("the transaction commits");
     }
     let database = reopen_and_check(&path);
-    let connection = database.connect();
+    let connection = database.session();
     assert_eq!(
         ask(&connection, "SELECT title FROM pages ORDER BY rowid"),
         "base\nbefore",
@@ -641,7 +648,7 @@ fn rolling_back_to_an_outer_savepoint_discards_the_inner_one() {
 fn a_rollback_to_an_unknown_savepoint_changes_nothing() {
     let directory = scratch("unknown-savepoint");
     let database = Database::open(directory.join("unknown.rdb")).expect("the database opens");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch(
             "CREATE VIRTUAL TABLE pages USING fts5 (title, body);\
@@ -689,7 +696,7 @@ fn a_rollback_to_an_unknown_savepoint_changes_nothing() {
 fn an_ordinary_table_rolls_back_beside_a_virtual_one() {
     let directory = scratch("mixed");
     let database = Database::open(directory.join("mixed.rdb")).expect("the database opens");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch(
             "CREATE TABLE plain (id INTEGER PRIMARY KEY, v TEXT);\
@@ -724,7 +731,7 @@ fn an_ordinary_table_rolls_back_beside_a_virtual_one() {
 fn two_connections_share_one_file() {
     let directory = scratch("connections");
     let database = Database::open(directory.join("shared.rdb")).expect("the database opens");
-    let writer = database.connect();
+    let writer = database.session();
     writer
         .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
         .expect("the schema is created");
@@ -732,7 +739,7 @@ fn two_connections_share_one_file() {
         .execute("INSERT INTO t VALUES (1, 'one')")
         .expect("the first row");
 
-    let reader = database.connect();
+    let reader = database.session();
     assert_eq!(ask(&reader, "SELECT count(*) FROM t"), "1");
 
     writer
@@ -758,7 +765,7 @@ fn a_trigger_and_a_view_survive_a_reopen() {
     let path = directory.join("rules.rdb");
     {
         let database = Database::open(&path).expect("the database opens");
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch(
                 "CREATE TABLE stock (sku TEXT PRIMARY KEY, on_hand INTEGER NOT NULL); \
@@ -786,7 +793,7 @@ fn a_trigger_and_a_view_survive_a_reopen() {
     }
 
     let database = reopen_and_check(&path);
-    let connection = database.connect();
+    let connection = database.session();
     assert_eq!(
         ask(
             &connection,

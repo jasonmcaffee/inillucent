@@ -114,7 +114,9 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use inillucent::{Connection, Database, Levers, OwnedDatum};
+use inillucent_engine::connect::{Connection, Database};
+use inillucent_sql::plan::Levers;
+use inillucent_tree::datum::OwnedDatum;
 
 /// How many rows the guards build their table from.
 ///
@@ -142,7 +144,7 @@ fn scratch(tag: &str) -> PathBuf {
 /// @param path - where the database goes
 fn build(path: &PathBuf) -> Database {
     let database = Database::open(path).expect("the database opens");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch(
             "CREATE TABLE t (id INTEGER PRIMARY KEY, email TEXT NOT NULL, bucket INTEGER NOT NULL);\
@@ -245,7 +247,7 @@ fn one(rows: &[Vec<OwnedDatum>]) -> i64 {
 fn an_index_beats_a_scan() {
     let directory = scratch("index");
     let database = build(&directory.join("b.rdb"));
-    let connection = database.connect();
+    let connection = database.session();
 
     let plan = connection
         .explain("SELECT id FROM t WHERE email = 'person9999@example.com'")
@@ -332,7 +334,7 @@ fn an_index_beats_a_scan() {
 fn one_transaction_beats_many() {
     let directory = scratch("commit");
     let database = Database::open(directory.join("b.rdb")).expect("the database opens");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch(
             "CREATE TABLE batched (id INTEGER PRIMARY KEY);\
@@ -422,7 +424,7 @@ fn one_transaction_beats_many() {
 fn re_preparing_is_cached_rather_than_recompiled() {
     let directory = scratch("prepare");
     let database = build(&directory.join("b.rdb"));
-    let connection = database.connect();
+    let connection = database.session();
 
     let sql = "SELECT id FROM t WHERE email = ?1";
     let rounds = 200;
@@ -448,8 +450,8 @@ fn re_preparing_is_cached_rather_than_recompiled() {
     // of what "not cached" costs rather than a claim about it.
     let uncached_directory = scratch("prepare-uncached");
     let uncached_database = build(&uncached_directory.join("b.rdb"));
-    let uncached = uncached_database.connect();
-    uncached.disable_optimizations(Levers::PLAN_CACHE);
+    let uncached = uncached_database.session();
+    uncached.disable_optimizations(Levers::without(Levers::PLAN_CACHE));
     let uncached_before = uncached.compiled_statement_count();
     for _ in 0..rounds {
         let mut fresh = uncached.prepare(sql).expect("the statement prepares");
@@ -493,7 +495,7 @@ fn rewriting_does_not_grow_the_file_without_bound() {
     let after_first;
     {
         let database = Database::open(&path).expect("the database opens");
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, payload TEXT NOT NULL)")
             .expect("the table is created");
@@ -596,7 +598,7 @@ fn file_bytes(path: &PathBuf) -> u64 {
 fn a_full_scan_is_linear_enough_to_finish() {
     let directory = scratch("scan");
     let database = build(&directory.join("b.rdb"));
-    let connection = database.connect();
+    let connection = database.session();
     let before = fetches(&database);
     let started = Instant::now();
     let rows = connection
@@ -666,7 +668,7 @@ fn a_keyset_page_costs_the_same_wherever_it_starts() {
     let directory = scratch("keyset");
     let path = directory.join("keyset.rdb");
     let database = Database::open(&path).expect("the database opens");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch("CREATE TABLE chunk (id TEXT PRIMARY KEY, body TEXT NOT NULL);")
         .expect("the schema is created");

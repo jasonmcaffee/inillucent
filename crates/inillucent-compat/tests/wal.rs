@@ -33,7 +33,7 @@ fn scratch(name: &str) -> PathBuf {
 /// Opens a inillucent connection on a path.
 fn connect(path: &Path) -> inillucent_compat::facade::Connection {
     let database = Database::open(path).expect("the database opens");
-    database.connect().expect("the connection opens")
+    database.session().expect("the connection opens")
 }
 
 /// Returns the single integer a query reports.
@@ -121,11 +121,11 @@ fn a_rolled_back_transaction_leaves_nothing() {
 fn a_second_connection_sees_the_commit() {
     let path = scratch("two-connections");
     let database = Database::open(&path).expect("the database opens");
-    let writer = database.connect().expect("the writer opens");
+    let writer = database.session().expect("the writer opens");
     writer
         .execute_batch("PRAGMA journal_mode=wal; CREATE TABLE t(a)")
         .expect("the table is created");
-    let reader = database.connect().expect("the reader opens");
+    let reader = database.session().expect("the reader opens");
     assert_eq!(integer(&reader, "SELECT count(*) FROM t"), 0);
     writer
         .execute_batch("INSERT INTO t VALUES (1)")

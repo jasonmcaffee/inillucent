@@ -59,22 +59,6 @@ use crate::expr::{Computed, Eval};
 /// written out at eleven call sites.
 const ENCODING: TextEncoding = TextEncoding::Utf8;
 
-/// Returns a borrowed page value as an owned `Value`.
-///
-/// Text and blobs are copied, which is the cost the module documentation
-/// explains. Everything else is free.
-///
-/// @param datum - the value read out of a batch
-pub fn to_value(datum: Datum<'_>) -> Value<'static> {
-    match datum {
-        Datum::Null => Value::Null,
-        Datum::Int(number) => Value::Integer(number),
-        Datum::Real(number) => Value::Real(number),
-        Datum::Text(bytes) => Value::owned_text(bytes).unwrap_or(Value::Null),
-        Datum::Blob(bytes) => Value::owned_blob(bytes).unwrap_or(Value::Null),
-    }
-}
-
 /// One of the dialect's pattern operators, for a caller that has two values and
 /// needs the answer this crate already knows how to compute.
 ///
@@ -120,19 +104,6 @@ pub fn matches_pattern(
     }
 }
 
-/// Returns a `Value` as an owned datum.
-///
-/// @param value - the value a function produced
-pub fn from_value(value: Value<'_>) -> OwnedDatum {
-    match value {
-        Value::Null => OwnedDatum::Null,
-        Value::Integer(number) => OwnedDatum::Int(number),
-        Value::Real(number) => OwnedDatum::Real(number),
-        Value::Text(text) => OwnedDatum::Text(text.utf8_bytes().into_owned()),
-        Value::Blob(blob) => OwnedDatum::Blob(blob.raw().to_vec()),
-    }
-}
-
 /// Evaluates a list of argument expressions into owned values.
 ///
 /// @param arguments - the compiled argument expressions
@@ -145,7 +116,7 @@ fn arguments_of(
 ) -> DbResult<Vec<Value<'static>>> {
     let mut out = Vec::with_capacity(arguments.len());
     for argument in arguments {
-        out.push(to_value(argument.value(batch, nth)?.get()));
+        out.push(Value::from(&argument.value(batch, nth)?.get()).into_owned()?);
     }
     Ok(out)
 }
@@ -199,7 +170,7 @@ impl Eval for ScalarCall {
             return Err(inillucent_base::error::statement_refusal(said));
         }
         let answer = builtin::call_with(self.func, &values, self.collation, ENCODING, context);
-        Ok(Computed::Owned(from_value(answer)))
+        Ok(Computed::Owned(OwnedDatum::from(answer)))
     }
 }
 
@@ -378,7 +349,8 @@ impl JsonCall {
         if self.arguments.len() != 2 {
             return Ok(None);
         }
-        // **Read as borrowed bytes, not as `Value`s.** `to_value` owns what it
+        // **Read as borrowed bytes, not as `Value`s.** Converting to an
+        // owned `Value` copies what it
         // is given, so converting first copied the whole document and the whole
         // path on every call - which on the gate's four thousand identical
         // calls is four thousand copies of a document the cache already holds.
@@ -451,7 +423,7 @@ impl JsonCall {
                     marks.push(answer.json);
                 }
                 JsonOperand::Plain(eval) => {
-                    values.push(to_value(eval.value(batch, nth)?.get()));
+                    values.push(Value::from(&eval.value(batch, nth)?.get()).into_owned()?);
                     marks.push(false);
                 }
             }
@@ -488,7 +460,9 @@ impl JsonCall {
 
 impl Eval for JsonCall {
     fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Computed<'p>> {
-        Ok(Computed::Owned(from_value(self.answer(batch, nth)?.value)))
+        Ok(Computed::Owned(OwnedDatum::from(
+            self.answer(batch, nth)?.value,
+        )))
     }
 }
 
@@ -530,7 +504,7 @@ pub struct MathCall {
 impl Eval for MathCall {
     fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Computed<'p>> {
         let values = arguments_of(&self.arguments, batch, nth)?;
-        Ok(Computed::Owned(from_value(mathfn::call(
+        Ok(Computed::Owned(OwnedDatum::from(mathfn::call(
             self.func, &values,
         ))))
     }
@@ -553,7 +527,7 @@ pub struct TimeCall {
 impl Eval for TimeCall {
     fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Computed<'p>> {
         let values = arguments_of(&self.arguments, batch, nth)?;
-        Ok(Computed::Owned(from_value(datetime::call(
+        Ok(Computed::Owned(OwnedDatum::from(datetime::call(
             self.func, &values, self.now, ENCODING,
         ))))
     }
@@ -580,11 +554,11 @@ impl Eval for GeneralArith {
         let right = self.right.value(batch, nth)?;
         let answer = eval::arithmetic(
             self.op,
-            &to_value(left.get()),
-            &to_value(right.get()),
+            &Value::from(&left.get()).into_owned()?,
+            &Value::from(&right.get()).into_owned()?,
             ENCODING,
         );
-        Ok(Computed::Owned(from_value(answer)))
+        Ok(Computed::Owned(OwnedDatum::from(answer)))
     }
 }
 
@@ -599,7 +573,7 @@ pub struct Unary {
 impl Eval for Unary {
     fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Computed<'p>> {
         let operand = self.operand.value(batch, nth)?;
-        let value = to_value(operand.get());
+        let value = Value::from(&operand.get()).into_owned()?;
         let answer = match self.op {
             UnaryOp::Negate => eval::negate(&value),
             // Unary plus is the identity in SQLite - it does not even apply a
@@ -608,7 +582,7 @@ impl Eval for Unary {
             UnaryOp::BitNot => eval::bit_not(&value),
             UnaryOp::Not => eval::logical_not(&value),
         };
-        Ok(Computed::Owned(from_value(answer)))
+        Ok(Computed::Owned(OwnedDatum::from(answer)))
     }
 }
 
@@ -623,10 +597,10 @@ pub struct Cast {
 impl Eval for Cast {
     fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Computed<'p>> {
         let operand = self.operand.value(batch, nth)?;
-        let value = to_value(operand.get());
+        let value = Value::from(&operand.get()).into_owned()?;
         let answer = cast::cast_value(value, self.affinity, ENCODING)
             .map_err(|_| misuse("a cast could not be evaluated"))?;
-        Ok(Computed::Owned(from_value(answer)))
+        Ok(Computed::Owned(OwnedDatum::from(answer)))
     }
 }
 
@@ -650,13 +624,13 @@ impl Eval for IsTest {
         let right = self.right.value(batch, nth)?;
         let answer = eval::is_comparison(
             self.negated,
-            &to_value(left.get()),
-            &to_value(right.get()),
+            &Value::from(&left.get()).into_owned()?,
+            &Value::from(&right.get()).into_owned()?,
             self.affinity,
             self.collation,
             ENCODING,
         );
-        Ok(Computed::Owned(from_value(answer)))
+        Ok(Computed::Owned(OwnedDatum::from(answer)))
     }
 }
 
@@ -681,11 +655,11 @@ impl Eval for Between {
         let operand = self.operand.value(batch, nth)?;
         let low = self.low.value(batch, nth)?;
         let high = self.high.value(batch, nth)?;
-        let operand = to_value(operand.get());
+        let operand = Value::from(&operand.get()).into_owned()?;
         let above = eval::comparison(
             BinaryOp::GreaterEqual,
             &operand,
-            &to_value(low.get()),
+            &Value::from(&low.get()).into_owned()?,
             self.affinity,
             self.collation,
             ENCODING,
@@ -693,7 +667,7 @@ impl Eval for Between {
         let below = eval::comparison(
             BinaryOp::LessEqual,
             &operand,
-            &to_value(high.get()),
+            &Value::from(&high.get()).into_owned()?,
             self.affinity,
             self.collation,
             ENCODING,
@@ -704,7 +678,7 @@ impl Eval for Between {
         } else {
             inside
         };
-        Ok(Computed::Owned(from_value(answer)))
+        Ok(Computed::Owned(OwnedDatum::from(answer)))
     }
 }
 
@@ -731,7 +705,7 @@ pub struct InList {
 impl Eval for InList {
     fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Computed<'p>> {
         let operand = self.operand.value(batch, nth)?;
-        let operand = to_value(operand.get());
+        let operand = Value::from(&operand.get()).into_owned()?;
         if operand.is_null() {
             // NULL IN (anything) is NULL, and NULL IN () is false. The empty
             // list is the exception SQLite makes and it is worth the branch.
@@ -743,7 +717,7 @@ impl Eval for InList {
         let mut saw_null = false;
         for candidate in &self.list {
             let candidate = candidate.value(batch, nth)?;
-            let candidate = to_value(candidate.get());
+            let candidate = Value::from(&candidate.get()).into_owned()?;
             if candidate.is_null() {
                 saw_null = true;
                 continue;
@@ -782,7 +756,7 @@ pub struct Case {
 impl Eval for Case {
     fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Computed<'p>> {
         let base = match &self.operand {
-            Some(operand) => Some(to_value(operand.value(batch, nth)?.get())),
+            Some(operand) => Some(Value::from(&operand.value(batch, nth)?.get()).into_owned()?),
             None => None,
         };
         for (when, then) in &self.branches {
@@ -793,14 +767,17 @@ impl Eval for Case {
                     let equal = eval::comparison(
                         BinaryOp::Equal,
                         base,
-                        &to_value(candidate.get()),
+                        &Value::from(&candidate.get()).into_owned()?,
                         None,
                         self.collation,
                         ENCODING,
                     );
                     eval::truth(&equal) == compare::Truth::True
                 }
-                None => eval::truth(&to_value(candidate.get())) == compare::Truth::True,
+                None => {
+                    eval::truth(&Value::from(&candidate.get()).into_owned()?)
+                        == compare::Truth::True
+                }
             };
             if matched {
                 return then.value(batch, nth);
@@ -856,14 +833,14 @@ impl Eval for Pattern {
                 if value.is_null() {
                     return Ok(Computed::Borrowed(Datum::Null));
                 }
-                eval::text_bytes(&to_value(value.get()), ENCODING)
+                eval::text_bytes(&Value::from(&value.get()).into_owned()?, ENCODING)
                     .first()
                     .copied()
             }
             None => None,
         };
-        let subject = eval::text_bytes(&to_value(operand.get()), ENCODING);
-        let pattern_bytes = eval::text_bytes(&to_value(pattern.get()), ENCODING);
+        let subject = eval::text_bytes(&Value::from(&operand.get()).into_owned()?, ENCODING);
+        let pattern_bytes = eval::text_bytes(&Value::from(&pattern.get()).into_owned()?, ENCODING);
         let matched = match self.kind {
             PatternKind::Like => {
                 pattern::like_folding(&pattern_bytes, &subject, escape, !self.case_sensitive)
@@ -1205,6 +1182,12 @@ mod tests {
     }
 
     /// The value bridge round-trips every class.
+    ///
+    /// The bridge is `inillucent-tree`'s pair of `From` impls since task-1961's
+    /// A6; this executor had its own copy of it until then. The exhaustive
+    /// round trip, including text that is not valid UTF-8, is
+    /// `crates/inillucent-tree/tests/value_round_trip.rs`. What this asserts
+    /// is that the executor reaches that one bridge and gets its answer back.
     #[test]
     fn the_value_bridge_round_trips() {
         let cases = [
@@ -1215,7 +1198,8 @@ mod tests {
             Datum::Blob(b"\x00\xFFbytes"),
         ];
         for datum in cases {
-            let round = from_value(to_value(datum));
+            let owned = Value::from(&datum).into_owned().unwrap();
+            let round = OwnedDatum::from(owned);
             assert_eq!(round, OwnedDatum::from_datum(&datum), "{datum:?}");
         }
     }

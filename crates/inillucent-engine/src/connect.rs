@@ -214,12 +214,35 @@ impl Database {
     /// `docs/roadmap.md` item 9, which is where concurrency is graded. An
     /// application that needs two independent transactions needs two processes,
     /// or two `Database` values over two files.
-    pub fn connect(&self) -> Connection<'_> {
+    ///
+    /// **It is called `session` and not `connect` because that is what it
+    /// returns (task-1961, A5).** `connect()` returned something shaped exactly
+    /// like an independent connection, and the paragraph above - that two of
+    /// them share one transaction - was the only thing that said otherwise.
+    /// Anyone arriving from SQLite or rusqlite reads `connect` as "a second
+    /// handle with its own transaction", writes through it, and has the write
+    /// undone by the first handle's `ROLLBACK` with nothing reported. The name
+    /// now says which of the two things it is. `connect` is kept as a
+    /// deprecated alias for one release.
+    pub fn session(&self) -> Connection<'_> {
         let session = self.engine.borrow().open_session();
         Connection {
             database: self,
             session,
         }
+    }
+
+    /// Returns a connection to this database.
+    ///
+    /// Renamed [`Database::session`] in task-1961, because two of these share
+    /// one transaction and `connect` says they do not. Kept for one release so
+    /// an application outside this workspace compiles while it is moved.
+    #[deprecated(
+        since = "0.1.3",
+        note = "renamed `session`: two of these share one transaction"
+    )]
+    pub fn connect(&self) -> Connection<'_> {
+        self.session()
     }
 
     /// Returns a connection that is a continuation of an earlier one.
@@ -231,12 +254,22 @@ impl Database {
     /// same session or a temporary table would not survive the statement that
     /// made it.
     ///
-    /// @param session - the number an earlier `connect` returned
-    pub fn connect_as(&self, session: u64) -> Connection<'_> {
+    /// @param session - the number an earlier [`Database::session`] returned
+    pub fn session_as(&self, session: u64) -> Connection<'_> {
         Connection {
             database: self,
             session,
         }
+    }
+
+    /// Returns a connection that is a continuation of an earlier one.
+    ///
+    /// Renamed [`Database::session_as`] in task-1961, with [`Database::connect`].
+    ///
+    /// @param session - the number an earlier [`Database::session`] returned
+    #[deprecated(since = "0.1.3", note = "renamed `session_as`, with `connect`")]
+    pub fn connect_as(&self, session: u64) -> Connection<'_> {
+        self.session_as(session)
     }
 
     /// Returns the file this database is in.
@@ -388,6 +421,22 @@ impl Database {
     }
 }
 
+/// One statement compiled out of a script, and how much of the script it used.
+///
+/// **A named pair, because the second half was an unnamed `usize` on a public
+/// method (task-1961, A10).** [`Connection::prepare_with_tail`] answered
+/// `(Statement, usize)`, and the number is a byte offset into the *input*,
+/// including the terminating semicolon and the trivia after it - which nothing
+/// in the type said. A caller that read it as a row count, a column count or an
+/// offset into the statement would compile.
+pub struct Prepared<'d> {
+    /// The compiled statement.
+    pub statement: Statement<'d>,
+    /// How many bytes of the script the statement used, so `&sql[consumed..]`
+    /// is the next statement rather than the space before it.
+    pub consumed: usize,
+}
+
 /// A connection to a database.
 ///
 /// It borrows the database rather than owning a handle of its own, because this
@@ -505,10 +554,13 @@ impl<'d> Connection<'d> {
     /// walked this way is split by the grammar rather than by a scan for `;`.
     ///
     /// @param sql - the script, positioned at the statement to compile
-    pub fn prepare_with_tail(&self, sql: &str) -> DbResult<(Statement<'d>, usize)> {
+    pub fn prepare_with_tail(&self, sql: &str) -> DbResult<Prepared<'d>> {
         let consumed = self.engine().statement_length(sql)?;
         let head = sql.get(..consumed).unwrap_or(sql);
-        Ok((self.prepare(head)?, consumed))
+        Ok(Prepared {
+            statement: self.prepare(head)?,
+            consumed,
+        })
     }
 
     /// Describes how a statement would be run.
@@ -616,8 +668,8 @@ impl<'d> Connection<'d> {
     /// Turns off one or more planner optimizations for this connection.
     ///
     /// @param mask - the levers to switch off
-    pub fn disable_optimizations(&self, mask: u32) {
-        self.engine_mut().disable_optimizations(mask);
+    pub fn disable_optimizations(&self, levers: inillucent_sql::plan::Levers) {
+        self.engine_mut().disable_optimizations(levers);
     }
 
     /// Puts the connection into or out of defensive mode.
@@ -746,6 +798,128 @@ impl<'d> Connection<'d> {
     /// `false` between a `BEGIN` and its `COMMIT`.
     pub fn autocommit(&self) -> bool {
         self.engine().autocommit()
+    }
+
+    /// Opens a transaction that rolls back unless it is committed.
+    ///
+    /// **The value is the guard (task-1961, A4).** Before this, a caller of the
+    /// engine wrote `BEGIN` through [`Connection::execute_batch`] and had to
+    /// remember the `COMMIT` on every path out of the function it was in - so
+    /// an early return, a `?` or a panic left the transaction open for the life
+    /// of the connection, holding the write lock and hiding every later
+    /// statement's work from anybody else. The driver has had this shape since
+    /// task-1932; it lives here now so the engine's own connection has it and
+    /// the driver marshals rather than decides.
+    ///
+    /// Refuses when a transaction is already open, and the check is
+    /// [`Connection::autocommit`] rather than a counter this type keeps,
+    /// because in this engine a transaction belongs to the *database* and not
+    /// to the connection that opened it: a `BEGIN` on one handle is joined by
+    /// every other handle on the same file, which is what the invariant on
+    /// [`Database::connect`] says. A counter per connection would answer "no
+    /// transaction here" while one was open on a sibling, and committing it
+    /// would settle work the sibling had not finished.
+    pub fn begin(&self) -> DbResult<Transaction<'_>> {
+        if !self.autocommit() {
+            // `SQLITE_ERROR`, which is what the pinned reference answers for
+            // `BEGIN` inside a transaction ("cannot start a transaction within
+            // a transaction"), rather than the `SQLITE_MISUSE` `refusal`
+            // hands out.
+            return Err(inillucent_base::error::statement_refusal(
+                "a transaction is already open on this database; this engine does not nest                  them, because committing the inner one would commit the outer one's work too.",
+            ));
+        }
+        self.execute_batch("BEGIN")?;
+        Ok(Transaction {
+            connection: self,
+            settled: std::cell::Cell::new(false),
+        })
+    }
+}
+
+/// An open transaction, which rolls back unless it is committed.
+///
+/// Invariant: **when this value goes away, the transaction it opened is over.**
+/// Either [`Transaction::commit`] kept the work, or [`Transaction::rollback`]
+/// discarded it, or the `Drop` below discarded it. There is no fourth way out,
+/// which is the reason the type exists: the alternative is a `BEGIN` in text
+/// and a `COMMIT` the caller has to reach on every path.
+///
+/// It borrows the connection, so the connection cannot be dropped or used for a
+/// second transaction while one is open.
+pub struct Transaction<'c> {
+    /// The connection the `BEGIN` was issued on.
+    connection: &'c Connection<'c>,
+    /// Whether the transaction has already been settled, so `Drop` does
+    /// nothing. A `Cell` because `commit` and `rollback` take `self` by value
+    /// and `Drop` takes `&mut self`, and both have to write it.
+    settled: std::cell::Cell<bool>,
+}
+
+impl std::fmt::Debug for Transaction<'_> {
+    /// Says whether the transaction is still open, and nothing a caller wrote.
+    fn fmt(&self, out: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        out.debug_struct("Transaction")
+            .field("settled", &self.settled.get())
+            .finish()
+    }
+}
+
+impl Transaction<'_> {
+    /// Runs one statement inside the transaction for its effect.
+    ///
+    /// @param sql - the statement
+    pub fn execute(&self, sql: &str) -> DbResult<i64> {
+        self.connection.execute(sql)
+    }
+
+    /// Runs one statement inside the transaction and returns its rows.
+    ///
+    /// @param sql - the statement
+    pub fn query(&self, sql: &str) -> DbResult<Vec<Vec<OwnedDatum>>> {
+        self.connection.query(sql)
+    }
+
+    /// Compiles a statement to run inside the transaction.
+    ///
+    /// @param sql - the statement
+    pub fn prepare(&self, sql: &str) -> DbResult<Statement<'_>> {
+        self.connection.prepare(sql)
+    }
+
+    /// Keeps everything this transaction wrote.
+    ///
+    /// Takes `self`, so a committed transaction cannot be used again and the
+    /// `Drop` below cannot roll back what was kept.
+    pub fn commit(self) -> DbResult<()> {
+        self.settled.set(true);
+        self.connection.execute_batch("COMMIT")
+    }
+
+    /// Discards everything this transaction wrote.
+    ///
+    /// The same thing dropping it does, said out loud. A caller that has
+    /// decided to abandon the work reads better for saying so, and a rollback
+    /// that fails is reportable here where it is not from `Drop`.
+    pub fn rollback(self) -> DbResult<()> {
+        self.settled.set(true);
+        self.connection.execute_batch("ROLLBACK")
+    }
+}
+
+impl Drop for Transaction<'_> {
+    /// Rolls back a transaction nobody committed.
+    ///
+    /// **Silent, because a `Drop` has nowhere to report to.** What it could
+    /// hide is a rollback that did not happen, and for that the engine would
+    /// have to refuse a `ROLLBACK` on a transaction it opened itself. A caller
+    /// who wants to know calls [`Transaction::rollback`] and reads the answer.
+    fn drop(&mut self) {
+        if self.settled.get() {
+            return;
+        }
+        self.settled.set(true);
+        let _ = self.connection.execute_batch("ROLLBACK");
     }
 }
 

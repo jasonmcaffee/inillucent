@@ -59,7 +59,7 @@ fn scratch(name: &str) -> PathBuf {
 /// Builds the probe table.
 fn build(path: &std::path::Path, indexes: bool) -> Result<Database, String> {
     let database = Database::open(path).map_err(|error| error.message().to_string())?;
-    let connection = database.connect();
+    let connection = database.session();
     let mut script = String::from(
         "PRAGMA page_size=4096; PRAGMA journal_mode=delete; PRAGMA synchronous=full;
          CREATE TABLE digits(n INTEGER PRIMARY KEY);
@@ -84,7 +84,7 @@ fn build(path: &std::path::Path, indexes: bool) -> Result<Database, String> {
 fn case(name: &str, indexes: bool, sql: &str, binds: usize) -> Result<(), String> {
     let path = scratch(name);
     let database = build(&path, indexes)?;
-    let connection = database.connect();
+    let connection = database.session();
     let before = database.cache_stats();
     let mut statement = connection
         .prepare(sql)
@@ -129,7 +129,7 @@ fn case(name: &str, indexes: bool, sql: &str, binds: usize) -> Result<(), String
 fn read_case(name: &str, indexes: bool, sql: &str) -> Result<(), String> {
     let path = scratch(name);
     let database = build(&path, indexes)?;
-    let connection = database.connect();
+    let connection = database.session();
     let before = database.cache_stats();
     let mut statement = connection
         .prepare(sql)

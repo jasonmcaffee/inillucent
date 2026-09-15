@@ -19,6 +19,7 @@ use inillucent_sql::ast::UnaryOp;
 use inillucent_sql::bind::BoundExpr;
 use inillucent_tree::datum::OwnedDatum;
 use inillucent_value::affinity::Affinity;
+use inillucent_value::Value;
 
 use crate::batch::Batch;
 use crate::expr::{compile, Expr};
@@ -127,12 +128,12 @@ pub(crate) fn constant_value(
     };
     let borrowed = value.borrow();
     let converted = inillucent_value::affinity::apply_affinity(
-        crate::scalar::to_value(borrowed),
+        Value::from(&borrowed).into_owned()?,
         affinity,
         inillucent_value::encoding::TextEncoding::Utf8,
     )
     .unwrap_or(inillucent_value::value::Value::Null);
-    Ok(crate::scalar::from_value(converted))
+    Ok(OwnedDatum::from(converted))
 }
 
 /// Reports whether an expression is a registered function over constants.
@@ -216,14 +217,15 @@ fn fold(expr: &Expr) -> Option<OwnedDatum> {
         // here would agree with that one until the first time somebody fixed a
         // rounding rule in one of them.
         Expr::Unary { op, operand } => {
-            let value = crate::scalar::to_value(fold(operand)?.borrow());
+            let folded = fold(operand)?;
+            let value = Value::from(&folded.borrow()).into_owned().ok()?;
             let answer = match op {
                 UnaryOp::Negate => inillucent_scalar::eval::negate(&value),
                 UnaryOp::Identity => value,
                 UnaryOp::BitNot => inillucent_scalar::eval::bit_not(&value),
                 UnaryOp::Not => inillucent_scalar::eval::logical_not(&value),
             };
-            Some(crate::scalar::from_value(answer))
+            Some(OwnedDatum::from(answer))
         }
         _ => None,
     }

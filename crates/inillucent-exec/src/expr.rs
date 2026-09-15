@@ -37,7 +37,7 @@ use inillucent_value::affinity::{self, Affinity};
 use inillucent_value::collation::Collation;
 use inillucent_value::compare::compare_sql;
 use inillucent_value::encoding::TextEncoding;
-use inillucent_value::value::{BlobValue, TextValue, Value};
+use inillucent_value::value::Value;
 
 use crate::batch::Batch;
 
@@ -963,10 +963,10 @@ impl Eval for ExternalCall {
     fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Computed<'p>> {
         let mut values = Vec::with_capacity(self.arguments.len());
         for argument in &self.arguments {
-            values.push(crate::scalar::to_value(argument.value(batch, nth)?.get()));
+            values.push(Value::from(&argument.value(batch, nth)?.get()).into_owned()?);
         }
         let answer = (self.body.0)(&values)?;
-        Ok(Computed::Owned(crate::scalar::from_value(answer)))
+        Ok(Computed::Owned(OwnedDatum::from(answer)))
     }
 }
 
@@ -1273,7 +1273,7 @@ impl Eval for AffinityCompare {
             return Ok(Computed::Borrowed(Datum::Null));
         }
         let (left, right) = (left.get(), right.get());
-        let (left, right) = (as_value(&left), as_value(&right));
+        let (left, right) = (Value::from(&left), Value::from(&right));
         let (left, right) = match self.affinity {
             None => (left, right),
             Some(affinity) => (
@@ -1289,23 +1289,6 @@ impl Eval for AffinityCompare {
             )))),
             None => Ok(Computed::Borrowed(Datum::Null)),
         }
-    }
-}
-
-/// Returns a borrowed page value as a `inillucent-value` value.
-///
-/// The database encoding is UTF-8 and only UTF-8 - the TDD says so in the leaf
-/// layout - so the encoding argument is a constant rather than a parameter
-/// nobody could vary.
-///
-/// @param datum - the value read out of a batch
-fn as_value<'p>(datum: &Datum<'p>) -> Value<'p> {
-    match datum {
-        Datum::Null => Value::Null,
-        Datum::Int(number) => Value::Integer(*number),
-        Datum::Real(number) => Value::Real(*number),
-        Datum::Text(bytes) => Value::Text(TextValue::utf8(bytes)),
-        Datum::Blob(bytes) => Value::Blob(BlobValue::borrowed(bytes)),
     }
 }
 
@@ -1529,12 +1512,12 @@ impl Eval for ApplyAffinity {
     fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Computed<'p>> {
         let value = self.operand.value(batch, nth)?;
         let converted = inillucent_value::affinity::apply_affinity(
-            crate::scalar::to_value(value.get()),
+            Value::from(&value.get()).into_owned()?,
             self.affinity,
             inillucent_value::TextEncoding::Utf8,
         )
         .unwrap_or(inillucent_value::Value::Null);
-        Ok(Computed::Owned(crate::scalar::from_value(converted)))
+        Ok(Computed::Owned(OwnedDatum::from(converted)))
     }
 }
 

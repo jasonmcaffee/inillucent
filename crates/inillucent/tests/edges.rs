@@ -34,7 +34,9 @@
 
 use std::path::PathBuf;
 
-use inillucent::{Database, OwnedDatum, PrimaryCode};
+use inillucent_base::PrimaryCode;
+use inillucent_engine::connect::Database;
+use inillucent_tree::datum::OwnedDatum;
 
 /// Returns a fresh, empty directory for one test's files.
 ///
@@ -81,7 +83,7 @@ fn cell(rows: &[Vec<OwnedDatum>]) -> OwnedDatum {
 #[test]
 fn aggregates_over_an_empty_table_are_defined() {
     let (_path, database) = fresh("empty-aggregate");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER)")
         .expect("the table is created");
@@ -116,7 +118,7 @@ fn aggregates_over_an_empty_table_are_defined() {
 #[test]
 fn a_unique_index_admits_many_nulls() {
     let (_path, database) = fresh("unique-null");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch(
             "CREATE TABLE t (id INTEGER PRIMARY KEY, alias TEXT);\
@@ -146,7 +148,7 @@ fn a_unique_index_admits_many_nulls() {
 fn integers_at_the_edges_round_trip() {
     let (path, database) = fresh("integer-edges");
     {
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, v INTEGER)")
             .expect("the table is created");
@@ -162,7 +164,7 @@ fn integers_at_the_edges_round_trip() {
     }
     drop(database);
     let database = Database::open(&path).expect("the database reopens");
-    let connection = database.connect();
+    let connection = database.session();
     let rows = connection
         .query("SELECT v FROM t ORDER BY id")
         .expect("the values are read");
@@ -182,7 +184,7 @@ fn blobs_keep_their_bytes() {
     let (path, database) = fresh("blobs");
     let awkward: Vec<u8> = vec![0x00, 0xff, 0x00, 0x41, 0x00];
     {
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, b BLOB)")
             .expect("the table is created");
@@ -199,7 +201,7 @@ fn blobs_keep_their_bytes() {
     }
     drop(database);
     let database = Database::open(&path).expect("the database reopens");
-    let connection = database.connect();
+    let connection = database.session();
     let rows = connection
         .query("SELECT b FROM t ORDER BY id")
         .expect("the blobs are read");
@@ -233,7 +235,7 @@ fn a_value_larger_than_a_page_round_trips() {
     // several extents rather than one page with a little spilled.
     let long: String = "abcdefghij".repeat(26_214);
     {
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
             .expect("the table is created");
@@ -245,7 +247,7 @@ fn a_value_larger_than_a_page_round_trips() {
     }
     drop(database);
     let database = Database::open(&path).expect("the database reopens");
-    let connection = database.connect();
+    let connection = database.session();
     assert_eq!(
         cell(&connection.query("SELECT length(v) FROM t").expect("length")),
         OwnedDatum::Int(long.len() as i64)
@@ -270,7 +272,7 @@ fn text_outside_ascii_survives() {
     let (path, database) = fresh("unicode");
     let samples = ["naïve", "日本語", "🛟 lifebuoy", "Straße"];
     {
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
             .expect("the table is created");
@@ -286,7 +288,7 @@ fn text_outside_ascii_survives() {
     }
     drop(database);
     let database = Database::open(&path).expect("the database reopens");
-    let connection = database.connect();
+    let connection = database.session();
     let rows = connection
         .query("SELECT v FROM t ORDER BY id")
         .expect("read back");
@@ -318,7 +320,7 @@ fn text_outside_ascii_survives() {
 #[test]
 fn a_collation_applies_where_it_was_declared() {
     let (_path, database) = fresh("collation");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch(
             "CREATE TABLE t (id INTEGER PRIMARY KEY, loose TEXT COLLATE NOCASE, tight TEXT);\
@@ -348,7 +350,7 @@ fn a_collation_applies_where_it_was_declared() {
 #[test]
 fn limit_and_offset_at_the_boundaries() {
     let (_path, database) = fresh("limits");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY)")
         .expect("the table is created");
@@ -373,7 +375,7 @@ fn limit_and_offset_at_the_boundaries() {
 #[test]
 fn division_by_zero_is_null() {
     let (_path, database) = fresh("divide");
-    let connection = database.connect();
+    let connection = database.session();
     assert_eq!(
         cell(&connection.query("SELECT 1 / 0").expect("the query runs")),
         OwnedDatum::Null
@@ -393,7 +395,7 @@ fn division_by_zero_is_null() {
 #[test]
 fn quoted_identifiers_work() {
     let (_path, database) = fresh("quoting");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch(
             "CREATE TABLE \"select\" (\"order\" INTEGER PRIMARY KEY, \"a b\" TEXT);\
@@ -427,7 +429,7 @@ fn quoted_identifiers_work() {
 #[test]
 fn binding_out_of_range_is_refused() {
     let (_path, database) = fresh("binding");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
         .expect("the table is created");
@@ -472,7 +474,7 @@ fn binding_out_of_range_is_refused() {
 #[test]
 fn clearing_bindings_keeps_the_range_check() {
     let (_path, database) = fresh("clear-binding");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY)")
         .expect("the table is created");
@@ -495,7 +497,7 @@ fn clearing_bindings_keeps_the_range_check() {
 #[test]
 fn a_statement_resets_and_ends_cleanly() {
     let (_path, database) = fresh("lifecycle");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch(
             "CREATE TABLE t (id INTEGER PRIMARY KEY);\
@@ -530,7 +532,7 @@ fn a_statement_resets_and_ends_cleanly() {
 #[test]
 fn a_bad_column_leaves_the_connection_usable() {
     let (_path, database) = fresh("bad-column");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY)")
         .expect("the table is created");
@@ -552,7 +554,7 @@ fn a_bad_column_leaves_the_connection_usable() {
 #[test]
 fn an_empty_statement_is_not_an_error() {
     let (_path, database) = fresh("empty-statement");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch("")
         .expect("nothing is a valid batch");
@@ -581,7 +583,7 @@ fn an_empty_statement_is_not_an_error() {
 #[test]
 fn execute_batch_creates_a_trigger() {
     let (_path, database) = fresh("batch-trigger");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch(
             "CREATE TABLE stock (sku TEXT PRIMARY KEY, on_hand INTEGER NOT NULL);\
@@ -612,7 +614,7 @@ fn execute_batch_creates_a_trigger() {
 #[test]
 fn a_batch_may_be_trivia() {
     let (_path, database) = fresh("batch-trivia");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch("")
         .expect("nothing is a valid batch");
@@ -646,7 +648,7 @@ fn a_batch_may_be_trivia() {
 fn an_implicit_rowid_is_stable_across_a_reopen() {
     let (path, database) = fresh("rowid");
     {
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch(
                 "CREATE TABLE t (v TEXT);\
@@ -661,7 +663,7 @@ fn an_implicit_rowid_is_stable_across_a_reopen() {
     }
     drop(database);
     let database = Database::open(&path).expect("the database reopens");
-    let connection = database.connect();
+    let connection = database.session();
     let rows = connection
         .query("SELECT rowid, v FROM t ORDER BY rowid")
         .expect("the rowids are read");
@@ -683,7 +685,7 @@ fn an_implicit_rowid_is_stable_across_a_reopen() {
 #[test]
 fn a_schema_change_reaches_an_open_connection() {
     let (_path, database) = fresh("schema-change");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch(
             "CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT); INSERT INTO t VALUES (1, 'x')",

@@ -8,11 +8,12 @@
 //! vectors. Sorting, hashing and aggregating copy, because they must, and the
 //! type system says so: those are the only places `OwnedDatum` appears.
 //!
-//! This is the rearchitecture design's `inillucent-exec`, which
-//! replaces `inillucent-vm`. What Phase 1 builds is the set the four
-//! `read.analytical` shapes need - scan, filter, project, simple and grouped
-//! aggregation, sort, top-n, distinct, limit - plus the closure compiler.
-//! Joins, the point probe, window functions and the vtab protocol are Phase 2.
+//! This crate is what the rearchitecture put in place of the bytecode virtual
+//! machine, which was deleted with the rest of the old engine. It carries the
+//! operators the four `read.analytical` shapes need - scan, filter, project,
+//! simple and grouped aggregation, sort, top-n, distinct, limit - the closure
+//! compiler, and, since Phase 2, joins, the point probe, window functions and
+//! the virtual-table protocol.
 //!
 //! ## Why there is no bytecode
 //!

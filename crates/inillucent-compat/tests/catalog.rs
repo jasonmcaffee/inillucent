@@ -87,7 +87,7 @@ fn build(name: &str, statements: &[&str]) -> Option<PathBuf> {
 fn open(path: &Path) -> Database {
     let database = Database::import(path).expect("the database opens");
     let _ = database
-        .connect()
+        .session()
         .execute_batch("PRAGMA busy_timeout = 5000");
     database
 }
@@ -173,7 +173,7 @@ fn the_catalog_reads_a_real_schema() {
         return;
     };
     let database = open(&path);
-    let connection = database.connect();
+    let connection = database.session();
 
     let info = table_from_create_sql(
         b"CREATE TABLE t (a INTEGER PRIMARY KEY, b TEXT COLLATE NOCASE, c REAL)",
@@ -262,7 +262,7 @@ fn an_automatic_index_gets_its_declared_key_order() {
         return;
     };
     let database = open(&path);
-    let connection = database.connect();
+    let connection = database.session();
     let index_list = connection
         .query("PRAGMA index_list(t)")
         .expect("it answers");
@@ -317,7 +317,7 @@ fn a_schema_change_recompiles_a_prepared_statement() {
         return;
     };
     let database = open(&path);
-    let connection = database.connect();
+    let connection = database.session();
     let cookie_before = connection.schema_cookie();
 
     let mut statement = connection.prepare("SELECT * FROM t").expect("it prepares");
@@ -340,7 +340,7 @@ fn a_schema_change_recompiles_a_prepared_statement() {
     // to a file this connection is not looking at. The subject of the test is
     // the prepared statement, not who moved the schema.
     database
-        .connect()
+        .session()
         .execute_batch("ALTER TABLE t ADD COLUMN c TEXT DEFAULT 'x'")
         .expect("the column is added");
     connection.reload_schema().expect("the schema reloads");
@@ -379,7 +379,7 @@ fn a_dropped_table_is_reported_rather_than_read() {
         return;
     };
     let database = open(&path);
-    let connection = database.connect();
+    let connection = database.session();
     let mut statement = connection.prepare("SELECT a FROM t").expect("it prepares");
 
     // Dropped on this connection rather than through the pinned SQLite binary,
@@ -416,7 +416,7 @@ fn an_unchanged_schema_does_not_recompile() {
         return;
     };
     let database = open(&path);
-    let connection = database.connect();
+    let connection = database.session();
     let before = connection.explain("SELECT a FROM t").expect("it explains");
     let mut statement = connection.prepare("SELECT a FROM t").expect("it prepares");
     assert!(statement.step().expect("it steps"));

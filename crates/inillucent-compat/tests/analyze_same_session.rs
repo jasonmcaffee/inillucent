@@ -163,7 +163,7 @@ fn build(connection: &Connection) {
 fn analyze_changes_the_plan_on_the_connection_that_ran_it() {
     let path = scratch("join-order");
     let database = Database::open(&path).expect("the database opens");
-    let connection = database.connect().expect("the connection opens");
+    let connection = database.session().expect("the connection opens");
     build(&connection);
 
     let answer_before = run(&connection, QUERY).expect("the query answers");
@@ -177,7 +177,7 @@ fn analyze_changes_the_plan_on_the_connection_that_ran_it() {
     drop(database);
 
     let reopened = Database::open(&path).expect("the database reopens");
-    let fresh = reopened.connect().expect("the connection opens");
+    let fresh = reopened.session().expect("the connection opens");
     let plan_reopened = plan(&fresh, QUERY);
     let answer_reopened = run(&fresh, QUERY).expect("the query answers");
 
@@ -235,7 +235,7 @@ fn analyze_changes_the_plan_on_the_connection_that_ran_it() {
 fn analyzing_one_table_keeps_the_other_tables_statistics() {
     let path = scratch("one-table");
     let database = Database::open(&path).expect("the database opens");
-    let connection = database.connect().expect("the connection opens");
+    let connection = database.session().expect("the connection opens");
     build(&connection);
 
     run_all(&connection, &["ANALYZE"]);

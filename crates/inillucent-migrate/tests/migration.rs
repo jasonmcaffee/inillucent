@@ -269,7 +269,7 @@ fn an_interrupted_migration_resumes() {
         }
         let database =
             inillucent_engine::connect::Database::open(&plan.staging).expect("the staging opens");
-        let connection = database.connect();
+        let connection = database.session();
         inillucent_migrate::copy::create_schema(&connection, DIMS).expect("the schema builds");
         manifest.record("stage", "schema").expect("recorded");
         inillucent_migrate::copy::copy_documents(&connection, source.store(), &mut manifest)

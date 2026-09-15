@@ -134,7 +134,7 @@ fn produce(
             .and_then(|row| row.first())
             .cloned()
             .unwrap_or(Value::Null);
-        bound.push(crate::shell::datum_of(&held));
+        bound.push(inillucent_tree::datum::OwnedDatum::from(&held));
     }
     let started = std::time::Instant::now();
     let collected = context.shell().collect_bound(sql, &bound);

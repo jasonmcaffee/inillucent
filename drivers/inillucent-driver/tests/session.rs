@@ -42,10 +42,10 @@ fn scratch(tag: &str) -> PathBuf {
 fn a_temp_table_survives_a_connection_per_call() {
     let path = scratch("temp");
     let database = Database::open(&path).expect("the database opens");
-    let session = database.connect().session();
+    let session = database.session().session();
 
     database
-        .connect_as(session)
+        .session_as(session)
         .query(
             "CREATE TEMP TABLE scratch (a INTEGER PRIMARY KEY, b TEXT)",
             &[],
@@ -53,11 +53,11 @@ fn a_temp_table_survives_a_connection_per_call() {
         )
         .expect("the temporary table is made");
     database
-        .connect_as(session)
+        .session_as(session)
         .query("INSERT INTO scratch VALUES (1, 'one')", &[], 0)
         .expect("the row is written");
     let rows = database
-        .connect_as(session)
+        .session_as(session)
         .query("SELECT b FROM temp.scratch", &[], 10)
         .expect("the temporary table is still there");
     assert_eq!(rows.total, 1, "the temporary table lost its row");
@@ -66,7 +66,7 @@ fn a_temp_table_survives_a_connection_per_call() {
     // what makes the assertion above about the session rather than about the
     // table having been permanent all along.
     let elsewhere = database
-        .connect()
+        .session()
         .query("SELECT b FROM scratch", &[], 10)
         .expect_err("another session must not see it");
     assert!(
@@ -87,17 +87,17 @@ fn a_session_number_identifies_the_connection_that_reported_it() {
     let path = scratch("number");
     let database = Database::open(&path).expect("the database opens");
 
-    let first = database.connect().session();
-    let second = database.connect().session();
+    let first = database.session().session();
+    let second = database.session().session();
     assert_ne!(first, second, "two connections shared a session number");
     assert_eq!(
-        database.connect_as(first).session(),
+        database.session_as(first).session(),
         first,
         "a continued connection reported a different session"
     );
     assert_eq!(
-        database.connect_as(first).session(),
-        database.connect_as(first).session(),
+        database.session_as(first).session(),
+        database.session_as(first).session(),
         "the number is not stable across two continuations of one session"
     );
 
@@ -115,14 +115,14 @@ fn a_session_number_identifies_the_connection_that_reported_it() {
 fn a_connection_pragma_holds_for_the_whole_session() {
     let path = scratch("pragma");
     let database = Database::open(&path).expect("the database opens");
-    let session = database.connect().session();
+    let session = database.session().session();
 
     database
-        .connect_as(session)
+        .session_as(session)
         .query("PRAGMA foreign_keys = ON", &[], 10)
         .expect("the pragma is accepted");
     let rows = database
-        .connect_as(session)
+        .session_as(session)
         .query("PRAGMA foreign_keys", &[], 10)
         .expect("the pragma reads back");
     let answer = rows

@@ -72,7 +72,7 @@ fn scratch(name: &str) -> PathBuf {
 /// @param database - the migrated database
 /// @param sql - a query answering one row
 fn text_of(database: &Database, sql: &str) -> String {
-    let connection = database.connect();
+    let connection = database.session();
     let rows = connection.query(sql).expect("the query runs");
     match rows.first().and_then(|row| row.first()) {
         Some(OwnedDatum::Text(bytes)) => String::from_utf8_lossy(bytes).into_owned(),

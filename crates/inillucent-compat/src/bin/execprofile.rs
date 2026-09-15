@@ -646,7 +646,9 @@ fn paired_write_range_update(fixture: &Path, page_size: usize) -> Result<(), Str
     let rebuilt_copy = restore(fixture, "write-rebuilt")?;
     let mut rebuilt_db = ImportedDatabase::import_with(rebuilt_copy, page_size, 4_096)
         .map_err(|error| format!("import failed: {error:?}"))?;
-    rebuilt_db.disable_optimizations(inillucent_sql::plan::Levers::PLAN_CACHE);
+    rebuilt_db.disable_optimizations(inillucent_sql::plan::Levers::without(
+        inillucent_sql::plan::Levers::PLAN_CACHE,
+    ));
 
     let reused_copy = restore(fixture, "write-reused")?;
     let mut reused_db = ImportedDatabase::import_with(reused_copy, page_size, 4_096)

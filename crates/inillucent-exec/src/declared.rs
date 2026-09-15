@@ -35,6 +35,7 @@ use inillucent_sql::dml::{codes, BoundCheck, BoundDefault, BoundIndexExprs};
 use inillucent_tree::datum::OwnedDatum;
 use inillucent_value::affinity::{self, Affinity};
 use inillucent_value::encoding::TextEncoding;
+use inillucent_value::Value;
 
 use crate::dml::RowSpace;
 use crate::expr::Eval;
@@ -548,7 +549,10 @@ fn already_stored_as(value: &OwnedDatum, affinity: Affinity) -> bool {
 /// @param value - the value about to be written
 /// @param affinity - the column's affinity
 fn convert(value: OwnedDatum, affinity: Affinity) -> OwnedDatum {
-    let held = crate::scalar::to_value(value.borrow());
+    // The copy is taken in its own statement so the borrow of `value` ends
+    // before the early return below moves it.
+    let held = Value::from(&value.borrow()).into_owned();
+    let Ok(held) = held else { return value };
     let converted = match affinity::apply_affinity(held, affinity, TextEncoding::Utf8) {
         Ok(converted) => converted,
         // A conversion that could not allocate leaves the value as it was
@@ -562,7 +566,7 @@ fn convert(value: OwnedDatum, affinity: Affinity) -> OwnedDatum {
     } else {
         converted
     };
-    crate::scalar::from_value(converted)
+    OwnedDatum::from(converted)
 }
 
 /// Applies INTEGER affinity to a value about to become a rowid.

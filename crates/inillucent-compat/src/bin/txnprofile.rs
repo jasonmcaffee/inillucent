@@ -90,7 +90,7 @@ fn measure_fts(root: &Path) -> Result<(), String> {
             std::fs::remove_file(&path).map_err(|failure| failure.to_string())?;
         }
         let database = Database::open(&path).map_err(|failure| failure.to_string())?;
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch("CREATE VIRTUAL TABLE documents USING fts5(title, body)")
             .map_err(|failure| failure.to_string())?;
@@ -140,7 +140,7 @@ fn measure_inserts(root: &Path) -> Result<f64, String> {
         std::fs::remove_file(&path).map_err(|failure| failure.to_string())?;
     }
     let database = Database::open(&path).map_err(|failure| failure.to_string())?;
-    let connection = database.connect();
+    let connection = database.session();
     for statement in [
         "CREATE TABLE main_table(id INTEGER PRIMARY KEY, key INTEGER NOT NULL,          category INTEGER NOT NULL, label TEXT NOT NULL, payload BLOB)",
         "CREATE INDEX main_key ON main_table(key)",
@@ -194,7 +194,7 @@ fn measure_batch(root: &Path, batch: u32) -> Result<f64, String> {
         std::fs::remove_file(&path).map_err(|failure| failure.to_string())?;
     }
     let database = Database::open(&path).map_err(|failure| failure.to_string())?;
-    let connection = database.connect();
+    let connection = database.session();
     build(&connection)?;
 
     let mut update = connection

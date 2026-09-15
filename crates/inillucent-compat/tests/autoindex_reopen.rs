@@ -56,7 +56,7 @@ fn scratch(name: &str) -> PathBuf {
 /// @param sql - the statements to run
 fn write_and_abandon(path: &Path, sql: &str) {
     let database = Database::open(path).expect("the database opens");
-    let connection = database.connect().expect("the connection opens");
+    let connection = database.session().expect("the connection opens");
     connection
         .execute_batch(&format!("{sql}\nPRAGMA locking_mode = NORMAL;"))
         .expect("the statements run");
@@ -70,7 +70,7 @@ fn write_and_abandon(path: &Path, sql: &str) {
 /// @param sql - the query
 fn read_back(path: &Path, sql: &str) -> Vec<Vec<Value<'static>>> {
     let database = Database::open(path).expect("the database reopens");
-    let connection = database.connect().expect("the connection opens");
+    let connection = database.session().expect("the connection opens");
     connection.query(sql).expect("the query runs")
 }
 
@@ -169,7 +169,7 @@ fn an_automatic_index_answers_a_query_after_a_tidy_close() {
     let path = directory.join("tidy.db");
     {
         let database = Database::open(&path).expect("the database opens");
-        let connection = database.connect().expect("the connection opens");
+        let connection = database.session().expect("the connection opens");
         connection
             .execute_batch(
                 "CREATE TABLE t(a TEXT PRIMARY KEY, b INT);

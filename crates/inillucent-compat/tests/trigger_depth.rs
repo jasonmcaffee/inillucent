@@ -110,7 +110,7 @@ fn the_configured_limit_is_the_one_enforced_and_the_one_named() {
     let _ = std::fs::remove_file(&path);
 
     let database = inillucent_engine::connect::Database::open(&path).expect("the database opens");
-    let connection = database.connect();
+    let connection = database.session();
 
     // Twelve tables and eleven triggers, so the chain is one level deeper than
     // the limit about to be set: the binder refuses when the eleventh trigger

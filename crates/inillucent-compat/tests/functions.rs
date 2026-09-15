@@ -48,7 +48,7 @@ fn scratch() -> std::path::PathBuf {
 /// Opens a database of this test's own, with one connection.
 fn connect() -> inillucent_compat::facade::Connection {
     let database = Database::open(scratch()).expect("opens");
-    Box::leak(Box::new(database)).connect().expect("connects")
+    Box::leak(Box::new(database)).session().expect("connects")
 }
 
 /// A scalar an application registered is callable from SQL.
@@ -565,7 +565,7 @@ fn a_vector_index_survives_a_reopen() {
     let path = scratch();
     {
         let database = Database::open(&path).expect("opens");
-        let connection = database.connect().expect("connects");
+        let connection = database.session().expect("connects");
         connection
             .create_scalar_function("toy_embed", 1, FunctionFlags::external(), toy_embedder())
             .expect("registers");
@@ -596,7 +596,7 @@ fn a_vector_index_survives_a_reopen() {
     }
 
     let database = Database::open(&path).expect("reopens");
-    let connection = database.connect().expect("connects");
+    let connection = database.session().expect("connects");
     connection
         .create_scalar_function("toy_embed", 1, FunctionFlags::external(), toy_embedder())
         .expect("registers");
@@ -643,7 +643,7 @@ fn every_insert_into_an_indexed_table_reaches_the_index() {
     let path = scratch();
     {
         let database = Database::open(&path).expect("opens");
-        let connection = database.connect().expect("connects");
+        let connection = database.session().expect("connects");
         connection
             .create_scalar_function("toy_embed", 1, FunctionFlags::external(), toy_embedder())
             .expect("registers");
@@ -664,7 +664,7 @@ fn every_insert_into_an_indexed_table_reaches_the_index() {
     }
 
     let database = Database::open(&path).expect("reopens");
-    let connection = database.connect().expect("connects");
+    let connection = database.session().expect("connects");
     assert_eq!(
         held_rows(&connection),
         "5",
@@ -685,7 +685,7 @@ fn a_backfilled_index_takes_later_inserts() {
     let path = scratch();
     {
         let database = Database::open(&path).expect("opens");
-        let connection = database.connect().expect("connects");
+        let connection = database.session().expect("connects");
         connection
             .create_scalar_function("toy_embed", 1, FunctionFlags::external(), toy_embedder())
             .expect("registers");
@@ -712,7 +712,7 @@ fn a_backfilled_index_takes_later_inserts() {
     }
 
     let database = Database::open(&path).expect("reopens");
-    let connection = database.connect().expect("connects");
+    let connection = database.session().expect("connects");
     connection
         .create_scalar_function("toy_embed", 1, FunctionFlags::external(), toy_embedder())
         .expect("registers");
@@ -745,7 +745,7 @@ fn a_delete_leaves_the_index_without_the_row() {
     let path = scratch();
     {
         let database = Database::open(&path).expect("opens");
-        let connection = database.connect().expect("connects");
+        let connection = database.session().expect("connects");
         connection
             .create_scalar_function("toy_embed", 1, FunctionFlags::external(), toy_embedder())
             .expect("registers");
@@ -768,7 +768,7 @@ fn a_delete_leaves_the_index_without_the_row() {
     }
 
     let database = Database::open(&path).expect("reopens");
-    let connection = database.connect().expect("connects");
+    let connection = database.session().expect("connects");
     assert_eq!(
         held_rows(&connection),
         "2",

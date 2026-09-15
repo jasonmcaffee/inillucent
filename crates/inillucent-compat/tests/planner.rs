@@ -145,7 +145,7 @@ fn build(connection: &inillucent_compat::facade::Connection) {
 fn analyze_writes_statistics_sqlite_reads() {
     let path = scratch("analyze");
     let database = Database::open(&path).expect("the database opens");
-    let connection = database.connect().expect("the connection opens");
+    let connection = database.session().expect("the connection opens");
     build(&connection);
     run_all(&connection, &["ANALYZE"]);
 
@@ -266,7 +266,7 @@ fn analyze_writes_statistics_sqlite_reads() {
 fn statistics_reorder_the_join() {
     let path = scratch("join-order");
     let database = Database::open(&path).expect("the database opens");
-    let connection = database.connect().expect("the connection opens");
+    let connection = database.session().expect("the connection opens");
     build(&connection);
 
     let query = "SELECT count(*) FROM large, small WHERE large.tag = small.tag";
@@ -307,7 +307,7 @@ fn statistics_reorder_the_join() {
 fn cross_join_pins_the_order() {
     let path = scratch("cross-join");
     let database = Database::open(&path).expect("the database opens");
-    let connection = database.connect().expect("the connection opens");
+    let connection = database.session().expect("the connection opens");
     build(&connection);
     run_all(&connection, &["ANALYZE"]);
 
@@ -347,7 +347,7 @@ fn cross_join_pins_the_order() {
 fn the_more_selective_index_wins() {
     let path = scratch("selectivity");
     let database = Database::open(&path).expect("the database opens");
-    let connection = database.connect().expect("the connection opens");
+    let connection = database.session().expect("the connection opens");
     run_all(
         &connection,
         &[
@@ -407,7 +407,7 @@ fn the_more_selective_index_wins() {
 fn a_comparison_proves_a_partial_index_predicate_of_is_not_null() {
     let path = scratch("partial-not-null");
     let database = Database::open(&path).expect("the database opens");
-    let connection = database.connect().expect("the connection opens");
+    let connection = database.session().expect("the connection opens");
     run_all(
         &connection,
         &[
@@ -528,7 +528,7 @@ fn statistics_sqlite_wrote_are_read_back() {
     // this one at its meta page. The statistics come across with everything
     // else, which is the half of the round trip this test is about.
     let database = Database::import(&path).expect("the database imports");
-    let connection = database.connect().expect("the connection opens");
+    let connection = database.session().expect("the connection opens");
     let query = "SELECT count(*) FROM large, small WHERE large.tag = small.tag";
     let planned = plan(&connection, query);
     let carried = run(
@@ -593,12 +593,12 @@ fn an_in_list_over_a_non_unique_index_answers_every_matching_row() {
     let path = scratch("in-union");
     {
         let database = Database::open(&path).expect("the database opens");
-        let connection = database.connect().expect("a connection opens");
+        let connection = database.session().expect("a connection opens");
         build_union_corpus(&connection, "b");
     }
 
     let database = Database::open(&path).expect("the database reopens");
-    let connection = database.connect().expect("a connection opens");
+    let connection = database.session().expect("a connection opens");
     let chosen = plan(&connection, "SELECT c FROM t WHERE b IN (1, 2)").join(" ");
     assert!(
         chosen.contains("SEARCH") && chosen.contains("INDEX i"),
@@ -638,12 +638,12 @@ fn an_in_list_behind_an_equality_prefix_seeks_on_both_columns() {
     let path = scratch("in-prefix");
     {
         let database = Database::open(&path).expect("the database opens");
-        let connection = database.connect().expect("a connection opens");
+        let connection = database.session().expect("a connection opens");
         build_union_corpus(&connection, "a, b");
     }
 
     let database = Database::open(&path).expect("the database reopens");
-    let connection = database.connect().expect("a connection opens");
+    let connection = database.session().expect("a connection opens");
     let chosen = plan(
         &connection,
         "SELECT c FROM t WHERE a = 5 AND b IN (1, 2, 3)",
@@ -684,7 +684,7 @@ fn an_in_list_behind_an_equality_prefix_seeks_on_both_columns() {
 fn an_anchored_pattern_on_an_indexed_column_seeks() {
     let path = scratch("prefix-seek");
     let database = Database::open(&path).expect("the database opens");
-    let connection = database.connect().expect("a connection opens");
+    let connection = database.session().expect("a connection opens");
     run_all(
         &connection,
         &[

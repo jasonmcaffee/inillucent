@@ -568,7 +568,8 @@ fn epoch_of(date: u16, time: u16) -> i64 {
 fn dos_of(epoch: i64) -> (u16, u16) {
     let days = epoch.div_euclid(86_400);
     let rest = epoch.rem_euclid(86_400);
-    let (year, month, day) = civil_from_days(days);
+    let civil = inillucent_scalar::datetime::civil_of_unix_day(days);
+    let (year, month, day) = (civil.year, civil.month, civil.day);
     let year = year.saturating_sub(1980).clamp(0, 127);
     let date = ((year as u16) << 9) | ((month as u16) << 5) | (day as u16);
     let time = (((rest / 3_600) as u16) << 11)
@@ -603,28 +604,6 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
     era.saturating_mul(146_097)
         .saturating_add(day_of_era)
         .saturating_sub(719_468)
-}
-
-/// Returns the civil date a day number names.
-///
-/// @param days - days since 1970-01-01
-fn civil_from_days(days: i64) -> (i64, i64, i64) {
-    let shifted = days.saturating_add(719_468);
-    let era = shifted.div_euclid(146_097);
-    let day_of_era = shifted.rem_euclid(146_097);
-    let year_of_era =
-        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
-    let year = year_of_era + era * 400;
-    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
-    let shifted_month = (5 * day_of_year + 2) / 153;
-    let day = day_of_year - (153 * shifted_month + 2) / 5 + 1;
-    let month = if shifted_month < 10 {
-        shifted_month + 3
-    } else {
-        shifted_month - 9
-    };
-    let year = if month <= 2 { year + 1 } else { year };
-    (year, month, day)
 }
 
 /// Returns a value's text, when it holds any.

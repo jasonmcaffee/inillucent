@@ -567,10 +567,10 @@ name = "inillucent"
 version = "0.1.2"
 dependencies = [
  "inillucent-base",
+ "inillucent-driver",
  "inillucent-engine",
  "inillucent-sql",
  "inillucent-tree",
- "inillucent-value",
 ]
 
 [[package]]
@@ -621,6 +621,7 @@ dependencies = [
  "inillucent-driver",
  "inillucent-engine",
  "inillucent-remote",
+ "inillucent-scalar",
  "inillucent-tree",
  "inillucent-value",
  "libc",

@@ -42,7 +42,7 @@ fn fixture(name: &str) -> Database {
     let _ = std::fs::remove_file(&path);
     let database = Database::open(&path).expect("a fresh database opens");
     {
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch(
                 "CREATE TABLE item (id INTEGER PRIMARY KEY, name TEXT, weight INTEGER); \
@@ -93,7 +93,7 @@ fn name_of(connection: &Connection<'_>, id: i64) -> Option<String> {
 #[test]
 fn an_abandoned_transaction_undoes_every_kind_of_change() {
     let database = fixture("every-kind");
-    let connection = database.connect();
+    let connection = database.session();
     assert_eq!(rows(&connection, "item"), Some(3));
 
     connection.execute_batch("BEGIN").expect("the batch opens");
@@ -133,7 +133,7 @@ fn an_abandoned_transaction_undoes_every_kind_of_change() {
 #[test]
 fn a_committed_transaction_keeps_what_it_did() {
     let database = fixture("committed");
-    let connection = database.connect();
+    let connection = database.session();
 
     connection.execute_batch("BEGIN").expect("the batch opens");
     connection
@@ -149,7 +149,7 @@ fn a_committed_transaction_keeps_what_it_did() {
 #[test]
 fn a_savepoint_is_a_point_the_transaction_returns_to() {
     let database = fixture("savepoint");
-    let connection = database.connect();
+    let connection = database.session();
 
     connection.execute_batch("BEGIN").expect("the batch opens");
     connection
@@ -187,7 +187,7 @@ fn a_savepoint_is_a_point_the_transaction_returns_to() {
 #[test]
 fn an_unnamed_savepoint_is_refused() {
     let database = fixture("unnamed");
-    let connection = database.connect();
+    let connection = database.session();
     connection.execute_batch("BEGIN").expect("the batch opens");
 
     let error = connection
@@ -209,7 +209,7 @@ fn an_unnamed_savepoint_is_refused() {
 #[test]
 fn a_table_created_in_an_abandoned_transaction_is_gone() {
     let database = fixture("ddl");
-    let connection = database.connect();
+    let connection = database.session();
 
     connection.execute_batch("BEGIN").expect("the batch opens");
     connection
@@ -255,7 +255,7 @@ fn a_rollback_survives_the_next_open() {
     let _ = std::fs::remove_file(&path);
     {
         let database = Database::open(&path).expect("created");
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch(
                 "CREATE TABLE item (id INTEGER PRIMARY KEY, name TEXT); \
@@ -275,7 +275,7 @@ fn a_rollback_survives_the_next_open() {
     }
 
     let database = Database::open(&path).expect("opened");
-    let connection = database.connect();
+    let connection = database.session();
     assert_eq!(
         rows(&connection, "item"),
         Some(1),

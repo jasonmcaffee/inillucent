@@ -100,7 +100,7 @@ fn open_sql(root: &Path, dims: usize) -> SqlIndex {
     {
         let database =
             inillucent_engine::connect::Database::open(&path).expect("the database opens");
-        copy::create_schema(&database.connect(), dims).expect("the schema builds");
+        copy::create_schema(&database.session(), dims).expect("the schema builds");
     }
     SqlIndex::open(&path, copy::SEARCH_TABLE).expect("the search table opens")
 }

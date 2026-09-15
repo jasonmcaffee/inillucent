@@ -62,7 +62,7 @@ fn shell(path: &Path, script: &str) -> Option<String> {
 /// Runs a script through inillucent, statement by statement.
 fn run(path: &Path, script: &str) -> String {
     let database = Database::open(path).expect("the database opens");
-    let connection = database.connect().expect("the connection opens");
+    let connection = database.session().expect("the connection opens");
     let mut out = String::new();
     let mut rest = script;
     while !rest.trim().is_empty() {

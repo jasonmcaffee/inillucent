@@ -243,7 +243,7 @@ fn build(connection: &Connection) {
 fn a_predicate_partitions_the_table_into_three() {
     let path = scratch("partition");
     let database = Database::open(&path).expect("the database opens");
-    let connection = database.connect().expect("the connection opens");
+    let connection = database.session().expect("the connection opens");
     build(&connection);
 
     let whole = run(&connection, "SELECT a FROM t ORDER BY a").expect("the base query runs");
@@ -289,7 +289,7 @@ fn a_predicate_partitions_the_table_into_three() {
 fn an_indexed_predicate_answers_what_a_scan_answers() {
     let path = scratch("norec");
     let database = Database::open(&path).expect("the database opens");
-    let connection = database.connect().expect("the connection opens");
+    let connection = database.session().expect("the connection opens");
     build(&connection);
 
     let mut state = 0x1932_9931_u64;

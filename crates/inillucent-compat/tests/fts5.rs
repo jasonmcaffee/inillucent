@@ -373,7 +373,7 @@ fn a_tokenizer_this_build_has_not_got_is_refused_rather_than_substituted() {
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
     }
     let database = Database::open(&path).expect("the database opens");
-    let connection = database.connect().expect("the connection opens");
+    let connection = database.session().expect("the connection opens");
     for name in ["trigram", "icu", "porter2"] {
         let refused = connection
             .execute(&format!(

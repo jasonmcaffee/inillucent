@@ -71,7 +71,7 @@ fn shell(path: &Path, script: &str) -> Option<String> {
 /// Opens a inillucent connection on a path.
 fn connect(path: &Path) -> inillucent_compat::facade::Connection {
     let database = Database::open(path).expect("the database opens");
-    database.connect().expect("the connection opens")
+    database.session().expect("the connection opens")
 }
 
 /// Runs a script and returns what each statement reported, errors included.

@@ -355,8 +355,8 @@ fn with_inillucent<T>(
 ) -> Result<T, String> {
     let database = Database::open(path)
         .map_err(|error| format!("cannot open {path:?}: {}", error.message()))?;
-    let connection = database.connect();
-    connection.disable_optimizations(disabled);
+    let connection = database.session();
+    connection.disable_optimizations(Levers::without(disabled));
     for pragma in [
         format!("PRAGMA page_size={};", plan.page_size),
         format!("PRAGMA journal_mode={};", plan.journal),

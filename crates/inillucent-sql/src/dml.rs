@@ -1266,7 +1266,7 @@ impl<'a> Binder<'a> {
                 ));
             }
             if position != ROWID_TARGET {
-                self.refuse_generated(&table, position, "INSERT into", Span::default())?;
+                self.refuse_generated(table, position, "INSERT into", Span::default())?;
             }
             targets.push(position);
         }

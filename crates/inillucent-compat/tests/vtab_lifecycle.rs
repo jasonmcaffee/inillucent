@@ -251,7 +251,7 @@ fn counted(name: &str) -> (Connection<'static>, Arc<Counts>) {
             counts: Arc::clone(&counts),
         }))
         .expect("the module registers");
-    let connection = database.connect();
+    let connection = database.session();
     exec(&connection, "CREATE VIRTUAL TABLE t USING counting");
     (connection, counts)
 }

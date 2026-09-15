@@ -237,7 +237,7 @@ fn fresh(
     // new engine's `Connection<'d>` borrows the `Database`, and this measurement
     // program runs for a few seconds and exits.
     let database: &'static Database = Box::leak(Box::new(database));
-    let connection = database.connect();
+    let connection = database.session();
     run(
         &connection,
         &format!("PRAGMA synchronous = {}", synchronous.name()),

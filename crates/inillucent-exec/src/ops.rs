@@ -36,6 +36,7 @@ use inillucent_tree::datum::{borrow_row, Datum, OwnedDatum};
 use inillucent_tree::key;
 use inillucent_tree::types::compare_under;
 use inillucent_value::collation::Collation;
+use inillucent_value::Value;
 
 use crate::aggregate::{Accumulator, AggregateKind};
 use crate::batch::{Batch, DenseInts, Vector};
@@ -527,16 +528,16 @@ impl AggregateSpec {
     ) -> DbResult<()> {
         let mut values = Vec::with_capacity(self.extra.len().saturating_add(1));
         if let Some(argument) = &self.argument {
-            values.push(crate::scalar::to_value(argument.value(batch, nth)?.get()));
+            values.push(Value::from(&argument.value(batch, nth)?.get()).into_owned()?);
         }
         for argument in &self.extra {
-            values.push(crate::scalar::to_value(argument.value(batch, nth)?.get()));
+            values.push(Value::from(&argument.value(batch, nth)?.get()).into_owned()?);
         }
         // The sort keys go on the end, where `Accumulator::finish` knows to
         // find them: it is told how many there are when the accumulator is
         // built.
         for (key, _) in &self.order_by {
-            values.push(crate::scalar::to_value(key.value(batch, nth)?.get()));
+            values.push(Value::from(&key.value(batch, nth)?.get()).into_owned()?);
         }
         accumulator.push_values(values);
         Ok(())

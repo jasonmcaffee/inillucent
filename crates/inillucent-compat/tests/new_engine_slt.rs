@@ -82,8 +82,7 @@ fn render_row(row: &[OwnedDatum], types: &str) -> Vec<String> {
     row.iter()
         .enumerate()
         .map(|(index, value)| {
-            let borrowed = value.borrow();
-            let as_value = inillucent_exec::scalar::to_value(borrowed);
+            let as_value = inillucent_value::Value::from(value);
             slt::render_value(&as_value, letters.get(index).copied().unwrap_or('T'))
         })
         .collect()

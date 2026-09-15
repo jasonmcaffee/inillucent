@@ -36,7 +36,7 @@ const ROWS: i64 = 2_000;
 /// afford.
 fn fixture(path: &std::path::Path) -> Database {
     let database = Database::open(path).expect("the database opens");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch(
             "CREATE TABLE main_table(id INTEGER PRIMARY KEY, key INTEGER NOT NULL, \
@@ -123,14 +123,14 @@ fn the_covering_index_arm_changes_the_plan_and_not_the_answer() {
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).expect("the scratch directory is made");
     let database = fixture(&directory.join("arm.db"));
-    let connection = database.connect();
+    let connection = database.session();
 
     for sql in COVERING_READS {
-        connection.disable_optimizations(0);
+        connection.disable_optimizations(Levers::all());
         let with_plan = plan(&connection, sql);
         let with = answer(&connection, sql);
 
-        connection.disable_optimizations(Levers::COVERING_INDEX);
+        connection.disable_optimizations(Levers::without(Levers::COVERING_INDEX));
         let without_plan = plan(&connection, sql);
         let without = answer(&connection, sql);
 
@@ -156,14 +156,14 @@ fn the_ordered_walk_arm_changes_the_plan_and_not_the_answer() {
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).expect("the scratch directory is made");
     let database = fixture(&directory.join("arm.db"));
-    let connection = database.connect();
+    let connection = database.session();
 
     for sql in ORDERED_READS {
-        connection.disable_optimizations(0);
+        connection.disable_optimizations(Levers::all());
         let with_plan = plan(&connection, sql);
         let with = answer(&connection, sql);
 
-        connection.disable_optimizations(Levers::ORDERED_WALK);
+        connection.disable_optimizations(Levers::without(Levers::ORDERED_WALK));
         let without_plan = plan(&connection, sql);
         let without = answer(&connection, sql);
 
@@ -186,14 +186,14 @@ fn the_streaming_group_arm_changes_the_plan_and_not_the_answer() {
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).expect("the scratch directory is made");
     let database = fixture(&directory.join("arm.db"));
-    let connection = database.connect();
+    let connection = database.session();
 
     for sql in STREAMED_GROUPS {
-        connection.disable_optimizations(0);
+        connection.disable_optimizations(Levers::all());
         let with_plan = plan(&connection, sql);
         let with = answer(&connection, sql);
 
-        connection.disable_optimizations(Levers::STREAMING_GROUP);
+        connection.disable_optimizations(Levers::without(Levers::STREAMING_GROUP));
         let without_plan = plan(&connection, sql);
         let without = answer(&connection, sql);
 
@@ -226,8 +226,8 @@ fn the_indexed_write_arm_changes_the_plan_and_not_the_outcome() {
     let mut plans = Vec::new();
     for (name, mask) in [("on", 0), ("off", Levers::INDEXED_WRITE)] {
         let database = fixture(&directory.join(format!("{name}.db")));
-        let connection = database.connect();
-        connection.disable_optimizations(mask);
+        let connection = database.session();
+        connection.disable_optimizations(Levers::without(mask));
         let mut chains = Vec::new();
         for sql in INDEXED_WRITES {
             chains.push(plan(&connection, sql));
@@ -262,12 +262,12 @@ fn a_prepared_statement_keeps_the_arm_it_was_compiled_under() {
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).expect("the scratch directory is made");
     let database = fixture(&directory.join("arm.db"));
-    let connection = database.connect();
+    let connection = database.session();
     let sql = COVERING_READS.first().copied().unwrap_or("SELECT 1");
 
-    connection.disable_optimizations(0);
+    connection.disable_optimizations(Levers::all());
     let mut early = connection.prepare(sql).expect("it prepares");
-    connection.disable_optimizations(Levers::COVERING_INDEX);
+    connection.disable_optimizations(Levers::without(Levers::COVERING_INDEX));
     let mut late = connection.prepare(sql).expect("it prepares");
 
     // Both statements still answer, and they still agree with each other: a

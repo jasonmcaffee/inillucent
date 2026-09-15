@@ -47,7 +47,7 @@ fn a_schema_change_on_one_database_does_not_enlist_it_in_the_next_commit() {
     let main = directory.join("main.db");
     let aux = directory.join("aux.db");
     let database = Database::open(&main).expect("the database opens");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch(&format!(
             "CREATE TABLE t(a);
@@ -96,7 +96,7 @@ fn a_two_file_transaction_leaves_nothing_behind() {
     let main = directory.join("main.db");
     let aux = directory.join("aux.db");
     let database = Database::open(&main).expect("the database opens");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch(&format!(
             "CREATE TABLE t(a);

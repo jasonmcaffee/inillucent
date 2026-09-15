@@ -164,7 +164,7 @@ pub fn start_inillucent(area: &str, name: &str) -> Connection<'static> {
     let database: &'static Database = Box::leak(Box::new(
         Database::open(&path).expect("inillucent opens its database"),
     ));
-    let connection = database.connect();
+    let connection = database.session();
     // Matches the old engine's default: the harness compares single-connection
     // scenarios against a separate oracle process, so nothing here contends for
     // the lock, but a scenario that does open a second connection should not
@@ -197,7 +197,8 @@ pub fn observe(connection: &Connection<'_>, sql: &str, query: bool) -> Observati
         let mut offset = 0usize;
         while offset < sql.len() {
             let rest = sql.get(offset..).unwrap_or("");
-            let (mut statement, consumed) = connection.prepare_with_tail(rest)?;
+            let prepared = connection.prepare_with_tail(rest)?;
+            let (mut statement, consumed) = (prepared.statement, prepared.consumed);
             // **Read after the first step, not before it.** This engine
             // resolves a statement's result columns when it runs rather than
             // when it is prepared - `Statement::columns` says so in as many

@@ -367,8 +367,8 @@ fn a_created_index_over_a_table_of_large_values_is_correct() {
 fn a_bulk_load_of_out_of_line_values_in_one_transaction_succeeds() {
     let directory = scratch("bulk");
     let path = directory.join("bulk.rdb");
-    let database = inillucent::Database::open(&path).expect("a database opens");
-    let connection = database.connect();
+    let database = inillucent_engine::connect::Database::open(&path).expect("a database opens");
+    let connection = database.session();
     // **A TEXT key, arriving in no order**, because that is what a migration
     // does: `attachment.id` is a UUID and a server hands its rows back in heap
     // order, so a key lands in the middle of a leaf that is already there and
@@ -439,9 +439,9 @@ fn a_bulk_load_of_out_of_line_values_in_one_transaction_succeeds() {
     let _ = connection;
     database.checkpoint().expect("the log folds into the file");
     drop(database);
-    let reopened = inillucent::Database::open(&path).expect("the file reopens");
+    let reopened = inillucent_engine::connect::Database::open(&path).expect("the file reopens");
     reopened.check().expect("every tree walks in key order");
-    let connection = reopened.connect();
+    let connection = reopened.session();
     let counted = connection
         .query("SELECT count(*), sum(length(body)) FROM wide")
         .expect("the aggregate answers");
@@ -478,8 +478,8 @@ fn a_bulk_load_of_out_of_line_values_in_one_transaction_succeeds() {
 fn an_out_of_line_row_written_before_an_existing_one() {
     let directory = scratch("before");
     let path = directory.join("before.rdb");
-    let database = inillucent::Database::open(&path).expect("a database opens");
-    let connection = database.connect();
+    let database = inillucent_engine::connect::Database::open(&path).expect("a database opens");
+    let connection = database.session();
     connection
         .execute_batch("CREATE TABLE wide (id INTEGER PRIMARY KEY, body TEXT)")
         .expect("the table is created");
@@ -528,8 +528,8 @@ fn two_rows_with_a_text_key_and_a_spilled_value() {
     for (name, key_type, first_big, second_big) in cases {
         let directory = scratch(&format!("two-{}", name.replace(' ', "-").replace(',', "")));
         let path = directory.join("two.rdb");
-        let database = inillucent::Database::open(&path).expect("a database opens");
-        let connection = database.connect();
+        let database = inillucent_engine::connect::Database::open(&path).expect("a database opens");
+        let connection = database.session();
         connection
             .execute_batch(&format!(
                 "CREATE TABLE wide (id {key_type} PRIMARY KEY, body TEXT)"

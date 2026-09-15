@@ -37,7 +37,7 @@ fn test_files() -> Vec<PathBuf> {
 fn connect() -> inillucent_compat::facade::Connection {
     let path = workspace_root().join("compat/fixtures/select-corpus.db");
     let database = Database::import_staged(&path, "conformance").expect("the corpus fixture opens");
-    database.connect().expect("the connection opens")
+    database.session().expect("the connection opens")
 }
 
 /// Renders one row of values the way the format writes them.

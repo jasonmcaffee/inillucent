@@ -211,7 +211,7 @@ fn a_verified_migration_publishes_and_reads_back() {
     );
 
     let database = Database::open(&destination).expect("the published database opens");
-    let connection = database.connect();
+    let connection = database.session();
     let rows = connection
         .query("SELECT id, body, price FROM note ORDER BY id")
         .expect("the query runs");

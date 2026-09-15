@@ -30,7 +30,7 @@ fn fixture(name: &str) -> Database {
     let _ = std::fs::remove_file(&path);
     let database = Database::open(&path).expect("a fresh database opens");
     {
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch(
                 "CREATE TABLE item (id INTEGER PRIMARY KEY, name TEXT, weight INTEGER); \
@@ -57,7 +57,7 @@ fn text(row: &[OwnedDatum]) -> String {
 #[test]
 fn a_statement_steps_once_per_row() {
     let database = fixture("steps");
-    let connection = database.connect();
+    let connection = database.session();
     let mut statement = connection
         .prepare("SELECT name FROM item ORDER BY id")
         .expect("the statement compiles");
@@ -86,7 +86,7 @@ fn a_statement_steps_once_per_row() {
 #[test]
 fn a_row_before_the_first_step_is_empty() {
     let database = fixture("unstepped");
-    let connection = database.connect();
+    let connection = database.session();
     let statement = connection
         .prepare("SELECT name FROM item ORDER BY id")
         .expect("the statement compiles");
@@ -100,7 +100,7 @@ fn a_row_before_the_first_step_is_empty() {
 #[test]
 fn a_statement_answers_each_new_binding() {
     let database = fixture("rebind");
-    let connection = database.connect();
+    let connection = database.session();
     let mut statement = connection
         .prepare("SELECT name FROM item WHERE id = ?1")
         .expect("the statement compiles");
@@ -127,7 +127,7 @@ fn a_statement_answers_each_new_binding() {
 #[test]
 fn each_binding_kind_reaches_the_value() {
     let database = fixture("kinds");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch("CREATE TABLE held (id INTEGER PRIMARY KEY, a TEXT, b BLOB, c INTEGER)")
         .expect("the table is created");
@@ -169,7 +169,7 @@ fn each_binding_kind_reaches_the_value() {
 #[test]
 fn binding_out_of_order_does_not_shift_the_parameters() {
     let database = fixture("outoforder");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch("CREATE TABLE pair (id INTEGER PRIMARY KEY, a TEXT, b TEXT)")
         .expect("the table is created");
@@ -192,7 +192,7 @@ fn binding_out_of_order_does_not_shift_the_parameters() {
 #[test]
 fn the_connection_reports_the_last_statement_s_changes() {
     let database = fixture("changes");
-    let connection = database.connect();
+    let connection = database.session();
 
     connection
         .execute_batch("UPDATE item SET weight = 1 WHERE weight = 250")

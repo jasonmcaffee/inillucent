@@ -32,6 +32,7 @@ use inillucent_tree::datum::{Datum, OwnedDatum};
 use inillucent_tree::key;
 use inillucent_tree::types::compare_under;
 use inillucent_value::collation::Collation;
+use inillucent_value::Value;
 
 use crate::aggregate::{Accumulator, AggregateKind};
 use crate::batch::Batch;
@@ -277,7 +278,7 @@ fn integer_of(value: &Datum<'_>) -> i64 {
         Datum::Int(held) => *held,
         Datum::Real(held) => *held as i64,
         Datum::Null => 0,
-        other => inillucent_value::cast::integer_value(&crate::scalar::to_value(*other)),
+        other => inillucent_value::cast::integer_value(&Value::from(other)),
     }
 }
 
@@ -287,7 +288,7 @@ fn real_of(value: &Datum<'_>) -> f64 {
         Datum::Int(held) => *held as f64,
         Datum::Real(held) => *held,
         Datum::Null => 0.0,
-        other => inillucent_value::cast::real_value(&crate::scalar::to_value(*other)),
+        other => inillucent_value::cast::real_value(&Value::from(other)),
     }
 }
 

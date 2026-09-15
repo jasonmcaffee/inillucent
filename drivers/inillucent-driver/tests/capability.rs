@@ -84,7 +84,7 @@ fn probe(name: &str, setup: &[&str], sql: &str, want_value: bool) -> Outcome {
 fn probe_with(name: &str, setup: &[&str], sql: &str, want_value: bool, register: bool) -> Outcome {
     let path = scratch(name);
     let database = Database::open(&path).expect("the scratch database opens");
-    let connection = database.connect();
+    let connection = database.session();
     if register {
         // Doubling and a case-insensitive comparison: two things whose right
         // answer is obvious, so a probe that returned the wrong one could not
@@ -235,7 +235,7 @@ fn described(outcome: &Outcome) -> String {
 fn an_unimplemented_construct_refuses_by_name_and_a_typo_does_not() {
     let path = scratch("classify");
     let database = Database::open(&path).expect("opens");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .query("CREATE TABLE people (a INTEGER PRIMARY KEY)", &[], 0)
         .expect("the fixture is made");

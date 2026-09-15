@@ -127,7 +127,7 @@ fn run(out: &std::path::Path, spread: bool, repeat: usize) -> Result<Sample, Str
         let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
     }
     let database = Database::open(&path).map_err(|error| error.message().to_string())?;
-    let connection = database.connect();
+    let connection = database.session();
     for pragma in [
         "PRAGMA journal_mode=wal;",
         "PRAGMA synchronous=normal;",

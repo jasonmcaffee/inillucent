@@ -176,7 +176,7 @@ fn grade(tag: &str, statements: &[&str]) {
     };
     let handle = Database::import_with_busy_timeout(&database, std::time::Duration::from_secs(5))
         .expect("the fixture opens");
-    let connection = handle.connect().expect("the connection opens");
+    let connection = handle.session().expect("the connection opens");
     let mut failures = Vec::new();
     for sql in statements {
         let observation = driver
@@ -631,7 +631,7 @@ fn the_time_zone_modifiers_are_a_deliberate_deviation() {
     };
     let handle = Database::import_with_busy_timeout(&database, std::time::Duration::from_secs(5))
         .expect("the fixture opens");
-    let connection = handle.connect().expect("the connection opens");
+    let connection = handle.session().expect("the connection opens");
 
     // A fixed instant, so nothing here reads a clock.
     const STAMP: &str = "2026-09-03 14:30:00";

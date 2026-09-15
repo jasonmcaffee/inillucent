@@ -500,10 +500,7 @@ fn crate_libraries() -> Vec<(String, String)> {
         let Ok(entries) = std::fs::read_dir(root.join(group)) else {
             continue;
         };
-        let mut paths: Vec<PathBuf> = entries
-            .map(|entry| entry.map(|e| e.path()))
-            .flatten()
-            .collect();
+        let mut paths: Vec<PathBuf> = entries.flat_map(|entry| entry.map(|e| e.path())).collect();
         paths.sort();
         for path in paths {
             let lib = path.join("src/lib.rs");
@@ -578,5 +575,173 @@ fn the_repository_page_counts_the_crates_under_each_lint_correctly() {
             .filter(|(_, source)| !source.contains("forbid(unsafe_code)"))
             .map(|(name, _)| name.as_str())
             .collect::<Vec<&str>>()
+    );
+}
+
+/// Returns every workspace member's crate name, read from the root manifest.
+///
+/// The manifest's own list rather than a directory walk, so a crate that is in
+/// the tree but not a member does not count as existing.
+fn workspace_members() -> BTreeSet<String> {
+    let root = workspace_root();
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).expect("the root manifest");
+    let mut names = BTreeSet::new();
+    let mut inside = false;
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed == "members = [" {
+            inside = true;
+            continue;
+        }
+        if inside {
+            if trimmed == "]" {
+                break;
+            }
+            let path = trimmed.trim_matches(|c| c == '"' || c == ',');
+            if let Some(name) = path.rsplit('/').next() {
+                if !name.is_empty() {
+                    names.insert(name.to_string());
+                }
+            }
+        }
+    }
+    assert!(
+        names.len() > 20,
+        "the root manifest's member list was not read: {names:?}"
+    );
+    // The binary targets too. `inillucent-shell`, `inillucent-mcp` and the
+    // profiling harnesses are things a reader can run; they are named the same
+    // way a crate is and they exist, so a front page naming one is naming
+    // something real.
+    for page in crate_front_pages() {
+        let Some(manifest) = page.parent().and_then(Path::parent) else {
+            continue;
+        };
+        let Ok(text) = std::fs::read_to_string(manifest.join("Cargo.toml")) else {
+            continue;
+        };
+        let mut in_bin = false;
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with('[') {
+                in_bin = trimmed == "[[bin]]";
+                continue;
+            }
+            if in_bin {
+                if let Some(rest) = trimmed.strip_prefix("name = ") {
+                    names.insert(rest.trim_matches('"').to_string());
+                }
+            }
+        }
+    }
+    names
+}
+
+/// Returns every crate front page: the `src/lib.rs` of each workspace member.
+///
+/// The front page and not every file, because that is what a `cargo doc`
+/// reader and a `cargo add` reader land on, and it is where A3 found the claim
+/// that four deleted crates were in the tree. A note further down a module
+/// about a crate that used to exist is history and reads correctly.
+fn crate_front_pages() -> Vec<PathBuf> {
+    let root = workspace_root();
+    let mut found = Vec::new();
+    for directory in ["crates", "drivers"] {
+        let Ok(entries) = std::fs::read_dir(root.join(directory)) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let page = entry.path().join("src").join("lib.rs");
+            if page.is_file() {
+                found.push(page);
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Returns the `inillucent-*` crate names a line of documentation spells.
+///
+/// The hyphenated spelling only. `inillucent_engine` is a Rust path the
+/// compiler already checks, and `inillucent` on its own is the product's name
+/// as often as the crate's.
+///
+/// @param line - one line of a doc comment
+fn crate_names_in(line: &str) -> Vec<String> {
+    let bytes: Vec<char> = line.chars().collect();
+    let mut found = Vec::new();
+    let mut at = 0usize;
+    while at < bytes.len() {
+        if !line[char_offset(&bytes, at)..].starts_with("inillucent-") {
+            at += 1;
+            continue;
+        }
+        let mut end = at;
+        while end < bytes.len()
+            && (bytes[end].is_ascii_alphanumeric() || bytes[end] == '-' || bytes[end] == '_')
+        {
+            end += 1;
+        }
+        let name: String = bytes[at..end].iter().collect();
+        let name = name.trim_end_matches(['-', '_']).to_string();
+        if name.len() > "inillucent-".len() {
+            found.push(name);
+        }
+        at = end.max(at + 1);
+    }
+    found
+}
+
+/// Returns the byte offset of a character position.
+///
+/// @param chars - the line as characters
+/// @param at - the character position
+fn char_offset(chars: &[char], at: usize) -> usize {
+    chars.iter().take(at).map(|c| c.len_utf8()).sum()
+}
+
+/// No crate's front page names a workspace member that does not exist.
+///
+/// **The facade's front page named four deleted crates and promised a type it
+/// did not export (task-1961, A3).** `crates/inillucent/src/lib.rs` described
+/// `inillucent-legacy`, `inillucent-capi`, `inillucent-session` and
+/// `inillucent-vm` as in the tree and said what would happen to them "when the
+/// driver lands" - the driver had landed and all four were deleted. It was the
+/// first documentation a `cargo add inillucent` reader saw, and nothing
+/// failed: a crate name in a doc comment is a string.
+///
+/// Narrow on purpose, in three ways. Only `src/lib.rs`, because that is the
+/// page a `cargo doc` reader lands on; only the hyphenated spelling, because
+/// `inillucent_engine` is a Rust path the compiler already checks; and only
+/// `//!` and `///` lines, because a name inside code is checked too.
+#[test]
+fn no_crate_front_page_names_a_member_that_does_not_exist() {
+    let members = workspace_members();
+    let mut wrong: Vec<String> = Vec::new();
+    for path in crate_front_pages() {
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for (number, line) in text.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with("//!") && !trimmed.starts_with("///") {
+                continue;
+            }
+            for named in crate_names_in(trimmed) {
+                if !members.contains(&named) {
+                    wrong.push(format!(
+                        "{}:{}: names `{named}`, which is not a workspace member",
+                        path.display(),
+                        number + 1
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "crate front pages name crates that do not exist:\n{}",
+        wrong.join("\n")
     );
 }

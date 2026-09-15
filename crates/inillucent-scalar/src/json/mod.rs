@@ -323,7 +323,12 @@ pub fn extract_parsed(node: &Node, steps: &[path::Step], binary: bool) -> DbResu
 }
 
 /// Turns one element into the SQL value `json_extract` hands back.
-pub fn value_of(node: &Node) -> DbResult<Answer> {
+///
+/// Named `sql_of` rather than `value_of` because `value_of` is what the four
+/// hand-written datum-to-SQL-value conversions task-1961 deleted were called,
+/// and a reader searching for one of those should not land here: this one
+/// takes a JSON element.
+pub fn sql_of(node: &Node) -> DbResult<Answer> {
     as_sql(node)
 }
 

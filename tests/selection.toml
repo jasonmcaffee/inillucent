@@ -691,6 +691,14 @@ kind = "test"
 name = "write_campaign"
 tier = "engine"
 
+# The one datum-to-value conversion, both directions, on bytes that are not
+# valid UTF-8 - the case the five hand-written copies disagreed about.
+[[target]]
+package = "inillucent-tree"
+kind = "test"
+name = "value_round_trip"
+tier = "unit"
+
 [[target]]
 package = "inillucent-vfs"
 kind = "test"

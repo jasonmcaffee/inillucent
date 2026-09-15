@@ -283,7 +283,7 @@ fn a_replayed_migration_publishes_the_same_values_a_live_one_did() {
     assert!(report.passed(), "{:?}", report.failures());
 
     let database = Database::open(&destination).expect("the published database opens");
-    let connection = database.connect();
+    let connection = database.session();
     let rows = connection
         .query("SELECT price FROM note WHERE id = 1")
         .expect("the query runs");

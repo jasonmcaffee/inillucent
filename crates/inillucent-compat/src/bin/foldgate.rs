@@ -463,7 +463,7 @@ fn run_one(
     let mut arm = Arm::default();
     let expected = {
         let database = open(&path)?;
-        let connection = database.connect();
+        let connection = database.session();
         set_busy_timeout(&connection)?;
         declare(&connection, folding, dims, fixed)?;
         let reader = start_reader(&path);
@@ -480,7 +480,7 @@ fn run_one(
     };
     let started = Instant::now();
     let database = open(&path)?;
-    let connection = database.connect();
+    let connection = database.session();
     let after = answers(&connection)?;
     arm.recovery_millis = started.elapsed().as_secs_f64() * 1e3;
     arm.recovered = after == expected;
@@ -816,7 +816,7 @@ fn read_until(path: &Path, flag: &std::sync::atomic::AtomicBool) -> (Vec<f64>, u
     while !flag.load(std::sync::atomic::Ordering::Relaxed) {
         if held.is_none() {
             held = open(path).ok().and_then(|database| {
-                let connection = database.connect();
+                let connection = database.session();
                 set_busy_timeout(&connection).ok()?;
                 Some(database)
             });
@@ -826,7 +826,7 @@ fn read_until(path: &Path, flag: &std::sync::atomic::AtomicBool) -> (Vec<f64>, u
             std::thread::sleep(READ_INTERVAL);
             continue;
         };
-        let connection = database.connect();
+        let connection = database.session();
         for query in QUERIES {
             if flag.load(std::sync::atomic::Ordering::Relaxed) {
                 break;

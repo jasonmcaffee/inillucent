@@ -51,7 +51,7 @@ fn detaching_the_middle_database_does_not_move_the_others() {
     let directory = scratch("renumber");
     let main = directory.join("main.db");
     let database = Database::open(&main).expect("the database opens");
-    let connection = database.connect().expect("the connection opens");
+    let connection = database.session().expect("the connection opens");
     // Three attachments, each with a table holding a different number of rows,
     // so that reading the wrong file is visible rather than merely possible.
     for (name, rows) in [("one", 1), ("two", 2), ("three", 3)] {
@@ -107,7 +107,7 @@ fn a_detached_name_can_be_reused_for_another_file() {
     let first = directory.join("first.db");
     let second = directory.join("second.db");
     let database = Database::open(&main).expect("the database opens");
-    let connection = database.connect().expect("the connection opens");
+    let connection = database.session().expect("the connection opens");
     connection
         .execute_batch(&format!(
             "ATTACH DATABASE '{}' AS aux;

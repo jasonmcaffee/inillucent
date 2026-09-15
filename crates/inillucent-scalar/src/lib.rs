@@ -3,17 +3,16 @@
 //!
 //! Invariant: there is one implementation of `substr()` in this workspace, and
 //! of `length()`, and of `LIKE`, and of `strftime()`, and of every other
-//! built-in. The rearchitecture puts two executors in the tree at once - the
-//! bytecode VM until Phase 5 deletes it, and the vectorised executor that
-//! replaces it - and the TDD's component triage says the function bodies
-//! "port into `inillucent-exec`". Copying them would have produced two `substr()`s
-//! that agree today and disagree after the next fix; this crate is that port,
-//! done as a move.
+//! built-in. The rearchitecture had two executors in the tree at once - the
+//! bytecode virtual machine, until Phase 5 deleted it, and the vectorised
+//! executor in `inillucent-exec` that replaced it - and the function bodies
+//! were moved here rather than copied into the second one. Copying them would
+//! have produced two `substr()`s that agree today and disagree after the next
+//! fix.
 //!
-//! `inillucent-vm`'s `eval`, `builtin`, `pattern`, `mathfn`, `printf` and
-//! `datetime` modules are now re-exports of the modules here, so every caller
-//! written against the old paths still compiles and every test that was written
-//! against them still runs - against this code.
+//! The virtual machine's `eval`, `builtin`, `pattern`, `mathfn`, `printf` and
+//! `datetime` modules were re-exports of the modules here for as long as it
+//! existed, so the move broke no caller and no test on the way through.
 //!
 //! ## What is in here and what is not
 //!

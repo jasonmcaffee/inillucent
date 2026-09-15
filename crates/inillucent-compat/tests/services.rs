@@ -87,7 +87,7 @@ fn a_backup_reproduces_the_database() {
     let destination_path = scratch("backup-destination");
     {
         let source = Database::open(&source_path).expect("the source opens");
-        let connection = source.connect();
+        let connection = source.session();
         connection
             .execute_batch(
                 "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT);
@@ -108,7 +108,7 @@ fn a_backup_reproduces_the_database() {
     );
 
     let backup = Database::open(&destination_path).expect("the backup opens through inillucent");
-    let connection = backup.connect();
+    let connection = backup.session();
     let check = connection
         .query("PRAGMA integrity_check")
         .expect("integrity_check runs")

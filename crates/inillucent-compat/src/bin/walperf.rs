@@ -298,7 +298,7 @@ fn fresh_owned(scratch: &Path, name: &str, synchronous: Synchronous) -> Result<D
         }
     }
     let database = Database::open(&path).map_err(text)?;
-    let connection = database.connect();
+    let connection = database.session();
     run(
         &connection,
         &format!(
@@ -321,7 +321,7 @@ fn open(
     // here needs the `Database` and its `Connection` to outlive the function
     // that opened them - some on another thread entirely.
     let database: &'static Database = Box::leak(Box::new(database));
-    let connection = database.connect();
+    let connection = database.session();
     run(
         &connection,
         &format!(
@@ -457,7 +457,7 @@ fn recovery_family(scratch: &Path) -> Result<Measurement, String> {
     let stem = "recovery.db";
     {
         let database = fresh_owned(scratch, "recovery", Synchronous::Full)?;
-        let connection = database.connect();
+        let connection = database.session();
         run(&connection, "PRAGMA wal_autocheckpoint = 0")?;
         run(&connection, "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT)")?;
         for key in 0..LOG_ROWS {

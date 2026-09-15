@@ -26,7 +26,7 @@ fn database(name: &str, script: &str) -> (Database, std::path::PathBuf) {
     let path = scratch(name);
     let database = Database::open(&path).expect("opens");
     {
-        let connection = database.connect();
+        let connection = database.session();
         connection.execute_batch(script).expect("runs the script");
     }
     (database, path)
@@ -34,7 +34,7 @@ fn database(name: &str, script: &str) -> (Database, std::path::PathBuf) {
 
 /// Returns every row a query produces, as owned values.
 fn query(database: &Database, sql: &str) -> Vec<Vec<OwnedDatum>> {
-    let connection = database.connect();
+    let connection = database.session();
     connection.query(sql).expect("queries")
 }
 
@@ -94,7 +94,7 @@ fn the_counters_report_what_a_statement_changed() {
          INSERT INTO t VALUES(2, 'two');
          INSERT INTO t VALUES(3, 'three');",
     );
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch("UPDATE t SET b = 'x' WHERE a >= 2")
         .expect("updates");
@@ -119,7 +119,7 @@ fn a_rolled_back_transaction_changes_nothing() {
         "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT);
          INSERT INTO t VALUES(1, 'kept');",
     );
-    let connection = database.connect();
+    let connection = database.session();
     connection.execute_batch("BEGIN").expect("begins");
     connection
         .execute_batch("INSERT INTO t VALUES(2, 'gone'); DELETE FROM t WHERE a = 1;")
@@ -143,7 +143,7 @@ fn a_savepoint_undoes_only_what_it_covers() {
         "CREATE TABLE t(a INTEGER PRIMARY KEY);
          INSERT INTO t VALUES(1);",
     );
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch(
             "BEGIN;
@@ -168,7 +168,7 @@ fn a_unique_constraint_refuses_a_duplicate() {
         "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT UNIQUE);
          INSERT INTO t VALUES(1, 'one');",
     );
-    let connection = database.connect();
+    let connection = database.session();
     let failure = connection
         .execute_batch("INSERT INTO t VALUES(2, 'one')")
         .expect_err("the duplicate is refused");
@@ -195,7 +195,7 @@ fn not_null_and_check_are_enforced() {
         "constraints.db",
         "CREATE TABLE t(a INTEGER NOT NULL, b INTEGER CHECK (b > 0));",
     );
-    let connection = database.connect();
+    let connection = database.session();
     let failure = connection
         .execute_batch("INSERT INTO t VALUES(NULL, 1)")
         .expect_err("NOT NULL refuses");
@@ -248,7 +248,7 @@ fn a_dropped_table_is_gone() {
          INSERT INTO keep VALUES(1);
          DROP TABLE go;",
     );
-    let connection = database.connect();
+    let connection = database.session();
     assert!(connection.query("SELECT * FROM go").is_err());
     let rows = connection
         .query("SELECT count(*) FROM keep")
@@ -263,7 +263,7 @@ fn returning_reports_the_written_row() {
         "returning.db",
         "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT);",
     );
-    let connection = database.connect();
+    let connection = database.session();
     let rows = connection
         .query("INSERT INTO t(b) VALUES('one') RETURNING a, b")
         .expect("inserts");
@@ -287,7 +287,7 @@ fn writes_survive_a_close_and_reopen() {
     let path = scratch("reopen.db");
     {
         let database = Database::open(&path).expect("opens");
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch(
                 "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT);
@@ -297,7 +297,7 @@ fn writes_survive_a_close_and_reopen() {
             .expect("writes");
     }
     let database = Database::open(&path).expect("reopens");
-    let connection = database.connect();
+    let connection = database.session();
     let rows = connection
         .query("SELECT a, b FROM t ORDER BY a")
         .expect("queries");

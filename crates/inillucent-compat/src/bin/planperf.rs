@@ -149,7 +149,7 @@ fn build_database(root: &Path) -> Result<PathBuf, String> {
         let _ = std::fs::remove_file(PathBuf::from(name));
     }
     let database = Database::open(&path).map_err(|failure| failure.to_string())?;
-    let connection = database.connect();
+    let connection = database.session();
     let mut script = vec![
         "CREATE TABLE fact (id INTEGER PRIMARY KEY, key TEXT, score REAL, tag INTEGER)".to_string(),
         "CREATE INDEX fact_by_key ON fact (key)".to_string(),
@@ -263,7 +263,7 @@ fn run_workload(
 fn run(root: &Path) -> Result<usize, String> {
     let path = build_database(root)?;
     let database = Database::open(&path).map_err(|failure| failure.to_string())?;
-    let connection = database.connect();
+    let connection = database.session();
     let mut measurements = Vec::new();
 
     // Planning, at four join widths. Two and five are inside the exhaustive

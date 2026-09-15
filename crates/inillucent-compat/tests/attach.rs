@@ -61,7 +61,7 @@ fn shell(main: &Path, script: &str) -> Option<String> {
 /// Runs a script through inillucent, statement by statement.
 fn run(main: &Path, script: &str) -> String {
     let database = Database::open(main).expect("the database opens");
-    let connection = database.connect().expect("the connection opens");
+    let connection = database.session().expect("the connection opens");
     let mut out = String::new();
     let mut rest = script;
     while !rest.trim().is_empty() {
@@ -375,7 +375,7 @@ fn a_two_database_commit_cleans_up_after_itself() {
     let aux = directory.join("aux.db");
     {
         let database = Database::open(&main).expect("the database opens");
-        let connection = database.connect().expect("the connection opens");
+        let connection = database.session().expect("the connection opens");
         connection
             .execute_batch(&format!(
                 "CREATE TABLE t(a);
@@ -401,7 +401,7 @@ fn a_two_database_commit_cleans_up_after_itself() {
     );
 
     let database = Database::open(&main).expect("the database reopens");
-    let connection = database.connect().expect("the connection opens");
+    let connection = database.session().expect("the connection opens");
     connection
         .execute_batch(&format!(
             "ATTACH DATABASE '{}' AS aux",
@@ -426,7 +426,7 @@ fn the_same_page_number_in_two_databases_is_two_pages() {
     let main = directory.join("main.db");
     let aux = directory.join("aux.db");
     let database = Database::open(&main).expect("the database opens");
-    let connection = database.connect().expect("the connection opens");
+    let connection = database.session().expect("the connection opens");
     connection
         .execute_batch(&format!(
             "CREATE TABLE t(a TEXT);

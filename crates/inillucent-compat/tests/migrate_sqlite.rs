@@ -616,7 +616,7 @@ INSERT INTO f(body) VALUES('the quick brown fox'),('jumps over');\n";
 
     let database =
         inillucent_engine::connect::Database::open(&destination).expect("the migration opens");
-    let connection = database.connect();
+    let connection = database.session();
     let one = |sql: &str| -> Vec<Vec<OwnedDatum>> {
         connection
             .query(sql)

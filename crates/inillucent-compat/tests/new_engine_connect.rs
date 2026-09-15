@@ -51,7 +51,7 @@ fn a_database_opens_by_path_and_keeps_what_was_written() {
     let path = scratch("by-path");
     {
         let database = Database::open(&path).expect("a path with nothing in it is created");
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch(
                 "CREATE TABLE note (id INTEGER PRIMARY KEY, body TEXT); \
@@ -74,7 +74,7 @@ fn a_database_opens_by_path_and_keeps_what_was_written() {
     // Opened again, by the same call, with no checkpoint in between - so this is
     // the recovery path as well as the open path.
     let database = Database::open(&path).expect("a path with a database in it is opened");
-    let connection = database.connect();
+    let connection = database.session();
     assert_eq!(
         column(
             &connection
@@ -100,14 +100,14 @@ fn a_reopened_database_can_be_written_to_again() {
     {
         let database = Database::open(&path).expect("created");
         database
-            .connect()
+            .session()
             .execute_batch("CREATE TABLE first (id INTEGER PRIMARY KEY, a TEXT)")
             .expect("the first table is created");
         database.checkpoint().expect("checkpointed");
     }
     {
         let database = Database::open(&path).expect("opened");
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch(
                 "CREATE TABLE second (id INTEGER PRIMARY KEY, b TEXT); \
@@ -128,7 +128,7 @@ fn a_reopened_database_can_be_written_to_again() {
 
     // And once more, so the second table survives the same trip the first did.
     let database = Database::open(&path).expect("opened again");
-    let connection = database.connect();
+    let connection = database.session();
     assert_eq!(
         column(&connection.query("SELECT b FROM second").unwrap()),
         vec!["two".to_string()],
@@ -141,7 +141,7 @@ fn a_reopened_database_can_be_written_to_again() {
 fn a_new_database_is_usable_immediately() {
     let path = scratch("fresh");
     let database = Database::open(&path).expect("created");
-    let connection = database.connect();
+    let connection = database.session();
     assert!(
         connection
             .query("SELECT name FROM sqlite_schema")
@@ -171,7 +171,7 @@ fn a_new_database_is_usable_immediately() {
 fn cache_size_grows_the_pool_and_reads_back_what_was_asked_for() {
     let path = scratch("cache-size");
     let database = Database::open(&path).expect("a fresh database opens");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, body TEXT)")
         .expect("the schema is created");

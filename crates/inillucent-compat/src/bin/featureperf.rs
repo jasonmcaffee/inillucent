@@ -115,7 +115,7 @@ fn open() -> Result<Connection<'static>, String> {
     // The database is leaked so the connection can be returned alone. This is a
     // measurement program that runs for a second and exits.
     let database: &'static Database = Box::leak(Box::new(database));
-    Ok(database.connect())
+    Ok(database.session())
 }
 
 /// Runs a statement for its effect.

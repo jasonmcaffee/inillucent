@@ -243,7 +243,7 @@ fn ordered_statements_match_the_oracle() {
     };
     let handle = Database::import_with_busy_timeout(&database, std::time::Duration::from_secs(5))
         .expect("the fixture opens");
-    let connection = handle.connect().expect("the connection opens");
+    let connection = handle.session().expect("the connection opens");
     let mut failures = Vec::new();
     for sql in STATEMENTS {
         let observation = driver
@@ -306,7 +306,7 @@ fn the_sort_is_skipped_exactly_where_the_walk_answers_the_order() {
     };
     let handle = Database::import_with_busy_timeout(&database, std::time::Duration::from_secs(5))
         .expect("the fixture opens");
-    let connection = handle.connect().expect("the connection opens");
+    let connection = handle.session().expect("the connection opens");
 
     let walked = [
         "SELECT id FROM t ORDER BY id",

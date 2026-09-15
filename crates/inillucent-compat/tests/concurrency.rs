@@ -64,7 +64,7 @@ fn workspace_root() -> PathBuf {
 /// held a pool over one file would be two page caches over one set of bytes".
 /// Opening the path a second time therefore does not give a second connection,
 /// it gives a second *writer*, and the second one is refused with "a writer
-/// holds PENDING" before any test body runs. `database.connect()` twice is the
+/// holds PENDING" before any test body runs. `database.session()` twice is the
 /// shape these tests are actually about.
 fn database(path: &std::path::Path) -> Database {
     Database::open(path).expect("the database opens")
@@ -122,7 +122,7 @@ fn as_integer(value: Option<&OwnedDatum>) -> i64 {
 fn two_sessions_on_one_database_do_not_hold_separate_snapshots() {
     let path = scratch("snapshot");
     let held = database(&path);
-    let writer = held.connect();
+    let writer = held.session();
     writer
         .execute_batch("PRAGMA journal_mode=wal")
         .expect("the mode changes");
@@ -133,7 +133,7 @@ fn two_sessions_on_one_database_do_not_hold_separate_snapshots() {
         .execute_batch("INSERT INTO t VALUES(1)")
         .expect("a row");
 
-    let reader = held.connect();
+    let reader = held.session();
     reader.execute_batch("BEGIN").expect("the read opens");
     assert_eq!(integer(&reader, "SELECT count(*) FROM t"), 1);
 
@@ -198,7 +198,7 @@ fn two_sessions_on_one_database_do_not_hold_separate_snapshots() {
 fn a_checkpoint_copies_the_whole_log_back_past_a_session() {
     let path = scratch("protected");
     let held = database(&path);
-    let writer = held.connect();
+    let writer = held.session();
     writer
         .execute_batch("PRAGMA journal_mode=wal")
         .expect("the mode changes");
@@ -209,7 +209,7 @@ fn a_checkpoint_copies_the_whole_log_back_past_a_session() {
         .execute_batch("INSERT INTO t VALUES(1)")
         .expect("a row");
 
-    let reader = held.connect();
+    let reader = held.session();
     reader.execute_batch("BEGIN").expect("the read opens");
     assert_eq!(integer(&reader, "SELECT count(*) FROM t"), 1);
 
@@ -270,7 +270,7 @@ fn a_checkpoint_copies_the_whole_log_back_past_a_session() {
 fn a_checkpoint_refuses_once_a_shared_transaction_has_written() {
     let path = scratch("protected-refusal");
     let held = database(&path);
-    let writer = held.connect();
+    let writer = held.session();
     writer
         .execute_batch("PRAGMA journal_mode=wal")
         .expect("the mode changes");
@@ -278,7 +278,7 @@ fn a_checkpoint_refuses_once_a_shared_transaction_has_written() {
         .execute_batch("CREATE TABLE t(a INTEGER PRIMARY KEY)")
         .expect("the table is made");
 
-    let reader = held.connect();
+    let reader = held.session();
     reader
         .execute_batch("BEGIN")
         .expect("the transaction opens");
@@ -323,11 +323,11 @@ fn a_checkpoint_refuses_once_a_shared_transaction_has_written() {
 fn a_second_writer_in_this_process_is_refused() {
     let path = scratch("one-writer");
     let held = database(&path);
-    let first = held.connect();
+    let first = held.session();
     first
         .execute_batch("CREATE TABLE t(a INTEGER PRIMARY KEY)")
         .expect("the table is made");
-    let second = held.connect();
+    let second = held.session();
 
     first
         .execute_batch("BEGIN IMMEDIATE")
@@ -405,7 +405,7 @@ fn a_connection_sees_another_connections_commit() {
     for mode in ["delete", "wal"] {
         let path = scratch(&format!("stale-cache-{mode}"));
         let held = database(&path);
-        let first = held.connect();
+        let first = held.session();
         first
             .execute_batch(&format!("PRAGMA journal_mode={mode}"))
             .expect("the mode changes");
@@ -416,7 +416,7 @@ fn a_connection_sees_another_connections_commit() {
             .execute_batch("INSERT INTO t VALUES(1, 'first')")
             .expect("a row");
 
-        let second = held.connect();
+        let second = held.session();
         // Both connections read the row, so both have the leaf page cached and
         // a stale answer is available to be given.
         assert_eq!(integer(&first, "SELECT count(*) FROM t"), 1);
@@ -497,7 +497,7 @@ fn a_wal_index_left_by_a_crash_is_rebuilt() {
     let mut saved: Vec<(std::path::PathBuf, Vec<u8>)> = Vec::new();
     {
         let held = database(&path);
-        let writer = held.connect();
+        let writer = held.session();
         writer
             .execute_batch("PRAGMA journal_mode=wal")
             .expect("the mode changes");
@@ -511,7 +511,7 @@ fn a_wal_index_left_by_a_crash_is_rebuilt() {
         }
         // A second session reads the same rows, so the image below is taken
         // while the database is genuinely in use rather than idle.
-        let reader = held.connect();
+        let reader = held.session();
         assert_eq!(integer(&reader, "SELECT count(*) FROM t"), 8);
         // **Whatever companion files this engine actually wrote, not
         // SQLite's.** The old suite copied `.db`, `-wal` and `-shm` and
@@ -552,7 +552,7 @@ fn a_wal_index_left_by_a_crash_is_rebuilt() {
         std::fs::write(companion, bytes).expect("the crash image is restored");
     }
     let recovered = database(&path);
-    let survivor = recovered.connect();
+    let survivor = recovered.session();
     assert_eq!(
         integer(&survivor, "SELECT count(*) FROM t"),
         8,

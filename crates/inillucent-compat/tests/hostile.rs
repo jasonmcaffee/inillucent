@@ -49,7 +49,7 @@ fn scratch() -> std::path::PathBuf {
 /// would be carried through every helper for nothing.
 fn connect() -> Connection {
     let database = Database::open(scratch()).expect("opens");
-    Box::leak(Box::new(database)).connect().expect("connects")
+    Box::leak(Box::new(database)).session().expect("connects")
 }
 
 /// Returns the failure a hostile function reports.

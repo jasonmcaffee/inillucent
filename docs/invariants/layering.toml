@@ -373,25 +373,30 @@ may_depend_on = [
   "inillucent-search",
 ]
 
-# **The facade reaches the new engine.** `inillucent::Database`
-# is the name an application outside this workspace writes against. It used to
-# reach `inillucent-session` - the SQLite-file-format engine the rearchitecture
-# replaced, deleted along with that crate - and is a re-export rather than a
-# wrapper: the two surfaces did not differ by the end, and a wrapper whose every
-# method forwards is a file to keep in step for nothing. The surface is smaller
-# by exactly the features the old engine had that the new one does not - backup,
-# blobs, serialize, the hooks - and a facade that kept their names and answered
-# "unsupported" would stop the compiler saying so.
+# **The name on crates.io, and one edge behind it.** `inillucent::Database` is
+# what an application outside this workspace writes against, and since
+# task-1961's A2 this crate is `pub use inillucent_driver::*;` and nothing else.
+#
+# It used to define a second public surface over the same engine - its own
+# `Value`, its own `Statement`, no transaction type - and nothing in the
+# repository said which of the two a Rust application should depend on. The
+# driver won: it has the transaction, the `Rows` type, the cancel flag and the
+# capability table that is checked in both directions, and the C ABI and the
+# four language packages already reach the engine through it. Two surfaces over
+# one engine is two sets of answers to keep in step, and the one with fewer
+# users was the one with the better design.
+#
+# The edge is to `inillucent-driver` alone. The four crates it used to name are
+# dev-dependencies now: `crates/inillucent/tests/` holds four end-to-end suites
+# that drive the *engine* - the budget counters, the log after a crash, the
+# edges of the statement surface the driver deliberately does not expose - and
+# they stay where every comment in the tree that cites them says they are.
 [[crate]]
 name = "inillucent"
 kind = "production"
-layer = 9
+layer = 10
 may_depend_on = [
-  "inillucent-base",
-  "inillucent-value",
-  "inillucent-tree",
-  "inillucent-sql",
-  "inillucent-engine",
+  "inillucent-driver",
 ]
 
 # `inillucent-migrate` is the one production crate that names both engines, and it
@@ -511,6 +516,21 @@ may_depend_on = [
   "inillucent-driver",
   "inillucent-engine",
   "inillucent-tree",
+  # The calendar arithmetic `inillucent archive` stamps an entry with
+  # (task-1961, A10). The edge is downward to layer 5 and adds nothing to any
+  # shipped binary: `inillucent-cli` already links `inillucent-engine`, which
+  # links `inillucent-exec`, which links `inillucent-scalar`, so the crate is in
+  # the graph today and this only names it.
+  #
+  # What it buys is one implementation of Howard Hinnant's `civil_from_days`.
+  # There were four: the date and time functions here, and a private copy each
+  # in `crates/inillucent-cli/src/archive.rs`,
+  # `crates/inillucent-ext/src/vtab/zipfile.rs` and the `perfhistory` harness,
+  # every one of them answering a bare `(i64, i64, i64)`. The one here has a
+  # named result and a round trip test against `julian_of`; the copies had
+  # neither, and the only thing that would have caught one of them drifting is
+  # somebody reading two files at once.
+  "inillucent-scalar",
   # `migrate --kind postgres|mysql`. The edge is downward to layer 9
   # and adds no third-party dependency to either shipped binary, which is the
   # whole reason the wire clients are first-party.

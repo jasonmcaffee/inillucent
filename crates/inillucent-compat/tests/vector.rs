@@ -119,7 +119,7 @@ fn cosine(left: &[f32], right: &[f32]) -> f64 {
 #[test]
 fn the_distance_functions_answer_the_arithmetic() {
     let held = database("measures");
-    let connection = held.connect();
+    let connection = held.session();
     let east = literal(&[1.0, 0.0]);
     let north = literal(&[0.0, 1.0]);
     let half = literal(&[1.0, 0.5]);
@@ -173,7 +173,7 @@ fn the_distance_functions_answer_the_arithmetic() {
 #[test]
 fn a_measure_of_something_that_is_not_a_vector_refuses_or_is_null() {
     let held = database("null");
-    let connection = held.connect();
+    let connection = held.session();
     let east = literal(&[1.0, 0.0]);
     let wide = literal(&[1.0, 0.0, 0.0]);
 
@@ -205,7 +205,7 @@ fn a_measure_of_something_that_is_not_a_vector_refuses_or_is_null() {
 #[test]
 fn ordering_by_cosine_agrees_with_an_exhaustive_search() {
     let held = database("graded");
-    let connection = held.connect();
+    let connection = held.session();
     connection
         .execute_batch("CREATE TABLE embedding (id INTEGER PRIMARY KEY, v BLOB NOT NULL)")
         .expect("the table is created");
@@ -282,7 +282,7 @@ fn texts(connection: &Connection<'_>, sql: &str) -> Vec<String> {
 #[test]
 fn a_vector_column_and_the_search_store_agree_with_an_exhaustive_cosine() {
     let held = database("equivalence");
-    let connection = held.connect();
+    let connection = held.session();
     connection
         .execute_batch(
             "CREATE TABLE embedding (id INTEGER PRIMARY KEY, v VECTOR(32));              CREATE VIRTUAL TABLE store USING inillucent_search(body, dims=32)",
@@ -358,7 +358,7 @@ fn a_vector_column_and_the_search_store_agree_with_an_exhaustive_cosine() {
 #[test]
 fn a_vector_column_refuses_the_wrong_width() {
     let held = database("width");
-    let connection = held.connect();
+    let connection = held.session();
     connection
         .execute_batch("CREATE TABLE e (id INTEGER PRIMARY KEY, v VECTOR(4))")
         .expect("the table is created");
@@ -400,7 +400,7 @@ fn a_vector_column_refuses_the_wrong_width() {
 #[test]
 fn an_index_using_the_module_is_built_and_maintained() {
     let held = database("hnsw");
-    let connection = held.connect();
+    let connection = held.session();
     connection
         .execute_batch(
             "CREATE TABLE t (id INTEGER PRIMARY KEY, v VECTOR(32));              INSERT INTO t(id, v) VALUES (1, {east});              INSERT INTO t(id, v) VALUES (2, {north})"
@@ -475,7 +475,7 @@ fn an_index_using_the_module_is_built_and_maintained() {
 #[test]
 fn the_plan_uses_the_index_and_the_index_agrees_with_exhaustive_cosine() {
     let held = database("planned");
-    let connection = held.connect();
+    let connection = held.session();
     connection
         .execute_batch("CREATE TABLE embedding (id INTEGER PRIMARY KEY, v VECTOR(32))")
         .expect("the table is created");
@@ -561,7 +561,7 @@ fn the_plan_uses_the_index_and_the_index_agrees_with_exhaustive_cosine() {
 #[test]
 fn an_index_needs_a_declared_width() {
     let held = database("width-needed");
-    let connection = held.connect();
+    let connection = held.session();
     connection
         .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, v BLOB)")
         .expect("the table is created");
@@ -578,7 +578,7 @@ fn an_index_needs_a_declared_width() {
 #[test]
 fn an_index_using_an_unknown_module_is_refused_by_name() {
     let held = database("using");
-    let connection = held.connect();
+    let connection = held.session();
     connection
         .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, v VECTOR(4))")
         .expect("the table is created");
@@ -617,7 +617,7 @@ fn tilt(tilt: f32) -> Vec<f32> {
 #[test]
 fn a_vector_column_round_trips() {
     let held = database("roundtrip");
-    let connection = held.connect();
+    let connection = held.session();
     connection
         .execute_batch("CREATE TABLE e (id INTEGER PRIMARY KEY, v BLOB)")
         .expect("the table is created");
@@ -663,7 +663,7 @@ fn a_filtered_vector_search_keeps_every_row_the_exhaustive_plan_finds() {
     /// How many rows the corpus holds.
     const ROWS: usize = 400;
     let held = database("filtered");
-    let connection = held.connect();
+    let connection = held.session();
     connection
         .execute_batch("CREATE TABLE e (id INTEGER PRIMARY KEY, src TEXT, v VECTOR(32))")
         .expect("the table is created");
@@ -755,7 +755,7 @@ fn a_filtered_vector_search_keeps_every_row_the_exhaustive_plan_finds() {
 #[test]
 fn a_mismatched_vector_pair_refuses() {
     let held = database("mismatch");
-    let connection = held.connect();
+    let connection = held.session();
     connection
         .execute_batch(&format!(
             "CREATE TABLE e (id INTEGER PRIMARY KEY, v VECTOR(32));
@@ -822,7 +822,7 @@ fn a_mismatched_vector_pair_refuses() {
 #[test]
 fn the_aggregates_fold_a_vector_and_the_operators_work_on_one() {
     let held = database("arithmetic");
-    let connection = held.connect();
+    let connection = held.session();
     connection
         .execute_batch(&format!(
             "CREATE TABLE e (id INTEGER PRIMARY KEY, v VECTOR(32), n INT);
@@ -882,7 +882,7 @@ fn the_aggregates_fold_a_vector_and_the_operators_work_on_one() {
 #[test]
 fn an_ivfflat_index_answers_what_an_exhaustive_scan_answers() {
     let held = database("ivfflat");
-    let connection = held.connect();
+    let connection = held.session();
     connection
         .execute_batch("CREATE TABLE e (id INTEGER PRIMARY KEY, v VECTOR(4))")
         .expect("the table is created");
@@ -952,7 +952,7 @@ fn an_ivfflat_index_answers_what_an_exhaustive_scan_answers() {
 #[test]
 fn an_ivfflat_takes_its_own_settings_and_refuses_another() {
     let held = database("ivfflat-settings");
-    let connection = held.connect();
+    let connection = held.session();
     connection
         .execute_batch(&format!(
             "CREATE TABLE e (id INTEGER PRIMARY KEY, v VECTOR(32));

@@ -75,7 +75,7 @@ impl ExtendedCode {
     pub fn primary(self) -> PrimaryCode {
         match self.row() {
             Some(row) => row.primary,
-            None => PrimaryCode::from_value(self.0 & 0xff).unwrap_or(PrimaryCode::Error),
+            None => PrimaryCode::from_code(self.0 & 0xff).unwrap_or(PrimaryCode::Error),
         }
     }
 
@@ -110,12 +110,17 @@ impl PrimaryCode {
         }
     }
 
-    /// Resolves a numeric primary code, returning `None` for a value the
+    /// Resolves a numeric primary code, returning `None` for a number the
     /// manifest does not list.
-    pub fn from_value(value: i32) -> Option<PrimaryCode> {
+    ///
+    /// Named for what it takes. It was `from_value` until task-1961, which is
+    /// the name of the datum-to-SQL-value conversion everywhere else in this
+    /// workspace, and this function has nothing to do with that one: its
+    /// argument is an error number out of `compat/errors.toml`.
+    pub fn from_code(number: i32) -> Option<PrimaryCode> {
         PRIMARY_ROWS
             .iter()
-            .find(|row| row.value == value)
+            .find(|row| row.value == number)
             .map(|row| row.code)
     }
 
@@ -639,7 +644,7 @@ mod tests {
     #[test]
     fn primary_codes_round_trip_through_their_numeric_value() {
         for row in PRIMARY_ROWS.iter() {
-            assert_eq!(PrimaryCode::from_value(row.value), Some(row.code));
+            assert_eq!(PrimaryCode::from_code(row.value), Some(row.code));
             assert_eq!(row.code.value(), row.value);
             assert_eq!(row.code.c_name(), row.c_name);
         }

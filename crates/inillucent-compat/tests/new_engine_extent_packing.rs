@@ -86,7 +86,7 @@ fn remove(path: &PathBuf) {
 fn cost_per_row(path: &PathBuf, width: usize) -> f64 {
     {
         let database = Database::open(path).expect("a fresh database opens");
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, body TEXT)")
             .expect("the schema is created");
@@ -215,7 +215,7 @@ fn values_sharing_a_page_read_back_after_a_reopen() {
     let widths = [4_200usize, 5_000, 4_500, 9_513, 4_097];
     {
         let database = Database::open(&path).expect("a fresh database opens");
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, body TEXT)")
             .expect("the schema is created");
@@ -234,7 +234,7 @@ fn values_sharing_a_page_read_back_after_a_reopen() {
         database.checkpoint().expect("the file is checkpointed");
     }
     let database = Database::open(&path).expect("the database reopens");
-    let connection = database.connect();
+    let connection = database.session();
     for (nth, width) in widths.iter().enumerate() {
         let rows = connection
             .query(&format!("SELECT body FROM t WHERE id = {}", nth + 1))
@@ -263,7 +263,7 @@ fn values_sharing_a_page_read_back_after_a_reopen() {
 fn deleting_every_packed_value_returns_the_pages() {
     let path = scratch("free");
     let database = Database::open(&path).expect("a fresh database opens");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, body TEXT)")
         .expect("the schema is created");
@@ -341,7 +341,7 @@ fn marked(width: usize, nth: usize) -> String {
 fn churning_packed_values_leaves_every_tree_intact() {
     let path = scratch("churn");
     let database = Database::open(&path).expect("a fresh database opens");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch(
             "CREATE TABLE t (id TEXT PRIMARY KEY, tag INTEGER, body TEXT);\

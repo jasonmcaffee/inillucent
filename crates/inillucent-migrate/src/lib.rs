@@ -193,7 +193,7 @@ pub fn migrate(plan: &Plan) -> Result<Outcome, String> {
 
     let database = Database::open(&plan.staging)
         .map_err(|error| format!("cannot open the staging database: {}", error.message()))?;
-    let connection = database.connect();
+    let connection = database.session();
 
     if !manifest.finished("schema") {
         copy::create_schema(&connection, dims)
@@ -415,7 +415,7 @@ fn structure_probe(database: &Path) -> Check {
             detail: format!("a tree is not intact: {}", error.message()),
         };
     }
-    let connection = database.connect();
+    let connection = database.session();
     let chunks = count_of(&connection, "SELECT count(*) FROM chunk");
     let content = count_of(
         &connection,

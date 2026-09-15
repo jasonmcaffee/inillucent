@@ -623,7 +623,7 @@ fn rebuild_full_text(source: &Path, staged: &Path) -> DbResult<Vec<Check>> {
         return Ok(checks);
     }
     let database = inillucent_engine::connect::Database::open(staged)?;
-    let connection = database.connect();
+    let connection = database.session();
     for (name, sql, columns, rows) in work {
         connection.execute_batch(&sql)?;
         // **The docid moves with the row.** An application that stored the

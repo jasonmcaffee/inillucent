@@ -37,13 +37,19 @@ pub fn julian_now() -> f64 {
 
 /// A broken-down date and time, as the formatter reads it.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Civil {
-    year: i64,
-    month: i64,
-    day: i64,
-    hour: i64,
-    minute: i64,
-    second: f64,
+pub struct Civil {
+    /// The proleptic Gregorian year.
+    pub year: i64,
+    /// The month, 1 to 12.
+    pub month: i64,
+    /// The day of the month, 1 to 31.
+    pub day: i64,
+    /// The hour, 0 to 23.
+    pub hour: i64,
+    /// The minute, 0 to 59.
+    pub minute: i64,
+    /// The second, with its fraction.
+    pub second: f64,
 }
 
 /// Calls a date or time function.
@@ -427,11 +433,29 @@ fn digits(bytes: &[u8]) -> Option<i64> {
     Some(value)
 }
 
+/// The Julian day of 1970-01-01 00:00 UTC, which is where Unix time starts.
+pub const UNIX_EPOCH_JULIAN_DAY: f64 = 2_440_587.5;
+
+/// Returns the civil date a Unix day number names.
+///
+/// **The one implementation of this in the workspace (task-1961, A10).** There
+/// were three more - `inillucent-cli`'s `archive.rs`, `inillucent-ext`'s
+/// `zipfile.rs` and the `perfhistory` harness - each a private copy of Howard
+/// Hinnant's `civil_from_days` answering a bare `(i64, i64, i64)` that a caller
+/// had to read in the right order. The date functions in this module had
+/// already been doing the same arithmetic, with a named result and a round trip
+/// test against [`julian_of`], since before any of them was written.
+///
+/// @param days - days since 1970-01-01, which may be negative
+pub fn civil_of_unix_day(days: i64) -> Civil {
+    civil_of(days as f64 + UNIX_EPOCH_JULIAN_DAY)
+}
+
 /// Returns the Julian day of a civil date and time.
 ///
 /// The formula is the standard one for the proleptic Gregorian calendar, and
 /// the half-day is the reason a Julian day starts at noon.
-fn julian_of(civil: Civil) -> f64 {
+pub fn julian_of(civil: Civil) -> f64 {
     let (mut year, mut month) = (civil.year, civil.month);
     if month <= 2 {
         year -= 1;
@@ -450,7 +474,9 @@ fn julian_of(civil: Civil) -> f64 {
 }
 
 /// Returns the civil date and time of a Julian day.
-fn civil_of(day: f64) -> Civil {
+///
+/// @param day - the Julian day, where 2440587.5 is 1970-01-01 00:00 UTC
+pub fn civil_of(day: f64) -> Civil {
     let shifted = day + 0.5;
     let z = shifted.floor();
     let fraction = shifted - z;

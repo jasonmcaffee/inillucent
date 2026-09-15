@@ -112,7 +112,7 @@ fn cached_and_fresh_pair(name: &str) -> (ImportedDatabase, ImportedDatabase) {
         .expect("a fresh database is created");
     let mut fresh = ImportedDatabase::create(scratch(&format!("{name}-fresh")), PAGE_SIZE, FRAMES)
         .expect("a fresh database is created");
-    fresh.disable_optimizations(Levers::PLAN_CACHE);
+    fresh.disable_optimizations(Levers::without(Levers::PLAN_CACHE));
     (cached, fresh)
 }
 

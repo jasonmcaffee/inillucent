@@ -42,7 +42,7 @@ impl SqlIndex {
     /// @param table - the `inillucent_search` table's name
     pub fn open(path: impl AsRef<std::path::Path>, table: &str) -> DbResult<SqlIndex> {
         let database = Database::open(path)?;
-        let dims = declared_dims(&database.connect(), table)?;
+        let dims = declared_dims(&database.session(), table)?;
         Ok(SqlIndex {
             database,
             table: table.to_string(),
@@ -52,7 +52,7 @@ impl SqlIndex {
 
     /// Returns a connection, for a caller that wants ordinary SQL as well.
     pub fn connection(&self) -> Connection<'_> {
-        self.database.connect()
+        self.database.session()
     }
 
     /// Walks every tree of the database and verifies its key order.
@@ -76,7 +76,7 @@ impl SqlIndex {
             "INSERT INTO {}({}) VALUES ('{}')",
             self.table, self.table, command
         );
-        self.database.connect().execute_batch(&sql)
+        self.database.session().execute_batch(&sql)
     }
 }
 
@@ -126,15 +126,15 @@ impl RetrievalIndex for SqlIndex {
             return Err(DbError::primary(inillucent_base::PrimaryCode::Misuse)
                 .with_detail("each chunk needs exactly one vector"));
         }
-        self.database.connect().execute_batch("BEGIN")?;
+        self.database.session().execute_batch("BEGIN")?;
         let outcome = self.append_inside(&chunks, embeddings);
         match outcome {
             Ok(count) => {
-                self.database.connect().execute_batch("COMMIT")?;
+                self.database.session().execute_batch("COMMIT")?;
                 Ok(count)
             }
             Err(failure) => {
-                let _ = self.database.connect().execute_batch("ROLLBACK");
+                let _ = self.database.session().execute_batch("ROLLBACK");
                 Err(failure)
             }
         }
@@ -146,7 +146,7 @@ impl RetrievalIndex for SqlIndex {
             return Ok(false);
         };
         let sql = format!("SELECT count(*) FROM {}_content WHERE id = ?1", self.table);
-        let mut probe = self.database.connect().prepare(&sql)?;
+        let mut probe = self.database.session().prepare(&sql)?;
         probe.bind_integer(1, rowid)?;
         let present = probe.step()?
             && probe
@@ -159,7 +159,7 @@ impl RetrievalIndex for SqlIndex {
             return Ok(false);
         }
         let sql = format!("DELETE FROM {} WHERE rowid = ?1", self.table);
-        let mut statement = self.database.connect().prepare(&sql)?;
+        let mut statement = self.database.session().prepare(&sql)?;
         statement.bind_integer(1, rowid)?;
         while statement.step()? {}
         Ok(true)
@@ -212,7 +212,7 @@ impl RetrievalIndex for SqlIndex {
             self.table,
             terms.join(" AND ")
         );
-        let mut statement = self.database.connect().prepare(&sql)?;
+        let mut statement = self.database.session().prepare(&sql)?;
         if has_text {
             statement.bind_text(1, &query.text)?;
         }
@@ -238,7 +238,7 @@ impl RetrievalIndex for SqlIndex {
     /// Returns how many rows the table holds.
     fn live_chunks(&mut self) -> DbResult<usize> {
         let sql = format!("SELECT count(*) FROM {}_content", self.table);
-        let mut statement = self.database.connect().prepare(&sql)?;
+        let mut statement = self.database.session().prepare(&sql)?;
         if !statement.step()? {
             return Ok(0);
         }
@@ -268,7 +268,7 @@ impl SqlIndex {
                 return Err(DbError::primary(inillucent_base::PrimaryCode::Misuse)
                     .with_detail(format!("{external} is not a rowid")));
             };
-            let mut statement = self.database.connect().prepare(&sql)?;
+            let mut statement = self.database.session().prepare(&sql)?;
             statement.bind_integer(1, rowid)?;
             statement.bind_text(2, &chunk.content)?;
             if self.dims > 0 {

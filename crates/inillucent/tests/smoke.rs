@@ -7,20 +7,25 @@
 //! what it was told, and hands it back after the process that wrote it has let
 //! go - and if it fails, nothing else is worth running.
 //!
-//! ## Why the public facade had no tests until now
+//! ## Why the public name has a suite of its own
 //!
-//! Because it is a re-export. `inillucent::Database` is
-//! `inillucent_engine::connect::Database` under another name, and the engine
-//! crate is tested thoroughly through `inillucent-compat`, so a suite here
+//! Because it is a re-export. Since task-1961's A2, `inillucent::Database` is
+//! `inillucent_driver::Database` under another name, and the driver is tested
+//! through its own suites and the C ABI's conformance run, so a suite here
 //! looked like it would be testing the same code twice.
 //!
 //! That reasoning has one hole, and it is the hole this file exists for: the
-//! thing an application depends on is not the engine, it is **the name**. A
+//! thing an application depends on is not the driver, it is **the name**. A
 //! re-export that stops compiling, a type that stops being public, a method
 //! that moves down a layer - none of those are engine defects and none of them
-//! fail an engine test, and every one of them breaks every caller. This
-//! facade was moved from one engine to another; nothing in the test suite
-//! would have noticed if it had moved to neither.
+//! fail a driver test, and every one of them breaks every caller. This name has
+//! now been moved between two engines and then re-rooted onto the driver;
+//! nothing in the test suite would have noticed if it had landed on neither.
+//!
+//! Which is also why every path below names `inillucent::` and never
+//! `inillucent_driver::`: a suite written against the crate underneath would
+//! pass while the re-export was broken, which is the one failure it is here to
+//! catch.
 //!
 //! ## Why the file is real
 //!
@@ -32,7 +37,7 @@
 
 use std::path::PathBuf;
 
-use inillucent::{Database, OwnedDatum};
+use inillucent::{Database, Rows, Value};
 
 /// Returns a fresh, empty directory for one test's files.
 ///
@@ -57,26 +62,22 @@ fn scratch(tag: &str) -> PathBuf {
 /// Returns the one integer a single-row, single-column answer holds.
 ///
 /// @param rows - what the query returned
-fn one_integer(rows: &[Vec<OwnedDatum>]) -> i64 {
-    match rows {
-        [row] => match row.as_slice() {
-            [OwnedDatum::Int(value)] => *value,
-            other => panic!("expected one integer, got {other:?}"),
-        },
-        other => panic!("expected one row, got {} of them: {other:?}", other.len()),
+fn one_integer(rows: &Rows) -> i64 {
+    assert_eq!(rows.rows.len(), 1, "expected one row: {rows:?}");
+    match rows.value(0, 0) {
+        Some(Value::Integer(value)) => *value,
+        other => panic!("expected one integer, got {other:?}"),
     }
 }
 
 /// Returns the one text a single-row, single-column answer holds.
 ///
 /// @param rows - what the query returned
-fn one_text(rows: &[Vec<OwnedDatum>]) -> String {
-    match rows {
-        [row] => match row.as_slice() {
-            [OwnedDatum::Text(bytes)] => String::from_utf8_lossy(bytes).into_owned(),
-            other => panic!("expected one text, got {other:?}"),
-        },
-        other => panic!("expected one row, got {} of them: {other:?}", other.len()),
+fn one_text(rows: &Rows) -> String {
+    assert_eq!(rows.rows.len(), 1, "expected one row: {rows:?}");
+    match rows.value(0, 0) {
+        Some(Value::Text(value)) => value.clone(),
+        other => panic!("expected one text, got {other:?}"),
     }
 }
 
@@ -97,15 +98,18 @@ fn opening_a_path_creates_a_database_there() {
 fn a_row_written_is_a_row_read() {
     let directory = scratch("roundtrip");
     let database = Database::open(directory.join("app.rdb")).expect("the database opens");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch("CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT NOT NULL)")
         .expect("the table is created");
     connection
-        .execute("INSERT INTO people VALUES (1, 'Ada')")
+        .execute(
+            "INSERT INTO people VALUES (?1, ?2)",
+            &[Value::Integer(1), Value::Text("Ada".to_string())],
+        )
         .expect("the row is written");
     let rows = connection
-        .query("SELECT name FROM people WHERE id = 1")
+        .query("SELECT name FROM people WHERE id = 1", &[], 1)
         .expect("the row is read");
     assert_eq!(one_text(&rows), "Ada");
 }
@@ -120,61 +124,101 @@ fn a_row_survives_the_handle_that_wrote_it() {
     let path = directory.join("app.rdb");
     {
         let database = Database::open(&path).expect("the database opens");
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch("CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT)")
             .expect("the table is created");
         connection
-            .execute("INSERT INTO notes VALUES (7, 'written before the reopen')")
+            .execute(
+                "INSERT INTO notes VALUES (?1, ?2)",
+                &[
+                    Value::Integer(7),
+                    Value::Text("before the reopen".to_string()),
+                ],
+            )
             .expect("the row is written");
     }
     let database = Database::open(&path).expect("the database reopens");
-    let connection = database.connect();
+    let connection = database.session();
     let rows = connection
-        .query("SELECT body FROM notes WHERE id = 7")
+        .query("SELECT body FROM notes WHERE id = 7", &[], 1)
         .expect("the row is read back");
-    assert_eq!(one_text(&rows), "written before the reopen");
+    assert_eq!(one_text(&rows), "before the reopen");
 }
 
-/// A transaction that is rolled back leaves the file as it found it.
+/// A transaction that is dropped without a commit leaves the file as it was.
+///
+/// **The `Drop` is the assertion, not a `rollback` call (task-1961, A4).** The
+/// transaction below is never committed and never rolled back by name: it goes
+/// out of scope, and the row it wrote has to be gone. That is the whole reason
+/// [`inillucent::Transaction`] is a value rather than a pair of methods, and
+/// nothing in this workspace asserted it through the public name before.
 #[test]
-fn a_rollback_leaves_nothing_behind() {
+fn a_dropped_transaction_leaves_nothing_behind() {
     let directory = scratch("rollback");
     let database = Database::open(directory.join("app.rdb")).expect("the database opens");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY)")
         .expect("the table is created");
     connection
-        .execute("INSERT INTO t VALUES (1)")
+        .execute("INSERT INTO t VALUES (1)", &[])
         .expect("one row");
-    connection
-        .execute_batch("BEGIN")
-        .expect("the transaction opens");
-    connection
-        .execute("INSERT INTO t VALUES (2)")
-        .expect("a second row");
+    {
+        let transaction = connection.begin().expect("the transaction opens");
+        transaction
+            .execute("INSERT INTO t VALUES (2)", &[])
+            .expect("a second row");
+        let counted = transaction
+            .query("SELECT count(*) FROM t", &[], 1)
+            .expect("counted");
+        assert_eq!(
+            one_integer(&counted),
+            2,
+            "the write is visible inside its own transaction"
+        );
+    }
+    let counted = connection
+        .query("SELECT count(*) FROM t", &[], 1)
+        .expect("counted");
     assert_eq!(
-        one_integer(&connection.query("SELECT count(*) FROM t").expect("counted")),
-        2,
-        "the write is visible inside its own transaction"
-    );
-    connection
-        .execute_batch("ROLLBACK")
-        .expect("the transaction is abandoned");
-    assert_eq!(
-        one_integer(&connection.query("SELECT count(*) FROM t").expect("counted")),
+        one_integer(&counted),
         1,
-        "and gone once it is abandoned"
+        "and gone once the transaction is dropped without a commit"
     );
 }
 
-/// A prepared statement binds, steps and resets.
+/// A transaction that is committed keeps what it wrote, past a reopen.
 #[test]
-fn a_prepared_statement_binds_and_steps() {
+fn a_committed_transaction_keeps_what_it_wrote() {
+    let directory = scratch("commit");
+    let path = directory.join("app.rdb");
+    {
+        let database = Database::open(&path).expect("the database opens");
+        let connection = database.session();
+        connection
+            .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+            .expect("the table is created");
+        let transaction = connection.begin().expect("the transaction opens");
+        transaction
+            .execute("INSERT INTO t VALUES (9)", &[])
+            .expect("a row");
+        transaction.commit().expect("the transaction commits");
+    }
+    let database = Database::open(&path).expect("the database reopens");
+    let counted = database
+        .session()
+        .query("SELECT count(*) FROM t", &[], 1)
+        .expect("counted");
+    assert_eq!(one_integer(&counted), 1);
+}
+
+/// A prepared statement binds and runs more than once.
+#[test]
+fn a_prepared_statement_binds_and_runs() {
     let directory = scratch("prepare");
     let database = Database::open(directory.join("app.rdb")).expect("the database opens");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch("CREATE TABLE k (id INTEGER PRIMARY KEY, label TEXT)")
         .expect("the table is created");
@@ -182,14 +226,13 @@ fn a_prepared_statement_binds_and_steps() {
         .prepare("INSERT INTO k VALUES (?1, ?2)")
         .expect("the insert prepares");
     for (id, label) in [(1i64, "one"), (2, "two"), (3, "three")] {
-        insert.reset();
-        insert.bind_integer(1, id).expect("the id binds");
-        insert.bind_text(2, label).expect("the label binds");
-        while insert.step().expect("the insert runs") {}
+        insert
+            .query(&[Value::Integer(id), Value::Text(label.to_string())], 0)
+            .expect("the insert runs");
     }
     drop(insert);
     let rows = connection
-        .query("SELECT count(*) FROM k")
+        .query("SELECT count(*) FROM k", &[], 1)
         .expect("the count is read");
     assert_eq!(one_integer(&rows), 3);
 }
@@ -199,30 +242,39 @@ fn a_prepared_statement_binds_and_steps() {
 fn an_index_is_built_and_used() {
     let directory = scratch("index");
     let database = Database::open(directory.join("app.rdb")).expect("the database opens");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch(
-            "CREATE TABLE m (id INTEGER PRIMARY KEY, email TEXT NOT NULL);\
+            "CREATE TABLE m (id INTEGER PRIMARY KEY, email TEXT NOT NULL); \
              CREATE UNIQUE INDEX m_email ON m (email);",
         )
         .expect("the schema is created");
     for number in 0..64i64 {
         connection
-            .execute(&format!(
-                "INSERT INTO m VALUES ({number}, 'a{number}@example.com')"
-            ))
+            .execute(
+                "INSERT INTO m VALUES (?1, ?2)",
+                &[
+                    Value::Integer(number),
+                    Value::Text(format!("a{number}@example.com")),
+                ],
+            )
             .expect("a row is written");
     }
+    let wanted = "a17@example.com";
     let plan = connection
-        .explain("SELECT id FROM m WHERE email = 'a17@example.com'")
+        .explain("SELECT id FROM m WHERE email = ?1")
         .expect("the plan is explained");
     let text = plan.join("\n");
     assert!(
         text.contains("m_email"),
-        "the unique index should be the way in, but the plan was:\n{text}"
+        "the unique index should be the way in, but the plan was: {text}"
     );
     let rows = connection
-        .query("SELECT id FROM m WHERE email = 'a17@example.com'")
+        .query(
+            "SELECT id FROM m WHERE email = ?1",
+            &[Value::Text(wanted.to_string())],
+            1,
+        )
         .expect("the row is found");
     assert_eq!(one_integer(&rows), 17);
 }
@@ -233,16 +285,16 @@ fn an_index_is_built_and_used() {
 fn a_bad_statement_is_a_readable_error() {
     let directory = scratch("error");
     let database = Database::open(directory.join("app.rdb")).expect("the database opens");
-    let connection = database.connect();
+    let connection = database.session();
     let failure = connection
-        .execute("SELECT * FROM a_table_that_was_never_created")
+        .execute("SELECT * FROM a_table_that_was_never_created", &[])
         .expect_err("a missing table is an error");
     assert!(
-        !failure.message().is_empty(),
+        !failure.message.is_empty(),
         "an error with no message is one nobody can act on"
     );
     assert!(
-        connection.query("SELECT 1").is_ok(),
+        connection.query("SELECT 1", &[], 1).is_ok(),
         "and the connection is still usable afterwards"
     );
 }
@@ -252,23 +304,41 @@ fn a_bad_statement_is_a_readable_error() {
 fn a_fresh_database_passes_its_own_integrity_check() {
     let directory = scratch("integrity");
     let database = Database::open(directory.join("app.rdb")).expect("the database opens");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch(
-            "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);\
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT); \
              CREATE INDEX t_v ON t (v);",
         )
         .expect("the schema is created");
     for number in 0..128i64 {
         connection
-            .execute(&format!(
-                "INSERT INTO t VALUES ({number}, 'value {number}')"
-            ))
+            .execute(
+                "INSERT INTO t VALUES (?1, ?2)",
+                &[
+                    Value::Integer(number),
+                    Value::Text(format!("value {number}")),
+                ],
+            )
             .expect("a row is written");
     }
-    database.check().expect("the file is sound");
+    database.integrity_check().expect("the file is sound");
     let rows = connection
-        .query("PRAGMA integrity_check")
+        .query("PRAGMA integrity_check", &[], 1)
         .expect("the pragma answers");
     assert_eq!(one_text(&rows), "ok");
+}
+
+/// The capability table is reachable through the public name.
+///
+/// The one thing `drivers/README.md` tells an application to ask before it
+/// composes a statement, so a re-export that dropped it would be a silent loss
+/// of the answer rather than a compile failure in this workspace.
+#[test]
+fn the_capability_table_is_reachable() {
+    assert!(
+        !inillucent::CAPABILITIES.is_empty(),
+        "an empty capability table answers every question with a shrug"
+    );
+    assert!(inillucent::capability("foreign_keys").is_some());
 }

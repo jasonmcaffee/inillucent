@@ -35,7 +35,7 @@ fn fixture(name: &str) -> Database {
     let _ = std::fs::remove_file(&path);
     let database = Database::open(&path).expect("a fresh database opens");
     {
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch(
                 "CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT, b INTEGER); \
@@ -74,7 +74,7 @@ fn details(connection: &Connection<'_>, sql: &str) -> Vec<String> {
 #[test]
 fn a_query_plan_reads_the_way_sqlite_s_reads() {
     let database = fixture("shape");
-    let connection = database.connect();
+    let connection = database.session();
 
     assert_eq!(
         details(&connection, "EXPLAIN QUERY PLAN SELECT a FROM t"),
@@ -115,7 +115,7 @@ fn a_query_plan_reads_the_way_sqlite_s_reads() {
 #[test]
 fn a_query_plan_has_the_columns_a_caller_expects() {
     let database = fixture("columns");
-    let connection = database.connect();
+    let connection = database.session();
     let rows = connection
         .query("EXPLAIN QUERY PLAN SELECT a FROM t")
         .expect("the plan is produced");
@@ -139,7 +139,7 @@ fn a_query_plan_has_the_columns_a_caller_expects() {
 #[test]
 fn a_write_is_explained_by_the_query_that_finds_its_rows() {
     let database = fixture("write");
-    let connection = database.connect();
+    let connection = database.session();
 
     assert_eq!(
         details(&connection, "EXPLAIN QUERY PLAN DELETE FROM t WHERE id = 1"),
@@ -163,7 +163,7 @@ fn a_write_is_explained_by_the_query_that_finds_its_rows() {
 #[test]
 fn a_query_plan_is_re_rendered_after_the_schema_changes() {
     let database = fixture("stale");
-    let connection = database.connect();
+    let connection = database.session();
 
     let query = "EXPLAIN QUERY PLAN SELECT a FROM t";
     assert_eq!(
@@ -194,7 +194,7 @@ fn a_query_plan_is_re_rendered_after_the_schema_changes() {
 #[test]
 fn plain_explain_lists_the_chain_in_the_references_columns() {
     let database = fixture("plain");
-    let connection = database.connect();
+    let connection = database.session();
 
     let rows = connection
         .query("EXPLAIN SELECT a FROM t")

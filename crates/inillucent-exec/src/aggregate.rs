@@ -29,6 +29,7 @@ use std::collections::HashSet;
 use inillucent_base::DbResult;
 use inillucent_tree::datum::{Datum, OwnedDatum};
 use inillucent_value::collation::Collation;
+use inillucent_value::Value;
 
 use crate::expr::{format_real, numeric};
 
@@ -344,7 +345,7 @@ impl Accumulator {
                 // answers, measured rather than assumed: `SELECT id, count(*)
                 // FROM t` is 1 there and was 4 here when the last row won.
                 if self.chosen.is_none() {
-                    self.chosen = Some(crate::scalar::from_value(value));
+                    self.chosen = Some(OwnedDatum::from(value));
                 }
                 return;
             };
@@ -352,7 +353,7 @@ impl Accumulator {
                 .get(1)
                 .cloned()
                 .unwrap_or(inillucent_value::value::Value::Null);
-            let seen = crate::scalar::from_value(seen);
+            let seen = OwnedDatum::from(seen);
             // A NULL never wins a `min` or a `max`, so a row whose witness is
             // NULL cannot be the row the bare column comes from - unless no row
             // has yet been chosen at all.
@@ -364,7 +365,7 @@ impl Accumulator {
             };
             if replace {
                 self.extreme = Some(seen);
-                self.chosen = Some(crate::scalar::from_value(value));
+                self.chosen = Some(OwnedDatum::from(value));
             }
             return;
         }
@@ -408,7 +409,7 @@ impl Accumulator {
         let Some(value) = value else {
             return true;
         };
-        let datum = crate::scalar::from_value(value.clone());
+        let datum = OwnedDatum::from(value.clone());
         self.scratch.clear();
         inillucent_tree::key::encode_into_with(&datum.borrow(), *collation, &mut self.scratch);
         if seen.contains(&self.scratch) {
@@ -451,7 +452,14 @@ impl Accumulator {
             AggregateKind::External(_)
             | AggregateKind::Percentile(_)
             | AggregateKind::GeopolyBox
-            | AggregateKind::VectorFold(_) => self.rows.push(vec![crate::scalar::to_value(*value)]),
+            // The copy is what an external aggregate needs: it keeps whole
+            // rows past the page they were read from. An allocation this
+            // small failing leaves a NULL in the row, which is what the
+            // conversion this replaced did, and is the only answer an
+            // infallible `push` can give.
+            | AggregateKind::VectorFold(_) => self
+                .rows
+                .push(vec![Value::from(value).into_owned().unwrap_or(Value::Null)]),
             AggregateKind::Sum | AggregateKind::Total | AggregateKind::Average => {
                 self.push_numeric(value)
             }
@@ -854,7 +862,7 @@ impl Accumulator {
         Ok(match &self.kind {
             AggregateKind::CountStar | AggregateKind::Count => OwnedDatum::Int(self.count),
             // The whole group at once, which is what the boundary promises.
-            AggregateKind::External(body) => crate::scalar::from_value((body.0)(&self.rows)?),
+            AggregateKind::External(body) => OwnedDatum::from((body.0)(&self.rows)?),
             AggregateKind::Percentile(which) => self.finish_percentile(*which),
             AggregateKind::GeopolyBox => self.finish_geopoly_box(),
             AggregateKind::VectorFold(average) => self.finish_vector_fold(*average),
@@ -913,9 +921,7 @@ impl Accumulator {
                         &inillucent_scalar::json::Argument::plain(&value),
                     )?;
                 }
-                crate::scalar::from_value(
-                    inillucent_scalar::json::group_array_final(items, *binary)?.value,
-                )
+                OwnedDatum::from(inillucent_scalar::json::group_array_final(items, *binary)?.value)
             }
             AggregateKind::JsonGroupObject(binary) => {
                 let mut members = Vec::with_capacity(self.json_rows.len());
@@ -934,7 +940,7 @@ impl Accumulator {
                         &inillucent_scalar::json::Argument::plain(&value),
                     )?;
                 }
-                crate::scalar::from_value(
+                OwnedDatum::from(
                     inillucent_scalar::json::group_object_final(members, *binary)?.value,
                 )
             }
@@ -970,7 +976,7 @@ impl Accumulator {
                 .cloned()
                 .unwrap_or(inillucent_value::value::Value::Null);
             inillucent_tree::key::encode_into_with(
-                &crate::scalar::from_value(value).borrow(),
+                &OwnedDatum::from(value).borrow(),
                 Collation::Binary,
                 &mut encoded,
             );
@@ -1014,7 +1020,7 @@ impl Accumulator {
                         .first()
                         .cloned()
                         .unwrap_or(inillucent_value::value::Value::Null);
-                    folded.push(&crate::scalar::from_value(value).borrow());
+                    folded.push(&OwnedDatum::from(value).borrow());
                 }
             }
         }

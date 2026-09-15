@@ -21,7 +21,7 @@ fn main() {
         let _ = std::fs::remove_file(&path);
     }
     let database = Database::open(&path).expect("opens");
-    let connection = database.connect();
+    let connection = database.session();
     let mut sql = String::new();
     for line in std::io::stdin().lines() {
         sql.push_str(&line.expect("reads"));

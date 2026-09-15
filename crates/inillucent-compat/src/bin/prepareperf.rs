@@ -171,7 +171,7 @@ fn run(fixture: &Path, rounds: u32) -> Result<(), String> {
 /// @param fixture - the database to open
 fn breakdown(fixture: &Path) -> Result<(), String> {
     let database = Database::open(fixture).map_err(|error| format!("open: {}", error.message()))?;
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch("PRAGMA busy_timeout = 5000")
         .map_err(|error| format!("busy_timeout: {}", error.message()))?;
@@ -183,7 +183,7 @@ fn breakdown(fixture: &Path) -> Result<(), String> {
     for (name, sql, binds) in WORKLOADS {
         // A cache miss every time: the lever is off, so this is parse, bind,
         // plan and compile plus everything else a prepare does.
-        connection.disable_optimizations(Levers::PLAN_CACHE);
+        connection.disable_optimizations(Levers::without(Levers::PLAN_CACHE));
         let compile = stage(4_000, || {
             let statement = connection
                 .prepare(sql)
@@ -192,7 +192,7 @@ fn breakdown(fixture: &Path) -> Result<(), String> {
             Ok(())
         })?;
         // A cache hit every time: everything a prepare does except compiling.
-        connection.disable_optimizations(0);
+        connection.disable_optimizations(Levers::all());
         let prepare = stage(4_000, || {
             let statement = connection
                 .prepare(sql)
@@ -256,7 +256,7 @@ fn breakdown(fixture: &Path) -> Result<(), String> {
             "  {name:<18} {compile:>10.0} {prepare:>10.0} {bind:>10.0} {step:>10.0} {in_txn:>12.0}"
         );
     }
-    connection.disable_optimizations(0);
+    connection.disable_optimizations(Levers::all());
     println!();
     Ok(())
 }
@@ -311,11 +311,11 @@ fn record(
 /// @param disabled - the levers to switch off
 fn time_inillucent(fixture: &Path, disabled: u32) -> Result<Vec<Sample>, String> {
     let database = Database::open(fixture).map_err(|error| format!("open: {}", error.message()))?;
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch("PRAGMA busy_timeout = 5000")
         .map_err(|error| format!("busy_timeout: {}", error.message()))?;
-    connection.disable_optimizations(disabled);
+    connection.disable_optimizations(Levers::without(disabled));
     let mut samples = Vec::with_capacity(WORKLOADS.len());
     for (name, sql, binds) in WORKLOADS {
         // One prepare outside the timer so the first-time costs a cache cannot

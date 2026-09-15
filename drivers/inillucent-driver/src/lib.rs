@@ -306,12 +306,30 @@ impl Database {
     /// connection needs nothing more; one that hands out a connection per call
     /// wants [`Database::connect_as`], or every `CREATE TEMP TABLE` is gone by
     /// the next statement.
-    pub fn connect(&self) -> Connection<'_> {
+    ///
+    /// **It is called `session` and not `connect` because that is what it
+    /// returns (task-1961, A5).** Two of these share one transaction - a
+    /// `BEGIN` on either is joined by the other, and a write through the second
+    /// is undone by the first one's `ROLLBACK` - and `connect` reads as denying
+    /// exactly that to anyone arriving from SQLite or rusqlite. `connect` is
+    /// kept as a deprecated alias for one release.
+    pub fn session(&self) -> Connection<'_> {
         Connection {
             database: self,
-            engine: self.engine.connect(),
+            engine: self.engine.session(),
             depth: Cell::new(0),
         }
+    }
+
+    /// Returns a connection to this database.
+    ///
+    /// Renamed [`Database::session`] in task-1961.
+    #[deprecated(
+        since = "0.1.3",
+        note = "renamed `session`: two of these share one transaction"
+    )]
+    pub fn connect(&self) -> Connection<'_> {
+        self.session()
     }
 
     /// Returns a connection that continues an earlier one's session.
@@ -339,12 +357,22 @@ impl Database {
     /// to find.
     ///
     /// @param session - the number an earlier connection reported
-    pub fn connect_as(&self, session: u64) -> Connection<'_> {
+    pub fn session_as(&self, session: u64) -> Connection<'_> {
         Connection {
             database: self,
-            engine: self.engine.connect_as(session),
+            engine: self.engine.session_as(session),
             depth: Cell::new(0),
         }
+    }
+
+    /// Returns a connection that continues an earlier one's session.
+    ///
+    /// Renamed [`Database::session_as`] in task-1961, with [`Database::connect`].
+    ///
+    /// @param session - the number an earlier connection reported
+    #[deprecated(since = "0.1.3", note = "renamed `session_as`, with `connect`")]
+    pub fn connect_as(&self, session: u64) -> Connection<'_> {
+        self.session_as(session)
     }
 
     /// Returns the file this database is in.
@@ -651,7 +679,7 @@ impl Connection<'_> {
                  too.",
             ));
         }
-        let guard = self.begin()?;
+        let mut guard = self.begin()?;
         let outcome = guard.run_all(work, check);
         match outcome {
             Ok(affected) => {
@@ -693,13 +721,14 @@ impl Connection<'_> {
                  too.",
             ));
         }
-        self.engine
-            .execute_batch("BEGIN")
+        let inner = self
+            .engine
+            .begin()
             .map_err(|error| self.database.classify(&error))?;
         self.depth.set(1);
         Ok(Transaction {
             connection: self,
-            settled: Cell::new(false),
+            inner: Some(inner),
         })
     }
 
@@ -1016,7 +1045,7 @@ impl Connection<'_> {
 /// # use inillucent_driver::{Database, Value, Result};
 /// # fn main() -> Result<()> {
 /// let database = Database::open("app.rdb")?;
-/// let connection = database.connect();
+/// let connection = database.session();
 /// let transaction = connection.begin()?;
 /// transaction.execute("UPDATE account SET balance = balance - ?1 WHERE id = ?2", &[Value::Integer(50), Value::Integer(1)])?;
 /// let moved = transaction.query("SELECT balance FROM account WHERE id = ?1", &[Value::Integer(1)], 1)?;
@@ -1032,8 +1061,22 @@ impl Connection<'_> {
 pub struct Transaction<'c> {
     /// The connection it is open on.
     connection: &'c Connection<'c>,
-    /// Whether `commit` or `rollback` has already run, so `Drop` does nothing.
-    settled: Cell<bool>,
+    /// The engine's own transaction, which is what actually rolls back.
+    ///
+    /// **Every decision about the transaction is one layer down (task-1961,
+    /// A4).** The `BEGIN`, the refusal to nest, the `COMMIT`, the `ROLLBACK`
+    /// and the rollback on drop are all
+    /// [`inillucent_engine::connect::Transaction`]'s, so the engine's own
+    /// connection carries the guarantee rather than only the driver's, and
+    /// there is one implementation of it rather than two. What is left here is
+    /// the driver's types: [`Value`] in, [`Rows`] out, [`Error`] on the way
+    /// back.
+    ///
+    /// An `Option` so that [`Transaction::commit`] and
+    /// [`Transaction::rollback`], which take `self`, can move the inner
+    /// transaction out and call its own `commit` or `rollback` - which is what
+    /// stops the `Drop` below from discarding work that was kept.
+    inner: Option<inillucent_engine::connect::Transaction<'c>>,
 }
 
 impl Transaction<'_> {
@@ -1058,13 +1101,14 @@ impl Transaction<'_> {
     ///
     /// Takes `self`, so a committed transaction cannot be used again and the
     /// `Drop` below cannot roll back what was kept.
-    pub fn commit(self) -> Result<()> {
-        self.settled.set(true);
+    pub fn commit(mut self) -> Result<()> {
         self.connection.depth.set(0);
-        self.connection
-            .engine
-            .execute_batch("COMMIT")
-            .map_err(|error| self.connection.database.classify(&error))
+        match self.inner.take() {
+            Some(inner) => inner
+                .commit()
+                .map_err(|error| self.connection.database.classify(&error)),
+            None => Ok(()),
+        }
     }
 
     /// Discards everything this transaction wrote.
@@ -1072,13 +1116,14 @@ impl Transaction<'_> {
     /// The same thing dropping it does, said out loud. A caller that has
     /// decided to abandon the work reads better for saying so, and the error a
     /// failed rollback produces is reportable here and is not from `Drop`.
-    pub fn rollback(self) -> Result<()> {
-        self.settled.set(true);
+    pub fn rollback(mut self) -> Result<()> {
         self.connection.depth.set(0);
-        self.connection
-            .engine
-            .execute_batch("ROLLBACK")
-            .map_err(|error| self.connection.database.classify(&error))
+        match self.inner.take() {
+            Some(inner) => inner
+                .rollback()
+                .map_err(|error| self.connection.database.classify(&error)),
+            None => Ok(()),
+        }
     }
 
     /// Runs a list of statements, rolling back on the first failure or on a
@@ -1089,7 +1134,7 @@ impl Transaction<'_> {
     ///
     /// @param work - the statements and their bound values, in order
     /// @param check - what must be true of the changed-row counts before commit
-    fn run_all<F>(&self, work: &[(String, Vec<Value>)], check: F) -> Result<Vec<u64>>
+    fn run_all<F>(&mut self, work: &[(String, Vec<Value>)], check: F) -> Result<Vec<u64>>
     where
         F: Fn(&[u64]) -> Result<()>,
     {
@@ -1113,10 +1158,12 @@ impl Transaction<'_> {
     /// written.
     ///
     /// @param why - what went wrong
-    fn rolled_back(&self, why: Error) -> Error {
-        self.settled.set(true);
+    fn rolled_back(&mut self, why: Error) -> Error {
         self.connection.depth.set(0);
-        match self.connection.engine.execute_batch("ROLLBACK") {
+        let Some(inner) = self.inner.take() else {
+            return why;
+        };
+        match inner.rollback() {
             Ok(()) => why,
             Err(error) => {
                 let mut failed = self.connection.database.classify(&error);
@@ -1132,22 +1179,16 @@ impl Transaction<'_> {
 }
 
 impl Drop for Transaction<'_> {
-    /// Rolls back an uncommitted transaction.
+    /// Puts the nesting depth back; the engine's transaction rolls itself back.
     ///
-    /// **Silent, because a `Drop` has nowhere to report to.** The failure it
-    /// could hide is a rollback that did not happen, and the thing that would
-    /// have to happen for that is the engine refusing a `ROLLBACK` on a
-    /// transaction it opened. The connection is dropped or reused immediately
-    /// afterwards, and a reused one refuses the next `begin` because the depth
-    /// is put back only on the paths that succeeded.
+    /// The `ROLLBACK` is [`inillucent_engine::connect::Transaction`]'s own
+    /// `Drop`, which runs when `inner` is dropped with the rest of this value.
+    /// What is left here is the driver's bookkeeping: the depth this connection
+    /// counts so a second [`Connection::begin`] is refused by name.
     ///
-    /// A caller who wants to know calls `rollback()` and reads the answer.
+    /// A caller who wants to know whether the rollback worked calls
+    /// [`Transaction::rollback`] and reads the answer.
     fn drop(&mut self) {
-        if self.settled.get() {
-            return;
-        }
-        self.settled.set(true);
-        let _ = self.connection.engine.execute_batch("ROLLBACK");
         self.connection.depth.set(0);
     }
 }

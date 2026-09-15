@@ -260,7 +260,7 @@ pub trait TreeCatalog {
         self.virtual_rows(table, path, params, needed)
     }
 
-    /// Returns what a module says about its own storage, or nothing.
+    /// Returns what a module says about its own storage.
     ///
     /// **The route `rtreecheck` takes.** A module's `integrity` is reachable
     /// from the connection and from nowhere else, and the question is about a
@@ -268,13 +268,10 @@ pub trait TreeCatalog {
     /// statement is being prepared, where the catalog is in hand, and the
     /// answer is folded into the expression as a constant.
     ///
-    /// `None` means there is no such table or its module does not check
-    /// itself; `Some(None)` means it checked and found nothing wrong.
-    ///
     /// @param name - the table's name, as written
-    fn module_integrity(&self, name: &[u8]) -> DbResult<Option<Option<String>>> {
+    fn module_integrity(&self, name: &[u8]) -> DbResult<ModuleIntegrity> {
         let _ = name;
-        Ok(None)
+        Ok(ModuleIntegrity::NoSuchModule)
     }
 
     /// Returns every row of a virtual scan, materialised.
@@ -425,7 +422,10 @@ pub trait TreeCatalog {
 /// layouts and the modules the statement sees. Wrapping rather than threading a
 /// parameter through every builder is what keeps a recursive query from
 /// changing the shape of a signature nothing else uses.
+mod integrity;
 mod keys;
+
+pub use integrity::ModuleIntegrity;
 use keys::{index_union_keys, point_key, range_union_bounds, rowid_union_keys, span_bounds};
 pub(crate) use keys::{nested_key, SpanBounds};
 
@@ -4705,9 +4705,9 @@ fn rtree_check(arguments: &[BoundExpr], space: &Space<'_>) -> DbResult<OwnedDatu
         return unsupported("rtreecheck from here");
     };
     match catalog.module_integrity(name)? {
-        Some(None) => Ok(OwnedDatum::Text(b"ok".to_vec())),
-        Some(Some(report)) => Ok(OwnedDatum::Text(report.into_bytes())),
-        None => Err(inillucent_base::error::misuse(format!(
+        ModuleIntegrity::Clean => Ok(OwnedDatum::Text(b"ok".to_vec())),
+        ModuleIntegrity::Report(report) => Ok(OwnedDatum::Text(report.into_bytes())),
+        ModuleIntegrity::NoSuchModule => Err(inillucent_base::error::misuse(format!(
             "no such rtree table: {}",
             String::from_utf8_lossy(name)
         ))),

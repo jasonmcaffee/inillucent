@@ -223,7 +223,7 @@ fn the_corpus_makes_cosine_and_l2_disagree() {
 #[test]
 fn an_l2_index_matches_the_exhaustive_l2_order() {
     let held = database("l2-matches-exhaustive");
-    let connection = held.connect();
+    let connection = held.session();
     load_corpus(&connection);
     connection
         .execute_batch("CREATE INDEX ix ON e USING inillucent_hnsw (v) WITH (metric = 'l2')")
@@ -257,7 +257,7 @@ fn an_l2_index_matches_the_exhaustive_l2_order() {
 #[test]
 fn an_l2_index_falls_back_to_the_scan_for_a_cosine_order() {
     let held = database("l2-falls-back-for-cosine");
-    let connection = held.connect();
+    let connection = held.session();
     load_corpus(&connection);
     connection
         .execute_batch("CREATE INDEX ix ON e USING inillucent_hnsw (v) WITH (metric = 'l2')")
@@ -296,7 +296,7 @@ fn an_l2_index_falls_back_to_the_scan_for_a_cosine_order() {
 #[test]
 fn a_default_cosine_index_falls_back_to_the_scan_for_an_l2_order() {
     let held = database("cosine-falls-back-for-l2");
-    let connection = held.connect();
+    let connection = held.session();
     load_corpus(&connection);
     connection
         .execute_batch("CREATE INDEX ix ON e USING inillucent_hnsw (v)")
@@ -346,7 +346,7 @@ fn a_default_cosine_index_falls_back_to_the_scan_for_an_l2_order() {
 #[test]
 fn the_search_table_form_takes_l2_too() {
     let held = database("search-table-l2");
-    let connection = held.connect();
+    let connection = held.session();
     connection
         .execute_batch(&format!(
             "CREATE VIRTUAL TABLE store USING inillucent_search(body, dims = {DIMENSIONS}, metric = 'l2')"

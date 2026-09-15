@@ -53,6 +53,9 @@ inillucent-engine = { workspace = true }
 inillucent-remote = { workspace = true }
 inillucent-value = { workspace = true }
 inillucent-tree = { workspace = true }
+# `archive.rs` stamps an archive entry with a calendar date; see the argument
+# beside this edge in docs/invariants/layering.toml.
+inillucent-scalar = { workspace = true }
 
 # Ctrl+C, and nothing else. There is no way to be told about it in the standard
 # library, and both platforms offer exactly one call: `SetConsoleCtrlHandler`

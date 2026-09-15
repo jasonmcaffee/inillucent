@@ -16,6 +16,7 @@ use std::cmp::Ordering;
 
 use inillucent_base::error::corrupt;
 use inillucent_base::DbResult;
+use inillucent_value::{BlobValue, TextValue, Value};
 
 /// A test-only count of how many times [`Datum::tagged_span`] ran.
 ///
@@ -350,6 +351,82 @@ impl OwnedDatum {
     }
 }
 
+/// Returns this value as the `inillucent-value` value, borrowing its payload.
+///
+/// **This impl and its three neighbours are the only conversion between a tree
+/// datum and a SQL value in the workspace (task-1961, A6).** There were five
+/// hand-written copies before: two byte-identical pairs in the shell and the
+/// compatibility facade, a third pair in the executor whose `Text` arm read
+/// `utf8_bytes()` where the others read `raw()`, and one row-at-a-time copy in
+/// the virtual-table host. Two spellings of the same conversion in one
+/// workspace is a pair of answers waiting to disagree, and the `Text` arm is
+/// where they already did.
+impl<'d> From<&'d OwnedDatum> for Value<'d> {
+    fn from(datum: &'d OwnedDatum) -> Value<'d> {
+        match datum {
+            OwnedDatum::Null => Value::Null,
+            OwnedDatum::Int(number) => Value::Integer(*number),
+            OwnedDatum::Real(number) => Value::Real(*number),
+            OwnedDatum::Text(bytes) => Value::Text(TextValue::utf8(bytes)),
+            OwnedDatum::Blob(bytes) => Value::Blob(BlobValue::borrowed(bytes)),
+        }
+    }
+}
+
+/// Returns a borrowed page value as the `inillucent-value` value.
+///
+/// Borrows the page's own bytes. A caller that needs a value outliving the pin
+/// calls [`Value::into_owned`], which is the one place the copy is paid for and
+/// the one place it can fail.
+impl<'p> From<&Datum<'p>> for Value<'p> {
+    fn from(datum: &Datum<'p>) -> Value<'p> {
+        match datum {
+            Datum::Null => Value::Null,
+            Datum::Int(number) => Value::Integer(*number),
+            Datum::Real(number) => Value::Real(*number),
+            Datum::Text(bytes) => Value::Text(TextValue::utf8(bytes)),
+            Datum::Blob(bytes) => Value::Blob(BlobValue::borrowed(bytes)),
+        }
+    }
+}
+
+/// Returns a SQL value as the datum a tree stores.
+///
+/// **The `Text` arm keeps the bytes as they are.** A `TEXT` column may hold
+/// bytes that are not valid UTF-8 - SQLite stores what it is given and this
+/// engine does the same - so a conversion that re-encoded them would replace
+/// them with U+FFFD and the value would not survive a write and a read. The one
+/// case where the bytes are not already the stored form is a `TextValue` whose
+/// encoding is UTF-16, which only `apply_affinity` with a non-UTF-8 target
+/// builds and which no path in this engine reaches: the database encoding is
+/// UTF-8 and only UTF-8. `utf8_bytes` answers `raw` for UTF-8 text without
+/// looking at it, and converts for that one case, so this arm is the `raw`
+/// form for every value the engine holds and is still right if that case ever
+/// arrives. `crates/inillucent-tree/tests/value_round_trip.rs` proves the
+/// round trip on bytes that are not valid UTF-8.
+impl From<&Value<'_>> for OwnedDatum {
+    fn from(value: &Value<'_>) -> OwnedDatum {
+        match value {
+            Value::Null => OwnedDatum::Null,
+            Value::Integer(number) => OwnedDatum::Int(*number),
+            Value::Real(number) => OwnedDatum::Real(*number),
+            Value::Text(text) => OwnedDatum::Text(text.utf8_bytes().into_owned()),
+            Value::Blob(blob) => OwnedDatum::Blob(blob.raw().to_vec()),
+        }
+    }
+}
+
+/// Returns a SQL value as the datum a tree stores, consuming the value.
+///
+/// The owning form of the impl above, for a caller that has a `Value` rather
+/// than a reference to one. It is the same conversion; nothing here decides
+/// anything the borrowed one does not.
+impl From<Value<'_>> for OwnedDatum {
+    fn from(value: Value<'_>) -> OwnedDatum {
+        OwnedDatum::from(&value)
+    }
+}
+
 /// Copies a borrowed row into owned storage.
 ///
 /// Compares an integer and a double exactly, the way SQLite's
@@ -414,6 +491,30 @@ pub fn own_row(row: &[Datum<'_>]) -> Vec<OwnedDatum> {
 /// @param row - the owned row
 pub fn borrow_row(row: &[OwnedDatum]) -> Vec<Datum<'_>> {
     row.iter().map(OwnedDatum::borrow).collect()
+}
+
+/// Returns one value as a SQL value that borrows nothing.
+///
+/// [`Value::from`] and [`Value::into_owned`], in the order every caller that
+/// hands a stored value to something outside the engine needs them, so the
+/// two-step is written once rather than at each of its call sites.
+///
+/// @param datum - the stored value
+pub fn owned_value(datum: &OwnedDatum) -> DbResult<Value<'static>> {
+    Value::from(datum).into_owned()
+}
+
+/// Returns a row as SQL values that borrow nothing.
+///
+/// The copy is what a caller handing a row to something outside the engine
+/// needs - a virtual-table module, a language binding - because those keep the
+/// row past the page it was read from. It is fallible for that reason: the copy
+/// is the one place in the conversion that allocates, and a caller that cannot
+/// have it has to hear so rather than be handed a row of NULLs.
+///
+/// @param row - the row to copy
+pub fn owned_row_values(row: &[OwnedDatum]) -> DbResult<Vec<Value<'static>>> {
+    row.iter().map(owned_value).collect()
 }
 
 /// Reads eight bytes, or says the buffer was short.

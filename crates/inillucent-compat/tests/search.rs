@@ -238,7 +238,7 @@ fn a_committed_write_survives_reopening() {
     let path = scratch(AREA, "reopen", "inillucent");
     {
         let database = Database::open(&path).expect("it opens");
-        let connection = database.connect();
+        let connection = database.session();
         seed(&connection);
         exec(&connection, "BEGIN");
         exec(
@@ -248,7 +248,7 @@ fn a_committed_write_survives_reopening() {
         exec(&connection, "COMMIT");
     }
     let database = Database::open(&path).expect("it reopens");
-    let connection = database.connect();
+    let connection = database.session();
     let found = column(
         &connection,
         "SELECT rowid FROM docs WHERE docs MATCH 'tirzepatide'",
@@ -689,7 +689,7 @@ fn state(connection: &Connection<'_>, table: &str, key: &str) -> i64 {
 fn open_at(path: &std::path::Path) -> Connection<'static> {
     let database: &'static Database =
         Box::leak(Box::new(Database::open(path).expect("the database opens")));
-    let connection = database.connect();
+    let connection = database.session();
     let _ = connection.execute_batch("PRAGMA busy_timeout = 5000");
     connection
 }
@@ -886,7 +886,7 @@ fn a_folded_index_reopens_and_answers() {
     let path = scratch(AREA, "fold-reopen", "inillucent");
     let expected = {
         let database = Database::open(&path).expect("the database opens");
-        let connection = database.connect();
+        let connection = database.session();
         let _ = connection.execute_batch("PRAGMA busy_timeout = 5000");
         exec(
             &connection,

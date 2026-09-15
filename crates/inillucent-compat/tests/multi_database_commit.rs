@@ -62,7 +62,7 @@ fn scratch(name: &str) -> PathBuf {
 /// @param aux - the database it attaches
 fn prepare(main: &Path, aux: &Path) {
     let database = Database::open(main).expect("the database opens");
-    let connection = database.connect().expect("the connection opens");
+    let connection = database.session().expect("the connection opens");
     connection
         .execute_batch(&format!(
             "CREATE TABLE t(a);
@@ -80,7 +80,7 @@ fn prepare(main: &Path, aux: &Path) {
 /// @param aux - the database it attaches
 fn write_across(main: &Path, aux: &Path) {
     let database = Database::open(main).expect("the database reopens");
-    let connection = database.connect().expect("the connection opens");
+    let connection = database.session().expect("the connection opens");
     connection
         .execute_batch(&format!(
             "ATTACH DATABASE '{}' AS aux;
@@ -115,7 +115,7 @@ fn write_across(main: &Path, aux: &Path) {
 /// @param aux - the database to attach to it
 fn counts(main: &Path, aux: &Path) -> Vec<i64> {
     let database = Database::open(main).expect("the database reopens");
-    let connection = database.connect().expect("the connection opens");
+    let connection = database.session().expect("the connection opens");
     connection
         .execute_batch(&format!(
             "ATTACH DATABASE '{}' AS aux",
@@ -239,7 +239,7 @@ fn a_single_database_commit_writes_no_super_journal() {
     let main = directory.join("main.db");
     {
         let database = Database::open(&main).expect("the database opens");
-        let connection = database.connect().expect("the connection opens");
+        let connection = database.session().expect("the connection opens");
         connection
             .execute_batch("CREATE TABLE t(a); BEGIN; INSERT INTO t VALUES (1); COMMIT;")
             .expect("the transaction commits");

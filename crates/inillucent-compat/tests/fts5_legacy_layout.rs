@@ -186,7 +186,7 @@ fn an_index_in_the_old_layout_still_answers() {
     let expected;
     {
         let database = Database::open(&path).expect("opens");
-        let connection = database.connect().expect("connects");
+        let connection = database.session().expect("connects");
         build(&connection);
         expected = matching(&connection, "quick");
         assert_eq!(
@@ -209,7 +209,7 @@ fn an_index_in_the_old_layout_still_answers() {
     }
 
     let database = Database::open(&path).expect("reopens");
-    let connection = database.connect().expect("connects");
+    let connection = database.session().expect("connects");
     assert_eq!(
         matching(&connection, "quick"),
         expected,
@@ -238,7 +238,7 @@ fn a_write_to_an_old_layout_index_keeps_what_it_held() {
     let path = scratch();
     {
         let database = Database::open(&path).expect("opens");
-        let connection = database.connect().expect("connects");
+        let connection = database.session().expect("connects");
         build(&connection);
         let moved = make_it_look_old(&connection);
         assert!(moved > 0, "something was converted");
@@ -251,7 +251,7 @@ fn a_write_to_an_old_layout_index_keeps_what_it_held() {
 
     {
         let database = Database::open(&path).expect("reopens");
-        let connection = database.connect().expect("connects");
+        let connection = database.session().expect("connects");
         let mut statement = connection
             .prepare("INSERT INTO docs (body) VALUES (?1)")
             .expect("prepares");
@@ -262,7 +262,7 @@ fn a_write_to_an_old_layout_index_keeps_what_it_held() {
     }
 
     let database = Database::open(&path).expect("reopens again");
-    let connection = database.connect().expect("connects");
+    let connection = database.session().expect("connects");
     assert_eq!(
         matching(&connection, "quick"),
         vec![1, 3, 4, 5],

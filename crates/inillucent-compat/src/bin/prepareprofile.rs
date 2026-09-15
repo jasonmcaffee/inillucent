@@ -130,7 +130,9 @@ fn fixture() -> Result<ImportedDatabase, String> {
     // number about a different question and would report the compile as thirty
     // nanoseconds. `prepare.trivial` is `prepare_each`, so the gate pays the
     // compile every iteration too.
-    database.disable_optimizations(inillucent_sql::plan::Levers::PLAN_CACHE);
+    database.disable_optimizations(inillucent_sql::plan::Levers::without(
+        inillucent_sql::plan::Levers::PLAN_CACHE,
+    ));
     Ok(database)
 }
 

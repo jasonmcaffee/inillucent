@@ -47,7 +47,7 @@ fn scratch(name: &str) -> PathBuf {
 /// @param name - the file's name
 fn opened(name: &str) -> Database {
     let database = Database::open(scratch(name)).expect("the database opens");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch("CREATE TABLE note (id INTEGER PRIMARY KEY, body TEXT)")
         .expect("the table is created");
@@ -58,7 +58,7 @@ fn opened(name: &str) -> Database {
 ///
 /// @param database - the open database
 fn count(database: &Database) -> i64 {
-    let connection = database.connect();
+    let connection = database.session();
     let rows = connection
         .query("SELECT count(*) FROM note", &[], 1)
         .expect("the count runs");
@@ -75,7 +75,7 @@ fn count(database: &Database) -> i64 {
 #[test]
 fn a_dropped_transaction_keeps_nothing() {
     let database = opened("dropped");
-    let connection = database.connect();
+    let connection = database.session();
     {
         let transaction = connection.begin().expect("a transaction opens");
         let changed = transaction
@@ -109,7 +109,7 @@ fn a_dropped_transaction_keeps_nothing() {
 #[test]
 fn a_committed_transaction_keeps_everything() {
     let database = opened("committed");
-    let connection = database.connect();
+    let connection = database.session();
     let transaction = connection.begin().expect("a transaction opens");
     transaction
         .execute(
@@ -138,7 +138,7 @@ fn a_committed_transaction_survives_a_reopen() {
     let path = scratch("reopened");
     {
         let database = Database::open(&path).expect("the database opens");
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch("CREATE TABLE note (id INTEGER PRIMARY KEY, body TEXT)")
             .expect("the table is created");
@@ -168,7 +168,7 @@ fn a_dropped_transaction_leaves_nothing_after_a_reopen() {
     let path = scratch("dropped-reopened");
     {
         let database = Database::open(&path).expect("the database opens");
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch("CREATE TABLE note (id INTEGER PRIMARY KEY, body TEXT)")
             .expect("the table is created");
@@ -193,7 +193,7 @@ fn a_dropped_transaction_leaves_nothing_after_a_reopen() {
 #[test]
 fn an_explicit_rollback_keeps_nothing() {
     let database = opened("rolled-back");
-    let connection = database.connect();
+    let connection = database.session();
     let transaction = connection.begin().expect("a transaction opens");
     transaction
         .execute(
@@ -214,7 +214,7 @@ fn an_explicit_rollback_keeps_nothing() {
 #[test]
 fn a_second_transaction_on_one_connection_is_refused() {
     let database = opened("nested");
-    let connection = database.connect();
+    let connection = database.session();
     let _outer = connection.begin().expect("the first transaction opens");
     let refused = connection.begin().expect_err("the second is refused");
     assert_eq!(refused.status, Status::InvalidState);
@@ -232,7 +232,7 @@ fn a_second_transaction_on_one_connection_is_refused() {
 #[test]
 fn a_connection_can_open_a_transaction_again_after_one_ends() {
     let database = opened("reopened-transaction");
-    let connection = database.connect();
+    let connection = database.session();
 
     let first = connection.begin().expect("the first transaction opens");
     first.commit().expect("the first commits");
@@ -262,7 +262,7 @@ fn a_read_only_connection_refuses_a_transaction() {
     let path = scratch("read-only");
     {
         let database = Database::open(&path).expect("the database opens");
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch("CREATE TABLE note (id INTEGER PRIMARY KEY, body TEXT)")
             .expect("the table is created");
@@ -272,7 +272,7 @@ fn a_read_only_connection_refuses_a_transaction() {
         ..inillucent_driver::OpenOptions::default()
     };
     let database = Database::open_with(&path, options).expect("the database reopens read only");
-    let connection = database.connect();
+    let connection = database.session();
     let refused = connection.begin().expect_err("a transaction is refused");
     assert_eq!(refused.status, Status::ReadOnly);
 }
@@ -284,7 +284,7 @@ fn a_read_only_connection_refuses_a_transaction() {
 #[test]
 fn the_batch_form_still_rolls_back_on_a_refused_check() {
     let database = opened("batch");
-    let connection = database.connect();
+    let connection = database.session();
     let work = vec![
         (
             "INSERT INTO note VALUES (?1, ?2)".to_string(),

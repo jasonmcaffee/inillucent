@@ -151,7 +151,7 @@ fn a_table_whose_columns_are_named_left_and_right_imports() {
         }
     };
     let imported = database.path().to_path_buf();
-    let connection = database.connect();
+    let connection = database.session();
     let rows = connection
         .query("SELECT left, right FROM pairs ORDER BY left", &[], 16)
         .expect("it queries");
@@ -198,7 +198,7 @@ fn the_join_keywords_are_names_in_every_position_sqlite_allows() {
         }
     };
     let imported = database.path().to_path_buf();
-    let connection = database.connect();
+    let connection = database.session();
     let rows = connection
         .query(
             "SELECT left.inner, left.outer, left.cross, left.indexed FROM left",
@@ -239,7 +239,7 @@ fn a_left_join_is_still_read_as_a_join() {
     };
     let database = Database::import_sqlite(&source).expect("it imports");
     let imported = database.path().to_path_buf();
-    let connection = database.connect();
+    let connection = database.session();
     // An inner join reads as one and answers.
     let rows = connection
         .query("SELECT t.b, u.c FROM t JOIN u ON t.a = u.a", &[], 16)

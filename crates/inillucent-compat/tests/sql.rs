@@ -63,7 +63,7 @@ fn imported_path(name: &str) -> PathBuf {
     let _ = std::fs::remove_file(&target);
     let database = Database::import(&source).expect("the fixture imports");
     let _ = database
-        .connect()
+        .session()
         .execute_batch("PRAGMA busy_timeout = 5000");
     let path = database.path().to_path_buf();
     cache.insert(name.to_string(), path.clone());
@@ -75,7 +75,7 @@ fn imported_path(name: &str) -> PathBuf {
 fn connect(name: &str) -> Database {
     let database = Database::open(imported_path(name)).expect("the import opens");
     let _ = database
-        .connect()
+        .session()
         .execute_batch("PRAGMA busy_timeout = 5000");
     database
 }
@@ -130,7 +130,7 @@ fn rows(connection: &Connection<'_>, sql: &str) -> Vec<String> {
 #[test]
 fn a_full_scan_returns_every_row_the_plan_produces() {
     let database = connect("basic-p4096-utf8.db");
-    let connection = database.connect();
+    let connection = database.session();
     let found = rows(&connection, "SELECT id, name FROM people");
     assert_eq!(
         found,
@@ -150,7 +150,7 @@ fn a_full_scan_returns_every_row_the_plan_produces() {
 #[test]
 fn every_storage_class_reads_back() {
     let database = connect("basic-p4096-utf8.db");
-    let connection = database.connect();
+    let connection = database.session();
     let found = rows(
         &connection,
         "SELECT id, name, score, tag, note FROM people WHERE id = 1",
@@ -167,7 +167,7 @@ fn every_storage_class_reads_back() {
 #[test]
 fn a_rowid_equality_becomes_a_seek() {
     let database = connect("basic-p4096-utf8.db");
-    let connection = database.connect();
+    let connection = database.session();
     let explained = connection
         .explain("SELECT name FROM people WHERE id = 7")
         .expect("it explains")
@@ -184,7 +184,7 @@ fn a_rowid_equality_becomes_a_seek() {
 #[test]
 fn a_rowid_range_stops_at_its_bound() {
     let database = connect("basic-p4096-utf8.db");
-    let connection = database.connect();
+    let connection = database.session();
     let found = rows(
         &connection,
         "SELECT id FROM people WHERE id > 1 AND id <= 7",
@@ -197,7 +197,7 @@ fn a_rowid_range_stops_at_its_bound() {
 #[test]
 fn an_index_seek_returns_what_a_scan_returns() {
     let database = connect("basic-p4096-utf8.db");
-    let connection = database.connect();
+    let connection = database.session();
     let explained = connection
         .explain("SELECT id FROM people WHERE name = 'alpha'")
         .expect("it explains")
@@ -219,7 +219,7 @@ fn an_index_seek_returns_what_a_scan_returns() {
 #[test]
 fn order_limit_and_offset_work_together() {
     let database = connect("basic-p4096-utf8.db");
-    let connection = database.connect();
+    let connection = database.session();
     assert_eq!(
         rows(
             &connection,
@@ -246,7 +246,7 @@ fn order_limit_and_offset_work_together() {
 #[test]
 fn nulls_sort_where_sqlite_sorts_them() {
     let database = connect("basic-p4096-utf8.db");
-    let connection = database.connect();
+    let connection = database.session();
     assert_eq!(
         rows(&connection, "SELECT note FROM people ORDER BY note LIMIT 1"),
         vec!["null"]
@@ -281,7 +281,7 @@ fn nulls_sort_where_sqlite_sorts_them() {
 #[test]
 fn aggregates_answer_over_the_whole_table() {
     let database = connect("basic-p4096-utf8.db");
-    let connection = database.connect();
+    let connection = database.session();
     assert_eq!(
         rows(&connection, "SELECT count(*) FROM people"),
         vec!["int:7"]
@@ -314,7 +314,7 @@ fn aggregates_answer_over_the_whole_table() {
 #[test]
 fn group_by_groups_and_having_filters() {
     let database = connect("basic-p4096-utf8.db");
-    let connection = database.connect();
+    let connection = database.session();
     let found = rows(
         &connection,
         "SELECT note IS NULL, count(*) FROM people GROUP BY note IS NULL",
@@ -331,7 +331,7 @@ fn group_by_groups_and_having_filters() {
 #[test]
 fn distinct_emits_each_row_once() {
     let database = connect("basic-p4096-utf8.db");
-    let connection = database.connect();
+    let connection = database.session();
     let found = rows(&connection, "SELECT DISTINCT note IS NULL FROM people");
     assert_eq!(found, vec!["int:0", "int:1"]);
 }
@@ -340,7 +340,7 @@ fn distinct_emits_each_row_once() {
 #[test]
 fn values_runs_without_a_table() {
     let database = connect("basic-p4096-utf8.db");
-    let connection = database.connect();
+    let connection = database.session();
     assert_eq!(
         rows(&connection, "VALUES (1, 'a'), (2, 'b')"),
         vec!["int:1|text:a", "int:2|text:b"]
@@ -355,7 +355,7 @@ fn values_runs_without_a_table() {
 #[test]
 fn parameters_bind_and_rebind() {
     let database = connect("basic-p4096-utf8.db");
-    let connection = database.connect();
+    let connection = database.session();
     let mut statement = connection
         .prepare("SELECT name FROM people WHERE id = ?1")
         .expect("it prepares");
@@ -385,7 +385,7 @@ fn parameters_bind_and_rebind() {
 #[test]
 fn result_metadata_names_the_column() {
     let database = connect("basic-p4096-utf8.db");
-    let connection = database.connect();
+    let connection = database.session();
     let mut statement = connection
         .prepare("SELECT name, score AS s, id + 1 FROM people")
         .expect("it prepares");
@@ -402,7 +402,7 @@ fn result_metadata_names_the_column() {
 #[test]
 fn an_unknown_name_fails_at_prepare_with_an_offset() {
     let database = connect("basic-p4096-utf8.db");
-    let connection = database.connect();
+    let connection = database.session();
     let missing_table = match connection.prepare("SELECT * FROM nope") {
         Err(failure) => failure,
         Ok(_) => panic!("a missing table must not prepare"),
@@ -445,7 +445,7 @@ fn reading_changes_no_byte_of_the_file() {
         let before = std::fs::read(&path).expect("the fixture reads");
         {
             let database = connect(fixture_row.name);
-            let connection = database.connect();
+            let connection = database.session();
             // Whatever the fixture holds, running one query over it is enough
             // to touch the pager, the cache and a cursor.
             let _ = connection.query("SELECT count(*) FROM sqlite_schema");
@@ -474,7 +474,7 @@ fn every_page_size_and_encoding_reads_the_same_rows() {
             continue;
         }
         let database = connect(name);
-        let connection = database.connect();
+        let connection = database.session();
         let found = rows(
             &connection,
             "SELECT id, name, score FROM people ORDER BY id",

@@ -47,7 +47,7 @@ fn fresh(name: &str) -> Database {
     let _ = std::fs::remove_file(&path);
     let database = Database::open(&path).expect("a fresh database opens");
     {
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch(
                 "CREATE TABLE t (id INTEGER PRIMARY KEY, a TEXT, b INTEGER); \
@@ -225,7 +225,7 @@ fn the_new_engine_answers_what_the_inventory_says_it_answers() {
     let mut wrong = Vec::new();
     for (index, (name, sql, expected)) in SURFACE.iter().enumerate() {
         let database = fresh(&format!("case{index}"));
-        let connection = database.connect();
+        let connection = database.session();
         let actual = match connection.query(sql) {
             Ok(_) => Yes,
             Err(error) => {
@@ -283,7 +283,7 @@ fn the_new_engine_answers_what_the_inventory_says_it_answers() {
 #[test]
 fn a_trigger_is_stored_and_fires() {
     let database = fresh("trigger");
-    let connection = database.connect();
+    let connection = database.session();
     // `fresh` already built `t` with two rows in it.
     connection
         .execute_batch("CREATE TABLE log (id INTEGER PRIMARY KEY, a INTEGER)")
@@ -356,7 +356,7 @@ fn count_of(connection: &Connection<'_>, table: &str) -> i64 {
 #[test]
 fn a_views_columns_are_reported() {
     let database = fresh("viewcols");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch("CREATE VIEW loud AS SELECT a AS shout FROM t")
         .expect("the view is created");
@@ -401,7 +401,7 @@ fn a_views_columns_are_reported() {
 #[test]
 fn a_transaction_can_be_entered_and_abandoned() {
     let database = fresh("txn");
-    let connection = database.connect();
+    let connection = database.session();
     assert_eq!(count(&connection), 2);
 
     connection

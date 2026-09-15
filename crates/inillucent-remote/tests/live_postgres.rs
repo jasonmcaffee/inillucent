@@ -76,7 +76,7 @@ fn scratch(name: &str) -> PathBuf {
 /// @param database - the migrated database
 /// @param sql - a query answering one row
 fn text_of(database: &Database, sql: &str) -> String {
-    let connection = database.connect();
+    let connection = database.session();
     let rows = connection.query(sql).expect("the query runs");
     match rows.first().and_then(|row| row.first()) {
         Some(OwnedDatum::Text(bytes)) => String::from_utf8_lossy(bytes).into_owned(),
@@ -199,7 +199,7 @@ fn a_live_postgres_database_migrates_verified_and_reads_back() {
         "11111111-2222-3333-4444-555555555555"
     );
     // The composite key came across as a key, not as two ordinary columns.
-    let connection = database.connect();
+    let connection = database.session();
     let key = connection
         .query("SELECT count(*) FROM pragma_index_list('reading')")
         .expect("the pragma runs");

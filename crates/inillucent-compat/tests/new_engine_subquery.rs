@@ -34,7 +34,7 @@ fn fixture(name: &str) -> Database {
     let _ = std::fs::remove_file(&path);
     let database = Database::open(&path).expect("a fresh database opens");
     {
-        let connection = database.connect();
+        let connection = database.session();
         connection
             .execute_batch(
                 "CREATE TABLE item (id INTEGER PRIMARY KEY, name TEXT, price INTEGER); \
@@ -73,7 +73,7 @@ fn integers(connection: &Connection<'_>, sql: &str) -> Vec<i64> {
 #[test]
 fn a_scalar_subquery_answers_in_a_projection_and_in_a_filter() {
     let database = fixture("scalar");
-    let connection = database.connect();
+    let connection = database.session();
 
     assert_eq!(
         integers(&connection, "SELECT (SELECT max(price) FROM item)"),
@@ -113,7 +113,7 @@ fn a_scalar_subquery_answers_in_a_projection_and_in_a_filter() {
 #[test]
 fn in_and_not_in_follow_the_three_valued_rule() {
     let database = fixture("in");
-    let connection = database.connect();
+    let connection = database.session();
 
     assert_eq!(
         integers(
@@ -155,7 +155,7 @@ fn in_and_not_in_follow_the_three_valued_rule() {
 #[test]
 fn exists_answers_from_whether_the_block_produced_a_row() {
     let database = fixture("exists");
-    let connection = database.connect();
+    let connection = database.session();
 
     assert_eq!(
         integers(
@@ -192,7 +192,7 @@ fn exists_answers_from_whether_the_block_produced_a_row() {
 #[test]
 fn a_folded_subquery_is_read_again_after_a_write() {
     let database = fixture("stale");
-    let connection = database.connect();
+    let connection = database.session();
 
     let query = "SELECT (SELECT count(*) FROM item)";
     assert_eq!(integers(&connection, query), vec![4]);
@@ -224,7 +224,7 @@ fn a_folded_subquery_is_read_again_after_a_write() {
 #[test]
 fn a_subquery_sees_the_statement_s_parameters() {
     let database = fixture("params");
-    let connection = database.connect();
+    let connection = database.session();
 
     let rows = connection
         .query_with(
@@ -251,7 +251,7 @@ fn a_subquery_sees_the_statement_s_parameters() {
 #[test]
 fn a_nested_subquery_is_answered_from_the_inside_out() {
     let database = fixture("nested");
-    let connection = database.connect();
+    let connection = database.session();
 
     assert_eq!(
         integers(
@@ -280,7 +280,7 @@ fn a_nested_subquery_is_answered_from_the_inside_out() {
 #[test]
 fn a_correlated_subquery_is_answered_per_row() {
     let database = fixture("correlated");
-    let connection = database.connect();
+    let connection = database.session();
 
     assert_eq!(
         integers(
@@ -331,7 +331,7 @@ fn a_correlated_subquery_is_answered_per_row() {
 #[test]
 fn a_subquery_in_a_compound_arm_is_folded_too() {
     let database = fixture("compound");
-    let connection = database.connect();
+    let connection = database.session();
 
     assert_eq!(
         integers(
@@ -353,7 +353,7 @@ fn a_subquery_in_a_compound_arm_is_folded_too() {
 #[test]
 fn a_folded_in_answers_the_same_as_the_literal_in() {
     let database = fixture("aslist");
-    let connection = database.connect();
+    let connection = database.session();
 
     let folded = integers(
         &connection,
@@ -384,7 +384,7 @@ fn a_folded_in_answers_the_same_as_the_literal_in() {
 #[test]
 fn a_subquery_in_a_values_list_and_in_a_set_is_folded() {
     let database = fixture("novplan");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch("DELETE FROM item")
         .expect("the fixture table is emptied");
@@ -440,7 +440,7 @@ fn a_subquery_in_a_values_list_and_in_a_set_is_folded() {
 #[test]
 fn a_compound_query_is_usable_as_a_derived_table() {
     let database = fixture("compound-derived");
-    let connection = database.connect();
+    let connection = database.session();
 
     // Two arms of two rows each, and 250 appears in both.
     let all =
@@ -519,7 +519,7 @@ fn sqlite_sequence_can_be_written_and_the_counter_follows() {
     let path = area.join("sequence.rdb");
     let _ = std::fs::remove_file(&path);
     let database = Database::open(&path).expect("a fresh database opens");
-    let connection = database.connect();
+    let connection = database.session();
     connection
         .execute_batch(
             "CREATE TABLE s (id INTEGER PRIMARY KEY AUTOINCREMENT, v TEXT);\

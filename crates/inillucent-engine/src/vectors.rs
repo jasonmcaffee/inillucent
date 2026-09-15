@@ -68,7 +68,7 @@ impl ImportedDatabase {
                 let Some(vector) = row.get(index.column) else {
                     continue;
                 };
-                let value = inillucent_exec::scalar::to_value(vector.borrow());
+                let value = inillucent_value::Value::from(&vector.borrow()).into_owned()?;
                 if matches!(value, inillucent_value::Value::Null) {
                     continue;
                 }

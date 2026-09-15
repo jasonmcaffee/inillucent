@@ -38,7 +38,7 @@ use inillucent_sql::plan::AccessPath;
 use inillucent_sql::vtab::{
     Change, FilterPlan, IndexQuery, ModuleArguments, ShadowRoot, ShadowStore,
 };
-use inillucent_tree::datum::{Datum, OwnedDatum};
+use inillucent_tree::datum::{owned_row_values, owned_value, Datum, OwnedDatum};
 use inillucent_tree::write::TreeLog;
 use inillucent_tree::PagedTree;
 use inillucent_value::Value;
@@ -80,21 +80,6 @@ pub struct WriteStore<'a> {
     pub trees: &'a mut HashMap<u32, PagedTree>,
     /// Where the records go.
     pub log: &'a mut dyn TreeLog,
-}
-
-/// Returns a shadow row as the values a module reads.
-///
-/// @param row - the tree's row
-fn as_values(row: &[OwnedDatum]) -> DbResult<Vec<Value<'static>>> {
-    row.iter()
-        .map(|value| match value {
-            OwnedDatum::Null => Ok(Value::Null),
-            OwnedDatum::Int(number) => Ok(Value::Integer(*number)),
-            OwnedDatum::Real(number) => Ok(Value::Real(*number)),
-            OwnedDatum::Text(bytes) => Value::owned_text(bytes),
-            OwnedDatum::Blob(bytes) => Value::owned_blob(bytes),
-        })
-        .collect()
 }
 
 /// Returns a module's values as a tree row.
@@ -232,7 +217,7 @@ fn walk(
     tree.visit_leaves(pool, &mut |leaf| {
         for row in leaf.live()? {
             let owned: Vec<OwnedDatum> = row.iter().map(OwnedDatum::from_datum).collect();
-            let values = match as_values(&owned) {
+            let values = match owned_row_values(&owned) {
                 Ok(values) => values,
                 Err(error) => {
                     failure = Some(error);
@@ -296,7 +281,7 @@ fn walk_from(
                 }
             }
             let owned: Vec<OwnedDatum> = row.iter().map(OwnedDatum::from_datum).collect();
-            let values = match as_values(&owned) {
+            let values = match owned_row_values(&owned) {
                 Ok(values) => values,
                 Err(error) => {
                     failure = Some(error);
@@ -351,7 +336,7 @@ fn walk_keyed_from(
     tree.visit_range(pool, &low, &mut |leaf| {
         for row in leaf.live()? {
             let owned_row: Vec<OwnedDatum> = row.iter().map(OwnedDatum::from_datum).collect();
-            let values = match as_values(&owned_row) {
+            let values = match owned_row_values(&owned_row) {
                 Ok(values) => values,
                 Err(error) => {
                     failure = Some(error);
@@ -913,14 +898,18 @@ impl ImportedDatabase {
     /// question a caller running an integrity check is asking.
     ///
     /// @param name - the table's name, as written
-    pub(super) fn module_integrity(&self, name: &[u8]) -> DbResult<Option<Option<String>>> {
+    pub(super) fn module_integrity(
+        &self,
+        name: &[u8],
+    ) -> DbResult<inillucent_exec::physical::ModuleIntegrity> {
+        use inillucent_exec::physical::ModuleIntegrity;
         let folded = name.to_ascii_lowercase();
         let Some(connected) = self.virtual_tables.get(&folded) else {
-            return Ok(None);
+            return Ok(ModuleIntegrity::NoSuchModule);
         };
         let arguments = connected.arguments.clone();
         let Some(found) = self.registry.module(&arguments.module) else {
-            return Ok(None);
+            return Ok(ModuleIntegrity::NoSuchModule);
         };
         let mut table = found.connect(&arguments, false)?;
         let store = ReadStore {
@@ -934,7 +923,7 @@ impl ImportedDatabase {
             limits: &self.limits,
             catalog: Some(&self.catalog),
         };
-        table.integrity(&mut context).map(Some)
+        table.integrity(&mut context).map(ModuleIntegrity::of)
     }
 
     pub(super) fn rows_of_module(
@@ -1048,13 +1037,14 @@ impl ImportedDatabase {
                 let Some(constraint) = offer.get(position) else {
                     continue;
                 };
-                arguments.push(inillucent_exec::scalar::to_value(
-                    inillucent_exec::physical::literal_value(&constraint.value, params)?.borrow(),
-                ));
+                arguments.push(owned_value(&inillucent_exec::physical::literal_value(
+                    &constraint.value,
+                    params,
+                )?)?);
             }
         } else {
             for value in supplied {
-                arguments.push(inillucent_exec::scalar::to_value(value.borrow()));
+                arguments.push(owned_value(value)?);
             }
         }
         let plan = FilterPlan {
@@ -1189,9 +1179,7 @@ impl ImportedDatabase {
                     row.push(OwnedDatum::Null);
                     continue;
                 }
-                row.push(inillucent_exec::scalar::from_value(
-                    cursor.column(&mut context, column)?,
-                ));
+                row.push(OwnedDatum::from(cursor.column(&mut context, column)?));
             }
             // Appended after the declared columns, which is where
             // `plan_stages` puts the rowid slot for a materialised virtual
@@ -1216,11 +1204,11 @@ impl ImportedDatabase {
             for (name, arguments) in &needed.functions {
                 let mut values: Vec<Value<'static>> = Vec::with_capacity(arguments.len());
                 for argument in arguments {
-                    values.push(inillucent_exec::scalar::to_value(
-                        inillucent_exec::physical::literal_value(argument, params)?.borrow(),
-                    ));
+                    values.push(owned_value(&inillucent_exec::physical::literal_value(
+                        argument, params,
+                    )?)?);
                 }
-                row.push(inillucent_exec::scalar::from_value(cursor.auxiliary(
+                row.push(OwnedDatum::from(cursor.auxiliary(
                     &mut context,
                     name,
                     &values,
@@ -1806,7 +1794,7 @@ impl ImportedDatabase {
             if let Some(row) = held.rows.first() {
                 for (position, at) in visible.iter().enumerate() {
                     if let (Some(slot), Some(value)) = (values.get_mut(*at), row.get(position)) {
-                        *slot = inillucent_exec::scalar::to_value(value.borrow());
+                        *slot = Value::from(&value.borrow()).into_owned()?;
                     }
                 }
             }
@@ -1824,7 +1812,7 @@ impl ImportedDatabase {
                         )
                     })?;
                 if let Some(slot) = values.get_mut(usize::from(assignment.column)) {
-                    *slot = inillucent_exec::scalar::to_value(value.borrow());
+                    *slot = Value::from(&value.borrow()).into_owned()?;
                 }
             }
             self.change_module(
@@ -1856,9 +1844,10 @@ impl ImportedDatabase {
             // the module declared, and the rest are NULL.
             let mut supplied: Vec<Value<'static>> = Vec::with_capacity(row.len());
             for expr in row {
-                supplied.push(inillucent_exec::scalar::to_value(
-                    inillucent_exec::physical::literal_value(expr, params)?.borrow(),
-                ));
+                supplied.push(
+                    Value::from(&inillucent_exec::physical::literal_value(expr, params)?.borrow())
+                        .into_owned()?,
+                );
             }
             let mut cells = vec![Value::Null; width];
             for (position, column) in statement.columns.iter().enumerate() {
@@ -1888,9 +1877,8 @@ impl ImportedDatabase {
                     supplied.get(*at).cloned().unwrap_or(Value::Null)
                 }
                 (None, Some(inillucent_sql::dml::ColumnSource::Expr(expr))) => {
-                    inillucent_exec::scalar::to_value(
-                        inillucent_exec::physical::literal_value(expr, params)?.borrow(),
-                    )
+                    Value::from(&inillucent_exec::physical::literal_value(expr, params)?.borrow())
+                        .into_owned()?
                 }
                 // Nothing named one, so the module allocates - which is what
                 // `Null` asks it for.
@@ -1976,8 +1964,8 @@ fn satisfies(
 ) -> DbResult<bool> {
     use inillucent_sql::vtab::ConstraintOp;
     use std::cmp::Ordering;
-    let left = inillucent_exec::scalar::to_value(held.borrow());
-    let right = inillucent_exec::scalar::to_value(wanted.borrow());
+    let left = Value::from(&held.borrow()).into_owned()?;
+    let right = Value::from(&wanted.borrow()).into_owned()?;
     if matches!(left, Value::Null) || matches!(right, Value::Null) {
         // A comparison against NULL is unknown, which excludes the row.
         return Ok(false);

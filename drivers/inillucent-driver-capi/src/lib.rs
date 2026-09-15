@@ -716,7 +716,7 @@ pub unsafe extern "C" fn inillucent_connect(
                 database: db as *const inillucent_db,
                 // Opened once, here, and continued by every call on this
                 // handle and on everything prepared on it.
-                session: database.database.connect().session(),
+                session: database.database.session().session(),
             }),
         }));
         INILLUCENT_OK
@@ -815,7 +815,7 @@ pub unsafe extern "C" fn inillucent_execute(
         if out.is_null() {
             return misused("inillucent_execute", error);
         }
-        let connection = database.database.connect_as(session_of(conn));
+        let connection = database.database.session_as(session_of(conn));
         match connection.query(sql, &[], capped(limit)) {
             Ok(rows) => {
                 *out = Box::into_raw(Box::new(built(rows)));
@@ -852,7 +852,7 @@ pub unsafe extern "C" fn inillucent_execute_batch(
         finish(
             database
                 .database
-                .connect_as(session_of(conn))
+                .session_as(session_of(conn))
                 .execute_batch(sql),
             error,
             false,
@@ -873,7 +873,7 @@ pub unsafe extern "C" fn inillucent_last_insert_rowid(conn: *mut inillucent_conn
         || match database_of(conn) {
             Some(database) => database
                 .database
-                .connect_as(session_of(conn))
+                .session_as(session_of(conn))
                 .last_insert_rowid(),
             None => 0,
         },
@@ -894,7 +894,7 @@ pub unsafe extern "C" fn inillucent_total_changes(conn: *mut inillucent_conn) ->
         || match database_of(conn) {
             Some(database) => database
                 .database
-                .connect_as(session_of(conn))
+                .session_as(session_of(conn))
                 .total_changes(),
             None => 0,
         },
@@ -916,7 +916,7 @@ pub unsafe extern "C" fn inillucent_in_transaction(conn: *mut inillucent_conn) -
             Some(database) => i32::from(
                 database
                     .database
-                    .connect_as(session_of(conn))
+                    .session_as(session_of(conn))
                     .in_transaction(),
             ),
             None => 0,
@@ -938,7 +938,7 @@ pub unsafe extern "C" fn inillucent_schema_cookie(conn: *mut inillucent_conn) ->
         || match database_of(conn) {
             Some(database) => database
                 .database
-                .connect_as(session_of(conn))
+                .session_as(session_of(conn))
                 .schema_cookie(),
             None => 0,
         },
@@ -972,7 +972,7 @@ pub unsafe extern "C" fn inillucent_cancel(
     guarded("inillucent_cancel", error, || match database_of(conn) {
         None => misused("inillucent_cancel", error),
         Some(database) => finish(
-            database.database.connect_as(session_of(conn)).cancel(),
+            database.database.session_as(session_of(conn)).cancel(),
             error,
             false,
         ),
@@ -1010,7 +1010,7 @@ pub unsafe extern "C" fn inillucent_prepare(
         if out.is_null() {
             return misused("inillucent_prepare", error);
         }
-        let connection = database.database.connect_as(session_of(conn));
+        let connection = database.database.session_as(session_of(conn));
         if let Err(why) = connection.prepare(sql) {
             let status = why.status as i32;
             report(error, &why, false);
@@ -1237,7 +1237,7 @@ pub unsafe extern "C" fn inillucent_stmt_execute(
         if out.is_null() {
             return misused("inillucent_stmt_execute", error);
         }
-        let connection = database.database.connect_as(statement.connection.session);
+        let connection = database.database.session_as(statement.connection.session);
         match connection.query(&statement.sql, &statement.params, capped(limit)) {
             Ok(rows) => {
                 *out = Box::into_raw(Box::new(built(rows)));
@@ -1602,7 +1602,7 @@ pub unsafe extern "C" fn inillucent_txn_begin(
         let status = finish(
             database
                 .database
-                .connect_as(session_of(conn))
+                .session_as(session_of(conn))
                 .execute_batch("BEGIN"),
             error,
             false,
@@ -1661,7 +1661,7 @@ pub unsafe extern "C" fn inillucent_txn_execute(
             );
             return INILLUCENT_INVALID_STATE;
         }
-        let connection = database.database.connect_as(transaction.connection.session);
+        let connection = database.database.session_as(transaction.connection.session);
         match connection.query(sql, &[], 0) {
             Ok(rows) => {
                 if !affected.is_null() {
@@ -1714,7 +1714,7 @@ pub unsafe extern "C" fn inillucent_txn_commit(
         transaction.spent = true;
         let outcome = database
             .database
-            .connect_as(transaction.connection.session)
+            .session_as(transaction.connection.session)
             .execute_batch("COMMIT");
         finish(outcome, error, false)
     })
@@ -1741,7 +1741,7 @@ pub unsafe extern "C" fn inillucent_txn_rollback(txn: *mut inillucent_txn) {
             if let Some(database) = database_in(&transaction.connection) {
                 let _ = database
                     .database
-                    .connect_as(transaction.connection.session)
+                    .session_as(transaction.connection.session)
                     .execute_batch("ROLLBACK");
             }
         },

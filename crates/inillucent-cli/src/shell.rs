@@ -15,7 +15,7 @@
 use std::io::Write;
 
 use inillucent_engine::connect::{Connection, Database};
-use inillucent_tree::datum::OwnedDatum;
+use inillucent_tree::datum::{owned_row_values, OwnedDatum};
 use inillucent_value::Value;
 
 use crate::render::{render, Layout, Mode};
@@ -257,12 +257,12 @@ impl Shell {
                 .register_module(module)
                 .map_err(|error| error.message().to_string())?;
         }
-        let session = database.connect().session();
+        let session = database.session().session();
         // **The reference's shell turns this on and this one has to as well.**
         // It is a connection flag rather than a shell one, so setting the field
         // below is not enough: the engine has to be told, or
         // `PRAGMA journal_mode = OFF` is honoured here and refused there.
-        database.connect_as(session).set_defensive(true);
+        database.session_as(session).set_defensive(true);
         Ok(Opened {
             database,
             session,
@@ -326,7 +326,7 @@ impl Shell {
     /// there for the next one.
     pub fn connection(&self) -> Connection<'_> {
         let held = self.open_slot();
-        held.database.connect_as(held.session)
+        held.database.session_as(held.session)
     }
 
     /// Returns what one run-time limit is set to on the open database.
@@ -758,7 +758,7 @@ impl Shell {
                 let Some(value) = self.parameters.get(&key) else {
                     continue;
                 };
-                let _ = statement.bind(index, crate::shell::datum_of(value));
+                let _ = statement.bind(index, OwnedDatum::from(value));
             }
         }
         let mut rows = Vec::new();
@@ -773,7 +773,17 @@ impl Shell {
                     })
                 }
                 Ok(false) => break,
-                Ok(true) => rows.push(statement.row().iter().map(value_of).collect()),
+                Ok(true) => match owned_row_values(statement.row()) {
+                    Ok(row) => rows.push(row),
+                    Err(error) => {
+                        return Err(Failure {
+                            message: reason(&error),
+                            offset: None,
+                            compiling: false,
+                            error: Some(error),
+                        })
+                    }
+                },
             }
         }
         // Read *after* stepping. The engine's statement materialises on its
@@ -811,7 +821,7 @@ impl Shell {
     /// @param sql - the text a caller passed as one statement
     pub fn trailing_statement(&self, sql: &str) -> Option<String> {
         let connection = self.connection();
-        let (_, consumed) = connection.prepare_with_tail(sql).ok()?;
+        let consumed = connection.prepare_with_tail(sql).ok()?.consumed;
         let left = sql.get(consumed..)?;
         let rest = left
             .get(inillucent_engine::connect::leading_trivia(left)..)?
@@ -1107,41 +1117,6 @@ pub fn mode_named(name: &str) -> Result<Mode, String> {
 
 /// Every mode name, for the message above and for `.help`.
 pub const MODE_NAMES: &str = "box column csv html insert json line list markdown quote table tabs";
-
-/// Returns a datum as the value the renderer formats.
-///
-/// The engine's rows are `OwnedDatum` and everything that prints one takes
-/// `Value`, which is `inillucent-value`'s type and the one the affinity and
-/// collation rules are written against. Converting here rather than rewriting
-/// `render.rs` keeps the formatting - `.mode`, `.nullvalue`, the width
-/// calculation - exactly as it was, which is what a caller of this shell would
-/// notice if it changed.
-///
-/// @param datum - one value out of a row
-fn value_of(datum: &OwnedDatum) -> Value<'static> {
-    match datum {
-        OwnedDatum::Null => Value::Null,
-        OwnedDatum::Int(number) => Value::Integer(*number),
-        OwnedDatum::Real(number) => Value::Real(*number),
-        OwnedDatum::Text(bytes) => Value::owned_text(bytes).unwrap_or(Value::Null),
-        OwnedDatum::Blob(bytes) => Value::owned_blob(bytes).unwrap_or(Value::Null),
-    }
-}
-
-/// Returns one value as the datum a bind takes.
-///
-/// The reverse of `value_of`, and the shell's own half of `.parameter`.
-///
-/// @param value - the value the shell is holding
-pub fn datum_of(value: &Value<'static>) -> OwnedDatum {
-    match value {
-        Value::Null => OwnedDatum::Null,
-        Value::Integer(number) => OwnedDatum::Int(*number),
-        Value::Real(number) => OwnedDatum::Real(*number),
-        Value::Text(text) => OwnedDatum::Text(text.raw().to_vec()),
-        Value::Blob(blob) => OwnedDatum::Blob(blob.raw().to_vec()),
-    }
-}
 
 /// Reports whether a statement is an `EXPLAIN QUERY PLAN`.
 ///
