@@ -39,6 +39,8 @@ inillucent-txn = { workspace = true }
 inillucent-cli = { workspace = true }
 inillucent-driver = { workspace = true }
 inillucent-engine = { workspace = true }
+# The retrieval engine, for `indexresidency.rs`. See the layering contract.
+inillucent-core = { workspace = true }
 inillucent-migrate = { workspace = true }
 # The gate's memory and processor accounting. The operating
 # system is the only thing that can say what a *process* cost, and the
@@ -135,6 +137,12 @@ path = "src/bin/execprofile.rs"
 [[bin]]
 name = "inillucent-shellrss"
 path = "src/bin/shellrss.rs"
+
+# Where a retrieval index's resident bytes go, part by part (task-1962,
+# roadmap item 3's first landing).
+[[bin]]
+name = "inillucent-indexresidency"
+path = "src/bin/indexresidency.rs"
 
 [[bin]]
 name = "inillucent-indexprofile"

@@ -113,13 +113,39 @@ measured rather than supposed.
 
 **1.3 GB resident for a 3.1 GB index of 600,589 chunks** with the vectors read from the file, and
 3.1 GB with them held in memory. The vectors are out of the default resident set; the graph and the
-keyword postings are still all in memory and nothing has tried to make either smaller.
+keyword postings are still all in memory.
 
-Done means, in three steps each with its number on the performance page: a measurement of where the
-1.3 GB goes; the graph's adjacency lists laid out as fixed width pages read through the buffer pool
-rather than deserialised whole; the postings the same way, a block per term. The resident set
-becomes the pool budget. Acceptance on the same corpus: under 512 MiB resident at the default pool
-with vectors on disk, p50 latency within 1.5x and p99 within 2x of today's, identical top k.
+**Landing 1 of three is done: the measurement, and it re-aims the other two.** Nothing had said which
+part the resident bytes were. `inillucent-indexresidency` reads a saved generation's four parts in
+the order an open reads them and samples the resident set between them, so what each part costs is
+measured rather than derived from its file's size. On the 600,589 chunk corpus at 768 dimensions,
+1,705,097 terms, with the vectors left in the file, measured twice with the same answer:
+
+| part | on disk MiB | resident MiB | share of resident |
+|---|---:|---:|---:|
+| `lexical.bin`, the BM25 postings | 614.8 | **890.3** | **53%** |
+| `store.bin`, the chunks and their dictionaries | 564.8 | 620.3 | 37% |
+| `graph.bin`, the HNSW adjacency | 87.7 | 154.2 | 9% |
+| `vectors.bin` | 1,759.5 | 0.0 | none, they are read from the file |
+| total | 3,026.9 | **1,664.9** | |
+
+Two things follow, and both change what the remaining landings are.
+
+**The postings are the largest, not the graph.** The design put landing 2 on the graph and landing 3
+on the postings. The graph is 154 MiB - nine per cent - and the postings are 890 MiB. The order
+reverses: postings first.
+
+**And the two of them together are not enough.** The acceptance is under 512 MiB resident at the
+default pool with the vectors on disk. Paging the postings and the graph would leave `store.bin`'s
+620 MiB, which is already over the bar on its own. The store is a landing the design does not
+mention and the arithmetic requires. It holds the chunk text and its dictionaries, and it is 620 MiB
+resident for 565 MiB on disk - so unlike the graph it is not being expanded much by being loaded; it
+is simply all of it, in memory, because a chunk's text is read by every result.
+
+Done, now: the postings behind the buffer pool, one block per term with delta coded document ids as
+the doclist already is; the store the same way, a block per chunk; and the graph last, its adjacency
+lists as fixed width pages. Each with its number on the performance page, and the acceptance
+unchanged - under 512 MiB resident, p50 within 1.5x and p99 within 2x, identical top k.
 
 ## 4. Threads
 

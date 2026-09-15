@@ -240,6 +240,25 @@ Where the remaining 5.4 MiB is:
 So most of what is left is the operating system's, which neither engine escapes, and one
 `CREATE INDEX`.
 
+### Where a retrieval index's resident bytes go
+
+Measured 2026-09-15 with `inillucent-indexresidency` on the 600,589 chunk corpus at 768 dimensions,
+1,705,097 terms, with the vectors left in the file, which is the default. Each part is read in the
+order an open reads it and the resident set is sampled between them, so what a part costs is measured
+rather than derived from its file's size. Two runs, the same answer to a tenth of a mebibyte.
+
+| part | on disk MiB | resident MiB | share of resident |
+|---|---:|---:|---:|
+| `lexical.bin`, the BM25 postings | 614.8 | **890.3** | **53%** |
+| `store.bin`, the chunks and their dictionaries | 564.8 | 620.3 | 37% |
+| `graph.bin`, the HNSW adjacency | 87.7 | 154.2 | 9% |
+| `vectors.bin` | 1,759.5 | 0.0 | none |
+| total | 3,026.9 | **1,664.9** | |
+
+The postings are the largest single part and the graph is the smallest, which is the reverse of the
+order [the roadmap](roadmap.md#3-the-retrieval-indexs-footprint) had assumed. The store is 620 MiB
+resident for 565 MiB on disk - it is not expanded much by loading, it is simply all of it in memory.
+
 **And the peak is reached by that one statement.** Read afresh over four runs, the high-water mark
 after every workload:
 

@@ -602,6 +602,15 @@ may_depend_on = [
   # `inillucent_compat::newengine` is a re-export of `inillucent-engine`, so
   # every gate and campaign written against the new engine names it directly.
   "inillucent-engine",
+  # The retrieval engine, for `indexresidency.rs` - which reads a saved index's
+  # four parts one at a time and samples the resident set between them, to say
+  # which of them the 1.3 GB is (task-1962, roadmap item 3). It calls the same
+  # public readers `persist::load` calls, in the same order, because a
+  # re-implementation would be measuring a different piece of work. The edge is
+  # downward and was already there transitively, through
+  # `inillucent-engine -> inillucent-search -> inillucent-core`; this declares
+  # the direct one the measurement uses.
+  "inillucent-core",
   # And `inillucent-migrate`, because the migration acceptance is a test: every
   # fixture in the SQLite parity corpus through the tool, checked against the pinned SQLite shell
   # reading the same source file. The oracle is what makes it a test rather than
