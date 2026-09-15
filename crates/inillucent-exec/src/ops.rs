@@ -38,7 +38,6 @@ pub use aggregate::*;
 pub use collect::*;
 pub use order::*;
 pub use row::*;
-// WIRED
 
 /// How many projected columns a permutation keeps on the stack.
 ///

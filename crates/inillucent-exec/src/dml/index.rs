@@ -181,3 +181,131 @@ pub(super) fn key_of(layout: &SourceLayout, row: &[OwnedDatum]) -> Vec<OwnedDatu
         .filter_map(|column| row.get(*column).cloned())
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dml::testing::{a_table, an_index};
+
+    /// A uniqueness check skips an entry that carries a NULL.
+    ///
+    /// **NULLs are distinct from each other in every unique index (T3,
+    /// task-1962).** SQL says two NULLs are not equal, so a unique index
+    /// accepts any number of entries whose key contains one - and a check that
+    /// treated the prefix as a value would refuse the second row of
+    /// `CREATE UNIQUE INDEX i ON t(a)` with two NULL `a`s, which SQLite allows.
+    #[test]
+    fn a_null_in_the_key_makes_the_entry_distinct() {
+        let index = an_index("i", 3, true, &[0]);
+        assert_eq!(
+            distinct_prefix(&index, &[OwnedDatum::Int(1), OwnedDatum::Int(9)]),
+            Some(vec![OwnedDatum::Int(1)]),
+            "one key column, so the prefix is one value and the rowid is not in it"
+        );
+        assert_eq!(
+            distinct_prefix(&index, &[OwnedDatum::Null, OwnedDatum::Int(9)]),
+            None,
+            "a NULL key is distinct from every other key, this one included"
+        );
+    }
+
+    /// A composite key takes as many values as the index has columns.
+    #[test]
+    fn the_prefix_is_as_wide_as_the_index() {
+        let index = an_index("i", 3, true, &[0, 1]);
+        assert_eq!(
+            distinct_prefix(
+                &index,
+                &[OwnedDatum::Int(1), OwnedDatum::Int(2), OwnedDatum::Int(9)]
+            ),
+            Some(vec![OwnedDatum::Int(1), OwnedDatum::Int(2)]),
+            "two key columns and a trailing rowid, so the rowid is not part of the key"
+        );
+        assert_eq!(
+            distinct_prefix(
+                &index,
+                &[OwnedDatum::Int(1), OwnedDatum::Null, OwnedDatum::Int(9)]
+            ),
+            None,
+            "a NULL anywhere in the key, not only in the first column"
+        );
+    }
+
+    /// An index with no tree of its own is not maintained.
+    ///
+    /// **A `WITHOUT ROWID` table's primary key is the table**, so its
+    /// `IndexInfo` names the table's own root. Writing entries for it would
+    /// write every row twice.
+    #[test]
+    fn an_index_that_is_the_table_is_not_maintained_separately() {
+        let mut table = a_table("t", &["a", "b"]);
+        table.indexes = vec![
+            an_index("by_a", 3, false, &[0]),
+            an_index("the_table_itself", table.root, true, &[0]),
+            an_index("no_tree", 0, false, &[1]),
+        ];
+        let kept: Vec<&[u8]> = maintained(&table)
+            .map(|(_, index)| index.name.as_slice())
+            .collect();
+        assert_eq!(
+            kept,
+            vec![b"by_a".as_slice()],
+            "only the index with a tree of its own that is not the table's"
+        );
+    }
+
+    /// The unique indexes are checked last-declared first, and each keeps the
+    /// position it was declared at.
+    ///
+    /// **`enumerate` before `rev`, and the order matters more than it looks.**
+    /// The reversal makes the constraint named on a collision the last-declared
+    /// index, which is what SQLite reports. The position is the number the
+    /// binder used when it bound the partial predicates, so reversing first
+    /// would renumber them and a partial index's predicate would be looked up
+    /// under another index's number.
+    #[test]
+    fn the_unique_indexes_are_reversed_but_keep_their_declared_positions() {
+        let mut table = a_table("t", &["a", "b", "c"]);
+        table.indexes = vec![
+            an_index("first_unique", 3, true, &[0]),
+            an_index("not_unique", 4, false, &[1]),
+            an_index("second_unique", 5, true, &[2]),
+        ];
+        let found: Vec<(usize, &[u8])> = unique_indexes(&table)
+            .map(|(at, index)| (at, index.name.as_slice()))
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                (2, b"second_unique".as_slice()),
+                (0, b"first_unique".as_slice())
+            ],
+            "the last-declared unique index is checked first, and each carries \
+             the position it was declared at rather than its position in this list"
+        );
+    }
+
+    /// A row's key is its key columns, in key order.
+    #[test]
+    fn a_row_s_key_is_its_key_columns() {
+        let layout = SourceLayout {
+            tree_key: 1,
+            slots: vec![Some(0), Some(1), Some(2)],
+            rowid: Some(0),
+            identity: vec![0],
+            types: vec![crate::expr::StaticType::Unknown; 3],
+            width: 3,
+            key_columns: vec![2, 0],
+        };
+        let row = [
+            OwnedDatum::Int(10),
+            OwnedDatum::Int(20),
+            OwnedDatum::Int(30),
+        ];
+        assert_eq!(
+            key_of(&layout, &row),
+            vec![OwnedDatum::Int(30), OwnedDatum::Int(10)],
+            "the key is in key order, which is not the row's order"
+        );
+    }
+}

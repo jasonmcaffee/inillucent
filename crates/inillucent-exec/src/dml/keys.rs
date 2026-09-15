@@ -167,3 +167,94 @@ pub fn module_keys_query(
         correlations: Vec::new(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dml::testing::a_table;
+
+    /// Returns a layout for a three-column rowid table.
+    ///
+    /// @param key_columns - which tree columns form the key
+    fn a_layout(key_columns: Vec<usize>) -> SourceLayout {
+        SourceLayout {
+            tree_key: 1,
+            slots: vec![Some(0), Some(1), Some(2)],
+            rowid: Some(0),
+            identity: vec![0],
+            types: vec![crate::expr::StaticType::Unknown; 3],
+            width: 3,
+            key_columns,
+        }
+    }
+
+    /// The keys query selects the key and carries the statement's own `WHERE`.
+    ///
+    /// **A statement's reads all happen before any of its writes (T3,
+    /// task-1962).** This is the read half: the `UPDATE` or `DELETE` is run as
+    /// a query that finds the keys of the rows it will change, and only then
+    /// are those rows written. A query that dropped the `WHERE` would change
+    /// every row in the table.
+    #[test]
+    fn the_keys_query_selects_the_key_under_the_statement_s_filter() {
+        let table = a_table("t", &["a", "b", "c"]);
+        let layout = a_layout(vec![0]);
+        let filter = BoundExpr::Compare {
+            op: inillucent_sql::ast::BinaryOp::Greater,
+            left: Box::new(BoundExpr::Rowid { source: 0 }),
+            right: Box::new(BoundExpr::Integer(4)),
+            affinity: Some(inillucent_value::Affinity::Integer),
+            collation: inillucent_value::Collation::Binary,
+        };
+        let query = keys_query(&table, 0, Some(&filter), None, None, &layout)
+            .expect("a one-column key compiles to a query");
+        assert_eq!(
+            query.columns.len(),
+            1,
+            "one key column, so the query reads one value per row"
+        );
+        assert!(
+            query.filter.is_some(),
+            "the statement's WHERE has to reach the query, or every row is changed"
+        );
+        assert_eq!(
+            query.sources.len(),
+            1,
+            "one FROM term: the table being written"
+        );
+    }
+
+    /// A `LIMIT` and an `OFFSET` travel with the keys query.
+    ///
+    /// `DELETE FROM t WHERE ... LIMIT 5` deletes five rows. Applying the limit
+    /// to the write rather than to the search would be the same answer only
+    /// while nothing filtered between the two.
+    #[test]
+    fn a_limit_and_an_offset_reach_the_query() {
+        let table = a_table("t", &["a", "b", "c"]);
+        let layout = a_layout(vec![0]);
+        let five = BoundExpr::Integer(5);
+        let two = BoundExpr::Integer(2);
+        let query = keys_query(&table, 0, None, Some(&five), Some(&two), &layout)
+            .expect("a limited delete compiles to a query");
+        assert!(
+            query.limit.is_some(),
+            "the LIMIT decides how many rows are found"
+        );
+        assert!(query.offset.is_some(), "and the OFFSET which ones");
+    }
+
+    /// A composite key reads every one of its columns.
+    #[test]
+    fn a_composite_key_reads_every_column_of_it() {
+        let table = a_table("t", &["a", "b", "c"]);
+        let layout = a_layout(vec![1, 2]);
+        let query = keys_query(&table, 0, None, None, None, &layout)
+            .expect("a two-column key compiles to a query");
+        assert_eq!(
+            query.columns.len(),
+            2,
+            "a WITHOUT ROWID table's key is every column of it, and a query              that read one of them would address the wrong row"
+        );
+    }
+}

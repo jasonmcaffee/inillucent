@@ -476,3 +476,58 @@ fn with_affinity(expr: Expr, affinity: Option<Affinity>) -> Expr {
         },
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A probe takes the indexed column's affinity, and takes none when the
+    /// index has none to give.
+    ///
+    /// **A key the index computes takes no affinity (T3, task-1962).** An index
+    /// on `lower(a)` stores whatever the expression returned, so converting the
+    /// probe would compare a converted value against an unconverted one - a
+    /// seek that lands somewhere else. SQLite applies none there either.
+    #[test]
+    fn a_probe_is_cast_only_when_the_column_has_an_affinity() {
+        let bare = with_affinity(Expr::Column(0), None);
+        assert!(
+            matches!(bare, Expr::Column(0)),
+            "no affinity means the expression is unchanged"
+        );
+        let cast = with_affinity(Expr::Column(0), Some(Affinity::Integer));
+        match cast {
+            Expr::Cast { affinity, operand } => {
+                assert_eq!(affinity, Affinity::Integer);
+                assert!(matches!(*operand, Expr::Column(0)));
+            }
+            other => panic!("an affinity should wrap the probe in a cast; it gave {other:?}"),
+        }
+    }
+
+    /// An unbounded span is the whole tree, and it says so with `None` rather
+    /// than with a sentinel key.
+    ///
+    /// **The inclusivity is carried per side.** It used to be one flag for
+    /// both, so `WHERE id > 495` returned `id >= 495` - one row too many, on
+    /// every range scan with an exclusive bound.
+    #[test]
+    fn a_default_span_is_the_whole_tree() {
+        let span = SpanBounds::default();
+        assert!(
+            span.low.is_none(),
+            "no lower bound is the start of the tree"
+        );
+        assert!(span.high.is_none(), "no upper bound is the end of it");
+        let exclusive_low = SpanBounds {
+            low: Some(vec![OwnedDatum::Int(495)]),
+            low_inclusive: false,
+            high: None,
+            high_inclusive: true,
+        };
+        assert!(
+            !exclusive_low.low_inclusive && exclusive_low.high_inclusive,
+            "the two sides carry their own inclusivity, which is what `id > 495` needs"
+        );
+    }
+}

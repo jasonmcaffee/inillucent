@@ -43,7 +43,6 @@ use crate::batch::Batch;
 // path it had, so no call site in the workspace moved.
 mod tree;
 pub use tree::*;
-// WIRED
 
 /// What a registered aggregate is: every row of the group in, one value out.
 pub type AggregateFn = dyn Fn(&[Vec<Value<'static>>]) -> DbResult<Value<'static>> + Send + Sync;

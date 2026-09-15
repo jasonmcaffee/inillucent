@@ -480,3 +480,72 @@ fn needs_before(
             })
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A constraint's own clause decides what an insert does about it.
+    ///
+    /// **A constraint carries its own algorithm (T3, task-1962).**
+    /// `a TEXT UNIQUE ON CONFLICT IGNORE` means every statement that collides
+    /// on `a` skips the row, with no `OR IGNORE` written anywhere.
+    #[test]
+    fn a_constraint_s_own_clause_decides_the_resolution() {
+        assert_eq!(
+            resolution_of(Some(ConflictAction::Ignore)),
+            Resolution::Skip
+        );
+        assert_eq!(
+            resolution_of(Some(ConflictAction::Replace)),
+            Resolution::Replace
+        );
+        assert_eq!(
+            resolution_of(Some(ConflictAction::Abort)),
+            Resolution::Raise
+        );
+        assert_eq!(
+            resolution_of(None),
+            Resolution::Raise,
+            "a constraint with no clause of its own reports the failure"
+        );
+    }
+
+    /// How much is undone is a different question from what the row does.
+    ///
+    /// `FAIL` keeps the rows already written by this statement, `ROLLBACK`
+    /// abandons the whole transaction, and everything else undoes the
+    /// statement. Folding these into the resolution would make
+    /// `INSERT OR FAIL` and `INSERT OR ABORT` the same statement, and they
+    /// differ by exactly the rows written before the one that failed.
+    #[test]
+    fn the_unwind_is_its_own_answer() {
+        assert_eq!(unwind_of(Some(ConflictAction::Fail)), Unwind::Nothing);
+        assert_eq!(
+            unwind_of(Some(ConflictAction::Rollback)),
+            Unwind::Transaction
+        );
+        assert_eq!(unwind_of(Some(ConflictAction::Abort)), Unwind::Statement);
+        assert_eq!(unwind_of(None), Unwind::Statement);
+    }
+
+    /// The four resolutions are four values.
+    ///
+    /// They are matched on rather than compared, so a derive that lost `Eq`
+    /// would be found by a compile error - but a variant that duplicated
+    /// another would not, and `Skip` doing what `Replace` does is a lost row.
+    #[test]
+    fn the_four_resolutions_are_distinct() {
+        let all = [
+            Resolution::Skip,
+            Resolution::Replace,
+            Resolution::Update,
+            Resolution::Raise,
+        ];
+        for (at, one) in all.iter().enumerate() {
+            for two in all.iter().skip(at + 1) {
+                assert_ne!(one, two, "{one:?} and {two:?} are the same value");
+            }
+        }
+    }
+}

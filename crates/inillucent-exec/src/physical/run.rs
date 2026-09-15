@@ -478,3 +478,27 @@ fn leaf_boundaries(
     boundaries.sort_by_key(|(key, _)| *key);
     Ok(boundaries)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each of SQL's four compound operators maps onto its own set operation.
+    ///
+    /// **Four values and not three (T3, task-1962).** `UNION` deduplicates and
+    /// `UNION ALL` does not, and collapsing them would silently drop every
+    /// duplicate row a `UNION ALL` was written to keep.
+    #[test]
+    fn the_four_compound_operators_are_four_set_operations() {
+        use inillucent_sql::ast::CompoundOp;
+        assert_eq!(kind_of(CompoundOp::Union), SetKind::Union);
+        assert_eq!(kind_of(CompoundOp::UnionAll), SetKind::UnionAll);
+        assert_eq!(kind_of(CompoundOp::Except), SetKind::Except);
+        assert_eq!(kind_of(CompoundOp::Intersect), SetKind::Intersect);
+        assert_ne!(
+            kind_of(CompoundOp::Union),
+            kind_of(CompoundOp::UnionAll),
+            "`UNION` removes duplicates and `UNION ALL` keeps them"
+        );
+    }
+}

@@ -1768,3 +1768,202 @@ fn limited_dml_refusal(limited: Option<(ast::Limited, Span)>) -> Option<ParseErr
         span,
     ))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::catalog_view::{
+        ColumnInfo, IndexColumnInfo, IndexInfo, IndexOrigin, TableInfo, TableKind,
+    };
+    use inillucent_value::Affinity;
+
+    /// Returns one plain column.
+    ///
+    /// @param name - the column's name
+    fn a_column(name: &str) -> ColumnInfo {
+        ColumnInfo {
+            name: name.as_bytes().to_vec(),
+            folded: name.to_ascii_lowercase().into_bytes(),
+            declared_type: b"INTEGER".to_vec(),
+            affinity: Affinity::Integer,
+            collation: b"binary".to_vec(),
+            not_null: false,
+            not_null_conflict: None,
+            primary_key_conflict: None,
+            default_sql: None,
+            primary_key_position: None,
+            hidden: false,
+            generated: false,
+            stored: false,
+            generated_sql: None,
+        }
+    }
+
+    /// Returns a rowid table with the columns named.
+    ///
+    /// @param name - the table's name
+    /// @param columns - the column names, in declaration order
+    fn a_table(name: &str, columns: &[&str]) -> TableInfo {
+        TableInfo {
+            name: name.as_bytes().to_vec(),
+            folded: name.to_ascii_lowercase().into_bytes(),
+            database: 0,
+            root: 2,
+            columns: columns.iter().map(|held| a_column(held)).collect(),
+            rowid_alias: None,
+            without_rowid: false,
+            strict: false,
+            autoincrement: false,
+            kind: TableKind::Table,
+            create_sql: Vec::new(),
+            indexes: Vec::new(),
+            view: None,
+            triggers: Vec::new(),
+            analysed_rows: None,
+            foreign_key_triggers: Vec::new(),
+            foreign_keys: Vec::new(),
+            checks: Vec::new(),
+            module: None,
+        }
+    }
+
+    /// Returns an index over the table columns named.
+    ///
+    /// @param name - the index's name
+    /// @param root - its own tree, or the table's for a `WITHOUT ROWID` key
+    /// @param columns - the table columns it keys on
+    fn an_index(name: &str, root: u32, columns: &[u16]) -> IndexInfo {
+        IndexInfo {
+            name: name.as_bytes().to_vec(),
+            folded: name.to_ascii_lowercase().into_bytes(),
+            root,
+            unique: true,
+            columns: columns
+                .iter()
+                .map(|held| IndexColumnInfo {
+                    column: Some(*held),
+                    expr_sql: None,
+                    collation: b"binary".to_vec(),
+                    descending: false,
+                    declared_descending: false,
+                })
+                .collect(),
+            partial_sql: None,
+            origin: IndexOrigin::Unique,
+            conflict: None,
+            prefix_rows: Vec::new(),
+            analysed_rows: None,
+            metric: None,
+        }
+    }
+
+    /// The three spellings of the rowid are the three SQLite accepts.
+    ///
+    /// **A fourth would be a column name a table could not have (T3,
+    /// task-1962).** `rowid`, `oid` and `_rowid_` all name the hidden key, and
+    /// a table that declares a column called any of them shadows it - so the
+    /// list decides which names a `SELECT rowid` can mean.
+    #[test]
+    fn the_rowid_has_three_names() {
+        assert!(is_rowid_name(b"rowid"));
+        assert!(is_rowid_name(b"oid"));
+        assert!(is_rowid_name(b"_rowid_"));
+        assert!(!is_rowid_name(b"row_id"));
+        assert!(!is_rowid_name(b"id"));
+        assert!(
+            !is_rowid_name(b"ROWID"),
+            "the argument is already folded, so an unfolded name is not one this asks about"
+        );
+    }
+
+    /// A unique violation names every column of the index, table-qualified.
+    ///
+    /// **The message is what an application matches on.** SQLite's wording is
+    /// `UNIQUE constraint failed: t.a, t.b`, and a library that switched on it
+    /// would stop recognising a collision if the columns were listed any other
+    /// way.
+    #[test]
+    fn a_unique_violation_names_every_column_of_the_index() {
+        let table = a_table("t", &["a", "b", "c"]);
+        let one = an_index("by_a", 3, &[0]);
+        assert_eq!(
+            unique_message(&table, &one),
+            "UNIQUE constraint failed: t.a"
+        );
+        let two = an_index("by_a_b", 4, &[0, 1]);
+        assert_eq!(
+            unique_message(&table, &two),
+            "UNIQUE constraint failed: t.a, t.b",
+            "both columns, in key order, separated the way the reference separates them"
+        );
+    }
+
+    /// A rowid collision names the aliasing column when there is one, and the
+    /// hidden `rowid` when there is not.
+    ///
+    /// The extended code differs with it: `SQLITE_CONSTRAINT_PRIMARYKEY` for an
+    /// `INTEGER PRIMARY KEY` and `SQLITE_CONSTRAINT_ROWID` for the hidden one.
+    #[test]
+    fn a_rowid_collision_names_the_column_that_aliases_it() {
+        let hidden = a_table("t", &["a"]);
+        assert_eq!(
+            rowid_message(&hidden),
+            (
+                codes::ROWID,
+                "UNIQUE constraint failed: t.rowid".to_string()
+            )
+        );
+        let mut aliased = a_table("t", &["id", "a"]);
+        aliased.rowid_alias = Some(0);
+        assert_eq!(
+            rowid_message(&aliased),
+            (
+                codes::PRIMARY_KEY,
+                "UNIQUE constraint failed: t.id".to_string()
+            )
+        );
+    }
+
+    /// A `WITHOUT ROWID` table has no rowid to name, so it names its key.
+    ///
+    /// **It used to answer `t.rowid`, naming a column the table does not
+    /// have.** Its own key *is* its primary key, held in the one index whose
+    /// root is the table's.
+    #[test]
+    fn a_without_rowid_collision_names_the_primary_key() {
+        let mut table = a_table("t", &["a", "b"]);
+        table.without_rowid = true;
+        table.indexes = vec![an_index("sqlite_autoindex_t_1", table.root, &[0, 1])];
+        assert_eq!(
+            rowid_message(&table),
+            (
+                codes::PRIMARY_KEY,
+                "UNIQUE constraint failed: t.a, t.b".to_string()
+            )
+        );
+    }
+
+    /// A constraint's own `ON CONFLICT REPLACE` makes a statement able to
+    /// replace, with no `OR REPLACE` written anywhere.
+    #[test]
+    fn a_constraint_can_make_a_plain_insert_replace() {
+        let plain = a_table("t", &["a"]);
+        assert!(!can_replace(&plain, None));
+        assert!(can_replace(&plain, Some(ConflictAction::Replace)));
+
+        let mut on_the_index = a_table("t", &["a"]);
+        let mut index = an_index("by_a", 3, &[0]);
+        index.conflict = Some(ConflictAction::Replace);
+        on_the_index.indexes = vec![index];
+        assert!(
+            can_replace(&on_the_index, None),
+            "`a UNIQUE ON CONFLICT REPLACE` replaces without the statement saying so"
+        );
+
+        let mut on_the_column = a_table("t", &["a"]);
+        if let Some(column) = on_the_column.columns.first_mut() {
+            column.not_null_conflict = Some(ConflictAction::Replace);
+        }
+        assert!(can_replace(&on_the_column, None));
+    }
+}

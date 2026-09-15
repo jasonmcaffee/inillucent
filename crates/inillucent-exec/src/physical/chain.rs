@@ -1567,3 +1567,51 @@ fn build_source<'t>(
         )),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A view over a space carries the stages it was given and nothing else.
+    ///
+    /// **The space is built once per prepare and viewed per execution (T3,
+    /// task-1962).** The layouts, the static types and the walk's order are the
+    /// prepare's answer and do not change between executions; what changes is
+    /// which stages are in play and where a correlated block's answer sits.
+    /// A view that carried the catalog would make the prepared statement
+    /// borrow it for as long as it lived.
+    #[test]
+    fn a_view_carries_the_stages_and_not_the_catalog() {
+        let held = HeldSpace {
+            layouts: Vec::new(),
+            types: vec![StaticType::Unknown; 2],
+            order: vec![0],
+        };
+        let space = held.view(&[]);
+        assert!(space.stages.is_empty());
+        assert_eq!(space.types.len(), 2);
+        assert_eq!(space.order, &[0]);
+        assert!(
+            space.catalog.is_none(),
+            "a view holds no catalog, so a prepared statement does not borrow one"
+        );
+        assert!(space.correlations.is_empty());
+    }
+
+    /// A view can be told where a correlated block's answer sits.
+    #[test]
+    fn a_view_can_carry_the_correlations() {
+        let held = HeldSpace {
+            layouts: Vec::new(),
+            types: Vec::new(),
+            order: Vec::new(),
+        };
+        let space = held.view_with(&[], &[(3, 7)]);
+        assert_eq!(
+            space.correlations,
+            &[(3, 7)],
+            "block 3's answer is at column 7, which is the only thing this \
+             view has that the plain one does not"
+        );
+    }
+}

@@ -32,3 +32,33 @@ impl ModuleIntegrity {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A module that found nothing wrong and a module that does not exist are
+    /// different answers.
+    ///
+    /// **This was `Option<Option<String>>` (T3, task-1962, and A10 before it).**
+    /// The outer and the inner `None` mean different things - no such table,
+    /// and a table that checked itself and found nothing - and one place four
+    /// hundred lines from the three that built it was where the difference was
+    /// decided.
+    #[test]
+    fn a_clean_module_is_not_a_missing_one() {
+        assert_eq!(ModuleIntegrity::of(None), ModuleIntegrity::Clean);
+        assert_ne!(ModuleIntegrity::of(None), ModuleIntegrity::NoSuchModule);
+    }
+
+    /// A report carries what the module said, unchanged.
+    #[test]
+    fn a_report_carries_the_module_s_own_words() {
+        let found = ModuleIntegrity::of(Some("row 4 has no entry".to_string()));
+        assert_eq!(
+            found,
+            ModuleIntegrity::Report("row 4 has no entry".to_string()),
+            "the integrity check prints this to a person, so it is not reworded"
+        );
+    }
+}

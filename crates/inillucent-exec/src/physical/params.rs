@@ -285,9 +285,19 @@ impl Params {
     ///
     /// An unbound parameter is NULL, which is what SQLite does.
     ///
+    /// **Zero is NULL rather than the first parameter (task-1962, T3).** The
+    /// subtraction below saturates, so `get(0)` used to read `?1`'s value - the
+    /// wrong parameter's, silently. The binder numbers from one and
+    /// [`Params::try_set`] refuses zero, so nothing reaches this today; the
+    /// guard is what keeps it an answer rather than a neighbour's value if
+    /// something ever does.
+    ///
     /// @param index - the one-based parameter number
     pub fn get(&self, index: u32) -> OwnedDatum {
         self.reads.set(self.reads.get().saturating_add(1));
+        if index == 0 {
+            return OwnedDatum::Null;
+        }
         self.held()
             .get(index.saturating_sub(1) as usize)
             .cloned()
@@ -448,5 +458,92 @@ impl Params {
             .lock()
             .map(|held| held.is_empty())
             .unwrap_or(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An unbound parameter reads as NULL rather than as an error.
+    ///
+    /// **SQLite's own rule, and the reason it is not a refusal (T3,
+    /// task-1962).** `SELECT ?1` with nothing bound answers NULL, and a
+    /// statement prepared before its parameters are bound is the ordinary case
+    /// rather than a mistake.
+    #[test]
+    fn an_unbound_parameter_reads_as_null() {
+        let params = Params::new();
+        assert_eq!(params.get(1), OwnedDatum::Null);
+        assert_eq!(params.get(9), OwnedDatum::Null);
+    }
+
+    /// Parameters are numbered from one, and `?0` does not exist.
+    #[test]
+    fn the_first_parameter_is_one() {
+        let params = Params::from_values(vec![OwnedDatum::Int(11), OwnedDatum::Int(22)]);
+        assert_eq!(params.get(1), OwnedDatum::Int(11));
+        assert_eq!(params.get(2), OwnedDatum::Int(22));
+        assert_eq!(
+            params.get(0),
+            OwnedDatum::Null,
+            "there is no `?0`, and asking for one is not a panic"
+        );
+    }
+
+    /// Every read is counted, and handing over the cell is not a read.
+    ///
+    /// **The counter is what makes a prepared statement safe to re-run.** A
+    /// `LIMIT ?1`, a projected `?2` or a residual filter over a parameter is
+    /// baked into the operator chain when the chain is built, so a chain may
+    /// only be re-run against new values if nothing except its source looked at
+    /// the old ones. Counting the reads asks the builder rather than forming a
+    /// second opinion about which constructs can carry a parameter.
+    #[test]
+    fn every_read_is_counted() {
+        let params = Params::from_values(vec![OwnedDatum::Int(1)]);
+        assert_eq!(params.reads(), 0, "nothing has read one yet");
+        let _ = params.get(1);
+        let _ = params.get(1);
+        assert_eq!(params.reads(), 2);
+        let _ = params.bindings();
+        assert_eq!(
+            params.reads(),
+            2,
+            "handing the cell to a compiled expression is the opposite of \
+             reading the value now, so it is not counted"
+        );
+    }
+
+    /// A binding past what the statement declared is refused.
+    ///
+    /// A caller binding `?3` on a statement with two parameters has made a
+    /// mistake, and accepting it silently would leave the value somewhere
+    /// nothing reads.
+    #[test]
+    fn a_binding_past_the_declaration_is_refused() {
+        let mut params = Params::new();
+        assert!(params.try_set(1, OwnedDatum::Int(1)).is_ok());
+        assert!(
+            params.try_set(0, OwnedDatum::Int(1)).is_err(),
+            "there is no `?0` to bind"
+        );
+        params.expect(2);
+        assert_eq!(params.declared(), Some(2));
+        assert!(params.try_set(2, OwnedDatum::Int(2)).is_ok());
+        assert!(
+            params.try_set(3, OwnedDatum::Int(3)).is_err(),
+            "the statement declared two parameters"
+        );
+    }
+
+    /// Clearing unbinds every parameter, which is `sqlite3_clear_bindings`.
+    #[test]
+    fn clearing_unbinds_everything() {
+        let mut params = Params::from_values(vec![OwnedDatum::Int(1), OwnedDatum::Int(2)]);
+        assert_eq!(params.get(2), OwnedDatum::Int(2));
+        params.clear();
+        assert_eq!(params.get(1), OwnedDatum::Null);
+        assert_eq!(params.get(2), OwnedDatum::Null);
     }
 }

@@ -83,7 +83,6 @@ pub(crate) use target::{
 pub use target::{view_layout, Changes, RowSpace, Trees, WriteTarget};
 pub(crate) use update::{difference, same_key, Difference};
 pub use update::{update, update_at, update_at_cached, update_cached, UpdateSetup};
-// WIRED
 
 /// One row in a tree's own column order.
 ///
@@ -98,3 +97,103 @@ pub type Row = Vec<OwnedDatum>;
 /// `RefCell` because the compiled statement is shared behind an `Rc` and this is
 /// the one part of it that fills in later.
 pub type UpdateCache = std::cell::RefCell<Option<std::rc::Rc<UpdateSetup>>>;
+
+/// The catalog rows the write path's own tests are written against.
+///
+/// Invariant: **a fixture here describes a table and nothing else.** It builds
+/// a `TableInfo` and an `IndexInfo` with every field at the value a plain
+/// `CREATE TABLE` would give it, so a test that cares about one field says so
+/// by setting that one field. Nothing here reads a file or a catalog.
+#[cfg(test)]
+pub(crate) mod testing {
+    use inillucent_sql::catalog_view::{
+        ColumnInfo, IndexColumnInfo, IndexInfo, IndexOrigin, TableInfo, TableKind,
+    };
+    use inillucent_value::Affinity;
+
+    /// Returns one column, declared with a type and nothing else.
+    ///
+    /// @param name - the column's name
+    /// @param affinity - the affinity its declared type gives it
+    pub(crate) fn a_column(name: &str, affinity: Affinity) -> ColumnInfo {
+        ColumnInfo {
+            name: name.as_bytes().to_vec(),
+            folded: name.to_ascii_lowercase().into_bytes(),
+            declared_type: b"INTEGER".to_vec(),
+            affinity,
+            collation: b"binary".to_vec(),
+            not_null: false,
+            not_null_conflict: None,
+            primary_key_conflict: None,
+            default_sql: None,
+            primary_key_position: None,
+            hidden: false,
+            generated: false,
+            stored: false,
+            generated_sql: None,
+        }
+    }
+
+    /// Returns a rowid table with the columns named, each with integer
+    /// affinity.
+    ///
+    /// @param name - the table's name
+    /// @param columns - the column names, in declaration order
+    pub(crate) fn a_table(name: &str, columns: &[&str]) -> TableInfo {
+        TableInfo {
+            name: name.as_bytes().to_vec(),
+            folded: name.to_ascii_lowercase().into_bytes(),
+            database: 0,
+            root: 2,
+            columns: columns
+                .iter()
+                .map(|held| a_column(held, Affinity::Integer))
+                .collect(),
+            rowid_alias: None,
+            without_rowid: false,
+            strict: false,
+            autoincrement: false,
+            kind: TableKind::Table,
+            create_sql: Vec::new(),
+            indexes: Vec::new(),
+            view: None,
+            triggers: Vec::new(),
+            analysed_rows: None,
+            foreign_key_triggers: Vec::new(),
+            foreign_keys: Vec::new(),
+            checks: Vec::new(),
+            module: None,
+        }
+    }
+
+    /// Returns an index over the named columns of a table.
+    ///
+    /// @param name - the index's name
+    /// @param root - its tree, or zero for one with no tree of its own
+    /// @param unique - whether it enforces uniqueness
+    /// @param columns - which table columns it keys on, in key order
+    pub(crate) fn an_index(name: &str, root: u32, unique: bool, columns: &[u16]) -> IndexInfo {
+        IndexInfo {
+            name: name.as_bytes().to_vec(),
+            folded: name.to_ascii_lowercase().into_bytes(),
+            root,
+            unique,
+            columns: columns
+                .iter()
+                .map(|held| IndexColumnInfo {
+                    column: Some(*held),
+                    expr_sql: None,
+                    collation: b"binary".to_vec(),
+                    descending: false,
+                    declared_descending: false,
+                })
+                .collect(),
+            partial_sql: None,
+            origin: IndexOrigin::Created,
+            conflict: None,
+            prefix_rows: Vec::new(),
+            analysed_rows: None,
+            metric: None,
+        }
+    }
+}

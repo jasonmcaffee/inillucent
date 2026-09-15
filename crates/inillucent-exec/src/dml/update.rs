@@ -678,3 +678,86 @@ pub(crate) fn same_key(layout: &SourceLayout, before: &[OwnedDatum], after: &[Ow
         .iter()
         .all(|column| before.get(*column) == after.get(*column))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two identical images differ in nothing.
+    ///
+    /// **Three answers rather than two (T3, task-1962).** This was
+    /// `Option<usize>`, which folded "nothing changed" and "several columns
+    /// changed" into the same `None` - so an `UPDATE` that changed nothing was
+    /// written the slowest way there is. The three cases are asserted here
+    /// because the caller does three different things with them.
+    #[test]
+    fn an_unchanged_row_differs_in_nothing() {
+        let before = [OwnedDatum::Int(1), OwnedDatum::Text(b"a".to_vec())];
+        let after = [OwnedDatum::Int(1), OwnedDatum::Text(b"a".to_vec())];
+        assert_eq!(difference(&before, &after), Difference::Nothing);
+    }
+
+    /// One changed column is named by its position.
+    #[test]
+    fn one_changed_column_is_named_by_position() {
+        let before = [OwnedDatum::Int(1), OwnedDatum::Text(b"a".to_vec())];
+        let after = [OwnedDatum::Int(1), OwnedDatum::Text(b"b".to_vec())];
+        assert_eq!(difference(&before, &after), Difference::One(1));
+    }
+
+    /// Two changed columns, or two different widths, are `Several`.
+    #[test]
+    fn more_than_one_change_is_several() {
+        let before = [OwnedDatum::Int(1), OwnedDatum::Int(2)];
+        let after = [OwnedDatum::Int(3), OwnedDatum::Int(4)];
+        assert_eq!(difference(&before, &after), Difference::Several);
+        let shorter = [OwnedDatum::Int(1)];
+        assert_eq!(
+            difference(&shorter, &after),
+            Difference::Several,
+            "two images of different widths cannot differ in one column"
+        );
+    }
+
+    /// A NULL written over a NULL has changed nothing.
+    ///
+    /// **The images are compared as values, not as SQL.** An `UPDATE` that
+    /// writes NULL over NULL would otherwise cost a tree write for no reason.
+    /// SQL's `NULL = NULL` being unknown is a question about a predicate; this
+    /// is a question about bytes.
+    #[test]
+    fn a_null_written_over_a_null_is_not_a_change() {
+        let before = [OwnedDatum::Null, OwnedDatum::Int(1)];
+        let after = [OwnedDatum::Null, OwnedDatum::Int(1)];
+        assert_eq!(difference(&before, &after), Difference::Nothing);
+    }
+
+    /// The key is the layout's key columns and nothing else.
+    ///
+    /// An `UPDATE` that leaves the key alone rewrites the row in place; one
+    /// that moves it has to delete and reinsert, and every index entry with it.
+    /// Asking about the wrong columns picks the wrong one of those.
+    #[test]
+    fn the_key_is_the_layout_s_key_columns() {
+        let layout = SourceLayout {
+            tree_key: 1,
+            slots: vec![Some(0), Some(1), Some(2)],
+            rowid: Some(0),
+            identity: vec![0],
+            types: vec![crate::expr::StaticType::Unknown; 3],
+            width: 3,
+            key_columns: vec![0],
+        };
+        let before = [OwnedDatum::Int(1), OwnedDatum::Int(2), OwnedDatum::Int(3)];
+        let same_key_different_row = [OwnedDatum::Int(1), OwnedDatum::Int(9), OwnedDatum::Int(9)];
+        let moved = [OwnedDatum::Int(2), OwnedDatum::Int(2), OwnedDatum::Int(3)];
+        assert!(
+            same_key(&layout, &before, &same_key_different_row),
+            "column 0 is the key and it did not move"
+        );
+        assert!(
+            !same_key(&layout, &before, &moved),
+            "column 0 is the key and it moved"
+        );
+    }
+}

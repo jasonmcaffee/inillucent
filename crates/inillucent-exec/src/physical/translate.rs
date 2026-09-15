@@ -1205,3 +1205,92 @@ fn name_of(expr: &BoundExpr) -> &'static str {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two expressions are the same expression when every part of them is.
+    ///
+    /// **What decides whether a sort can be skipped (T3, task-1962).** The
+    /// chain builder asks whether the `ORDER BY` it was given is the order the
+    /// scan already produces; answering yes for two different expressions drops
+    /// a sort the answer needed, and answering no for two identical ones pays
+    /// for one it did not.
+    #[test]
+    fn the_same_expression_is_the_same_expression() {
+        assert!(same_expr(&Expr::Column(3), &Expr::Column(3)));
+        assert!(!same_expr(&Expr::Column(3), &Expr::Column(4)));
+        assert!(same_expr(
+            &Expr::Literal(OwnedDatum::Int(7)),
+            &Expr::Literal(OwnedDatum::Int(7))
+        ));
+        assert!(!same_expr(
+            &Expr::Literal(OwnedDatum::Int(7)),
+            &Expr::Literal(OwnedDatum::Int(8))
+        ));
+        assert!(
+            !same_expr(&Expr::Column(0), &Expr::Literal(OwnedDatum::Int(0))),
+            "a column and a literal are never the same expression, whatever the column holds"
+        );
+    }
+
+    /// An arithmetic node is the same only when the operator and both sides
+    /// are.
+    #[test]
+    fn an_operator_is_part_of_the_expression() {
+        let add = Expr::Arith(
+            ArithOp::Add,
+            Box::new(Expr::Column(0)),
+            Box::new(Expr::Literal(OwnedDatum::Int(1))),
+        );
+        let same = Expr::Arith(
+            ArithOp::Add,
+            Box::new(Expr::Column(0)),
+            Box::new(Expr::Literal(OwnedDatum::Int(1))),
+        );
+        let subtract = Expr::Arith(
+            ArithOp::Subtract,
+            Box::new(Expr::Column(0)),
+            Box::new(Expr::Literal(OwnedDatum::Int(1))),
+        );
+        assert!(same_expr(&add, &same));
+        assert!(!same_expr(&add, &subtract));
+    }
+
+    /// A refusal names the construct it will not translate.
+    ///
+    /// **A refusal a reader cannot act on costs a debugging session**, and the
+    /// first run of the Phase 2 gate spent one on exactly this line: every
+    /// unhandled node answered "an expression".
+    #[test]
+    fn a_refusal_names_the_kind_of_expression() {
+        assert_eq!(name_of(&BoundExpr::Null), "NULL");
+        assert_eq!(name_of(&BoundExpr::Integer(1)), "an integer literal");
+        assert_eq!(name_of(&BoundExpr::Parameter(1)), "a parameter");
+        assert_eq!(
+            name_of(&BoundExpr::Not(Box::new(BoundExpr::Null))),
+            "NOT",
+            "an operator names itself rather than its category"
+        );
+    }
+
+    /// The trim list is one column reader per column, in order.
+    #[test]
+    fn trimming_reads_each_column_once() {
+        let types = vec![StaticType::Unknown; 3];
+        let readers = trim(2, &types).expect("two of three columns compile");
+        assert_eq!(
+            readers.len(),
+            2,
+            "a trim to two columns reads two, which is what drops the \
+             columns a join carried and the caller did not select"
+        );
+        assert!(
+            trim(0, &types)
+                .expect("trimming to nothing compiles")
+                .is_empty(),
+            "a statement that selects nothing reads nothing"
+        );
+    }
+}

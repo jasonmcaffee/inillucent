@@ -698,3 +698,47 @@ pub(crate) struct Upsert<'a> {
     /// Which `ON CONFLICT` arm matched, when the statement has several.
     pub(crate) arm: Option<usize>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::dml::testing::a_table;
+
+    /// A view's row identifies no stored row.
+    ///
+    /// **Which is the whole reason an `INSTEAD OF` trigger exists (T3,
+    /// task-1962).** A view has no tree and no rowid, so a write to one has
+    /// nothing to address; the layout says so with an empty `identity` rather
+    /// than with a rowid that names nothing.
+    #[test]
+    fn a_view_s_layout_identifies_no_row() {
+        let view = a_table("v", &["a", "b", "c"]);
+        let layout = view_layout(&view);
+        assert_eq!(layout.width, 3);
+        assert_eq!(layout.slots, vec![Some(0), Some(1), Some(2)]);
+        assert_eq!(layout.rowid, None, "a view has no rowid");
+        assert!(
+            layout.identity.is_empty(),
+            "and no stored row to identify, which is what an INSTEAD OF trigger is for"
+        );
+        assert!(
+            layout.key_columns.is_empty(),
+            "so there is no key to seek it by either"
+        );
+    }
+
+    /// A missing tree is reported by the table's own name.
+    ///
+    /// The message reaches an application, and "no tree imported" without the
+    /// name is a message nobody can act on.
+    #[test]
+    fn a_missing_tree_names_the_table() {
+        let table = a_table("orders", &["id"]);
+        let error = missing_tree(&table);
+        assert!(
+            error.detail().is_some_and(|said| said.contains("orders")),
+            "the refusal should name the table; it said {:?}",
+            error.detail()
+        );
+    }
+}

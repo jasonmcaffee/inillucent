@@ -756,3 +756,52 @@ pub(crate) fn declarations_are_met(
     }
     Ok(true)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use inillucent_base::error::{misuse, Unwind};
+
+    /// A trigger's `INSERT OR ROLLBACK` decides how far the outer statement
+    /// unwinds.
+    ///
+    /// **The clause travels with the error rather than with the statement
+    /// (T3, task-1962).** A failure inside a trigger body is reported to the
+    /// statement that fired it, and how much that statement undoes is what the
+    /// *inner* statement's clause said: `INSERT OR ROLLBACK` in a trigger
+    /// abandons the transaction, not just the row.
+    #[test]
+    fn the_inner_clause_decides_the_outer_unwind() {
+        let refused = || misuse("UNIQUE constraint failed: t.a");
+        assert_eq!(
+            outer_unwind(refused(), Some(ConflictAction::Rollback)).unwind(),
+            Unwind::Transaction
+        );
+        assert_eq!(
+            outer_unwind(refused(), Some(ConflictAction::Fail)).unwind(),
+            Unwind::Nothing,
+            "`OR FAIL` keeps the rows already written by the statement"
+        );
+        assert_eq!(
+            outer_unwind(refused(), Some(ConflictAction::Abort)).unwind(),
+            Unwind::Statement
+        );
+    }
+
+    /// A statement with no clause of its own leaves the error exactly as it
+    /// was.
+    ///
+    /// The error may already carry an unwind a deeper statement set, and
+    /// overwriting it with the default would turn a `ROLLBACK` two triggers
+    /// down into an ordinary statement abort.
+    #[test]
+    fn no_clause_changes_nothing() {
+        let carried =
+            misuse("UNIQUE constraint failed: t.a").with_outer_unwind(Unwind::Transaction);
+        assert_eq!(
+            outer_unwind(carried, None).unwind(),
+            Unwind::Transaction,
+            "the clause a deeper statement set survives a caller that has none"
+        );
+    }
+}

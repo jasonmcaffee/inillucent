@@ -1127,3 +1127,80 @@ pub(crate) fn refuse_unhandled(select: &BoundSelect) -> DbResult<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every access kind describes itself, and no two describe themselves the
+    /// same way.
+    ///
+    /// **`EXPLAIN QUERY PLAN` is read by a person deciding whether the planner
+    /// did what they asked (T3, task-1962).** Two kinds sharing a description
+    /// would make a skip scan and a full scan indistinguishable in the one
+    /// place that exists to tell them apart.
+    #[test]
+    fn every_access_kind_describes_itself_distinctly() {
+        let kinds = [
+            AccessKind::Full,
+            AccessKind::Vector,
+            AccessKind::Span,
+            AccessKind::Reverse,
+            AccessKind::Skip,
+            AccessKind::Point,
+            AccessKind::SeekUnion,
+            AccessKind::RangeUnion,
+            AccessKind::Nested,
+            AccessKind::Materialised,
+        ];
+        let mut seen: Vec<&str> = kinds.iter().map(|kind| kind.describe()).collect();
+        seen.sort_unstable();
+        let mut unique = seen.clone();
+        unique.dedup();
+        assert_eq!(
+            seen, unique,
+            "two access kinds describe themselves the same way: {seen:?}"
+        );
+        assert_eq!(AccessKind::Skip.describe(), "SKIP SCAN");
+        assert_eq!(AccessKind::Full.describe(), "SCAN");
+        assert_eq!(AccessKind::Materialised.describe(), "SCAN SUBQUERY");
+    }
+
+    /// A refusal says what the pass will not run, and says it the same way
+    /// twice.
+    ///
+    /// **The message and the marker are written in one place**, so a caller
+    /// asking `DbError::unsupported()` and a caller reading the message cannot
+    /// be told different things. They were told different things once: the
+    /// wording lived in `format!` and the marker was attached separately.
+    #[test]
+    fn a_refusal_names_the_construct_in_both_places() {
+        let refused: DbResult<()> = unsupported("a window frame this wide");
+        let error = refused.expect_err("`unsupported` refuses");
+        assert_eq!(
+            error.unsupported(),
+            Some("a window frame this wide"),
+            "the marker carries the construct, for a caller that branches on it"
+        );
+        assert!(
+            error.message().contains("a window frame this wide"),
+            "and the message carries it too, for a caller that reads it; it said {:?}",
+            error.message()
+        );
+    }
+
+    /// A shape with no operators is an empty description, not a missing one.
+    #[test]
+    fn a_shape_carries_its_names_and_its_operators() {
+        let shape = Shape {
+            names: vec![b"a".to_vec(), b"b".to_vec()],
+            operators: vec!["Scan(t)".to_string(), "Filter(a > 1)".to_string()],
+        };
+        assert_eq!(shape.names.len(), 2);
+        assert_eq!(
+            shape.operators.first().map(String::as_str),
+            Some("Scan(t)"),
+            "the source is first, which is the order EXPLAIN prints"
+        );
+    }
+}

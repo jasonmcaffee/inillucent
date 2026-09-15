@@ -53,7 +53,6 @@ pub use hash::*;
 pub use loops::*;
 pub use store::*;
 pub(crate) use store::{encode_row_key, materialise};
-// WIRED
 
 /// How many join-key columns fit on the stack.
 ///

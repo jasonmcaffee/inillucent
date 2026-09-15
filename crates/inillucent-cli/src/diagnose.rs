@@ -1045,3 +1045,120 @@ pub fn filectrl(shell: &mut Shell, arguments: &[&str]) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A table's content query ends in a semicolon, because the hash covers
+    /// the statement text.
+    ///
+    /// **The trailing semicolon is part of the digest, not punctuation (T3,
+    /// task-1962).** The reference prefixes each statement's rows with
+    /// `S<n>:<sql>`, where `<sql>` is the statement as prepared - and the text
+    /// it prepared ends with the terminator. Dropping it changes the digest,
+    /// and `.sha3sum` exists to be compared against the reference's.
+    #[test]
+    fn every_content_query_ends_in_a_semicolon() {
+        for table in ["sqlite_schema", "sqlite_sequence", "sqlite_stat1", "orders"] {
+            let sql = content_query(table);
+            assert!(
+                sql.ends_with(';'),
+                "`{table}`'s query is hashed as text and the reference's ends                  in a semicolon; this one is {sql:?}"
+            );
+        }
+    }
+
+    /// An ordinary table is read `NOT INDEXED`, and its name is quoted.
+    ///
+    /// **`NOT INDEXED` is what makes the digest a fact about the rows.** A
+    /// query the planner answered from a covering index would hash the index's
+    /// column order rather than the table's.
+    #[test]
+    fn an_ordinary_table_is_read_not_indexed_and_quoted() {
+        assert_eq!(
+            content_query("orders"),
+            "SELECT * FROM \"orders\" NOT INDEXED;"
+        );
+        assert_eq!(
+            content_query("a\"b"),
+            "SELECT * FROM \"a\"\"b\" NOT INDEXED;",
+            "a quote in a table name is doubled, or the statement is a different one"
+        );
+    }
+
+    /// The three catalog tables are read by named column, in a stated order.
+    ///
+    /// `SELECT *` on them would hash whatever column order this build happens
+    /// to store, which is the one thing a digest compared against another
+    /// engine cannot depend on.
+    #[test]
+    fn the_catalog_tables_name_their_columns_and_their_order() {
+        assert_eq!(
+            content_query("sqlite_schema"),
+            "SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY name;"
+        );
+        assert_eq!(
+            content_query("sqlite_sequence"),
+            "SELECT name,seq FROM sqlite_sequence ORDER BY name;"
+        );
+        assert_eq!(
+            content_query("sqlite_stat1"),
+            "SELECT tbl,idx,stat FROM sqlite_stat1 ORDER BY tbl,idx;"
+        );
+    }
+
+    /// Every value kind encodes under its own tag, and a length precedes the
+    /// bytes that have one.
+    ///
+    /// **The tag is what keeps two different values from hashing alike.**
+    /// Without the length, the text `"ab"` followed by `"c"` and the text `"a"`
+    /// followed by `"bc"` would feed the sponge the same bytes.
+    #[test]
+    fn each_value_kind_encodes_under_its_own_tag() {
+        assert_eq!(encoded(&Value::Null), b"N".to_vec());
+        assert_eq!(
+            encoded(&Value::Integer(1)).first().copied(),
+            Some(b'I'),
+            "an integer is tagged, so 1 does not hash as the text \"1\""
+        );
+        assert_eq!(
+            encoded(&Value::Integer(1)).len(),
+            9,
+            "the tag and eight bytes"
+        );
+        assert_eq!(encoded(&Value::Real(1.0)).len(), 9);
+        assert_ne!(
+            encoded(&Value::Integer(1)),
+            encoded(&Value::Real(1.0)),
+            "an integer and a real of the same value are different values"
+        );
+    }
+
+    /// A digest renders as lowercase hex, two characters per byte.
+    #[test]
+    fn a_digest_renders_as_lowercase_hex() {
+        assert_eq!(hex(&[0x00, 0x0f, 0xa0, 0xff]), "000fa0ff");
+        assert_eq!(hex(&[]), "");
+        assert_eq!(
+            hex(&[0xde, 0xad]).len(),
+            4,
+            "two characters a byte, with the leading zero kept"
+        );
+    }
+
+    /// A statistics line pads the label to the reference's column.
+    ///
+    /// The output of `.stats` is a file people diff against SQLite's, so the
+    /// column the value starts in is part of the answer.
+    #[test]
+    fn a_statistics_line_pads_the_label() {
+        let rendered = line("Bytes received by read():", "4096");
+        assert!(rendered.starts_with("Bytes received by read():"));
+        assert_eq!(
+            rendered.find("4096"),
+            Some(37),
+            "the value starts one space past a 36-wide label, which is where              the reference puts it"
+        );
+    }
+}

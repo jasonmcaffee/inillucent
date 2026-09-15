@@ -457,9 +457,16 @@ impl ForcePlan {
                 "hashaggregate" | "hashgroup" => forced.hash_group = true,
                 "noskipscan" | "noskip" => forced.no_skip_scan = true,
                 other => {
-                    return Err(misuse(format!(
-                        "force_plan does not know the operator '{other}'"
-                    )))
+                    // **The sentence is the message as well as the detail
+                    // (task-1962, T3).** `misuse` attaches what it is given as
+                    // detail alone, so `PRAGMA inillucent.force_plan =
+                    // 'tablescn'` reported `bad parameter or other API misuse`
+                    // to the person who had just mistyped the operator - the
+                    // one thing they needed to see was the only thing not
+                    // there. `physical::stages::unsupported` was fixed the same
+                    // way and for the same reason.
+                    let said = format!("force_plan does not know the operator '{other}'");
+                    return Err(misuse(said.clone()).with_message(said));
                 }
             }
         }
@@ -506,5 +513,125 @@ impl ForcePlan {
                 },
             ),
         ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every lever the pragma names is set, and only that lever.
+    ///
+    /// **A misspelled lever is refused rather than ignored (T3, task-1962).**
+    /// The levers exist so a measurement can ask "is the answer the same with
+    /// this operator off"; a run that silently switched nothing off would
+    /// answer that question with the default plan and report it as the forced
+    /// one.
+    #[test]
+    fn a_forced_plan_sets_the_levers_it_names() {
+        let forced = ForcePlan::parse("scan,hashgroup").expect("two known levers parse");
+        assert!(forced.table_scan, "scan was named");
+        assert!(forced.hash_group, "hashgroup was named");
+        assert!(!forced.full_sort, "sort was not named");
+        assert!(!forced.hash_distinct, "distinct was not named");
+        assert!(!forced.no_skip_scan, "noskip was not named");
+    }
+
+    /// The spellings the pragma accepts are the spellings it documents.
+    #[test]
+    fn both_spellings_of_each_lever_parse() {
+        for (one, two) in [
+            ("scan", "tablescan"),
+            ("distinct", "hashdistinct"),
+            ("hashaggregate", "hashgroup"),
+            ("noskipscan", "noskip"),
+        ] {
+            let left = ForcePlan::parse(one).expect("the first spelling parses");
+            let right = ForcePlan::parse(two).expect("the second spelling parses");
+            assert_eq!(
+                (
+                    left.table_scan,
+                    left.full_sort,
+                    left.hash_distinct,
+                    left.hash_group,
+                    left.no_skip_scan
+                ),
+                (
+                    right.table_scan,
+                    right.full_sort,
+                    right.hash_distinct,
+                    right.hash_group,
+                    right.no_skip_scan
+                ),
+                "`{one}` and `{two}` name the same lever and should set the same one"
+            );
+        }
+    }
+
+    /// An empty string forces nothing, which is how a pragma is cleared, and
+    /// whitespace around a name is not part of it.
+    #[test]
+    fn an_empty_force_plan_forces_nothing() {
+        let forced = ForcePlan::parse("").expect("the empty string parses");
+        assert!(!forced.table_scan);
+        assert!(!forced.full_sort);
+        assert!(!forced.hash_distinct);
+        assert!(!forced.hash_group);
+        assert!(!forced.no_skip_scan);
+        let spaced = ForcePlan::parse("  scan ,  sort  ").expect("spaces are trimmed");
+        assert!(spaced.table_scan && spaced.full_sort);
+    }
+
+    /// A name this build does not know is an error, not a no-op.
+    #[test]
+    fn an_unknown_lever_is_refused() {
+        let refused = ForcePlan::parse("scan,nonsense");
+        assert!(
+            refused.is_err(),
+            "`nonsense` is not a lever and parsing it answered a plan"
+        );
+        let error = refused.expect_err("an unknown operator is refused");
+        assert!(
+            error.message().contains("nonsense"),
+            "the refusal should name the operator it did not know, in the              message a person reads; it said {:?}",
+            error.message()
+        );
+        assert_eq!(
+            error.detail(),
+            Some("force_plan does not know the operator 'nonsense'"),
+            "and in the detail, which is what a caller reading the error programmatically gets"
+        );
+    }
+
+    /// The metamorphic sweep offers the default and one arm per lever.
+    ///
+    /// A sweep that forgot an arm would report "the answer is the same under
+    /// every plan" having never built the plan it was added for.
+    #[test]
+    fn the_sweep_offers_one_arm_per_lever() {
+        let arms = ForcePlan::alternatives();
+        assert_eq!(arms.len(), 6, "the default and one per lever");
+        let (name, default) = arms.first().expect("there is a first arm");
+        assert_eq!(*name, "default");
+        assert!(
+            !default.table_scan
+                && !default.full_sort
+                && !default.hash_distinct
+                && !default.hash_group
+                && !default.no_skip_scan,
+            "the first arm is the shipped planner with nothing forced"
+        );
+        let forced: usize = arms
+            .iter()
+            .skip(1)
+            .map(|(_, plan)| {
+                usize::from(plan.table_scan)
+                    + usize::from(plan.full_sort)
+                    + usize::from(plan.hash_distinct)
+                    + usize::from(plan.hash_group)
+                    + usize::from(plan.no_skip_scan)
+            })
+            .sum();
+        assert_eq!(forced, 5, "each of the five arms forces exactly one lever");
     }
 }

@@ -124,7 +124,6 @@ pub(crate) use translate::{
     aggregate_output_types, aggregate_specs, constant_count, constant_limit, constant_offset,
     same_expr, translate_post, translate_scan, trim,
 };
-// WIRED
 mod integrity;
 mod keys;
 
@@ -224,4 +223,75 @@ pub(crate) enum Negative {
     NoLimit,
     /// A negative count means zero.
     Zero,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use inillucent_sql::bind::BoundExpr;
+    use inillucent_value::{Affinity, Collation};
+
+    /// A negative `LIMIT` and a negative `OFFSET` mean different things.
+    ///
+    /// **They mean different things and the difference is a wrong answer
+    /// (T3, task-1962).** A negative `LIMIT` is SQLite's way of saying "no
+    /// limit"; a negative `OFFSET` is treated as zero. The first version of
+    /// this clamped both to zero, which turned `LIMIT -1` into `LIMIT 0` -
+    /// every row suppressed.
+    #[test]
+    fn a_negative_limit_is_no_limit_and_a_negative_offset_is_zero() {
+        let params = Params::new();
+        let minus_one = BoundExpr::Unary {
+            op: inillucent_sql::ast::UnaryOp::Negate,
+            operand: Box::new(BoundExpr::Integer(1)),
+        };
+        assert_eq!(
+            translate::constant_count(Some(&minus_one), &params, Negative::NoLimit)
+                .expect("a negated literal is a constant"),
+            None,
+            "`LIMIT -1` means no limit"
+        );
+        assert_eq!(
+            translate::constant_count(Some(&minus_one), &params, Negative::Zero)
+                .expect("a negated literal is a constant"),
+            Some(0),
+            "`OFFSET -1` means no offset"
+        );
+    }
+
+    /// A non-negative count is the count, and no clause at all is `None`.
+    #[test]
+    fn a_positive_count_is_itself() {
+        let params = Params::new();
+        let five = BoundExpr::Integer(5);
+        assert_eq!(
+            translate::constant_count(Some(&five), &params, Negative::NoLimit)
+                .expect("a literal is a constant"),
+            Some(5)
+        );
+        assert_eq!(
+            translate::constant_count(None, &params, Negative::Zero)
+                .expect("no clause is not an error"),
+            None,
+            "a statement with no LIMIT is not a statement with LIMIT 0"
+        );
+    }
+
+    /// A `LIMIT` that is not a constant is refused rather than guessed at.
+    #[test]
+    fn a_limit_that_is_not_a_constant_is_refused() {
+        let params = Params::new();
+        let column = BoundExpr::Column {
+            source: 0,
+            column: 0,
+            slot: 0,
+            affinity: Affinity::Blob,
+            collation: Collation::Binary,
+        };
+        let refused = translate::constant_count(Some(&column), &params, Negative::NoLimit);
+        assert!(
+            refused.is_err(),
+            "a column is not a constant, so there is no count to return"
+        );
+    }
 }

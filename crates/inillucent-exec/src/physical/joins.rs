@@ -877,3 +877,105 @@ pub(crate) fn output_is_sorted_by(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use inillucent_value::{Affinity, Collation};
+
+    /// A join's outer kind survives the translation, and the three that behave
+    /// alike are one value.
+    ///
+    /// **`CROSS`, `INNER` and a comma are the same join (T3, task-1962).** They
+    /// differ in what the planner may reorder, which the planner has already
+    /// decided by the time the chain is built; keeping three values here would
+    /// be three values nothing distinguishes, and a `LEFT` that fell into one
+    /// of them would drop the unmatched rows a `LEFT JOIN` exists to keep.
+    #[test]
+    fn the_outer_kinds_are_kept_and_the_inner_ones_are_one() {
+        use inillucent_sql::ast::JoinKind as Written;
+        assert_eq!(join_kind_of(Written::Left), JoinKind::Left);
+        assert_eq!(join_kind_of(Written::Right), JoinKind::Right);
+        assert_eq!(join_kind_of(Written::Full), JoinKind::Full);
+        for written in [Written::Comma, Written::Inner, Written::Cross] {
+            assert_eq!(
+                join_kind_of(written),
+                JoinKind::Inner,
+                "{written:?} produces the same rows as an inner join"
+            );
+        }
+    }
+
+    /// A constant argument reads no column; an argument over the row beside it
+    /// does.
+    ///
+    /// **The test that decides whether a table-valued function's argument may
+    /// be folded once.** `json_each('[1,2]')` can be; `json_each(t.body)`
+    /// cannot be at all, and folding it would run the module once with the
+    /// first row's value for every row.
+    #[test]
+    fn a_constant_argument_reads_no_column() {
+        assert!(!reads_a_column(&BoundExpr::Text(b"[1,2]".to_vec())));
+        assert!(!reads_a_column(&BoundExpr::Integer(10)));
+        assert!(reads_a_column(&BoundExpr::Column {
+            source: 0,
+            column: 0,
+            slot: 0,
+            affinity: Affinity::Blob,
+            collation: Collation::Binary,
+        }));
+        assert!(
+            reads_a_column(&BoundExpr::Rowid { source: 0 }),
+            "a rowid read is a column read, and answering otherwise folded a \
+             per-row value as a statement-wide constant"
+        );
+    }
+
+    /// A parameter anywhere in an argument makes it a constant for this
+    /// execution only.
+    #[test]
+    fn a_parameter_is_found_at_any_depth() {
+        assert!(reads_a_parameter(&BoundExpr::Parameter(1)));
+        assert!(!reads_a_parameter(&BoundExpr::Integer(1)));
+        let nested = BoundExpr::Not(Box::new(BoundExpr::And(
+            Box::new(BoundExpr::Integer(1)),
+            Box::new(BoundExpr::Parameter(2)),
+        )));
+        assert!(
+            reads_a_parameter(&nested),
+            "a parameter two levels down is still a parameter, and a chain \
+             built around it may not be re-run against new values"
+        );
+    }
+
+    /// An order is a scan prefix only when every position matches, from the
+    /// first.
+    #[test]
+    fn an_order_matches_the_scan_only_from_its_start() {
+        let scan_order = vec![vec![0usize], vec![1usize]];
+        assert!(is_scan_prefix(&[Expr::Column(0)], &scan_order));
+        assert!(is_scan_prefix(
+            &[Expr::Column(0), Expr::Column(1)],
+            &scan_order
+        ));
+        assert!(
+            !is_scan_prefix(&[Expr::Column(1)], &scan_order),
+            "the second key alone is not a prefix of the walk's order"
+        );
+        assert!(
+            !is_scan_prefix(&[], &scan_order),
+            "an empty order asks for nothing and cannot skip a sort"
+        );
+        assert!(
+            !is_scan_prefix(
+                &[Expr::Column(0), Expr::Column(1), Expr::Column(2)],
+                &scan_order
+            ),
+            "an order longer than the walk's cannot be satisfied by it"
+        );
+        assert!(
+            !is_scan_prefix(&[Expr::Literal(OwnedDatum::Int(1))], &scan_order),
+            "only a column can match a walk's key position"
+        );
+    }
+}
