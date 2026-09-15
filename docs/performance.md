@@ -42,7 +42,7 @@ it, expressed as the family's own ratio.
 | `large.values` | 4% | text and blobs across the boundary where a value stops fitting in a leaf | **1,167% faster** (12.67x) | 8.81x | 1.50x, met |
 | `read.analytical` | 10% | scans, aggregates, `GROUP BY`, `DISTINCT`, sorts | **567% faster** (6.67x) | 5.45x | 5.00x, met |
 | `read.range` | 12% | selective ranges, forward and reverse, covering and not | **402% faster** (5.02x) | 4.00x | 3.00x, met |
-| `read.join` | 8% | two table and four table joins | **332% faster** (4.32x) | 3.00x | 3.00x, and two of four runs came in under it |
+| `read.join` | 8% | two table and four table joins | **332% faster** (4.32x) | 3.00x | 3.00x, met on re-measurement - see below |
 | `transaction` | 10% | autocommit, small batches, large batches, savepoints | **152% faster** (2.52x) | 1.99x | no slower than SQLite, met |
 | `write` | 20% | insert, update, delete, upsert, with and without indexes | **108% faster** (2.08x) | 1.62x | 1.50x, met |
 | `open.prepare` | 8% | parse, bind, step one row, reset | **56% faster** (1.56x) | 1.17x | 5.00x, missed |
@@ -51,9 +51,30 @@ it, expressed as the family's own ratio.
 
 **No family is below the 1.00x floor on any of the four runs**, which is the release condition.
 
-**`read.join` has not cleared its bar.** The four lower bounds were 2.97x, 3.00x, 3.00x and 2.99x.
-Two runs missed the 3.00x requirement, so `read.join` stays in
-[the roadmap](roadmap.md#1-readjoin-and-extension-miss-their-bars-on-the-lower-bound) with `extension`.
+**`read.join` has cleared its bar since, and the number in the table above is the older one.** The
+four lower bounds in the run that produced this table were 2.97x, 3.00x, 3.00x and 2.99x, which
+straddles the 3.00x requirement rather than meeting it. The statement chain reuse that landed in
+task-1911 had never been measured against the family. Re-measured 2026-09-15, four consecutive runs
+on the same box, 30 rounds each, `--scale medium --page-size 32768 --frames 4096`:
+
+| run | `read.join` | 95% low | bar |
+|---|---:|---:|---:|
+| 1 | 6.46x | **4.11x** | 3.00x |
+| 2 | 6.26x | **4.00x** | 3.00x |
+| 3 | 6.14x | **4.02x** | 3.00x |
+| 4 | 5.60x | **3.67x** | 3.00x |
+
+`join.selective` reads 35.49x and `join.range` 1.17x; the range join is still the slow half, and the
+family it is in is met. `read.join` is off [the roadmap](roadmap.md#1-extension-misses-its-bar-on-the-lower-bound);
+`extension` stays on it.
+
+**`extension` still misses, on four runs of its own**: 1.58x, 1.60x, 1.59x and 1.67x, with lower
+bounds of 1.40x, 1.39x, 1.39x and 1.45x against a 1.50x bar. `extension.fts.build` is the worst
+workload in every one of them, at 0.56x to 0.58x, and it is what holds the bound down - the rest of
+the family is well clear, with `extension.fts.query` at **1.70x to 1.85x** and a mean of 1.77x, up from the 1.43x a
+revert left it at. The gate's own per-round breakdown says where `fts.build`'s time goes: of 11.6 ms
+for 500 rows against SQLite's 6.5 ms, the content row is 2.7 ms, the dictionary flush 2.4 ms and the
+docsize row 2.0 ms - three quarters of it in three steps.
 
 **`transaction` fell from 3.41x, and the reason is `txn.autocommit`.** The other two workloads in
 that family did not move: `txn.batched` reads 3.79x and `txn.large` 4.05x. `txn.autocommit` is now

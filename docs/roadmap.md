@@ -9,32 +9,65 @@ Every ratio and percentage on this page also appears in [Performance](performanc
 where it was measured, and a test in `crates/inillucent-compat/tests/documentation.rs` fails when
 this page carries a number that page has moved past.
 
-## 1. `read.join` and `extension` miss their bars on the lower bound
+## 1. `extension` misses its bar on the lower bound
 
-Every family is faster than SQLite. Two miss the target their bar sets, and both miss on the 95%
-lower bound rather than the point estimate. These are targets rather than requirements, so neither
-fails a release.
+`read.join` no longer does. It was on this list because its four lower bounds read 2.97x, 3.00x,
+3.00x and 2.99x against a 3.00x bar, and a number that straddles a threshold has not met it. The
+chain reuse that landed in task-1911 had never been measured against the family. Re-measured
+2026-09-15, four consecutive runs on the same box, 30 rounds each, `--scale medium --page-size 32768
+--frames 4096`:
 
-| family | measured | the bar asks |
-|---|---|---|
-| `read.join` | 332% faster (4.32x), lower bound **3.00x** | 200% faster. The four runs read 2.97x, 3.00x, 3.00x and 2.99x: a number that straddles a threshold has not met it |
-| `extension` | 52% faster (1.52x), lower bound 1.36x | 50% faster, missed on the lower bound only |
+| run | `read.join` | 95% low | bar |
+|---|---:|---:|---:|
+| 1 | 6.46x | **4.11x** | 3.00x |
+| 2 | 6.26x | **4.00x** | 3.00x |
+| 3 | 6.14x | **4.02x** | 3.00x |
+| 4 | 5.60x | **3.67x** | 3.00x |
 
-**`read.join`.** The statement chain is reused across executions now, which reaches the point join's
-shape (41% saved, paired measurement) and not the 200 row range join, whose cost is per entry across
-200 probes, each a fresh descent from the root. The family has not been re-measured since the chain
-reuse landed. Done means: four consecutive gate runs on a quiet box with the lower bound above
-3.00x. If they do not clear it, the next lever is keeping the inner cursor across probes when the
-outer side is ordered on the join key, seeking forward instead of descending, measured paired on
-`join.range`.
+Every lower bound clears the bar, by a third at the narrowest. `join.selective` reads 35.49x and
+`join.range` 1.17x; the range join is still the slow half and still the one an ordered probe reuse
+would reach, but the family it is in is met and the item does not need it.
 
-**`extension`.** `extension.fts.build` at 0.59x is what holds the family's lower bound down. A
-segment format for FTS5 was built once, made `fts.build` no faster and halved `fts.query`, and was
-reverted; the cost was a manifest re-read from disk on every query, because a module had no way to
-learn that another connection had committed. A module has that hook now (`committed_elsewhere`,
-`schema_changed`). Done means: the segment format re-applied with the manifest cached and dropped
-on those hooks, `fts.query` at or above its current 1.43x, and the family's lower bound above 1.50x.
-If the query cost comes back, it is reverted again and the number recorded.
+**`extension` still misses, and re-applying the reverted segment format cannot close it.** Four runs
+the same way:
+
+| run | `extension` | 95% low | bar |
+|---|---:|---:|---:|
+| 1 | 1.58x | 1.40x | 1.50x |
+| 2 | 1.60x | 1.39x | 1.50x |
+| 3 | 1.59x | 1.39x | 1.50x |
+| 4 | 1.67x | 1.45x | 1.50x |
+
+`extension.fts.build` is the worst workload in every run, at 0.56x to 0.58x, and it is what holds
+the bound down. The rest of the family is well clear, with `extension.fts.query` at **1.70x to
+1.85x**.
+
+The design said to re-apply the segment format with the manifest cached, and to accept it only if
+`fts.query` stays at or above 1.43x **and** the family's lower bound clears 1.50x. The second cannot
+follow from the first. [Closed items](closed-items.md#extensionftsbuild) records what that format
+did when it was built: it *made `fts.build` no faster* and halved `fts.query`. The workload dragging
+the family is `fts.build`, and a change the measurement record says does not move `fts.build` cannot
+move the family past a bar `fts.build` is holding down. `fts.query` has meanwhile risen from the
+1.43x that revert left to 1.77x on its own.
+
+So what the item needs is `fts.build` itself, and the gate's own per-round breakdown says where its
+time goes. 500 rows in 11.6 ms against SQLite's 6.5 ms:
+
+| step | ms |
+|---|---:|
+| content | 2.7 |
+| dictionary write (the flush) | 2.4 |
+| docsize | 2.0 |
+| tokenize | 0.6 |
+| new terms (507 of them) | 0.6 |
+| terms | 0.5 |
+| group | 0.3 |
+| dictionary read | 0.2 |
+
+Three steps are three quarters of it: writing the content row, writing the docsize row, and flushing
+the dictionary. SQLite writes about 1,000 rows and one segment blob for the same documents. Done
+means a design against those three numbers rather than against the segment format, and it is not
+designed here.
 
 ## 2. `write.insert.batch` is 43% slower than SQLite
 

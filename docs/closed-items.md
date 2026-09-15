@@ -44,7 +44,7 @@ order swapped every round:
 
 The 200 row range scan does not move, and the sequential arms' 11 to 14% was noise: 17 of 40 rounds
 went the other way. Its cost is per entry across 200 probes, which no per statement saving can
-reach; that is [roadmap item 1](roadmap.md#1-readjoin-and-extension-miss-their-bars-on-the-lower-bound).
+reach; that is [roadmap item 1](roadmap.md#1-extension-misses-its-bar-on-the-lower-bound).
 Building this surfaced four defects that were live in `build_statement` and invisible only because
 nothing reused a chain: `Statement::run` never re-ran `subquery::fold`, so a second execution of a
 statement whose source key reads a subquery refused; it formatted an `EXPLAIN` string and threw it
@@ -94,7 +94,7 @@ The remaining cost was the manifest re-read from disk on every query, which coul
 because a module had no hook that said "another connection may have committed since you last
 looked". That hook exists now: `VirtualTable::committed_elsewhere` and `schema_changed`
 (task-1932). Re-attempting the format with a cached manifest is what
-[roadmap item 1](roadmap.md#1-readjoin-and-extension-miss-their-bars-on-the-lower-bound) names for
+[roadmap item 1](roadmap.md#1-extension-misses-its-bar-on-the-lower-bound) names for
 the `extension` family.
 
 ## The old engine is deleted
