@@ -126,7 +126,7 @@ impl ImportedDatabase {
         // statement named something that is not there" - the same class of
         // mistake `refused()`'s own doc comment already found and fixed for
         // parser and binder refusals.
-        let found = self.registry.module(module).ok_or_else(|| {
+        let found = self.session_state.registry.module(module).ok_or_else(|| {
             statement_refusal(format!(
                 "no such module: {}",
                 String::from_utf8_lossy(module)
@@ -196,8 +196,8 @@ impl ImportedDatabase {
         // module that writes an initial row writes it into one of them.
         let table = {
             let txn = self.current_txn();
-            let at = self.ddl_schema;
-            let session = self.session.get();
+            let at = self.schema.ddl_schema;
+            let session = self.session_state.session.get();
             let wal = self
                 .log_of(at)
                 .ok_or_else(|| refusal("a statement names a database that is not attached"))?;
@@ -207,7 +207,7 @@ impl ImportedDatabase {
                 schema: at,
                 wrote: false,
                 // **The before-images a rollback needs.** Every ordinary write
-                // passes `Some(&self.undo)`; this path passed `None`, so a
+                // passes `Some(&self.writing.undo)`; this path passed `None`, so a
                 // virtual table's writes went into the pool with nothing
                 // recorded that could put them back. `ROLLBACK` then undid
                 // every ordinary table and left the module's shadow trees as
@@ -216,26 +216,26 @@ impl ImportedDatabase {
                 // only thing that corrected it. The file itself was never
                 // wrong: no commit record was written, so recovery ignored
                 // the pages. Only the live connection was.
-                undo: Some(&self.undo),
+                undo: Some(&self.writing.undo),
                 uncommitted: self.uncommitted_handle_of(at),
             };
             let store = WriteStore {
                 database: super::file_of(
-                    &mut self.database,
-                    &mut self.attached,
-                    &mut self.temps,
+                    &mut self.storage.database,
+                    &mut self.session_state.attached,
+                    &mut self.session_state.temps,
                     session,
                     at,
                 )?,
-                trees: &mut self.trees,
+                trees: &mut self.schema.trees,
                 log: &mut log,
             };
             let mut nowhere = inillucent_ext::vtab::WithStore { store };
             let mut context = Context {
                 host: &mut nowhere,
                 database: 0,
-                limits: &self.limits,
-                catalog: Some(&self.catalog),
+                limits: &self.session_state.limits,
+                catalog: Some(&self.schema.catalog),
             };
             let mut table = found.connect(&connect, true)?;
             table.begin(&mut context)?;
@@ -243,7 +243,7 @@ impl ImportedDatabase {
             table.commit(&mut context)?;
             table
         };
-        self.virtual_tables.insert(
+        self.session_state.virtual_tables.insert(
             name.to_ascii_lowercase(),
             Connected {
                 table,
@@ -275,7 +275,8 @@ impl ImportedDatabase {
     /// @param suffix - which shadow
     fn existing_shadow_root(&self, owner: &[u8], suffix: &[u8]) -> DbResult<u32> {
         let wanted = shadow_table_name(owner, suffix).to_ascii_lowercase();
-        self.entries
+        self.schema
+            .entries
             .iter()
             .find(|recorded| recorded.entry.name.to_ascii_lowercase() == wanted)
             .map(|recorded| recorded.root)
@@ -307,24 +308,24 @@ impl ImportedDatabase {
     ) -> DbResult<inillucent_exec::physical::ModuleIntegrity> {
         use inillucent_exec::physical::ModuleIntegrity;
         let folded = name.to_ascii_lowercase();
-        let Some(connected) = self.virtual_tables.get(&folded) else {
+        let Some(connected) = self.session_state.virtual_tables.get(&folded) else {
             return Ok(ModuleIntegrity::NoSuchModule);
         };
         let arguments = connected.arguments.clone();
-        let Some(found) = self.registry.module(&arguments.module) else {
+        let Some(found) = self.session_state.registry.module(&arguments.module) else {
             return Ok(ModuleIntegrity::NoSuchModule);
         };
         let mut table = found.connect(&arguments, false)?;
         let store = ReadStore {
-            pool: self.database.pool(),
-            trees: &self.trees,
+            pool: self.storage.database.pool(),
+            trees: &self.schema.trees,
         };
         let mut nowhere = inillucent_ext::vtab::WithStore { store };
         let mut context = Context {
             host: &mut nowhere,
             database: 0,
-            limits: &self.limits,
-            catalog: Some(&self.catalog),
+            limits: &self.session_state.limits,
+            catalog: Some(&self.schema.catalog),
         };
         table.integrity(&mut context).map(ModuleIntegrity::of)
     }
@@ -385,7 +386,7 @@ impl ImportedDatabase {
         // caching one would mean a map that has to be invalidated when the
         // registry changes.
         let held;
-        let connected = match self.virtual_tables.get(&table.folded) {
+        let connected = match self.session_state.virtual_tables.get(&table.folded) {
             Some(connected) => connected,
             None => {
                 let Some(connected) = self.connect_eponymous(&table.folded)? else {
@@ -418,15 +419,15 @@ impl ImportedDatabase {
         };
         let mut cursor = connected.table.open()?;
         let store = ReadStore {
-            pool: self.database.pool(),
-            trees: &self.trees,
+            pool: self.storage.database.pool(),
+            trees: &self.schema.trees,
         };
         let mut nowhere = inillucent_ext::vtab::WithStore { store };
         let mut context = Context {
             host: &mut nowhere,
             database: 0,
-            limits: &self.limits,
-            catalog: Some(&self.catalog),
+            limits: &self.session_state.limits,
+            catalog: Some(&self.schema.catalog),
         };
         self.drive_cursor(
             cursor.as_mut(),
@@ -535,7 +536,11 @@ impl ImportedDatabase {
         cursor.filter(context, plan)?;
         while !cursor.eof() {
             let row = read_row(cursor, context, shape, params)?;
-            if !passes_rechecks(&row, &shape.rechecks, self.case_sensitive_like)? {
+            if !passes_rechecks(
+                &row,
+                &shape.rechecks,
+                self.session_state.case_sensitive_like,
+            )? {
                 cursor.next(context)?;
                 continue;
             }
@@ -1042,7 +1047,7 @@ impl ImportedDatabase {
         let mut batch: Vec<Vec<OwnedDatum>> =
             Vec::with_capacity(inillucent_exec::batch::BATCH_ROWS);
         for row in rows {
-            if !passes_rechecks(&row, &rechecks, self.case_sensitive_like)? {
+            if !passes_rechecks(&row, &rechecks, self.session_state.case_sensitive_like)? {
                 continue;
             }
             batch.push(row);
@@ -1068,7 +1073,7 @@ impl ImportedDatabase {
     ///
     /// @param folded - the module's folded name
     fn connect_eponymous(&self, folded: &[u8]) -> DbResult<Option<Connected>> {
-        let Some(module) = self.registry.eponymous(folded) else {
+        let Some(module) = self.session_state.registry.eponymous(folded) else {
             return Ok(None);
         };
         let arguments = inillucent_sql::vtab::ModuleArguments {

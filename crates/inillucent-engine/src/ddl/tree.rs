@@ -80,7 +80,7 @@ impl crate::ImportedDatabase {
         layout: SourceLayout,
         rows: &dyn inillucent_tree::leaf::Rows<'d>,
     ) -> DbResult<PageId> {
-        let at = self.ddl_schema;
+        let at = self.schema.ddl_schema;
         let local = self.local_of(at, root);
         let tree = {
             let (_, txn, open, wal, uncommitted) = self.catalog_write()?;
@@ -89,14 +89,14 @@ impl crate::ImportedDatabase {
                 txn,
                 schema: at,
                 wrote: false,
-                undo: open.then_some(&self.undo),
+                undo: open.then_some(&self.writing.undo),
                 uncommitted,
             };
-            let session = self.session.get();
+            let session = self.session_state.session.get();
             let database = crate::file_of(
-                &mut self.database,
-                &mut self.attached,
-                &mut self.temps,
+                &mut self.storage.database,
+                &mut self.session_state.attached,
+                &mut self.session_state.temps,
                 session,
                 at,
             )?;
@@ -113,20 +113,20 @@ impl crate::ImportedDatabase {
             )?
         };
         let page = tree.root();
-        self.trees.insert(root, tree);
-        self.layouts.insert(root, std::rc::Rc::new(layout));
-        self.touched |= crate::schema_bit(at);
+        self.schema.trees.insert(root, tree);
+        self.schema.layouts.insert(root, std::rc::Rc::new(layout));
+        self.writing.touched |= crate::schema_bit(at);
         Ok(page)
     }
     /// Gives one tree's pages back to the free map and forgets it.
     ///
     /// @param root - the identifier it is registered under
     pub(crate) fn release_tree(&mut self, root: u32) -> DbResult<()> {
-        let at = self.schema_of(root);
+        let at = self.session_state.schema_of(root);
         let owner = self
             .schema_file(at)
             .ok_or_else(|| refusal("a statement names a database that is not attached"))?;
-        let pages = match self.trees.get(&root) {
+        let pages = match self.schema.trees.get(&root) {
             Some(tree) => tree.pages(owner.pool())?,
             None => Vec::new(),
         };
@@ -138,11 +138,11 @@ impl crate::ImportedDatabase {
             wal.append(txn, inillucent_wal::record::Body::FreePage { page: page.0 })?;
         }
         {
-            let session = self.session.get();
+            let session = self.session_state.session.get();
             let database = crate::file_of(
-                &mut self.database,
-                &mut self.attached,
-                &mut self.temps,
+                &mut self.storage.database,
+                &mut self.session_state.attached,
+                &mut self.session_state.temps,
                 session,
                 at,
             )?;
@@ -150,11 +150,11 @@ impl crate::ImportedDatabase {
                 database.release(page, 1)?;
             }
         }
-        self.owner.remove(&root);
-        self.trees.remove(&root);
-        self.layouts.remove(&root);
-        self.covering.remove(&root);
-        for roots in self.covering.values_mut() {
+        self.session_state.owner.remove(&root);
+        self.schema.trees.remove(&root);
+        self.schema.layouts.remove(&root);
+        self.schema.covering.remove(&root);
+        for roots in self.schema.covering.values_mut() {
             roots.retain(|held| *held != root);
         }
         Ok(())

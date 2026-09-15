@@ -30,15 +30,14 @@ pub(crate) struct SessionChanges {
 }
 
 impl SessionChanges {
-    /// Records `changed_ever`'s value at the instant `session` opened.
-    ///
-    /// @param session - the session id `open_session` just minted
-    /// @param changed_ever - `changed_ever`'s value at this instant
     /// Records a session's baseline the first time that session runs anything.
     ///
     /// **The second and later calls do nothing**, because the baseline is what
-    /// `changed_ever` stood at when the connection opened and a connection that
-    /// has already run a statement has moved it.
+    /// `changed_ever` stood at when the connection opened, and a connection
+    /// that has already run a statement has moved it. Recording it on first use
+    /// rather than when the number was handed out is what lets
+    /// `Database::session` open a connection without borrowing the engine at
+    /// all - see `connect.rs` and task-1962 A11.
     ///
     /// @param session - the connection
     /// @param changed_ever - the shared counter's current value
@@ -47,10 +46,6 @@ impl SessionChanges {
             .borrow_mut()
             .entry(session)
             .or_insert(changed_ever);
-    }
-
-    pub(crate) fn record_open(&self, session: u64, changed_ever: i64) {
-        self.baseline.borrow_mut().insert(session, changed_ever);
     }
 
     /// Returns how many rows `session` alone has changed, given

@@ -31,9 +31,9 @@ impl crate::ImportedDatabase {
             let (name, file) = match at {
                 crate::MAIN => (
                     b"main".to_vec(),
-                    self.path.to_string_lossy().as_bytes().to_vec(),
+                    self.storage.path.to_string_lossy().as_bytes().to_vec(),
                 ),
-                _ => match self.schema_at(at) {
+                _ => match self.session_state.schema_at(at) {
                     Some(held) => (
                         held.name.clone(),
                         held.path
@@ -83,6 +83,7 @@ impl crate::ImportedDatabase {
         let mut rows = Vec::new();
         for key in &table.foreign_keys {
             let parent = self
+                .schema
                 .tables
                 .iter()
                 .find(|candidate| candidate.folded == key.parent_folded);
@@ -234,7 +235,8 @@ impl crate::ImportedDatabase {
             return Vec::new();
         };
         let authorizer = inillucent_sql::bind::AllowAll;
-        let mut binder = inillucent_sql::bind::Binder::new(&self.catalog, &body.ast, &authorizer);
+        let mut binder =
+            inillucent_sql::bind::Binder::new(&self.schema.catalog, &body.ast, &authorizer);
         let Ok(bound) = binder.bind_select(body.select) else {
             return Vec::new();
         };
@@ -358,7 +360,7 @@ impl crate::ImportedDatabase {
             return Ok(empty);
         };
         let wanted = argument_text(argument).to_ascii_lowercase().into_bytes();
-        let found = self.tables.iter().find_map(|table| {
+        let found = self.schema.tables.iter().find_map(|table| {
             table
                 .indexes
                 .iter()
@@ -431,7 +433,7 @@ impl crate::ImportedDatabase {
         let mut rows: Vec<Vec<OwnedDatum>> = Vec::new();
         // Newest first, which is the order SQLite reports and the order
         // `index_list` already uses for the same reason.
-        for table in self.tables.iter().rev() {
+        for table in self.schema.tables.iter().rev() {
             if table.folded == b"sqlite_schema" || table.folded == b"sqlite_temp_schema" {
                 continue;
             }
@@ -507,7 +509,7 @@ impl crate::ImportedDatabase {
             .iter()
             .map(|held| (*held).to_string())
             .collect();
-        for (name, _) in &self.collations {
+        for (name, _) in &self.session_state.collations {
             if !names.iter().any(|held| held.eq_ignore_ascii_case(name)) {
                 names.push(name.clone());
             }
@@ -534,12 +536,16 @@ impl crate::ImportedDatabase {
     ) -> Option<&inillucent_sql::catalog_view::TableInfo> {
         let argument = argument?;
         let wanted = argument_text(argument).to_ascii_lowercase().into_bytes();
-        self.tables.iter().find(|table| table.folded == wanted).or(
-            if wanted == b"sqlite_schema" || wanted == b"sqlite_master" {
-                Some(&self.schema_info)
-            } else {
-                None
-            },
-        )
+        self.schema
+            .tables
+            .iter()
+            .find(|table| table.folded == wanted)
+            .or(
+                if wanted == b"sqlite_schema" || wanted == b"sqlite_master" {
+                    Some(&self.schema.schema_info)
+                } else {
+                    None
+                },
+            )
     }
 }

@@ -29,7 +29,7 @@ impl crate::ImportedDatabase {
     /// a commit between keeps the first transaction, because that is what
     /// `BEGIN` inside a transaction does.
     pub fn begin_batch(&mut self) {
-        if self.batch.get().is_some() {
+        if self.writing.batch.get().is_some() {
             return;
         }
         // **The file is taken here, not at the first write.** A transaction
@@ -40,13 +40,13 @@ impl crate::ImportedDatabase {
         // than overlapping: there is no shared-memory index that would let a
         // reader follow a writer's log, and pretending otherwise is what would
         // corrupt a file.
-        let _ = self.database.begin_write_within(true);
-        let txn = self.next_txn.get();
-        self.next_txn.set(txn.saturating_add(1));
-        self.batch.set(Some(txn));
-        self.undo.borrow_mut().clear();
-        self.marks.clear();
-        self.touched = 0;
+        let _ = self.storage.database.begin_write_within(true);
+        let txn = self.writing.next_txn.get();
+        self.writing.next_txn.set(txn.saturating_add(1));
+        self.writing.batch.set(Some(txn));
+        self.writing.undo.borrow_mut().clear();
+        self.writing.marks.clear();
+        self.writing.touched = 0;
     }
 
     /// Undoes everything the open transaction changed, newest first.
@@ -68,10 +68,17 @@ impl crate::ImportedDatabase {
             Some(name) => {
                 let folded = name.to_ascii_lowercase();
                 let Some(position) = self
+                    .writing
                     .marks
                     .iter()
                     .rposition(|(held, _)| *held == folded)
-                    .map(|index| self.marks.get(index).map(|(_, at)| *at).unwrap_or(0))
+                    .map(|index| {
+                        self.writing
+                            .marks
+                            .get(index)
+                            .map(|(_, at)| *at)
+                            .unwrap_or(0)
+                    })
                 else {
                     return Err(refusal(format!(
                         "no such savepoint: {}",
@@ -98,8 +105,8 @@ impl crate::ImportedDatabase {
     ///   statement's own rather than `current_txn`: outside a batch `write` has
     ///   already taken a number and moved `next_txn` past it
     pub(crate) fn undo_to_floor(&mut self, floor: usize, reload: bool, txn: u64) -> DbResult<()> {
-        while self.undo.borrow().len() > floor {
-            let Some(entry) = self.undo.borrow_mut().pop() else {
+        while self.writing.undo.borrow().len() > floor {
+            let Some(entry) = self.writing.undo.borrow_mut().pop() else {
                 break;
             };
             // **The record says which file it came out of, and that is the
@@ -133,16 +140,16 @@ impl crate::ImportedDatabase {
             } else {
                 self.handle_of(at, entry.tree).unwrap_or(0)
             };
-            let Some(tree) = self.trees.get_mut(&root) else {
+            let Some(tree) = self.schema.trees.get_mut(&root) else {
                 // The tree is gone, which a rollback of a `CREATE TABLE` makes
                 // true. Its rows went with it.
                 continue;
             };
-            let session = self.session.get();
+            let session = self.session_state.session.get();
             let database = file_of(
-                &mut self.database,
-                &mut self.attached,
-                &mut self.temps,
+                &mut self.storage.database,
+                &mut self.session_state.attached,
+                &mut self.session_state.temps,
                 session,
                 at,
             )?;
@@ -157,8 +164,8 @@ impl crate::ImportedDatabase {
                 }
             }
         }
-        let held = self.undo.borrow().len();
-        self.marks.retain(|(_, at)| *at <= held);
+        let held = self.writing.undo.borrow().len();
+        self.writing.marks.retain(|(_, at)| *at <= held);
         // **A DML statement cannot have changed the catalog, so undoing one has
         // nothing to rebuild from it.** `CREATE`, `DROP` and `ALTER` do not go
         // through `write`, and reloading here would cost a catalog read on
@@ -240,7 +247,7 @@ impl crate::ImportedDatabase {
                 })
                 .collect();
             for held in &reloaded {
-                if held.entry.tree_id != 0 && !self.trees.contains_key(&held.root) {
+                if held.entry.tree_id != 0 && !self.schema.trees.contains_key(&held.root) {
                     missing.push(String::from_utf8_lossy(&held.entry.name).into_owned());
                 }
             }
@@ -280,7 +287,7 @@ impl crate::ImportedDatabase {
                 Some(root) if root != 0 => root,
                 _ => continue,
             };
-            if self.trees.contains_key(&root) {
+            if self.schema.trees.contains_key(&root) {
                 continue;
             }
             let Some((columns, key_columns, layout)) = self.shape_of_entry(entries, held, root)
@@ -299,9 +306,9 @@ impl crate::ImportedDatabase {
                 held.entry.stats.leaf_count,
                 held.entry.stats.row_count,
             )?;
-            self.trees.insert(root, tree);
-            self.layouts.insert(root, std::rc::Rc::new(layout));
-            self.owner.insert(root, at);
+            self.schema.trees.insert(root, tree);
+            self.schema.layouts.insert(root, std::rc::Rc::new(layout));
+            self.session_state.owner.insert(root, at);
             restored.insert(held.rowid, root);
         }
         // An index's tree is a covering candidate of its table's, and the link
@@ -329,7 +336,7 @@ impl crate::ImportedDatabase {
             if partial {
                 continue;
             }
-            let candidates = self.covering.entry(table_root).or_default();
+            let candidates = self.schema.covering.entry(table_root).or_default();
             if !candidates.contains(&index_root) {
                 candidates.push(index_root);
             }
@@ -421,16 +428,16 @@ impl crate::ImportedDatabase {
         // **The modules are told, or the connection goes on answering out of a
         // transaction that did not happen.** See `rollback_modules`: the file
         // was always put back correctly, and the module's own buffer was not.
-        self.modules_begun.set(false);
+        self.session_state.modules_begun.set(false);
         let told = self.rollback_modules(None);
         let undone = self.undo_to(None);
-        self.marks.clear();
-        self.batch.set(None);
-        self.implicit_transaction.set(false);
+        self.writing.marks.clear();
+        self.writing.batch.set(None);
+        self.writing.implicit_transaction.set(false);
         // Rolled back, so no-steal has nothing left to hold back on any
         // schema this transaction touched - read before `touched` is cleared
         // below, which is the only record of which schemas those were.
-        for at in schemas_in(self.touched) {
+        for at in schemas_in(self.writing.touched) {
             if let Some(database) = self.schema_file(at) {
                 database.pool().set_uncommitted_lsn(u64::MAX);
             }
@@ -438,10 +445,10 @@ impl crate::ImportedDatabase {
         // Nothing to decide: an abandoned transaction has no commit for a
         // super-journal to be about, and the records it left are never replayed
         // because no `Commit` follows them.
-        self.touched = 0;
+        self.writing.touched = 0;
         // The transaction's own setting goes with the transaction, which is
         // SQLite's rule for `PRAGMA defer_foreign_keys`.
-        self.defer_foreign_keys = false;
+        self.session_state.defer_foreign_keys = false;
         self.refresh_catalog();
         undone?;
         told?;
@@ -480,21 +487,21 @@ impl crate::ImportedDatabase {
         self.sync_modules()?;
         // `PRAGMA defer_foreign_keys` is the transaction's setting, not the
         // connection's, and SQLite clears it at each commit and rollback.
-        if self.defer_foreign_keys {
-            self.defer_foreign_keys = false;
+        if self.session_state.defer_foreign_keys {
+            self.session_state.defer_foreign_keys = false;
             self.forget_compiled_statements();
         }
-        self.modules_begun.set(false);
+        self.session_state.modules_begun.set(false);
         // Nothing to abandon once it is committed, and holding the before-images
         // would hold every row a long transaction touched.
-        self.undo.borrow_mut().clear();
-        self.marks.clear();
-        self.implicit_transaction.set(false);
-        let Some(txn) = self.batch.take() else {
-            self.touched = 0;
+        self.writing.undo.borrow_mut().clear();
+        self.writing.marks.clear();
+        self.writing.implicit_transaction.set(false);
+        let Some(txn) = self.writing.batch.take() else {
+            self.writing.touched = 0;
             return Ok(());
         };
-        let participants = std::mem::take(&mut self.touched);
+        let participants = std::mem::take(&mut self.writing.touched);
         self.commit_across(txn, participants)
     }
 
@@ -519,12 +526,12 @@ impl crate::ImportedDatabase {
         let durable: Vec<usize> = schemas_in(participants)
             .filter(|at| self.path_of(*at).is_some())
             .collect();
-        self.decided_over.set(durable.len());
+        self.writing.decided_over.set(durable.len());
         if durable.len() < 2 {
             return self.vote(txn, participants);
         }
         let files: Vec<PathBuf> = durable.iter().filter_map(|at| self.path_of(*at)).collect();
-        let near = self.path.clone();
+        let near = self.storage.path.clone();
         let mut journal = multi::SuperJournal::create(&near, txn, &files)?;
         // **Every marker is durable before any vote is.** A `Commit` that
         // reached the disk while its marker had not would be replayed by a
@@ -577,10 +584,11 @@ impl crate::ImportedDatabase {
             wrote_any = true;
         }
         if !wrote_any {
-            self.wal.commit(txn, txn)?;
-            self.database
+            self.storage.wal.commit(txn, txn)?;
+            self.storage
+                .database
                 .pool()
-                .set_durable_lsn(self.wal.write_ahead_point());
+                .set_durable_lsn(self.storage.wal.write_ahead_point());
         }
         Ok(())
     }
@@ -591,6 +599,6 @@ impl crate::ImportedDatabase {
     /// every statement the performance gate measures. Two or more is a
     /// super-journal.
     pub fn decided_over(&self) -> usize {
-        self.decided_over.get()
+        self.writing.decided_over.get()
     }
 }

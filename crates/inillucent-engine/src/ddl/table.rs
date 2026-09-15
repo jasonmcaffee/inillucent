@@ -60,7 +60,8 @@ impl crate::ImportedDatabase {
     /// @param name - the table's name as written
     fn table_is_autoincrement(&self, name: &[u8]) -> bool {
         let folded = name.to_ascii_lowercase();
-        self.tables
+        self.schema
+            .tables
             .iter()
             .any(|held| held.folded == folded && held.autoincrement)
     }
@@ -72,7 +73,7 @@ impl crate::ImportedDatabase {
     /// binder's own rule to run is a rule with a hole in it.
     fn ensure_sequence_table(&mut self) -> DbResult<()> {
         let folded = inillucent_exec::sequence::SEQUENCE_TABLE.to_ascii_lowercase();
-        if self.tables.iter().any(|held| held.folded == folded) {
+        if self.schema.tables.iter().any(|held| held.folded == folded) {
             return Ok(());
         }
         self.define_table(
@@ -88,6 +89,7 @@ impl crate::ImportedDatabase {
     pub(crate) fn forget_sequence(&mut self, name: &[u8]) -> DbResult<()> {
         let folded = inillucent_exec::sequence::SEQUENCE_TABLE.to_ascii_lowercase();
         let Some(root) = self
+            .schema
             .tables
             .iter()
             .find(|held| held.folded == folded)
@@ -97,7 +99,7 @@ impl crate::ImportedDatabase {
         };
         let doomed: Vec<i64> = {
             let pool = self.pool_of(root)?;
-            let Some(tree) = self.trees.get(&root) else {
+            let Some(tree) = self.schema.trees.get(&root) else {
                 return Ok(());
             };
             let mut keys = Vec::new();
@@ -118,7 +120,7 @@ impl crate::ImportedDatabase {
             return Ok(());
         }
         let txn = self.current_txn();
-        let at = self.schema_of(root);
+        let at = self.session_state.schema_of(root);
         let wal = self
             .log_of(at)
             .ok_or_else(|| refusal("a statement names a database that is not attached"))?;
@@ -130,11 +132,11 @@ impl crate::ImportedDatabase {
             undo: None,
             uncommitted: self.uncommitted_handle_of(at),
         };
-        let Some(tree) = self.trees.get_mut(&root) else {
+        let Some(tree) = self.schema.trees.get_mut(&root) else {
             return Ok(());
         };
         for rowid in doomed {
-            tree.delete(&mut self.database, &mut log, &[Datum::Int(rowid)])?;
+            tree.delete(&mut self.storage.database, &mut log, &[Datum::Int(rowid)])?;
         }
         Ok(())
     }
@@ -259,7 +261,11 @@ impl crate::ImportedDatabase {
                     tree_id: 0,
                 },
             )?;
-            self.covering.entry(root).or_default().push(index_root);
+            self.schema
+                .covering
+                .entry(root)
+                .or_default()
+                .push(index_root);
             if let Some(slot) = info.indexes.get_mut(position) {
                 slot.root = index_root;
             }

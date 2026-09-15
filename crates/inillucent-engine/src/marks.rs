@@ -37,10 +37,10 @@ impl ImportedDatabase {
         // level a module is given is how many savepoints were already open,
         // which is the same number `rollback_to` later hands it: a module
         // numbers its own marks by what it was told, so the two have to agree.
-        let level = i32::try_from(self.marks.len()).unwrap_or(i32::MAX);
+        let level = i32::try_from(self.writing.marks.len()).unwrap_or(i32::MAX);
         self.savepoint_modules(level)?;
-        let held = self.undo.borrow().len();
-        self.marks.push((name.to_ascii_lowercase(), held));
+        let held = self.writing.undo.borrow().len();
+        self.writing.marks.push((name.to_ascii_lowercase(), held));
         Ok(())
     }
 
@@ -58,7 +58,12 @@ impl ImportedDatabase {
         // A name the transaction does not hold is left to `undo_to` to refuse,
         // so that the error is the one it has always been.
         let folded = name.to_ascii_lowercase();
-        let Some(position) = self.marks.iter().rposition(|(held, _)| *held == folded) else {
+        let Some(position) = self
+            .writing
+            .marks
+            .iter()
+            .rposition(|(held, _)| *held == folded)
+        else {
             // **A name no savepoint holds changes nothing, modules included.**
             // Defaulting the level to zero and telling the modules anyway made
             // `ROLLBACK TO a_name_that_is_not_open` discard a buffered virtual
@@ -84,7 +89,12 @@ impl ImportedDatabase {
     /// @param name - the savepoint's name
     pub fn release(&mut self, name: &[u8]) -> DbResult<()> {
         let folded = name.to_ascii_lowercase();
-        let Some(position) = self.marks.iter().rposition(|(held, _)| *held == folded) else {
+        let Some(position) = self
+            .writing
+            .marks
+            .iter()
+            .rposition(|(held, _)| *held == folded)
+        else {
             return Err(refusal(format!(
                 "no such savepoint: {}",
                 String::from_utf8_lossy(name)
@@ -96,7 +106,7 @@ impl ImportedDatabase {
         // savepoint had no moment at which to fold it into the transaction.
         let level = i32::try_from(position).unwrap_or(i32::MAX);
         let told = self.release_modules(level);
-        self.marks.truncate(position);
+        self.writing.marks.truncate(position);
         told
     }
 }

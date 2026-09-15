@@ -111,7 +111,7 @@ impl ImportedDatabase {
         // exactly what the next open needs, because everything after it is in
         // the log for recovery to replay.
         self.refresh_statistics()?;
-        self.wal.sync()?;
+        self.storage.wal.sync()?;
         // **The segment boundary is moved to the checkpoint point first.**
         // A segment is only retirable once every record in it is below the
         // checkpoint LSN, and the segment being appended to never is - the
@@ -119,7 +119,7 @@ impl ImportedDatabase {
         // "everything except the current segment" into "everything", and it is
         // the difference between a log that shrinks and one that keeps one
         // segment's worth of a finished build for ever.
-        self.wal.roll_segment()?;
+        self.storage.wal.roll_segment()?;
         // **Read before `log_free_map_pages` touches anything.** Every page
         // `holds_uncommitted` will hold back in the flush below is already
         // dirty right now - it was dirtied by the write that made it
@@ -131,7 +131,7 @@ impl ImportedDatabase {
         // own pages' stale `rec_lsn` values for no reason: they are logged and
         // flushed unconditionally by this same checkpoint regardless of any
         // open transaction, so they were never a page recovery could miss.
-        let oldest_dirty = self.database.pool().oldest_dirty_lsn();
+        let oldest_dirty = self.storage.database.pool().oldest_dirty_lsn();
         // The free map's own pages, logged and stamped before they are
         // rewritten - see `inillucent_txn::engine::log_free_map_pages` - and
         // done *before* `set_log_position` reads the durable point below.
@@ -141,10 +141,10 @@ impl ImportedDatabase {
         // the next reopen would scan it again every time. That is exactly
         // what `inillucent-txn`'s own copy of this checkpoint measures:
         // `recovering_checkpointing_and_recovering_again_is_the_same_database`.
-        inillucent_txn::engine::log_free_map_pages(&mut self.database, &self.wal)?;
-        self.wal.sync()?;
-        let durable = self.wal.write_ahead_point();
-        self.database.pool().set_durable_lsn(durable);
+        inillucent_txn::engine::log_free_map_pages(&mut self.storage.database, &self.storage.wal)?;
+        self.storage.wal.sync()?;
+        let durable = self.storage.wal.write_ahead_point();
+        self.storage.database.pool().set_durable_lsn(durable);
         // **Never past an open transaction's own first record, nor past any
         // other held-back page's.** Read off this schema's own pool, because
         // a connection with an `ATTACH`ed file checkpoints each file's
@@ -154,7 +154,7 @@ impl ImportedDatabase {
         // that simply had not been checkpointed yet - see this module's own
         // doc comment for the reproduction.
         let recovery_from = durable
-            .min(self.database.pool().uncommitted_lsn())
+            .min(self.storage.database.pool().uncommitted_lsn())
             .min(oldest_dirty);
         // **The segment `recovery_from` actually lives in, not the one
         // `roll_segment` just opened.** The freshly rolled segment is only
@@ -171,8 +171,9 @@ impl ImportedDatabase {
         // `recovery_from` - the `?` here is that refusal reaching this
         // checkpoint: better a failed checkpoint than one that persists a
         // recovery point `read_chain` cannot actually honor.
-        let recovery_sequence = self.wal.sequence_containing(recovery_from)?;
-        self.database
+        let recovery_sequence = self.storage.wal.sequence_containing(recovery_from)?;
+        self.storage
+            .database
             .set_log_position(recovery_from, 0, recovery_sequence);
         // **Before the segments below it are retired.** From this instant, any
         // page that dirties for the first time floors its `rec_lsn` at
@@ -180,9 +181,9 @@ impl ImportedDatabase {
         // carrying - see `Pool::note_dirty_from`. Set after `set_log_position`
         // only because the two do not interact; what matters is that it is set
         // before `retire_segments_below` below actually deletes anything.
-        self.database.pool().set_retained_lsn(recovery_from);
-        self.database.checkpoint_after_free_map()?;
-        self.wal.note_checkpoint(recovery_from, 0)?;
+        self.storage.database.pool().set_retained_lsn(recovery_from);
+        self.storage.database.checkpoint_after_free_map()?;
+        self.storage.wal.note_checkpoint(recovery_from, 0)?;
         // **And then the segments the checkpoint has made redundant go.**
         //
         // `retire_segments_below` was written, documented as "called after a
@@ -202,10 +203,11 @@ impl ImportedDatabase {
         // turn a tidy-up into an outage. `recovery_from` rather than `durable`
         // is what makes that true of a segment a held-back page still needs,
         // not only of one recovery has already replayed.
-        self.wal.retire_segments_below(recovery_from)?;
-        self.database
+        self.storage.wal.retire_segments_below(recovery_from)?;
+        self.storage
+            .database
             .pool()
-            .set_durable_lsn(self.wal.write_ahead_point());
+            .set_durable_lsn(self.storage.wal.write_ahead_point());
         // Every attached database too, because a log is per file and a
         // connection closed after a checkpoint should leave databases rather
         // than databases and logs nobody will open again.
@@ -234,8 +236,8 @@ impl ImportedDatabase {
     /// rewritten on every checkpoint, with no `WritePage` record and no LSN
     /// stamp behind it, so a crash mid-write could leave it unrecoverable.
     fn checkpoint_attached(&mut self) -> DbResult<()> {
-        for nth in 0..self.attached.len() {
-            let Some(held) = self.attached.get_mut(nth) else {
+        for nth in 0..self.session_state.attached.len() {
+            let Some(held) = self.session_state.attached.get_mut(nth) else {
                 continue;
             };
             if held.path.is_none() {

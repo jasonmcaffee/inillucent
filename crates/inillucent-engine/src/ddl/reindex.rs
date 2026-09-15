@@ -38,6 +38,7 @@ impl ImportedDatabase {
         // statement that could have repaired such an index reported it as
         // corrupt instead.
         let targets: Vec<(Vec<u8>, Vec<u8>)> = self
+            .schema
             .tables
             .iter()
             .flat_map(|table| {
@@ -64,13 +65,14 @@ impl ImportedDatabase {
             })
             .map(|(table, index)| (table, index.name.clone()))
             .collect();
-        let named_table = self.tables.iter().any(|table| {
+        let named_table = self.schema.tables.iter().any(|table| {
             wanted
                 .iter()
                 .any(|name| table.folded == *name && !table.indexes.is_empty())
         });
         let targets: Vec<(Vec<u8>, Vec<u8>)> = if named_table {
-            self.tables
+            self.schema
+                .tables
                 .iter()
                 .filter(|table| wanted.contains(&table.folded))
                 .flat_map(|table| {
@@ -116,6 +118,7 @@ impl ImportedDatabase {
     fn rebuild_index(&mut self, table: &[u8], name: &[u8]) -> DbResult<()> {
         let folded = table.to_ascii_lowercase();
         let owner = self
+            .schema
             .tables
             .iter()
             .find(|held| held.folded == folded)
@@ -129,6 +132,7 @@ impl ImportedDatabase {
             .cloned()
             .ok_or_else(|| refusal(format!("no such index: {}", String::from_utf8_lossy(name))))?;
         let rowid = self
+            .schema
             .entries
             .iter()
             .find(|held| {
@@ -138,6 +142,7 @@ impl ImportedDatabase {
             .map(|held| held.rowid)
             .ok_or_else(|| refusal("the index has no catalog row"))?;
         let sql = self
+            .schema
             .entries
             .iter()
             .find(|held| held.rowid == rowid)
@@ -189,7 +194,7 @@ impl ImportedDatabase {
         } else {
             flat.chunks_exact(key_columns).collect()
         };
-        let at = self.ddl_schema;
+        let at = self.schema.ddl_schema;
         // **The catalog row names the new tree before the tree is filled
         // (task-1932, found by `reindex_crash.rs`).** A recovery derives every
         // tree's shape from the catalog rows it has replayed so far, and

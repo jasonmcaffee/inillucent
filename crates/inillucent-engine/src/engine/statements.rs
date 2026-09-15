@@ -34,9 +34,11 @@ impl crate::ImportedDatabase {
     pub fn plan(&self, sql: &str) -> DbResult<PhysicalPlan> {
         let parsed = self.parse_once(sql)?;
         let bound = self.bind_parsed(sql, &parsed);
-        self.recycle(parsed);
+        self.compiled.recycle(parsed);
         match bound? {
-            BoundStatement::Select(select) => Ok(plan_select_with(*select, self.levers)),
+            BoundStatement::Select(select) => {
+                Ok(plan_select_with(*select, self.session_state.levers))
+            }
             _ => Err(refusal(format!("{sql} is not a read-only statement"))),
         }
     }
@@ -173,17 +175,21 @@ impl crate::ImportedDatabase {
     pub(crate) fn statement_tables(&self, sql: &str) -> DbResult<StatementTables> {
         let parsed = self.parse_once(sql)?;
         let fallback = AllowAll;
-        let authorizer: &dyn inillucent_sql::bind::Authorizer = match &self.authorizer {
+        let authorizer: &dyn inillucent_sql::bind::Authorizer = match &self.session_state.authorizer
+        {
             Some(held) => held.as_ref(),
             None => &fallback,
         };
         let externals = self.external_functions();
-        let mut binder = Binder::new(&self.catalog, &parsed.ast, authorizer)
+        let mut binder = Binder::new(&self.schema.catalog, &parsed.ast, authorizer)
             .with_source(sql.as_bytes())
             .with_functions(&externals)
-            .with_collations(&self.collations)
-            .with_limits(&self.limits)
-            .with_foreign_keys(self.foreign_keys, self.defer_foreign_keys);
+            .with_collations(&self.session_state.collations)
+            .with_limits(&self.session_state.limits)
+            .with_foreign_keys(
+                self.session_state.foreign_keys,
+                self.session_state.defer_foreign_keys,
+            );
         let bound = binder.bind_statement(&parsed.statement).map_err(refused)?;
         let mut names: Vec<(&'static str, Vec<u8>)> = Vec::new();
         let mut written = None;

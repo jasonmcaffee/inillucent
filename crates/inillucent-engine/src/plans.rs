@@ -145,7 +145,8 @@ impl ImportedDatabase {
     /// Counted across every session, because the cache is keyed by session and
     /// a caller asking how much it is holding means all of it.
     pub fn cached_statements(&self) -> usize {
-        self.statements
+        self.compiled
+            .statements
             .borrow()
             .values()
             .map(HashMap::len)
@@ -154,14 +155,14 @@ impl ImportedDatabase {
 
     /// Returns the ceiling one session's cache is emptied at.
     pub fn statement_cache_limit(&self) -> usize {
-        self.statement_cache_limit.get()
+        self.compiled.statement_cache_limit.get()
     }
 
     /// Returns what one run-time limit is set to on this connection.
     ///
     /// @param limit - which limit
     pub fn limit(&self, limit: inillucent_base::limits::Limit) -> i64 {
-        self.limits.get(limit)
+        self.session_state.limits.get(limit)
     }
 
     /// Sets one run-time limit, and returns what it was before.
@@ -178,7 +179,7 @@ impl ImportedDatabase {
     /// @param requested - the value asked for
     /// @returns the value that was in force before this call
     pub fn set_limit(&mut self, limit: inillucent_base::limits::Limit, requested: i64) -> i64 {
-        self.limits.set(limit, requested)
+        self.session_state.limits.set(limit, requested)
     }
 
     /// Sets the ceiling one session's cache is emptied at.
@@ -188,9 +189,9 @@ impl ImportedDatabase {
     ///
     /// @param most - how many compiled statements one session may hold
     pub fn set_statement_cache_limit(&self, most: usize) {
-        self.statement_cache_limit.set(most);
+        self.compiled.statement_cache_limit.set(most);
         if most == 0 {
-            self.statements.borrow_mut().clear();
+            self.compiled.statements.borrow_mut().clear();
         }
     }
 
@@ -200,7 +201,7 @@ impl ImportedDatabase {
     /// just issued a hundred thousand generated statements and wants the memory
     /// back has no other way to ask for it.
     pub fn clear_statement_cache(&self) {
-        self.statements.borrow_mut().clear();
+        self.compiled.statements.borrow_mut().clear();
     }
 
     /// Returns the key a compiled statement is held under.
@@ -210,7 +211,7 @@ impl ImportedDatabase {
     /// tables; two lever settings' plans are kept apart because a plan built
     /// with the covering-index rule on is that rule's answer.
     fn plan_key(&self) -> u64 {
-        (self.session.get() << 32) | u64::from(self.levers.disabled())
+        (self.session_state.session.get() << 32) | u64::from(self.session_state.levers.disabled())
     }
 
     /// Returns how many statements are compiled and held.
@@ -218,7 +219,12 @@ impl ImportedDatabase {
     /// The plan cache's size, which is what a test asserting that a
     /// registration invalidated it asks about.
     pub fn cached_plan_count(&self) -> usize {
-        self.statements.borrow().values().map(HashMap::len).sum()
+        self.compiled
+            .statements
+            .borrow()
+            .values()
+            .map(HashMap::len)
+            .sum()
     }
 
     /// Returns how many statements this connection has compiled since it opened.
@@ -229,7 +235,7 @@ impl ImportedDatabase {
     /// it on every prepare has the size the first number reports and none of
     /// the behaviour it is being trusted for.
     pub fn compiled_statement_count(&self) -> u64 {
-        self.compiles.get()
+        self.compiled.compiles.get()
     }
 
     /// Reports whether a compiled plan may be reused.
@@ -237,7 +243,7 @@ impl ImportedDatabase {
     /// Only when nothing can refuse a statement: an authorizer that could
     /// answer differently this time has to be asked this time.
     fn cacheable(&self) -> bool {
-        match &self.authorizer {
+        match &self.session_state.authorizer {
             Some(held) => held.allows_everything(),
             None => true,
         }
@@ -259,7 +265,7 @@ impl ImportedDatabase {
         if !self.cacheable() {
             return Ok(std::rc::Rc::new(self.compile(sql)?));
         }
-        if !self.levers.has(Levers::PLAN_CACHE) {
+        if !self.session_state.levers.has(Levers::PLAN_CACHE) {
             // The lever is off, so nothing is held and every execution
             // compiles. It exists so a measurement can price the compile.
             return Ok(std::rc::Rc::new(self.compile(sql)?));
@@ -283,7 +289,7 @@ impl ImportedDatabase {
         // asked, which is an allocation on the one path a plan cache exists to
         // make free.
         let key = self.plan_key();
-        let held = self.statements.borrow();
+        let held = self.compiled.statements.borrow();
         if let Some(found) = held.get(&key).and_then(|under| under.get(sql)) {
             return Ok(std::rc::Rc::clone(found));
         }
@@ -305,9 +311,9 @@ impl ImportedDatabase {
         //
         // A ceiling of zero caches nothing at all, which is what a caller
         // diagnosing a plan asks for: every statement is compiled fresh.
-        let ceiling = self.statement_cache_limit.get();
+        let ceiling = self.compiled.statement_cache_limit.get();
         if ceiling > 0 {
-            let mut held = self.statements.borrow_mut();
+            let mut held = self.compiled.statements.borrow_mut();
             let under = held.entry(key).or_default();
             if under.len() >= ceiling {
                 under.clear();

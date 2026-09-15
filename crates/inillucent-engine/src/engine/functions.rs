@@ -17,7 +17,8 @@ impl crate::ImportedDatabase {
     /// was holding it, which is why the machinery looks the body up when it
     /// runs rather than carrying it.
     pub(crate) fn external_functions(&self) -> Vec<inillucent_sql::function::ExternalFunction> {
-        self.registry
+        self.session_state
+            .registry
             .functions()
             .iter()
             .map(|held| inillucent_sql::function::ExternalFunction {
@@ -84,7 +85,7 @@ impl crate::ImportedDatabase {
         &mut self,
         function: inillucent_ext::registry::UserFunction,
     ) -> DbResult<()> {
-        self.registry.register_function(function);
+        self.session_state.registry.register_function(function);
         self.forget_compiled_statements();
         Ok(())
     }
@@ -94,7 +95,7 @@ impl crate::ImportedDatabase {
     /// @param name - the name it was registered under
     /// @param arity - the arity it was registered for
     pub fn remove_function(&mut self, name: &str, arity: i32) -> bool {
-        let removed = self.registry.unregister_function(name, arity);
+        let removed = self.session_state.registry.unregister_function(name, arity);
         if removed {
             self.forget_compiled_statements();
         }
@@ -117,8 +118,10 @@ impl crate::ImportedDatabase {
     ) -> DbResult<()> {
         let collation = inillucent_value::collation::register_custom(name, comparator);
         let folded = name.to_ascii_uppercase();
-        self.collations.retain(|(existing, _)| *existing != folded);
-        self.collations.push((folded, collation));
+        self.session_state
+            .collations
+            .retain(|(existing, _)| *existing != folded);
+        self.session_state.collations.push((folded, collation));
         // A comparison compiled under BINARY would keep comparing under BINARY.
         self.forget_compiled_statements();
         Ok(())
@@ -128,7 +131,7 @@ impl crate::ImportedDatabase {
     ///
     /// @param on - whether the flag is in force
     pub fn set_defensive(&mut self, on: bool) {
-        self.defensive = on;
+        self.session_state.defensive = on;
     }
 
     /// Installs the authorizer every later statement is bound under.
@@ -143,8 +146,8 @@ impl crate::ImportedDatabase {
         &mut self,
         authorizer: Option<std::rc::Rc<dyn inillucent_sql::bind::Authorizer>>,
     ) {
-        self.authorizer = authorizer;
-        self.statements.borrow_mut().clear();
+        self.session_state.authorizer = authorizer;
+        self.compiled.statements.borrow_mut().clear();
     }
 
     /// Sets exactly which planner optimizations are off for this connection.
@@ -186,11 +189,11 @@ impl crate::ImportedDatabase {
         // two settings is two entries; clearing would make the second arm's
         // first execution pay a compile the first arm's did not, and that
         // difference is the size of the thing such a measurement looks for.
-        self.levers = levers;
+        self.session_state.levers = levers;
     }
 
     /// Returns which planner optimizations this connection has on.
     pub fn levers(&self) -> Levers {
-        self.levers
+        self.session_state.levers
     }
 }

@@ -51,12 +51,12 @@ impl ImportedDatabase {
     /// refuses to run on a damaged database is the one you needed.
     pub(crate) fn dbstat_rows(&self) -> DbResult<Vec<Vec<OwnedDatum>>> {
         let mut rows = Vec::new();
-        for held in &self.entries {
+        for held in &self.schema.entries {
             let entry = &held.entry;
             if held.root == 0 {
                 continue;
             }
-            let Some(tree) = self.trees.get(&held.root) else {
+            let Some(tree) = self.schema.trees.get(&held.root) else {
                 continue;
             };
             let Ok(pool) = self.pool_of(held.root) else {
@@ -113,7 +113,7 @@ impl ImportedDatabase {
     /// engine answers the read that a diagnostic needs and refuses the write,
     /// which the module's default `update` already does.
     pub(crate) fn dbpage_rows(&self) -> DbResult<Vec<Vec<OwnedDatum>>> {
-        let pool = self.database.pool();
+        let pool = self.storage.database.pool();
         let mut rows = Vec::new();
         for page in 1..=pool.page_count() {
             let Ok(guard) = pool.fetch(inillucent_pool::PageId(page)) else {

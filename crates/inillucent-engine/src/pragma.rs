@@ -111,20 +111,20 @@ impl ImportedDatabase {
             b"integrity_check" => self.pragma_integrity_check("integrity_check"),
             b"quick_check" => self.pragma_integrity_check("quick_check"),
             b"wal_checkpoint" => self.pragma_wal_checkpoint(),
-            b"page_size" => Ok(named_integer("page_size", self.page_size as i64)),
+            b"page_size" => Ok(named_integer("page_size", self.storage.page_size as i64)),
             b"page_count" => Ok(named_integer(
                 "page_count",
-                self.database.pool().page_count() as i64,
+                self.storage.database.pool().page_count() as i64,
             )),
             b"freelist_count" => Ok(named_integer(
                 "freelist_count",
-                self.database.free_pages() as i64,
+                self.storage.database.free_pages() as i64,
             )),
             b"user_version" => self.pragma_user_version(argument),
             b"application_id" => self.pragma_application_id(argument),
             b"schema_version" => Ok(named_integer(
                 "schema_version",
-                i64::from(self.database.schema_cookie()),
+                i64::from(self.storage.database.schema_cookie()),
             )),
             // **A connection-visible counter, not a file one.** SQLite's
             // `data_version` changes when *another* connection has committed;
@@ -225,13 +225,13 @@ impl ImportedDatabase {
             b"collation_list" => self.pragma_collation_list(),
             b"pragma_list" => list_of("name", &listed_pragmas()),
             b"module_list" => {
-                let mut names = self.registry.module_names();
+                let mut names = self.session_state.registry.module_names();
                 names.extend(ENGINE_MODULES.iter().map(|name| (*name).to_string()));
                 names.sort();
                 names.dedup();
                 list_of("name", &names)
             }
-            b"function_list" => pragma_function_list(&self.registry),
+            b"function_list" => pragma_function_list(&self.session_state.registry),
             b"compile_options" => list_of("compile_options", COMPILE_OPTIONS),
             b"database_list" => Outcome {
                 rows: self.database_list(),

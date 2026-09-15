@@ -430,28 +430,28 @@ impl ConnectionSettings {
     /// @param database - the connection `VACUUM` is about to reopen
     pub(crate) fn capture(database: &ImportedDatabase) -> ConnectionSettings {
         ConnectionSettings {
-            journal_mode: database.journal_mode,
-            foreign_keys: database.foreign_keys,
-            defer_foreign_keys: database.defer_foreign_keys,
-            locking_exclusive: database.locking_exclusive,
-            defensive: database.defensive,
-            secure_delete: database.secure_delete,
-            auto_vacuum: database.auto_vacuum,
-            automatic_index: database.automatic_index,
-            ignore_check_constraints: database.ignore_check_constraints,
-            case_sensitive_like: database.case_sensitive_like,
-            cache_size: database.cache_size,
-            analysis_limit: database.analysis_limit,
-            writable_schema: database.writable_schema,
-            query_only: database.query_only,
-            recursive_triggers: database.recursive_triggers,
-            max_page_count: database.max_page_count,
-            temp_store: database.temp_store,
-            busy_timeout_ms: database.busy_timeout_ms,
-            collations: database.collations.clone(),
-            authorizer: database.authorizer.clone(),
-            levers: database.levers,
-            registry: database.registry.clone(),
+            journal_mode: database.session_state.journal_mode,
+            foreign_keys: database.session_state.foreign_keys,
+            defer_foreign_keys: database.session_state.defer_foreign_keys,
+            locking_exclusive: database.session_state.locking_exclusive,
+            defensive: database.session_state.defensive,
+            secure_delete: database.session_state.secure_delete,
+            auto_vacuum: database.session_state.auto_vacuum,
+            automatic_index: database.session_state.automatic_index,
+            ignore_check_constraints: database.session_state.ignore_check_constraints,
+            case_sensitive_like: database.session_state.case_sensitive_like,
+            cache_size: database.session_state.cache_size,
+            analysis_limit: database.session_state.analysis_limit,
+            writable_schema: database.session_state.writable_schema,
+            query_only: database.session_state.query_only,
+            recursive_triggers: database.session_state.recursive_triggers,
+            max_page_count: database.session_state.max_page_count,
+            temp_store: database.session_state.temp_store,
+            busy_timeout_ms: database.session_state.busy_timeout_ms,
+            collations: database.session_state.collations.clone(),
+            authorizer: database.session_state.authorizer.clone(),
+            levers: database.session_state.levers,
+            registry: database.session_state.registry.clone(),
         }
     }
 
@@ -473,28 +473,28 @@ impl ConnectionSettings {
     /// @param database - the freshly reopened connection
     pub(crate) fn restore(self, database: &mut ImportedDatabase) -> DbResult<()> {
         database.set_journal_mode(self.journal_mode)?;
-        database.foreign_keys = self.foreign_keys;
-        database.defer_foreign_keys = self.defer_foreign_keys;
-        database.locking_exclusive = self.locking_exclusive;
-        database.defensive = self.defensive;
-        database.secure_delete = self.secure_delete;
-        database.auto_vacuum = self.auto_vacuum;
-        database.automatic_index = self.automatic_index;
-        database.ignore_check_constraints = self.ignore_check_constraints;
-        database.case_sensitive_like = self.case_sensitive_like;
-        database.cache_size = self.cache_size;
-        database.analysis_limit = self.analysis_limit;
-        database.writable_schema = self.writable_schema;
-        database.query_only = self.query_only;
-        database.recursive_triggers = self.recursive_triggers;
-        database.max_page_count = self.max_page_count;
-        database.temp_store = self.temp_store;
-        database.busy_timeout_ms = self.busy_timeout_ms;
-        database.collations = self.collations;
-        database.authorizer = self.authorizer;
-        database.levers = self.levers;
-        database.registry = self.registry;
-        database.eponymous.clear();
+        database.session_state.foreign_keys = self.foreign_keys;
+        database.session_state.defer_foreign_keys = self.defer_foreign_keys;
+        database.session_state.locking_exclusive = self.locking_exclusive;
+        database.session_state.defensive = self.defensive;
+        database.session_state.secure_delete = self.secure_delete;
+        database.session_state.auto_vacuum = self.auto_vacuum;
+        database.session_state.automatic_index = self.automatic_index;
+        database.session_state.ignore_check_constraints = self.ignore_check_constraints;
+        database.session_state.case_sensitive_like = self.case_sensitive_like;
+        database.session_state.cache_size = self.cache_size;
+        database.session_state.analysis_limit = self.analysis_limit;
+        database.session_state.writable_schema = self.writable_schema;
+        database.session_state.query_only = self.query_only;
+        database.session_state.recursive_triggers = self.recursive_triggers;
+        database.session_state.max_page_count = self.max_page_count;
+        database.session_state.temp_store = self.temp_store;
+        database.session_state.busy_timeout_ms = self.busy_timeout_ms;
+        database.session_state.collations = self.collations;
+        database.session_state.authorizer = self.authorizer;
+        database.session_state.levers = self.levers;
+        database.session_state.registry = self.registry;
+        database.session_state.eponymous.clear();
         database.refresh_catalog();
         Ok(())
     }
@@ -526,7 +526,7 @@ pub(crate) struct AttachedSchemas {
     next_handle: u32,
     /// Every built tree an attached or temporary schema owns.
     ///
-    /// **`self.trees` is connection-wide, keyed by handle rather than by
+    /// **`self.schema.trees` is connection-wide, keyed by handle rather than by
     /// schema, and `main`'s own trees are not among these** - `Attached`
     /// itself holds no `PagedTree` at all, only the catalog row that names
     /// one, so a handle here is unreachable without its matching entry moving
@@ -549,23 +549,23 @@ impl AttachedSchemas {
     /// @param database - the connection about to be reopened
     pub(crate) fn take(database: &mut ImportedDatabase) -> AttachedSchemas {
         let is_attached = |root: &u32| *root >= crate::FIRST_ATTACHED_HANDLE;
-        let trees = std::mem::take(&mut database.trees)
+        let trees = std::mem::take(&mut database.schema.trees)
             .into_iter()
             .filter(|(root, _)| is_attached(root))
             .collect();
-        let layouts = std::mem::take(&mut database.layouts)
+        let layouts = std::mem::take(&mut database.schema.layouts)
             .into_iter()
             .filter(|(root, _)| is_attached(root))
             .collect();
-        let covering = std::mem::take(&mut database.covering)
+        let covering = std::mem::take(&mut database.schema.covering)
             .into_iter()
             .filter(|(root, _)| is_attached(root))
             .collect();
         AttachedSchemas {
-            temps: std::mem::take(&mut database.temps),
-            attached: std::mem::take(&mut database.attached),
-            owner: std::mem::take(&mut database.owner),
-            next_handle: database.next_handle,
+            temps: std::mem::take(&mut database.session_state.temps),
+            attached: std::mem::take(&mut database.session_state.attached),
+            owner: std::mem::take(&mut database.session_state.owner),
+            next_handle: database.schema.next_handle,
             trees,
             layouts,
             covering,
@@ -575,18 +575,18 @@ impl AttachedSchemas {
     /// Puts every temporary table and every attached database back onto a
     /// freshly reopened connection, and rebuilds the tables that describe
     /// them - the same step `ATTACH` itself takes after adding one, needed
-    /// here because the fresh connection derived `self.tables` from `main`
+    /// here because the fresh connection derived `self.schema.tables` from `main`
     /// alone, before any of this existed to derive it from.
     ///
     /// @param database - the freshly reopened connection
     pub(crate) fn restore(self, database: &mut ImportedDatabase) -> DbResult<()> {
-        database.temps = self.temps;
-        database.attached = self.attached;
-        database.owner = self.owner;
-        database.next_handle = self.next_handle;
-        database.trees.extend(self.trees);
-        database.layouts.extend(self.layouts);
-        database.covering.extend(self.covering);
+        database.session_state.temps = self.temps;
+        database.session_state.attached = self.attached;
+        database.session_state.owner = self.owner;
+        database.schema.next_handle = self.next_handle;
+        database.schema.trees.extend(self.trees);
+        database.schema.layouts.extend(self.layouts);
+        database.schema.covering.extend(self.covering);
         database.rebuild_tables()
     }
 }
@@ -643,7 +643,7 @@ fn reopened(
 /// the new file afterwards, because every tree handle it holds names a
 /// root that has moved.
 ///
-/// **Every step is on `connection.vfs`** - the rebuild, the rename, the segment
+/// **Every step is on `connection.storage.vfs`** - the rebuild, the rename, the segment
 /// removals and both reopens. It was not: the reopens constructed a fresh
 /// `OsVfs` and the rebuild called `std::fs` directly, so a connection on
 /// `MemoryVfs`, `SimVfs` or an application's own encrypting VFS either
@@ -664,7 +664,7 @@ fn reopened(
 /// other connection setting is captured before the first reopen and put
 /// back after the second, by `ConnectionSettings`.
 pub(crate) fn vacuum_in_place(connection: &mut ImportedDatabase) -> DbResult<()> {
-    if !connection.imposters.is_empty() {
+    if !connection.schema.imposters.is_empty() {
         return Err(refusal(
             "cannot VACUUM a connection with an imposter table declared - every index gets a fresh tree below",
         ));
@@ -673,21 +673,21 @@ pub(crate) fn vacuum_in_place(connection: &mut ImportedDatabase) -> DbResult<()>
         .duration_since(std::time::UNIX_EPOCH)
         .map(|since| since.as_nanos() as u64)
         .unwrap_or(0);
-    let scratch = scratch_beside(&connection.path, stamp);
-    let _ = connection.vfs.delete(
+    let scratch = scratch_beside(&connection.storage.path, stamp);
+    let _ = connection.storage.vfs.delete(
         &inillucent_vfs::DbPath::new(scratch.to_string_lossy().as_ref()),
         false,
     );
     connection.rebuild_into(&scratch)?;
-    let path = connection.path.clone();
-    let page_size = connection.page_size;
-    let frames = connection.frames;
+    let path = connection.storage.path.clone();
+    let page_size = connection.storage.page_size;
+    let frames = connection.storage.frames;
     // **Taken before the first `*connection`.** Every reopen and every file
     // operation below has to land on the file system this connection was
     // opened on, and `*connection` replaces the whole `ImportedDatabase` - so
     // the handle is taken here, while it is still the one the caller
     // gave us (task-1946, H2).
-    let vfs = std::sync::Arc::clone(&connection.vfs);
+    let vfs = std::sync::Arc::clone(&connection.storage.vfs);
     // **`changes()`/`total_changes()`/`last_insert_rowid()` are the
     // connection's own history, not a fact about the file `VACUUM` is
     // rewriting, and SQLite's own `VACUUM` leaves them alone.** Assigning
@@ -701,10 +701,10 @@ pub(crate) fn vacuum_in_place(connection: &mut ImportedDatabase) -> DbResult<()>
     // and restored once, after the second and final swap - nothing runs a
     // statement on it between the two, so there is nothing to restore
     // in between.
-    let last_changes = connection.last_changes.get();
-    let changed_ever = connection.changed_ever.get();
-    let last_rowid = connection.last_rowid.get();
-    let session_change_baseline = std::mem::take(&mut connection.session_change_baseline);
+    let last_changes = connection.counters.last_changes.get();
+    let changed_ever = connection.counters.changed_ever.get();
+    let last_rowid = connection.counters.last_rowid.get();
+    let session_change_baseline = std::mem::take(&mut connection.counters.session_change_baseline);
     let settings = ConnectionSettings::capture(connection);
     let schemas = AttachedSchemas::take(connection);
     // **The old file is closed before it is replaced, not after** -
@@ -730,12 +730,13 @@ pub(crate) fn vacuum_in_place(connection: &mut ImportedDatabase) -> DbResult<()>
     // the original unrecoverable, its log already gone.
     remove_log_segments(&vfs, &path);
     *connection = reopened(&vfs, &path, page_size, frames, "the database it replaced")?;
-    connection.last_changes.set(last_changes);
-    connection.changed_ever.set(changed_ever);
+    connection.counters.last_changes.set(last_changes);
+    connection.counters.changed_ever.set(changed_ever);
     connection
+        .counters
         .last_rowid
         .set(last_rowid_after_vacuum(connection, last_rowid));
-    connection.session_change_baseline = session_change_baseline;
+    connection.counters.session_change_baseline = session_change_baseline;
     // Before the settings: `ConnectionSettings::restore`'s
     // `refresh_catalog` needs the tables `rebuild_tables` derives here
     // already in place to describe them.

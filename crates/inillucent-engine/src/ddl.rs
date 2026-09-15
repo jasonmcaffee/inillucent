@@ -136,7 +136,7 @@ impl ImportedDatabase {
         // schema, and the primitives underneath - `allocate_root`, `record`,
         // `build_tree`, `seal` - have to write into it. Put back afterwards, so
         // nothing outside one statement ever observes it as anything but `main`.
-        let previous = self.ddl_schema;
+        let previous = self.schema.ddl_schema;
         let at = schema_of(&directive);
         // **The temporary database is made by the first statement that needs
         // one.** The binder has already resolved `temp` to schema one, because
@@ -146,7 +146,7 @@ impl ImportedDatabase {
         if at == super::TEMP {
             self.ensure_temp()?;
         }
-        self.ddl_schema = at;
+        self.schema.ddl_schema = at;
         // **The schema cookie moves once per schema change, and only here.**
         // Not in `refresh_catalog`, which also runs on open and on `ATTACH`:
         // a cookie that rose every time the catalog was re-derived would climb
@@ -172,17 +172,17 @@ impl ImportedDatabase {
         // one integer read off a `Vec`'s length - and the reload is what puts
         // the connection's derived schema back in step with the catalog tree
         // the undo has just restored.
-        let autocommit = self.batch.get().is_none();
-        let mark = self.undo.borrow().len();
+        let autocommit = self.writing.batch.get().is_none();
+        let mark = self.writing.undo.borrow().len();
         let txn = self.current_txn();
         let outcome = self.run_directive(*directive, sql);
-        self.ddl_schema = previous;
+        self.schema.ddl_schema = previous;
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(error) => {
                 let undone = self.undo_to_floor(mark, true, txn);
                 if autocommit {
-                    self.undo.borrow_mut().clear();
+                    self.writing.undo.borrow_mut().clear();
                 }
                 // **The undo's own failure is the one worth reporting.** A
                 // "no such function" describing a database that is now in a
@@ -197,10 +197,10 @@ impl ImportedDatabase {
             // before-images stop being useful - and leaving them would put a
             // committed `CREATE TABLE` inside the reach of the next explicit
             // `ROLLBACK`, which undoes to floor zero.
-            self.undo.borrow_mut().clear();
+            self.writing.undo.borrow_mut().clear();
         }
         if changes_schema {
-            self.database.bump_schema_cookie();
+            self.storage.database.bump_schema_cookie();
         }
         Ok(outcome)
     }
@@ -354,14 +354,14 @@ impl ImportedDatabase {
             // transaction underneath it: the `COMMIT` that follows has nothing
             // left to commit and has to say so.
             Directive::Begin(_) => {
-                if self.batch.get().is_some() {
+                if self.writing.batch.get().is_some() {
                     return Err(refusal("cannot start a transaction within a transaction"));
                 }
                 self.begin_batch();
                 Ok(Outcome::empty())
             }
             Directive::Commit => {
-                if self.batch.get().is_none() {
+                if self.writing.batch.get().is_none() {
                     return Err(refusal("cannot commit - no transaction is active"));
                 }
                 self.commit_batch()?;
@@ -378,7 +378,7 @@ impl ImportedDatabase {
                     Ok(Outcome::empty())
                 }
                 None => {
-                    if self.batch.get().is_none() {
+                    if self.writing.batch.get().is_none() {
                         return Err(refusal("cannot rollback - no transaction is active"));
                     }
                     self.rollback()?;
@@ -392,9 +392,9 @@ impl ImportedDatabase {
             // the savepoint stack's own, and not one an explicit `BEGIN`
             // opened around it - see that field's own doc comment.
             Directive::Savepoint(name) => {
-                if self.batch.get().is_none() {
+                if self.writing.batch.get().is_none() {
                     self.begin_batch();
-                    self.implicit_transaction.set(true);
+                    self.writing.implicit_transaction.set(true);
                 }
                 self.savepoint(&name)?;
                 Ok(Outcome::empty())
@@ -407,7 +407,7 @@ impl ImportedDatabase {
                 // released, and that transaction stays open for the `COMMIT`
                 // that follows - `implicit_transaction` is what tells the two
                 // apart.
-                if self.marks.is_empty() && self.implicit_transaction.get() {
+                if self.writing.marks.is_empty() && self.writing.implicit_transaction.get() {
                     self.commit_batch()?;
                 }
                 Ok(Outcome::empty())
@@ -443,7 +443,7 @@ impl ImportedDatabase {
             // are not committed. The message is SQLite's, and so is the code:
             // `SQLITE_ERROR` (1), not `refusal`'s `SQLITE_MISUSE` (21) -
             // `dml_differential.rs`'s `vacuum_matches_sqlite` grades it.
-            Directive::Vacuum { .. } if self.batch.get().is_some() => {
+            Directive::Vacuum { .. } if self.writing.batch.get().is_some() => {
                 Err(statement_refusal("cannot VACUUM from within a transaction"))
             }
             Directive::Vacuum { into: None, .. } => {

@@ -142,8 +142,9 @@ impl crate::ImportedDatabase {
         let folded = name.to_ascii_lowercase();
         match kind {
             Ast::Table => {
-                let at = self.ddl_schema;
+                let at = self.schema.ddl_schema;
                 let position = self
+                    .schema
                     .tables
                     .iter()
                     .position(|held| held.database == at && held.folded == folded)
@@ -151,6 +152,7 @@ impl crate::ImportedDatabase {
                         refusal(format!("no such table: {}", String::from_utf8_lossy(name)))
                     })?;
                 let owner = self
+                    .schema
                     .tables
                     .get(position)
                     .cloned()
@@ -184,17 +186,22 @@ impl crate::ImportedDatabase {
                 let _ = position;
             }
             Ast::Index => {
-                let owner = self.ddl_schema;
-                let found = self.tables.iter().enumerate().find_map(|(at, table)| {
-                    if table.database != owner {
-                        return None;
-                    }
-                    table
-                        .indexes
-                        .iter()
-                        .position(|index| index.folded == folded)
-                        .map(|which| (at, which, table.root))
-                });
+                let owner = self.schema.ddl_schema;
+                let found = self
+                    .schema
+                    .tables
+                    .iter()
+                    .enumerate()
+                    .find_map(|(at, table)| {
+                        if table.database != owner {
+                            return None;
+                        }
+                        table
+                            .indexes
+                            .iter()
+                            .position(|index| index.folded == folded)
+                            .map(|which| (at, which, table.root))
+                    });
                 let Some((table_at, index_at, table_root)) = found else {
                     return Err(refusal(format!(
                         "no such index: {}",
@@ -202,13 +209,14 @@ impl crate::ImportedDatabase {
                     )));
                 };
                 let index_root = self
+                    .schema
                     .tables
                     .get(table_at)
                     .and_then(|table| table.indexes.get(index_at))
                     .map(|index| index.root)
                     .ok_or_else(|| refusal("the index that was just found is gone"))?;
                 let rowids: Vec<i64> = self
-                    .entries_of(self.ddl_schema)
+                    .entries_of(self.schema.ddl_schema)
                     .iter()
                     .filter(|held| {
                         held.entry.kind == ObjectKind::Index
@@ -230,7 +238,7 @@ impl crate::ImportedDatabase {
                     ObjectKind::Trigger
                 };
                 let rowids: Vec<i64> = self
-                    .entries_of(self.ddl_schema)
+                    .entries_of(self.schema.ddl_schema)
                     .iter()
                     .filter(|held| {
                         held.entry.kind == wanted && held.entry.name.to_ascii_lowercase() == folded
@@ -263,8 +271,9 @@ impl crate::ImportedDatabase {
         action: &AlterKind,
     ) -> DbResult<Outcome> {
         let folded = table.to_ascii_lowercase();
-        let at = self.ddl_schema;
+        let at = self.schema.ddl_schema;
         if !self
+            .schema
             .tables
             .iter()
             .any(|held| held.database == at && held.folded == folded)
@@ -454,7 +463,7 @@ impl crate::ImportedDatabase {
         // the statement would be a second implementation of every module's
         // argument grammar, agreeing with the module until the day it did not.
         for table in &mut rebuilt {
-            let Some(connected) = self.virtual_tables.get(&table.folded) else {
+            let Some(connected) = self.session_state.virtual_tables.get(&table.folded) else {
                 continue;
             };
             let declaration = connected.table.declaration();
@@ -467,7 +476,7 @@ impl crate::ImportedDatabase {
                 arguments: connected.arguments.arguments.clone(),
             });
         }
-        self.tables = rebuilt;
+        self.schema.tables = rebuilt;
         Ok(())
     }
     /// Rebuilds one table's tree so its leaves carry the columns the catalog
@@ -489,6 +498,7 @@ impl crate::ImportedDatabase {
     /// @param folded - the table's folded name
     fn table_has_a_row(&mut self, folded: &[u8]) -> DbResult<bool> {
         let Some(root) = self
+            .schema
             .tables
             .iter()
             .find(|table| table.folded == folded)
@@ -496,13 +506,14 @@ impl crate::ImportedDatabase {
         else {
             return Ok(false);
         };
-        let Some(tree) = self.trees.get(&root) else {
+        let Some(tree) = self.schema.trees.get(&root) else {
             return Ok(false);
         };
         Ok(!tree.rows(self.pool_of(root)?)?.is_empty())
     }
     fn rebuild_table_tree(&mut self, folded: &[u8]) -> DbResult<()> {
         let Some(info) = self
+            .schema
             .tables
             .iter()
             .find(|table| table.folded == folded)
@@ -512,12 +523,14 @@ impl crate::ImportedDatabase {
         };
         let old_root = info.root;
         let old_layout = self
+            .schema
             .layouts
             .get(&old_root)
             .cloned()
             .ok_or_else(|| refusal("no layout for the table being rebuilt"))?;
         let old_rows = {
             let tree = self
+                .schema
                 .trees
                 .get(&old_root)
                 .ok_or_else(|| refusal("no tree for the table being rebuilt"))?;
@@ -607,18 +620,25 @@ impl crate::ImportedDatabase {
             .map(|row| row.iter().map(OwnedDatum::borrow).collect())
             .collect();
         self.release_tree(old_root)?;
-        let covering: Vec<u32> = self.covering.get(&old_root).cloned().unwrap_or_default();
+        let covering: Vec<u32> = self
+            .schema
+            .covering
+            .get(&old_root)
+            .cloned()
+            .unwrap_or_default();
         self.build_tree_from(old_root, columns, key_columns, layout, &borrowed)?;
         if !covering.is_empty() {
-            self.covering.insert(old_root, covering);
+            self.schema.covering.insert(old_root, covering);
         }
         // The catalog row's `rootpage` moved with the tree.
         let page = self
+            .schema
             .trees
             .get(&old_root)
             .map(PagedTree::root)
             .unwrap_or(PageId::NONE);
         let update = self
+            .schema
             .entries
             .iter()
             .find(|held| {

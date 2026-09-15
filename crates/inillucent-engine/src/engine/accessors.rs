@@ -17,7 +17,7 @@ impl crate::ImportedDatabase {
     /// are 64% of compiling `SELECT 1` does not say which of the three to
     /// change.
     pub fn catalog_view(&self) -> &StaticCatalog {
-        &self.catalog
+        &self.schema.catalog
     }
 
     /// Returns every object's name and the identifier its tree is known by.
@@ -28,7 +28,8 @@ impl crate::ImportedDatabase {
     /// would corrupt a recovery quietly, and the only cheap way to catch a
     /// caller reintroducing a process-local number is to compare the two.
     pub fn tree_identifiers(&self) -> Vec<(String, u64)> {
-        self.entries
+        self.schema
+            .entries
             .iter()
             .map(|held| {
                 (
@@ -44,27 +45,27 @@ impl crate::ImportedDatabase {
     /// A caller that finds a query refused can tell "the engine does not do
     /// this yet" from "the table is not there" by looking here.
     pub fn skipped(&self) -> &[String] {
-        &self.skipped
+        &self.schema.skipped
     }
 
     /// Returns how many frames the pool holds.
     pub fn frames(&self) -> usize {
-        self.frames
+        self.storage.frames
     }
 
     /// Returns how many bytes the pool occupies.
     pub fn pool_bytes(&self) -> usize {
-        self.database.pool().byte_size()
+        self.storage.database.pool().byte_size()
     }
 
     /// Returns the database file the import wrote.
     pub fn file(&self) -> &std::path::Path {
-        &self.path
+        &self.storage.path
     }
 
     /// Returns how many pages the file holds.
     pub fn page_count(&self) -> u64 {
-        self.database.pool().page_count()
+        self.storage.database.pool().page_count()
     }
 
     /// Returns how many pool frames hold a page right now.
@@ -74,12 +75,12 @@ impl crate::ImportedDatabase {
     /// is the part of the resident set the engine chose rather than the part
     /// the allocator happens to be holding.
     pub fn frames_resident(&self) -> usize {
-        self.database.pool().resident()
+        self.storage.database.pool().resident()
     }
 
     /// Returns what the pool has done since the last reset.
     pub fn pool_stats(&self) -> inillucent_pool::PoolStats {
-        self.database.pool().stats()
+        self.storage.database.pool().stats()
     }
 
     /// Reads every page of every tree, so a measurement starts warm.
@@ -89,8 +90,8 @@ impl crate::ImportedDatabase {
     /// workload before it times it; this is the same courtesy on this side, and
     /// it is stated rather than left to the first round.
     pub fn warm(&self) -> DbResult<()> {
-        for tree in self.trees.values() {
-            tree.visit_leaves(self.database.pool(), &mut |_| Ok(true))?;
+        for tree in self.schema.trees.values() {
+            tree.visit_leaves(self.storage.database.pool(), &mut |_| Ok(true))?;
         }
         Ok(())
     }
@@ -102,26 +103,33 @@ impl crate::ImportedDatabase {
     ///
     /// @param root - the root page id the fixture recorded
     pub fn byte_size(&self, root: u32) -> Option<usize> {
-        self.trees.get(&root).map(PagedTree::byte_size)
+        self.schema.trees.get(&root).map(PagedTree::byte_size)
     }
 
     /// Returns the index roots that could cover a query over one table.
     ///
     /// @param table_root - the table's root page id
     pub fn candidates(&self, table_root: u32) -> Vec<u32> {
-        self.covering.get(&table_root).cloned().unwrap_or_default()
+        self.schema
+            .covering
+            .get(&table_root)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Returns the page size the trees were built at.
     pub fn page_size(&self) -> usize {
-        self.page_size
+        self.storage.page_size
     }
 
     /// Returns how many leaves one root's tree holds.
     ///
     /// @param root - the root page id the fixture recorded
     pub fn leaf_count(&self, root: u32) -> Option<usize> {
-        self.trees.get(&root).map(|tree| tree.leaf_count() as usize)
+        self.schema
+            .trees
+            .get(&root)
+            .map(|tree| tree.leaf_count() as usize)
     }
 
     /// Returns a table's root page id by name.
@@ -131,9 +139,10 @@ impl crate::ImportedDatabase {
     ///
     /// @param name - the table's name
     pub fn table_root(&self, name: &str) -> Option<u32> {
-        self.layouts
+        self.schema
+            .layouts
             .iter()
-            .filter(|(root, _)| self.covering.contains_key(root))
+            .filter(|(root, _)| self.schema.covering.contains_key(root))
             .map(|(root, _)| *root)
             .find(|root| self.catalog_name(*root).as_deref() == Some(name))
     }
@@ -142,7 +151,8 @@ impl crate::ImportedDatabase {
     ///
     /// @param root - the root page id
     fn catalog_name(&self, root: u32) -> Option<String> {
-        self.catalog
+        self.schema
+            .catalog
             .tables
             .iter()
             .find(|table| table.root == root)
@@ -151,7 +161,7 @@ impl crate::ImportedDatabase {
 
     /// Returns every imported root, for reporting.
     pub fn roots(&self) -> Vec<u32> {
-        let mut roots: Vec<u32> = self.trees.keys().copied().collect();
+        let mut roots: Vec<u32> = self.schema.trees.keys().copied().collect();
         roots.sort_unstable();
         roots
     }

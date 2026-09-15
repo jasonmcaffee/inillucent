@@ -22,14 +22,15 @@ impl crate::ImportedDatabase {
     /// statement cache is emptied in the same breath the generation is bumped.
     /// This is here so a test can say so rather than infer it.
     pub fn catalog_generation(&self) -> u64 {
-        self.catalog_generation
+        self.schema.catalog_generation
     }
     /// Returns the catalog's rows, in the order the tree holds them.
     ///
     /// For the acceptance tests, which compare them against SQLite's
     /// `sqlite_schema`.
     pub fn schema_entries(&self) -> Vec<(i64, SchemaEntry)> {
-        self.entries
+        self.schema
+            .entries
             .iter()
             .map(|held| (held.rowid, held.entry.clone()))
             .collect()
@@ -39,7 +40,7 @@ impl crate::ImportedDatabase {
         // The handle, which is what everything above the file names the tree by.
         // Its file-local identifier goes into the catalog row and into every log
         // record, and `record` reads it back with `local_of`.
-        Ok(self.allocate_in(self.ddl_schema)?.1)
+        Ok(self.allocate_in(self.schema.ddl_schema)?.1)
     }
     /// Returns the rowid the next catalog row takes.
     ///
@@ -47,7 +48,7 @@ impl crate::ImportedDatabase {
     /// with no explicit key does - and SQLite writes its own `sqlite_schema`
     /// rows with exactly that statement.
     pub(crate) fn next_catalog_rowid(&self) -> i64 {
-        self.entries_of(self.ddl_schema)
+        self.entries_of(self.schema.ddl_schema)
             .iter()
             .map(|held| held.rowid)
             .max()
@@ -68,7 +69,7 @@ impl crate::ImportedDatabase {
         // `CREATE TABLE child(... REFERENCES parent)` written *before* the
         // parent exists start being enforced when the parent arrives.
         inillucent_sql::foreign_key::plan_schema(
-            &mut self.tables,
+            &mut self.schema.tables,
             b"main",
             &inillucent_base::limits::Limits::default(),
         );
@@ -101,18 +102,18 @@ impl crate::ImportedDatabase {
         // is. It also fixes every attachment's number: `main`, `temp`, then the
         // attachments, which is SQLite's own layout.
         catalog.databases.push((b"temp".to_vec(), 0));
-        for held in &self.attached {
+        for held in &self.session_state.attached {
             catalog.databases.push((held.name.clone(), 0));
         }
-        for table in &self.tables {
+        for table in &self.schema.tables {
             catalog = catalog.with_table(table.clone());
         }
-        catalog = catalog.with_table(self.schema_info.clone());
-        catalog = catalog.with_table(crate::schema_alias_of(&self.schema_info));
+        catalog = catalog.with_table(self.schema.schema_info.clone());
+        catalog = catalog.with_table(crate::schema_alias_of(&self.schema.schema_info));
         // Each attached database's own `sqlite_schema`, reachable only when it
         // is qualified: an unqualified `sqlite_schema` is `main`'s, which is
         // what SQLite answers and what the search order above already gives.
-        for held in &self.attached {
+        for held in &self.session_state.attached {
             catalog = catalog.with_table(held.schema_info.clone());
             catalog = catalog.with_table(crate::schema_alias_of(&held.schema_info));
         }
@@ -124,7 +125,7 @@ impl crate::ImportedDatabase {
         // `sqlite_temp_master`, which is how SQLite names it - and registering
         // it as `sqlite_schema` as well would put it *first* in the search order
         // and make an unqualified `sqlite_schema` mean the temporary one.
-        if let Some(held) = self.schema_at(crate::TEMP) {
+        if let Some(held) = self.session_state.schema_at(crate::TEMP) {
             let temp_schema = crate::schema_named(&held.schema_info, b"sqlite_temp_schema");
             let temp_master = crate::schema_named(&held.schema_info, b"sqlite_temp_master");
             catalog = catalog.with_table(temp_schema);
@@ -138,15 +139,15 @@ impl crate::ImportedDatabase {
         // anything putting them in the catalog, so every one of them was
         // `no such table`. They go on last, so a real table of the
         // same name shadows the module.
-        if self.eponymous.is_empty() {
-            self.eponymous = self.eponymous_tables();
+        if self.session_state.eponymous.is_empty() {
+            self.session_state.eponymous = self.eponymous_tables();
         }
-        for table in &self.eponymous {
+        for table in &self.session_state.eponymous {
             catalog = catalog.with_eponymous(table.clone());
         }
-        self.catalog = catalog;
+        self.schema.catalog = catalog;
         self.forget_compiled_statements();
-        self.catalog_generation = self.catalog_generation.saturating_add(1);
+        self.schema.catalog_generation = self.schema.catalog_generation.saturating_add(1);
         // Last, after the catalog a module would read is the new one; see
         // `vtab::schema_changed_modules` (task-1932, M2).
         self.schema_changed_modules();
@@ -163,8 +164,8 @@ impl crate::ImportedDatabase {
     /// an error in the schema this is refreshing.
     fn eponymous_tables(&self) -> Vec<inillucent_sql::catalog_view::TableInfo> {
         let mut tables = Vec::new();
-        for name in self.registry.module_names() {
-            let Some(module) = self.registry.eponymous(name.as_bytes()) else {
+        for name in self.session_state.registry.module_names() {
+            let Some(module) = self.session_state.registry.eponymous(name.as_bytes()) else {
                 continue;
             };
             let arguments = inillucent_sql::vtab::ModuleArguments {
@@ -315,22 +316,22 @@ impl crate::ImportedDatabase {
     /// one of those has to come through here, or the next execution answers
     /// with the old decision.
     pub(crate) fn forget_compiled_statements(&self) {
-        self.statements.borrow_mut().clear();
+        self.compiled.statements.borrow_mut().clear();
     }
-    /// Returns what a catalog-row write on `self.ddl_schema` needs that is not
-    /// the borrow of `self.undo` a method cannot hand back - callers still
+    /// Returns what a catalog-row write on `self.schema.ddl_schema` needs that is not
+    /// the borrow of `self.writing.undo` a method cannot hand back - callers still
     /// write their own `WalLog` literal so that borrow stays disjoint from the
-    /// `&mut self.database` they take right after, the reason
+    /// `&mut self.storage.database` they take right after, the reason
     /// [`crate::file_of`] is a free function too.
     pub(crate) fn catalog_write(&self) -> DbResult<CatalogWrite> {
-        let at = self.ddl_schema;
+        let at = self.schema.ddl_schema;
         let wal = self
             .log_of(at)
             .ok_or_else(|| refusal("a statement names a database that is not attached"))?;
         Ok((
             at,
             self.current_txn(),
-            self.batch.get().is_some(),
+            self.writing.batch.get().is_some(),
             wal,
             self.uncommitted_handle_of(at),
         ))
@@ -348,7 +349,7 @@ impl crate::ImportedDatabase {
         // itself would be a fifth place it could disagree with the tree it
         // describes - and a catalog naming the wrong tree would send recovery's
         // row records somewhere else.
-        let at = self.ddl_schema;
+        let at = self.schema.ddl_schema;
         entry.tree_id = self.local_of(at, root);
         let catalog_handle = self.catalog_handle_of(at);
         {
@@ -359,7 +360,7 @@ impl crate::ImportedDatabase {
                 schema: at,
                 wrote: false,
                 // **A before-image whether or not a transaction is open
-                // (task-1932, H3).** This was `open.then_some(&self.undo)`, so
+                // (task-1932, H3).** This was `open.then_some(&self.writing.undo)`, so
                 // outside an explicit transaction a catalog write recorded
                 // nothing to put back - and `execute_ddl`, which now takes an
                 // undo floor the way `write` does, would have had an empty
@@ -368,18 +369,19 @@ impl crate::ImportedDatabase {
                 // `build_tree_rows` is deliberately still gated: a bulk build's
                 // before-images are one record per row of the table, and a
                 // freshly built tree has no earlier state to restore to.
-                undo: Some(&self.undo),
+                undo: Some(&self.writing.undo),
                 uncommitted,
             };
             let tree = self
+                .schema
                 .trees
                 .get_mut(&catalog_handle)
                 .ok_or_else(|| refusal("the catalog tree is not attached"))?;
-            let session = self.session.get();
+            let session = self.session_state.session.get();
             let database = crate::file_of(
-                &mut self.database,
-                &mut self.attached,
-                &mut self.temps,
+                &mut self.storage.database,
+                &mut self.session_state.attached,
+                &mut self.session_state.temps,
                 session,
                 at,
             )?;
@@ -390,7 +392,7 @@ impl crate::ImportedDatabase {
             .push(Recorded { rowid, root, entry });
         // A schema change is a write, and a transaction that made one in two
         // files commits both or neither like any other.
-        self.touched |= crate::schema_bit(at);
+        self.writing.touched |= crate::schema_bit(at);
         Ok(())
     }
     /// Returns the shape of a tree, for its catalog row.
@@ -400,7 +402,7 @@ impl crate::ImportedDatabase {
     ///
     /// @param root - the tree's identifier
     pub(crate) fn tree_stats(&self, root: u32) -> inillucent_catalog::paged::TreeStats {
-        match self.trees.get(&root) {
+        match self.schema.trees.get(&root) {
             Some(tree) => inillucent_catalog::paged::TreeStats {
                 first_leaf: tree.first_leaf(),
                 leaf_count: tree.leaf_count(),
@@ -428,17 +430,19 @@ impl crate::ImportedDatabase {
             // so a declaration this connection added stays until it is taken
             // out - and `.imposter off` that left the table queryable would be
             // the one thing the command exists to undo.
-            let held = std::mem::take(&mut self.imposters);
+            let held = std::mem::take(&mut self.schema.imposters);
             for (info, layout, _) in held {
-                self.tables.retain(|table| table.folded != info.folded);
-                self.layouts.remove(&layout.tree_key);
-                self.trees.remove(&info.root);
+                self.schema
+                    .tables
+                    .retain(|table| table.folded != info.folded);
+                self.schema.layouts.remove(&layout.tree_key);
+                self.schema.trees.remove(&info.root);
             }
             self.refresh_catalog();
             return Ok(None);
         };
         let folded = index.to_ascii_lowercase();
-        let Some((owner, declared)) = self.tables.iter().find_map(|table| {
+        let Some((owner, declared)) = self.schema.tables.iter().find_map(|table| {
             table
                 .indexes
                 .iter()
@@ -450,7 +454,7 @@ impl crate::ImportedDatabase {
                 String::from_utf8_lossy(index)
             )));
         };
-        let Some(tree) = self.trees.get(&declared.root).cloned() else {
+        let Some(tree) = self.schema.trees.get(&declared.root).cloned() else {
             return Err(refusal(format!(
                 "the index {} has no tree",
                 String::from_utf8_lossy(index)
@@ -513,20 +517,25 @@ impl crate::ImportedDatabase {
             // that is the whole reason for looking at one this way.
             key_columns: (0..columns.len()).collect(),
         };
-        self.imposters.retain(|(held, _, _)| held.name != info.name);
-        self.imposters.push((info, layout, tree));
+        self.schema
+            .imposters
+            .retain(|(held, _, _)| held.name != info.name);
+        self.schema.imposters.push((info, layout, tree));
         self.refresh_catalog();
         Ok(Some(format!("{sql};")))
     }
     /// Puts the imposter declarations back after a catalog rebuild.
     pub(crate) fn republish_imposters(&mut self) {
-        let held = self.imposters.clone();
+        let held = self.schema.imposters.clone();
         for (info, layout, tree) in held {
-            self.layouts
+            self.schema
+                .layouts
                 .insert(layout.tree_key, std::rc::Rc::new(layout));
-            self.trees.insert(info.root, tree);
-            self.tables.retain(|table| table.folded != info.folded);
-            self.tables.push(info);
+            self.schema.trees.insert(info.root, tree);
+            self.schema
+                .tables
+                .retain(|table| table.folded != info.folded);
+            self.schema.tables.push(info);
         }
     }
     /// Rewrites every catalog row whose tree has changed shape.
@@ -540,6 +549,7 @@ impl crate::ImportedDatabase {
     /// notices if they no longer describe the tree.
     pub(crate) fn refresh_statistics(&mut self) -> DbResult<()> {
         let stale: Vec<(i64, SchemaEntry)> = self
+            .schema
             .entries
             .iter()
             .filter_map(|held| {
@@ -590,26 +600,27 @@ impl crate::ImportedDatabase {
                 wrote: false,
                 // See `record` above: the before-image is kept whether or not
                 // an explicit transaction is open (task-1932, H3).
-                undo: Some(&self.undo),
+                undo: Some(&self.writing.undo),
                 uncommitted,
             };
             let catalog_handle = self.catalog_handle_of(at);
             let tree = self
+                .schema
                 .trees
                 .get_mut(&catalog_handle)
                 .ok_or_else(|| refusal("the catalog tree is not attached"))?;
-            let session = self.session.get();
+            let session = self.session_state.session.get();
             let database = crate::file_of(
-                &mut self.database,
-                &mut self.attached,
-                &mut self.temps,
+                &mut self.storage.database,
+                &mut self.session_state.attached,
+                &mut self.session_state.temps,
                 session,
                 at,
             )?;
             delete_entry(database, tree, &mut log, rowid)?;
             insert_entry(database, tree, &mut log, rowid, &entry)?;
         }
-        let at = self.ddl_schema;
+        let at = self.schema.ddl_schema;
         for held in self.entries_of_mut(at).into_iter().flatten() {
             if held.rowid == rowid {
                 held.entry = entry.clone();
@@ -630,25 +641,26 @@ impl crate::ImportedDatabase {
                 wrote: false,
                 // See `record` above: the before-image is kept whether or not
                 // an explicit transaction is open (task-1932, H3).
-                undo: Some(&self.undo),
+                undo: Some(&self.writing.undo),
                 uncommitted,
             };
             let catalog_handle = self.catalog_handle_of(at);
             let tree = self
+                .schema
                 .trees
                 .get_mut(&catalog_handle)
                 .ok_or_else(|| refusal("the catalog tree is not attached"))?;
-            let session = self.session.get();
+            let session = self.session_state.session.get();
             let database = crate::file_of(
-                &mut self.database,
-                &mut self.attached,
-                &mut self.temps,
+                &mut self.storage.database,
+                &mut self.session_state.attached,
+                &mut self.session_state.temps,
                 session,
                 at,
             )?;
             delete_entry(database, tree, &mut log, rowid)?;
         }
-        let at = self.ddl_schema;
+        let at = self.schema.ddl_schema;
         if let Some(held) = self.entries_of_mut(at) {
             held.retain(|row| row.rowid != rowid);
         }
@@ -667,12 +679,13 @@ impl crate::ImportedDatabase {
     /// *after* the one about to commit. Everything logged under that number is
     /// written and never committed. See `statement_txn` for what that cost.
     pub(crate) fn current_txn(&self) -> u64 {
-        match self.batch.get() {
+        match self.writing.batch.get() {
             Some(held) => held,
             None => self
+                .writing
                 .statement_txn
                 .get()
-                .unwrap_or_else(|| self.next_txn.get()),
+                .unwrap_or_else(|| self.writing.next_txn.get()),
         }
     }
     /// Commits a schema change that was its own transaction.
@@ -680,12 +693,12 @@ impl crate::ImportedDatabase {
     /// Inside a batch this does nothing: the batch's `COMMIT` is what makes the
     /// change durable, which is the whole difference between the two groupings.
     pub(crate) fn seal(&mut self) -> DbResult<()> {
-        if self.batch.get().is_some() {
+        if self.writing.batch.get().is_some() {
             return Ok(());
         }
-        let txn = self.next_txn.get();
-        self.next_txn.set(txn.saturating_add(1));
-        let at = self.ddl_schema;
+        let txn = self.writing.next_txn.get();
+        self.writing.next_txn.set(txn.saturating_add(1));
+        let at = self.schema.ddl_schema;
         let wal = self
             .log_of(at)
             .ok_or_else(|| refusal("a statement names a database that is not attached"))?;
@@ -701,7 +714,7 @@ impl crate::ImportedDatabase {
         // statement would find a schema in it that it had not written: a
         // one-file insert paying for a two-file protocol, and a `Commit` record
         // in a log for a transaction that never touched it.
-        let participants = std::mem::take(&mut self.touched) | crate::schema_bit(at);
+        let participants = std::mem::take(&mut self.writing.touched) | crate::schema_bit(at);
         self.commit_across(txn, participants)
     }
 }

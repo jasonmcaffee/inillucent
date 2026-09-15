@@ -30,6 +30,7 @@
 //! | [`compiled`] | the write path: compiling a statement and applying what it decided |
 //! | [`explain`] | rendering `EXPLAIN` and `EXPLAIN QUERY PLAN` as rows |
 //! | [`rowshape`] | what a table's rows look like on disk, and reading a schema back |
+//! | [`state`] | the six groups `ImportedDatabase`'s fields are made of |
 
 pub mod accessors;
 pub mod batch;
@@ -40,4 +41,5 @@ pub mod functions;
 pub mod integrity;
 pub mod open;
 pub mod rowshape;
+pub mod state;
 pub mod statements;

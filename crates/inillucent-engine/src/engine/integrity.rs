@@ -19,9 +19,9 @@ impl crate::ImportedDatabase {
     /// drifted structurally still answers a scan correctly for a long time,
     /// which is precisely why the check has to be a check rather than a query.
     pub fn check_trees(&self) -> DbResult<()> {
-        for (root, tree) in &self.trees {
+        for (root, tree) in &self.schema.trees {
             let pool = self
-                .schema_file(self.schema_of(*root))
+                .schema_file(self.session_state.schema_of(*root))
                 .ok_or_else(|| refusal("a tree names a database that is not attached"))?
                 .pool();
             tree.check(pool)?;
@@ -67,6 +67,7 @@ impl crate::ImportedDatabase {
     ) -> DbResult<()> {
         let folded = index.to_ascii_lowercase().into_bytes();
         let root = self
+            .schema
             .tables
             .iter()
             .flat_map(|table| table.indexes.iter())
@@ -117,24 +118,25 @@ impl crate::ImportedDatabase {
     /// would report a healthy partial index as damaged, which is worse than
     /// not looking.
     fn check_indexes_agree(&self) -> DbResult<()> {
-        for table in &self.tables {
-            let Some(layout) = self.layouts.get(&table.root) else {
+        for table in &self.schema.tables {
+            let Some(layout) = self.schema.layouts.get(&table.root) else {
                 continue;
             };
-            let Some(table_tree) = self.trees.get(&table.root) else {
+            let Some(table_tree) = self.schema.trees.get(&table.root) else {
                 continue;
             };
-            let Some(file) = self.schema_file(self.schema_of(table.root)) else {
+            let Some(file) = self.schema_file(self.session_state.schema_of(table.root)) else {
                 continue;
             };
             for index in &table.indexes {
                 if index.root == 0 || index.root == table.root {
                     continue;
                 }
-                let Some(index_tree) = self.trees.get(&index.root) else {
+                let Some(index_tree) = self.schema.trees.get(&index.root) else {
                     continue;
                 };
-                let Some(index_file) = self.schema_file(self.schema_of(index.root)) else {
+                let Some(index_file) = self.schema_file(self.session_state.schema_of(index.root))
+                else {
                     continue;
                 };
                 // **Two sequential walks and a merge, with no probe between

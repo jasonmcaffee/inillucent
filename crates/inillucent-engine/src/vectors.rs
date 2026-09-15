@@ -49,7 +49,13 @@ impl ImportedDatabase {
         if changes.written.is_empty() && changes.removed.is_empty() {
             return Ok(false);
         }
-        let indexes: Vec<VectorIndex> = self.vector_indexes.values().flatten().cloned().collect();
+        let indexes: Vec<VectorIndex> = self
+            .session_state
+            .vector_indexes
+            .values()
+            .flatten()
+            .cloned()
+            .collect();
         let reached = !indexes.is_empty();
         for index in indexes {
             for row in &changes.removed {
@@ -117,7 +123,7 @@ impl ImportedDatabase {
         depth: usize,
     ) -> DbResult<Option<Vec<i64>>> {
         let folded = index.to_ascii_lowercase();
-        let Some(connected) = self.virtual_tables.get(&folded) else {
+        let Some(connected) = self.session_state.virtual_tables.get(&folded) else {
             return Ok(None);
         };
         let (inillucent_tree::datum::Datum::Blob(bytes)
@@ -226,14 +232,14 @@ impl ImportedDatabase {
         };
         let mut cursor = connected.table.open()?;
         let store = vtab::ReadStore {
-            pool: self.database.pool(),
-            trees: &self.trees,
+            pool: self.storage.database.pool(),
+            trees: &self.schema.trees,
         };
         let mut nowhere = inillucent_ext::vtab::WithStore { store };
         let mut context = inillucent_ext::vtab::Context {
             host: &mut nowhere,
             database: 0,
-            limits: &self.limits,
+            limits: &self.session_state.limits,
             catalog: None,
         };
         cursor.filter(&mut context, &plan)?;
@@ -253,7 +259,7 @@ impl ImportedDatabase {
     /// general: it only recognises the two arguments it put there.
     pub(crate) fn refresh_vector_indexes(&mut self) {
         let mut found: HashMap<u32, Vec<VectorIndex>> = HashMap::new();
-        for (name, connected) in &self.virtual_tables {
+        for (name, connected) in &self.session_state.virtual_tables {
             let Some(source) = argument_of(&connected.arguments.arguments, b"source") else {
                 continue;
             };
@@ -261,10 +267,10 @@ impl ImportedDatabase {
                 continue;
             };
             let folded = source.to_ascii_lowercase();
-            let Some(table) = self.tables.iter().find(|held| held.folded == folded) else {
+            let Some(table) = self.schema.tables.iter().find(|held| held.folded == folded) else {
                 continue;
             };
-            let Some(layout) = self.layouts.get(&table.root) else {
+            let Some(layout) = self.schema.layouts.get(&table.root) else {
                 continue;
             };
             let wanted = column.to_ascii_lowercase();
@@ -288,7 +294,7 @@ impl ImportedDatabase {
         // with `IndexOrigin::Module` on the table it indexes: none of the
         // b-tree paths apply to it, and the one path that does looks for
         // exactly that origin.
-        for table in &mut self.tables {
+        for table in &mut self.schema.tables {
             table
                 .indexes
                 .retain(|held| held.origin != inillucent_sql::catalog_view::IndexOrigin::Module);
@@ -314,13 +320,14 @@ impl ImportedDatabase {
                     prefix_rows: Vec::new(),
                     analysed_rows: None,
                     metric: self
+                        .session_state
                         .virtual_tables
                         .get(&index.name.to_ascii_lowercase())
                         .map(declared_metric),
                 });
             }
         }
-        self.vector_indexes = found;
+        self.session_state.vector_indexes = found;
     }
 
     /// Builds an index a module owns, and backfills it from the table.
@@ -368,6 +375,7 @@ impl ImportedDatabase {
         };
         let folded = table.to_ascii_lowercase();
         let owner = self
+            .schema
             .tables
             .iter()
             .find(|held| held.folded == folded)
@@ -463,13 +471,13 @@ impl ImportedDatabase {
         // The rowid is column 0 and the vector column 1 of what was just read,
         // which is not the table's layout - so the index is told where they are
         // for this one call rather than being asked to agree with the layout.
-        let held = self.vector_indexes.clone();
-        self.vector_indexes = std::collections::HashMap::from([(
+        let held = self.session_state.vector_indexes.clone();
+        self.session_state.vector_indexes = std::collections::HashMap::from([(
             owner.root,
             vec![super::VectorIndex::at(name.to_ascii_lowercase(), 1, 0)],
         )]);
         let outcome = self.follow_vector_indexes(&changes);
-        self.vector_indexes = held;
+        self.session_state.vector_indexes = held;
         outcome?;
         // **Folded before it is sealed**, so a `CREATE INDEX` over a full table
         // leaves a published generation rather than a delta log as long as the
@@ -479,7 +487,7 @@ impl ImportedDatabase {
         // Inside a batch the fold waits for `COMMIT`, because `sync_modules`
         // ends by telling every module its transaction is over and the batch's
         // is not.
-        if self.batch.get().is_none() {
+        if self.writing.batch.get().is_none() {
             self.sync_modules()?;
         }
         // **The backfill is a write, so it needs the commit record every other

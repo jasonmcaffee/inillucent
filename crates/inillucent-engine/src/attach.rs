@@ -58,7 +58,8 @@ impl ImportedDatabase {
         if name.eq_ignore_ascii_case(TEMP) {
             return Some(super::TEMP);
         }
-        self.attached
+        self.session_state
+            .attached
             .iter()
             .position(|held| held.name.eq_ignore_ascii_case(name))
             .map(|nth| nth.saturating_add(FIRST_ATTACHED))
@@ -79,6 +80,7 @@ impl ImportedDatabase {
             )));
         }
         if self
+            .session_state
             .attached
             .iter()
             .any(|held| held.name.eq_ignore_ascii_case(name))
@@ -88,7 +90,7 @@ impl ImportedDatabase {
                 String::from_utf8_lossy(name)
             )));
         }
-        if self.attached.len() >= MAX_ATTACHED {
+        if self.session_state.attached.len() >= MAX_ATTACHED {
             return Err(refusal(format!(
                 "too many attached databases - max {MAX_ATTACHED}"
             )));
@@ -151,8 +153,8 @@ impl ImportedDatabase {
                 vfs.as_ref(),
                 &path,
                 Options::default()
-                    .with_page_size(self.page_size)
-                    .with_frames(self.frames.max(64)),
+                    .with_page_size(self.storage.page_size)
+                    .with_frames(self.storage.frames.max(64)),
             )?;
             // An empty catalog is a catalog tree with no rows, not the absence
             // of one: every later `CREATE TABLE` inserts into it.
@@ -177,7 +179,7 @@ impl ImportedDatabase {
             wal,
             catalog_tree,
             highest_txn,
-        } = open_file(&vfs, &path, self.frames, &self.doubt_for(&path)?)?;
+        } = open_file(&vfs, &path, self.storage.frames, &self.doubt_for(&path)?)?;
         // **This attachment gets its own rollback journal, matching `main`.**
         // `Pool::checkpoint` writes an attached file's pages in place exactly
         // as it does `main`'s, so without this a checkpoint interrupted on an
@@ -187,7 +189,7 @@ impl ImportedDatabase {
         // - but the page size is this file's own, read off the file it just
         // opened, because an attached file can have been created at a
         // different page size than this connection's default.
-        let journal = super::journal_for(self.journal_mode).map(|protection| {
+        let journal = super::journal_for(self.session_state.journal_mode).map(|protection| {
             inillucent_pool::journal::Journal::new(
                 Arc::clone(&vfs),
                 &path,
@@ -200,15 +202,19 @@ impl ImportedDatabase {
         // file attached mid-session may hold higher numbers than anything this
         // connection has issued, and a number reused across the two would make
         // a crashed run's records replay under a live transaction's commit.
-        self.raise_transactions_past(highest_txn);
+        self.writing.raise_transactions_past(highest_txn);
 
         // A temporary database is schema one whoever it belongs to; an
         // attachment takes the next number after the ones already there.
         let index = match session {
             Some(_) => super::TEMP,
-            None => self.attached.len().saturating_add(FIRST_ATTACHED),
+            None => self
+                .session_state
+                .attached
+                .len()
+                .saturating_add(FIRST_ATTACHED),
         };
-        let mut next = self.next_handle;
+        let mut next = self.schema.next_handle;
         let mut take = |count: u32| -> u32 {
             let handle = next;
             next = next.saturating_add(count);
@@ -223,12 +229,12 @@ impl ImportedDatabase {
             catalog_handle,
             &mut |_local| take(1),
         )?;
-        if next <= self.next_handle {
+        if next <= self.schema.next_handle {
             return Err(refusal(
                 "this connection holds too many attached objects to name them all",
             ));
         }
-        self.next_handle = next;
+        self.schema.next_handle = next;
 
         let LoadedSchema {
             trees,
@@ -242,12 +248,12 @@ impl ImportedDatabase {
             highest_identifier,
         } = loaded;
         for root in trees.keys() {
-            self.owner.insert(*root, index);
+            self.session_state.owner.insert(*root, index);
         }
-        self.trees.extend(trees);
-        self.layouts.extend(layouts);
-        self.covering.extend(covering);
-        self.skipped.extend(skipped);
+        self.schema.trees.extend(trees);
+        self.schema.layouts.extend(layouts);
+        self.schema.covering.extend(covering);
+        self.schema.skipped.extend(skipped);
         let held = Attached {
             name,
             path: held,
@@ -262,8 +268,8 @@ impl ImportedDatabase {
             session,
         };
         match session {
-            Some(_) => self.temps.push(held),
-            None => self.attached.push(held),
+            Some(_) => self.session_state.temps.push(held),
+            None => self.session_state.attached.push(held),
         }
         self.rebuild_tables()?;
         self.refresh_catalog();
@@ -286,13 +292,15 @@ impl ImportedDatabase {
                 String::from_utf8_lossy(name)
             )));
         };
-        if self.batch.get().is_some() {
+        if self.writing.batch.get().is_some() {
             return Err(refusal("cannot DETACH database within transaction"));
         }
         let Some(nth) = at.checked_sub(FIRST_ATTACHED) else {
             return Err(refusal("cannot detach database main"));
         };
-        let Some(mut held) = (nth < self.attached.len()).then(|| self.attached.remove(nth)) else {
+        let Some(mut held) = (nth < self.session_state.attached.len())
+            .then(|| self.session_state.attached.remove(nth))
+        else {
             return Err(refusal(format!(
                 "no such database: {}",
                 String::from_utf8_lossy(name)
@@ -303,17 +311,18 @@ impl ImportedDatabase {
         // by `refresh_catalog` below, and these maps are emptied here so that a
         // handle cannot be answered by a tree that was detached.
         let gone: Vec<u32> = self
+            .session_state
             .owner
             .iter()
             .filter(|(_, owner)| **owner == at)
             .map(|(root, _)| *root)
             .collect();
         for root in gone {
-            self.owner.remove(&root);
-            self.trees.remove(&root);
-            self.layouts.remove(&root);
-            self.covering.remove(&root);
-            for roots in self.covering.values_mut() {
+            self.session_state.owner.remove(&root);
+            self.schema.trees.remove(&root);
+            self.schema.layouts.remove(&root);
+            self.schema.covering.remove(&root);
+            for roots in self.schema.covering.values_mut() {
                 roots.retain(|kept| *kept != root);
             }
         }
@@ -322,13 +331,14 @@ impl ImportedDatabase {
         // `aux3` was bound under - which is a statement reading a different
         // file from the one it names.
         let moved: Vec<(u32, usize)> = self
+            .session_state
             .owner
             .iter()
             .filter(|(_, owner)| **owner > at)
             .map(|(root, owner)| (*root, owner.saturating_sub(1)))
             .collect();
         for (root, owner) in moved {
-            self.owner.insert(root, owner);
+            self.session_state.owner.insert(root, owner);
         }
         // The log is folded into the file before the file goes, so that what is
         // left on disk is a database rather than a database and a log nobody

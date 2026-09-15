@@ -41,7 +41,8 @@ impl ImportedDatabase {
         // table it is on. Resolving it here rather than refusing keeps
         // `ANALYZE main_label` doing what a person who typed it meant.
         let wanted = match wanted {
-            Some(name) if !self.tables.iter().any(|held| held.folded == name) => self
+            Some(name) if !self.schema.tables.iter().any(|held| held.folded == name) => self
+                .schema
                 .tables
                 .iter()
                 .find(|held| held.indexes.iter().any(|index| index.folded == name))
@@ -58,6 +59,7 @@ impl ImportedDatabase {
         // then, when that dump was replayed, as statistics claiming the tables
         // were empty.
         let subjects: Vec<TableInfo> = self
+            .schema
             .tables
             .iter()
             .filter(|held| !held.folded.starts_with(b"sqlite_"))
@@ -106,7 +108,7 @@ impl ImportedDatabase {
     /// a side effect of it.
     fn ensure_stat1(&mut self) -> DbResult<()> {
         let folded = STAT1.to_ascii_lowercase();
-        if self.tables.iter().any(|held| held.folded == folded) {
+        if self.schema.tables.iter().any(|held| held.folded == folded) {
             return Ok(());
         }
         self.define_table(STAT1, STAT1_SQL.as_bytes().to_vec())?;
@@ -122,7 +124,7 @@ impl ImportedDatabase {
     ///
     /// @param root - the tree's identifier
     fn live_rows(&self, root: u32) -> DbResult<i64> {
-        let Some(tree) = self.trees.get(&root) else {
+        let Some(tree) = self.schema.trees.get(&root) else {
             return Ok(0);
         };
         let pool = self.pool_of(root)?;
@@ -144,7 +146,7 @@ impl ImportedDatabase {
     /// @param rows - the table's row count
     fn measure_index(&self, index: &IndexInfo, rows: i64) -> DbResult<Vec<u8>> {
         let width = index.columns.len();
-        let Some(tree) = self.trees.get(&index.root) else {
+        let Some(tree) = self.schema.trees.get(&index.root) else {
             return Ok(rows.to_string().into_bytes());
         };
         // `groups[n]` counts how many distinct values the first `n + 1` key
@@ -231,6 +233,7 @@ impl ImportedDatabase {
     fn clear_stat1(&mut self, tables: &[Vec<u8>]) -> DbResult<()> {
         let folded = STAT1.to_ascii_lowercase();
         let Some(root) = self
+            .schema
             .tables
             .iter()
             .find(|held| held.folded == folded)
@@ -241,6 +244,7 @@ impl ImportedDatabase {
         let doomed: Vec<i64> = {
             let pool = self.pool_of(root)?;
             let tree = self
+                .schema
                 .trees
                 .get(&root)
                 .ok_or_else(|| refusal("sqlite_stat1 has no tree"))?;
@@ -261,7 +265,7 @@ impl ImportedDatabase {
             keys
         };
         let txn = self.current_txn();
-        let at = self.schema_of(root);
+        let at = self.session_state.schema_of(root);
         let wal = self
             .log_of(at)
             .ok_or_else(|| refusal("a statement names a database that is not attached"))?;
@@ -274,11 +278,12 @@ impl ImportedDatabase {
             uncommitted: self.uncommitted_handle_of(at),
         };
         let tree = self
+            .schema
             .trees
             .get_mut(&root)
             .ok_or_else(|| refusal("sqlite_stat1 has no tree"))?;
         for rowid in doomed {
-            tree.delete(&mut self.database, &mut log, &[Datum::Int(rowid)])?;
+            tree.delete(&mut self.storage.database, &mut log, &[Datum::Int(rowid)])?;
         }
         Ok(())
     }
@@ -289,6 +294,7 @@ impl ImportedDatabase {
     fn write_stat1(&mut self, rows: &[(Vec<u8>, Option<Vec<u8>>, Vec<u8>)]) -> DbResult<()> {
         let folded = STAT1.to_ascii_lowercase();
         let Some(root) = self
+            .schema
             .tables
             .iter()
             .find(|held| held.folded == folded)
@@ -299,6 +305,7 @@ impl ImportedDatabase {
         let mut next = {
             let pool = self.pool_of(root)?;
             let tree = self
+                .schema
                 .trees
                 .get(&root)
                 .ok_or_else(|| refusal("sqlite_stat1 has no tree"))?;
@@ -314,7 +321,7 @@ impl ImportedDatabase {
             highest.saturating_add(1)
         };
         let txn = self.current_txn();
-        let at = self.schema_of(root);
+        let at = self.session_state.schema_of(root);
         let wal = self
             .log_of(at)
             .ok_or_else(|| refusal("a statement names a database that is not attached"))?;
@@ -327,6 +334,7 @@ impl ImportedDatabase {
             uncommitted: self.uncommitted_handle_of(at),
         };
         let tree = self
+            .schema
             .trees
             .get_mut(&root)
             .ok_or_else(|| refusal("sqlite_stat1 has no tree"))?;
@@ -341,7 +349,7 @@ impl ImportedDatabase {
                 OwnedDatum::Text(stat.clone()),
             ];
             let row: Vec<Datum<'_>> = owned.iter().map(OwnedDatum::borrow).collect();
-            tree.insert(&mut self.database, &mut log, &row)?;
+            tree.insert(&mut self.storage.database, &mut log, &row)?;
             next = next.saturating_add(1);
         }
         Ok(())
@@ -353,6 +361,7 @@ impl ImportedDatabase {
     pub fn statistics(&self, table: &[u8]) -> Vec<(Option<Vec<u8>>, Vec<u8>)> {
         let folded = STAT1.to_ascii_lowercase();
         let Some(root) = self
+            .schema
             .tables
             .iter()
             .find(|held| held.folded == folded)
@@ -360,7 +369,7 @@ impl ImportedDatabase {
         else {
             return Vec::new();
         };
-        let Some(tree) = self.trees.get(&root) else {
+        let Some(tree) = self.schema.trees.get(&root) else {
             return Vec::new();
         };
         let Ok(pool) = self.pool_of(root) else {
@@ -396,6 +405,7 @@ impl ImportedDatabase {
     pub(crate) fn republish_statistics(&mut self) {
         let folded = STAT1.to_ascii_lowercase();
         let Some(root) = self
+            .schema
             .tables
             .iter()
             .find(|held| held.folded == folded)
@@ -403,16 +413,16 @@ impl ImportedDatabase {
         else {
             // No statistics table: clear whatever a previous one left, so a
             // `DROP TABLE sqlite_stat1` stops changing plans.
-            apply_statistics(&mut self.tables, &[]);
+            apply_statistics(&mut self.schema.tables, &[]);
             return;
         };
         // Read under an immutable borrow, then patch: the rows come back owned,
         // which is what lets both happen in one method.
-        let rows = match (self.trees.get(&root), self.pool_of(root)) {
+        let rows = match (self.schema.trees.get(&root), self.pool_of(root)) {
             (Some(tree), Ok(pool)) => statistics_rows(pool, tree),
             _ => Vec::new(),
         };
-        apply_statistics(&mut self.tables, &rows);
+        apply_statistics(&mut self.schema.tables, &rows);
     }
 }
 

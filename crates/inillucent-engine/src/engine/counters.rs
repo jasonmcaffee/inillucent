@@ -12,12 +12,12 @@ impl crate::ImportedDatabase {
     /// `sqlite3_get_autocommit` answers and what the differential harness
     /// compares after every step.
     pub fn autocommit(&self) -> bool {
-        self.batch.get().is_none()
+        self.writing.batch.get().is_none()
     }
 
     /// Returns the rowid the last `INSERT` assigned on this database.
     pub fn last_insert_rowid(&self) -> i64 {
-        self.last_rowid.get()
+        self.counters.last_rowid.get()
     }
 
     /// Returns how many rows every statement on **this connection** has
@@ -25,13 +25,15 @@ impl crate::ImportedDatabase {
     ///
     /// `changed_ever` is one counter shared by every connection this database
     /// has ever handed out, so the answer is the counter's value minus what it
-    /// already read when `self.session` was opened - see
-    /// `session_change_baseline`. `self.session` is always the caller's own:
+    /// already read when `self.session_state.session` was opened - see
+    /// `session_change_baseline`. `self.session_state.session` is always the caller's own:
     /// every entry point reaches this through `use_session`, which sets it
     /// first.
     pub fn total_changes(&self) -> i64 {
-        self.session_change_baseline
-            .total_changes(self.session.get(), self.changed_ever.get())
+        self.counters.session_change_baseline.total_changes(
+            self.session_state.session.get(),
+            self.counters.changed_ever.get(),
+        )
     }
 
     /// Returns how many rows the most recent write changed.
@@ -40,7 +42,7 @@ impl crate::ImportedDatabase {
     /// statement's own rows: a trigger body's go into `total_changes` and not
     /// into this, which is SQLite's rule.
     pub fn changes(&self) -> i64 {
-        self.last_changes.get()
+        self.counters.last_changes.get()
     }
 
     /// Records what a write changed, on both counters.
@@ -48,9 +50,10 @@ impl crate::ImportedDatabase {
     /// @param own - the rows the statement wrote itself
     /// @param all - the rows written under it, triggers included
     pub(crate) fn record_changes(&self, own: i64, all: i64) {
-        self.last_changes.set(own);
-        self.changed_ever
-            .set(self.changed_ever.get().saturating_add(all));
+        self.counters.last_changes.set(own);
+        self.counters
+            .changed_ever
+            .set(self.counters.changed_ever.get().saturating_add(all));
     }
 
     /// Records the rowid an `INSERT` assigned, when it assigned one.
@@ -59,7 +62,7 @@ impl crate::ImportedDatabase {
     ///   table that has one
     pub(crate) fn remember_rowid(&self, rowid: Option<i64>) {
         if let Some(assigned) = rowid {
-            self.last_rowid.set(assigned);
+            self.counters.last_rowid.set(assigned);
         }
     }
 
@@ -71,13 +74,13 @@ impl crate::ImportedDatabase {
     /// asked per row.
     pub fn scalar_context(&self) -> inillucent_exec::scalar::Context {
         inillucent_exec::scalar::Context {
-            changes: self.last_changes.get(),
+            changes: self.counters.last_changes.get(),
             total_changes: self.total_changes(),
-            last_insert_rowid: self.last_rowid.get(),
+            last_insert_rowid: self.counters.last_rowid.get(),
             seed: self.next_seed(),
             // So the `like(a, b)` function spelling follows the same pragma the
             // `LIKE` operator does.
-            like_case_sensitive: self.case_sensitive_like,
+            like_case_sensitive: self.session_state.case_sensitive_like,
         }
     }
 
@@ -95,9 +98,9 @@ impl crate::ImportedDatabase {
     /// advanced once per statement. Not cryptographic, which is also true of
     /// SQLite's `random()`.
     fn next_seed(&self) -> u64 {
-        let mut rng = inillucent_base::rng::Rng::new(self.seed.get());
+        let mut rng = inillucent_base::rng::Rng::new(self.counters.seed.get());
         let next = rng.next_u64();
-        self.seed.set(next);
+        self.counters.seed.set(next);
         next
     }
 }

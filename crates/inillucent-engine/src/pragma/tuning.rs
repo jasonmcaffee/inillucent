@@ -44,12 +44,14 @@ impl crate::ImportedDatabase {
         &mut self,
         argument: Option<&PragmaArgument>,
     ) -> DbResult<Outcome> {
-        let page_size = self.page_size.max(1);
+        let page_size = self.storage.page_size.max(1);
         let Some(argument) = argument else {
-            let bytes = self.frames.saturating_mul(page_size);
+            let bytes = self.storage.frames.saturating_mul(page_size);
             return Ok(named_integer(
                 "cache_size",
-                self.cache_size.unwrap_or(-((bytes / 1024) as i64)),
+                self.session_state
+                    .cache_size
+                    .unwrap_or(-((bytes / 1024) as i64)),
             ));
         };
         // SQLite's units: a negative number is kibibytes and a positive one is
@@ -62,17 +64,17 @@ impl crate::ImportedDatabase {
             asked.max(1)
         };
         let wanted = usize::try_from(pages).unwrap_or(usize::MAX);
-        if wanted > self.database.pool().frames() {
-            self.database.pool_mut().grow_frames(wanted)?;
-            self.frames = self.database.pool().frames();
+        if wanted > self.storage.database.pool().frames() {
+            self.storage.database.pool_mut().grow_frames(wanted)?;
+            self.storage.frames = self.storage.database.pool().frames();
         }
-        let pool = self.database.pool();
+        let pool = self.storage.database.pool();
         let held = pool.frames() as i64;
         pool.set_budget(pages.clamp(1, held) as usize);
         // Still the truth rather than the request, for the one case the grow
         // could not satisfy: an allocation that the platform refused reports
         // what the pool ended up with, in the units the caller used.
-        self.cache_size = Some(if pages > held {
+        self.session_state.cache_size = Some(if pages > held {
             if asked < 0 {
                 -(held.saturating_mul(page_size as i64) / 1024)
             } else {
@@ -91,7 +93,7 @@ impl crate::ImportedDatabase {
         let Some(argument) = argument else {
             return Ok(named_integer(
                 "synchronous",
-                match self.wal.synchronous() {
+                match self.storage.wal.synchronous() {
                     Synchronous::Off => 0,
                     Synchronous::Normal => 1,
                     Synchronous::Full => 2,
@@ -124,17 +126,26 @@ impl crate::ImportedDatabase {
         argument: Option<&PragmaArgument>,
     ) -> DbResult<Outcome> {
         match argument {
-            None => Ok(named_integer("timeout", self.busy_timeout_ms as i64)),
+            None => Ok(named_integer(
+                "timeout",
+                self.session_state.busy_timeout_ms as i64,
+            )),
             Some(argument) => {
-                self.busy_timeout_ms = argument_integer(argument).max(0) as u64;
-                Ok(named_integer("timeout", self.busy_timeout_ms as i64))
+                self.session_state.busy_timeout_ms = argument_integer(argument).max(0) as u64;
+                Ok(named_integer(
+                    "timeout",
+                    self.session_state.busy_timeout_ms as i64,
+                ))
             }
         }
     }
     /// Reads or sets a boolean flag the engine records and reports.
     pub(crate) fn pragma_flag(&mut self, argument: Option<&PragmaArgument>) -> DbResult<Outcome> {
         match argument {
-            None => Ok(named_integer("foreign_keys", i64::from(self.foreign_keys))),
+            None => Ok(named_integer(
+                "foreign_keys",
+                i64::from(self.session_state.foreign_keys),
+            )),
             Some(argument) => {
                 let asked = argument_boolean(argument);
                 // **The compiled statements go with it.** Whether keys are
@@ -144,10 +155,10 @@ impl crate::ImportedDatabase {
                 // pragma turned them on. Which is exactly the shape of bug this
                 // pragma exists to avoid, since the symptom is a write that is
                 // accepted rather than an error that is reported.
-                if asked != self.foreign_keys {
+                if asked != self.session_state.foreign_keys {
                     self.forget_compiled_statements();
                 }
-                self.foreign_keys = asked;
+                self.session_state.foreign_keys = asked;
                 Ok(Outcome::empty())
             }
         }
@@ -163,14 +174,14 @@ impl crate::ImportedDatabase {
         match argument {
             None => Ok(named_integer(
                 "defer_foreign_keys",
-                i64::from(self.defer_foreign_keys),
+                i64::from(self.session_state.defer_foreign_keys),
             )),
             Some(argument) => {
                 let asked = argument_boolean(argument);
-                if asked != self.defer_foreign_keys {
+                if asked != self.session_state.defer_foreign_keys {
                     self.forget_compiled_statements();
                 }
-                self.defer_foreign_keys = asked;
+                self.session_state.defer_foreign_keys = asked;
                 Ok(Outcome::empty())
             }
         }
@@ -223,11 +234,11 @@ impl crate::ImportedDatabase {
         let Some(argument) = argument else {
             return Ok(named_integer(
                 "user_version",
-                i64::from(self.database.user_version()),
+                i64::from(self.storage.database.user_version()),
             ));
         };
         let value = argument_integer(argument) as i32;
-        self.database.set_user_version(value);
+        self.storage.database.set_user_version(value);
         // **Checkpointed, because the meta page is not in the log.** Every
         // other write here is replayed from the WAL on the next open; a meta
         // field only reaches the file at a checkpoint, so one that was set and
@@ -247,11 +258,11 @@ impl crate::ImportedDatabase {
         let Some(argument) = argument else {
             return Ok(named_integer(
                 "application_id",
-                i64::from(self.database.application_id()),
+                i64::from(self.storage.database.application_id()),
             ));
         };
         let value = argument_integer(argument) as i32;
-        self.database.set_application_id(value);
+        self.storage.database.set_application_id(value);
         self.checkpoint()?;
         Ok(Outcome::empty())
     }
@@ -269,10 +280,13 @@ impl crate::ImportedDatabase {
     ) -> DbResult<Outcome> {
         if let Some(argument) = argument {
             let asked = argument_integer(argument);
-            let held = self.database.pool().page_count() as i64;
-            self.max_page_count = asked.max(held).min(DEFAULT_MAX_PAGE_COUNT);
+            let held = self.storage.database.pool().page_count() as i64;
+            self.session_state.max_page_count = asked.max(held).min(DEFAULT_MAX_PAGE_COUNT);
         }
-        Ok(named_integer("max_page_count", self.max_page_count))
+        Ok(named_integer(
+            "max_page_count",
+            self.session_state.max_page_count,
+        ))
     }
     /// Sets whether `LIKE` compares ASCII letters exactly.
     ///
@@ -292,10 +306,10 @@ impl crate::ImportedDatabase {
             return Ok(Outcome::empty());
         };
         let asked = argument_boolean(argument);
-        if asked != self.case_sensitive_like {
+        if asked != self.session_state.case_sensitive_like {
             self.forget_compiled_statements();
         }
-        self.case_sensitive_like = asked;
+        self.session_state.case_sensitive_like = asked;
         Ok(Outcome::empty())
     }
     /// Reads or sets how many rows `ANALYZE` may sample per index.
@@ -309,9 +323,12 @@ impl crate::ImportedDatabase {
         argument: Option<&PragmaArgument>,
     ) -> DbResult<Outcome> {
         if let Some(argument) = argument {
-            self.analysis_limit = argument_integer(argument).max(0);
+            self.session_state.analysis_limit = argument_integer(argument).max(0);
         }
-        Ok(named_integer("analysis_limit", self.analysis_limit))
+        Ok(named_integer(
+            "analysis_limit",
+            self.session_state.analysis_limit,
+        ))
     }
     /// Reads or sets `locking_mode`.
     ///
@@ -338,7 +355,7 @@ impl crate::ImportedDatabase {
     }
     /// Returns the word `locking_mode` reports.
     pub(crate) fn locking_word(&self) -> &'static str {
-        if self.locking_exclusive() {
+        if self.session_state.locking_exclusive() {
             "exclusive"
         } else {
             "normal"
@@ -361,7 +378,10 @@ impl crate::ImportedDatabase {
         argument: Option<&PragmaArgument>,
     ) -> DbResult<Outcome> {
         let Some(argument) = argument else {
-            return Ok(word_row("journal_mode", self.journal_mode().word()));
+            return Ok(word_row(
+                "journal_mode",
+                self.session_state.journal_mode().word(),
+            ));
         };
         let asked = argument_text(argument);
         if let Some(mode) = inillucent_pool::journal::JournalMode::named(asked.trim()) {
@@ -371,12 +391,18 @@ impl crate::ImportedDatabase {
             // mode that was already in force. `off` protects nothing, so a
             // connection that has asked to be protected from itself cannot have
             // it.
-            if self.defensive && mode == inillucent_pool::journal::JournalMode::Off {
-                return Ok(word_row("journal_mode", self.journal_mode().word()));
+            if self.session_state.defensive && mode == inillucent_pool::journal::JournalMode::Off {
+                return Ok(word_row(
+                    "journal_mode",
+                    self.session_state.journal_mode().word(),
+                ));
             }
             self.set_journal_mode(mode)?;
         }
-        Ok(word_row("journal_mode", self.journal_mode().word()))
+        Ok(word_row(
+            "journal_mode",
+            self.session_state.journal_mode().word(),
+        ))
     }
     /// Reads or sets `auto_vacuum`.
     ///
@@ -394,7 +420,10 @@ impl crate::ImportedDatabase {
         argument: Option<&PragmaArgument>,
     ) -> DbResult<Outcome> {
         let Some(argument) = argument else {
-            return Ok(named_integer("auto_vacuum", i64::from(self.auto_vacuum)));
+            return Ok(named_integer(
+                "auto_vacuum",
+                i64::from(self.session_state.auto_vacuum),
+            ));
         };
         let asked = match argument_text(argument).trim().to_ascii_lowercase().as_str() {
             "0" | "none" => Some(0u8),
@@ -405,11 +434,12 @@ impl crate::ImportedDatabase {
         // An unrecognised word is a no-op in SQLite rather than an error.
         if let Some(mode) = asked {
             if self
+                .schema
                 .tables
                 .iter()
                 .all(|table| table.folded.starts_with(b"sqlite_"))
             {
-                self.auto_vacuum = mode;
+                self.session_state.auto_vacuum = mode;
             }
         }
         Ok(Outcome::empty())
@@ -426,7 +456,7 @@ impl crate::ImportedDatabase {
         &mut self,
         argument: Option<&PragmaArgument>,
     ) -> DbResult<Outcome> {
-        if self.auto_vacuum != 2 {
+        if self.session_state.auto_vacuum != 2 {
             return Ok(Outcome::empty());
         }
         let pages = argument.map(argument_integer).unwrap_or(i64::MAX).max(0);
@@ -443,16 +473,17 @@ impl crate::ImportedDatabase {
         let Some(argument) = argument else {
             return Ok(named_integer(
                 "secure_delete",
-                i64::from(self.secure_delete),
+                i64::from(self.session_state.secure_delete),
             ));
         };
-        self.secure_delete = match argument_text(argument).trim().to_ascii_lowercase().as_str() {
-            "2" | "fast" => 2,
-            _ => u8::from(argument_boolean(argument)),
-        };
+        self.session_state.secure_delete =
+            match argument_text(argument).trim().to_ascii_lowercase().as_str() {
+                "2" | "fast" => 2,
+                _ => u8::from(argument_boolean(argument)),
+            };
         Ok(named_integer(
             "secure_delete",
-            i64::from(self.secure_delete),
+            i64::from(self.session_state.secure_delete),
         ))
     }
     /// Reads or sets `ignore_check_constraints`.
@@ -471,14 +502,14 @@ impl crate::ImportedDatabase {
         let Some(argument) = argument else {
             return Ok(named_integer(
                 "ignore_check_constraints",
-                i64::from(self.ignore_check_constraints),
+                i64::from(self.session_state.ignore_check_constraints),
             ));
         };
         let asked = argument_boolean(argument);
-        if asked != self.ignore_check_constraints {
+        if asked != self.session_state.ignore_check_constraints {
             self.forget_compiled_statements();
         }
-        self.ignore_check_constraints = asked;
+        self.session_state.ignore_check_constraints = asked;
         Ok(Outcome::empty())
     }
     /// Reads or sets `automatic_index`.
@@ -491,17 +522,17 @@ impl crate::ImportedDatabase {
         let Some(argument) = argument else {
             return Ok(named_integer(
                 "automatic_index",
-                i64::from(self.automatic_index),
+                i64::from(self.session_state.automatic_index),
             ));
         };
         let asked = argument_boolean(argument);
-        if asked != self.automatic_index {
+        if asked != self.session_state.automatic_index {
             self.forget_compiled_statements();
         }
-        self.automatic_index = asked;
+        self.session_state.automatic_index = asked;
         // The planner reads the lever, not the field: a plan carries the levers
         // it was built under, so the two have to move together.
-        self.set_automatic_index(asked);
+        self.session_state.set_automatic_index(asked);
         Ok(Outcome::empty())
     }
     /// Reads or sets `writable_schema`, which this engine records and honours
@@ -523,7 +554,7 @@ impl crate::ImportedDatabase {
             // refuses with it off.
             return Ok(named_integer("writable_schema", 0));
         };
-        self.writable_schema = argument_boolean(argument);
+        self.session_state.writable_schema = argument_boolean(argument);
         Ok(Outcome::empty())
     }
     /// Reads or sets whether this connection may write.
@@ -538,9 +569,12 @@ impl crate::ImportedDatabase {
         argument: Option<&PragmaArgument>,
     ) -> DbResult<Outcome> {
         let Some(argument) = argument else {
-            return Ok(named_integer("query_only", i64::from(self.query_only)));
+            return Ok(named_integer(
+                "query_only",
+                i64::from(self.session_state.query_only),
+            ));
         };
-        self.query_only = argument_boolean(argument);
+        self.session_state.query_only = argument_boolean(argument);
         Ok(Outcome::empty())
     }
     /// Reads or sets whether a trigger's own writes fire triggers.
@@ -558,14 +592,14 @@ impl crate::ImportedDatabase {
         let Some(argument) = argument else {
             return Ok(named_integer(
                 "recursive_triggers",
-                i64::from(self.recursive_triggers),
+                i64::from(self.session_state.recursive_triggers),
             ));
         };
         let asked = argument_boolean(argument);
-        if asked != self.recursive_triggers {
+        if asked != self.session_state.recursive_triggers {
             self.forget_compiled_statements();
         }
-        self.recursive_triggers = asked;
+        self.session_state.recursive_triggers = asked;
         Ok(Outcome::empty())
     }
     /// Reads or sets where temporary tables live.
@@ -582,10 +616,10 @@ impl crate::ImportedDatabase {
         argument: Option<&PragmaArgument>,
     ) -> DbResult<Outcome> {
         let Some(argument) = argument else {
-            return Ok(named_integer("temp_store", self.temp_store));
+            return Ok(named_integer("temp_store", self.session_state.temp_store));
         };
         let text = argument_text(argument).trim().to_ascii_lowercase();
-        self.temp_store = match text.as_str() {
+        self.session_state.temp_store = match text.as_str() {
             "0" | "default" => 0,
             "2" | "memory" => 2,
             other => {

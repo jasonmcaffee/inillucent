@@ -64,11 +64,13 @@ impl crate::ImportedDatabase {
         let sql = canonical_sql(keywords, source, name_offset, source.len() as u32);
         let folded = table.to_ascii_lowercase();
         let position = self
+            .schema
             .tables
             .iter()
             .position(|held| held.folded == folded)
             .ok_or_else(|| refusal(format!("no such table: {}", String::from_utf8_lossy(table))))?;
         let owner = self
+            .schema
             .tables
             .get(position)
             .cloned()
@@ -182,7 +184,7 @@ impl crate::ImportedDatabase {
         // catalog text, and refreshing the planner's view of it. `seal` is
         // timed after it and apart from it - see below.
         let tail = std::time::Instant::now();
-        let at = self.ddl_schema;
+        let at = self.schema.ddl_schema;
         self.rewrite(
             rowid,
             SchemaEntry {
@@ -202,7 +204,11 @@ impl crate::ImportedDatabase {
         // Offering one here answered `SELECT rowid FROM t` with the rows inside
         // the predicate, silently, under a plan that said `SCAN t`.
         if crate::covers_every_row(&index) {
-            self.covering.entry(owner.root).or_default().push(root);
+            self.schema
+                .covering
+                .entry(owner.root)
+                .or_default()
+                .push(root);
             self.sort_covering(owner.root);
         }
         let _ = position;
@@ -218,7 +224,7 @@ impl crate::ImportedDatabase {
         // number nobody could act on.
         let sealed = std::time::Instant::now();
         self.seal()?;
-        self.index_stages.set(crate::StageTimings {
+        self.compiled.index_stages.set(crate::StageTimings {
             scan,
             sort,
             unique: uniqueness,
@@ -259,10 +265,12 @@ impl crate::ImportedDatabase {
         directions: &[bool],
     ) -> DbResult<EntrySet> {
         let layout = self
+            .schema
             .layouts
             .get(&owner.root)
             .ok_or_else(|| refusal("no layout for the table being indexed"))?;
         let tree = self
+            .schema
             .trees
             .get(&owner.root)
             .ok_or_else(|| refusal("no tree for the table being indexed"))?;
@@ -446,11 +454,12 @@ impl crate::ImportedDatabase {
     /// @param table_root - the table whose list changed
     pub(crate) fn sort_covering(&mut self, table_root: u32) {
         let sizes: HashMap<u32, usize> = self
+            .schema
             .trees
             .iter()
             .map(|(root, tree)| (*root, tree.byte_size()))
             .collect();
-        if let Some(roots) = self.covering.get_mut(&table_root) {
+        if let Some(roots) = self.schema.covering.get_mut(&table_root) {
             roots.sort_by_key(|root| sizes.get(root).copied().unwrap_or(usize::MAX));
         }
     }

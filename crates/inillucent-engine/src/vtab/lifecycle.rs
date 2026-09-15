@@ -38,13 +38,18 @@ impl crate::ImportedDatabase {
     /// disagree with the file.
     pub(crate) fn reconnect_modules(&mut self) -> DbResult<()> {
         let declarations: Vec<Vec<u8>> = self
+            .schema
             .entries
             .iter()
             .filter(|recorded| recorded.entry.kind == ObjectKind::Table)
             .map(|recorded| recorded.entry.sql.clone())
             .collect();
         for sql in declarations {
-            let parsed = match inillucent_sql::parser::parse_next_statement(&sql, 0, &self.limits) {
+            let parsed = match inillucent_sql::parser::parse_next_statement(
+                &sql,
+                0,
+                &self.session_state.limits,
+            ) {
                 Ok(parsed) => parsed,
                 Err(_) => continue,
             };
@@ -60,7 +65,7 @@ impl crate::ImportedDatabase {
             let name = parsed.ast.text(*name).to_vec();
             let module = parsed.ast.text(*module).to_vec();
             let arguments: Vec<Vec<u8>> = arguments.clone();
-            let Some(found) = self.registry.module(&module) else {
+            let Some(found) = self.session_state.registry.module(&module) else {
                 // A file naming a module this build does not have is a file
                 // this build cannot answer for. It is skipped rather than
                 // refused so the rest of the database still opens, and the
@@ -83,6 +88,7 @@ impl crate::ImportedDatabase {
                 let owned = shadow.owner.clone().unwrap_or_else(|| name.clone());
                 let shadow_name = shadow_table_name(&owned, &shadow.suffix).to_ascii_lowercase();
                 let Some(recorded) = self
+                    .schema
                     .entries
                     .iter()
                     .find(|recorded| recorded.entry.name.to_ascii_lowercase() == shadow_name)
@@ -106,7 +112,7 @@ impl crate::ImportedDatabase {
                 });
             }
             let table = found.connect(&connect, false)?;
-            self.virtual_tables.insert(
+            self.session_state.virtual_tables.insert(
                 name.to_ascii_lowercase(),
                 Connected {
                     table,
@@ -126,19 +132,20 @@ impl crate::ImportedDatabase {
         // which a module could start buffering, because the engine's only
         // `begin` was at `CREATE VIRTUAL TABLE`. Told before the table is taken
         // out of the map, so the module being written hears it too.
-        if !self.modules_begun.get() {
-            self.modules_begun.set(true);
+        if !self.session_state.modules_begun.get() {
+            self.session_state.modules_begun.set(true);
             self.begin_modules()?;
         }
         let key = name.to_ascii_lowercase();
         let mut connected = self
+            .session_state
             .virtual_tables
             .remove(&key)
             .ok_or_else(|| refusal(format!("no such table: {}", String::from_utf8_lossy(name))))?;
         let outcome = {
             let txn = self.current_txn();
-            let at = self.ddl_schema;
-            let session = self.session.get();
+            let at = self.schema.ddl_schema;
+            let session = self.session_state.session.get();
             let wal = self
                 .log_of(at)
                 .ok_or_else(|| refusal("a statement names a database that is not attached"))?;
@@ -148,7 +155,7 @@ impl crate::ImportedDatabase {
                 schema: at,
                 wrote: false,
                 // **The before-images a rollback needs.** Every ordinary write
-                // passes `Some(&self.undo)`; this path passed `None`, so a
+                // passes `Some(&self.writing.undo)`; this path passed `None`, so a
                 // virtual table's writes went into the pool with nothing
                 // recorded that could put them back. `ROLLBACK` then undid
                 // every ordinary table and left the module's shadow trees as
@@ -157,33 +164,33 @@ impl crate::ImportedDatabase {
                 // only thing that corrected it. The file itself was never
                 // wrong: no commit record was written, so recovery ignored
                 // the pages. Only the live connection was.
-                undo: Some(&self.undo),
+                undo: Some(&self.writing.undo),
                 uncommitted: self.uncommitted_handle_of(at),
             };
             let store = WriteStore {
                 database: crate::file_of(
-                    &mut self.database,
-                    &mut self.attached,
-                    &mut self.temps,
+                    &mut self.storage.database,
+                    &mut self.session_state.attached,
+                    &mut self.session_state.temps,
                     session,
                     at,
                 )?,
-                trees: &mut self.trees,
+                trees: &mut self.schema.trees,
                 log: &mut log,
             };
             let mut nowhere = inillucent_ext::vtab::WithStore { store };
             let mut context = Context {
                 host: &mut nowhere,
                 database: 0,
-                limits: &self.limits,
-                catalog: Some(&self.catalog),
+                limits: &self.session_state.limits,
+                catalog: Some(&self.schema.catalog),
             };
             connected.table.update(&mut context, change)
         };
         // Put it back whatever happened: a module that failed a write is still
         // the connected table, and dropping it would make the next statement
         // say the table does not exist.
-        self.virtual_tables.insert(key, connected);
+        self.session_state.virtual_tables.insert(key, connected);
         outcome
     }
     /// Applies an `INSERT` into a virtual table by handing the row to the module.
@@ -373,7 +380,7 @@ impl crate::ImportedDatabase {
         }
         // Outside a transaction the statement is its own, so the module flushes
         // and the log commits here; inside one, `commit_batch` does both.
-        if self.batch.get().is_none() {
+        if self.writing.batch.get().is_none() {
             self.sync_modules()?;
             self.seal()?;
         }
@@ -404,15 +411,15 @@ impl crate::ImportedDatabase {
     /// per row against SQLite's 5.5. SQLite syncs its modules at the end of the
     /// statement's transaction and so does this.
     pub(crate) fn sync_modules(&mut self) -> DbResult<()> {
-        let names: Vec<Vec<u8>> = self.virtual_tables.keys().cloned().collect();
+        let names: Vec<Vec<u8>> = self.session_state.virtual_tables.keys().cloned().collect();
         for name in names {
-            let Some(mut connected) = self.virtual_tables.remove(&name) else {
+            let Some(mut connected) = self.session_state.virtual_tables.remove(&name) else {
                 continue;
             };
             let outcome = {
                 let txn = self.current_txn();
-                let at = self.ddl_schema;
-                let session = self.session.get();
+                let at = self.schema.ddl_schema;
+                let session = self.session_state.session.get();
                 let wal = self
                     .log_of(at)
                     .ok_or_else(|| refusal("a statement names a database that is not attached"))?;
@@ -425,33 +432,33 @@ impl crate::ImportedDatabase {
                     // at a commit the buffer is cleared immediately after, and
                     // at a savepoint these writes are exactly what a later
                     // `ROLLBACK TO` an earlier point has to be able to undo.
-                    undo: Some(&self.undo),
+                    undo: Some(&self.writing.undo),
                     uncommitted: self.uncommitted_handle_of(at),
                 };
                 let store = WriteStore {
                     database: crate::file_of(
-                        &mut self.database,
-                        &mut self.attached,
-                        &mut self.temps,
+                        &mut self.storage.database,
+                        &mut self.session_state.attached,
+                        &mut self.session_state.temps,
                         session,
                         at,
                     )?,
-                    trees: &mut self.trees,
+                    trees: &mut self.schema.trees,
                     log: &mut log,
                 };
                 let mut nowhere = inillucent_ext::vtab::WithStore { store };
                 let mut context = Context {
                     host: &mut nowhere,
                     database: 0,
-                    limits: &self.limits,
-                    catalog: Some(&self.catalog),
+                    limits: &self.session_state.limits,
+                    catalog: Some(&self.schema.catalog),
                 };
                 connected
                     .table
                     .sync(&mut context)
                     .and_then(|()| connected.table.commit(&mut context))
             };
-            self.virtual_tables.insert(name, connected);
+            self.session_state.virtual_tables.insert(name, connected);
             outcome?;
         }
         Ok(())
@@ -521,9 +528,9 @@ impl crate::ImportedDatabase {
     /// wanted to refuse a schema change would have had to refuse the statement
     /// that made it.
     pub(crate) fn schema_changed_modules(&mut self) {
-        let names: Vec<Vec<u8>> = self.virtual_tables.keys().cloned().collect();
+        let names: Vec<Vec<u8>> = self.session_state.virtual_tables.keys().cloned().collect();
         for name in names {
-            if let Some(connected) = self.virtual_tables.get_mut(&name) {
+            if let Some(connected) = self.session_state.virtual_tables.get_mut(&name) {
                 connected.table.schema_changed();
             }
         }
@@ -533,9 +540,9 @@ impl crate::ImportedDatabase {
     /// Infallible for the same reason: the reload has already happened, and a
     /// module's opinion about it cannot put the pages back.
     pub(crate) fn committed_elsewhere_modules(&mut self) {
-        let names: Vec<Vec<u8>> = self.virtual_tables.keys().cloned().collect();
+        let names: Vec<Vec<u8>> = self.session_state.virtual_tables.keys().cloned().collect();
         for name in names {
-            if let Some(connected) = self.virtual_tables.get_mut(&name) {
+            if let Some(connected) = self.session_state.virtual_tables.get_mut(&name) {
                 connected.table.committed_elsewhere();
             }
         }
@@ -553,14 +560,14 @@ impl crate::ImportedDatabase {
     ///
     /// @param moment - what happened
     fn tell_modules(&mut self, moment: Moment) -> DbResult<()> {
-        let names: Vec<Vec<u8>> = self.virtual_tables.keys().cloned().collect();
+        let names: Vec<Vec<u8>> = self.session_state.virtual_tables.keys().cloned().collect();
         let mut first_failure: Option<inillucent_base::DbError> = None;
         for name in names {
-            let Some(mut connected) = self.virtual_tables.remove(&name) else {
+            let Some(mut connected) = self.session_state.virtual_tables.remove(&name) else {
                 continue;
             };
             let outcome = self.tell_one_module(&mut connected, moment);
-            self.virtual_tables.insert(name, connected);
+            self.session_state.virtual_tables.insert(name, connected);
             if let Err(why) = outcome {
                 if first_failure.is_none() {
                     first_failure = Some(why);
@@ -583,8 +590,8 @@ impl crate::ImportedDatabase {
     ///     transaction
     fn tell_one_module(&mut self, connected: &mut Connected, moment: Moment) -> DbResult<()> {
         let txn = self.current_txn();
-        let at = self.ddl_schema;
-        let session = self.session.get();
+        let at = self.schema.ddl_schema;
+        let session = self.session_state.session.get();
         let Some(wal) = self.log_of(at) else {
             return Ok(());
         };
@@ -598,21 +605,21 @@ impl crate::ImportedDatabase {
         };
         let store = WriteStore {
             database: crate::file_of(
-                &mut self.database,
-                &mut self.attached,
-                &mut self.temps,
+                &mut self.storage.database,
+                &mut self.session_state.attached,
+                &mut self.session_state.temps,
                 session,
                 at,
             )?,
-            trees: &mut self.trees,
+            trees: &mut self.schema.trees,
             log: &mut log,
         };
         let mut nowhere = inillucent_ext::vtab::WithStore { store };
         let mut context = Context {
             host: &mut nowhere,
             database: 0,
-            limits: &self.limits,
-            catalog: Some(&self.catalog),
+            limits: &self.session_state.limits,
+            catalog: Some(&self.schema.catalog),
         };
         match moment {
             Moment::Begin => connected.table.begin(&mut context),

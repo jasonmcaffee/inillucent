@@ -28,7 +28,7 @@ impl crate::ImportedDatabase {
     ) -> DbResult<Outcome> {
         let only = argument.map(|argument| argument_text(argument).to_ascii_lowercase());
         let mut rows = Vec::new();
-        for query in self.violation_queries(only.as_deref())? {
+        for query in self.schema.violation_queries(only.as_deref())? {
             for row in self.query_internally(&query.sql)? {
                 rows.push(vec![
                     OwnedDatum::Text(query.child.clone()),
@@ -103,7 +103,7 @@ impl crate::ImportedDatabase {
         // transaction's own first record - which is what letting it proceed
         // would require - is exactly the no-steal argument `holds_uncommitted`
         // makes, so this is refused rather than made honest.
-        if self.batch.get().is_some() && self.touched != 0 {
+        if self.writing.batch.get().is_some() && self.writing.touched != 0 {
             return Err(DbError::primary(PrimaryCode::Locked)
                 .with_detail("cannot checkpoint: a transaction has written and not committed"));
         }
@@ -113,7 +113,7 @@ impl crate::ImportedDatabase {
         // write-ahead log has neither - which is a different statement from
         // "no frames moved". A caller polling the second column to decide
         // whether a checkpoint is due needs to be able to tell those apart.
-        if self.journal_mode() != inillucent_pool::journal::JournalMode::Wal {
+        if self.session_state.journal_mode() != inillucent_pool::journal::JournalMode::Wal {
             self.checkpoint()?;
             return Ok(Outcome {
                 rows: vec![vec![
@@ -125,9 +125,15 @@ impl crate::ImportedDatabase {
                 changes: Default::default(),
             });
         }
-        let before = self.database.pool().stats().writes;
+        let before = self.storage.database.pool().stats().writes;
         self.checkpoint()?;
-        let moved = self.database.pool().stats().writes.saturating_sub(before) as i64;
+        let moved = self
+            .storage
+            .database
+            .pool()
+            .stats()
+            .writes
+            .saturating_sub(before) as i64;
         Ok(Outcome {
             rows: vec![vec![
                 OwnedDatum::Int(0),

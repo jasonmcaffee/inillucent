@@ -130,7 +130,7 @@ impl ImportedDatabase {
     /// cache until it finishes compiling.
     pub(crate) fn stmt_rows(&self) -> DbResult<Vec<Vec<OwnedDatum>>> {
         let mut texts: Vec<String> = Vec::new();
-        for session in self.statements.borrow().values() {
+        for session in self.compiled.statements.borrow().values() {
             texts.extend(session.keys().cloned());
         }
         texts.sort();
@@ -187,7 +187,7 @@ impl ImportedDatabase {
             candidates.push((name.clone(), PHASE_TABLE));
         }
         for name in &named {
-            let Some(table) = self.catalog.table_named(&name.to_ascii_lowercase()) else {
+            let Some(table) = self.schema.catalog.table_named(&name.to_ascii_lowercase()) else {
                 continue;
             };
             for column in &table.columns {
