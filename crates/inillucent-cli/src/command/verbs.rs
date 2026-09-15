@@ -1220,13 +1220,8 @@ fn migrate_sqlite_file(from: &std::path::Path, to: &std::path::Path) -> Result<O
     let mut staged = to.as_os_str().to_os_string();
     staged.push(format!(".staging-{}", std::process::id()));
     let staged = std::path::PathBuf::from(staged);
-    let imported = inillucent_engine::ImportedDatabase::import_into(
-        from.to_path_buf(),
-        staged.clone(),
-        inillucent_engine::connect::PAGE_SIZE,
-        DEFAULT_FRAMES,
-    )
-    .map_err(|error| Failed::from_engine(&error))?;
+    let imported = inillucent_driver::Database::import_sqlite_into(from, &staged)
+        .map_err(Failed::from_driver)?;
     drop(imported);
     std::fs::rename(&staged, to).map_err(|error| {
         Failed::said(
@@ -1243,12 +1238,6 @@ fn migrate_sqlite_file(from: &std::path::Path, to: &std::path::Path) -> Result<O
     )
     .with("destination", json::text(to.to_string_lossy())))
 }
-
-/// How many frames the buffer pool holds while a migration runs.
-///
-/// The driver's own default, so a file built here is built by the same machine
-/// that a file opened there is read by.
-const DEFAULT_FRAMES: usize = 4_096;
 
 /// `version`: what this build is.
 pub fn version(context: &mut Context, _arguments: &Arguments) -> Result<Outcome, Failed> {

@@ -84,6 +84,23 @@ impl Failed {
         }
     }
 
+    /// Carries a failure the driver already classified.
+    ///
+    /// **For the callers that now go through the driver rather than the engine
+    /// (task-1962, roadmap item 7).** `from_engine` above asks the driver to
+    /// classify a raw engine error; this one is handed the answer, which is the
+    /// same decision made in the same place.
+    ///
+    /// @param error - the driver's error
+    pub fn from_driver(error: inillucent_driver::Error) -> Failed {
+        Failed {
+            status: error.status,
+            message: error.message,
+            feature: error.feature,
+            offset: error.offset,
+        }
+    }
+
     /// Classifies a shell failure, which may or may not carry the engine's error.
     ///
     /// @param failure - what the shell reported

@@ -249,9 +249,9 @@ impl Shell {
         // function over the file system belongs to a program that asked for
         // one; the reference draws the same line, with `fsdir` in `shell.c`.
         for module in [
-            std::sync::Arc::new(inillucent_engine::ext::vtab::fsdir::FsDirModule)
-                as std::sync::Arc<dyn inillucent_engine::ext::vtab::Module>,
-            std::sync::Arc::new(inillucent_engine::ext::vtab::zipfile::ZipFileModule),
+            std::sync::Arc::new(inillucent_driver::vtab::fsdir::FsDirModule)
+                as std::sync::Arc<dyn inillucent_driver::vtab::Module>,
+            std::sync::Arc::new(inillucent_driver::vtab::zipfile::ZipFileModule),
         ] {
             database
                 .register_module(module)
@@ -367,10 +367,10 @@ impl Shell {
     ///
     /// @param on - whether the decisions are watched
     pub fn set_authorizer(&mut self, on: bool) {
-        let installed: Option<std::rc::Rc<dyn inillucent_engine::Authorizer>> = on.then(|| {
+        let installed: Option<std::rc::Rc<dyn inillucent_driver::Authorizer>> = on.then(|| {
             std::rc::Rc::new(crate::commands::Watching {
                 seen: std::rc::Rc::clone(&self.authorized),
-            }) as std::rc::Rc<dyn inillucent_engine::Authorizer>
+            }) as std::rc::Rc<dyn inillucent_driver::Authorizer>
         });
         let _ = self.connection().set_authorizer(installed);
     }
@@ -392,7 +392,7 @@ impl Shell {
     }
 
     /// Returns what the page cache has been asked to do.
-    pub fn cache_stats(&self) -> inillucent_engine::connect::CacheStats {
+    pub fn cache_stats(&self) -> inillucent_driver::CacheStats {
         self.open_slot().database.cache_stats()
     }
 
@@ -608,8 +608,8 @@ impl Shell {
         // Armed for this statement and dropped after it, so a Ctrl+C that
         // arrives between two statements belongs to the one that finished and
         // is cleared rather than applied to the one that has not started.
-        let armed = inillucent_engine::base::budget::arm(
-            inillucent_engine::base::budget::Limits::unbounded(),
+        let armed = inillucent_driver::arm(
+            inillucent_driver::StatementLimits::unbounded(),
             std::sync::Arc::clone(&self.cancel),
         );
         let outcome = self.collect(sql);
@@ -823,9 +823,7 @@ impl Shell {
         let connection = self.connection();
         let consumed = connection.prepare_with_tail(sql).ok()?.consumed;
         let left = sql.get(consumed..)?;
-        let rest = left
-            .get(inillucent_engine::connect::leading_trivia(left)..)?
-            .trim();
+        let rest = left.get(inillucent_driver::leading_trivia(left)..)?.trim();
         if rest.is_empty() {
             return None;
         }

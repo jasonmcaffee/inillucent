@@ -28,8 +28,8 @@ pub mod verbs;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use inillucent_driver::vfs::confine::{self, Root};
 use inillucent_driver::Status;
-use inillucent_engine::vfs::confine::{self, Root};
 
 use crate::json::Json;
 use crate::shell::Shell;
@@ -303,7 +303,7 @@ pub struct Context {
     /// a `SELECT` whose `WHERE` rejects everything after scanning a hundred
     /// million rows still stops. A row ceiling alone would let that run to the
     /// end and then report zero rows.
-    limits: inillucent_engine::base::budget::Limits,
+    limits: inillucent_driver::StatementLimits,
     /// Whether arming a budget clears the cancellation flag first.
     ///
     /// True everywhere but the MCP server, which reads its input on a second
@@ -395,7 +395,7 @@ impl Context {
             root,
             limit: 200,
             max_rows: None,
-            limits: inillucent_engine::base::budget::Limits::unbounded(),
+            limits: inillucent_driver::StatementLimits::unbounded(),
             preserve_cancel: std::cell::Cell::new(false),
             cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             null: String::new(),
@@ -497,7 +497,7 @@ impl Context {
     /// Sets what one command may spend inside the engine.
     ///
     /// @param limits - the budget, or `Limits::unbounded` for a command line
-    pub fn set_limits(&mut self, limits: inillucent_engine::base::budget::Limits) {
+    pub fn set_limits(&mut self, limits: inillucent_driver::StatementLimits) {
         self.limits = limits;
     }
 
@@ -506,7 +506,7 @@ impl Context {
     /// A verb that runs work outside the executor - a migration reads a remote
     /// server and writes rows through a second connection - asks so that it can
     /// put itself under the same ceiling rather than beside it.
-    pub fn limits(&self) -> inillucent_engine::base::budget::Limits {
+    pub fn limits(&self) -> inillucent_driver::StatementLimits {
         self.limits.clone()
     }
 
@@ -544,7 +544,7 @@ impl Context {
             }),
             limit: 200,
             max_rows: None,
-            limits: inillucent_engine::base::budget::Limits::unbounded(),
+            limits: inillucent_driver::StatementLimits::unbounded(),
             preserve_cancel: std::cell::Cell::new(false),
             cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             null: String::new(),
@@ -808,7 +808,7 @@ mod tests {
             root: Some(Arc::new(Root::at(&root).unwrap())),
             limit: 200,
             max_rows: None,
-            limits: inillucent_engine::base::budget::Limits::unbounded(),
+            limits: inillucent_driver::StatementLimits::unbounded(),
             preserve_cancel: std::cell::Cell::new(false),
             cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             null: String::new(),
@@ -869,7 +869,7 @@ mod tests {
             root: Some(Arc::new(Root::at(&root).unwrap())),
             limit: 200,
             max_rows: None,
-            limits: inillucent_engine::base::budget::Limits::unbounded(),
+            limits: inillucent_driver::StatementLimits::unbounded(),
             preserve_cancel: std::cell::Cell::new(false),
             cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             null: String::new(),

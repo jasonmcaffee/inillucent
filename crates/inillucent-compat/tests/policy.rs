@@ -1741,22 +1741,33 @@ fn no_shell_file_reaches_past_the_driver_more_than_it_is_recorded_at() {
     // task-1932; a row at zero is a file that has moved and whose row should
     // be deleted.
     const REACHES: [(&str, usize); 8] = [
-        // The shell itself: sessions, virtual table modules, the authorizer,
-        // pool statistics, `ATTACH`. The largest of the eight and the one whose
-        // move decides what the driver's surface has to become.
-        ("crates/inillucent-cli/src/shell.rs", 10),
-        // The command table's context and its budget arming.
-        ("crates/inillucent-cli/src/command/mod.rs", 8),
-        // The dot commands, which reach the engine for `.dbinfo`, `.stats` and
-        // the serialisation verbs.
-        ("crates/inillucent-cli/src/commands.rs", 7),
+        // The shell itself. Down from ten to one in task-1962 (roadmap item
+        // 7): the virtual table modules, the authorizer, the cache statistics,
+        // the statement budget and `leading_trivia` are all on the driver's
+        // surface now. The one left is `use inillucent_engine::connect::
+        // {Connection, Database}` - the types the shell's statement loop is
+        // built on. See the comment below this table for why that one is a
+        // decision about the shell's value type rather than a substitution.
+        ("crates/inillucent-cli/src/shell.rs", 1),
+        // Down from eight to zero in task-1962 (roadmap item 7). The VFS
+        // confinement root and the statement budget were both already
+        // re-exported by the driver; these lines named the engine for types
+        // that were one `use` away.
+        ("crates/inillucent-cli/src/command/mod.rs", 0),
+        // Down from seven to zero in task-1962 (roadmap item 7). Every one was
+        // the authorizer trait and its two enums, which the driver re-exports
+        // now: installing an authorizer is part of every binding's surface.
+        ("crates/inillucent-cli/src/commands.rs", 0),
         // The VFS, for `inillucent diagnose`. Down from two to zero in
         // task-1946 (M11): it was reaching through the engine's own re-export
         // rather than into engine internals, which made it a dependency
         // question, and the driver re-exports `vfs` now.
         ("crates/inillucent-cli/src/diagnose.rs", 0),
-        // `migrate` and `batch`, which drive a transaction.
-        ("crates/inillucent-cli/src/command/verbs.rs", 2),
+        // Down from two to zero in task-1962 (roadmap item 7). `migrate`
+        // staged its import through `ImportedDatabase::import_into` because
+        // the driver only derived the target; `Database::import_sqlite_into`
+        // takes one, which is the property a migration needs.
+        ("crates/inillucent-cli/src/command/verbs.rs", 0),
         // One function signature taking an engine connection, which follows
         // `shell.rs`.
         ("crates/inillucent-cli/src/import.rs", 1),

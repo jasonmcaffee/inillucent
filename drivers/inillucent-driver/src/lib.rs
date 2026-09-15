@@ -95,6 +95,44 @@ pub use inillucent_engine::DEFAULT_STATEMENT_CACHE;
 /// counts, for those two lines alone.
 pub use inillucent_engine::vfs;
 
+/// The authorizer a front end installs, and what it is asked about.
+///
+/// **Re-exported because a front end that installs one is not reaching into
+/// the engine (task-1962, roadmap item 7).** `sqlite3_set_authorizer` is part
+/// of every binding's surface; the shell's `.auth on` is one, and
+/// `crates/inillucent-cli/src/commands.rs` named `inillucent_engine` seven
+/// times for this trait alone.
+pub use inillucent_engine::{AuthAction, Authorization, Authorizer};
+
+/// The virtual table modules a front end may register, and the trait they
+/// implement.
+///
+/// The shell adds `fsdir` and `zipfile` and the library does not - a
+/// table-valued function over the file system belongs to a program that asked
+/// for one, which is the line the reference draws too, with `fsdir` in
+/// `shell.c`. Registering one is a thing a caller does, so it is on this
+/// surface (task-1962, roadmap item 7).
+pub use inillucent_engine::ext::vtab;
+
+/// What the page cache has been asked to do.
+///
+/// For `.stats` and `inillucent diagnose`, which report the work a statement
+/// caused rather than the answer it gave.
+pub use inillucent_engine::connect::CacheStats;
+
+/// How many bytes at the front of a script are whitespace and semicolons.
+///
+/// A front end that has asked [`Connection::statement_length`] where one
+/// statement ends uses this to find where the next one begins, so that what it
+/// shows a person is the statement rather than the space before it.
+pub use inillucent_engine::connect::leading_trivia;
+
+/// The run-time limits `sqlite3_limit` reads and writes.
+///
+/// Re-exported for the same reason [`StatementLimits`] is: a caller naming one
+/// should not have to name the engine to do it.
+pub use inillucent_engine::base::limits::Limit;
+
 /// Arming a statement budget, for a front end that runs statements itself.
 ///
 /// The shell and the MCP server both arm one per call rather than going through
@@ -279,6 +317,35 @@ impl Database {
         let options = OpenOptions::default();
         let engine = EngineDatabase::import_with(path.as_ref(), options.cache_frames)
             .map_err(|error| Error::from_engine(&error, options.diagnostics))?;
+        Database::around(engine, options)
+    }
+
+    /// Imports a SQLite file into a database at the path named, and opens that.
+    ///
+    /// **The target is taken rather than derived (task-1962, roadmap item 7).**
+    /// `inillucent migrate` writes to a staging name and renames it once the
+    /// import is complete, because a half-written database must not sit at the
+    /// path somebody is about to open. `import_sqlite` derives the target,
+    /// which is what a fixture wants and not what a migration wants.
+    ///
+    /// @param from - the SQLite database to read
+    /// @param to - the file to write
+    pub fn import_sqlite_into(from: impl AsRef<Path>, to: impl AsRef<Path>) -> Result<Database> {
+        let options = OpenOptions::default();
+        let engine = EngineDatabase::import_into(
+            from.as_ref().to_path_buf(),
+            to.as_ref().to_path_buf(),
+            options.cache_frames,
+        )
+        .map_err(|error| Error::from_engine(&error, options.diagnostics))?;
+        Database::around(engine, options)
+    }
+
+    /// Wraps an opened engine database in the driver's own handle.
+    ///
+    /// @param engine - the opened database
+    /// @param options - what it was opened with
+    fn around(engine: EngineDatabase, options: OpenOptions) -> Result<Database> {
         engine.set_statement_cache_limit(options.statement_cache);
         let path = engine.path().to_path_buf();
         Ok(Database {
@@ -421,6 +488,53 @@ impl Database {
         self.engine
             .backup_to(path.as_ref())
             .map_err(|error| self.classify(&error))
+    }
+
+    /// Registers a virtual table module this database's statements may name.
+    ///
+    /// **A program that wants `fsdir` asks for it (task-1962, roadmap item
+    /// 7).** The shell registers `fsdir` and `zipfile` and the library does
+    /// not, which is the line the reference draws too; making the registration
+    /// part of this surface is what lets a front end draw it without naming the
+    /// engine. See [`vtab`] for the modules that ship.
+    ///
+    /// @param module - the module, which the database holds for its life
+    pub fn register_module(&self, module: Arc<dyn vtab::Module>) -> Result<()> {
+        self.engine
+            .register_module(module)
+            .map_err(|error| self.classify(&error))
+    }
+
+    /// Returns what the page cache has been asked to do.
+    ///
+    /// The work a statement caused rather than the answer it gave, which is
+    /// what `.stats` reports and what a measurement compares between two runs.
+    pub fn cache_stats(&self) -> CacheStats {
+        self.engine.cache_stats()
+    }
+
+    /// Returns how many bytes the page cache is holding.
+    pub fn pool_bytes(&self) -> usize {
+        self.engine.pool_bytes()
+    }
+
+    /// Returns what one run-time limit is set to on this database.
+    ///
+    /// `sqlite3_limit`'s read half. It takes no borrow of the engine, so a
+    /// callback may ask it while a statement is running - see
+    /// `crates/inillucent-engine/src/connect.rs` and task-1962's A1 step 3.
+    ///
+    /// @param limit - which limit
+    pub fn limit(&self, limit: Limit) -> i64 {
+        self.engine.limit(limit)
+    }
+
+    /// Sets one run-time limit, and returns what it was before.
+    ///
+    /// @param limit - which limit
+    /// @param requested - the value asked for, clamped to the manifest's bounds
+    pub fn set_limit(&self, limit: Limit, requested: i64) -> i64 {
+        self.engine.set_limit(limit, requested)
     }
 
     /// Turns an engine error into a driver error, honouring the open options.
@@ -864,6 +978,73 @@ impl Connection<'_> {
     pub fn schema_cookie(&self) -> Result<u64> {
         self.engine
             .schema_cookie()
+            .map_err(|error| self.database.classify(&error))
+    }
+
+    /// Returns how many rows the last statement on this database changed.
+    ///
+    /// `sqlite3_changes`. The statement's own rows: a trigger body's go into
+    /// [`Connection::total_changes`] and not into this, which is SQLite's rule.
+    pub fn changes(&self) -> Result<i64> {
+        self.engine
+            .changes()
+            .map_err(|error| self.database.classify(&error))
+    }
+
+    /// Installs the authorizer every later statement is bound under, or removes
+    /// it.
+    ///
+    /// `sqlite3_set_authorizer`: the callback is consulted before a read, a
+    /// select or a function call is bound, and a `Deny` refuses the statement.
+    /// Pass `None` to allow everything again. The plan cache is emptied with
+    /// it, because a plan compiled under one authorizer is that authorizer's
+    /// answer.
+    ///
+    /// @param authorizer - the callback, or nothing
+    pub fn set_authorizer(&self, authorizer: Option<std::rc::Rc<dyn Authorizer>>) -> Result<()> {
+        self.engine
+            .set_authorizer(authorizer)
+            .map_err(|error| self.database.classify(&error))
+    }
+
+    /// Puts the connection into or out of defensive mode.
+    ///
+    /// `SQLITE_DBCONFIG_DEFENSIVE`, which the reference's shell turns on by
+    /// default: it refuses `PRAGMA journal_mode = OFF` and
+    /// `PRAGMA writable_schema = ON`, both of which let a caller lose or
+    /// corrupt a database with one statement.
+    ///
+    /// @param on - whether the flag is in force
+    pub fn set_defensive(&self, on: bool) -> Result<()> {
+        self.engine
+            .set_defensive(on)
+            .map_err(|error| self.database.classify(&error))
+    }
+
+    /// Returns the named parameters one statement declares, with their indexes.
+    ///
+    /// For a front end that binds by name and has to know which names the
+    /// statement has before it can ask for them.
+    ///
+    /// @param sql - the statement text
+    pub fn parameter_names(&self, sql: &str) -> Result<Vec<(Vec<u8>, u32)>> {
+        self.engine
+            .parameter_names(sql)
+            .map_err(|error| self.database.classify(&error))
+    }
+
+    /// Returns how many bytes of `sql` the first statement in it uses.
+    ///
+    /// **What a shell needs to know whether a line is finished.** A
+    /// `CREATE TRIGGER` spans many lines and holds semicolons inside its body,
+    /// so "ends with a semicolon" is the wrong question and the parser has to
+    /// be the one that answers it. `&sql[length..]` is what is left.
+    ///
+    /// @param sql - the script
+    pub fn statement_length(&self, sql: &str) -> Result<usize> {
+        self.engine
+            .prepare_with_tail(sql)
+            .map(|prepared| prepared.consumed)
             .map_err(|error| self.database.classify(&error))
     }
 

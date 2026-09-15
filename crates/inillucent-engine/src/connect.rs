@@ -235,7 +235,21 @@ impl Database {
         let source = path.as_ref().to_path_buf();
         let mut target = source.clone().into_os_string();
         target.push(".rdb");
-        let target = PathBuf::from(target);
+        Database::import_into(source, PathBuf::from(target), frames)
+    }
+
+    /// Imports a SQLite file into a database at the path named, and opens that.
+    ///
+    /// **The target is taken rather than derived, because that is the property
+    /// a migration needs (task-1962, roadmap item 7).** A half-written database
+    /// must not sit at the path somebody is about to open, so `inillucent
+    /// migrate` writes to a staging name and renames it; deriving the target
+    /// here would take that choice away from the caller.
+    ///
+    /// @param source - the SQLite database to read
+    /// @param target - the file to write
+    /// @param frames - how many frames the buffer pool holds
+    pub fn import_into(source: PathBuf, target: PathBuf, frames: usize) -> DbResult<Database> {
         let engine = ImportedDatabase::import_into(source, target.clone(), PAGE_SIZE, frames)?;
         Ok(Database {
             writer: std::rc::Rc::clone(&engine.writing),

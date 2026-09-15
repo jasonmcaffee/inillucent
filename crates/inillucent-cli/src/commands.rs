@@ -341,17 +341,17 @@ pub struct Watching {
     pub seen: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
 }
 
-impl inillucent_engine::Authorizer for Watching {
+impl inillucent_driver::Authorizer for Watching {
     /// Records one decision and allows it.
     ///
     /// @param action - what the binder is about to bind
     fn authorize(
         &self,
-        action: inillucent_engine::AuthAction<'_>,
-    ) -> inillucent_engine::Authorization {
+        action: inillucent_driver::AuthAction<'_>,
+    ) -> inillucent_driver::Authorization {
         let line = match action {
-            inillucent_engine::AuthAction::Select => "SELECT NULL NULL NULL NULL".to_string(),
-            inillucent_engine::AuthAction::Read {
+            inillucent_driver::AuthAction::Select => "SELECT NULL NULL NULL NULL".to_string(),
+            inillucent_driver::AuthAction::Read {
                 database,
                 table,
                 column,
@@ -361,12 +361,12 @@ impl inillucent_engine::Authorizer for Watching {
                 quoted(column),
                 quoted(database)
             ),
-            inillucent_engine::AuthAction::Function { name } => {
+            inillucent_driver::AuthAction::Function { name } => {
                 format!("FUNCTION NULL {} NULL NULL", quoted(name))
             }
         };
         self.seen.borrow_mut().push(format!("authorizer: {line}"));
-        inillucent_engine::Authorization::Allow
+        inillucent_driver::Authorization::Allow
     }
 }
 

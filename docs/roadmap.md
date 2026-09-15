@@ -107,28 +107,45 @@ image in the log applied before any page other than the meta page is read, so th
 repair generalises to every page; and a test that tears page 4 with an image in the log and opens,
 beside one that tears it without and fails with the documented code.
 
-## 7. Five command line files still reach past the driver
+## 7. Two command line lines still reach past the driver
 
 `drivers/README.md` says the driver is the one surface an application reaches the engine through,
 and for an application that is true: the C ABI, the four language wrappers and every published
-package go through it. The command line does not. Five files under `crates/inillucent-cli/src`
-import `inillucent_engine` directly, and
+package go through it. The command line did not. Five files under `crates/inillucent-cli/src`
+imported `inillucent_engine` directly, and
 `crates/inillucent-compat/tests/policy.rs`'s `no_shell_file_reaches_past_the_driver_more_than_it_is_recorded_at`
 records how many lines of each do, so the number can only come down.
 
-| file | lines | what it reaches for |
-|---|---|---|
-| `shell.rs` | 10 | sessions, virtual table modules, the authorizer, pool statistics, `ATTACH` |
-| `command/mod.rs` | 8 | the command table's context and its budget arming |
-| `commands.rs` | 7 | `.dbinfo`, `.stats` and the serialisation verbs |
-| `command/verbs.rs` | 2 | `migrate` and `batch`, which drive a transaction |
-| `import.rs` | 1 | one function signature taking an engine connection, which follows `shell.rs` |
+**Twenty-eight lines to two.** Three of the five files are at zero; the driver grew the eleven
+things they reached for.
 
-Done means the driver grows each of those, as thin wrappers over engine methods that exist, the
-table ratchets to zero file by file, and at zero the test becomes "no file under the command line
-imports the engine". The claim in `drivers/README.md` is not false today, because it is about what
-an *application* reaches; it becomes false the day somebody reads it as being about this
-repository. Until the count is zero, this item is what says so.
+| file | was | is | what moved |
+|---|---:|---:|---|
+| `shell.rs` | 10 | 1 | the virtual table modules, the authorizer, the cache statistics, the statement budget and `leading_trivia` |
+| `command/mod.rs` | 8 | 0 | the VFS confinement root and the statement budget, both already re-exported |
+| `commands.rs` | 7 | 0 | the authorizer trait and its two enums |
+| `command/verbs.rs` | 2 | 0 | `Database::import_sqlite_into`, which takes the target a staged migration needs |
+| `import.rs` | 1 | 1 | one function signature, which follows `shell.rs` |
+
+What the driver grew: `Database::register_module`, `cache_stats`, `pool_bytes`, `limit`,
+`set_limit` and `import_sqlite_into`; `Connection::changes`, `set_authorizer`, `set_defensive`,
+`parameter_names` and `statement_length`; and re-exports of `AuthAction`, `Authorization`,
+`Authorizer`, `vtab`, `CacheStats`, `Limit` and `leading_trivia`.
+
+**The two that are left are one decision, and it is about the shell's value type.** Both are the
+engine's `connect::Connection` and `connect::Database` as types - the shell's statement loop is
+written against the engine's own streaming statement (`prepare`, `bind`, `step`, `row`,
+`columns`), and its renderer against `inillucent_value::Value<'static>`, which is what
+`owned_row_values` produces. The driver's `Statement` answers one materialised `Rows` whose cells
+are `inillucent_driver::Value`, a different owning type. So moving the last two lines means either a
+conversion per cell of every row the shell prints - which would be a third `Value` conversion in a
+workspace whose whole point is that there is one - or rewriting `render.rs`, and with it the output
+of 63 dot commands that is matched line for line against the reference shell. Neither is a
+substitution; both are a decision about which value type the command line is written against.
+
+Done, now, means that decision is made. The claim in `drivers/README.md` is not false today,
+because it is about what an *application* reaches; it becomes false the day somebody reads it as
+being about this repository. Until the count is zero, this item is what says so.
 
 ## Where to go next
 
