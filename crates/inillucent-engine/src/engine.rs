@@ -31,6 +31,10 @@
 //! | [`explain`] | rendering `EXPLAIN` and `EXPLAIN QUERY PLAN` as rows |
 //! | [`rowshape`] | what a table's rows look like on disk, and reading a schema back |
 //! | [`state`] | the six groups `ImportedDatabase`'s fields are made of |
+//! | [`keys`] | settling the foreign keys a statement left outstanding |
+//! | [`locks`] | taking the file lock, and choosing the journal |
+//! | [`write`] | where a statement's writes go, and what undoes them |
+//! | [`tables`] | questions asked about one table's declaration |
 
 pub mod accessors;
 pub mod batch;
@@ -39,7 +43,11 @@ pub mod counters;
 pub mod explain;
 pub mod functions;
 pub mod integrity;
+pub mod keys;
+pub mod locks;
 pub mod open;
 pub mod rowshape;
 pub mod state;
 pub mod statements;
+pub mod tables;
+pub mod write;

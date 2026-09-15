@@ -584,3 +584,126 @@ impl crate::ImportedDatabase {
         Ok(opened)
     }
 }
+
+/// Returns a built tree's shape as the catalog records it.
+///
+/// @param shape - what the build produced
+pub(crate) fn stats_of(shape: &TreeShape) -> inillucent_catalog::paged::TreeStats {
+    inillucent_catalog::paged::TreeStats {
+        first_leaf: shape.first_leaf,
+        leaf_count: shape.leaf_count,
+        row_count: shape.row_count,
+    }
+}
+
+/// One catalog row, with the identifier of the tree it describes.
+///
+/// The row is what the file holds; the identifier is what the `trees` and
+/// `layouts` maps are keyed by. They are different numbers - see the module
+/// documentation on `newengine::ddl` - and carrying them together is what lets a
+/// rename change the row without the tree it names moving.
+#[derive(Clone, Debug)]
+pub(crate) struct Recorded {
+    /// The rowid the catalog tree stores it under.
+    pub(crate) rowid: i64,
+    /// The identifier its tree is registered under, zero when it has no tree.
+    pub(crate) root: u32,
+    /// The row itself.
+    pub(crate) entry: SchemaEntry,
+}
+
+/// The shape of one built tree, kept so it can be re-attached after the file is
+/// closed and reopened.
+///
+/// It is what the catalog will hold in Phase 3. Carrying it explicitly rather
+/// than rediscovering it on open is deliberate: rediscovering a root's height
+/// by reading the root is fine, but rediscovering its *row count* means walking
+/// it, and a harness that walked every tree on open would be measuring its own
+/// startup.
+pub(crate) struct TreeShape {
+    pub(crate) root: PageId,
+    pub(crate) columns: Vec<ColumnSpec>,
+    pub(crate) key_columns: usize,
+    pub(crate) first_leaf: PageId,
+    pub(crate) leaf_count: u64,
+    pub(crate) row_count: u64,
+}
+
+/// The root number `sqlite_schema` is registered under.
+///
+/// A root number is only an identifier here - the physical page comes from the
+/// meta record - so the catalog takes one no imported table can be given. SQLite
+/// roots start at 1 and count pages, so a number at the top of the range is
+/// free by construction.
+pub(crate) const SCHEMA_VIEW_ROOT: u32 = u32::MAX;
+
+/// The identifier the first DDL-created tree is registered under.
+///
+/// Imported trees are keyed by the fixture's SQLite root *page*, which counts
+/// pages from one, so a fixture would have to be eight terabytes at the default
+/// page size before it reached this. Counting up from here keeps every created
+/// tree's identifier distinct from every imported one without a search.
+pub(crate) const FIRST_CREATED_ROOT: u32 = 0x8000_0000;
+
+/// The first handle a tree of an attached database is registered under.
+///
+/// **A handle is the connection's name for a tree; a tree identifier is the
+/// file's.** They are the same number for `main` and they cannot be for anything
+/// else: two files number their own trees from one, so a connection holding both
+/// would have two trees under one key. So `main` keeps identity and every other
+/// schema's trees are re-numbered into the range above this.
+///
+/// The two ranges cannot meet by growth, because `allocate_root` refuses at this
+/// number: a `main` holding 2^30 created objects is refused by name rather than
+/// silently handed a handle an attached database already answers to.
+pub(crate) const FIRST_ATTACHED_HANDLE: u32 = 0xC000_0000;
+
+/// How many databases a connection may hold beside `main` and `temp`.
+///
+/// SQLite's `SQLITE_MAX_ATTACHED` default, and the number `attach.rs` grades
+/// against.
+pub(crate) const MAX_ATTACHED: usize = 10;
+
+/// Returns the path the imported database is written to.
+///
+/// The page size and the frame count are in the name so that a sweep over
+/// either does not overwrite the previous run's file while it is still open.
+///
+/// @param fixture - the SQLite fixture being imported
+/// @param page_size - the page size the trees are built at
+/// @param frames - how many frames the pool holds
+pub(crate) fn target_path(fixture: &std::path::Path, page_size: usize, frames: usize) -> PathBuf {
+    let stem = fixture
+        .file_stem()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "fixture".to_string());
+    let directory = fixture
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    directory.join(format!("{stem}-p{page_size}-f{frames}.rdb"))
+}
+
+/// Tells a pool how to make the log catch up when it is behind.
+///
+/// **Registered wherever a database and a log come together**, which is the
+/// import, the open and the reopen. Without it the pool can only refuse a page
+/// whose LSN is past the durable point, and a statement that dirties more pages
+/// than the pool holds has no way to satisfy it: `CREATE INDEX` on the large
+/// fixture failed on every one of thirty qualification rounds for exactly that
+/// reason.
+///
+/// The sync is real. `write_ahead_point` is `durable_end` under NORMAL and
+/// FULL, so what is handed back is a point the log has reached rather than one
+/// it has merely been given bytes for, and the pool's guard still refuses if it
+/// is not far enough.
+///
+/// @param pool - the pool that will do the asking
+/// @param wal - the log it should ask
+pub(crate) fn let_the_pool_ask_the_log(pool: &Pool, wal: &std::rc::Rc<Wal>) {
+    let held = std::rc::Rc::clone(wal);
+    pool.on_log_behind(std::rc::Rc::new(move || {
+        held.sync()?;
+        Ok(held.write_ahead_point())
+    }));
+}

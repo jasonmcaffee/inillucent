@@ -225,7 +225,7 @@ held every record above it. Recovery failed on the one page neither could supply
 
 SQLite is not exposed to this for a structural reason: its log holds whole page images and a
 checkpoint is a copy, so an interrupted one is simply redone. Here a connection in `wal` takes a
-`delete` journal (`journal_for` in `crates/inillucent-engine/src/lib.rs`), which holds the pre-images
+`delete` journal (`journal_for` in `crates/inillucent-engine/src/engine/locks.rs`), which holds the pre-images
 for the duration of a checkpoint and removes the file once the checkpoint's meta record is durable.
 That is the cost the default mode already pays, and it makes an interrupted checkpoint undoable in
 every mode rather than in three of the five. `off` is the one mode that gets nothing, because that

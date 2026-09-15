@@ -251,3 +251,364 @@ impl crate::ImportedDatabase {
         }
     }
 }
+
+impl ImportedDatabase {
+    /// Binds one statement against the imported schema.
+    ///
+    /// @param sql - the statement text
+    pub fn bind(&self, sql: &str) -> DbResult<BoundStatement> {
+        let parsed = self.parse_once(sql)?;
+        let bound = self.bind_parsed(sql, &parsed);
+        self.compiled.recycle(parsed);
+        bound
+    }
+
+    /// Binds a statement somebody has already parsed.
+    ///
+    /// **So that a compile parses once.** `compile` has to look at the parse to
+    /// decide whether the statement is an `EXPLAIN` - the binder's job is the
+    /// statement being explained, not the explaining - and it then called
+    /// `bind`, which parsed the same text a second time. On `SELECT 1` that was
+    /// 270 ns of a 1,145 ns compile spent producing an arena that was thrown
+    /// away, and `prepare.trivial` pays a compile every iteration.
+    ///
+    /// @param sql - the statement text, for diagnostics and spans
+    /// @param parsed - the parse to bind
+    pub(crate) fn bind_parsed(
+        &self,
+        sql: &str,
+        parsed: &inillucent_sql::parser::ParsedStatement,
+    ) -> DbResult<BoundStatement> {
+        let fallback = AllowAll;
+        let authorizer: &dyn inillucent_sql::bind::Authorizer = match &self.session_state.authorizer
+        {
+            Some(held) => held.as_ref(),
+            None => &fallback,
+        };
+        let externals = self.external_functions();
+        let mut binder = Binder::new(&self.schema.catalog, &parsed.ast, authorizer)
+            .with_source(sql.as_bytes())
+            .with_functions(&externals)
+            .with_collations(&self.session_state.collations)
+            .with_limits(&self.session_state.limits)
+            .with_foreign_keys(
+                self.session_state.foreign_keys,
+                self.session_state.defer_foreign_keys,
+            );
+        binder.bind_statement(&parsed.statement).map_err(refused)
+    }
+
+    /// Parses, plans and runs one statement of any kind.
+    ///
+    /// A `SELECT` answers with rows; an `INSERT`, `UPDATE` or `DELETE` answers
+    /// with a count and whatever `RETURNING` asked for. One entry point rather
+    /// than two, because a corpus record does not say which it is and a harness
+    /// that had to guess would be guessing from the SQL text.
+    ///
+    /// @param sql - the statement text
+    /// @param params - the values bound to `?1`, `?2`, ...
+    pub fn execute_any(&mut self, sql: &str, params: &Params) -> DbResult<Outcome> {
+        let cached = self.compiled(sql)?;
+        self.execute_compiled(&cached, params)
+    }
+
+    /// Compiles one statement and hands back the handle, without running it.
+    ///
+    /// **So that a caller can take the compile out of a timed region**, which is
+    /// where SQLite's already is: `sqlite_bench.c` calls `sqlite3_prepare_v2`
+    /// before it reads the clock and then resets and re-binds inside the loop.
+    /// A harness that looked its statement up per iteration would be timing a
+    /// hash of the SQL text that the other arm does not pay.
+    ///
+    /// @param sql - the statement text
+    pub fn prepare_statement(&self, sql: &str) -> DbResult<Statement> {
+        Ok(Statement {
+            cached: std::cell::RefCell::new(self.compiled(sql)?),
+            sql: sql.to_string(),
+            generation: std::cell::Cell::new(self.schema_generation()),
+        })
+    }
+
+    /// Runs a statement [`ImportedDatabase::prepare_statement`] compiled.
+    ///
+    /// **The plan is compiled again when the schema has moved under it
+    /// (task-1932).** A plan is built against a snapshot of the catalog, and a
+    /// statement held across a `CREATE TABLE`, a `DROP`, an `ALTER` or a
+    /// `REINDEX` is holding one that describes trees that are not there any
+    /// more. `Connection::step` has checked this since it existed; this
+    /// entry point, which the gates and the profiles run their statements
+    /// through, did not - so the two halves of the same public API disagreed
+    /// about whether an already-prepared statement follows a schema change.
+    /// SQLite's own `sqlite3_step` reprepares, and so does this.
+    ///
+    /// @param statement - the handle
+    /// @param params - the values bound to `?1`, `?2`, ...
+    pub fn execute_statement(
+        &mut self,
+        statement: &Statement,
+        params: &Params,
+    ) -> DbResult<Outcome> {
+        let held = self.current_plan(statement)?;
+        self.execute_compiled(&held, params)
+    }
+
+    /// Returns a statement's plan, compiling it again if the schema has moved.
+    ///
+    /// @param statement - the handle
+    fn current_plan(&self, statement: &Statement) -> DbResult<std::rc::Rc<Cached>> {
+        let generation = self.schema_generation();
+        if statement.generation.get() != generation {
+            let fresh = self.compiled(&statement.sql)?;
+            *statement.cached.borrow_mut() = fresh;
+            statement.generation.set(generation);
+        }
+        Ok(std::rc::Rc::clone(&statement.cached.borrow()))
+    }
+
+    /// Runs one statement and reports where its time went.
+    ///
+    /// **Two numbers, because there are two halves and they are fixed in
+    /// different places.** `find` is the query that decides which rows change -
+    /// an ordinary planned query, whose cost is the operator chain and the
+    /// descent. `apply` is everything after: compiling the assignments, reading
+    /// the rows, maintaining the indexes and writing the tree.
+    ///
+    /// This exists because the write gate misses and a guess about which half is
+    /// expensive is a guess this project has been wrong about before. It is on
+    /// the harness's own type, in a test-only crate, and nothing in the engine
+    /// consults it.
+    ///
+    /// @param statement - a handle from `prepare_statement`
+    /// @param params - the values bound to `?1`, `?2`, ...
+    pub fn execute_timed(
+        &mut self,
+        statement: &Statement,
+        params: &Params,
+    ) -> DbResult<(u128, u128)> {
+        let cached = self.current_plan(statement)?;
+        let found = std::time::Instant::now();
+        let rows = match &*cached {
+            Cached::Nothing
+            | Cached::Ddl(_)
+            | Cached::QueryPlan(_)
+            | Cached::Program(_)
+            | Cached::VirtualUpdate(..)
+            | Cached::VirtualDelete(..)
+            | Cached::VirtualInsert(_)
+            | Cached::Select(..)
+            | Cached::Insert(_, None, _) => Vec::new(),
+            // This harness measures a fresh build on purpose - see the doc
+            // comment - so it keeps calling `run_any_prepared` directly
+            // rather than `query`'s slot, exactly as it did before Stage 3.
+            Cached::Insert(_, Some(query), _) => {
+                physical::run_any_prepared(&query.plan, self, &query.prepared, params)?.0
+            }
+            Cached::Update(_, query, _, _) | Cached::Delete(_, query) => {
+                if let Some(key) = physical::rowid_seek_key(&query.plan, params)? {
+                    vec![vec![key]]
+                } else {
+                    physical::run_any_prepared(&query.plan, self, &query.prepared, params)?.0
+                }
+            }
+        };
+        let find = found.elapsed().as_nanos();
+        let applied = std::time::Instant::now();
+        match &*cached {
+            Cached::Nothing => {}
+            Cached::Ddl(sql) => {
+                self.execute_ddl(sql)?;
+            }
+            // Rendered when it was compiled, so there is nothing to apply and
+            // nothing to time. It is here to be exhaustive rather than to be
+            // measured: a plan description is not a workload.
+            Cached::QueryPlan(_) | Cached::Program(_) => {}
+            // A module's own write, which this harness does not time: what it
+            // costs is the module's business and not the engine's.
+            Cached::VirtualDelete(..) | Cached::VirtualUpdate(..) => {}
+            Cached::VirtualInsert(statement) => {
+                self.insert_into_module(statement, params)?;
+            }
+            Cached::Select(plan, prepared, _) => {
+                physical::run_any_prepared(plan, self, prepared, params)?;
+            }
+            Cached::Insert(statement, ..) => {
+                self.write(params, Vec::new(), |target, params| {
+                    dml::insert(statement, target, params, &rows)
+                })?;
+            }
+            Cached::Update(statement, _, _, setup) => {
+                self.write(params, Vec::new(), |target, params| {
+                    dml::update_cached(statement, target, params, &rows, setup)
+                })?;
+            }
+            Cached::Delete(statement, ..) => {
+                self.write(params, Vec::new(), |target, params| {
+                    dml::delete(statement, target, params, &rows)
+                })?;
+            }
+        }
+        Ok((find, applied.elapsed().as_nanos()))
+    }
+}
+
+impl ImportedDatabase {
+    /// Returns the named parameters one statement declares, with their indexes.
+    ///
+    /// **A question about the text, answered by parsing it.** The compiled form
+    /// does not carry the names - a plan is cached by its SQL and the values
+    /// arrive later - and the caller that needs them is a *shell*, binding what
+    /// a person typed into `.parameter set`. Parsing again costs one parse of
+    /// one statement and keeps the name table out of every cached plan.
+    ///
+    /// @param sql - the statement text
+    pub fn parameter_names(&self, sql: &str) -> DbResult<Vec<(Vec<u8>, u32)>> {
+        let parsed = self.parse_once(sql)?;
+        let names = parsed.parameters.names.clone();
+        self.compiled.recycle(parsed);
+        Ok(names)
+    }
+
+    /// Returns the highest parameter number a statement uses.
+    ///
+    /// What `sqlite3_bind_parameter_count` answers, and what a bind has to be
+    /// checked against: an index above it is `SQLITE_RANGE` rather than a slot
+    /// nobody will ever read.
+    ///
+    /// It is a parse rather than a lookup because the compiled plan does not
+    /// carry the number - `Cached` has thirteen variants and none of them has a
+    /// place to put it. The parse reuses the recycled arena, which is most of
+    /// what a parse costs, and it happens once per `prepare` rather than once
+    /// per execution: a statement prepared once and stepped a million times
+    /// pays it once.
+    ///
+    /// @param sql - the statement text
+    pub fn parameter_count(&self, sql: &str) -> DbResult<u32> {
+        let parsed = self.parse_once(sql)?;
+        let count = parsed.parameters.count;
+        self.compiled.recycle(parsed);
+        Ok(count)
+    }
+
+    /// Returns whether a compiled statement changes the database.
+    ///
+    /// A read takes a shared lock and a write an exclusive one, so the answer
+    /// decides which. A directive is counted as a write: `CREATE TABLE` and
+    /// `PRAGMA user_version = 1` both change the file, and the ones that do not
+    /// pay a lock they did not need rather than skip one they did.
+    pub(crate) fn writes_of(cached: &Cached) -> bool {
+        !matches!(
+            cached,
+            Cached::Select(..) | Cached::QueryPlan(_) | Cached::Program(_) | Cached::Nothing
+        )
+    }
+}
+
+/// A statement compiled once and run many times.
+///
+/// Opaque on purpose: what is inside is the engine's business, and a caller that
+/// could see it would be a caller that could be broken by a plan shape changing.
+pub struct Statement {
+    /// The compiled plan, replaced when the schema moves under it.
+    ///
+    /// A `RefCell` because [`ImportedDatabase::execute_statement`] takes the
+    /// statement by shared reference and every caller holds it across many
+    /// executions; the reprepare has to happen in place or the signature would
+    /// have to change under all of them.
+    pub(crate) cached: std::cell::RefCell<std::rc::Rc<Cached>>,
+    /// The statement's text, so it can be compiled again.
+    pub(crate) sql: String,
+    /// The schema generation `cached` was compiled against.
+    pub(crate) generation: std::cell::Cell<u64>,
+}
+
+/// What running one statement produced.
+#[derive(Clone, Debug, Default)]
+pub struct Outcome {
+    /// The rows a `SELECT` answered, or the rows `RETURNING` named.
+    pub rows: Vec<Vec<OwnedDatum>>,
+    /// The result column names, for a `SELECT`.
+    pub names: Vec<String>,
+    /// What a write changed.
+    pub changes: Changes,
+}
+
+/// Turns a parse or bind failure into a database error, keeping its kind.
+///
+/// **The message is exactly what it was**; what this adds is that a refusal the
+/// binder marked `Unsupported` - "a construct the grammar has but this phase
+/// does not implement" - arrives carrying that fact, where every conversion
+/// site used to flatten it into an ordinary `SQLITE_MISUSE`.
+///
+/// It matters because this engine is deliberately incomplete, and a caller in
+/// front of it has to tell "this engine cannot do that yet" from "you typed it
+/// wrong" without matching on the wording of a sentence. `inillucent-driver`
+/// is that caller; `ParseErrorKind::Refused` stays a plain misuse, because it
+/// is the reference's own wording for a statement the schema will not have and
+/// is not a gap in this engine.
+///
+/// @param error - the parser's or binder's failure
+pub(crate) fn refused(
+    error: inillucent_sql::diagnostic::ParseError,
+) -> inillucent_base::error::DbError {
+    // **The sentence goes in the message as well as the detail**, and that is a
+    // fix rather than a flourish. `misuse` attaches what it is given as
+    // *detail*, so every refusal this engine produced answered `message()` with
+    // its primary code's own text - "bad parameter or other API misuse" - and
+    // the sentence a person can act on was in the field `inillucent-base`
+    // documents as never leaving the process. `inillucent-cli::shell::reason`
+    // and `readgate::why` had each worked around it separately, which is what a
+    // defect looks like when it has been met twice and fixed neither time.
+    //
+    // **The primary code comes from `error.code()`, not from `refusal`'s own
+    // `SQLITE_MISUSE`.** `ParseError::code` already answers this correctly -
+    // `PrimaryCode::Error` for an ordinary compile-time refusal, `TooBig` for
+    // the one limit SQLite reports as a parse error - because a parse or bind
+    // refusal is `SQLITE_ERROR` in SQLite, not `SQLITE_MISUSE`: `SELECT
+    // nosuchcolumn FROM a`, `PRIMARY KEY missing on table x`, `ambiguous
+    // column name: v`, `AUTOINCREMENT is only allowed on an INTEGER PRIMARY
+    // KEY` and `RAISE() may only be used within a trigger-program` are every
+    // one of them code 1 at the reference, measured through
+    // `dml_differential.rs`. Routing them all through `refusal` here answered
+    // 21 for every one of them - right message, wrong code - which is
+    // invisible to a suite that only compares rows and text, and exactly what
+    // `dml_differential`'s own primary-code assertions exist to catch.
+    //
+    // A parse or bind refusal is caller-safe by construction: it names tables,
+    // columns and constructs, which are the caller's own words, and never a
+    // path, a bound value or page bytes. The detail is left in place so that
+    // everything reading it - the shell, the gate, the surface inventory -
+    // sees exactly what it saw before.
+    let mut built = inillucent_base::error::DbError::primary(error.code())
+        .with_message(error.message())
+        .with_detail(error.message());
+    // **And the position, which used to be dropped here.** A refusal carries the
+    // span of the token it is about, and the shell draws the reference's two
+    // lines of caret art from it - so losing it here turned every parse failure
+    // into a bare sentence where the reference points at the word. A refusal
+    // that is deliberately positionless says so with a default span, which is
+    // what `no_such_table` and the `ALTER TABLE` refusals use, and those stay
+    // positionless because the reference points at nothing for them either.
+    if error.span != inillucent_sql::lexer::Span::default() {
+        built = built.with_sql_offset(error.offset());
+    }
+    match error.kind {
+        inillucent_sql::diagnostic::ParseErrorKind::Unsupported(what) => {
+            built.with_unsupported(what)
+        }
+        _ => built,
+    }
+}
+
+/// Names the kind of statement a refusal is about.
+///
+/// @param statement - the bound statement
+pub(crate) fn describe_statement(statement: &BoundStatement) -> &'static str {
+    match statement {
+        BoundStatement::Select(_) => "a query",
+        BoundStatement::Insert(_) => "an insert",
+        BoundStatement::Update(_) => "an update",
+        BoundStatement::Delete(_) => "a delete",
+        BoundStatement::Directive(_) => "a directive",
+        BoundStatement::Empty => "nothing",
+    }
+}

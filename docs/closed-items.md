@@ -288,7 +288,7 @@ numbers can find what happened to them.
 
   SQLite is not exposed to this, and the reason is structural rather than careful: its log holds
   whole page images and a checkpoint is a copy, so an interrupted one is simply redone. A connection
-  in `wal` now takes a `delete` journal. See `journal_for` in `crates/inillucent-engine/src/lib.rs`.
+  in `wal` now takes a `delete` journal. See `journal_for` in `crates/inillucent-engine/src/engine/locks.rs`.
   It holds the pre-images for the duration of a checkpoint and removes the file once the
   checkpoint's meta record is durable. It is the cost the default mode already pays, and what it
   buys is that an interrupted checkpoint is undoable in every mode rather than in three of the five.

@@ -992,7 +992,7 @@ const CEILINGS: [(&str, usize); 11] = [
     // **Lowered to 2,650 in task-1962 (A1 step 2).** Sixty-three fields became
     // six groups, and the six structs and the methods that touch only one of
     // them are `engine/state.rs`. A1 step 3 takes it further.
-    ("crates/inillucent-engine/src/lib.rs", 2_650),
+    ("crates/inillucent-engine/src/lib.rs", 1_300),
     // Lowered from 6,663 in task-1932. The window pass - `run_windowed` and
     // the seven helpers only it calls - moved whole to
     // `crates/inillucent-exec/src/windowpass.rs`, which is 575 lines this
