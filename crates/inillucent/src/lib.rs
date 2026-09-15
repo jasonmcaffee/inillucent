@@ -16,14 +16,12 @@
 //! let database = Database::open("app.rdb")?;
 //! let connection = database.session();
 //! connection.execute("CREATE TABLE note (id INTEGER PRIMARY KEY, body TEXT)", &[])?;
-//!
 //! let transaction = connection.begin()?;
 //! transaction.execute(
 //!     "INSERT INTO note (body) VALUES (?1)",
 //!     &[Value::Text("hello".to_string())],
 //! )?;
 //! transaction.commit()?;
-//!
 //! let mut statement = connection.prepare("SELECT body FROM note WHERE id = ?1")?;
 //! let rows = statement.query(&[Value::Integer(1)], 1)?;
 //! assert_eq!(rows.value(0, 0).and_then(Value::text), Some("hello"));
