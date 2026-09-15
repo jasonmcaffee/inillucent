@@ -75,10 +75,34 @@ to 43%, `join.range` from 15% to 11%, `range.lookaside` from 14% to 8%.
 |---|---|---|---|---|
 | `prepare.trivial` | `open.prepare` | 0.50x | **100% slower** | `SELECT 1` compiled on every call, in 25 allocations. Split by the profiler: 417 ns to parse, 520 more to bind, and the rest to build a pipeline |
 | `extension.fts.build` | `extension` | 0.59x | **69% slower** | three tree writes per document where SQLite writes about 1,000 rows and one segment blob. It was 178% slower; [Closed items](closed-items.md#extensionftsbuild) has what closed half the gap and what did not |
-| `write.insert.batch` | `write` | 0.70x | **43% slower** | 2,000 inserts in one transaction; a split used to write four whole page images to the log and now writes three |
+| `write.insert.batch` | `write` | 0.70x | **43% slower** | 2,000 inserts in one transaction. **58% of the log it writes is split records**, 963 KiB of 1,664 KiB, at 24,656 bytes each - three whole 8 KiB page images for one row that would not fit. Measured below |
 | `join.range` | `read.join` | 0.90x | 11% slower | an index range and a row fetch per entry, where SQLite amortises one statement's overhead over two hundred rows and this does not |
 | `range.lookaside` | `read.range` | 0.93x | 8% slower | the same shape |
 | `extension.json` | `extension` | 0.96x | 4% slower | the extraction itself, plus two uncontended mutex acquisitions per call; the parse of a repeated document and path is already cached |
+
+### Where `write.insert.batch`'s time and log volume actually go
+
+Measured 2026-09-15 with `inillucent-writelogattrib` on the medium fixture: 2,000 inserts into
+`main_table`, which carries two secondary indexes, in one transaction - the gate's own shape. The
+log is read back from disk with the same decoder recovery uses, so the byte counts are exact rather
+than estimated.
+
+| record kind | records | bytes | share of the log |
+|---|---:|---:|---:|
+| `Structural` (a split) | 40 | 963.1 KiB | **58%** |
+| `InsertRow` | 6,000 | 687.5 KiB | 41% |
+| `CompactLeaf` | 187 | 11.7 KiB | 0.7% |
+| `AllocPage`, `Commit` | 41 | 1.6 KiB | 0.1% |
+
+1,664 KiB of log for about 240 KiB of rows. A split record carries the left page, the right page and
+the parent, whole: 24,656 bytes at an 8 KiB page size, for one row that would not fit.
+
+**And the delta area is not where the time is.** `LeafRef::locate` walks each leaf's unsorted delta
+area on every insert, which `docs/roadmap.md` named as the cause. Counted directly: **8,329 calls,
+119,645 entries walked, 5.1 ms**, 14.4 entries a call, against **66.8 ms** of apply time. Under
+eight per cent, and that is the whole walk - a fingerprint block over it would save less, because a
+probe that matches still decodes and the block costs a hash per insert. Removing all of it would
+move 0.70x to about 0.755x.
 
 **`txn.large` is no longer on this list.** It was the slowest workload on the board at 0.09x, it decided
 the `transaction` floor, and it is now **3.70x**, where the median round takes 2.66 ms against

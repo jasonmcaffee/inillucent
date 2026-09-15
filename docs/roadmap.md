@@ -41,16 +41,40 @@ If the query cost comes back, it is reverted again and the number recorded.
 **0.70x**: 2,000 inserts in one transaction. It was 72% slower; the improvement came with the
 delta log seek in task-1911. It sits inside a family that clears its bar, so it blocks nothing.
 
-The cost is in `crates/inillucent-tree/src/leaf.rs`. `locate()` walks each leaf's unsorted delta
-area, up to `DELTA_LIMIT` (32) entries with a typed decode per key column, on every insert, and
-`main_table` carries two secondary indexes, so a batch pays it three times a row.
+**The cause named here was the wrong one, and the measurement says so.** The text said `locate()`'s
+walk of each leaf's unsorted delta area, and the fix designed for it was a 16 bit fingerprint per
+delta entry so an insert that misses the delta area would pay halfword compares and no decode. That
+design carried its own stop condition - "if the saving is under a fifth of the gap, record it and
+stop" - and the stop condition is met before the format change, on the numbers below.
 
-Done means: a 16 bit fingerprint per delta entry at the head of the delta area, flagged by a leaf
-header bit, so an insert that misses the delta area pays 32 halfword compares and no decode. Leaves
-written before the bit read as they do today and gain the block on their next delta write, so no
-page is migrated. `locate()` is shared with recovery and takes the same path. Measured paired before
-and after; if the saving is under a fifth of the gap, that is recorded and the next lever, a sorted
-delta area, gets its own design.
+`inillucent-writelogattrib` on the medium fixture, 2,000 inserts into `main_table` with its two
+secondary indexes, which is the gate's own shape:
+
+| where the log goes | records | bytes | share |
+|---|---:|---:|---:|
+| `Structural` (a split) | 40 | 963.1 KiB | **58%** |
+| `InsertRow` | 6,000 | 687.5 KiB | 41% |
+| `CompactLeaf` | 187 | 11.7 KiB | 0.7% |
+| `AllocPage` and the commit | 41 | 1.6 KiB | 0.1% |
+
+1,664 KiB of log for about 240 KiB of rows, and a split costs **24,656 bytes** - three whole 8 KiB
+page images for one row that would not fit.
+
+And `locate`'s delta walk, counted directly: **8,329 calls, 119,645 entries walked, 5.1 ms**, 14.4
+entries a call, against **66.8 ms** of apply time across both arms. Under eight per cent, and that
+is the whole walk rather than what a fingerprint block would save - a probe that matches still
+decodes, and the block itself costs a hash per insert and 64 bytes a leaf. Removing all of it would
+move 0.70x to about 0.755x: five and a half points of a forty-three point gap, where a fifth is
+eight and a half. `crates/inillucent-compat/src/bin/writelogattrib.rs`'s own header already recorded
+that a previous fix to that decode "did not move the gate ratio"; this is the number behind that
+sentence.
+
+Done, now, means the lever the measurement points at rather than the one that was guessed: **a
+split that logs less than three whole pages.** A batch insert at the end of a key range splits
+right, and the right page it creates is nearly empty - so the record carries an 8 KiB image of a
+page that holds one row. Nothing here designs it; a format change to the split record is its own
+ticket with its own crash campaigns, and the honest state of this item is that its cause is now
+measured rather than supposed.
 
 ## 3. The retrieval index's footprint
 
