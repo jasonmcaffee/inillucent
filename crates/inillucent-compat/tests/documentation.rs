@@ -937,8 +937,15 @@ fn every_method_a_package_table_names_exists_in_its_binding() {
     let mut missing: Vec<String> = Vec::new();
     let mut checked = 0usize;
     for (readme, sources) in packages {
+        // **Read with the line endings normalised.** `core.autocrlf` is true
+        // on the machine this is developed on, so a fresh checkout holds these
+        // files with CRLF, and a split on a heading delimited by a newline
+        // finds nothing in one. The first version of this passed here and
+        // failed in a `git worktree`, which is a fresh checkout, and that is
+        // what found it.
         let text = std::fs::read_to_string(root.join(readme))
-            .unwrap_or_else(|_| panic!("{readme} is there"));
+            .unwrap_or_else(|_| panic!("{readme} is there"))
+            .replace("\r\n", "\n");
         let Some(table) = text.split("\n## The API\n").nth(1) else {
             missing.push(format!("{readme} has no `## The API` table"));
             continue;
