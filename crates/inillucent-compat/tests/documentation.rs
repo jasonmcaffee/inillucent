@@ -920,9 +920,15 @@ fn every_method_a_package_table_names_exists_in_its_binding() {
                 "packages/npm/inillucent/resolve.mjs",
             ],
         ),
+        // **The tracked binding, not the copy the wheel ships.**
+        // `packages/python/src/inillucent/driver.py` is in `.gitignore`:
+        // `packages/python/build.py` stages it into the package from here, so
+        // a clone does not have it and this table would have been checked
+        // against a file that is not there. A `git worktree` is what found
+        // that, being a clone.
         (
             "packages/python/README.md",
-            &["packages/python/src/inillucent/driver.py"],
+            &["drivers/bindings/python/inillucent.py"],
         ),
         (
             "packages/php/README.md",
@@ -957,7 +963,7 @@ fn every_method_a_package_table_names_exists_in_its_binding() {
             .join("\n");
         assert!(
             !body.is_empty(),
-            "none of {sources:?} could be read, so {readme}'s table is checked against nothing"
+            "none of {sources:?} could be read, so {readme}'s table is checked against              nothing. A source a clone does not carry - anything under `.gitignore` - is              not the one to check a table against"
         );
         for name in table_names(table) {
             checked = checked.saturating_add(1);

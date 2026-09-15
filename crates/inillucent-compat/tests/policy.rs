@@ -978,7 +978,18 @@ const CEILINGS: [(&str, usize); 11] = [
     // log record means - moved whole into `recovery.rs`, which is where
     // the half that decides *which* records to replay already lives. They
     // were seven hundred lines apart in a file of nearly eight thousand.
-    ("crates/inillucent-engine/src/lib.rs", 7428),
+    //
+    // **Lowered to 3,300 in task-1962 (A1 step 1).** The one `impl
+    // ImportedDatabase` block of 3,773 lines is ten modules under
+    // `engine/`, each a run of methods that was already contiguous in it:
+    // opening, the accessors, the statement path, the counters, the
+    // transaction manager, the integrity walk, the function registry, the
+    // write path, `EXPLAIN` rendering and the row layout. Nothing moved
+    // that was not adjacent, no signature changed, and the type is still
+    // one type - splitting the file and splitting the type are different
+    // changes with different risks, and doing the second without the first
+    // would have been one diff nobody could read.
+    ("crates/inillucent-engine/src/lib.rs", 3300),
     // Lowered from 6,663 in task-1932. The window pass - `run_windowed` and
     // the seven helpers only it calls - moved whole to
     // `crates/inillucent-exec/src/windowpass.rs`, which is 575 lines this
@@ -1002,7 +1013,15 @@ const CEILINGS: [(&str, usize); 11] = [
     // lines and is now 353 - and `probes_one_entry_each` carries the
     // argument that used to sit inside it. The file is 931 lines shorter
     // than this ticket found it either way.
-    ("crates/inillucent-exec/src/physical.rs", 5_732),
+    // **Lowered to 400 in task-1962 (A7).** 5,708 lines doing five jobs became
+    // seven modules under `physical/`, beside the `keys.rs` an earlier ticket
+    // had already carved out and left alone: the catalog and the layouts, the
+    // parameter set, the stages a statement is planned into, the operator
+    // chain, the joins, the run and compound paths, and the expression
+    // translator. What is left in `physical.rs` is the module list and the
+    // re-exports, so every `physical::Params`, `physical::prepare` and
+    // `physical::run` reference in the workspace resolves where it did.
+    ("crates/inillucent-exec/src/physical.rs", 400),
     // task-1913 lowered this to 5,111 in the shared checkout, with this
     // note: "the ratchet asks for an extraction, so the ten items that
     // answer 'what does this name in a `WITH` stand for' are `bind/cte.rs`:
@@ -2093,7 +2112,11 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 65] = [
     // 531 before task-1946 H6 moved the card's four path rows into
     // `runs::note_inputs` and `runs::note_run_files`.
     ("crates/inillucent-bench/src/gradeembed.rs", "run", 527),
-    ("crates/inillucent-exec/src/physical.rs", "translate", 494),
+    (
+        "crates/inillucent-exec/src/physical/translate.rs",
+        "translate",
+        494,
+    ),
     ("crates/inillucent-bench/src/main.rs", "main", 488),
     ("crates/inillucent-compat/src/perf.rs", "plan_for", 450),
     ("crates/inillucent-bench/src/scenarios.rs", "grade", 445),
@@ -2103,11 +2126,23 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 65] = [
         393,
     ),
     ("crates/inillucent-compat/src/bin/fullgate.rs", "run", 389),
-    ("crates/inillucent-exec/src/physical.rs", "build_upper", 383),
+    (
+        "crates/inillucent-exec/src/physical/chain.rs",
+        "build_upper",
+        383,
+    ),
     ("crates/inillucent-compat/src/bin/readgate.rs", "run", 370),
     ("crates/inillucent-exec/src/join.rs", "push", 362),
-    ("crates/inillucent-exec/src/physical.rs", "plan_stages", 353),
-    ("crates/inillucent-engine/src/lib.rs", "load_schema", 329),
+    (
+        "crates/inillucent-exec/src/physical/stages.rs",
+        "plan_stages",
+        353,
+    ),
+    (
+        "crates/inillucent-engine/src/engine/rowshape.rs",
+        "load_schema",
+        329,
+    ),
     ("crates/inillucent-compat/src/bin/writegate.rs", "run", 318),
     (
         "crates/inillucent-engine/src/vtab.rs",
@@ -2144,7 +2179,11 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 65] = [
     ),
     ("crates/inillucent-storage/src/mutate.rs", "balance", 224),
     ("crates/inillucent-compat/src/bin/analytical.rs", "run", 223),
-    ("crates/inillucent-engine/src/lib.rs", "write", 219),
+    (
+        "crates/inillucent-engine/src/engine/compiled.rs",
+        "write",
+        219,
+    ),
     (
         "crates/inillucent-compat/src/bin/storageprofile.rs",
         "run",
@@ -2153,7 +2192,11 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 65] = [
     ("crates/inillucent-exec/src/dml.rs", "update_at_cached", 215),
     ("crates/inillucent-bench/src/synth.rs", "check", 214),
     ("crates/inillucent-model/tests/campaign.rs", "segment", 213),
-    ("crates/inillucent-engine/src/lib.rs", "import_into", 210),
+    (
+        "crates/inillucent-engine/src/engine/open.rs",
+        "import_into",
+        210,
+    ),
     // 206 before task-1946 M12 moved the row encoding, the locate and the
     // orphaned-extent read into `encode_row_spilling_wide_values`,
     // `locate_and_read_previous` and `orphaned_extents`.
@@ -2226,7 +2269,11 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 65] = [
         "handshake",
         154,
     ),
-    ("crates/inillucent-engine/src/lib.rs", "apply_compiled", 154),
+    (
+        "crates/inillucent-engine/src/engine/compiled.rs",
+        "apply_compiled",
+        154,
+    ),
     (
         "crates/inillucent-compat/src/bin/probeprofile.rs",
         "probe_stages",
