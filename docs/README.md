@@ -48,6 +48,7 @@ every verdict is the same in both.
 |---|---|
 | [Repository](repository.md) | the crates, what each one is for, building, and running the tests |
 | [Roadmap](roadmap.md) | what is not there yet, in the order it is being worked |
+| [Closed items](closed-items.md) | what came off the roadmap, with the measurement that closed each, and what is settled |
 | [Dependency policy](dependency-policy.md) | what a production crate may link, and why the allowed list is short |
 | [`AGENTS.md`](../AGENTS.md) | the front door for an AI agent, using or changing this repository |
 | [`agent-skills/`](../agent-skills/README.md) | one task shaped page per job, readable by any agent |

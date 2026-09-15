@@ -1409,7 +1409,7 @@ power loss itself had left whole. Making it sync costs one `fsync` per checkpoin
 which is parity with SQLite, which performs the same sync at `synchronous = FULL`. The other two
 workloads in the family did not move. The engine was faster at autocommit than SQLite by not doing
 work SQLite does, and three more ways a crash could lose a database came out of the same thread -
-[the roadmap](roadmap.md#what-task-1911-closed) has all four.
+[Closed items](closed-items.md#what-task-1911-closed) has all four.
 
 **How to read every percentage below.** A workload that takes 1 second where SQLite takes 4 is
 written as **300% faster**, and its ratio is 4.00x. A workload that takes 4 seconds where SQLite

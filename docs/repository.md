@@ -56,7 +56,7 @@ not differ, so there is no wrapper.
 The old engine was the one that reached SQLite file format parity: 264 of 271 capabilities passed,
 with seven optional ones missing. It was measured between 30% and 95% slower than SQLite across the
 families, which is why the current engine was written, and it has now been deleted -
-[Roadmap](roadmap.md#7-the-old-engine-is-deleted) records what its four crates were and what still
+[Closed items](closed-items.md#the-old-engine-is-deleted) records what its four crates were and what still
 reads a SQLite file in their place.
 
 ## The other directories
@@ -112,7 +112,7 @@ and nothing reported them - the source read as coverage while no run had ever st
 `tests/selection.toml` now names the features a target is built with, so they are built, they run,
 and the ones that need the weights say so. This page used to say seventeen tests failed; task-1869 had
 already removed the cause and nobody re-ran it, which is recorded in
-[the roadmap](roadmap.md#what-task-1911-closed).
+[Closed items](closed-items.md#what-task-1911-closed).
 
 ## What the tests cover
 

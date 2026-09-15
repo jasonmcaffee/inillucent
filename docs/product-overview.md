@@ -90,10 +90,13 @@ index fits in memory everything PostgreSQL does to survive a power cut is overhe
 - **This engine's own file format.** SQLite files are imported once with
   [`inillucent migrate`](migrating.md), not opened in place.
 - **No replication, no backups beyond a verified file copy, no wire protocol.** It is a library.
-- **Publishing a retrieval generation costs the whole corpus.** Adding content folds each new row
-  into the published generation, one graph insert per row written. Writing the generation out is
-  still proportional to the corpus, because a generation is one serialised index. [Roadmap item 10](roadmap.md#10-a-generation-is-one-blob-so-publishing-one-still-costs-the-whole-corpus)
-  has the measurements and the setting that pins write latency.
+- **Write latency on a table with a vector index rises with its delta log, not with the corpus.**
+  Adding content folds each new row into a segment, one graph insert per row written, and publishing
+  a segment is proportional to the batch. The default delta log is 1,024 entries; a table that needs
+  its write latency pinned declares `compact = N`. [Closed items](closed-items.md#a-generation-is-one-blob)
+  has the measurements and
+  [Keeping a vector index current](relational-architecture.md#10-keeping-a-vector-index-current) how
+  to choose `N`.
 - **Six of the thirty workloads are slower than SQLite**, listed on
   [the performance page](performance.md#the-workloads-that-are-slower).
 - **No macOS archive yet.** Build it from a checkout with `cargo build --release -p inillucent-cli`;

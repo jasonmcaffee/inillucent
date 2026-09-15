@@ -53,7 +53,7 @@ it, expressed as the family's own ratio.
 
 **`read.join` has not cleared its bar.** The four lower bounds were 2.97x, 3.00x, 3.00x and 2.99x.
 Two runs missed the 3.00x requirement, so `read.join` stays in
-[the roadmap](roadmap.md#2-four-per-family-bars-are-missed) with the other three.
+[the roadmap](roadmap.md#1-readjoin-and-extension-miss-their-bars-on-the-lower-bound) with `extension`.
 
 **`transaction` fell from 3.41x, and the reason is `txn.autocommit`.** The other two workloads in
 that family did not move: `txn.batched` reads 3.79x and `txn.large` 4.05x. `txn.autocommit` is now
@@ -61,7 +61,7 @@ that family did not move: `txn.batched` reads 3.79x and `txn.large` 4.05x. `txn.
 do the sync a rollback journal is for. Autocommit checkpoints once per statement, so it pays that
 sync once per statement, and SQLite at `synchronous = FULL` pays the same one. The old number was
 faster than SQLite by skipping work SQLite does; four separate ways a crash could then lose a
-database are in [the roadmap](roadmap.md#what-task-1911-closed), and that is what the 2.36x bought.
+database are in [Closed items](closed-items.md#what-task-1911-closed), and that is what the 2.36x bought.
 `transaction` was under the contract's floor on all four runs before task-1890, which took it to
 3.41x; what that took, and the defect in the measurement it uncovered, is the section after next.
 
@@ -74,7 +74,7 @@ to 43%, `join.range` from 15% to 11%, `range.lookaside` from 14% to 8%.
 | workload | family | ratio | how much slower | why |
 |---|---|---|---|---|
 | `prepare.trivial` | `open.prepare` | 0.50x | **100% slower** | `SELECT 1` compiled on every call, in 25 allocations. Split by the profiler: 417 ns to parse, 520 more to bind, and the rest to build a pipeline |
-| `extension.fts.build` | `extension` | 0.59x | **69% slower** | three tree writes per document where SQLite writes about 1,000 rows and one segment blob. It was 178% slower; [roadmap item 6](roadmap.md#6-extensionftsbuild) has what closed half the gap and what did not |
+| `extension.fts.build` | `extension` | 0.59x | **69% slower** | three tree writes per document where SQLite writes about 1,000 rows and one segment blob. It was 178% slower; [Closed items](closed-items.md#extensionftsbuild) has what closed half the gap and what did not |
 | `write.insert.batch` | `write` | 0.70x | **43% slower** | 2,000 inserts in one transaction; a split used to write four whole page images to the log and now writes three |
 | `join.range` | `read.join` | 0.90x | 11% slower | an index range and a row fetch per entry, where SQLite amortises one statement's overhead over two hundred rows and this does not |
 | `range.lookaside` | `read.range` | 0.93x | 8% slower | the same shape |
