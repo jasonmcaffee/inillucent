@@ -95,7 +95,9 @@ mod engine;
 
 // The six groups `ImportedDatabase`'s fields are made of, and the methods
 // that touch only one of them. See `engine::state` (task-1962, A1 step 2).
-pub(crate) use engine::state::{Compiled, Counters, Schema, SessionState, Storage, Writing};
+pub(crate) use engine::state::{
+    Compiled, Counters, Pragmas, Schema, SessionState, Storage, Writing,
+};
 // **Re-exported at the root because that is where they were (task-1962, A1
 // step 1).** The split moved these two modules' free functions out of `lib.rs`;
 // every call site in this crate names them unqualified, and a move that changes
@@ -234,6 +236,13 @@ pub const DEFAULT_FRAMES: usize = 4_096;
 pub struct ImportedDatabase {
     /// What one connection has that its siblings do not.
     pub(crate) session_state: SessionState,
+    /// The settings a `PRAGMA` or an `sqlite3_limit` call changes.
+    ///
+    /// **Shared rather than owned (task-1962, A1 step 3).** Every field is
+    /// behind its own cell, so [`crate::connect::Database`] holds the same
+    /// group and can answer `sqlite3_limit` while a statement is running. See
+    /// [`Pragmas`].
+    pub(crate) pragmas: std::rc::Rc<Pragmas>,
     /// The catalog, the trees it names, and what was derived from both.
     pub(crate) schema: Schema,
     /// The file, and everything that reads or writes a page of it.
@@ -402,8 +411,8 @@ impl ImportedDatabase {
     ///
     /// @param sql - the script, positioned at the statement to measure
     pub fn statement_length(&self, sql: &str) -> DbResult<usize> {
-        let parsed =
-            parse_next_statement(sql.as_bytes(), 0, &self.session_state.limits).map_err(refused)?;
+        let parsed = parse_next_statement(sql.as_bytes(), 0, &self.pragmas.limits.borrow())
+            .map_err(refused)?;
         Ok(parsed.consumed)
     }
 
@@ -467,7 +476,7 @@ impl ImportedDatabase {
     /// schema's tables - so it stays on the database rather than moving onto
     /// either (task-1962, A1 step 2).
     pub(crate) fn has_deferred_foreign_keys(&self) -> bool {
-        self.session_state.defer_foreign_keys
+        self.pragmas.defer_foreign_keys.get()
             || self
                 .schema
                 .tables
@@ -501,7 +510,7 @@ impl ImportedDatabase {
         inillucent_sql::parser::parse_next_statement_into(
             sql.as_bytes(),
             0,
-            &self.session_state.limits,
+            &self.pragmas.limits.borrow(),
             arena,
         )
         .map_err(refused)
@@ -842,7 +851,7 @@ impl TreeCatalog for ImportedDatabase {
     /// compiled form - the plan cache is emptied when the pragma changes, so a
     /// `LIKE` compiled under one setting never runs under the other.
     fn like_is_case_sensitive(&self) -> bool {
-        self.session_state.case_sensitive_like
+        self.pragmas.case_sensitive_like.get()
     }
 
     fn tree(&self, root: u32) -> Option<&PagedTree> {

@@ -9,7 +9,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use inillucent_base::limits::Limits;
 use inillucent_base::DbResult;
 use inillucent_catalog::load::table_from_create_sql;
 use inillucent_catalog::paged::{schema_create_sql, write_catalog};
@@ -17,7 +16,6 @@ use inillucent_exec::physical::SourceLayout;
 use inillucent_exec::StaticType;
 use inillucent_pool::{Database, Options};
 use inillucent_sql::catalog_view::StaticCatalog;
-use inillucent_sql::plan::Levers;
 use inillucent_tree::PagedTree;
 use inillucent_vfs::{DbPath, OsVfs};
 use inillucent_wal::{Wal, WalOptions, FIRST_LSN};
@@ -254,29 +252,10 @@ impl crate::ImportedDatabase {
                 next_handle: FIRST_ATTACHED_HANDLE,
                 ddl_schema: 0,
             },
+            pragmas: std::rc::Rc::new(Pragmas::fresh()),
             session_state: SessionState {
-                limits: Limits::default(),
                 modules_begun: std::cell::Cell::new(false),
-                busy_timeout_ms: 0,
-                foreign_keys: false,
-                defer_foreign_keys: false,
-                journal_mode: inillucent_pool::journal::JournalMode::Delete,
-                locking_exclusive: true,
-                ignore_check_constraints: false,
-                secure_delete: 0,
-                auto_vacuum: 0,
-                automatic_index: true,
-                levers: Levers::default(),
-                case_sensitive_like: false,
-                cache_size: None,
-                analysis_limit: 0,
-                writable_schema: false,
-                defensive: false,
                 authorizer: None,
-                query_only: false,
-                recursive_triggers: false,
-                max_page_count: crate::pragma::DEFAULT_MAX_PAGE_COUNT,
-                temp_store: 0,
                 collations: Vec::new(),
                 registry: modules(),
                 eponymous: Vec::new(),
@@ -306,9 +285,9 @@ impl crate::ImportedDatabase {
         let mode = if self.storage.database.wal_mode() {
             inillucent_pool::journal::JournalMode::Wal
         } else {
-            self.session_state.journal_mode
+            self.pragmas.journal_mode.get()
         };
-        self.session_state.journal_mode = mode;
+        self.pragmas.journal_mode.set(mode);
         let held: std::sync::Arc<dyn inillucent_vfs::Vfs> =
             std::sync::Arc::clone(&self.storage.vfs);
         let journal = journal_for(mode).map(|protection| {
@@ -536,34 +515,15 @@ impl crate::ImportedDatabase {
                 imposters: Vec::new(),
                 catalog_generation: 0,
             },
+            pragmas: std::rc::Rc::new(Pragmas::fresh()),
             session_state: SessionState {
-                limits: Limits::default(),
                 modules_begun: std::cell::Cell::new(false),
                 attached: Vec::new(),
                 temps: Vec::new(),
                 session: std::cell::Cell::new(0),
                 tables_session: 0,
                 owner: HashMap::new(),
-                busy_timeout_ms: 0,
-                foreign_keys: false,
-                defer_foreign_keys: false,
-                journal_mode: inillucent_pool::journal::JournalMode::Delete,
-                locking_exclusive: true,
-                ignore_check_constraints: false,
-                secure_delete: 0,
-                auto_vacuum: 0,
-                automatic_index: true,
-                levers: Levers::default(),
-                case_sensitive_like: false,
-                cache_size: None,
-                analysis_limit: 0,
-                writable_schema: false,
-                defensive: false,
                 authorizer: None,
-                query_only: false,
-                recursive_triggers: false,
-                max_page_count: crate::pragma::DEFAULT_MAX_PAGE_COUNT,
-                temp_store: 0,
                 collations: Vec::new(),
                 registry: modules(),
                 eponymous: Vec::new(),

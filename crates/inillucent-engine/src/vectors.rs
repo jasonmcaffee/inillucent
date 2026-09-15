@@ -239,7 +239,7 @@ impl ImportedDatabase {
         let mut context = inillucent_ext::vtab::Context {
             host: &mut nowhere,
             database: 0,
-            limits: &self.session_state.limits,
+            limits: &self.pragmas.limits.borrow(),
             catalog: None,
         };
         cursor.filter(&mut context, &plan)?;

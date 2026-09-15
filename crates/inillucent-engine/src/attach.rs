@@ -189,7 +189,7 @@ impl ImportedDatabase {
         // - but the page size is this file's own, read off the file it just
         // opened, because an attached file can have been created at a
         // different page size than this connection's default.
-        let journal = super::journal_for(self.session_state.journal_mode).map(|protection| {
+        let journal = super::journal_for(self.pragmas.journal_mode.get()).map(|protection| {
             inillucent_pool::journal::Journal::new(
                 Arc::clone(&vfs),
                 &path,

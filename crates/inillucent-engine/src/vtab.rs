@@ -234,7 +234,7 @@ impl ImportedDatabase {
             let mut context = Context {
                 host: &mut nowhere,
                 database: 0,
-                limits: &self.session_state.limits,
+                limits: &self.pragmas.limits.borrow(),
                 catalog: Some(&self.schema.catalog),
             };
             let mut table = found.connect(&connect, true)?;
@@ -324,7 +324,7 @@ impl ImportedDatabase {
         let mut context = Context {
             host: &mut nowhere,
             database: 0,
-            limits: &self.session_state.limits,
+            limits: &self.pragmas.limits.borrow(),
             catalog: Some(&self.schema.catalog),
         };
         table.integrity(&mut context).map(ModuleIntegrity::of)
@@ -426,7 +426,7 @@ impl ImportedDatabase {
         let mut context = Context {
             host: &mut nowhere,
             database: 0,
-            limits: &self.session_state.limits,
+            limits: &self.pragmas.limits.borrow(),
             catalog: Some(&self.schema.catalog),
         };
         self.drive_cursor(
@@ -539,7 +539,7 @@ impl ImportedDatabase {
             if !passes_rechecks(
                 &row,
                 &shape.rechecks,
-                self.session_state.case_sensitive_like,
+                self.pragmas.case_sensitive_like.get(),
             )? {
                 cursor.next(context)?;
                 continue;
@@ -1047,7 +1047,7 @@ impl ImportedDatabase {
         let mut batch: Vec<Vec<OwnedDatum>> =
             Vec::with_capacity(inillucent_exec::batch::BATCH_ROWS);
         for row in rows {
-            if !passes_rechecks(&row, &rechecks, self.session_state.case_sensitive_like)? {
+            if !passes_rechecks(&row, &rechecks, self.pragmas.case_sensitive_like.get())? {
                 continue;
             }
             batch.push(row);

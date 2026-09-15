@@ -80,7 +80,7 @@ impl crate::ImportedDatabase {
             seed: self.next_seed(),
             // So the `like(a, b)` function spelling follows the same pragma the
             // `LIKE` operator does.
-            like_case_sensitive: self.session_state.case_sensitive_like,
+            like_case_sensitive: self.pragmas.case_sensitive_like.get(),
         }
     }
 

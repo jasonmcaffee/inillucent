@@ -22,24 +22,31 @@
 
 use crate::*;
 
-/// What one connection has that its siblings do not.
+/// One connection's settings: everything a `PRAGMA` or an `sqlite3_limit` call
+/// sets and everything else only reads.
 ///
-/// **One of the six groups `ImportedDatabase`'s fields are made of (task-1962,
-/// A1 step 2).** The temporary objects, the attached databases, the connection
-/// pragmas, the registered functions and collations, the modules, and the
-/// authorizer. These are what "a connection" means in this engine, and A1 step 3
-/// lifts them into `Session` - which is what makes two connections two things
-/// rather than two numbers reaching into one.
-pub(crate) struct SessionState {
+/// **Its own group, behind its own cells (task-1962, A1 step 3).** TDD section
+/// 11 names `pragmas` as a member of `Session`, and this is that member. Every
+/// field is behind a cell, so the group is reachable through a shared reference
+/// and [`crate::connect::Database`] holds a second handle on the same one. That
+/// is what lets `sqlite3_limit` and `PRAGMA defensive` be answered while a
+/// statement is running, which is where an application asks them from.
+///
+/// The cells are not about threads. `Pragmas` is `Rc`, not `Arc`, and a
+/// connection is still single-threaded; the cell is what makes a *shared*
+/// reference enough to write through.
+pub(crate) struct Pragmas {
     /// The bounds a statement is parsed and planned under.
-    pub(crate) limits: Limits,
+    pub(crate) limits: std::cell::RefCell<Limits>,
+
     /// Which planner optimizations are on.
     ///
     /// Per connection rather than per statement, because a lever is a question
     /// about the *planner* - "is the answer the same with this off" - and a
     /// measurement that varied it per statement would be comparing two plans of
     /// two different queries.
-    pub(crate) levers: Levers,
+    pub(crate) levers: std::cell::Cell<Levers>,
+
     /// How long a writer waits for the writer slot, in milliseconds.
     ///
     /// `PRAGMA busy_timeout` reads and writes it. The value is carried here
@@ -47,12 +54,15 @@ pub(crate) struct SessionState {
     /// directly and never takes the writer slot - so what it can honestly do
     /// with the setting is remember it and report it, which is what the pragma
     /// is asked for far more often than it is relied on.
-    pub(crate) busy_timeout_ms: u64,
+    pub(crate) busy_timeout_ms: std::cell::Cell<u64>,
+
     /// Whether `PRAGMA foreign_keys` is on.
-    pub(crate) foreign_keys: bool,
+    pub(crate) foreign_keys: std::cell::Cell<bool>,
+
     /// Whether `PRAGMA defer_foreign_keys` has put every immediate check off
     /// until the commit, for the transaction now open.
-    pub(crate) defer_foreign_keys: bool,
+    pub(crate) defer_foreign_keys: std::cell::Cell<bool>,
+
     /// Whether the file lock is held between transactions.
     ///
     /// **`normal` is a real setting now, and the reason it can be reported
@@ -62,64 +72,74 @@ pub(crate) struct SessionState {
     /// transaction and released after it, so a second process may have the file
     /// in between - which is what the word means. `exclusive` keeps it, which
     /// is faster and is what a single-process application wants.
-    pub(crate) locking_exclusive: bool,
+    pub(crate) locking_exclusive: std::cell::Cell<bool>,
+
     /// How the pre-commit state is protected, which `PRAGMA journal_mode` sets.
     ///
     /// The write-ahead log by default, because it is the faster of the two -
     /// one sync per commit against two. A rollback journal is what an
     /// application selects when it wants the database to be one file after a
     /// clean close, which is the reason a rollback journal is supported at all.
-    pub(crate) journal_mode: inillucent_pool::journal::JournalMode,
+    pub(crate) journal_mode: std::cell::Cell<inillucent_pool::journal::JournalMode>,
+
     /// Whether `PRAGMA ignore_check_constraints` has turned `CHECK` off.
     ///
     /// Like `foreign_keys` it is read by the *binder*, so changing it throws
     /// away the compiled statements: a plan built while checks were on carries
     /// them and would keep carrying them after the pragma turned them off.
-    pub(crate) ignore_check_constraints: bool,
+    pub(crate) ignore_check_constraints: std::cell::Cell<bool>,
+
     /// What `PRAGMA secure_delete` is set to: 0 off, 1 on, 2 fast.
     ///
     /// On, the bytes a deleted row occupied are overwritten before the space is
     /// reused, so a row that has been deleted is not still readable in the file
     /// by anyone who opens it with a hex editor. Off is SQLite default and
     /// this engine default, because the overwrite is a write.
-    pub(crate) secure_delete: u8,
+    pub(crate) secure_delete: std::cell::Cell<u8>,
+
     /// What `PRAGMA auto_vacuum` is set to: 0 none, 1 full, 2 incremental.
     ///
     /// Settable only while the database holds no table, which is SQLite rule -
     /// the mode decides how the file is laid out, and changing it afterwards is
     /// what `VACUUM` is for.
-    pub(crate) auto_vacuum: u8,
+    pub(crate) auto_vacuum: std::cell::Cell<u8>,
+
     /// Whether `PRAGMA automatic_index` lets the planner build one.
     ///
     /// On by default, as in SQLite: an unindexed table on the inner side of a
     /// join is scanned once per outer row, and building a transient index over
     /// it first is cheaper as soon as the outer side has more than a handful of
     /// rows.
-    pub(crate) automatic_index: bool,
+    pub(crate) automatic_index: std::cell::Cell<bool>,
+
     /// What `PRAGMA cache_size` reads back, in SQLite's own signed units.
     ///
     /// `None` until a caller sets one, when it is the pool's own size in
     /// kibibytes; afterwards it is the caller's number, so reading it always
     /// describes the cache the engine is actually keeping.
-    pub(crate) cache_size: Option<i64>,
+    pub(crate) cache_size: std::cell::Cell<Option<i64>>,
+
     /// Whether `LIKE` compares ASCII letters exactly.
     ///
     /// `PRAGMA case_sensitive_like`. Read by the binder's translation through
     /// `TreeCatalog::like_is_case_sensitive`, and the statement cache is
     /// emptied when it changes so a compiled `LIKE` is never run under the
     /// other setting.
-    pub(crate) case_sensitive_like: bool,
+    pub(crate) case_sensitive_like: std::cell::Cell<bool>,
+
     /// What `PRAGMA analysis_limit` was set to, in rows.
     ///
     /// Recorded and exceeded: `ANALYZE` walks the whole table, which is more
     /// than any cap asks for.
-    pub(crate) analysis_limit: i64,
+    pub(crate) analysis_limit: std::cell::Cell<i64>,
+
     /// What `PRAGMA writable_schema` was set to.
     ///
     /// Recorded and reported. There is nothing for it to unlock: the binder
     /// refuses a write to a reserved-prefix table whatever it says, and a
     /// module's shadow table is an ordinary table a write reaches without it.
-    pub(crate) writable_schema: bool,
+    pub(crate) writable_schema: std::cell::Cell<bool>,
+
     /// Whether `SQLITE_DBCONFIG_DEFENSIVE` is in force.
     ///
     /// Off here and on in the shell, which is where SQLite draws the same line:
@@ -128,24 +148,87 @@ pub(crate) struct SessionState {
     /// `PRAGMA journal_mode = OFF`, which stops protecting anything, and
     /// `PRAGMA writable_schema = ON`, which lets a caller write a schema row
     /// the engine will later try to parse.
-    pub(crate) defensive: bool,
+    pub(crate) defensive: std::cell::Cell<bool>,
+
     /// Whether this connection refuses to write, set by `PRAGMA query_only`.
     ///
     /// Honoured rather than remembered: a caller sets it to make a mistake
     /// impossible, and one that recorded it and wrote anyway would be worse
     /// than an engine that refused the pragma outright.
-    pub(crate) query_only: bool,
+    pub(crate) query_only: std::cell::Cell<bool>,
+
     /// Whether a trigger's own writes fire triggers, set by
     /// `PRAGMA recursive_triggers`.
-    pub(crate) recursive_triggers: bool,
+    pub(crate) recursive_triggers: std::cell::Cell<bool>,
+
     /// The ceiling `PRAGMA max_page_count` set, in pages.
-    pub(crate) max_page_count: i64,
+    pub(crate) max_page_count: std::cell::Cell<i64>,
+
     /// What `PRAGMA temp_store` reports.
     ///
     /// The *setting* rather than the state, which is what SQLite reports: this
     /// engine keeps temporary tables in memory whatever the number says, and
     /// the one value it cannot be - `FILE` - is refused rather than recorded.
-    pub(crate) temp_store: i64,
+    pub(crate) temp_store: std::cell::Cell<i64>,
+}
+
+impl Pragmas {
+    /// Turns the automatic index on or off, which `PRAGMA automatic_index` does.
+    ///
+    /// It is its own method rather than a call to `disable_levers` because that
+    /// one only ever turns levers *off* - it is the measurement harness's entry
+    /// point, and an A/B arm never turns one back on. A pragma has to do both.
+    ///
+    /// @param on - whether the planner may build one
+    pub(crate) fn set_automatic_index(&self, on: bool) {
+        let mask = self.levers.get().disabled();
+        self.levers.set(Levers::without(if on {
+            mask & !Levers::AUTOMATIC_INDEX
+        } else {
+            mask | Levers::AUTOMATIC_INDEX
+        }));
+    }
+
+    /// Returns the settings a connection starts with.
+    ///
+    /// The values are SQLite's own defaults for a fresh connection, and both
+    /// open paths - creating a database and opening one - start here, because a
+    /// setting is a property of the connection rather than of the file.
+    pub(crate) fn fresh() -> Pragmas {
+        Pragmas {
+            limits: std::cell::RefCell::new(Limits::default()),
+            levers: std::cell::Cell::new(Levers::default()),
+            busy_timeout_ms: std::cell::Cell::new(0),
+            foreign_keys: std::cell::Cell::new(false),
+            defer_foreign_keys: std::cell::Cell::new(false),
+            locking_exclusive: std::cell::Cell::new(true),
+            journal_mode: std::cell::Cell::new(inillucent_pool::journal::JournalMode::Delete),
+            ignore_check_constraints: std::cell::Cell::new(false),
+            secure_delete: std::cell::Cell::new(0),
+            auto_vacuum: std::cell::Cell::new(0),
+            automatic_index: std::cell::Cell::new(true),
+            cache_size: std::cell::Cell::new(None),
+            case_sensitive_like: std::cell::Cell::new(false),
+            analysis_limit: std::cell::Cell::new(0),
+            writable_schema: std::cell::Cell::new(false),
+            defensive: std::cell::Cell::new(false),
+            query_only: std::cell::Cell::new(false),
+            recursive_triggers: std::cell::Cell::new(false),
+            max_page_count: std::cell::Cell::new(crate::pragma::DEFAULT_MAX_PAGE_COUNT),
+            temp_store: std::cell::Cell::new(0),
+        }
+    }
+}
+
+/// What one connection has that its siblings do not.
+///
+/// **One of the six groups `ImportedDatabase`'s fields are made of (task-1962,
+/// A1 step 2).** The temporary objects, the attached databases, the connection
+/// pragmas, the registered functions and collations, the modules, and the
+/// authorizer. These are what "a connection" means in this engine, and A1 step 3
+/// lifts them into `Session` - which is what makes two connections two things
+/// rather than two numbers reaching into one.
+pub(crate) struct SessionState {
     /// The authorizer every statement is bound under, when one is installed.
     ///
     /// `sqlite3_set_authorizer`'s subject: a callback the binder consults
@@ -629,16 +712,6 @@ impl Schema {
 }
 
 impl SessionState {
-    /// Returns how the pre-commit state is protected.
-    pub(crate) fn journal_mode(&self) -> inillucent_pool::journal::JournalMode {
-        self.journal_mode
-    }
-
-    /// Returns whether the file lock is kept between transactions.
-    pub(crate) fn locking_exclusive(&self) -> bool {
-        self.locking_exclusive
-    }
-
     /// Returns the schema one number names, for the session now running.
     ///
     /// `None` for `main`, which is held as this type's own fields rather than as
@@ -678,22 +751,6 @@ impl SessionState {
             return MAIN;
         }
         self.owner.get(&root).copied().unwrap_or(MAIN)
-    }
-
-    /// Turns the automatic index on or off, which `PRAGMA automatic_index` does.
-    ///
-    /// It is its own method rather than a call to `disable_levers` because that
-    /// one only ever turns levers *off* - it is the measurement harness's entry
-    /// point, and an A/B arm never turns one back on. A pragma has to do both.
-    ///
-    /// @param on - whether the planner may build one
-    pub(crate) fn set_automatic_index(&mut self, on: bool) {
-        let mask = self.levers.disabled();
-        self.levers = Levers::without(if on {
-            mask & !Levers::AUTOMATIC_INDEX
-        } else {
-            mask | Levers::AUTOMATIC_INDEX
-        });
     }
 }
 

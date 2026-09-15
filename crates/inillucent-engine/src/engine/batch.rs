@@ -448,7 +448,7 @@ impl crate::ImportedDatabase {
         self.writing.touched.set(0);
         // The transaction's own setting goes with the transaction, which is
         // SQLite's rule for `PRAGMA defer_foreign_keys`.
-        self.session_state.defer_foreign_keys = false;
+        self.pragmas.defer_foreign_keys.set(false);
         self.refresh_catalog();
         undone?;
         told?;
@@ -487,8 +487,8 @@ impl crate::ImportedDatabase {
         self.sync_modules()?;
         // `PRAGMA defer_foreign_keys` is the transaction's setting, not the
         // connection's, and SQLite clears it at each commit and rollback.
-        if self.session_state.defer_foreign_keys {
-            self.session_state.defer_foreign_keys = false;
+        if self.pragmas.defer_foreign_keys.get() {
+            self.pragmas.defer_foreign_keys.set(false);
             self.forget_compiled_statements();
         }
         self.session_state.modules_begun.set(false);

@@ -430,27 +430,27 @@ impl ConnectionSettings {
     /// @param database - the connection `VACUUM` is about to reopen
     pub(crate) fn capture(database: &ImportedDatabase) -> ConnectionSettings {
         ConnectionSettings {
-            journal_mode: database.session_state.journal_mode,
-            foreign_keys: database.session_state.foreign_keys,
-            defer_foreign_keys: database.session_state.defer_foreign_keys,
-            locking_exclusive: database.session_state.locking_exclusive,
-            defensive: database.session_state.defensive,
-            secure_delete: database.session_state.secure_delete,
-            auto_vacuum: database.session_state.auto_vacuum,
-            automatic_index: database.session_state.automatic_index,
-            ignore_check_constraints: database.session_state.ignore_check_constraints,
-            case_sensitive_like: database.session_state.case_sensitive_like,
-            cache_size: database.session_state.cache_size,
-            analysis_limit: database.session_state.analysis_limit,
-            writable_schema: database.session_state.writable_schema,
-            query_only: database.session_state.query_only,
-            recursive_triggers: database.session_state.recursive_triggers,
-            max_page_count: database.session_state.max_page_count,
-            temp_store: database.session_state.temp_store,
-            busy_timeout_ms: database.session_state.busy_timeout_ms,
+            journal_mode: database.pragmas.journal_mode.get(),
+            foreign_keys: database.pragmas.foreign_keys.get(),
+            defer_foreign_keys: database.pragmas.defer_foreign_keys.get(),
+            locking_exclusive: database.pragmas.locking_exclusive.get(),
+            defensive: database.pragmas.defensive.get(),
+            secure_delete: database.pragmas.secure_delete.get(),
+            auto_vacuum: database.pragmas.auto_vacuum.get(),
+            automatic_index: database.pragmas.automatic_index.get(),
+            ignore_check_constraints: database.pragmas.ignore_check_constraints.get(),
+            case_sensitive_like: database.pragmas.case_sensitive_like.get(),
+            cache_size: database.pragmas.cache_size.get(),
+            analysis_limit: database.pragmas.analysis_limit.get(),
+            writable_schema: database.pragmas.writable_schema.get(),
+            query_only: database.pragmas.query_only.get(),
+            recursive_triggers: database.pragmas.recursive_triggers.get(),
+            max_page_count: database.pragmas.max_page_count.get(),
+            temp_store: database.pragmas.temp_store.get(),
+            busy_timeout_ms: database.pragmas.busy_timeout_ms.get(),
             collations: database.session_state.collations.clone(),
             authorizer: database.session_state.authorizer.clone(),
-            levers: database.session_state.levers,
+            levers: database.pragmas.levers.get(),
             registry: database.session_state.registry.clone(),
         }
     }
@@ -473,26 +473,41 @@ impl ConnectionSettings {
     /// @param database - the freshly reopened connection
     pub(crate) fn restore(self, database: &mut ImportedDatabase) -> DbResult<()> {
         database.set_journal_mode(self.journal_mode)?;
-        database.session_state.foreign_keys = self.foreign_keys;
-        database.session_state.defer_foreign_keys = self.defer_foreign_keys;
-        database.session_state.locking_exclusive = self.locking_exclusive;
-        database.session_state.defensive = self.defensive;
-        database.session_state.secure_delete = self.secure_delete;
-        database.session_state.auto_vacuum = self.auto_vacuum;
-        database.session_state.automatic_index = self.automatic_index;
-        database.session_state.ignore_check_constraints = self.ignore_check_constraints;
-        database.session_state.case_sensitive_like = self.case_sensitive_like;
-        database.session_state.cache_size = self.cache_size;
-        database.session_state.analysis_limit = self.analysis_limit;
-        database.session_state.writable_schema = self.writable_schema;
-        database.session_state.query_only = self.query_only;
-        database.session_state.recursive_triggers = self.recursive_triggers;
-        database.session_state.max_page_count = self.max_page_count;
-        database.session_state.temp_store = self.temp_store;
-        database.session_state.busy_timeout_ms = self.busy_timeout_ms;
+        database.pragmas.foreign_keys.set(self.foreign_keys);
+        database
+            .pragmas
+            .defer_foreign_keys
+            .set(self.defer_foreign_keys);
+        database
+            .pragmas
+            .locking_exclusive
+            .set(self.locking_exclusive);
+        database.pragmas.defensive.set(self.defensive);
+        database.pragmas.secure_delete.set(self.secure_delete);
+        database.pragmas.auto_vacuum.set(self.auto_vacuum);
+        database.pragmas.automatic_index.set(self.automatic_index);
+        database
+            .pragmas
+            .ignore_check_constraints
+            .set(self.ignore_check_constraints);
+        database
+            .pragmas
+            .case_sensitive_like
+            .set(self.case_sensitive_like);
+        database.pragmas.cache_size.set(self.cache_size);
+        database.pragmas.analysis_limit.set(self.analysis_limit);
+        database.pragmas.writable_schema.set(self.writable_schema);
+        database.pragmas.query_only.set(self.query_only);
+        database
+            .pragmas
+            .recursive_triggers
+            .set(self.recursive_triggers);
+        database.pragmas.max_page_count.set(self.max_page_count);
+        database.pragmas.temp_store.set(self.temp_store);
+        database.pragmas.busy_timeout_ms.set(self.busy_timeout_ms);
         database.session_state.collations = self.collations;
         database.session_state.authorizer = self.authorizer;
-        database.session_state.levers = self.levers;
+        database.pragmas.levers.set(self.levers);
         database.session_state.registry = self.registry;
         database.session_state.eponymous.clear();
         database.refresh_catalog();
@@ -694,6 +709,10 @@ pub(crate) fn vacuum_in_place(connection: &mut ImportedDatabase) -> DbResult<()>
     // writer nothing writes to. Put back below, with the reopen's own values
     // copied into it.
     let writer = std::rc::Rc::clone(&connection.writing);
+    // The settings group for the same reason, and it is put back before
+    // `settings.restore` below so that the restore writes into the group both
+    // handles hold rather than into one the reopen made.
+    let pragmas = std::rc::Rc::clone(&connection.pragmas);
     // **`changes()`/`total_changes()`/`last_insert_rowid()` are the
     // connection's own history, not a fact about the file `VACUUM` is
     // rewriting, and SQLite's own `VACUUM` leaves them alone.** Assigning
@@ -738,6 +757,7 @@ pub(crate) fn vacuum_in_place(connection: &mut ImportedDatabase) -> DbResult<()>
     *connection = reopened(&vfs, &path, page_size, frames, "the database it replaced")?;
     writer.adopt(&connection.writing);
     connection.writing = writer;
+    connection.pragmas = pragmas;
     connection.counters.last_changes.set(last_changes);
     connection.counters.changed_ever.set(changed_ever);
     connection

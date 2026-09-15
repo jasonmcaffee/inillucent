@@ -30,8 +30,14 @@
 //! callback, and applications do call it there to decide whether they may open
 //! a transaction of their own. `Connection::autocommit` reads the writer the
 //! database holds beside the engine, so it takes no borrow and answers while
-//! the statement that invoked the callback is still running. The last test
-//! below is that answer, and it is a value rather than a refusal.
+//! the statement that invoked the callback is still running. The last tests
+//! below are those answers, and they are values rather than refusals.
+//!
+//! The run-time limits are the sharper case. `Database::limit` and
+//! `Database::set_limit` took `self.engine.borrow()` and `borrow_mut()` with no
+//! `try_`, so `sqlite3_limit` asked from inside a callback did not return an
+//! error - it aborted the process. They read the settings group the database
+//! holds beside the engine now.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -223,4 +229,85 @@ fn a_callback_can_ask_whether_a_transaction_is_open() {
     connection
         .execute_batch("ROLLBACK")
         .expect("the transaction closes");
+}
+
+/// An authorizer that reads and writes a run-time limit from inside a
+/// statement.
+struct AsksLimits {
+    /// The database the question goes to, which is the one being authorized.
+    database: Rc<Database>,
+    /// What the limit read as, and what setting it answered, per call.
+    answers: RefCell<Vec<(i64, i64)>>,
+}
+
+impl Authorizer for AsksLimits {
+    /// Allows the action, having first read and set a limit.
+    ///
+    /// @param _action - what the binder is asking about
+    fn authorize(&self, _action: AuthAction<'_>) -> Authorization {
+        let read = self
+            .database
+            .limit(inillucent_base::limits::Limit::VariableNumber);
+        let before = self
+            .database
+            .set_limit(inillucent_base::limits::Limit::VariableNumber, 250);
+        self.answers.borrow_mut().push((read, before));
+        Authorization::Allow
+    }
+}
+
+/// A callback can read and set a run-time limit while the statement that called
+/// it is running.
+///
+/// **This one aborted rather than refused (task-1962, A1 step 3).**
+/// `Database::limit` and `Database::set_limit` reached the engine through
+/// `borrow()` and `borrow_mut()` with no `try_`, and a `RefCell` already
+/// borrowed answers those by aborting the process - so an application calling
+/// `sqlite3_limit` from an authorizer, which SQLite documents as allowed, took
+/// the process with it. The settings are their own group behind their own cells
+/// now, and the database holds a handle on it.
+///
+/// The values are asserted rather than the absence of a crash: the first read
+/// is the limit set before the statement started, and the write is read back
+/// after it, so a group nothing writes to would fail the second assertion even
+/// if it survived the first.
+#[test]
+fn a_callback_can_read_and_set_a_run_time_limit() {
+    let directory = scratch("limits");
+    let database = Rc::new(Database::open(directory.join("d.rdb")).expect("the database opens"));
+    let connection = database.session();
+    connection
+        .execute("CREATE TABLE t (a INTEGER)")
+        .expect("the table is made");
+    database.set_limit(inillucent_base::limits::Limit::VariableNumber, 300);
+
+    let watcher = Rc::new(AsksLimits {
+        database: Rc::clone(&database),
+        answers: RefCell::new(Vec::new()),
+    });
+    connection
+        .set_authorizer(Some(Rc::clone(&watcher) as Rc<dyn Authorizer>))
+        .expect("nothing is running on this connection");
+    let _ = connection.query("SELECT a FROM t");
+    connection
+        .set_authorizer(None)
+        .expect("the authorizer comes off");
+
+    let answers = watcher.answers.borrow().clone();
+    let (first_read, first_before) = *answers
+        .first()
+        .expect("the authorizer was called at least once");
+    assert_eq!(
+        first_read, 300,
+        "the first read from inside the authorizer should see the limit set          before the statement started"
+    );
+    assert_eq!(
+        first_before, 300,
+        "and setting it should report the same value as the one before it"
+    );
+    assert_eq!(
+        database.limit(inillucent_base::limits::Limit::VariableNumber),
+        250,
+        "the write the authorizer made should be the one in force afterwards;          a different answer means it wrote to a group nothing else reads"
+    );
 }

@@ -113,7 +113,7 @@ impl crate::ImportedDatabase {
         // write-ahead log has neither - which is a different statement from
         // "no frames moved". A caller polling the second column to decide
         // whether a checkpoint is due needs to be able to tell those apart.
-        if self.session_state.journal_mode() != inillucent_pool::journal::JournalMode::Wal {
+        if self.pragmas.journal_mode.get() != inillucent_pool::journal::JournalMode::Wal {
             self.checkpoint()?;
             return Ok(Outcome {
                 rows: vec![vec![

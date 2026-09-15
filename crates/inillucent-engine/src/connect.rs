@@ -121,6 +121,15 @@ pub struct Database {
     /// statement was already holding, so the answer was an error rather than a
     /// number.
     writer: std::rc::Rc<crate::engine::state::Writing>,
+    /// The same settings the engine holds.
+    ///
+    /// **The second group A1 step 3 moved out (task-1962).** `PRAGMA` values,
+    /// the planner levers and the run-time limits, each behind its own cell.
+    /// `limit` and `set_limit` below took `self.engine.borrow()` and
+    /// `borrow_mut()` with no `try_`, so `sqlite3_limit` from inside a callback
+    /// did not return an error - it aborted the process. They read this
+    /// instead and take no borrow of the engine at all.
+    settings: std::rc::Rc<crate::engine::state::Pragmas>,
 }
 
 /// Reports whether a path names an in-memory database rather than a file.
@@ -161,6 +170,7 @@ impl Database {
             let engine = ImportedDatabase::create_on(vfs, path.clone(), PAGE_SIZE, frames)?;
             return Ok(Database {
                 writer: std::rc::Rc::clone(&engine.writing),
+                settings: std::rc::Rc::clone(&engine.pragmas),
                 engine: RefCell::new(engine),
                 path,
                 changes: std::cell::Cell::new(0),
@@ -174,6 +184,7 @@ impl Database {
         };
         Ok(Database {
             writer: std::rc::Rc::clone(&engine.writing),
+            settings: std::rc::Rc::clone(&engine.pragmas),
             engine: RefCell::new(engine),
             path,
             changes: std::cell::Cell::new(0),
@@ -213,6 +224,7 @@ impl Database {
         let engine = ImportedDatabase::import_into(source, target.clone(), PAGE_SIZE, frames)?;
         Ok(Database {
             writer: std::rc::Rc::clone(&engine.writing),
+            settings: std::rc::Rc::clone(&engine.pragmas),
             engine: RefCell::new(engine),
             path: target,
             changes: std::cell::Cell::new(0),
@@ -362,7 +374,7 @@ impl Database {
     ///
     /// @param limit - which limit
     pub fn limit(&self, limit: inillucent_base::limits::Limit) -> i64 {
-        self.engine.borrow().limit(limit)
+        self.settings.limits.borrow().get(limit)
     }
 
     /// Sets one run-time limit, and returns what it was before.
@@ -371,7 +383,7 @@ impl Database {
     /// @param requested - the value asked for
     /// @returns the value that was in force before this call
     pub fn set_limit(&self, limit: inillucent_base::limits::Limit, requested: i64) -> i64 {
-        self.engine.borrow_mut().set_limit(limit, requested)
+        self.settings.limits.borrow_mut().set(limit, requested)
     }
 
     /// Returns what the page cache has been asked to do.
@@ -717,7 +729,10 @@ impl<'d> Connection<'d> {
     ///
     /// @param mask - the levers to switch off
     pub fn disable_optimizations(&self, levers: inillucent_sql::plan::Levers) -> DbResult<()> {
-        self.engine_mut()?.disable_optimizations(levers);
+        // The plan cache is keyed by the levers rather than cleared by them -
+        // see `ImportedDatabase::disable_optimizations` - so setting the value
+        // is the whole of it, and it needs no borrow of the engine.
+        self.database.settings.levers.set(levers);
         Ok(())
     }
 
@@ -730,7 +745,7 @@ impl<'d> Connection<'d> {
     ///
     /// @param on - whether the flag is in force
     pub fn set_defensive(&self, on: bool) -> DbResult<()> {
-        self.engine_mut()?.set_defensive(on);
+        self.database.settings.defensive.set(on);
         Ok(())
     }
 

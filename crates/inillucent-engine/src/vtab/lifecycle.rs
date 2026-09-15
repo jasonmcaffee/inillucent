@@ -48,7 +48,7 @@ impl crate::ImportedDatabase {
             let parsed = match inillucent_sql::parser::parse_next_statement(
                 &sql,
                 0,
-                &self.session_state.limits,
+                &self.pragmas.limits.borrow(),
             ) {
                 Ok(parsed) => parsed,
                 Err(_) => continue,
@@ -182,7 +182,7 @@ impl crate::ImportedDatabase {
             let mut context = Context {
                 host: &mut nowhere,
                 database: 0,
-                limits: &self.session_state.limits,
+                limits: &self.pragmas.limits.borrow(),
                 catalog: Some(&self.schema.catalog),
             };
             connected.table.update(&mut context, change)
@@ -450,7 +450,7 @@ impl crate::ImportedDatabase {
                 let mut context = Context {
                     host: &mut nowhere,
                     database: 0,
-                    limits: &self.session_state.limits,
+                    limits: &self.pragmas.limits.borrow(),
                     catalog: Some(&self.schema.catalog),
                 };
                 connected
@@ -618,7 +618,7 @@ impl crate::ImportedDatabase {
         let mut context = Context {
             host: &mut nowhere,
             database: 0,
-            limits: &self.session_state.limits,
+            limits: &self.pragmas.limits.borrow(),
             catalog: Some(&self.schema.catalog),
         };
         match moment {

@@ -37,7 +37,7 @@ impl crate::ImportedDatabase {
         self.compiled.recycle(parsed);
         match bound? {
             BoundStatement::Select(select) => {
-                Ok(plan_select_with(*select, self.session_state.levers))
+                Ok(plan_select_with(*select, self.pragmas.levers.get()))
             }
             _ => Err(refusal(format!("{sql} is not a read-only statement"))),
         }
@@ -185,10 +185,10 @@ impl crate::ImportedDatabase {
             .with_source(sql.as_bytes())
             .with_functions(&externals)
             .with_collations(&self.session_state.collations)
-            .with_limits(&self.session_state.limits)
+            .with_limits(&self.pragmas.limits.borrow())
             .with_foreign_keys(
-                self.session_state.foreign_keys,
-                self.session_state.defer_foreign_keys,
+                self.pragmas.foreign_keys.get(),
+                self.pragmas.defer_foreign_keys.get(),
             );
         let bound = binder.bind_statement(&parsed.statement).map_err(refused)?;
         let mut names: Vec<(&'static str, Vec<u8>)> = Vec::new();
@@ -290,10 +290,10 @@ impl ImportedDatabase {
             .with_source(sql.as_bytes())
             .with_functions(&externals)
             .with_collations(&self.session_state.collations)
-            .with_limits(&self.session_state.limits)
+            .with_limits(&self.pragmas.limits.borrow())
             .with_foreign_keys(
-                self.session_state.foreign_keys,
-                self.session_state.defer_foreign_keys,
+                self.pragmas.foreign_keys.get(),
+                self.pragmas.defer_foreign_keys.get(),
             );
         binder.bind_statement(&parsed.statement).map_err(refused)
     }

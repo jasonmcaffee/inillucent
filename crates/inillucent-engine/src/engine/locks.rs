@@ -23,7 +23,7 @@ impl ImportedDatabase {
     ///
     /// @param exclusive - whether to keep the lock
     pub(crate) fn set_locking_exclusive(&mut self, exclusive: bool) -> DbResult<()> {
-        self.session_state.locking_exclusive = exclusive;
+        self.pragmas.locking_exclusive.set(exclusive);
         if !exclusive && self.writing.batch.get().is_none() {
             self.storage.database.end_access()?;
         }
@@ -79,7 +79,7 @@ impl ImportedDatabase {
             .running
             .set(self.writing.running.get().saturating_sub(1));
         if self.writing.running.get() > 0
-            || self.session_state.locking_exclusive
+            || self.pragmas.locking_exclusive.get()
             || self.writing.batch.get().is_some()
         {
             return Ok(());
@@ -114,7 +114,7 @@ impl ImportedDatabase {
         &mut self,
         mode: inillucent_pool::journal::JournalMode,
     ) -> DbResult<()> {
-        if mode == self.session_state.journal_mode {
+        if mode == self.pragmas.journal_mode.get() {
             return Ok(());
         }
         if self.writing.batch.get().is_some() {
@@ -123,7 +123,7 @@ impl ImportedDatabase {
             ));
         }
         self.checkpoint()?;
-        self.session_state.journal_mode = mode;
+        self.pragmas.journal_mode.set(mode);
         // **WAL is the one mode the file remembers.** SQLite writes a
         // read/write version of 2 into its header for a WAL database and 1 for
         // everything else, so a reopen comes back in WAL and comes back at the

@@ -35,7 +35,7 @@ impl crate::ImportedDatabase {
         // cached by its text, and a value baked into the plan would answer with
         // whatever was true when it was first compiled.
         params.set_context(self.scalar_context());
-        params.set_recursive_triggers(self.session_state.recursive_triggers);
+        params.set_recursive_triggers(self.pragmas.recursive_triggers.get());
         // **The file lock, taken here and released here.** Both entry points -
         // `execute_any` and `execute_statement` - come through this function, so
         // no statement can run without it. Under `exclusive`, which is the
@@ -80,7 +80,7 @@ impl crate::ImportedDatabase {
         // mistake impossible, so recording it and writing anyway would be worse
         // than not having the pragma at all. The message is SQLite's own, which
         // is what an application's error handling is written against.
-        if self.session_state.query_only && writes_something(cached) {
+        if self.pragmas.query_only.get() && writes_something(cached) {
             return Err(inillucent_base::error::DbError::primary(
                 inillucent_base::error::PrimaryCode::ReadOnly,
             )
@@ -282,15 +282,15 @@ impl crate::ImportedDatabase {
             .with_source(sql.as_bytes())
             .with_functions(&externals)
             .with_collations(&self.session_state.collations)
-            .with_limits(&self.session_state.limits)
+            .with_limits(&self.pragmas.limits.borrow())
             .with_foreign_keys(
-                self.session_state.foreign_keys,
-                self.session_state.defer_foreign_keys,
+                self.pragmas.foreign_keys.get(),
+                self.pragmas.defer_foreign_keys.get(),
             );
         let bound = binder.bind_statement(inner).map_err(refused)?;
         let lines = match bound {
             BoundStatement::Select(select) => {
-                plan_select_with(*select, self.session_state.levers).describe()
+                plan_select_with(*select, self.pragmas.levers.get()).describe()
             }
             // A write's plan is the query that finds the rows it changes, and
             // that is the thing a reader is asking about - "did my DELETE use
@@ -347,7 +347,7 @@ impl crate::ImportedDatabase {
         self.compiled.recycle(parsed);
         match bound? {
             BoundStatement::Select(select) => {
-                let plan = plan_select_with(*select, self.session_state.levers);
+                let plan = plan_select_with(*select, self.pragmas.levers.get());
                 let prepared = physical::prepare_any(&plan, self)?;
                 Ok(Cached::Select(
                     Box::new(plan),
@@ -367,7 +367,7 @@ impl crate::ImportedDatabase {
             BoundStatement::Insert(statement) => {
                 let source = match &statement.source {
                     inillucent_sql::dml::BoundInsertSource::Select(select) => {
-                        let plan = plan_select_with((**select).clone(), self.session_state.levers);
+                        let plan = plan_select_with((**select).clone(), self.pragmas.levers.get());
                         let prepared = physical::prepare_any(&plan, self)?;
                         Some(CachedQuery::new(plan, prepared))
                     }
@@ -398,7 +398,7 @@ impl crate::ImportedDatabase {
                     statement.limit.as_ref(),
                     statement.offset.as_ref(),
                 );
-                let plan = plan_select_with(select, self.session_state.levers);
+                let plan = plan_select_with(select, self.pragmas.levers.get());
                 let prepared = physical::prepare_any(&plan, self)?;
                 Ok(Cached::VirtualUpdate(
                     statement,
@@ -427,7 +427,7 @@ impl crate::ImportedDatabase {
                     statement.limit.as_ref(),
                     statement.offset.as_ref(),
                 );
-                let plan = plan_select_with(select, self.session_state.levers);
+                let plan = plan_select_with(select, self.pragmas.levers.get());
                 let prepared = physical::prepare_any(&plan, self)?;
                 Ok(Cached::VirtualDelete(
                     statement,
@@ -439,7 +439,7 @@ impl crate::ImportedDatabase {
                     .view_rows
                     .as_ref()
                     .ok_or_else(|| refusal("a view delete with no query"))?;
-                let plan = plan_select_with((**rows).clone(), self.session_state.levers);
+                let plan = plan_select_with((**rows).clone(), self.pragmas.levers.get());
                 let prepared = physical::prepare_any(&plan, self)?;
                 Ok(Cached::Delete(statement, CachedQuery::new(plan, prepared)))
             }
@@ -491,7 +491,7 @@ impl crate::ImportedDatabase {
             .get(&table.root)
             .ok_or_else(|| refusal("no layout imported for the table being written"))?;
         let select = dml::keys_query(table, source, filter, limit, offset, layout)?;
-        let mut plan = plan_select_with(select, self.session_state.levers);
+        let mut plan = plan_select_with(select, self.pragmas.levers.get());
         // **The one place `Levers::INDEXED_WRITE` has to be applied by hand.**
         // `plan_select_with` is the ordinary read planner, shared with every
         // `SELECT`, so nothing in it ever consulted this lever -
@@ -499,7 +499,7 @@ impl crate::ImportedDatabase {
         // any more since the rearchitecture moved a write's row-finding onto
         // this bound `SELECT`. Forcing the sole source to a table scan below
         // is `write_path_with`'s own answer for "the lever is off".
-        if !self.session_state.levers.has(Levers::INDEXED_WRITE) {
+        if !self.pragmas.levers.get().has(Levers::INDEXED_WRITE) {
             for planned in &mut plan.sources {
                 planned.path = inillucent_sql::plan::AccessPath::TableScan { root: table.root };
             }
@@ -535,7 +535,7 @@ impl crate::ImportedDatabase {
         // an `INSTEAD OF UPDATE` fires with `OLD` taken from running the view,
         // which is exactly the query the binder left on `view_rows`.
         if let Some(rows) = &statement.view_rows {
-            let plan = plan_select_with((**rows).clone(), self.session_state.levers);
+            let plan = plan_select_with((**rows).clone(), self.pragmas.levers.get());
             let prepared = physical::prepare_any(&plan, self)?;
             return Ok((plan, prepared));
         }
@@ -568,7 +568,7 @@ impl crate::ImportedDatabase {
             &statement.from,
             &assigned,
         )?;
-        let plan = plan_select_with(select, self.session_state.levers);
+        let plan = plan_select_with(select, self.pragmas.levers.get());
         let prepared = physical::prepare_any(&plan, self)?;
         Ok((plan, prepared))
     }
