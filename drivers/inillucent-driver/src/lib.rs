@@ -38,6 +38,13 @@
 //! an oversight: two connections holding two pools over one set of bytes would
 //! be two page caches over one file. Two databases on two files are
 //! independent.
+//!
+//! [`SharedDatabase`] is how several threads use one database anyway:
+//! **serialized, not parallel**, which is SQLite's own word for it. Any number
+//! of threads, exactly one statement at a time, and a transaction that holds
+//! its turn for its whole life. The database is opened on a thread of its own
+//! and never moved, which is why this crate can offer it and still
+//! `forbid(unsafe_code)` - see the `shared` module for the argument.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -59,6 +66,7 @@ pub mod capability;
 pub mod error;
 pub mod introspect;
 pub mod rows;
+pub mod shared;
 pub mod value;
 
 use std::cell::Cell;
@@ -74,6 +82,7 @@ pub use capability::{capability, supports, Capability, Support, CAPABILITIES};
 pub use error::{Error, Result, Status};
 pub use introspect::{Item, Kind, Table};
 pub use rows::Rows;
+pub use shared::{SharedConnection, SharedDatabase, SharedTransaction};
 pub use value::{Column, Value, ValueKind};
 
 /// What one statement may spend, and the default ceiling on the plan cache.

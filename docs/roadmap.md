@@ -92,15 +92,37 @@ with vectors on disk, p50 latency within 1.5x and p99 within 2x of today's, iden
 
 Access from several **processes** works: the same SHARED, RESERVED, PENDING and EXCLUSIVE protocol
 as SQLite, under `PRAGMA locking_mode = normal`, measured over 37 stress rounds with two writing
-processes and no lost writes. Threads inside one process do not. The engine is single threaded by
-construction: its pool and trees use `RefCell`, a connection borrows the database, and there is no
-parallel scan. The retrieval engine's graph build is the one thing that uses every core.
+processes and no lost writes. Threads inside one process did not.
 
-Done means the step that is reachable, which is what SQLite calls serialized mode: a database that
-can be moved to another thread, and a shared handle that serialises statements behind a lock so a
-web server can hand one database to a pool of workers. One transaction at a time becomes a type
-rather than a doc comment. Statements do not run in parallel; a parallel executor is not on this
-list.
+**Built: `SharedDatabase`, which is serialized mode.** Any number of threads use one database,
+exactly one statement runs at a time, and a transaction holds its turn for its whole life. A web
+server hands one `SharedDatabase` to a pool of workers and each worker clones it.
+
+**The database is not moved between threads; it gets one of its own.** The design said to make
+`Database: Send` after an audit and put it behind `Arc<Mutex<_>>`. The audit found no thread local
+and no raw pointer in the engine - the one `thread_local!` in the workspace is a test-only decode
+counter - so what stands in the way is `Rc`, and the argument for an `unsafe impl Send` would be
+that the `Rc` graph is reachable only through the mutex. That argument has a hole:
+`Connection::set_authorizer` takes an `Rc<dyn Authorizer>` the **caller** keeps a clone of, so a
+database with one installed would have a live handle on two threads and a non-atomic count between
+them. It is closable by leaving `set_authorizer` off the shared surface, but then the soundness of a
+shipped `unsafe` rests on a method not being added later.
+
+So the database is opened on a thread of its own and never leaves it, and the handles send it
+statements over a channel. `inillucent-driver` keeps `#![forbid(unsafe_code)]` and the confinement
+is the compiler's rather than a paragraph's. The cost is a thread per shared database and a channel
+round trip per statement - two context switches against a statement that takes longer than that.
+
+`drivers/inillucent-driver/tests/threads.rs` asserts the three properties the design named: eight
+threads inserting a thousand rows each land eight thousand rows with no two sharing a key; a reader
+sampling throughout a thousand-row transaction sees zero or a thousand and never a number between;
+and a database used and dropped on another thread releases its file, which the reopen afterwards
+proves. A fourth asserts that a transaction dropped without a commit rolls back **and** gives the
+turn up, because a rollback that did not run would leave the next thread's statement inside a
+transaction nobody opened.
+
+Statements still do not run in parallel. A parallel executor is not on this list, and
+[the architecture overview](architecture-overview.md) says so where a reader meets it.
 
 ## 5. A macOS archive
 

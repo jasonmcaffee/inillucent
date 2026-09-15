@@ -122,12 +122,41 @@ files and recomputing them is cheaper than the disk they would take.
 [Architecture section 11](architecture.md#11-saving-and-reopening) has the sizes on the measured
 corpus.
 
+## Threads: serialized, not parallel
+
+SQLite's own word for it, and the same promise. `SharedDatabase` in the driver lets any number of
+threads use one database, and exactly one statement runs at a time. No statement runs in parallel
+with another, no statement is split across threads, and the executor is unchanged. What it buys is
+that an application with a thread pool does not need a connection per thread and a protocol for
+handing them around.
+
+**The database gets a thread of its own rather than a lock.** A `Database` holds `Rc` - the engine's
+state groups, the log, the compiled plans - so it is neither `Send` nor `Sync`. The obvious way to
+share one is a mutex and an `unsafe impl Send` whose argument is that the `Rc` graph is reachable
+only through the mutex; that argument has a hole, because `Connection::set_authorizer` takes an `Rc`
+the caller keeps a clone of. So the database is opened on a thread of its own and never leaves it,
+and the handles send it statements. `inillucent-driver` keeps `#![forbid(unsafe_code)]` and the
+confinement is the compiler's rather than a paragraph's. The cost is a thread per shared database
+and a channel round trip per statement.
+
+**A transaction holds the turn for its whole life.** In this engine a transaction belongs to the
+*database* rather than to the handle that opened it, so another thread's statement between a `BEGIN`
+and its `COMMIT` would join that transaction and be committed by it. `SharedTransaction` takes a
+turn lock when it opens and gives it back when it settles, so every other thread waits for the whole
+transaction. That is the cost of the promise.
+
+`drivers/inillucent-driver/tests/threads.rs` asserts the three properties: eight threads inserting a
+thousand rows each land eight thousand rows with no two sharing a key; a reader sampling throughout a
+thousand-row transaction sees zero rows or a thousand and never a number between; and a database
+used and dropped on another thread releases its file, which the reopen afterwards proves.
+
 ## What is deliberately not here
 
 - **A second process.** No server, no port, no connection pool. The engine is a library and the
   database is a file.
-- **A parallel executor.** One statement runs on one thread. The retrieval engine's index *build*
-  uses several; nothing on the query path does.
+- **A parallel executor.** One statement runs on one thread, and several threads take turns rather
+  than running at once - see the section above. The retrieval engine's index *build* uses several
+  threads; nothing on the query path does.
 - **SQLite's file format.** `Database::import` reads a `.db` file once, into a new `.rdb`. Opening a
   `.db` directly is not a thing this engine does, and it says so rather than half doing it.
 - **Every SQL construct.** What is not built answers exit code 3, or `unsupported` over the driver
