@@ -311,3 +311,67 @@ fn a_callback_can_read_and_set_a_run_time_limit() {
         "the write the authorizer made should be the one in force afterwards;          a different answer means it wrote to a group nothing else reads"
     );
 }
+
+/// An authorizer that asks what the last statement changed.
+struct AsksCounters {
+    /// The database the question goes to, which is the one being authorized.
+    database: Rc<Database>,
+    /// The rowid and the change count, per call.
+    answers: RefCell<Vec<(i64, i64)>>,
+}
+
+impl Authorizer for AsksCounters {
+    /// Allows the action, having first read the two counters.
+    ///
+    /// @param _action - what the binder is asking about
+    fn authorize(&self, _action: AuthAction<'_>) -> Authorization {
+        let connection = self.database.session();
+        let rowid = connection.last_insert_rowid().unwrap_or(-1);
+        let changed = connection.changes().unwrap_or(-1);
+        self.answers.borrow_mut().push((rowid, changed));
+        Authorization::Allow
+    }
+}
+
+/// A callback can read what the last statement did.
+///
+/// **`sqlite3_changes` from a hook is the canonical case (task-1962, A1
+/// step 3).** An application told that a row changed asks how many, and it asks
+/// while the statement that told it is still running. Through
+/// `Database::engine` that was the `already running a statement` refusal, so
+/// the number came back as an error and the hook had nothing to report.
+///
+/// The values are asserted: the `INSERT` before the statement assigned rowid 1
+/// and changed one row, so a group nothing writes to would answer zero for
+/// both.
+#[test]
+fn a_callback_can_read_what_the_last_statement_did() {
+    let directory = scratch("counters");
+    let database = Rc::new(Database::open(directory.join("e.rdb")).expect("the database opens"));
+    let connection = database.session();
+    connection
+        .execute("CREATE TABLE t (a INTEGER)")
+        .expect("the table is made");
+    connection
+        .execute("INSERT INTO t VALUES (7)")
+        .expect("the row is written");
+
+    let watcher = Rc::new(AsksCounters {
+        database: Rc::clone(&database),
+        answers: RefCell::new(Vec::new()),
+    });
+    connection
+        .set_authorizer(Some(Rc::clone(&watcher) as Rc<dyn Authorizer>))
+        .expect("nothing is running on this connection");
+    let _ = connection.query("SELECT a FROM t");
+    connection
+        .set_authorizer(None)
+        .expect("the authorizer comes off");
+
+    let answers = watcher.answers.borrow().clone();
+    let (rowid, changed) = *answers
+        .first()
+        .expect("the authorizer was called at least once");
+    assert_eq!(rowid, 1, "the INSERT before the SELECT assigned rowid 1");
+    assert_eq!(changed, 1, "and it changed one row");
+}

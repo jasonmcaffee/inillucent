@@ -193,20 +193,20 @@ impl crate::ImportedDatabase {
             // process can then open the file; making it the default would pay
             // for that on every statement of every program that never opens a
             // second connection.
-            counters: Counters {
+            counters: std::rc::Rc::new(Counters {
                 last_rowid: std::cell::Cell::new(0),
                 last_changes: std::cell::Cell::new(0),
                 seed: std::cell::Cell::new(fresh_seed()),
                 changed_ever: std::cell::Cell::new(0),
                 session_change_baseline: session_changes::SessionChanges::default(),
-            },
-            compiled: Compiled {
+            }),
+            compiled: std::rc::Rc::new(Compiled {
                 statements: std::cell::RefCell::new(HashMap::new()),
                 statement_cache_limit: std::cell::Cell::new(plans::DEFAULT_STATEMENT_CACHE),
                 compiles: std::cell::Cell::new(0),
                 scratch_ast: std::cell::RefCell::new(None),
                 index_stages: std::cell::Cell::new(StageTimings::default()),
-            },
+            }),
             writing: std::rc::Rc::new(Writing {
                 next_txn: std::cell::Cell::new(1),
                 statement_txn: std::cell::Cell::new(None),
@@ -466,20 +466,20 @@ impl crate::ImportedDatabase {
         let mut opened = ImportedDatabase {
             // Above every number the log still holds, so that this run cannot
             // call something by a name a crashed one already used.
-            counters: Counters {
+            counters: std::rc::Rc::new(Counters {
                 last_rowid: std::cell::Cell::new(0),
                 last_changes: std::cell::Cell::new(0),
                 seed: std::cell::Cell::new(fresh_seed()),
                 changed_ever: std::cell::Cell::new(0),
                 session_change_baseline: session_changes::SessionChanges::default(),
-            },
-            compiled: Compiled {
+            }),
+            compiled: std::rc::Rc::new(Compiled {
                 statements: std::cell::RefCell::new(HashMap::new()),
                 statement_cache_limit: std::cell::Cell::new(plans::DEFAULT_STATEMENT_CACHE),
                 compiles: std::cell::Cell::new(0),
                 scratch_ast: std::cell::RefCell::new(None),
                 index_stages: std::cell::Cell::new(StageTimings::default()),
-            },
+            }),
             writing: std::rc::Rc::new(Writing {
                 next_txn: std::cell::Cell::new(highest_txn.saturating_add(1)),
                 statement_txn: std::cell::Cell::new(None),

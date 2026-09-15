@@ -726,10 +726,16 @@ pub(crate) fn vacuum_in_place(connection: &mut ImportedDatabase) -> DbResult<()>
     // and restored once, after the second and final swap - nothing runs a
     // statement on it between the two, so there is nothing to restore
     // in between.
-    let last_changes = connection.counters.last_changes.get();
-    let changed_ever = connection.counters.changed_ever.get();
+    // Carrying the group itself is what keeps them, and it keeps
+    // `session_change_baseline` with them, which is the one a reopen could not
+    // have reconstructed.
+    let counters = std::rc::Rc::clone(&connection.counters);
     let last_rowid = connection.counters.last_rowid.get();
-    let session_change_baseline = std::mem::take(&mut connection.counters.session_change_baseline);
+    // The plan cache is carried for the handle rather than for the plans:
+    // `crate::connect::Database` holds a second handle on it, and every plan in
+    // it names a tree this rebuild has moved, so it takes the reopen's own
+    // empty cache through `Compiled::adopt` below.
+    let compiled = std::rc::Rc::clone(&connection.compiled);
     let settings = ConnectionSettings::capture(connection);
     let schemas = AttachedSchemas::take(connection);
     // **The old file is closed before it is replaced, not after** -
@@ -758,13 +764,13 @@ pub(crate) fn vacuum_in_place(connection: &mut ImportedDatabase) -> DbResult<()>
     writer.adopt(&connection.writing);
     connection.writing = writer;
     connection.pragmas = pragmas;
-    connection.counters.last_changes.set(last_changes);
-    connection.counters.changed_ever.set(changed_ever);
+    compiled.adopt(&connection.compiled);
+    connection.compiled = compiled;
+    connection.counters = counters;
     connection
         .counters
         .last_rowid
         .set(last_rowid_after_vacuum(connection, last_rowid));
-    connection.counters.session_change_baseline = session_change_baseline;
     // Before the settings: `ConnectionSettings::restore`'s
     // `refresh_catalog` needs the tables `rebuild_tables` derives here
     // already in place to describe them.

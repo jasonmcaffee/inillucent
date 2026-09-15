@@ -258,9 +258,19 @@ pub struct ImportedDatabase {
     /// callback the engine was already running.
     pub(crate) writing: std::rc::Rc<Writing>,
     /// The compiled statements this connection is holding on to.
-    pub(crate) compiled: Compiled,
+    ///
+    /// **Shared rather than owned (task-1962, A1 step 3).** Every field is
+    /// already behind its own cell, so [`crate::connect::Database`] holds the
+    /// same group and answers `cached_statements` and the cache limit without
+    /// borrowing the engine - which it did through `borrow()` with no `try_`.
+    pub(crate) compiled: std::rc::Rc<Compiled>,
     /// What the engine remembers about statements that have already run.
-    pub(crate) counters: Counters,
+    ///
+    /// **Shared rather than owned (task-1962, A1 step 3).** `sqlite3_changes`,
+    /// `sqlite3_total_changes` and `sqlite3_last_insert_rowid` are all read
+    /// from inside a callback by applications that have one, and the canonical
+    /// case is `sqlite3_changes` from an update hook.
+    pub(crate) counters: std::rc::Rc<Counters>,
 }
 
 /// A database file this connection has attached beside the one it was opened

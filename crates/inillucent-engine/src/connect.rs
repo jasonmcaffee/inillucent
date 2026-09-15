@@ -130,6 +130,17 @@ pub struct Database {
     /// did not return an error - it aborted the process. They read this
     /// instead and take no borrow of the engine at all.
     settings: std::rc::Rc<crate::engine::state::Pragmas>,
+    /// The same plan cache the engine holds.
+    ///
+    /// Every field of it was already behind a cell, so this needed nothing but
+    /// the `Rc` (task-1962, A1 step 3).
+    plans: std::rc::Rc<crate::engine::state::Compiled>,
+    /// The same counters the engine holds.
+    ///
+    /// `sqlite3_changes` from an update hook is the case this is for: an
+    /// application asks what the statement it was just told about changed,
+    /// while that statement is still running.
+    counters: std::rc::Rc<crate::engine::state::Counters>,
 }
 
 /// Reports whether a path names an in-memory database rather than a file.
@@ -171,6 +182,8 @@ impl Database {
             return Ok(Database {
                 writer: std::rc::Rc::clone(&engine.writing),
                 settings: std::rc::Rc::clone(&engine.pragmas),
+                plans: std::rc::Rc::clone(&engine.compiled),
+                counters: std::rc::Rc::clone(&engine.counters),
                 engine: RefCell::new(engine),
                 path,
                 changes: std::cell::Cell::new(0),
@@ -185,6 +198,8 @@ impl Database {
         Ok(Database {
             writer: std::rc::Rc::clone(&engine.writing),
             settings: std::rc::Rc::clone(&engine.pragmas),
+            plans: std::rc::Rc::clone(&engine.compiled),
+            counters: std::rc::Rc::clone(&engine.counters),
             engine: RefCell::new(engine),
             path,
             changes: std::cell::Cell::new(0),
@@ -225,6 +240,8 @@ impl Database {
         Ok(Database {
             writer: std::rc::Rc::clone(&engine.writing),
             settings: std::rc::Rc::clone(&engine.pragmas),
+            plans: std::rc::Rc::clone(&engine.compiled),
+            counters: std::rc::Rc::clone(&engine.counters),
             engine: RefCell::new(engine),
             path: target,
             changes: std::cell::Cell::new(0),
@@ -350,24 +367,24 @@ impl Database {
     /// See `ImportedDatabase::cached_statements`; this is the same count,
     /// reachable from the connection surface an application actually holds.
     pub fn cached_statements(&self) -> usize {
-        self.engine.borrow().cached_statements()
+        self.plans.held()
     }
 
     /// Returns the ceiling one session's plan cache is emptied at.
     pub fn statement_cache_limit(&self) -> usize {
-        self.engine.borrow().statement_cache_limit()
+        self.plans.limit()
     }
 
     /// Sets the ceiling one session's plan cache is emptied at.
     ///
     /// @param most - how many compiled statements one session may hold
     pub fn set_statement_cache_limit(&self, most: usize) {
-        self.engine.borrow().set_statement_cache_limit(most);
+        self.plans.set_limit(most);
     }
 
     /// Forgets every compiled statement.
     pub fn clear_statement_cache(&self) {
-        self.engine.borrow().clear_statement_cache();
+        self.plans.forget_all();
     }
 
     /// Returns what one run-time limit is set to on this database.
@@ -711,7 +728,7 @@ impl<'d> Connection<'d> {
 
     /// Returns how many statements are compiled and held.
     pub fn cached_plan_count(&self) -> DbResult<usize> {
-        Ok(self.engine()?.cached_plan_count())
+        Ok(self.database.plans.held())
     }
 
     /// Returns how many statements this connection has compiled since it opened.
@@ -722,7 +739,7 @@ impl<'d> Connection<'d> {
     /// `crates/inillucent/tests/budget.rs` asserts on it, and that file writes
     /// against this facade.
     pub fn compiled_statement_count(&self) -> DbResult<u64> {
-        Ok(self.engine()?.compiled_statement_count())
+        Ok(self.database.plans.compiles())
     }
 
     /// Turns off one or more planner optimizations for this connection.
@@ -841,17 +858,25 @@ impl<'d> Connection<'d> {
     /// holding the previous statement's number, and `sqlite3_changes` and
     /// `changes()` could answer differently about the same statement.
     pub fn changes(&self) -> DbResult<i64> {
-        Ok(self.engine()?.changes())
+        Ok(self.database.counters.last_changes.get())
     }
 
     /// Returns how many rows every statement so far has changed.
+    /// **This connection's own number rather than the engine's**, which is
+    /// the same answer and one fewer thing to be stale: the engine's copy is
+    /// whatever the last `use_session` set, and a connection knows which one it
+    /// is without asking.
     pub fn total_changes(&self) -> DbResult<i64> {
-        Ok(self.engine()?.total_changes())
+        Ok(self
+            .database
+            .counters
+            .session_change_baseline
+            .total_changes(self.session, self.database.counters.changed_ever.get()))
     }
 
     /// Returns the rowid the last `INSERT` assigned.
     pub fn last_insert_rowid(&self) -> DbResult<i64> {
-        Ok(self.engine()?.last_insert_rowid())
+        Ok(self.database.counters.last_rowid.get())
     }
 
     /// Returns how many databases the last commit was decided over.

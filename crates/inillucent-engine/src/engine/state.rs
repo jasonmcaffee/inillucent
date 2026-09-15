@@ -785,6 +785,68 @@ impl Writing {
 }
 
 impl Compiled {
+    /// Returns how many compiled statements this connection is holding.
+    ///
+    /// Counted across every session, because the cache is keyed by session and
+    /// a caller asking how much it is holding means all of it.
+    pub(crate) fn held(&self) -> usize {
+        self.statements
+            .borrow()
+            .values()
+            .map(HashMap::len)
+            .fold(0usize, usize::saturating_add)
+    }
+
+    /// Returns the ceiling one session's cache is emptied at.
+    pub(crate) fn limit(&self) -> usize {
+        self.statement_cache_limit.get()
+    }
+
+    /// Sets the ceiling one session's cache is emptied at.
+    ///
+    /// Zero means every statement is compiled fresh, which is what a caller
+    /// diagnosing a plan wants and what nothing else should ask for.
+    ///
+    /// @param most - how many compiled statements one session may hold
+    pub(crate) fn set_limit(&self, most: usize) {
+        self.statement_cache_limit.set(most);
+        if most == 0 {
+            self.statements.borrow_mut().clear();
+        }
+    }
+
+    /// Forgets every compiled statement.
+    pub(crate) fn forget_all(&self) {
+        self.statements.borrow_mut().clear();
+    }
+
+    /// Returns how many statements this connection has compiled since it
+    /// opened.
+    pub(crate) fn compiles(&self) -> u64 {
+        self.compiles.get()
+    }
+
+    /// Takes every field from a freshly opened connection's cache, keeping this
+    /// cache's identity.
+    ///
+    /// The counterpart of [`Writing::adopt`], and for the same swap. It matters
+    /// more here: a `VACUUM` gives every tree a fresh root, so a plan compiled
+    /// before it names a tree that is no longer there. The reopened connection
+    /// builds an empty cache and this is how the group both handles hold
+    /// becomes that empty cache rather than keeping plans the rebuild invalidated.
+    ///
+    /// @param fresh - the cache the reopened connection built
+    pub(crate) fn adopt(&self, fresh: &Compiled) {
+        self.statements.replace(fresh.statements.take());
+        self.statement_cache_limit
+            .set(fresh.statement_cache_limit.get());
+        self.compiles.set(fresh.compiles.get());
+        self.scratch_ast.replace(fresh.scratch_ast.take());
+        self.index_stages.set(fresh.index_stages.get());
+    }
+}
+
+impl Compiled {
     /// Puts a finished parse's arena back for the next statement to fill.
     ///
     /// @param parsed - the parse nothing holds a reference into any more

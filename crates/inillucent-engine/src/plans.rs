@@ -145,17 +145,12 @@ impl ImportedDatabase {
     /// Counted across every session, because the cache is keyed by session and
     /// a caller asking how much it is holding means all of it.
     pub fn cached_statements(&self) -> usize {
-        self.compiled
-            .statements
-            .borrow()
-            .values()
-            .map(HashMap::len)
-            .fold(0usize, usize::saturating_add)
+        self.compiled.held()
     }
 
     /// Returns the ceiling one session's cache is emptied at.
     pub fn statement_cache_limit(&self) -> usize {
-        self.compiled.statement_cache_limit.get()
+        self.compiled.limit()
     }
 
     /// Returns what one run-time limit is set to on this connection.
@@ -189,10 +184,7 @@ impl ImportedDatabase {
     ///
     /// @param most - how many compiled statements one session may hold
     pub fn set_statement_cache_limit(&self, most: usize) {
-        self.compiled.statement_cache_limit.set(most);
-        if most == 0 {
-            self.compiled.statements.borrow_mut().clear();
-        }
+        self.compiled.set_limit(most);
     }
 
     /// Forgets every compiled statement.
@@ -235,7 +227,7 @@ impl ImportedDatabase {
     /// it on every prepare has the size the first number reports and none of
     /// the behaviour it is being trusted for.
     pub fn compiled_statement_count(&self) -> u64 {
-        self.compiled.compiles.get()
+        self.compiled.compiles()
     }
 
     /// Reports whether a compiled plan may be reused.
