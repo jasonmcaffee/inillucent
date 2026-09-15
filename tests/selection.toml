@@ -745,6 +745,15 @@ tier = "engine"
 # its own platform, so the other compiles to an empty binary and runs nothing -
 # which is correct rather than hollow: there is no lock protocol to test for a
 # platform this build does not target (task-1962, T4).
+# A page the log carries whole, torn and read by a record that is not the one
+# that would have fixed it; and a page the log carries nothing for, which is
+# refused by name (task-1962, roadmap item 6).
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "torn_page_with_image"
+tier = "engine"
+
 [[target]]
 package = "inillucent-vfs"
 kind = "test"

@@ -368,6 +368,18 @@ impl ImportedDatabase {
         &self.storage.wal
     }
 
+    /// Returns the LSN the file's last checkpoint reached.
+    ///
+    /// **Where recovery's replay window starts**, and therefore which records
+    /// an open would replay and which it would never look at. A test reasoning
+    /// about what the log can repair has to ask, because a record below this
+    /// point is one recovery does not read - see
+    /// `crates/inillucent-compat/tests/torn_page_with_image.rs` (task-1962,
+    /// roadmap item 6).
+    pub fn checkpoint_lsn(&self) -> u64 {
+        self.storage.database.meta().checkpoint_lsn
+    }
+
     /// Returns what `PRAGMA application_id` would answer.
     pub(crate) fn application_id(&self) -> i32 {
         self.storage.database.application_id()

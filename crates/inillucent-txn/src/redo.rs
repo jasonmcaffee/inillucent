@@ -625,6 +625,17 @@ pub struct Applier<'a, R: RowRedo> {
     stats: RedoStats,
     /// Every `AllocPage` and `FreePage` the replay applied, in log order.
     free_map: Vec<FreeMapChange>,
+    /// Whether this pass applies only the records that carry a whole page
+    /// image.
+    ///
+    /// **The pass that runs before anything reads a page (task-1962, roadmap
+    /// item 6).** A logical row record reads the page it is about to change,
+    /// so a page a crash tore fails the replay at the first record that touches
+    /// it - even when a later record in the same window carries that page
+    /// whole. The images need no catalog and no row decoder, so they can all be
+    /// applied first, and the logical pass then reads pages the log has already
+    /// made whole.
+    images_only: bool,
 }
 
 impl<'a, R: RowRedo> Applier<'a, R> {
@@ -638,7 +649,77 @@ impl<'a, R: RowRedo> Applier<'a, R> {
             rows,
             stats: RedoStats::default(),
             free_map: Vec::new(),
+            images_only: false,
         }
+    }
+
+    /// Returns an applier that applies only the records carrying a whole page
+    /// image.
+    ///
+    /// **Run before any page other than the meta page is read (task-1962,
+    /// roadmap item 6).** Every other record is skipped, including the
+    /// allocations and the frees, because this pass exists to make the file's
+    /// pages readable rather than to decide what is in them; the logical pass
+    /// that follows applies all of it, and a page this pass has already written
+    /// carries the record's own LSN, so that pass skips it rather than writing
+    /// it twice.
+    ///
+    /// The row decoder is never called, so a caller with no catalog to seed one
+    /// from passes an empty tolerant one.
+    ///
+    /// @param database - the file to apply into
+    /// @param rows - never used, and taken so the type is the same one
+    pub fn images(database: &'a mut Database, rows: R) -> Applier<'a, R> {
+        Applier {
+            images_only: true,
+            ..Applier::new(database, rows)
+        }
+    }
+
+    /// Applies one record when this pass is applying only whole page images.
+    ///
+    /// **A `CompactLeaf` with an empty image is skipped rather than re-run.**
+    /// An empty image means "re-run the compaction", which reads the leaf - and
+    /// reading a leaf is the thing this pass exists to make safe. The logical
+    /// pass runs it, by which time every page the log carries whole is whole.
+    ///
+    /// @param record - the record
+    /// @param wanted - which of its pages still need it
+    /// @param lsn - the record's own LSN
+    fn redo_image(&mut self, record: &Record<'_>, wanted: &[bool], lsn: u64) -> DbResult<()> {
+        match record.body {
+            Body::WritePage { page, image } => self.put_image(page, image, lsn)?,
+            // An empty image means "re-run the compaction", which reads the
+            // leaf - and reading a leaf is the thing this pass exists to make
+            // safe. The logical pass runs it, by which time every page the log
+            // carries whole is whole.
+            Body::CompactLeaf { image: [], .. } => {}
+            Body::CompactLeaf { page, image, .. } => self.put_image(page, image, lsn)?,
+            Body::Structural {
+                left,
+                right,
+                parent,
+                left_image,
+                right_image,
+                parent_image,
+                ..
+            } => {
+                // Zipped rather than indexed: `wanted` has exactly one entry
+                // per page the record names, so an `unwrap_or(false)` would be
+                // a branch no input can take.
+                for (take, (page, image)) in wanted.iter().zip([
+                    (left, left_image),
+                    (right, right_image),
+                    (parent, parent_image),
+                ]) {
+                    if *take {
+                        self.put_image(page, image, lsn)?;
+                    }
+                }
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     /// Returns what the replay did.
@@ -712,6 +793,9 @@ impl<R: RowRedo> Redo for Applier<'_, R> {
 
     fn redo(&mut self, record: &Record<'_>, wanted: &[bool]) -> DbResult<()> {
         let lsn = record.lsn;
+        if self.images_only {
+            return self.redo_image(record, wanted, lsn);
+        }
         match record.body {
             Body::WritePage { page, image } => self.put_image(page, image, lsn)?,
             // An empty image means "re-run the compaction"; one that carries a

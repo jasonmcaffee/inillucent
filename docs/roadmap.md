@@ -85,27 +85,48 @@ install inillucent-cli` builds it from source in the meantime. Everything reacha
 machine is done; what is left is `packaging/macos/release-macos.sh --version <N> --upload` run on
 one, after which the Homebrew formula and the two npm platform packages that wait on it go live.
 
-## 6. Recovery can read a page before redo has had a chance to rewrite it
+## 6. Recovery reads a page before redo has had a chance to rewrite it
 
-Found while hardening a test for the free map checkpoint fix, not root caused further. Recovery
-reads page 4 and fails its checksum before the redo pass that would have rebuilt it ever runs, so a
-page the log could have repaired makes the whole open fail instead. Reproduced at cut 7 of
-`crates/inillucent-compat/tests/free_map_checkpoint_crash.rs` under `PRAGMA journal_mode = off`, with
-every checkpoint fix in place; it does not reproduce under the default `delete` journal, whose
-rollback journal repairs a torn page on its own.
+**Root cause named, and it is one level deeper than the hypothesis was.** The guess was a read on
+the open path, before the tolerant pass that repairs the catalog root. It is not: the read is inside
+redo itself. A logical row record changes a page by reading it - an `INSERT` into a leaf reads the
+leaf, adds the row and writes it back - so a crash that tore a page failed the replay at the
+**first** record naming that page, even when a later record in the same window carried the page
+whole. The window's end state was knowable and recovery refused the file anyway.
 
-It is the same shape `open_file`'s own comment describes for the catalog root: a page whose bytes
-fail their checksum before anything has replayed a record, at a point where recovery has not run
-and cannot run first, because its row decoder needs a shape that comes from the very read that is
-failing. The catalog root has a repair pass for exactly this circle. Page 4 is not the catalog root,
-so that pass does not reach it.
+It was found by naming every read in `open_file`. At cut 8 of
+`crates/inillucent-compat/tests/free_map_checkpoint_crash.rs`'s `journal_mode = off` sweep the
+refusal reads `replaying the log: page 4 checksum ... is not the computed ...`, and the three reads
+before redo - the bootstrap open, the catalog attach, the catalog read - are all named and none of
+them is it. Those names stay, because the next person asking this question should not have to
+instrument a build to answer it.
 
-`journal_mode = off` is documented to mean a torn checkpoint page is not recoverable at all, so part
-of this is that mode behaving as specified. What is not explained by that alone is the read
-happening before redo rather than after. Done means: the root cause named; every physical page
-image in the log applied before any page other than the meta page is read, so the catalog root's
-repair generalises to every page; and a test that tears page 4 with an image in the log and opens,
-beside one that tears it without and fails with the documented code.
+**The fix, and where it runs.** When the logical pass fails with a corruption code, every record in
+the window that carries a whole page image is applied - `WritePage`, a `CompactLeaf` that carries
+one, and a split's three pages - and the same pass runs again. The images need no catalog and no row
+decoder, which is what lets them go first. Re-running is sound because redo is idempotent on the
+page-LSN rule: a record the first attempt applied has stamped its pages with its own LSN, so the
+second attempt skips it. The free map's own read moved inside what the retry covers, because that
+page is a page like any other and it is the one a checkpoint rewrites every time.
+
+**On the failure and not before it, and that is measured rather than chosen.** Applying the images
+unconditionally makes `read_checkpointed_catalog` succeed where it used to fail, which flips the
+`repaired` flag and seeds the logical pass with the checkpoint-time catalog rather than the
+end-of-window one. `wal_crash`'s commit campaign priced that: the one cut of twenty-three that
+reaches the new state stopped reaching it. A committed transaction lost is a worse defect than the
+one being fixed.
+
+`crates/inillucent-compat/tests/torn_page_with_image.rs` is the pair the item asks for. A page the
+window carries whole **and** that a record reads is torn and the database opens, answering all 199
+rows; a page a record reads and no record carries is torn and the open refuses with
+`SQLITE_CORRUPT`, naming the page. Both pages are chosen by reading the log rather than by being
+named, so neither goes stale when the layout moves, and the fixture crashes rather than closing -
+closing checkpoints the log away and there would be no window to be about.
+
+`journal_mode = off` is documented to mean a torn checkpoint page is not recoverable at all, and
+cuts 8 to 18 of that sweep still refuse: the log holds no image for page 4 there, so there is
+nothing to rebuild it from. That is the mode behaving as specified, and it is what the second test
+asserts deliberately rather than by accident.
 
 ## 7. Two command line lines still reach past the driver
 

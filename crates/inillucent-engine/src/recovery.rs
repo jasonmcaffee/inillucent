@@ -112,8 +112,157 @@ fn resume_above_every_stamp(
 ///
 /// @param database - the file being opened
 fn read_checkpointed_catalog(database: &Database) -> DbResult<Vec<SchemaEntry>> {
-    let before = attach_catalog(database.pool(), database.catalog_root())?;
-    read_catalog(database.pool(), &before)
+    let before = attach_catalog(database.pool(), database.catalog_root()).map_err(|error| {
+        let said = error.detail().unwrap_or_default().to_string();
+        error.with_detail(format!("attaching the catalog before redo: {said}"))
+    })?;
+    read_catalog(database.pool(), &before).map_err(|error| {
+        let said = error.detail().unwrap_or_default().to_string();
+        error.with_detail(format!("reading the catalog before redo: {said}"))
+    })
+}
+
+/// Replays the log into the file, logically, and reports what it did.
+///
+/// Its own function because `open_file` runs it twice when the first attempt
+/// reports corruption: once as it stands, and once after every whole page image
+/// in the window has been applied. The catalog it is seeded with and its
+/// tolerance are the same both times, so the only difference between the two is
+/// that the pages the log describes are whole.
+///
+/// @param database - the file being opened
+/// @param vfs - the file system the log lives on
+/// @param db_path - the database file
+/// @param start - where in the log to replay from
+/// @param checkpointed - the catalog the row decoder is seeded with
+/// @param tolerant - whether a record naming an unknown tree is skipped
+fn replay(
+    database: &mut Database,
+    vfs: &std::sync::Arc<dyn inillucent_vfs::Vfs>,
+    db_path: &DbPath,
+    start: inillucent_wal::RecoveryStart,
+    checkpointed: &[SchemaEntry],
+    tolerant: bool,
+) -> DbResult<(
+    inillucent_wal::recover::Recovered,
+    Vec<inillucent_txn::redo::FreeMapChange>,
+)> {
+    let (outcome, changes) = {
+        let mut applier = inillucent_txn::redo::Applier::new(
+            database,
+            LearningRows::new_with_tolerance(checkpointed, tolerant),
+        );
+        let outcome = inillucent_wal::recover(vfs.as_ref(), db_path, start, &mut applier).map_err(
+            |error| {
+                let said = error.detail().unwrap_or_default().to_string();
+                error.with_detail(format!("replaying the log: {said}"))
+            },
+        )?;
+        (outcome, applier.free_map_changes().to_vec())
+    };
+    // **Inside this function rather than after it**, because the free map's own
+    // page is read here and it is a page like any other: a crash can tear it,
+    // and the log can hold it whole. Leaving it outside put it beyond the
+    // retry, so the one page a checkpoint rewrites on every checkpoint was the
+    // one page the repair could not reach (task-1962, roadmap item 6).
+    database.load_free_map().map_err(|error| {
+        let said = error.detail().unwrap_or_default().to_string();
+        error.with_detail(format!("reading the free map after redo: {said}"))
+    })?;
+    Ok((outcome, changes))
+}
+
+/// Replays the log, and repairs the pages it carries whole when the replay
+/// reports corruption.
+///
+/// Its own function rather than a block inside `open_file` because it is one
+/// decision with two outcomes, and `open_file` is already the longest function
+/// in this file.
+///
+/// @param database - the file being opened
+/// @param vfs - the file system the log lives on
+/// @param db_path - the database file
+/// @param start - where in the log to replay from
+/// @param checkpointed - the catalog the row decoder is seeded with
+/// @param tolerant - whether a record naming an unknown tree is skipped
+fn replay_with_repair(
+    database: &mut Database,
+    vfs: &std::sync::Arc<dyn inillucent_vfs::Vfs>,
+    db_path: &DbPath,
+    start: inillucent_wal::RecoveryStart,
+    checkpointed: &[SchemaEntry],
+    tolerant: bool,
+) -> DbResult<(
+    inillucent_wal::recover::Recovered,
+    Vec<inillucent_txn::redo::FreeMapChange>,
+)> {
+    // **The second pass is tolerant exactly when the first one had to run
+    // (task-1932, found by `reindex_crash.rs`).** The catalog it is seeded
+    // with was read *after* the repair pass replayed the whole window, so
+    // it is the catalog as at the END of the log, while the records it is
+    // about to replay run from the start of it. A tree that was superseded
+    // inside that window - which is what `REINDEX` and `CREATE INDEX` do,
+    // every rebuild allocating a fresh tree - is therefore named by no row
+    // this pass will ever see, and refusing its records failed the open
+    // outright:
+    //
+    // ```text
+    // bad parameter or other API misuse: the log names tree 2147483649,
+    // which this recovery was not told the shape of
+    // ```
+    //
+    // A database that had survived a crash during a `REINDEX` would not
+    // open at all. Skipping those records is right rather than merely
+    // convenient: the tree they name has been dropped by the end of the
+    // window, so replaying them would write pages nothing will ever read.
+    // When the checkpointed catalog was readable this stays strict, which
+    // is every ordinary open.
+    match replay(
+        database,
+        vfs,
+        db_path,
+        start.clone(),
+        checkpointed,
+        tolerant,
+    ) {
+        Ok(replayed) => Ok(replayed),
+        // **A page the log holds whole, torn, and read by a record that is
+        // not the one that would have fixed it (task-1962, roadmap item
+        // 6).** Redo reads the page a row record changes, so a crash that
+        // tore a page fails the replay at the first record naming it - even
+        // when a later record in the same window carries that page whole.
+        // The images need no catalog and no row decoder, so they can all go
+        // in first and the pass can be run again against a file the log has
+        // already made whole.
+        //
+        // **On the failure and not before it**, which is what keeps every
+        // other outcome the one it was. Running the images unconditionally
+        // makes `read_checkpointed_catalog` succeed where it used to fail,
+        // which flips `repaired` and seeds this pass with the
+        // checkpoint-time catalog rather than the end-of-window one - and
+        // `wal_crash`'s commit campaign measured the cost of that: the one
+        // cut of twenty-three that reaches the new state stopped reaching
+        // it. The repair belongs where the damage is reported.
+        //
+        // Re-running is sound because redo is idempotent on the page-LSN
+        // rule: every record the first attempt applied has stamped its
+        // pages with its own LSN, so the second attempt skips it.
+        Err(error) if error.code() == inillucent_base::error::PrimaryCode::Corrupt => {
+            {
+                let mut images = inillucent_txn::redo::Applier::images(
+                    database,
+                    LearningRows::new_tolerant(&[]),
+                );
+                inillucent_wal::recover(vfs.as_ref(), db_path, start.clone(), &mut images)
+                    .map_err(|why| {
+                        let said = why.detail().unwrap_or_default().to_string();
+                        why.with_detail(format!("applying the log's page images: {said}"))
+                    })?;
+            }
+            replay(database, vfs, db_path, start, checkpointed, tolerant)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Opens one database file, replays its log into it, and opens that log.
@@ -134,7 +283,11 @@ pub(crate) fn open_file(
     frames: usize,
     doubtful: &std::collections::BTreeSet<u64>,
 ) -> DbResult<OpenedFile> {
-    let database = Database::open_before_recovery(vfs.as_ref(), db_path, frames.max(64))?;
+    let database =
+        Database::open_before_recovery(vfs.as_ref(), db_path, frames.max(64)).map_err(|error| {
+            let said = error.detail().unwrap_or_default().to_string();
+            error.with_detail(format!("opening the file before redo: {said}"))
+        })?;
 
     // **Recovery.** The log is replayed into the file before anything is read
     // out of it, which is what makes this an open rather than a reader of
@@ -213,36 +366,8 @@ pub(crate) fn open_file(
             read_checkpointed_catalog(&database)?
         }
     };
-    let (outcome, free_map) = {
-        // **The second pass is tolerant exactly when the first one had to run
-        // (task-1932, found by `reindex_crash.rs`).** The catalog it is seeded
-        // with was read *after* the repair pass replayed the whole window, so
-        // it is the catalog as at the END of the log, while the records it is
-        // about to replay run from the start of it. A tree that was superseded
-        // inside that window - which is what `REINDEX` and `CREATE INDEX` do,
-        // every rebuild allocating a fresh tree - is therefore named by no row
-        // this pass will ever see, and refusing its records failed the open
-        // outright:
-        //
-        // ```text
-        // bad parameter or other API misuse: the log names tree 2147483649,
-        // which this recovery was not told the shape of
-        // ```
-        //
-        // A database that had survived a crash during a `REINDEX` would not
-        // open at all. Skipping those records is right rather than merely
-        // convenient: the tree they name has been dropped by the end of the
-        // window, so replaying them would write pages nothing will ever read.
-        // When the checkpointed catalog was readable this stays strict, which
-        // is every ordinary open.
-        let mut applier = inillucent_txn::redo::Applier::new(
-            &mut database,
-            LearningRows::new_with_tolerance(&checkpointed, repaired),
-        );
-        let outcome = inillucent_wal::recover(vfs.as_ref(), db_path, start, &mut applier)?;
-        (outcome, applier.free_map_changes().to_vec())
-    };
-    database.load_free_map()?;
+    let (outcome, free_map) =
+        replay_with_repair(&mut database, vfs, db_path, start, &checkpointed, repaired)?;
     // The free map is rebuilt after the scan rather than inside it: the map and
     // every page write are both behind `&mut Database`, and one record cannot
     // hold two mutable borrows of the same object.
@@ -293,7 +418,11 @@ pub(crate) fn open_file(
 
     // The catalog is read again, because recovery may have changed it: a
     // `CREATE TABLE` after the checkpoint is a row in this very tree.
-    let catalog_tree = attach_catalog(database.pool(), database.catalog_root())?;
+    let catalog_tree =
+        attach_catalog(database.pool(), database.catalog_root()).map_err(|error| {
+            let said = error.detail().unwrap_or_default().to_string();
+            error.with_detail(format!("attaching the catalog after redo: {said}"))
+        })?;
     Ok(OpenedFile {
         database,
         wal,
