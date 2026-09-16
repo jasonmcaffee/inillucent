@@ -14,21 +14,21 @@
 mod arm;
 mod corpus;
 mod embedcheck;
-mod http;
-mod llamacpp;
 mod engine;
 mod gradeembed;
+mod http;
+mod llamacpp;
 mod metrics;
 mod models;
 mod queryset;
 mod report;
 mod residency;
-mod scenarios;
 mod runs;
+mod scenarios;
 mod stats;
-mod tune;
 mod synth;
 mod truncation;
+mod tune;
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -46,7 +46,10 @@ const DEFAULT_DB: &str = "postgres://127.0.0.1:5433/inillucent_synth";
 const DEFAULT_MODEL_DIR: &str = "~/.cache/inillucent-models/nomic-embed-text-v1.5";
 
 #[derive(Parser)]
-#[command(name = "inillucent-bench", about = "Grade inillucent against postgres + pgvector")]
+#[command(
+    name = "inillucent-bench",
+    about = "Grade inillucent against postgres + pgvector"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -147,8 +150,14 @@ fn parse_endpoint_overrides(
             .split_once('=')
             .with_context(|| format!("--endpoint-for {pair} is not <model id>=<host:port>"))?;
         anyhow::ensure!(!model.is_empty(), "--endpoint-for {pair} names no model");
-        anyhow::ensure!(!endpoint.is_empty(), "--endpoint-for {pair} names no endpoint");
-        if map.insert(model.to_string(), endpoint.to_string()).is_some() {
+        anyhow::ensure!(
+            !endpoint.is_empty(),
+            "--endpoint-for {pair} names no endpoint"
+        );
+        if map
+            .insert(model.to_string(), endpoint.to_string())
+            .is_some()
+        {
             anyhow::bail!("--endpoint-for names {model} twice");
         }
     }
@@ -180,7 +189,10 @@ enum Command {
     SynthEmbed {
         #[arg(long, default_value = "corpus.jsonl")]
         corpus: PathBuf,
-        #[arg(long, default_value = "~/.cache/inillucent-models/nomic-embed-text-v1.5")]
+        #[arg(
+            long,
+            default_value = "~/.cache/inillucent-models/nomic-embed-text-v1.5"
+        )]
         model_dir: String,
         /// The weights file, used only when the model directory has no
         /// `model.json` and the directory is the baseline's.
@@ -651,7 +663,9 @@ fn parse_devices(text: &str) -> Result<Vec<Device>> {
 /// @param vector_weight - the weight on the vector side, ignored by `rrf`
 fn parse_fusion(name: &str, vector_weight: f32) -> Result<Fusion> {
     Ok(match name.trim().to_ascii_lowercase().as_str() {
-        "rrf" => Fusion::ReciprocalRank { k: inillucent_core::rank::RRF_K },
+        "rrf" => Fusion::ReciprocalRank {
+            k: inillucent_core::rank::RRF_K,
+        },
         "minmax" => Fusion::NormalizedScore { vector_weight },
         "convex" => Fusion::Convex { vector_weight },
         // Theoretical min-max. Scales each side by bounds the results had no say
@@ -671,7 +685,10 @@ fn parse_bools(text: &str) -> Result<Vec<bool>> {
         .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|s| s.parse::<bool>().map_err(|e| anyhow::anyhow!("{s} is not true or false: {e}")))
+        .map(|s| {
+            s.parse::<bool>()
+                .map_err(|e| anyhow::anyhow!("{s} is not true or false: {e}"))
+        })
         .collect::<Result<_>>()?;
     anyhow::ensure!(!values.is_empty(), "the list named no values");
     Ok(values)
@@ -685,7 +702,10 @@ fn parse_floats(text: &str) -> Result<Vec<f32>> {
         .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|s| s.parse::<f32>().map_err(|e| anyhow::anyhow!("{s} is not a number: {e}")))
+        .map(|s| {
+            s.parse::<f32>()
+                .map_err(|e| anyhow::anyhow!("{s} is not a number: {e}"))
+        })
         .collect::<Result<_>>()?;
     anyhow::ensure!(!values.is_empty(), "the list named no values");
     Ok(values)
@@ -704,7 +724,11 @@ fn parse_adaptive(text: &str) -> Result<Vec<AdaptiveWeights>> {
     for rule in text.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         let parts: Vec<f32> = rule
             .split(':')
-            .map(|p| p.trim().parse::<f32>().map_err(|e| anyhow::anyhow!("{p} is not a number: {e}")))
+            .map(|p| {
+                p.trim()
+                    .parse::<f32>()
+                    .map_err(|e| anyhow::anyhow!("{p} is not a number: {e}"))
+            })
             .collect::<Result<_>>()?;
         anyhow::ensure!(
             parts.len() == 4,
@@ -873,7 +897,11 @@ fn synth_embed(
         cache,
         &model,
         &scenarios::seeds(),
-        &arm::ArmOptions { batch_size: batch, device: devices[0], ..base.clone() },
+        &arm::ArmOptions {
+            batch_size: batch,
+            device: devices[0],
+            ..base.clone()
+        },
         report_every,
         &devices,
         window_batches,
@@ -882,11 +910,18 @@ fn synth_embed(
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    let models_root = cli.models_root.clone().unwrap_or_else(models::default_models_root);
+    let models_root = cli
+        .models_root
+        .clone()
+        .unwrap_or_else(models::default_models_root);
     // Before the match, which moves the command out of `cli`.
     let base = arm_options_for(&cli)?;
     match cli.command {
-        Command::SynthBuild { derived, out, scale } => {
+        Command::SynthBuild {
+            derived,
+            out,
+            scale,
+        } => {
             let derived = derived.unwrap_or_else(synth::default_derived_dir);
             let report = synth::build(&derived, &out, scale)?;
             eprintln!(
@@ -895,7 +930,10 @@ fn main() -> Result<()> {
                 report.documents,
                 out.display()
             );
-            eprintln!("{:<12} {:>7} {:>8} {:>7}", "source", "docs", "chunks", "mean");
+            eprintln!(
+                "{:<12} {:>7} {:>8} {:>7}",
+                "source", "docs", "chunks", "mean"
+            );
             for (source, docs, chunks, mean) in &report.per_source {
                 eprintln!("{source:<12} {docs:>7} {chunks:>8} {mean:>7}");
             }
@@ -907,7 +945,15 @@ fn main() -> Result<()> {
         Command::SynthCheck { corpus, per_source } => {
             synth::check(&corpus, per_source)?;
         }
-        Command::SynthEmbed { corpus, model_dir, model_file, batch, report_every, devices, window_batches } => {
+        Command::SynthEmbed {
+            corpus,
+            model_dir,
+            model_file,
+            batch,
+            report_every,
+            devices,
+            window_batches,
+        } => {
             synth_embed(
                 &corpus,
                 &cli.cache,
@@ -931,7 +977,12 @@ fn main() -> Result<()> {
             let json_path = out.unwrap_or_else(|| card.clone());
             write_card(&rescored, &json_path.with_extension("md"))?;
         }
-        Command::QueryTexts { from_cache, per_source, limit, out } => {
+        Command::QueryTexts {
+            from_cache,
+            per_source,
+            limit,
+            out,
+        } => {
             let total = gradeembed::write_query_texts(&from_cache, per_source, limit, &out)?;
             eprintln!("wrote {total} queries to {}", out.display());
         }
@@ -970,7 +1021,11 @@ fn main() -> Result<()> {
             );
             corpus::save_cache(&c, &cli.cache)?;
             let bytes = std::fs::metadata(&cli.cache)?.len();
-            eprintln!("cached {} ({:.1} MB)", cli.cache.display(), bytes as f64 / 1e6);
+            eprintln!(
+                "cached {} ({:.1} MB)",
+                cli.cache.display(),
+                bytes as f64 / 1e6
+            );
         }
         Command::Build { limit, quantized } => {
             let c = corpus::load_cache(&cli.cache)?;
@@ -991,13 +1046,21 @@ fn main() -> Result<()> {
             );
             drop(index);
         }
-        Command::Save { limit, quantized, dir } => {
+        Command::Save {
+            limit,
+            quantized,
+            dir,
+        } => {
             let c = corpus::load_cache(&cli.cache)?;
             let (index, _keys, stats, seconds) = scenarios::build_index(&c, limit, quantized)?;
             eprintln!("built {} chunks in {:.1}s", stats.chunks, seconds);
             let start = Instant::now();
             inillucent_core::persist::save(&index, &dir)?;
-            eprintln!("saved to {} in {:.1}s", dir.display(), start.elapsed().as_secs_f64());
+            eprintln!(
+                "saved to {} in {:.1}s",
+                dir.display(),
+                start.elapsed().as_secs_f64()
+            );
             let mut total = 0u64;
             for entry in std::fs::read_dir(&dir)? {
                 let entry = entry?;
@@ -1023,7 +1086,10 @@ fn main() -> Result<()> {
             let query = index.vectors().copy_of(7);
             for (label, filter) in [
                 ("no predicate", inillucent_core::filter::Filter::default()),
-                ("source = slack", inillucent_core::filter::Filter::source("slack")),
+                (
+                    "source = slack",
+                    inillucent_core::filter::Filter::source("slack"),
+                ),
             ] {
                 let compiled = index.compile(&filter);
                 let start = Instant::now();
@@ -1033,7 +1099,13 @@ fn main() -> Result<()> {
                 let lexical = index.lexical_search("offer eligibility rules", &compiled, 10);
                 let lexical_ms = start.elapsed().as_secs_f64() * 1000.0;
                 let start = Instant::now();
-                let hybrid = probe(index.hybrid_search("offer eligibility rules", &query, &compiled, 10, None));
+                let hybrid = probe(index.hybrid_search(
+                    "offer eligibility rules",
+                    &query,
+                    &compiled,
+                    10,
+                    None,
+                ));
                 let hybrid_ms = start.elapsed().as_secs_f64() * 1000.0;
                 eprintln!(
                     "  {label}: {} passing chunks, path {} | vector {} hits {:.2}ms | lexical {} hits {:.2}ms | hybrid {} hits {:.2}ms",
@@ -1048,7 +1120,13 @@ fn main() -> Result<()> {
                 );
             }
         }
-        Command::EmbedCheck { model_dir, model_file, samples, batch, device } => {
+        Command::EmbedCheck {
+            model_dir,
+            model_file,
+            samples,
+            batch,
+            device,
+        } => {
             let dir = model_dir.map(|d| expand_home(&d)).transpose()?;
             let c = corpus::load_cache(&cli.cache)?;
             embedcheck::run(
@@ -1106,7 +1184,20 @@ fn main() -> Result<()> {
                 .map(str::to_string)
                 .collect();
             anyhow::ensure!(!names.is_empty(), "--fusions named no method");
-            let settings = tune::build_settings(baseline, &tune::Sweep { coverages: &parse_floats(&coverages)?, weights: &parse_floats(&weights)?, proximities: &parse_floats(&proximities)?, prefixes: &parse_bools(&prefixes)?, tiers: &parse_bools(&tiers)?, phrases: &parse_floats(&phrases)?, fusions: &names, mmrs: &parse_floats(&mmrs)?, adaptive: &parse_adaptive(&adaptive)? });
+            let settings = tune::build_settings(
+                baseline,
+                &tune::Sweep {
+                    coverages: &parse_floats(&coverages)?,
+                    weights: &parse_floats(&weights)?,
+                    proximities: &parse_floats(&proximities)?,
+                    prefixes: &parse_bools(&prefixes)?,
+                    tiers: &parse_bools(&tiers)?,
+                    phrases: &parse_floats(&phrases)?,
+                    fusions: &names,
+                    mmrs: &parse_floats(&mmrs)?,
+                    adaptive: &parse_adaptive(&adaptive)?,
+                },
+            );
             let model = models::resolve_dir(std::path::Path::new(&dir), &model_file)?;
             tune::run(
                 &c,
@@ -1149,7 +1240,10 @@ fn main() -> Result<()> {
             let options = scenarios::GradeOptions {
                 limit,
                 per_source,
-                arm_options: arm::ArmOptions { device: Device::parse(&device)?, ..base.clone() },
+                arm_options: arm::ArmOptions {
+                    device: Device::parse(&device)?,
+                    ..base.clone()
+                },
                 model: models::resolve_dir(std::path::Path::new(&dir), &model_file)?,
                 database_url: cli.database_url.clone(),
                 inillucent_only,
@@ -1230,11 +1324,18 @@ fn main() -> Result<()> {
                 abstention,
                 lexical,
                 cost_samples,
-                cost_devices: if cost { parse_devices(&cost_devices)? } else { Vec::new() },
+                cost_devices: if cost {
+                    parse_devices(&cost_devices)?
+                } else {
+                    Vec::new()
+                },
                 cost_repeats,
                 matryoshka_chunks,
                 query_vectors: parse_query_vectors(&query_vectors)?,
-                arm_options: arm::ArmOptions { device: Device::parse(&device)?, ..base.clone() },
+                arm_options: arm::ArmOptions {
+                    device: Device::parse(&device)?,
+                    ..base.clone()
+                },
             };
             let card = gradeembed::run(&options)?;
             write_card(&card, &out)?;
@@ -1275,8 +1376,7 @@ fn main() -> Result<()> {
             let start = Instant::now();
             let vectors = if as_queries {
                 let prefix = &model.manifest.prefixes.query;
-                let prefixed: Vec<String> =
-                    texts.iter().map(|t| format!("{prefix}{t}")).collect();
+                let prefixed: Vec<String> = texts.iter().map(|t| format!("{prefix}{t}")).collect();
                 embedder.embed_prefixed(&prefixed)?
             } else {
                 embedder.embed_documents(&texts)?
@@ -1316,7 +1416,11 @@ fn main() -> Result<()> {
                 }
             }
             vector_file.flush()?;
-            eprintln!("wrote {} and {}", texts_out.display(), vectors_out.display());
+            eprintln!(
+                "wrote {} and {}",
+                texts_out.display(),
+                vectors_out.display()
+            );
         }
         Command::EmbedResidency {
             model_dir,
@@ -1359,8 +1463,14 @@ fn main() -> Result<()> {
                 corpus::short(&before),
                 corpus::short(&model.digest())
             );
-            eprintln!("  weights   {} {}", model.manifest.model_file, model.manifest.weights_sha256);
-            eprintln!("  tokenizer tokenizer.json {}", model.manifest.tokenizer_sha256);
+            eprintln!(
+                "  weights   {} {}",
+                model.manifest.model_file, model.manifest.weights_sha256
+            );
+            eprintln!(
+                "  tokenizer tokenizer.json {}",
+                model.manifest.tokenizer_sha256
+            );
             eprintln!("  manifest  {}", model.digest());
         }
     }

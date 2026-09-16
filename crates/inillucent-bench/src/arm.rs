@@ -106,7 +106,9 @@ impl ArmOptions {
     /// card with one GGUF arm needs no override at all and a card with three names each.
     /// @param model_id - the model's id, as its manifest declares it
     pub fn endpoint_for(&self, model_id: &str) -> &str {
-        self.endpoint_overrides.get(model_id).map_or(self.endpoint.as_str(), |e| e.as_str())
+        self.endpoint_overrides
+            .get(model_id)
+            .map_or(self.endpoint.as_str(), |e| e.as_str())
     }
 }
 
@@ -197,7 +199,9 @@ fn split_endpoint(endpoint: &str) -> Result<(String, u16)> {
     let (host, port) = endpoint
         .rsplit_once(':')
         .with_context(|| format!("{endpoint} is not host:port"))?;
-    let port: u16 = port.parse().with_context(|| format!("{port} is not a port"))?;
+    let port: u16 = port
+        .parse()
+        .with_context(|| format!("{port} is not a port"))?;
     anyhow::ensure!(!host.is_empty(), "{endpoint} names no host");
     Ok((host.to_string(), port))
 }
@@ -208,8 +212,14 @@ mod tests {
 
     #[test]
     fn an_endpoint_splits_into_a_host_and_a_port() {
-        assert_eq!(split_endpoint("127.0.0.1:8189").unwrap(), ("127.0.0.1".into(), 8189));
-        assert_eq!(split_endpoint("localhost:1").unwrap(), ("localhost".into(), 1));
+        assert_eq!(
+            split_endpoint("127.0.0.1:8189").unwrap(),
+            ("127.0.0.1".into(), 8189)
+        );
+        assert_eq!(
+            split_endpoint("localhost:1").unwrap(),
+            ("localhost".into(), 1)
+        );
     }
 
     #[test]
@@ -225,7 +235,9 @@ mod tests {
     #[test]
     fn the_default_llama_port_is_not_nikayas() {
         assert_ne!(DEFAULT_LLAMA_PORT, 8087);
-        assert!(ArmOptions::default().endpoint.ends_with(&DEFAULT_LLAMA_PORT.to_string()));
+        assert!(ArmOptions::default()
+            .endpoint
+            .ends_with(&DEFAULT_LLAMA_PORT.to_string()));
     }
 
     /// Gate C1(a) compares three GGUF arms - the student's q8_0 against v2-moe's f16
@@ -237,9 +249,16 @@ mod tests {
     fn each_model_can_name_its_own_server() {
         let mut options = ArmOptions::default();
         options.endpoint = "127.0.0.1:8189".into();
-        options.endpoint_overrides.insert("v2moe-q8".into(), "127.0.0.1:8190".into());
-        options.endpoint_overrides.insert("student-q8".into(), "127.0.0.1:8191".into());
-        assert_eq!(options.endpoint_for("nomic-embed-text-v2-moe"), "127.0.0.1:8189");
+        options
+            .endpoint_overrides
+            .insert("v2moe-q8".into(), "127.0.0.1:8190".into());
+        options
+            .endpoint_overrides
+            .insert("student-q8".into(), "127.0.0.1:8191".into());
+        assert_eq!(
+            options.endpoint_for("nomic-embed-text-v2-moe"),
+            "127.0.0.1:8189"
+        );
         assert_eq!(options.endpoint_for("v2moe-q8"), "127.0.0.1:8190");
         assert_eq!(options.endpoint_for("student-q8"), "127.0.0.1:8191");
     }
@@ -249,9 +268,16 @@ mod tests {
     #[test]
     fn an_overridden_endpoint_is_still_split_into_a_host_and_a_port() {
         let mut options = ArmOptions::default();
-        options.endpoint_overrides.insert("student-q8".into(), "127.0.0.1:8191".into());
-        assert_eq!(split_endpoint(options.endpoint_for("student-q8")).unwrap(), ("127.0.0.1".into(), 8191));
-        options.endpoint_overrides.insert("broken".into(), "127.0.0.1".into());
+        options
+            .endpoint_overrides
+            .insert("student-q8".into(), "127.0.0.1:8191".into());
+        assert_eq!(
+            split_endpoint(options.endpoint_for("student-q8")).unwrap(),
+            ("127.0.0.1".into(), 8191)
+        );
+        options
+            .endpoint_overrides
+            .insert("broken".into(), "127.0.0.1".into());
         assert!(split_endpoint(options.endpoint_for("broken")).is_err());
     }
 

@@ -42,8 +42,10 @@ pub fn count_truncated(
     // recorded 664 truncated chunks, 0.36 per cent, because its embedding run was resumed
     // four times and the header kept the last process's counter. The corpus figure is 4,299,
     // 2.32 per cent - six times larger, and the number gate C3 is read from.
-    let texts: Vec<String> =
-        chunks.iter().map(|c| sanitize_for_model(&c.content)).collect();
+    let texts: Vec<String> = chunks
+        .iter()
+        .map(|c| sanitize_for_model(&c.content))
+        .collect();
     Ok(count_truncation(model_dir, manifest, &texts)?.truncated)
 }
 
@@ -118,32 +120,40 @@ mod tests {
         let path = dir.to_string_lossy().to_string();
 
         // Three short chunks and two over a four token bound.
-        let chunks: Vec<SynthChunk> = ["alpha beta", "alpha", "beta beta",
-            "alpha beta alpha beta alpha", "beta alpha beta alpha beta alpha"]
-            .iter()
-            .enumerate()
-            .map(|(i, text)| SynthChunk {
-                doc_id: i as i64,
-                source: "test".to_string(),
-                chunk_index: 0,
-                heading_path: Vec::new(),
-                content: (*text).to_string(),
-                title: String::new(),
-                url: String::new(),
-                space_key: None,
-                author: None,
-                author_id: None,
-                updated_at: None,
-                labels: Vec::new(),
-                deleted: false,
-            })
-            .collect();
+        let chunks: Vec<SynthChunk> = [
+            "alpha beta",
+            "alpha",
+            "beta beta",
+            "alpha beta alpha beta alpha",
+            "beta alpha beta alpha beta alpha",
+        ]
+        .iter()
+        .enumerate()
+        .map(|(i, text)| SynthChunk {
+            doc_id: i as i64,
+            source: "test".to_string(),
+            chunk_index: 0,
+            heading_path: Vec::new(),
+            content: (*text).to_string(),
+            title: String::new(),
+            url: String::new(),
+            space_key: None,
+            author: None,
+            author_id: None,
+            updated_at: None,
+            labels: Vec::new(),
+            deleted: false,
+        })
+        .collect();
 
         let served = count_truncated(&path, &counting_manifest(Backend::LlamaCpp, 4), &chunks)
             .expect("counting a served arm");
         let loaded = count_truncated(&path, &counting_manifest(Backend::Onnx, 4), &chunks)
             .expect("counting a loaded arm");
-        assert_eq!(loaded, 2, "two of the five chunks are over a four token bound");
+        assert_eq!(
+            loaded, 2,
+            "two of the five chunks are over a four token bound"
+        );
         assert_eq!(
             served, loaded,
             "a served arm has the same tokenizer and must reach the same count: \

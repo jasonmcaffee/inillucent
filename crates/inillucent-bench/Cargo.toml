@@ -30,3 +30,12 @@ rand.workspace = true
 # The served arm counts tokens with the model own tokenizer rather than through
 # the server one text at a time; see llamacpp.rs.
 tokenizers.workspace = true
+
+[dev-dependencies]
+# The one skip helper, `inillucent_base::testing::skipping`.
+#
+# **A dev-dependency, so the feature is on for this crate's test targets and
+# off in a shipped build (task-1969, 4.6).** The skip sites this crate used to
+# print itself were invisible to `inillucent-testrun --strict`, which reads the
+# panic rather than the phrase.
+inillucent-base = { workspace = true, features = ["testing"] }

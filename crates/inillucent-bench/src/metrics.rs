@@ -16,11 +16,7 @@ pub fn recall_at_k(returned: &[u32], reference: &[u32], k: usize) -> f32 {
     if want.is_empty() {
         return 1.0;
     }
-    let got = returned
-        .iter()
-        .take(k)
-        .filter(|c| want.contains(c))
-        .count();
+    let got = returned.iter().take(k).filter(|c| want.contains(c)).count();
     got as f32 / want.len() as f32
 }
 
@@ -100,7 +96,11 @@ pub fn precision_at_k(returned: &[u32], correct: &HashSet<u32>, k: usize) -> f32
     if considered == 0 {
         return 0.0;
     }
-    let hits = returned.iter().take(k).filter(|c| correct.contains(c)).count();
+    let hits = returned
+        .iter()
+        .take(k)
+        .filter(|c| correct.contains(c))
+        .count();
     // The denominator is what was returned rather than `k`, so a query whose
     // filter admits only three chunks is not scored as 70% wrong for returning
     // the three that exist.
@@ -153,7 +153,11 @@ pub fn ndcg_graded_at_k(
     }
     ideal_grades.sort_unstable_by(|a, b| b.cmp(a));
     ideal_grades.truncate(k.min(attainable.max(1)));
-    let ideal: f64 = ideal_grades.iter().enumerate().map(|(i, g)| gain(*g) * discount(i)).sum();
+    let ideal: f64 = ideal_grades
+        .iter()
+        .enumerate()
+        .map(|(i, g)| gain(*g) * discount(i))
+        .sum();
     if ideal == 0.0 {
         return 0.0;
     }
@@ -170,18 +174,20 @@ pub fn ndcg_graded_at_k(
 /// @param grades - relevance grade per chunk
 /// @param k - the cutoff
 /// @param floor - the lowest grade that counts as required evidence
-pub fn graded_recall_at_k(
-    returned: &[u32],
-    grades: &HashMap<u32, u8>,
-    k: usize,
-    floor: u8,
-) -> f32 {
-    let required: HashSet<u32> =
-        grades.iter().filter(|(_, g)| **g >= floor).map(|(c, _)| *c).collect();
+pub fn graded_recall_at_k(returned: &[u32], grades: &HashMap<u32, u8>, k: usize, floor: u8) -> f32 {
+    let required: HashSet<u32> = grades
+        .iter()
+        .filter(|(_, g)| **g >= floor)
+        .map(|(c, _)| *c)
+        .collect();
     if required.is_empty() {
         return 1.0;
     }
-    let found = returned.iter().take(k).filter(|c| required.contains(c)).count();
+    let found = returned
+        .iter()
+        .take(k)
+        .filter(|c| required.contains(c))
+        .count();
     found as f32 / required.len() as f32
 }
 
@@ -292,7 +298,10 @@ mod tests {
         let uncapped = ndcg_at_k(&returned, &correct, 10);
         let capped = ndcg_at_k_attainable(&returned, &correct, 10, 2);
         assert!(uncapped < 0.5, "uncapped nDCG should look bad: {uncapped}");
-        assert!((capped - 1.0).abs() < 1e-6, "capped nDCG should be perfect: {capped}");
+        assert!(
+            (capped - 1.0).abs() < 1e-6,
+            "capped nDCG should be perfect: {capped}"
+        );
     }
 
     #[test]
@@ -361,12 +370,18 @@ mod tests {
         let g = graded(&[(1, 3), (2, 2), (3, 1)]);
         let answer_first = ndcg_graded_at_k(&[1, 2, 9], &g, 10, 2);
         let related_first = ndcg_graded_at_k(&[3, 1, 9], &g, 10, 2);
-        assert!(answer_first > related_first, "{answer_first} vs {related_first}");
+        assert!(
+            answer_first > related_first,
+            "{answer_first} vs {related_first}"
+        );
 
         // The binary metric cannot tell them apart: both put a correct chunk in
         // the list and both put one at rank one.
         let correct = set(&[1, 2, 3]);
-        assert_eq!(success_at_k(&[1, 2, 9], &correct, 1), success_at_k(&[3, 1, 9], &correct, 1));
+        assert_eq!(
+            success_at_k(&[1, 2, 9], &correct, 1),
+            success_at_k(&[3, 1, 9], &correct, 1)
+        );
     }
 
     #[test]
@@ -398,7 +413,11 @@ mod tests {
         let g = graded(&[(1, 3), (2, 3), (5, 1)]);
         assert_eq!(graded_recall_at_k(&[1, 9, 8], &g, 10, 3), 0.5);
         assert_eq!(graded_recall_at_k(&[1, 2, 9], &g, 10, 3), 1.0);
-        assert_eq!(success_at_k(&[1, 9, 8], &set(&[1, 2]), 10), 1.0, "success calls half an answer complete");
+        assert_eq!(
+            success_at_k(&[1, 9, 8], &set(&[1, 2]), 10),
+            1.0,
+            "success calls half an answer complete"
+        );
     }
 
     #[test]
@@ -406,5 +425,4 @@ mod tests {
         let g = graded(&[(1, 3), (5, 1)]);
         assert_eq!(graded_recall_at_k(&[1], &g, 10, 3), 1.0);
     }
-
 }

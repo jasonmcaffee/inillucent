@@ -134,7 +134,11 @@ impl RunWriter {
         fs::create_dir_all(&dir)
             .with_context(|| format!("creating the run directory {}", dir.display()))?;
         let per_query = BufWriter::new(File::create(dir.join("per-query.jsonl"))?);
-        Ok(RunWriter { dir, per_query, written: 0 })
+        Ok(RunWriter {
+            dir,
+            per_query,
+            written: 0,
+        })
     }
 
     /// Append one engine's answer to one query.
@@ -198,16 +202,22 @@ pub fn git_revision(repo: &Path) -> (String, bool) {
         Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
     };
     let commit = run(&["rev-parse", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
-    let dirty = run(&["status", "--porcelain"]).map(|s| !s.is_empty()).unwrap_or(false);
+    let dirty = run(&["status", "--porcelain"])
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
     (commit, dirty)
 }
 
 /// A connection string with its password removed, for a file people share.
 pub fn redact(url: &str) -> String {
     // postgres://user:secret@host/db -> postgres://user:***@host/db
-    let Some(scheme_end) = url.find("://") else { return url.to_string() };
+    let Some(scheme_end) = url.find("://") else {
+        return url.to_string();
+    };
     let (scheme, rest) = url.split_at(scheme_end + 3);
-    let Some(at) = rest.find('@') else { return url.to_string() };
+    let Some(at) = rest.find('@') else {
+        return url.to_string();
+    };
     let (credentials, host) = rest.split_at(at);
     match credentials.split_once(':') {
         Some((user, _)) => format!("{scheme}{user}:***{host}"),
@@ -338,7 +348,9 @@ pub fn host_facts() -> HostFacts {
     HostFacts {
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
-        logical_cpus: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0),
+        logical_cpus: std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(0),
     }
 }
 
@@ -435,7 +447,12 @@ mod tests {
             answerable: true,
             latency_ms: 1.5,
             returned: 2,
-            hits: vec![HitRecord { rank: 1, key: "7#0".into(), score: 0.9, grade: 3 }],
+            hits: vec![HitRecord {
+                rank: 1,
+                key: "7#0".into(),
+                score: 0.9,
+                grade: 3,
+            }],
             metrics: [("ndcg@10".to_string(), 1.0)].into_iter().collect(),
         })
         .unwrap();
@@ -484,10 +501,13 @@ mod tests {
 
         let lines = fs::read_to_string(dir.join("per-query.jsonl")).unwrap();
         assert_eq!(lines.lines().count(), 1);
-        let parsed: serde_json::Value = serde_json::from_str(lines.lines().next().unwrap()).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(lines.lines().next().unwrap()).unwrap();
         assert_eq!(parsed["engine"], "inillucent");
         assert_eq!(parsed["hits"][0]["grade"], 3);
-        assert!(fs::read_to_string(dir.join("manifest.json")).unwrap().contains("test-run"));
+        assert!(fs::read_to_string(dir.join("manifest.json"))
+            .unwrap()
+            .contains("test-run"));
         fs::remove_dir_all(&root).ok();
     }
 }
