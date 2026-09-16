@@ -122,9 +122,9 @@ sha256 = "83e11e769024aad6ed3366f014bde3165bf0d6bcc3b84aacb5dbbf8a9d152fa8"
 
 [[amendment]]
 path = "crates/inillucent-core/Cargo.toml"
-ticket = "task-1953"
-reason = "task-1946 M6: the only crate in the workspace with no license, description, repository, readme or lints - which cargo deny reports as error[unlicensed] - and the one most likely to be depended on alone. It gains the five lines its siblings have, plus rust-version.workspace, which is 1.88 and was measured rather than guessed."
-sha256 = "a7b4b859b0e71417c09e4c9dfe56de7a1cb60d8e5b7d654a4f86a455dea546b2"
+ticket = "task-1970"
+reason = "the inillucent-base dev-dependency with its testing feature, so this crate's #[cfg(test)] modules can call the one skip helper (task-1969, 4.6)"
+sha256 = "d1da91d63e66a610e07d5e9c8d0e05362851e95db760882fe90027c25cde954f"
 
 [[amendment]]
 path = "crates/inillucent-core/src/binio.rs"
@@ -152,9 +152,9 @@ sha256 = "3f8c9918845848bba6c58be46c3b9c47a97f72ad4847bdfb707c1091cae10ccb"
 
 [[amendment]]
 path = "crates/inillucent-core/src/embed_onnx.rs"
-ticket = "task-1953"
-reason = "task-1946 H7, H10 and M8: the ONNX test's own model lookup held the same hard-coded drive letter and now reads INILLUCENT_MODEL_ROOTS; both of its ways out say '; skipping' instead of returning None in silence, which is what made five tests report green on a machine with no weights; one doc link and one warning string with eighteen spaces in it."
-sha256 = "1942f73b190969b9a3060404075f8b4bbfa7999c53eeb3dbba687b30bcb31557"
+ticket = "task-1970"
+reason = "six eprintln skips became inillucent_base::testing::skipping, which panics under INILLUCENT_STRICT so the strict runner can see them (task-1969, 4.6)"
+sha256 = "80e692f01f2f2e142813c733db563036ca2a7152d293d69d6594454bebfc9885"
 
 [[amendment]]
 path = "crates/inillucent-core/src/filter.rs"
@@ -218,9 +218,9 @@ sha256 = "022f1fe51faf8019de7517920c0d00798c2121dd873b2f9a18f7b8dbec44e7c4"
 
 [[amendment]]
 path = "crates/inillucent-core/src/residency.rs"
-ticket = "task-1953"
-reason = "task-1946 H10: managed_or_skip returned None through a ? when no model was installed, so five tests in this module reported green on a machine with no weights and said nothing at all. Both ways out now print the reason with the '; skipping' suffix the strict runner counts."
-sha256 = "1c490cc65c6e3df6b60a20c44d84b5b524c4f7055534f131c3bc0d997ebec242"
+ticket = "task-1970"
+reason = "the same change to the one skip in this file (task-1969, 4.6)"
+sha256 = "351e16ab8fd9c30bc60c22f2d1e5446db8578d3502edd9ed30927b57fcf943b8"
 
 [[amendment]]
 path = "crates/inillucent-core/src/store.rs"
