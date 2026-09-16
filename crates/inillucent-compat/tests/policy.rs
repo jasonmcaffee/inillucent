@@ -2126,7 +2126,7 @@ fn mentions_of(text: &str, name: &str) -> usize {
 /// A function that falls under 150 lines loses its row rather than keeping a
 /// lowered one: the list is what is over the threshold, and a row on a short
 /// function is a hole the width of its old number. Seven left in task-1962 A8.
-const FUNCTION_CEILINGS: [(&str, &str, usize); 59] = [
+const FUNCTION_CEILINGS: [(&str, &str, usize); 61] = [
     // 531 before task-1946 H6 moved the card's four path rows into
     // `runs::note_inputs` and `runs::note_run_files`.
     // 527 until task-1970's `cargo fmt --all` reflowed this crate to 588. The whitespace-stripped
@@ -2138,11 +2138,18 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 59] = [
         "open_on",
         160,
     ),
-    ("crates/inillucent-bench/src/main.rs", "main", 488),
+    // 488 until task-1970's `cargo fmt --all` reflowed this crate to 568. Not growth: with all
+    // whitespace stripped this function gains 9 commas and its identifiers are unchanged
+    // character for character (task-1966).
+    ("crates/inillucent-bench/src/main.rs", "main", 568),
     ("crates/inillucent-compat/src/perf.rs", "plan_for", 450),
     // 445 until the same formatting pass took it to 537. It sat exactly at its ceiling before,
     // which is why a reflow broke it (task-1966).
     ("crates/inillucent-bench/src/scenarios.rs", "grade", 537),
+    // Not on this list before the formatting pass: it was 148 lines and the limit for an
+    // unrecorded function is 150. Reflow took it to 160, adding 4 commas with its identifiers
+    // unchanged. Recorded rather than split, because the code did not change (task-1966).
+    ("crates/inillucent-bench/src/scenarios.rs", "filtered_vector", 160),
     ("crates/inillucent-compat/src/bin/fullgate.rs", "run", 389),
     ("crates/inillucent-compat/src/bin/readgate.rs", "run", 370),
     ("crates/inillucent-compat/src/bin/writegate.rs", "run", 318),
@@ -2150,14 +2157,18 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 59] = [
     ("crates/inillucent-engine/src/ddl.rs", "run_directive", 273),
     ("crates/inillucent-tree/src/paged/skip.rs", "skip_scan", 249),
     ("crates/inillucent-sql/src/bind.rs", "bind_call_with", 248),
-    ("crates/inillucent-bench/src/synth.rs", "build_source", 243),
+    // 243 until the same pass took it to 275: 4 commas, identifiers unchanged, and it also sat
+    // exactly at its ceiling (task-1966).
+    ("crates/inillucent-bench/src/synth.rs", "build_source", 275),
     ("crates/inillucent-exec/src/expr/tree.rs", "compile", 242),
     (
         "crates/inillucent-tree/src/leaf/encode.rs",
         "encode_rows_with",
         239,
     ),
-    ("crates/inillucent-bench/src/report.rs", "render", 238),
+    // 238 until the same pass took it to 258: one comma added, identifiers unchanged. It sat
+    // exactly at its ceiling, which is why a reflow broke it (task-1966).
+    ("crates/inillucent-bench/src/report.rs", "render", 258),
     (
         "crates/inillucent-compat/src/bin/readperf.rs",
         "measure",
@@ -2195,7 +2206,11 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 59] = [
         "update_at_cached",
         219,
     ),
-    ("crates/inillucent-bench/src/synth.rs", "check", 214),
+    // 214 until the same pass took it to 230, and this is the clearest case in the crate:
+    // whitespace-stripped it is 7,235 characters before and 7,235 after, with no punctuation
+    // added at all. Sixteen more lines holding character-for-character identical code, which is
+    // what a line ceiling cannot tell apart from growth on its own (task-1966).
+    ("crates/inillucent-bench/src/synth.rs", "check", 230),
     ("crates/inillucent-model/tests/campaign.rs", "segment", 213),
     // The group name in front of the fields it reads, from task-1962 A1
     // step 2; the formatter then wraps what it used to fit on one line.
@@ -2269,7 +2284,12 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 59] = [
     ("crates/inillucent-sql/src/plan.rs", "index_candidate", 167),
     ("crates/inillucent-compat/src/bin/testrun.rs", "report", 164),
     ("crates/inillucent-compat/src/bin/planperf.rs", "run", 163),
-    ("crates/inillucent-bench/src/synth.rs", "build", 163),
+    // 163 until the same pass took it to 179: two commas, identifiers unchanged, and it sat
+    // exactly at its ceiling (task-1966).
+    ("crates/inillucent-bench/src/synth.rs", "build", 179),
+    // New to this list for the same reason: 135 lines before the formatting pass and 158 after,
+    // two commas added, identifiers unchanged (task-1966).
+    ("crates/inillucent-bench/src/synth.rs", "embed", 158),
     (
         "crates/inillucent-engine/src/vtab.rs",
         "create_virtual_table",
