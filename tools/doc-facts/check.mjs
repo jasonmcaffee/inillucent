@@ -518,7 +518,37 @@ function privateRepositorySentencesAgree() {
  * `docs/repository.md` names the same three, and a fourth name here without a line there is the
  * drift this list exists to stop.
  */
-const OPTIONAL_PREREQUISITES = ['postgres', 'mysql', 'INILLUCENT_NETWORK_TESTS', 'onnx'];
+/**
+ * The prerequisites a strict run may name without that being a failure of the run.
+ *
+ * **Read out of `tests/selection.toml` rather than written here (task-1969, 4.15).** This was
+ * `['postgres', 'mysql', 'INILLUCENT_NETWORK_TESTS', 'onnx']`, the four values the map happened to
+ * hold when it was written - so the same census that took the map from 9 prerequisite values to 19
+ * would have turned every newly declared absence into "it exited 1 for a prerequisite that is not
+ * optional". The list and the thing it describes were the same list twice, and one of them went
+ * stale the moment the other grew.
+ *
+ * What it is for is unchanged: a strict run exits non-zero when it names a hollow suite, and a
+ * hollow suite whose prerequisite the map declares is the documented condition rather than a
+ * defect. A prerequisite the map does *not* declare is still a failure, which is what makes this a
+ * check rather than a blanket permission - and `selection.rs`'s
+ * `every_target_that_can_skip_declares_it_and_vice_versa` is what keeps the map equal to the
+ * suites.
+ *
+ * `INILLUCENT_NETWORK_TESTS` is kept beside the map's values: the runner names the environment
+ * variable rather than the `network` the row declares, and the two are the same condition.
+ */
+function optionalPrerequisites() {
+  const file = path.join(ROOT, 'tests', 'selection.toml');
+  if (!fs.existsSync(file)) return ['INILLUCENT_NETWORK_TESTS'];
+  const declared = new Set(['INILLUCENT_NETWORK_TESTS']);
+  for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
+    const found = /^requires = \[(.*)\]$/.exec(line.trim());
+    if (!found) continue;
+    for (const value of found[1].matchAll(/"([^"]+)"/g)) declared.add(value[1]);
+  }
+  return [...declared];
+}
 
 /**
  * Runs the test runner, for the test and target counts.
@@ -613,8 +643,9 @@ export function judgeTestRun(outcome) {
     problems.push(`it said ${result.declaredWithoutPrerequisite} suite(s) had no prerequisite and this could read ${result.missingPrerequisites.length} of them`);
   }
   if (outcome.status !== 0) {
+    const allowed = optionalPrerequisites();
     const unexplained = result.missingPrerequisites.filter(
-      (row) => !OPTIONAL_PREREQUISITES.some((allowed) => row.needs.includes(allowed)),
+      (row) => !allowed.some((named) => row.needs.includes(named)),
     );
     if (result.missingPrerequisites.length === 0) {
       problems.push(`it exited ${outcome.status} and named no missing prerequisite to explain it`);
