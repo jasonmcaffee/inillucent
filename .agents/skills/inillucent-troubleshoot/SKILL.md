@@ -30,8 +30,9 @@ capability that fails and a denied one that now works each turn the build red â€
 trusting in a way a hand-written feature list is not. **A name that is not in the table answers
 *no***, because a capability nobody declared was never checked.
 
-`docs/feature-comparison.md` is the measured side-by-side against SQLite: 416 differential cases, 409 in
-agreement, and every one of the seven differences named with what it measures.
+`docs/feature-comparison.md` is the measured side-by-side against SQLite: 416 differential cases, 403 of
+which produce SQLite's exact bytes, and every one of the differences named with what it measures. Six
+of the other thirteen are vector features SQLite does not have and seven answer differently.
 
 ## "It refuses to write the file"
 

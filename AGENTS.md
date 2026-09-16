@@ -45,9 +45,13 @@ inillucent help migrate         # one command, every parameter
    MCP the same thing is the status `unsupported`. Do not treat it as a syntax error and start
    rewording your SQL — it will not help.
 2. **Ask before you compose.** `inillucent capabilities` enumerates what the engine does, and every
-   row is checked against the running engine by a test **in both directions** — a claimed capability
-   that fails and a denied one that now works each turn the build red. That makes it worth trusting
-   in a way a hand-written feature list is not.
+   row but two is checked against the running engine by a test **in both directions** — a claimed
+   capability that fails and a denied one that now works each turn the build red. That makes it
+   worth trusting in a way a hand-written feature list is not. The two exceptions are `cancel` and
+   `readonly_open`, both `partial`: what they claim is about *when* a statement stops and *which
+   layer* refuses a write, and neither is a thing one statement can be run to find out. Each says so
+   in its own note, and `cargo test -p inillucent-driver --test capability` fails if a third joins
+   them without this sentence changing.
 3. **`--output json` on any command** gives the same object a language binding sees: typed values, an
    exact `total` independent of `--limit`, and the driver's own status name on a failure. Parse that
    rather than the aligned table.

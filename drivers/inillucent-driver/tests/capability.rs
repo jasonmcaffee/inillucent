@@ -283,3 +283,48 @@ fn an_unimplemented_construct_refuses_by_name_and_a_typo_does_not() {
     drop(database);
     let _ = std::fs::remove_file(&path);
 }
+
+/// The number of rows the two-direction check skips is the number AGENTS.md
+/// states.
+///
+/// **AGENTS.md said "every row" and two rows had no probe (task-1969, 5.9).**
+/// `Probe::Nothing` rows are skipped by
+/// [`the_capability_table_matches_the_engine`] in both directions, so they are
+/// exactly the claims the page's own argument does not cover - and the page was
+/// the thing telling a reader to trust the table over a hand-written list.
+///
+/// Either the number is zero or the page names it. It is two, the page names
+/// them, and this is what stops a third being added quietly: a new unprobed row
+/// fails here until somebody writes down what it is and why it cannot be run.
+#[test]
+fn the_unprobed_rows_are_the_ones_the_documents_name() {
+    let unprobed: Vec<&str> = CAPABILITIES
+        .iter()
+        .filter(|entry| matches!(entry.probe, Probe::Nothing))
+        .map(|entry| entry.name)
+        .collect();
+    assert_eq!(
+        unprobed,
+        vec!["cancel", "readonly_open"],
+        "the rows with no probe have changed, and AGENTS.md names the old two"
+    );
+
+    let mut root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    root.pop();
+    root.pop();
+    let page = std::fs::read_to_string(root.join("AGENTS.md")).expect("AGENTS.md is readable");
+    // Whitespace-flattened, because the sentence is wrapped in the page and a
+    // reflow would otherwise fail this for a reason that is not about the
+    // claim.
+    let flattened: String = page.split_whitespace().collect::<Vec<&str>>().join(" ");
+    assert!(
+        flattened.contains("every row but two is checked against the running engine"),
+        "AGENTS.md no longer states how many capability rows the two-direction check skips"
+    );
+    for name in &unprobed {
+        assert!(
+            flattened.contains(&format!("`{name}`")),
+            "AGENTS.md does not name `{name}`, which is one of the rows the check skips"
+        );
+    }
+}

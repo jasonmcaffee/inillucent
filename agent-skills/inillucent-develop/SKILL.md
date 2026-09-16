@@ -79,9 +79,10 @@ Two things the surface already decides for you, and which a new verb must not re
   engine grows a construct.
 - **`context.confine(path)`** for any path, and **`context.confined()`** for anything that can reach
   something *other* than a path — a host, a port, a URL. `--root` is about reach, not only paths.
-- **The decision is not in the CLI.** `context.confine` calls `inillucent_vfs::confine`, which
-  resolves the path through the file system, and `OsVfs` calls the same service again before it
-  opens, deletes or stats anything. The CLI's copy exists to name the path a person typed in the
+- **The decision is not in the CLI.** `context.confine` goes through
+  `inillucent_vfs::confine`, which is a *module* rather than a function: `Root::admit` and
+  `Root::admit_path` resolve a path against the root, and `confine::authorize` is what `OsVfs`
+  calls again before it opens, deletes or stats anything. The CLI's copy exists to name the path a person typed in the
   refusal; it is not a second policy, and a new file operation must not grow one. If code you are
   writing opens a file from a path a caller supplied, it is already confined — do not add a check,
   and do not reach past `OsVfs` to `std::fs`.

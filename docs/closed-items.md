@@ -318,3 +318,52 @@ numbers can find what happened to them.
   cause: `crates/inillucent-compat/src/interchange.rs` moves a database between the engines as
   `.dump` output replayed by the reference shell, instead of handing `sqlite3` a file it cannot read.
   This document was simply never updated.
+
+## Recovery reads a page before redo has had a chance to rewrite it
+
+**Closed by `cdc58eb`.** It was roadmap item 6, described there in the past
+tense - the fix landed, the pair of tests landed, and the item stayed on the
+open list (task-1969, 6.3). What closed it is
+`replay_with_repair` in `crates/inillucent-engine/src/recovery.rs`, and what
+holds it closed is `crates/inillucent-compat/tests/torn_page_with_image.rs`.
+
+**Root cause named, and it is one level deeper than the hypothesis was.** The guess was a read on
+the open path, before the tolerant pass that repairs the catalog root. It is not: the read is inside
+redo itself. A logical row record changes a page by reading it - an `INSERT` into a leaf reads the
+leaf, adds the row and writes it back - so a crash that tore a page failed the replay at the
+**first** record naming that page, even when a later record in the same window carried the page
+whole. The window's end state was knowable and recovery refused the file anyway.
+
+It was found by naming every read in `open_file`. At cut 8 of
+`crates/inillucent-compat/tests/free_map_checkpoint_crash.rs`'s `journal_mode = off` sweep the
+refusal reads `replaying the log: page 4 checksum ... is not the computed ...`, and the three reads
+before redo - the bootstrap open, the catalog attach, the catalog read - are all named and none of
+them is it. Those names stay, because the next person asking this question should not have to
+instrument a build to answer it.
+
+**The fix, and where it runs.** When the logical pass fails with a corruption code, every record in
+the window that carries a whole page image is applied - `WritePage`, a `CompactLeaf` that carries
+one, and a split's three pages - and the same pass runs again. The images need no catalog and no row
+decoder, which is what lets them go first. Re-running is sound because redo is idempotent on the
+page-LSN rule: a record the first attempt applied has stamped its pages with its own LSN, so the
+second attempt skips it. The free map's own read moved inside what the retry covers, because that
+page is a page like any other and it is the one a checkpoint rewrites every time.
+
+**On the failure and not before it, and that is measured rather than chosen.** Applying the images
+unconditionally makes `read_checkpointed_catalog` succeed where it used to fail, which flips the
+`repaired` flag and seeds the logical pass with the checkpoint-time catalog rather than the
+end-of-window one. `wal_crash`'s commit campaign priced that: the one cut of twenty-three that
+reaches the new state stopped reaching it. A committed transaction lost is a worse defect than the
+one being fixed.
+
+`crates/inillucent-compat/tests/torn_page_with_image.rs` is the pair the item asks for. A page the
+window carries whole **and** that a record reads is torn and the database opens, answering all 199
+rows; a page a record reads and no record carries is torn and the open refuses with
+`SQLITE_CORRUPT`, naming the page. Both pages are chosen by reading the log rather than by being
+named, so neither goes stale when the layout moves, and the fixture crashes rather than closing -
+closing checkpoints the log away and there would be no window to be about.
+
+`journal_mode = off` is documented to mean a torn checkpoint page is not recoverable at all, and
+cuts 8 to 18 of that sweep still refuse: the log holds no image for page 4 there, so there is
+nothing to rebuild it from. That is the mode behaving as specified, and it is what the second test
+asserts deliberately rather than by accident.

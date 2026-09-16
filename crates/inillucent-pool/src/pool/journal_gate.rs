@@ -18,7 +18,8 @@ impl Pool {
     /// Which is to say: whether a rollback journal whose pre-images reach the
     /// disk is in force. `wal` takes a `delete` journal rather than none, so
     /// this is true of every mode the engine ships with except `memory` and
-    /// `off` - see `journal_for` in `crates/inillucent-engine/src/lib.rs`.
+    /// `off` - see `journal_for` in `crates/inillucent-engine/src/engine/locks.rs`,
+    /// which is where task-1962's A1 split moved it from `lib.rs`.
     pub(super) fn can_undo_a_steal(&self) -> bool {
         self.journal
             .borrow()
