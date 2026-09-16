@@ -267,8 +267,9 @@ functions, which is true and is what a C ABI is for.
 *programs*: eighteen gate and profiling binaries between them, each run by hand
 or by a scheduled job rather than by `cargo test`. The library halves of both
 are covered by the suites that use them. Their percentages are in the table
-above and are not repeated here, because they were repeated here, and the two
-copies said 40.6% and 40.9%.
+above and are not repeated here. They were repeated here, in prose eleven lines
+under the table, and the two copies disagreed in the first decimal place -
+which is what a number written twice does.
 
 The three retrieval crates - `inillucent-core`, `inillucent-bench` and
 `inillucent-model` - are excluded from the run. They need ONNX Runtime and a

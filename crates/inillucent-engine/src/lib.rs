@@ -225,8 +225,8 @@ pub use inillucent_ext::registry as extensions;
 /// this crate one edge rather than three.
 ///
 /// **Under its own name, not as `Value` (task-1961 A6, task-1969 6.3).** This
-/// read `pub use inillucent_tree::datum::OwnedDatum as Value;` twenty-four
-/// lines below `pub use inillucent_value::Value as ExprValue;`, so this crate
+/// re-export used to rename the type to `Value`, twenty-four lines below the
+/// one that renames `inillucent_value::Value` to `ExprValue` - so this crate
 /// exported two different types and called one of them by the other's name.
 /// With `inillucent_driver::Value` as well that was three confusable types
 /// called `Value`, and A2 had already removed the facade's reason to need the

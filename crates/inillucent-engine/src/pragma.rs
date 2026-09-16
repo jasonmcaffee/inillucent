@@ -604,7 +604,7 @@ fn function_row(name: &str, builtin: bool, kind: &str, arity: i64, flags: i64) -
 /// governs is whether a *schema* may name the function rather than what the
 /// function is, and SQLite's own `function_list` does not report it either.
 ///
-/// It is what `FunctionFlags::external` sets, which is the constructor anything
+/// It is what `FunctionFlags::external()` sets, which is the constructor anything
 /// registered from outside should use - not what the `Default` derive gives,
 /// which is every flag false (task-1969, 7.4). This sentence said "the default"
 /// and `inillucent-search`'s `embed` took the derive at its word.
