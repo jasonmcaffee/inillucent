@@ -498,11 +498,14 @@ fn calls_the_skip_helper(file: &std::path::Path) -> bool {
     let compares = brings_in("compare");
     let compares_queries = brings_in("compare_queries");
     let announces = brings_in("announce_skip") || brings_in("skipping");
+    // Built rather than written, so this file does not carry the text
+    // `policy.rs`'s `no_test_file_defines_its_own_skip_helper` forbids.
+    let a_definition = format!("fn {}", "skipping(");
     text.lines().map(without_comments_or_literals).any(|code| {
         code.contains("differential::skipping(")
                 || code.contains("differential::announce_skip(")
                 || code.contains("testing::skipping(")
-                || (imported && code.contains("skipping(") && !code.contains("fn skipping("))
+                || (imported && code.contains("skipping(") && !code.contains(&a_definition))
                 // **`differential::compare` announces for its caller**, which
                 // is the same allowance `policy.rs`'s `announces_by_saying_so`
                 // makes and for the same reason: it has one way to return zero,

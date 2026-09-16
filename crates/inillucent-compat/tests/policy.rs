@@ -1189,7 +1189,12 @@ fn every_skip_site_goes_through_the_one_helper() {
         };
         let lines: Vec<&str> = text.lines().collect();
         for (at, line) in lines.iter().enumerate() {
-            if line.contains("skipping(") && !line.contains("fn skipping(") {
+            // The needle is built rather than written, so this file does not
+            // itself carry the text it forbids - the same reason
+            // `PRIVATE_REFERENCES` in `tools/doc-facts/check.mjs` is the one
+            // place its patterns are allowed to live.
+            let a_definition = format!("fn {}", "skipping(");
+            if line.contains("skipping(") && !line.contains(&a_definition) {
                 through_the_helper = through_the_helper.saturating_add(1);
             }
             let message = quoted_after(line, "eprintln!(")
@@ -2600,13 +2605,11 @@ fn no_function_grows_past_the_length_it_is_recorded_at() {
 /// **The defect this refuses shipped and hid nine tests (task-1969, 4.2).**
 /// `crates/inillucent-compat/tests/differential.rs` defined
 ///
-/// ```ignore
-/// fn announce_skip() {
-///     eprintln!("the pinned SQLite oracle is not built; run tools/sqlite-reference.{ps1,sh}");
-/// }
-/// ```
+/// a private helper of its own named `announce_skip`, whose whole body was an
+/// `eprintln!` of the sentence the library helper prints - and which therefore
+/// printed neither the `; skipping` marker nor the panic.
 ///
-/// which shadowed `inillucent_compat::differential::announce_skip` at nine call
+/// It shadowed `inillucent_compat::differential::announce_skip` at nine call
 /// sites. Neither guard saw it. `every_skip_site_carries_the_one_marker` reads
 /// an `eprintln!` only when a `return;` follows within four lines, and here the
 /// `eprintln!` was a helper body followed by a closing brace.
@@ -2652,6 +2655,8 @@ fn no_test_file_defines_its_own_skip_helper() {
                 continue;
             };
             if name == "skipping" || name == "announce_skip" {
+                // Matched on the parsed name rather than on the text, which is
+                // also what keeps the forbidden spelling out of this file.
                 defined.push(format!("{relative}:{}", at.saturating_add(1)));
             }
         }
