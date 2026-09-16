@@ -56,7 +56,7 @@ impl Rng {
 }
 
 /// How a comparison between two engines came out, with the uncertainty attached.
-#[derive(Clone, Debug, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Paired {
     /// Mean of `candidate - baseline` over the queries. Positive means the
     /// candidate scored higher, whatever the metric's direction; the caller
@@ -77,7 +77,7 @@ pub struct Paired {
 
 /// The verdict a comparison earns, once its uncertainty and a practical
 /// threshold have both been taken into account.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Verdict {
     /// The interval clears both zero and the practical threshold.
     Better,

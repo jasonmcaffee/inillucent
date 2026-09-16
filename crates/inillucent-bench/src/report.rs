@@ -33,7 +33,7 @@ pub struct Measure {
 /// argued about; it is not evidence for or against shipping, because several
 /// diagnostics move together whenever one behaviour changes and counting each of
 /// them separately turns one result into several.
-#[derive(Serialize, Clone, Copy, PartialEq, Eq)]
+#[derive(Serialize, serde::Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Role {
     /// The one measurement this family is decided by.
     Primary,

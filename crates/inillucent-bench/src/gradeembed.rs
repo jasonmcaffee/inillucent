@@ -172,7 +172,7 @@ pub struct EmbeddingGradeOptions {
 
 /// What one arm is, so a reader never has to trust that two columns are
 /// comparable - they can check.
-#[derive(Serialize, Clone)]
+#[derive(Serialize, serde::Deserialize, Clone)]
 pub struct ArmFacts {
     pub model_id: String,
     pub dims: usize,
@@ -204,7 +204,7 @@ pub struct ArmFacts {
     pub bytes_per_vector: BTreeMap<String, usize>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, serde::Deserialize, Clone)]
 pub struct EmbeddingRow {
     pub family: String,
     pub metric: String,
@@ -218,7 +218,7 @@ pub struct EmbeddingRow {
     pub series: BTreeMap<String, Vec<f64>>,
 }
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, serde::Deserialize, Clone)]
 pub struct Lane {
     pub name: String,
     pub rationale: String,
@@ -226,7 +226,7 @@ pub struct Lane {
 }
 
 /// One candidate against the baseline on one row.
-#[derive(Serialize, Clone)]
+#[derive(Serialize, serde::Deserialize, Clone)]
 pub struct ArmJudgement {
     pub lane: String,
     pub family: String,
@@ -240,7 +240,7 @@ pub struct ArmJudgement {
     pub paired: Option<Paired>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, serde::Deserialize)]
 pub struct EmbeddingCard {
     pub run_id: String,
     pub generated_at_unix: u64,
@@ -789,6 +789,106 @@ fn composite(per_family: &BTreeMap<String, Vec<f64>>, families: &[&str]) -> Vec<
 // The run
 // ---------------------------------------------------------------------------
 
+/// Decide where one arm's query vectors come from: its own model, or a sidecar.
+///
+/// Every arm's queries are embedded by that arm's own model with that arm's own prefixes,
+/// because a query vector produced by a different model is not a measurement of this one. The
+/// sidecar is the exception and it exists for one case: a model this harness cannot open at
+/// all, whose owner produced the vectors elsewhere. `read_query_vectors` is what makes that
+/// safe - it refuses a sidecar that does not describe this run - so the choice here is only
+/// which of the two paths to take.
+///
+/// @param arm - the arm being graded, for its model, its cache header and its dimensions
+/// @param families - the graded families, to count how many vectors a sidecar must carry
+/// @param options - the run's options, holding the sidecar map and the arm options
+fn open_query_source(
+    arm: &Arm,
+    families: &Families,
+    options: &EmbeddingGradeOptions,
+) -> Result<(Option<crate::arm::Arm>, Option<std::collections::VecDeque<Vec<f32>>>)> {
+    let id = arm.header.model_id.clone();
+    let Some(path) = options.query_vectors.get(&id).cloned() else {
+        let embedder = queryset::open_query_embedder(
+            &arm.model,
+            &crate::arm::ArmOptions { device: options.device, ..options.arm_options.clone() },
+        )
+        .with_context(|| format!("opening {id} to embed the query set"))?;
+        return Ok((Some(embedder), None));
+    };
+    let expected: usize = families
+        .named
+        .iter()
+        .chain(families.abstention.iter())
+        .map(|(_, qs)| qs.len())
+        .sum();
+    let rows = read_query_vectors(
+        &path,
+        &id,
+        arm.model.manifest.dims,
+        &arm.header,
+        options.per_source,
+        expected,
+    )
+    .with_context(|| format!("reading {id}'s query vectors from {}", path.display()))?;
+    eprintln!("  {expected} query vectors read from {}", path.display());
+    Ok((None, Some(rows.into())))
+}
+
+/// Time one arm on every processor the cost lane was asked for, and record what it measured.
+///
+/// A served arm runs wherever its server runs, and `--device` says nothing about that. Timing it
+/// once per requested device would put one number in a `cpu` column and the same number in a
+/// `cuda:0` column, and a reader would take that to mean this model reaches GPU throughput on a
+/// processor. It is timed once, under a label naming the backend and the endpoint, and the card
+/// says so.
+///
+/// A device that fails is reported and skipped rather than ending the run: the cost lane is one
+/// lane of several, and a card missing one throughput number is worth more than no card.
+///
+/// @param arm - the arm to time
+/// @param cost_texts - the shared sample, long enough that each repeat gets its own slice
+/// @param cost_repeats - timed passes per device
+/// @param options - the run's options, for the requested devices and the arm options
+/// @param facts - the arm's row on the card, written in place
+fn time_arm(
+    arm: &Arm,
+    cost_texts: &[String],
+    cost_repeats: usize,
+    options: &EmbeddingGradeOptions,
+    facts: &mut ArmFacts,
+) {
+    let devices: Vec<Device> = match arm.model.manifest.backend {
+        inillucent_core::model::Backend::LlamaCpp => vec![options.device],
+        inillucent_core::model::Backend::Onnx => options.cost_devices.clone(),
+    };
+    for device in &devices {
+        match time_model(&arm.model, cost_texts, cost_repeats, *device, &options.arm_options) {
+            Ok((rates, tokens, share)) => {
+                let label = match arm.model.manifest.backend {
+                    inillucent_core::model::Backend::LlamaCpp => format!(
+                        "llama.cpp at {}",
+                        options.arm_options.endpoint_for(&arm.model.manifest.id)
+                    ),
+                    inillucent_core::model::Backend::Onnx => device.label(),
+                };
+                let middle = median(&rates);
+                let printed: Vec<String> = rates.iter().map(|r| format!("{r:.1}")).collect();
+                eprintln!(
+                    "  cost lane on {label}: {middle:.1} chunks/s median of [{}], \
+                     {tokens:.1} tokens per chunk, {:.2}% truncated",
+                    printed.join(", "),
+                    100.0 * share
+                );
+                facts.chunks_per_second.insert(label.clone(), middle);
+                facts.chunks_per_second_runs.insert(label, rates);
+                facts.tokens_per_chunk = Some(tokens);
+                facts.sample_truncation_share = Some(share);
+            }
+            Err(e) => eprintln!("  cost lane on {} failed: {e:#}", device.label()),
+        }
+    }
+}
+
 pub fn run(options: &EmbeddingGradeOptions) -> Result<EmbeddingCard> {
     let arms = resolve_arms(options)?;
     let baseline_id = match &options.baseline {
@@ -882,44 +982,7 @@ pub fn run(options: &EmbeddingGradeOptions) -> Result<EmbeddingCard> {
 
         // Queries, embedded by this arm's own model with this arm's own prefixes - or read
         // from a sidecar that model produced, when the harness cannot open it at all.
-        let external = options.query_vectors.get(&id).cloned();
-        let mut embedder: Option<crate::arm::Arm> = None;
-        let mut supplied: Option<std::collections::VecDeque<Vec<f32>>> = None;
-        match &external {
-            Some(path) => {
-                let expected: usize = families
-                    .named
-                    .iter()
-                    .chain(families.abstention.iter())
-                    .map(|(_, qs)| qs.len())
-                    .sum();
-                let rows = read_query_vectors(
-                    path,
-                    &id,
-                    arm.model.manifest.dims,
-                    &arm.header,
-                    options.per_source,
-                    expected,
-                )
-                .with_context(|| {
-                    format!("reading {id}'s query vectors from {}", path.display())
-                })?;
-                eprintln!("  {expected} query vectors read from {}", path.display());
-                supplied = Some(rows.into());
-            }
-            None => {
-                embedder = Some(
-                    queryset::open_query_embedder(
-                        &arm.model,
-                        &crate::arm::ArmOptions {
-                            device: options.device,
-                            ..options.arm_options.clone()
-                        },
-                    )
-                    .with_context(|| format!("opening {id} to embed the query set"))?,
-                );
-            }
-        }
+        let (embedder, mut supplied) = open_query_source(arm, &families, options)?;
         let mut query_vectors: Vec<Vec<Vec<f32>>> = Vec::new();
         for (name, qs) in &families.named {
             let vectors = match supplied.as_mut() {
@@ -1178,53 +1241,7 @@ pub fn run(options: &EmbeddingGradeOptions) -> Result<EmbeddingCard> {
 
         // ---- cost lane ----
         if options.cost {
-            // A served arm runs wherever its server runs, and `--device` says
-            // nothing about that. Timing it once per requested device would put
-            // one number in a `cpu` column and the same number in a `cuda:0`
-            // column, and a reader would take that to mean this model reaches GPU
-            // throughput on a processor. It is timed once, under a label naming
-            // the backend and the endpoint, and the card says so.
-            let devices: Vec<Device> = match arm.model.manifest.backend {
-                inillucent_core::model::Backend::LlamaCpp => vec![options.device],
-                inillucent_core::model::Backend::Onnx => options.cost_devices.clone(),
-            };
-            for device in &devices {
-                match time_model(
-                    &arm.model,
-                    &cost_texts,
-                    cost_repeats,
-                    *device,
-                    &options.arm_options,
-                ) {
-                    Ok((rates, tokens, share)) => {
-                        let label = match arm.model.manifest.backend {
-                            inillucent_core::model::Backend::LlamaCpp => {
-                                format!(
-                                    "llama.cpp at {}",
-                                    options.arm_options.endpoint_for(&arm.model.manifest.id)
-                                )
-                            }
-                            inillucent_core::model::Backend::Onnx => device.label(),
-                        };
-                        let middle = median(&rates);
-                        let printed: Vec<String> =
-                            rates.iter().map(|r| format!("{r:.1}")).collect();
-                        eprintln!(
-                            "  cost lane on {label}: {middle:.1} chunks/s median of [{}], \
-                             {tokens:.1} tokens per chunk, {:.2}% truncated",
-                            printed.join(", "),
-                            100.0 * share
-                        );
-                        facts.chunks_per_second.insert(label.clone(), middle);
-                        facts.chunks_per_second_runs.insert(label, rates);
-                        facts.tokens_per_chunk = Some(tokens);
-                        facts.sample_truncation_share = Some(share);
-                    }
-                    Err(e) => {
-                        eprintln!("  cost lane on {} failed: {e:#}", device.label());
-                    }
-                }
-            }
+            time_arm(arm, &cost_texts, cost_repeats, options, &mut facts);
         }
 
         arm_facts.push(facts);
@@ -1577,10 +1594,21 @@ fn composite_lane(scores: &LaneScores, name: &str) -> Lane {
     let mut rows = Vec::new();
     for (label, set, role) in [
         (format!("composite, declared ({})", HEADLINE.join(" + ")), HEADLINE, Role::Primary),
+        // Primary, not diagnostic. Only primary rows are judged, so while this was
+        // diagnostic the promoted composite had values and a per-query series but no
+        // paired verdict and no interval - and the promoted set is the one a later
+        // ticket's gates are declared on. Task-1818 read the declared two-family
+        // composite because it was the only one with a verdict, and three of its runs
+        // earned "better" on it while passage evidence regressed by up to 0.064
+        // underneath. A row nobody can get a verdict for is a row that gets read as
+        // the row beside it.
+        //
+        // Judging both costs one extra comparison per model per lane and takes nothing
+        // away: the declared composite is still judged and still says what it said.
         (
             format!("composite, promoted ({} families)", PROMOTED.len()),
             PROMOTED,
-            Role::Diagnostic,
+            Role::Primary,
         ),
     ] {
         // family -> model -> series, transposed to model -> concatenated series.
@@ -1618,10 +1646,11 @@ fn composite_lane(scores: &LaneScores, name: &str) -> Lane {
         name: name.to_string(),
         rationale: format!(
             "One score per question, every family concatenated, so the composite is a paired \
-             series rather than a mean of means. The declared composite is {} and is what gate \
-             G0 and gate G1 are decided on; the promoted composite is reported beside it so \
-             that a promotion, if the declared one turns out to be blind, is a visible decision \
-             taken against a number that was already on the card.",
+             series rather than a mean of means. The declared composite is {}. Both composites \
+             are judged: while only the declared one carried a verdict, the promoted set could \
+             be read but not decided on, and a row nobody can get a verdict for is a row that \
+             gets read as the row beside it - three of task-1818's runs earned \"better\" on the \
+             declared composite while passage evidence regressed by up to 0.064 underneath it.",
             HEADLINE.join(" and ")
         ),
         rows,
@@ -1911,6 +1940,66 @@ fn cost_lane(arms: &[ArmFacts]) -> Lane {
                 .to_string(),
         rows,
     }
+}
+
+/// Re-score a card that is already on disk, from the per-query series inside it.
+///
+/// A judging rule can change after a card is made. This ticket changed one: the
+/// promoted six family composite was diagnostic, so it had values and a series but no
+/// verdict, and the gates are declared on it. Without this, correcting that would mean
+/// re-embedding five models over 185,078 chunks - about two hours of card - to recover
+/// a number the card already contains everything needed to compute.
+///
+/// It recomputes rather than patches: every judgement on the card is discarded and the
+/// whole set is produced again by the same `judge` a fresh run uses, from the same
+/// series, with the card's own recorded stats seed. So a rejudged card and a rerun card
+/// agree by construction rather than by inspection, and there is no second
+/// implementation of the statistics to drift.
+///
+/// What it cannot do is change a number that came from a model. The lanes, the values
+/// and the series are read and never touched; only the verdicts are rewritten.
+/// @param path - the card's JSON
+pub fn rejudge(path: &Path) -> Result<(EmbeddingCard, usize, usize)> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let mut card: EmbeddingCard = serde_json::from_str(&text)
+        .with_context(|| format!("parsing {}", path.display()))?;
+    let before = card.judgements.len();
+    let promoted = reapply_roles(&mut card);
+    if promoted > 0 {
+        eprintln!("  {promoted} row(s) promoted to primary by this binary's role rule");
+    }
+    card.judgements = judge(&card.lanes, &card.baseline, card.stats_seed);
+    let after = card.judgements.len();
+    Ok((card, before, after))
+}
+
+/// Re-take this binary's role decision on a card an earlier binary wrote.
+///
+/// A row's role is a decision about what the card is evidence for, not a measurement, so
+/// re-scoring a card means re-taking that decision. Without this, `rejudge` re-runs the
+/// statistics over the roles stored in the file and cannot fix the thing it exists to fix: a
+/// promoted composite that was diagnostic when the card was written stays unjudged, and the only
+/// way to get a verdict on it is to embed five corpora again - which is nine hours for a number
+/// already in the file.
+///
+/// Only the promoted composite is re-taken, because it is the only row whose role this ticket
+/// changed. A card whose rows were measured differently is a different card and is not repaired
+/// here; the digests and the seed on it are what say whether two cards are comparable.
+///
+/// @param card - the card, changed in place
+fn reapply_roles(card: &mut EmbeddingCard) -> usize {
+    let promoted = format!("composite, promoted ({} families)", PROMOTED.len());
+    let mut changed = 0usize;
+    for lane in &mut card.lanes {
+        for row in &mut lane.rows {
+            if row.family == promoted && row.role != Role::Primary {
+                row.role = Role::Primary;
+                changed = changed.saturating_add(1);
+            }
+        }
+    }
+    changed
 }
 
 /// Compare every candidate against the baseline on every primary row.
@@ -2493,13 +2582,117 @@ mod tests {
         }
     }
 
-    /// The dense lane must agree with the exhaustive search the score card
-    /// already uses as its reference ranking.
+    /// `rejudge` has to re-take the role decision, not only re-run the statistics.
     ///
-    /// Two implementations of "the exact answer" that disagree would mean the
-    /// dense lane and the accuracy scenario were measuring against two different
-    /// truths, and the card would carry both without saying so. This is cheap and
-    /// it is the one place that can be checked directly.
+    /// Written after running it on the Phase 0 card, which was produced by a binary that
+    /// marked the promoted composite diagnostic: `rejudge` reported 60 judgements before and
+    /// 60 after, because it judged the roles stored in the file. A `rejudge` that cannot
+    /// change a role cannot repair a card, and the card it exists for costs nine hours of
+    /// embedding to earn again.
+    #[test]
+    fn rejudge_promotes_a_row_an_older_binary_left_diagnostic() {
+        let mut scores: LaneScores = BTreeMap::new();
+        for family in PROMOTED {
+            let mut per_metric: BTreeMap<String, BTreeMap<String, Vec<f64>>> = BTreeMap::new();
+            let mut per_model: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+            per_model.insert("base".to_string(), (0..40).map(|i| 0.5 + i as f64 * 0.001).collect());
+            per_model
+                .insert("candidate".to_string(), (0..40).map(|i| 0.6 + i as f64 * 0.001).collect());
+            per_metric.insert(M_NDCG.to_string(), per_model);
+            scores.insert((*family).to_string(), per_metric);
+        }
+        let mut lane = composite_lane(&scores, "dense composite");
+        // The card an older binary wrote: the row is there, measured, and unjudgeable.
+        for row in &mut lane.rows {
+            if row.family.contains("promoted") {
+                row.role = Role::Diagnostic;
+            }
+        }
+        let mut card = EmbeddingCard {
+            run_id: "rejudge-role".to_string(),
+            generated_at_unix: 0,
+            corpus_sha256: String::new(),
+            corpus_chunks: 0,
+            corpus_documents: 0,
+            query_seed_digest: String::new(),
+            baseline: "base".to_string(),
+            arms: Vec::new(),
+            lanes: vec![lane],
+            judgements: Vec::new(),
+            query_counts: BTreeMap::new(),
+            stats_seed: 20260901,
+            ranking_threshold: RANKING_THRESHOLD,
+            composite_declared: HEADLINE.join(" + "),
+            provenance: BTreeMap::new(),
+            caveats: Vec::new(),
+        };
+        card.judgements = judge(&card.lanes, &card.baseline, 20260901);
+        let stale = card.judgements.len();
+
+        let dir = std::env::temp_dir().join("inillucent-rejudge-role");
+        std::fs::create_dir_all(&dir).expect("a temp directory");
+        let path = dir.join("card.json");
+        std::fs::write(&path, serde_json::to_string(&card).expect("a card serialises"))
+            .expect("writing the card");
+
+        let (rescored, before, after) = rejudge(&path).expect("rejudging the card");
+        assert_eq!(before, stale, "the stored judgement count is what `before` reports");
+        assert!(
+            after > before,
+            "re-taking the role decision must produce judgements the stored card had none of: \
+             {before} -> {after}"
+        );
+        let promoted = rescored
+            .lanes
+            .iter()
+            .flat_map(|l| l.rows.iter())
+            .find(|r| r.family.contains("promoted"))
+            .expect("the promoted composite is on the card");
+        assert_eq!(promoted.role, Role::Primary, "the promoted row must come back primary");
+        assert!(
+            rescored.judgements.iter().any(|j| j.family.contains("promoted")),
+            "the promoted composite must have a verdict after a rejudge"
+        );
+    }
+
+    /// The promoted six family composite has to carry a verdict, because the gates that
+    /// matter are declared on it. While it was diagnostic it had values and a per-query
+    /// series and no verdict at all - and a row nobody can get a verdict for is a row
+    /// that gets read as the row beside it, which is how three of task-1818's runs
+    /// earned "better" on the declared two family composite while passage evidence
+    /// regressed by up to 0.064 underneath.
+    #[test]
+    fn both_composites_are_judged() {
+        let mut scores: LaneScores = BTreeMap::new();
+        for family in PROMOTED {
+            let mut per_metric: BTreeMap<String, BTreeMap<String, Vec<f64>>> = BTreeMap::new();
+            let mut per_model: BTreeMap<String, Vec<f64>> = BTreeMap::new();
+            per_model.insert("base".to_string(), vec![0.5; 40]);
+            per_model.insert("candidate".to_string(), vec![0.6; 40]);
+            per_metric.insert(M_NDCG.to_string(), per_model);
+            scores.insert((*family).to_string(), per_metric);
+        }
+        let lane = composite_lane(&scores, "dense composite");
+        let promoted = lane
+            .rows
+            .iter()
+            .find(|r| r.family.contains("promoted"))
+            .expect("the promoted composite is on the card");
+        assert_eq!(promoted.role, Role::Primary, "the promoted composite must be judged");
+        assert!(!promoted.series.is_empty(), "a judged row needs its per-query series");
+
+        let judgements = judge(&[lane], "base", 20260901);
+        let families: Vec<&str> = judgements.iter().map(|j| j.family.as_str()).collect();
+        assert!(
+            families.iter().any(|f| f.contains("promoted")),
+            "the promoted composite produced no judgement: {families:?}"
+        );
+        assert!(
+            families.iter().any(|f| f.contains("declared")),
+            "judging the promoted one must not have cost the declared one its verdict: {families:?}"
+        );
+    }
+
     /// A safetensors checkpoint names its weights from a JSON index, and the index is
     /// tiny. `Qwen3-Embedding-8B` is 30 KB of index in front of four shards totalling
     /// 15.1 GB, so reading the named file alone would put the heaviest arm on the board
@@ -2624,6 +2817,13 @@ mod tests {
         assert!(format!("{error:#}").contains("bytes"), "{error:#}");
     }
 
+    /// The dense lane must agree with the exhaustive search the score card
+    /// already uses as its reference ranking.
+    ///
+    /// Two implementations of "the exact answer" that disagree would mean the
+    /// dense lane and the accuracy scenario were measuring against two different
+    /// truths, and the card would carry both without saying so. This is cheap and
+    /// it is the one place that can be checked directly.
     #[test]
     fn the_dense_lane_agrees_with_the_exhaustive_search_the_card_uses() {
         let dims = 16;

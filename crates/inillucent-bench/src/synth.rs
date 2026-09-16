@@ -47,7 +47,7 @@ use anyhow::{Context, Result};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
-use inillucent_core::embed_onnx::{count_truncation, Device};
+use inillucent_core::embed_onnx::Device;
 use inillucent_core::model::{Backend, ModelManifest};
 
 use crate::arm::{Arm, ArmOptions};
@@ -1407,7 +1407,7 @@ pub fn embed(
         // A run that embedded nothing cannot report how much was truncated, so it
         // counts with the tokenizer alone rather than writing a zero that would
         // read as "nothing was cut".
-        let truncated = count_truncated(model_dir, manifest, &chunks)?;
+        let truncated = crate::truncation::count_truncated(model_dir, manifest, &chunks)?;
         return assemble_cache(&chunks, &vectors_path, cache_path, manifest, seeds, truncated);
     }
 
@@ -1490,42 +1490,10 @@ pub fn embed(
         );
     }
     if done > 0 {
-        truncated += count_truncated(model_dir, manifest, &chunks[..done])?;
+        truncated += crate::truncation::count_truncated(model_dir, manifest, &chunks[..done])?;
     }
 
     assemble_cache(&chunks, &vectors_path, cache_path, manifest, seeds, truncated)
-}
-
-/// How many of these chunks a model tokenizer takes past its truncation bound,
-/// counted without running the model.
-///
-/// Needed on a resumed run: the sessions this process opened only saw the chunks
-/// this process embedded, and a truncation share that silently described the tail
-/// of the corpus would be exactly the kind of number that reads as a measurement
-/// and is not one.
-/// @param model_dir - the model directory
-/// @param manifest - what the model is
-/// @param chunks - the chunks to count over
-fn count_truncated(
-    model_dir: &str,
-    manifest: &ModelManifest,
-    chunks: &[SynthChunk],
-) -> Result<usize> {
-    if manifest.backend == Backend::LlamaCpp {
-        // A served arm has no local tokenizer to count with, so a resumed run
-        // cannot recount what an earlier run truncated. Reporting a zero would
-        // be worse than reporting nothing, so this says so and the header
-        // records what this process actually saw.
-        eprintln!(
-            "  note: {} is served rather than loaded, so a resumed run cannot recount the \
-             truncation an earlier run performed",
-            manifest.id
-        );
-        return Ok(0);
-    }
-    let texts: Vec<String> =
-        chunks.iter().map(|c| sanitize_for_model(&c.content)).collect();
-    Ok(count_truncation(model_dir, manifest, &texts)?.truncated)
 }
 
 /// Opens one embedder per device.

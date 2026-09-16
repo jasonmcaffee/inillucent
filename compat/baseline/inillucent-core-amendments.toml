@@ -39,8 +39,8 @@ sha256 = "7a5be6a0b5b8f36097605c76889785d6fca3b218e26cbf936b51587b59e84233"
 [[amendment]]
 path = "crates/inillucent-bench/src/gradeembed.rs"
 ticket = "task-1966"
-reason = "per-model llama-server endpoints, the cache-from-vectors and query-texts subcommands, the query-vector sidecar, and weighing a sharded checkpoint by its shards"
-sha256 = "3eed8ce22e522c4374d9e41671f80dfa5200d3099ded42b206777be0a52f747c"
+reason = "the promoted six-family composite is judged rather than diagnostic, and rejudge re-takes that decision on a card an older binary wrote"
+sha256 = "31a893842d3009164fe7ef4823ead4bf8706d115d1e90682133c7d708c5aad88"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/http.rs"
@@ -57,8 +57,8 @@ sha256 = "f084ff66b3d606c560f38404eb36fdd509c007f138f48ea63e31a03f385e9140"
 [[amendment]]
 path = "crates/inillucent-bench/src/main.rs"
 ticket = "task-1966"
-reason = "opt-in concurrency for a served arm, defaulting to one so the cost lane keeps single-stream semantics"
-sha256 = "414e33f2eb24e84cbd862f793fdc224f3443ac02b6ba554cc5e5728c16da5816"
+reason = "the rejudge subcommand, the arm options built once instead of four times, and the truncation module"
+sha256 = "0ce2c7353774ef0cf9b3aa2e16a83847aae8560474bc6c3e6c213a870a1367d3"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/models.rs"
@@ -74,9 +74,9 @@ sha256 = "2b016373543b72d64b1fc252e4c06d6826e0b7bcfc57347f871d77163c2a7444"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/report.rs"
-ticket = "embedding model head to head grading"
-reason = "The grading harness was generalised from one embedding model to a head-to-head between several, matching the success criteria the design document set for that comparison. A model is now a manifest (id, width, Matryoshka widths, four prefixes, pooling, token bound, backend, output, tokenizer and weights digests) instead of a set of constants; a cache carries a header naming the corpus digest, the model, the manifest digest and the truncation it performed; grade-embedding compares two or more caches and refuses before it starts unless they agree on corpus, chunk count and query seeds; and the embedder gained CLS and last-token pooling, graph-driven inputs, and a llama.cpp backend for the one model with no ONNX export. ModelManifest::nomic_v1_5() reproduces every constant it replaced: the fresh baseline cache agrees with the August run at cosine 1.000000 minimum over 5000 chunks, and grade's card is unchanged on every measurement row."
-sha256 = "01190f4138afa9c926334e4ad64e3a9a36f033171f7b73284f00bd721cbee627"
+ticket = "task-1966"
+reason = "a card can be read back: Deserialize and Debug on Role and Verdict, so rejudge and the report script can parse a card the harness wrote"
+sha256 = "90ab829a9f498f70f2e5cf4442383f0a33945e608e65910c40df81e8cc557950"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/residency.rs"
@@ -97,10 +97,22 @@ reason = "task-1946 H6: the card's four path rows go through the two helpers in 
 sha256 = "cc00c83ecc304470c757a8f1e7dcc7f744b6adda66dbdbf5c05e9a2fb41c5350"
 
 [[amendment]]
+path = "crates/inillucent-bench/src/stats.rs"
+ticket = "task-1966"
+reason = "a card can be read back: Deserialize on Paired, so rejudge and the report script can parse a card the harness wrote"
+sha256 = "ba34b0a184a076f07d6996b53bf95157061881107dc24b92cdef5d24ba3026a6"
+
+[[amendment]]
 path = "crates/inillucent-bench/src/synth.rs"
 ticket = "task-1966"
-reason = "per-model llama-server endpoints, the cache-from-vectors and query-texts subcommands, the query-vector sidecar, and weighing a sharded checkpoint by its shards"
-sha256 = "4b6376899ba466107aeb05e71aa16422216adfa719978c7da3916e3c30ca66e5"
+reason = "a served arm's truncation is counted over the whole corpus, and the counting moved to its own module"
+sha256 = "76f779b1cfa90e3a8bbc1806da93f920652a60e4c8b517058ddb4344dd6f2a18"
+
+[[amendment]]
+path = "crates/inillucent-bench/src/truncation.rs"
+ticket = "task-1966"
+reason = "the truncation count, extracted from synth so the module stays at the size it is recorded at"
+sha256 = "b6b10b011ae2e8d5e4c4e3ec9ffb8af0b6e7ffb2581f58f7eb340ea6ea7960b4"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/tune.rs"

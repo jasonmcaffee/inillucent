@@ -28,6 +28,7 @@ mod runs;
 mod stats;
 mod tune;
 mod synth;
+mod truncation;
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -199,6 +200,25 @@ enum Command {
         /// Chunks between progress lines.
         #[arg(long, default_value_t = 2000)]
         report_every: usize,
+    },
+    /// Re-score a card that is already on disk, from the per-query series inside it.
+    ///
+    /// A judging rule can change after a card is made, and this ticket changed one: the
+    /// promoted six family composite was diagnostic, so it had values and a series but
+    /// no verdict, and the gates are declared on it. Without this, correcting that
+    /// would mean re-embedding every arm over 185,078 chunks to recover a number the
+    /// card already contains everything needed to compute.
+    ///
+    /// The lanes, the values and the series are read and never touched. Only the
+    /// verdicts are rewritten, by the same code a fresh run uses, from the card's own
+    /// recorded stats seed.
+    Rejudge {
+        /// The card's JSON. Its markdown is rewritten beside it.
+        #[arg(long)]
+        card: PathBuf,
+        /// Write to a different path instead of over the card.
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
     /// Write every query `grade-embedding` would generate, in the order an arm's
     /// query vectors have to be in.
@@ -720,9 +740,151 @@ fn expand_home(path: &str) -> Result<String> {
     })
 }
 
+/// Write a scorecard as its markdown and its JSON, and say where both went.
+///
+/// `grade-embedding` and `rejudge` both end this way, and the pair has to stay a pair: the
+/// markdown is what a person reads and the JSON is what `rejudge` and the report scripts parse,
+/// so a card written as one without the other is a card that cannot be re-scored later.
+///
+/// @param card - the scorecard to write
+/// @param markdown - where the markdown goes; the JSON goes beside it under the same stem
+fn write_card(card: &gradeembed::EmbeddingCard, markdown: &std::path::Path) -> Result<()> {
+    std::fs::write(markdown, gradeembed::render(card))?;
+    let json_path = markdown.with_extension("json");
+    std::fs::write(&json_path, serde_json::to_string_pretty(card)?)?;
+    eprintln!(
+        "card written to {}, measurements to {}",
+        markdown.display(),
+        json_path.display()
+    );
+    Ok(())
+}
+
+/// Assemble a corpus cache from vectors an embedder outside this harness produced.
+///
+/// Half of the pair that lets a model this harness cannot open still be a graded arm. The
+/// vectors arrive as a file; everything that makes a cache trustworthy - the corpus they
+/// describe, the model manifest they are labelled with, the seeds, the truncation count - is
+/// attached here, and the cache is loaded straight back so the run fails now rather than on the
+/// first arm if any of it disagrees.
+///
+/// @param corpus - the chunk file the vectors were produced from
+/// @param model_dir - the model directory, resolved for its manifest
+/// @param model_file - the weights file inside that directory
+/// @param vectors - the vectors an external embedder wrote
+/// @param cache - where the assembled cache goes
+/// @param truncated - how many chunks the embedder reported truncating
+/// @param unverified_weights - skip the weights digest check, for a model held elsewhere
+fn cache_from_vectors(
+    corpus: &std::path::Path,
+    model_dir: &str,
+    model_file: &str,
+    vectors: &std::path::Path,
+    cache: &std::path::Path,
+    truncated: usize,
+    unverified_weights: bool,
+) -> Result<()> {
+    let dir = expand_home(model_dir)?;
+    let model = models::resolve_dir(std::path::Path::new(&dir), model_file)?;
+    if !unverified_weights {
+        model.verify_files()?;
+    }
+    let chunks = synth::read_corpus(corpus)?;
+    anyhow::ensure!(
+        truncated <= chunks.len(),
+        "{truncated} truncated chunks were reported for a corpus of {}",
+        chunks.len()
+    );
+    synth::assemble_cache(
+        &chunks,
+        vectors,
+        cache,
+        &model.manifest,
+        &scenarios::seeds(),
+        truncated,
+    )?;
+    let assembled = corpus::load_cache(cache)?;
+    eprintln!(
+        "{} chunks of {} at {} dims, {truncated} truncated, corpus {}",
+        assembled.len(),
+        assembled.header.model_id,
+        assembled.dims,
+        corpus::short(&assembled.header.corpus_sha256)
+    );
+    Ok(())
+}
+
+/// The arm options every subcommand builds the same way, from the same global flags.
+///
+/// Built in one place because it was built in four, and each flag added to the set had to be
+/// added to all four by hand. `--endpoint-for` and `--llama-concurrency` were added that way on
+/// this ticket: a served arm that reached three of the four call sites would have run against
+/// the wrong endpoint under a label naming the right one, which is the failure this harness
+/// exists to make impossible.
+///
+/// A caller that needs a different device or batch size still says so at the call site, with
+/// `..base.clone()`, so the override stays visible where it is made. It carries no device of its
+/// own: `--device` belongs to a subcommand, not to the command line as a whole.
+///
+/// @param cli - the parsed command line, for the endpoint flags and the batch ceiling
+fn arm_options_for(cli: &Cli) -> Result<arm::ArmOptions> {
+    Ok(arm::ArmOptions {
+        endpoint: cli.endpoint.clone(),
+        endpoint_overrides: parse_endpoint_overrides(&cli.endpoint_for)?,
+        concurrency: cli.llama_concurrency,
+        max_batch_cells: cli.max_batch_cells,
+        ..Default::default()
+    })
+}
+
+/// Embed a corpus into a cache with one model, on one or more processors.
+///
+/// The weights are verified before a chunk is read. A cache is trusted for the rest of the
+/// ticket - every lane reads it and nothing re-embeds - so a model that is not the model its
+/// manifest describes has to be refused here or not at all.
+///
+/// @param corpus - the chunk file to embed
+/// @param cache - where the cache goes
+/// @param model_dir - the model directory, `~` expanded
+/// @param model_file - the weights file inside it
+/// @param devices - the processors to spread the work over, comma separated as given
+/// @param batch - texts per request
+/// @param report_every - how often to print progress, in chunks
+/// @param window_batches - batches per progress window
+/// @param base - the arm options built from the global flags
+#[allow(clippy::too_many_arguments)]
+fn synth_embed(
+    corpus: &std::path::Path,
+    cache: &std::path::Path,
+    model_dir: &str,
+    model_file: &str,
+    devices: &str,
+    batch: usize,
+    report_every: usize,
+    window_batches: usize,
+    base: &arm::ArmOptions,
+) -> Result<()> {
+    let dir = expand_home(model_dir)?;
+    let devices = parse_devices(devices)?;
+    let model = models::resolve_dir(std::path::Path::new(&dir), model_file)?;
+    model.verify_files()?;
+    synth::embed(
+        corpus,
+        cache,
+        &model,
+        &scenarios::seeds(),
+        &arm::ArmOptions { batch_size: batch, device: devices[0], ..base.clone() },
+        report_every,
+        &devices,
+        window_batches,
+    )
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let models_root = cli.models_root.clone().unwrap_or_else(models::default_models_root);
+    // Before the match, which moves the command out of `cli`.
+    let base = arm_options_for(&cli)?;
     match cli.command {
         Command::SynthBuild { derived, out, scale } => {
             let derived = derived.unwrap_or_else(synth::default_derived_dir);
@@ -746,28 +908,28 @@ fn main() -> Result<()> {
             synth::check(&corpus, per_source)?;
         }
         Command::SynthEmbed { corpus, model_dir, model_file, batch, report_every, devices, window_batches } => {
-            let dir = expand_home(&model_dir)?;
-            let devices = parse_devices(&devices)?;
-            let model = models::resolve_dir(std::path::Path::new(&dir), &model_file)?;
-            model.verify_files()?;
-            synth::embed(
+            synth_embed(
                 &corpus,
                 &cli.cache,
-                &model,
-                &scenarios::seeds(),
-                &arm::ArmOptions {
-                    batch_size: batch,
-                    device: devices[0],
-                    endpoint: cli.endpoint.clone(),
-                    endpoint_overrides: parse_endpoint_overrides(&cli.endpoint_for)?,
-                    concurrency: cli.llama_concurrency,
-                    max_batch_cells: cli.max_batch_cells,
-                    ..Default::default()
-                },
-                report_every,
+                &model_dir,
+                &model_file,
                 &devices,
+                batch,
+                report_every,
                 window_batches,
+                &base,
             )?;
+        }
+        Command::Rejudge { card, out } => {
+            let (rescored, before, after) = gradeembed::rejudge(&card)?;
+            eprintln!(
+                "rejudged {}: {before} judgements -> {after}, stats seed {}, baseline {}",
+                card.display(),
+                rescored.stats_seed,
+                rescored.baseline
+            );
+            let json_path = out.unwrap_or_else(|| card.clone());
+            write_card(&rescored, &json_path.with_extension("md"))?;
         }
         Command::QueryTexts { from_cache, per_source, limit, out } => {
             let total = gradeembed::write_query_texts(&from_cache, per_source, limit, &out)?;
@@ -781,33 +943,15 @@ fn main() -> Result<()> {
             truncated,
             unverified_weights,
         } => {
-            let dir = expand_home(&model_dir)?;
-            let model = models::resolve_dir(std::path::Path::new(&dir), &model_file)?;
-            if !unverified_weights {
-                model.verify_files()?;
-            }
-            let chunks = synth::read_corpus(&corpus)?;
-            anyhow::ensure!(
-                truncated <= chunks.len(),
-                "{truncated} truncated chunks were reported for a corpus of {}",
-                chunks.len()
-            );
-            synth::assemble_cache(
-                &chunks,
+            cache_from_vectors(
+                &corpus,
+                &model_dir,
+                &model_file,
                 &vectors,
                 &cli.cache,
-                &model.manifest,
-                &scenarios::seeds(),
                 truncated,
+                unverified_weights,
             )?;
-            let assembled = corpus::load_cache(&cli.cache)?;
-            eprintln!(
-                "{} chunks of {} at {} dims, {truncated} truncated, corpus {}",
-                assembled.len(),
-                assembled.header.model_id,
-                assembled.dims,
-                corpus::short(&assembled.header.corpus_sha256)
-            );
         }
         Command::SynthLoad { corpus, no_indexes } => {
             let chunks = synth::read_corpus(&corpus)?;
@@ -916,11 +1060,7 @@ fn main() -> Result<()> {
                 &arm::ArmOptions {
                     batch_size: batch,
                     device: Device::parse(&device)?,
-                    endpoint: cli.endpoint.clone(),
-                    endpoint_overrides: parse_endpoint_overrides(&cli.endpoint_for)?,
-                    concurrency: cli.llama_concurrency,
-                    max_batch_cells: cli.max_batch_cells,
-                    ..Default::default()
+                    ..base.clone()
                 },
             )?;
         }
@@ -1009,14 +1149,7 @@ fn main() -> Result<()> {
             let options = scenarios::GradeOptions {
                 limit,
                 per_source,
-                arm_options: arm::ArmOptions {
-                    device: Device::parse(&device)?,
-                    endpoint: cli.endpoint.clone(),
-                    endpoint_overrides: parse_endpoint_overrides(&cli.endpoint_for)?,
-                    concurrency: cli.llama_concurrency,
-                    max_batch_cells: cli.max_batch_cells,
-                    ..Default::default()
-                },
+                arm_options: arm::ArmOptions { device: Device::parse(&device)?, ..base.clone() },
                 model: models::resolve_dir(std::path::Path::new(&dir), &model_file)?,
                 database_url: cli.database_url.clone(),
                 inillucent_only,
@@ -1101,24 +1234,10 @@ fn main() -> Result<()> {
                 cost_repeats,
                 matryoshka_chunks,
                 query_vectors: parse_query_vectors(&query_vectors)?,
-                arm_options: arm::ArmOptions {
-                    device: Device::parse(&device)?,
-                    endpoint: cli.endpoint.clone(),
-                    endpoint_overrides: parse_endpoint_overrides(&cli.endpoint_for)?,
-                    concurrency: cli.llama_concurrency,
-                    max_batch_cells: cli.max_batch_cells,
-                    ..Default::default()
-                },
+                arm_options: arm::ArmOptions { device: Device::parse(&device)?, ..base.clone() },
             };
             let card = gradeembed::run(&options)?;
-            std::fs::write(&out, gradeembed::render(&card))?;
-            let json_path = out.with_extension("json");
-            std::fs::write(&json_path, serde_json::to_string_pretty(&card)?)?;
-            eprintln!(
-                "card written to {}, measurements to {}",
-                out.display(),
-                json_path.display()
-            );
+            write_card(&card, &out)?;
             gradeembed::print_summary(&card);
         }
         Command::ExportVectors {
