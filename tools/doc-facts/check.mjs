@@ -176,12 +176,47 @@ function capabilities() {
   return { total: answer.rows.length, yes: by.yes || 0, partial: by.partial || 0, no: by.no || 0 };
 }
 
-/** Reads the probe's last run, which is what the SQL and compatibility pages quote. */
+/** Returns the commit this checkout is on, or null when that cannot be read. */
+function headCommit() {
+  const shown = spawnSync('git', ['-C', ROOT, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
+  const sha = (shown.stdout || '').trim();
+  return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
+}
+
+/** What `probe()` could not accept about the result it read, for the exit code. */
+let probeStaleness = null;
+
+/**
+ * Reads the probe's last run, which is what the SQL and compatibility pages quote.
+ *
+ * **It is refused when it was recorded at another commit (task-1969, 4.4).**
+ * `_agent_output/feature-probe/results.json` is gitignored, so on every fresh
+ * clone it is absent and on every machine that has one it is however old that
+ * machine's last probe was. Nothing checked either. A probe from a month and
+ * forty commits ago passed as today's, and the 416-case count and the 403 that
+ * agree - the two numbers `docs/feature-comparison.md` is built on - were being
+ * held against a measurement of a different engine.
+ *
+ * A result with no `commit` is refused too. That is the old bare-array shape,
+ * and accepting it would leave the hole open for exactly as long as one stale
+ * file survives.
+ */
 function probe() {
   const file = path.join(ROOT, '_agent_output', 'feature-probe', 'results.json');
   if (!fs.existsSync(file)) return null;
   const cases = JSON.parse(fs.readFileSync(file, 'utf8'));
-  const rows = Array.isArray(cases) ? cases : cases.cases || [];
+  const head = headCommit();
+  if (!Array.isArray(cases) && head && cases.commit !== head) {
+    probeStaleness = cases.commit
+      ? `the probe result was recorded at ${cases.commit} and this tree is at ${head}; re-run \`node tools/feature-probe/run.js\``
+      : `the probe result records no commit, so it cannot be dated; re-run \`node tools/feature-probe/run.js\``;
+    return null;
+  }
+  if (Array.isArray(cases)) {
+    probeStaleness = 'the probe result is a bare array with no commit, so it cannot be dated; re-run `node tools/feature-probe/run.js`';
+    return null;
+  }
+  const rows = cases.cases || [];
   const by = {};
   for (const row of rows) by[row.verdict] = (by[row.verdict] || 0) + 1;
   return { total: rows.length, same: by.same || 0, refused: by.refused || 0, differ: by['wrong-answer'] || 0, oursOnly: by['ours-only'] || 0 };
@@ -203,6 +238,22 @@ function pragmaRegisterCount() {
   if (!fs.existsSync(file)) return null;
   const found = fs.readFileSync(file, 'utf8').match(/^count = (\d+)$/m);
   return found ? Number(found[1]) : null;
+}
+
+/**
+ * Counts the `[[target]]` rows in `tests/selection.toml`.
+ *
+ * **Three documents gave three target counts and nothing compared any of them
+ * to the map (task-1969, 4.14).** `docs/repository.md` said 170,
+ * `tests/inillucent-testing-tdd.md` said 169, and the file itself had 181.
+ * `judgeTestRun` compares a written count against what the *runner* reported,
+ * so a document that agrees with a stale run passes; the map is the thing both
+ * documents are describing, and it is the thing to compare against.
+ */
+function selectionRows() {
+  const file = path.join(ROOT, 'tests', 'selection.toml');
+  if (!fs.existsSync(file)) return null;
+  return (fs.readFileSync(file, 'utf8').match(/^\[\[target\]\]$/gm) || []).length;
 }
 
 /** Reads the register audit, which is where the pragma and collation counts come from. */
@@ -719,6 +770,52 @@ const audit = registers();
 const lints = crateLints();
 const tests = testRun();
 const chapters = await bookChapters();
+const mapRows = selectionRows();
+
+/**
+ * Every instrument, what it answered, and the command that provisions it.
+ *
+ * **An instrument that cannot answer is a failure of this program, not a
+ * reason for it to say nothing (task-1969, 4.4).** Ten of the sixteen facts
+ * returned `null` on a checkout with nothing built and no probe result - which
+ * is every fresh clone, because `_agent_output/` is gitignored - and `:789`
+ * built `failed` out of the checks that were not `skipped`. So the program
+ * printed `skip` ten times and exited 0 with "Every fact a document states is
+ * the fact the engine reports." The task-1925 fix gave `judgeTestRun` this
+ * treatment and left the other ten instruments as they were.
+ *
+ * `scopedOutWithout` is the one legitimate absence: a flag the caller did not
+ * pass puts a fact out of scope rather than leaving it unmeasured. There are
+ * two, and both are named here rather than being a property of the instrument,
+ * so adding a third is a decision somebody writes down.
+ */
+const INSTRUMENTS = [
+  { label: 'command line verbs', value: verbs, provision: 'cargo build --release -p inillucent-cli' },
+  { label: 'MCP tools', value: tools, provision: 'cargo build --release -p inillucent-cli' },
+  { label: 'shell dot commands', value: dots, provision: 'cargo build --release -p inillucent-cli' },
+  { label: 'shell command line options', value: options, provision: 'cargo build --release -p inillucent-cli' },
+  { label: 'function register', value: functions, provision: 'cargo build --release -p inillucent-cli' },
+  { label: 'driver capabilities', value: caps, provision: 'cargo build --release -p inillucent-cli' },
+  { label: 'pragma register count', value: pragmaRegisterCount(), provision: 'restore compat/api/pragmas.toml' },
+  { label: 'probe result', value: probed, provision: 'node tools/feature-probe/run.js' },
+  { label: 'register audit', value: audit, provision: 'node tools/feature-probe/registers.js' },
+  { label: 'crate lints', value: lints, provision: 'nothing - it reads the manifests, so a null here is a defect in this file' },
+  { label: 'selection map rows', value: mapRows, provision: 'restore tests/selection.toml' },
+  { label: 'test run', value: tests, provision: 'cargo build -p inillucent-compat --bin inillucent-testrun --features testrun', scopedOutWithout: '--run-tests', facts: ['tests'] },
+  { label: 'documentation book chapters', value: chapters, provision: 'a checkout of the site', scopedOutWithout: '--site <dir>', facts: ['documentation book chapters'] },
+];
+
+/**
+ * Reports whether a flag that scopes a fact out of this run was passed.
+ *
+ * `facts` on an instrument names the checks it feeds, because a check's label
+ * and its instrument's label are not the same word - the `test run` instrument
+ * answers the `tests` fact - and matching them by equality printed a genuine
+ * instrument failure as an out-of-scope line.
+ */
+function passed(flag) {
+  return flag ? args.includes(flag.split(' ')[0]) : true;
+}
 
 // Two assertions that are not counts: what a public repository must not carry, and
 // whether every packaged copy of the release version agrees with the workspace.
@@ -742,13 +839,17 @@ const checks = [
   assertWritten('crates forbidding unsafe', lints?.forbidsUnsafe, /(?:(\d+) of (?:the )?29 crates forbid|and (\d+) forbid[\s\n]+`unsafe`)/i),
   assertWritten('crates denying the four lints', lints?.deniesFour, /(\d+) of the 29 crates deny/i),
   assertWritten('tests', tests?.tests, /(?:([\d,]+) tests across \d+ test targets|'([\d,]+)',\s*label: 'tests,)/i),
-  assertWritten('test targets', tests?.targets, /tests across (\d+) test targets/i),
+  // Held against the map rather than against the runner. A document that agrees
+  // with a stale run used to pass, which is how 170, 169 and 181 coexisted.
+  assertWritten('test targets', mapRows, /tests across (\d+) test targets/i),
+  assertWritten('selection map rows', mapRows, /(\d+) (?:\[\[target\]\] )?rows in `?tests\/selection\.toml`?/i),
   assertWritten('documentation book chapters', chapters, /(?:in|carries|book has) (\d+) chapters/i),
 ];
 
 const measured = {
   verbs, mcpTools: tools, dotCommands: dots, shellOptions: options, functions, capabilities: caps,
   probe: probed, registers: audit, crates: lints, tests, bookChapters: chapters,
+  selectionRows: mapRows,
 };
 
 // A run that could not produce a fact is a failure of this file, not a reason to say nothing. The
@@ -756,6 +857,15 @@ const measured = {
 // trouble is reported beside the facts and counted in the exit code.
 const instrumentErrors = [];
 if (tests?.error) instrumentErrors.push(tests.error);
+if (probeStaleness) instrumentErrors.push(probeStaleness);
+for (const instrument of INSTRUMENTS) {
+  if (!passed(instrument.scopedOutWithout)) continue;
+  if (instrument.value !== null && instrument.value !== undefined) continue;
+  instrumentErrors.push(`${instrument.label} could not be measured; run \`${instrument.provision}\``);
+}
+if (mapRows !== null && tests?.targets !== undefined && tests?.targets !== null && tests.targets !== mapRows) {
+  instrumentErrors.push(`the runner reported ${tests.targets} targets and tests/selection.toml has ${mapRows} rows, so one of them is stale`);
+}
 
 if (asJson) {
   console.log(JSON.stringify({ measured, checks, assertions, instrumentErrors }, null, 2));
@@ -771,7 +881,18 @@ if (asJson) {
   }
   console.log('\nwhat the documents say\n');
   for (const check of checks) {
-    if (check.skipped) { console.log(`  skip  ${check.label} — nothing to compare against`); continue; }
+    // Not `skip`. A fact whose instrument could not answer is in
+    // `instrumentErrors` and fails the run; the only thing printed here without
+    // a verdict is a fact a flag put out of scope, and it says which flag.
+    if (check.skipped) {
+      const scoped = INSTRUMENTS.find(
+        (instrument) => instrument.scopedOutWithout && (instrument.facts || []).includes(check.label),
+      );
+      console.log(scoped
+        ? `  n/a   ${check.label} - out of scope without ${scoped.scopedOutWithout}`
+        : `  FAIL  ${check.label} - its instrument could not answer; see below`);
+      continue;
+    }
     if (check.seen === 0) { console.log(`  MISS  ${check.label} — the engine says ${check.expected} and no document states it`); continue; }
     if (check.wrong.length === 0) { console.log(`  ok    ${check.label} — ${check.expected}, in ${check.seen} place(s)`); continue; }
     console.log(`  FAIL  ${check.label} — the engine says ${check.expected}`);

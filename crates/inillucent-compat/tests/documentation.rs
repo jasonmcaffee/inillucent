@@ -1120,3 +1120,246 @@ fn ratios_in(text: &str) -> Vec<(String, String)> {
     }
     found
 }
+
+/// Every prerequisite the map declares is on the page.
+///
+/// **The page described one machine's run rather than the shape (task-1969,
+/// 4.15).** It listed the five suites that one `--strict` pass on one desktop
+/// happened to name and said "`tools/doc-facts/check.mjs` accepts those four
+/// prerequisites and no others". Both lists were true of that machine and of
+/// nothing else: a checkout without the oracle, the pinned shell, a C compiler,
+/// Python with `ssl` or `openssl` sees thirty or forty suites named, and a
+/// reader had no way to tell an expected absence from a new one.
+///
+/// So the page carries the prerequisites instead, and this reads them out of
+/// `tests/selection.toml` and fails when one is missing from the table. The
+/// counts are checked too, because a row that says 28 beside a prerequisite 29
+/// rows declare is a number somebody will trust.
+#[test]
+fn the_prerequisite_table_names_every_value_in_the_map() {
+    let root = workspace_root();
+    let page = std::fs::read_to_string(root.join("docs/repository.md")).expect("the page");
+    let table = between(&page, "<!-- requires:begin -->", "<!-- requires:end -->");
+    let map = inillucent_compat::selection::Map::load(&root.join("tests/selection.toml"))
+        .expect("the selection map");
+
+    let mut declared: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for row in &map.rows {
+        for value in &row.requires {
+            *declared.entry(value.clone()).or_insert(0) += 1;
+        }
+    }
+    assert!(
+        declared.len() >= 10,
+        "the map declares {} distinct prerequisites, which means this is reading the wrong \
+         file rather than that the workspace needs almost nothing",
+        declared.len()
+    );
+
+    let mut missing: Vec<String> = Vec::new();
+    let mut miscounted: Vec<String> = Vec::new();
+    for (value, count) in &declared {
+        let Some(row) = table
+            .lines()
+            .find(|line| line.starts_with(&format!("| `{value}` |")))
+        else {
+            missing.push(value.clone());
+            continue;
+        };
+        let written: Option<usize> = row
+            .split('|')
+            .nth(2)
+            .and_then(|cell| cell.trim().parse().ok());
+        if written != Some(*count) {
+            miscounted.push(format!(
+                "`{value}`: the table says {} and {count} row(s) declare it",
+                row.split('|').nth(2).unwrap_or("").trim()
+            ));
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "these prerequisites are declared in tests/selection.toml and are not in the table \
+         in docs/repository.md between `<!-- requires:begin -->` and `<!-- requires:end -->`:\n  {}\n\
+         A reader on a machine without one of them sees `--strict` name a suite and has \
+         nowhere to find out what it needs.",
+        missing.join("\n  ")
+    );
+    assert!(
+        miscounted.is_empty(),
+        "these counts in the table disagree with the map:\n  {}",
+        miscounted.join("\n  ")
+    );
+}
+
+/// Every workspace member is in the coverage table, excluded by name, or
+/// explained in a sentence beside it.
+///
+/// **The table listed 25 crates against a workspace of 29 and said why for
+/// three (task-1969, 4.12).** The fourth is `inillucent`, the facade, whose
+/// body is a re-export and which therefore emits no regions at all - true, and
+/// written nowhere, so a reader counting the rows found four missing and no
+/// answer. Nothing read the page back at any point: `tools/coverage.mjs`
+/// printed the table to standard output and stopped.
+#[test]
+fn the_coverage_block_names_every_workspace_member_that_is_measured() {
+    let root = workspace_root();
+    let page = std::fs::read_to_string(root.join("docs/repository.md")).expect("the page");
+    let table = between(&page, "<!-- coverage:begin -->", "<!-- coverage:end -->");
+    let tool = std::fs::read_to_string(root.join("tools/coverage.mjs")).expect("the coverage tool");
+    let excluded = between(&tool, "const EXCLUDED = [", "]");
+
+    let mut absent: Vec<String> = Vec::new();
+    for member in workspace_member_crates() {
+        if table.contains(&format!("| `{member}` |")) {
+            continue;
+        }
+        // Excluded from the run by name, which `tools/coverage.mjs` holds and
+        // the page states, or named in a sentence on the page that says why it
+        // has no row.
+        if excluded.contains(&format!("'{member}'")) && page.contains(&format!("`{member}`")) {
+            continue;
+        }
+        if page.contains(&format!("the fourth is `{member}`"))
+            || page.contains(&format!("and the fourth is `{member}`"))
+        {
+            continue;
+        }
+        absent.push(member);
+    }
+    assert!(
+        absent.is_empty(),
+        "these workspace members have no row in the coverage table, are not in \
+         `tools/coverage.mjs`'s EXCLUDED, and are not named in a sentence on the page:\n  {}\n\
+         Re-run `node tools/coverage.mjs --per-crate --write`, or say on the page why the \
+         crate emits no regions.",
+        absent.join("\n  ")
+    );
+}
+
+/// The per-tier table in the testing standard counts what the map holds.
+///
+/// **Three documents gave three target counts and nothing compared any of them
+/// to the map (task-1969, 4.14).** `docs/repository.md` said 170, this
+/// document said 169 and its per-tier table said `engine` 53 and
+/// `differential` 30 where the map had 58 and 31, and `tools/doc-facts/check.mjs`
+/// compared a written count against what the *runner* reported - so a document
+/// that agreed with a stale run passed.
+///
+/// Only the target column is checked. The test count per tier is a property of
+/// a run rather than of the map, and a test that read it out of the map would
+/// be asserting a number the map does not hold.
+#[test]
+fn the_per_tier_table_matches_the_map() {
+    let root = workspace_root();
+    let standard = std::fs::read_to_string(root.join("tests/inillucent-testing-tdd.md"))
+        .expect("the standard");
+    let map = inillucent_compat::selection::Map::load(&root.join("tests/selection.toml"))
+        .expect("the selection map");
+
+    let mut counted: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+    for row in &map.rows {
+        *counted.entry(row.tier.clone()).or_insert(0) += 1;
+    }
+
+    let mut wrong: Vec<String> = Vec::new();
+    let mut read = 0usize;
+    for tier in &map.tiers {
+        let Some(line) = standard
+            .lines()
+            .find(|line| line.starts_with(&format!("| `{}` |", tier.name)))
+        else {
+            wrong.push(format!("`{}` has no row in the per-tier table", tier.name));
+            continue;
+        };
+        read += 1;
+        let written: Option<usize> = line
+            .split('|')
+            .nth(2)
+            .and_then(|cell| cell.trim().replace(',', "").parse().ok());
+        let held = counted.get(&tier.name).copied().unwrap_or(0);
+        if written != Some(held) {
+            wrong.push(format!(
+                "`{}`: the table says {} and the map has {held}",
+                tier.name,
+                line.split('|').nth(2).unwrap_or("").trim()
+            ));
+        }
+    }
+    assert!(
+        read >= 5,
+        "read {read} tier rows out of the per-tier table, which means this is reading the \
+         wrong table rather than that the suite has almost no tiers"
+    );
+    assert!(
+        wrong.is_empty(),
+        "the per-tier table in tests/inillucent-testing-tdd.md disagrees with \
+         tests/selection.toml:\n  {}\n\
+         The map is what the runner runs, so the map is the number.",
+        wrong.join("\n  ")
+    );
+}
+
+/// Returns every workspace member's crate name, and nothing else.
+///
+/// `workspace_members` above adds every `[[bin]]` name as well, because a front
+/// page naming `inillucent-shell` is naming something real. A coverage table has
+/// one row per *crate*, so this reads the member list alone.
+fn workspace_member_crates() -> BTreeSet<String> {
+    let root = workspace_root();
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).expect("the root manifest");
+    let mut names = BTreeSet::new();
+    let mut inside = false;
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed == "members = [" {
+            inside = true;
+            continue;
+        }
+        if !inside {
+            continue;
+        }
+        if trimmed == "]" {
+            break;
+        }
+        // The member list carries section comments - "Phase 1 foundation.",
+        // "The driver (task-1837): ..." - and a blank line between groups.
+        // Reading those as paths produced rows like `README.md` and half a
+        // sentence, which then read as crates with no coverage row.
+        if trimmed.is_empty() || trimmed.starts_with('#') || !trimmed.starts_with('"') {
+            continue;
+        }
+        let path = trimmed
+            .trim_matches(|c| c == '"' || c == ',')
+            .trim_matches('"');
+        if let Some(name) = path.rsplit('/').next() {
+            if !name.is_empty() {
+                names.insert(name.to_string());
+            }
+        }
+    }
+    assert!(
+        names.len() > 20,
+        "the root manifest's member list was not read: {names:?}"
+    );
+    names
+}
+
+/// Returns the text between two markers, or panics naming the one that is
+/// missing.
+///
+/// @param text - the document
+/// @param opens - the marker the block starts after
+/// @param closes - the marker the block ends before
+fn between<'a>(text: &'a str, opens: &str, closes: &str) -> &'a str {
+    let start = text
+        .find(opens)
+        .unwrap_or_else(|| panic!("the document has no {opens}"));
+    let rest = text
+        .get(start.saturating_add(opens.len())..)
+        .unwrap_or_default();
+    let end = rest
+        .find(closes)
+        .unwrap_or_else(|| panic!("the document has no {closes} after {opens}"));
+    rest.get(..end).unwrap_or_default()
+}

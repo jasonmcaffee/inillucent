@@ -18,9 +18,19 @@
 //
 //   --per-crate   also print a table of one row per crate, which is what
 //                 `docs/repository.md` publishes
+//   --write       write that table into docs/repository.md between the two
+//                 marker comments, rather than leaving it for somebody to paste
+//
+// **`--write` exists because the published table had no checker and contradicted
+// itself (task-1969, 4.12).** The program printed the table to stdout and
+// stopped; a person pasted it into the page, and the prose under it went on
+// saying 40.9% and 47.9% where the table said 40.6% and 48.4%. Nothing read the
+// page back. Writing it between markers makes the page a function of the
+// measurement, and `cargo test -p inillucent-compat --test documentation` reads
+// the block.
 
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -125,11 +135,10 @@ function perCrate(report) {
     crates.set(held[1], row);
   }
   const percent = (whole, missed) => (whole === 0 ? '-' : `${((100 * (whole - missed)) / whole).toFixed(1)}%`);
-  console.log('| crate | regions | region coverage | lines | line coverage |');
-  console.log('|---|---:|---:|---:|---:|');
+  const rows = ['| crate | regions | region coverage | lines | line coverage |', '|---|---:|---:|---:|---:|'];
   const ordered = [...crates.entries()].sort((one, two) => two[1].lines - one[1].lines);
   for (const [crate, row] of ordered) {
-    console.log(
+    rows.push(
       `| \`${crate}\` | ${row.regions.toLocaleString('en-US')} | ${percent(row.regions, row.missedRegions)} ` +
         `| ${row.lines.toLocaleString('en-US')} | ${percent(row.lines, row.missedLines)} |`,
     );
@@ -137,11 +146,44 @@ function perCrate(report) {
   if (total) {
     const regions = Number(total[1]);
     const lines = Number(total[7]);
-    console.log(
+    rows.push(
       `| **total** | **${regions.toLocaleString('en-US')}** | **${percent(regions, Number(total[2]))}** ` +
         `| **${lines.toLocaleString('en-US')}** | **${percent(lines, Number(total[8]))}** |`,
     );
   }
+  return rows.join('\n');
+}
+
+/** Where the generated table starts and ends in `docs/repository.md`. */
+const BEGIN = '<!-- coverage:begin -->';
+const END = '<!-- coverage:end -->';
+
+/**
+ * Writes the table into `docs/repository.md` between the two markers.
+ *
+ * It refuses rather than appending when a marker is missing: a page that has
+ * lost its markers is one where the table has been edited by hand, and silently
+ * putting a second copy at the end would leave two tables disagreeing, which is
+ * the condition this replaces.
+ *
+ * @param table - the rendered markdown table
+ */
+function writeIntoThePage(table) {
+  const page = join(root, 'docs', 'repository.md');
+  const text = readFileSync(page, 'utf8');
+  const opens = text.indexOf(BEGIN);
+  const closes = text.indexOf(END);
+  if (opens < 0 || closes < 0 || closes < opens) {
+    console.error(`${page} has no ${BEGIN} ... ${END} block, so there is nowhere to write the table`);
+    process.exit(1);
+  }
+  const updated = `${text.slice(0, opens + BEGIN.length)}\n\n${table}\n\n${text.slice(closes)}`;
+  if (updated === text) {
+    console.log('the table in docs/repository.md is already what this run measured');
+    return;
+  }
+  writeFileSync(page, updated);
+  console.log('wrote the table into docs/repository.md');
 }
 
 const first = measure();
@@ -164,5 +206,7 @@ if (first.status !== 0) {
 }
 
 if (process.argv.includes('--per-crate')) {
-  perCrate(report);
+  const table = perCrate(report);
+  console.log(table);
+  if (process.argv.includes('--write')) writeIntoThePage(table);
 }

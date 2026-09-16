@@ -4,13 +4,22 @@
 # each one lived in somebody's memory, so "did you run the checks" had no
 # answer.
 #
-# Every stage prints its name and its elapsed time, and the script stops at the
-# first failure with a non-zero exit code.
+# Every stage prints its name and its elapsed time. **The script runs every
+# stage and exits non-zero at the end naming all of them**, rather than stopping
+# at the first failure - the header said it stopped for two tickets while
+# `stage()` recorded the name and carried on, which is the more useful behaviour
+# and is what a reader should be told (task-1969, 4.13).
 #
 #   tools/validate.sh                # everything
-#   tools/validate.sh --quick        # fmt, lint, contracts and smoke only
+#   tools/validate.sh --quick        # stops after `smoke`: toolchain, format,
+#                                    # build, lint, dependencies, defaults,
+#                                    # docs, oracle, fixtures, doctests, urls,
+#                                    # contracts, compat, smoke - fourteen
+#                                    # stages, not the four an earlier header
+#                                    # claimed
 #   tools/validate.sh --coverage     # everything, plus the coverage measurement
-#   tools/validate.sh --stage lint   # one stage by name
+#   tools/validate.sh --stage lint   # one stage by name, wherever it sits -
+#                                    # `--quick --stage tests` runs `tests`
 
 set -u
 
@@ -187,9 +196,14 @@ stage doctests 'the examples a cargo add reader depends on, compiled and run' do
 stage urls 'a URL a shipped package names has to resolve for somebody with no credential' \
     node "$root/tools/check-public-urls.mjs"
 
+# `gates_fail_closed` is here rather than only in the full run (task-1961,
+# criterion 10; task-1969, 4.13). It is the only test any gate program has, and a
+# quick run that skipped it was a quick run with nothing holding the programs
+# that decide pass or fail.
 stage contracts 'dependencies, layering, the command table and the test map' \
     cargo test --manifest-path "$root/Cargo.toml" -p inillucent-compat \
-    --test policy --test selection --test command_parity --test harness
+    --test policy --test selection --test command_parity --test harness \
+    --test gates_fail_closed
 
 # **A published compatibility report may not carry its own unresolved Problems
 # table (task-1946, M5).** compat/compat-report.md shipped fourteen rows saying
@@ -212,6 +226,46 @@ smoke() {
         && "$root/target/debug/inillucent-testrun" --tier smoke
 }
 stage smoke 'a real file opened, written, reopened, read' smoke
+
+# **`--stage` reaches past the quick exit (task-1969, 4.13).** `--quick` means
+# "stop after smoke"; it does not mean "refuse to run the stage I named". The two
+# read the same until `coverage` moved below this line, after which
+# `--quick --coverage --stage coverage` would have measured nothing on Unix and
+# everything on Windows - which is the platform difference this whole section is
+# about.
+if [ "$quick" -eq 1 ] && [ -z "$only" ]; then
+    if [ "${#failed[@]}" -gt 0 ]; then
+        echo; echo "FAILED: ${failed[*]}"; exit 1
+    fi
+    echo; echo 'quick validation passed'; exit 0
+fi
+
+security() {
+    cargo test --manifest-path "$root/Cargo.toml" -p inillucent-compat --test confinement \
+        && cargo test --manifest-path "$root/Cargo.toml" -p inillucent-driver-capi --test abi --test conformance \
+        && cargo test --manifest-path "$root/Cargo.toml" -p inillucent-remote --test transport
+}
+stage security 'root confinement, the C ABI lifetimes, and migration transport' security
+
+# --strict is the flag that matters: several suites report success when a
+# prerequisite is absent, and without it a green on a machine with nothing
+# installed reads the same as a green on one with everything.
+stage tests 'every selected suite, with missing prerequisites named' \
+    "$root/target/debug/inillucent-testrun" --strict
+
+# **Every published count, against the engine that produced it (task-1969,
+# 4.4).** `tools/doc-facts/check.mjs` checks the 30 verbs, the 63 dot commands,
+# the 416 probe cases, the test and target counts and the private-reference
+# patterns, and it is checked by nothing else. Its only caller was
+# `packaging/release.ps1`, on Windows, without `--run-tests` - so on Unix it ran
+# at no point in any gate.
+#
+# After `build` and `tests`, because it reads the built binaries and the runner's
+# own summary, and both are fresh by the time it runs. `--run-tests` is what puts
+# the two test facts in scope; without it they report as out of scope rather than
+# as measured.
+stage doc-facts 'every count a document states, against the engine that produced it' \
+    node "$root/tools/doc-facts/check.mjs" --run-tests
 
 # **Coverage, behind a flag, so the published number can be re-measured
 # (task-1961, T2).** The only numbers on record before this named `rustdb-vm`, a
@@ -240,32 +294,16 @@ stage smoke 'a real file opened, written, reopened, read' smoke
 # accepts, so the run ended with `os error 206` and no number after twenty
 # minutes of work. The wrapper re-runs that same command through a response
 # file, and prints the per-crate table `docs/repository.md` publishes.
+#
+# `--write` puts that table into the page between two marker comments instead of
+# leaving it for somebody to paste, which is why the page's prose used to say
+# 40.9% where its table said 40.6% (task-1969, 4.12).
 coverage_run() {
-    node "$root/tools/coverage.mjs" --per-crate
+    node "$root/tools/coverage.mjs" --per-crate --write
 }
 if [ "$coverage" -eq 1 ]; then
     stage coverage 'the coverage number docs/repository.md publishes, re-measured' coverage_run
 fi
-
-if [ "$quick" -eq 1 ]; then
-    if [ "${#failed[@]}" -gt 0 ]; then
-        echo; echo "FAILED: ${failed[*]}"; exit 1
-    fi
-    echo; echo 'quick validation passed'; exit 0
-fi
-
-security() {
-    cargo test --manifest-path "$root/Cargo.toml" -p inillucent-compat --test confinement \
-        && cargo test --manifest-path "$root/Cargo.toml" -p inillucent-driver-capi --test abi --test conformance \
-        && cargo test --manifest-path "$root/Cargo.toml" -p inillucent-remote --test transport
-}
-stage security 'root confinement, the C ABI lifetimes, and migration transport' security
-
-# --strict is the flag that matters: several suites report success when a
-# prerequisite is absent, and without it a green on a machine with nothing
-# installed reads the same as a green on one with everything.
-stage tests 'every selected suite, with missing prerequisites named' \
-    "$root/target/debug/inillucent-testrun" --strict
 
 echo
 if [ "${#failed[@]}" -gt 0 ]; then

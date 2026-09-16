@@ -98,6 +98,19 @@ function verdict(ours, theirs) {
   return 'wrong-answer';
 }
 
+/**
+ * Returns the commit this checkout is on, or null when that cannot be read.
+ *
+ * Null rather than a throw: a probe run inside an exported tarball with no
+ * `.git` should still produce its numbers. What reads this decides what a
+ * missing commit means, and `check.mjs` treats it as a result it cannot date.
+ */
+function headCommit() {
+  const shown = spawnSync('git', ['-C', ROOT, 'rev-parse', 'HEAD'], { encoding: 'utf8' });
+  const sha = (shown.stdout || '').trim();
+  return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
+}
+
 function main() {
   const args = process.argv.slice(2);
   const filterAt = args.indexOf('--filter');
@@ -117,7 +130,13 @@ function main() {
     if (n % 20 === 0) process.stderr.write(`  ${n}/${selected.length}\n`);
   }
   fs.mkdirSync(path.dirname(out), { recursive: true });
-  fs.writeFileSync(out, JSON.stringify(results, null, 2));
+  // **The result says which tree it measured (task-1969, 4.4).** It used to be a
+  // bare array, and `tools/doc-facts/check.mjs` read it with no freshness check
+  // of any kind - so a probe recorded a month and forty commits ago passed as
+  // today's, and every published count that comes out of it (416 cases, 403 the
+  // same) was being checked against a measurement of a different engine. The
+  // file is gitignored, so nothing else could have noticed.
+  fs.writeFileSync(out, JSON.stringify({ commit: headCommit(), recordedAt: new Date().toISOString(), cases: results }, null, 2));
 
   const tally = {};
   for (const r of results) tally[r.verdict] = (tally[r.verdict] || 0) + 1;

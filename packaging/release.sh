@@ -123,6 +123,20 @@ if [ "$smoke_only" -eq 0 ]; then
       "rust-toolchain.toml pins $pinned and this is rustc $running, so the release would not be the build the repository grades itself against."
   fi
 
+  # **Every packaged copy of the version has to agree with the workspace, and no
+  # tracked file may carry a credential or a personal reference.** Both are
+  # things nothing checked: at 0.1.2 the Python package reported 0.1.0 and the
+  # PHP installer downloaded 0.1.1, so `composer require` followed by the
+  # installer fetched the release that cannot embed, and the tracked score card
+  # carried a PostgreSQL password in clear (task-1946, H7 and H9).
+  #
+  # **`release.ps1` has asked this since task-1946 and this script never did
+  # (task-1969, 4.4)**, so a release cut on Linux - which is the only way the
+  # Linux archives get cut - went out without any of it being asked.
+  if ! node "$root/tools/doc-facts/check.mjs"; then
+    deny_unless "$allow_dirty" allow-dirty       "tools/doc-facts/check.mjs failed: a document disagrees with the engine, a packaged version pin disagrees with the workspace, or a tracked file carries something a public repository must not."
+  fi
+
   [ "$skip_build" -eq 0 ] || waived+=("skip-build")
 fi
 

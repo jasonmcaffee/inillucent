@@ -629,7 +629,7 @@ AGENTS.md says "every row". Either the three get probes or AGENTS.md names the c
 | 13 | `docs/pragmas.md` generated and checked | met | `harness.rs:479`; 68 |
 | 14 | skills copied byte identical, pointer files | met | `documentation.rs:784, 845` |
 | 15 | repositories public, Go route recorded, url check in validate | met | `validate.sh:188` |
-| 16 | no pre-rewrite sha; the task-1946 TDD holds no machine path or account | **not met, second clause** | `tasks/task-1946-inillucent-code-review-round-two-tdd.md:290` `J:/inillucent-embeddings/...`; `:315, 723` `postgres://jason@127.0.0.1:5432/corpus`; `:723` quotes `C:\jason`, `C:/jason`, `J:/inillucent` as the patterns a later check must find zero of |
+| 16 | no pre-rewrite sha; the task-1946 TDD holds no machine path or account | **not met, second clause** | `tasks/task-1946-inillucent-code-review-round-two-tdd.md:290` names a drive letter path, `:315` an account inside a connection string, and `:723` quotes three of the patterns `check.mjs` searches for as the things a later check must find zero of. All five are redacted by the implementation ticket; the patterns themselves stay in `tools/doc-facts/check.mjs`, which is the one file that has to hold them |
 | 17 | layering: no unused edge, dev edges checked | met | `layering.rs:452, 500` |
 | 18 | default feature `cargo check` and `--features check` in validate | met | `validate.sh:121-127` |
 | 19 | roadmap matches section 9 | met, one item since closed | 6.3 |
@@ -970,7 +970,7 @@ Each is a command or a file state a reviewer can check without reading the diff.
 33. `docs/roadmap.md` does not contain "Recovery reads a page"; `docs/closed-items.md` names the item, `cdc58eb` and `torn_page_with_image.rs`; remaining items are renumbered and every link into `roadmap.md` resolves (`documentation.rs`'s link check passes).
 34. `grep -rn fourteen crates/inillucent-cli/src/command/outcome.rs packages/go/inillucent.go packages/npm/inillucent/index.mjs agent-skills/inillucent-mcp/SKILL.md` returns nothing; `agent-skills/inillucent-troubleshoot/SKILL.md` states the count `docs/feature-comparison.md:24` states; `agent-skills/inillucent-develop/SKILL.md` no longer names a function `inillucent_vfs::confine`; `every_skill_copy_matches_its_source` passes.
 35. `crates/inillucent-pool/src/pool/journal_gate.rs:21` names `engine/locks.rs`; `crates/inillucent-migrate/tests/` has a test that a failed SQLite file migration leaves the staging file, or `main.rs:20` no longer says "always".
-36. `grep -nE 'C:\\\\jason|C:/jason|J:/inillucent|postgres://jason@' tasks/task-1946-inillucent-code-review-round-two-tdd.md` returns nothing; `.gitignore` contains `*.profraw`.
+36. `node tools/doc-facts/check.mjs` reports `ok  no tracked file carries a private reference`, which is the check that holds the patterns and searches every tracked document for them; `.gitignore` contains `*.profraw`.
 37. AGENTS.md either states the number of `capabilities` rows exempt from the two direction check or that number is 0.
 38. `git -C <repo> log --format='%an %cn %b' <base>..HEAD` shows only `Jason McAffee` and no `Co-Authored-By`, `Generated`, `Claude` or `Anthropic` line.
 39. `tools/validate.sh` and `tools/validate.ps1` both exit 0 on the final tree, and `target/debug/inillucent-testrun --strict` reports 0 failed, 0 undetermined, with its list of hollow targets pasted into the closing comment beside the `requires` table.

@@ -139,3 +139,10 @@ __pycache__/
 # source and these are not.
 /tools/cross/bin/
 /tools/cross/cache/
+
+# The raw counters a coverage run writes, one per test process. A
+# `cargo llvm-cov` run leaves 133 of them scattered through the source tree, and
+# `packaging/release.ps1`'s clean-checkout check then refuses to cut a release
+# over them - so the first thing anybody did after measuring coverage was work
+# out what these were and delete them by hand.
+*.profraw

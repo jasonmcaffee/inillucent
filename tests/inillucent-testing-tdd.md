@@ -125,7 +125,7 @@ the two numbers and what was expected of them.
 
 ## 2. The shape of the suite
 
-**169 test targets, 2,789 tests, in nine tiers.** A target is one binary
+**181 test targets, 2,789 tests, in nine tiers.** A target is one binary
 `cargo test` builds; a tier is a band you can ask for by name. Every target is
 in exactly one tier, so the tiers partition the suite rather than overlapping
 it. (Was 129 targets, 2,336 tests when this document was written; task-1911's
@@ -139,17 +139,26 @@ Then the two code reviews: task-1932 and task-1946 took it to 169 and
 oracle, and the rollback journal's ordering, and deleting 1,284 lines that
 nothing called.)
 
+**The target column is the `[[target]]` row count in `tests/selection.toml`, and
+`cargo test -p inillucent-compat --test documentation` fails when it is not.**
+It said 169 here and 170 in `docs/repository.md` while the map held 181, and its
+`engine` and `differential` cells said 53 and 30 against the map's 58 and 31.
+Nothing compared any of the three to the map: `tools/doc-facts/check.mjs` held a
+written count against what the *runner* last reported, so a document that agreed
+with a stale run passed (task-1969, 4.14). The test count per tier is a property
+of a run rather than of the map and is not checked here.
+
 | tier | targets | tests | what it is for |
 |---|---:|---:|---|
 | `smoke` | 1 | 8 | the ten-second answer: a real file opened, written, reopened, read |
-| `unit` | 26 | 1,242 | every crate's own `#[cfg(test)]` modules |
-| `engine` | 53 | 330 | SQL and storage behaviour over real database files |
-| `differential` | 30 | 309 | graded against the pinned SQLite 3.53.4 |
+| `unit` | 31 | 1,242 | every crate's own `#[cfg(test)]` modules |
+| `engine` | 58 | 330 | SQL and storage behaviour over real database files |
+| `differential` | 31 | 309 | graded against the pinned SQLite 3.53.4 |
 | `durability` | 23 | 176 | crashes, injected faults, corruption and concurrency |
 | `e2e` | 21 | 130 | the public surfaces an application binds to, end to end |
 | `perf` | 1 | 6 | the cost guards — **runs alone**, see §5 |
 | `retrieval` | 6 | 519 | the embedding and retrieval engine, and its graded harness |
-| `tooling` | 8 | 69 | the checks that keep the repository's own rules true |
+| `tooling` | 9 | 69 | the checks that keep the repository's own rules true |
 
 The map that assigns them is `tests/selection.toml`, and it is data rather than
 code so that a person can read the whole arrangement in one file.

@@ -287,7 +287,7 @@ which replaces the password with `***`. The command line does not, and `--databa
 argument. So the tracked `inillucent-scorecard.md:220` and `inillucent-scorecard.json` (one hit)
 carry `postgres://postgres:inillucent@127.0.0.1:5433/inillucent_synth` in clear, beside the
 redacted copy, and the same table (`scorecard.md:220-224`) carries `<machine path>\inillucent\...` and
-`J:/inillucent-embeddings/...`.
+`<drive>:/inillucent-embeddings/...`.
 
 The password is for a local synthetic corpus database and has been in the history since the
 scorecard was first committed, so its exposure is already what it is; the fix is for the next
@@ -312,7 +312,7 @@ Three places, all confirmed by grep at `6e84068`:
 - `crates/inillucent-core/src/tokenize.rs`: `<account address>` eight times and
   `gordon@example.invalid` at lines 184, 231, 232, 437, 441, 519, 520 as tokenizer fixtures. The same
   file already uses `jason@example.com` elsewhere.
-- `crates/inillucent-remote/src/lib.rs:8` and `url.rs:5`: `postgres://jason@127.0.0.1:5432/corpus`
+- `crates/inillucent-remote/src/lib.rs:8` and `url.rs:5`: `postgres://<user>@127.0.0.1:5432/corpus`
   as the doc example, where every other example in the crate uses `user`.
 
 **Fix.** Rewrite `PUBLISHING.md` to what a contributor needs (which registries exist, how an
@@ -719,10 +719,14 @@ closes.
 
 1. Every test in section 10 exists, is in `tests/selection.toml`, and the commit message says which
    fail on `6e84068`.
-2. These greps over `git ls-files` return nothing: `jasonlmcaffee`, `black.rainbow.labs@`,
-   `example-company`, `postgres:inillucent@`, `C:\jason`, `C:/jason`, `J:/inillucent`, `jason-25`,
-   `Codex Sol`, `codex exec`, `npmjs.com/settings`, `~/.claude`, `opencode.json`, `aiservice-web`.
-   `tools/doc-facts/check.mjs` runs them.
+2. Fourteen greps over `git ls-files` return nothing. They are the patterns
+   `tools/doc-facts/check.mjs`'s `PRIVATE_REFERENCES` holds and are not quoted here: an account
+   name, two company names, a database password in a connection string, two developer machine
+   paths, a machine name, a coding agent's name and its command, a registry settings URL, an agent
+   configuration directory, an agent configuration file and an internal project name. Quoting them
+   in this document put three of them into a tracked file, which is what criterion 16 of the
+   task-1961 review found. `tools/doc-facts/check.mjs` is where they are written down, once, in
+   the program that searches for them.
 3. `python -c "import inillucent; print(inillucent.__version__)"` prints 0.1.2, `NATIVE_VERSION` in
    the PHP installer is 0.1.2, and the version pin check fails if any copy differs from
    `[workspace.package] version`.

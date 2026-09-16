@@ -105,16 +105,51 @@ mistaken for a green run.
 If you do use `cargo test --workspace`, pass `--no-fail-fast`. Without it the run stops at the first
 failing binary, and has reported about a quarter of the suite.
 
-**No test fails today.** `inillucent-testrun --strict` reports 170 targets, 2,819 tests, 0 failed
-and 0 undetermined. The counts are exact. The wall clock was 840 seconds on a 24 processor desktop
-that was carrying other work while it ran, so read it as one run on one machine rather than as a
-figure to plan against. It still prints `not ok`, because five suites
-evidenced nothing: `inillucent-remote::live_postgres` and `inillucent-remote::live_mysql` have no
-server configured on this machine, `inillucent-remote::lib` runs only when
-`INILLUCENT_NETWORK_TESTS` is set, because it opens sockets, and `inillucent-core::lib` and
-`inillucent-bench` hold twenty-nine cases that need the embedding weights, which
-`inillucent setup-embeddings all` installs. That is the condition `--strict` exists
-to report, and `tools/doc-facts/check.mjs` accepts those four prerequisites and no others.
+**No test fails today.** `inillucent-testrun --strict` reports 0 failed and 0 undetermined over the
+181 rows in `tests/selection.toml`. The wall clock was 840 seconds on a 24 processor desktop that
+was carrying other work while it ran, so read it as one run on one machine rather than as a figure
+to plan against.
+
+**It will still print `not ok` on your machine, and how many suites it names depends on what you
+have installed.** This page used to answer that with a list of the five suites one run on one
+desktop happened to name, which told a reader on a fresh clone nothing: a machine without the
+oracle, the pinned shell, a C compiler, Python with `ssl`, or `openssl` sees thirty or forty, and
+there was no way to tell an expected absence from a new one. So what is published is the shape
+instead - every prerequisite any row declares, how many rows declare it, and what provides it. It
+is read out of `tests/selection.toml`, and
+`cargo test -p inillucent-compat --test documentation` fails when a value in the map is not in this
+table.
+
+<!-- requires:begin -->
+
+| prerequisite | rows | what provides it |
+|---|---:|---|
+| `oracle` | 27 | the pinned SQLite 3.53.4 comparison process: `pwsh tools/sqlite-reference.ps1`, `bash tools/sqlite-reference.sh` |
+| `programs` | 6 | the command surface built into this profile's target directory: `cargo build -p inillucent-cli` |
+| `shell` | 6 | the pinned `sqlite3` 3.53.4 shell, from the same two scripts as the oracle |
+| `fixtures` | 2 | the gate fixtures, which are 1.2 MB and 120 MB and are not tracked: `bash tools/build-gate-fixtures.sh _agent_output/fixtures` |
+| `onnx` | 2 | ONNX Runtime and the embedding weights: `inillucent setup-embeddings all` |
+| `tracked-fixtures` | 2 | the 35 files under `compat/fixtures/`, which are in the repository - declared for a checkout that has lost them, not for a fresh clone |
+| `asan` | 1 | a toolchain with the address sanitizer, which is nightly on every platform and absent on Windows |
+| `baseline` | 1 | a recorded performance baseline: `cargo run -p inillucent-compat --bin inillucent-baseline -- capture` |
+| `btree-corpus` | 1 | the retained sequences under `compat/corpus/btree/`, which are tracked |
+| `cc` | 1 | a C compiler on `PATH`, for the program that links the C ABI |
+| `directory-link` | 1 | permission to create a directory link, which Windows gives an elevated shell or a machine in developer mode |
+| `mysql` | 1 | a live MySQL server, named by `INILLUCENT_TEST_MYSQL_URL` |
+| `narrow-slots` | 1 | the narrow integer slots compiled in, which is a constant in `crates/inillucent-tree/src/leaf.rs` |
+| `network` | 1 | outbound network access, turned on by setting `INILLUCENT_NETWORK_TESTS` |
+| `openssl` | 1 | the `openssl` command, which generates the certificates the TLS suite serves |
+| `postgres` | 1 | a live PostgreSQL server, named by `INILLUCENT_TEST_POSTGRES_URL` |
+| `python` | 1 | a Python interpreter with `ssl`, for the TLS server and the `ctypes` conformance runner |
+| `sqlite-bench` | 1 | the pinned benchmark driver, built by the same two reference scripts |
+| `testrun` | 1 | the runner itself: `cargo build -p inillucent-compat --bin inillucent-testrun --features testrun`, which a plain `cargo test` does not build |
+
+<!-- requires:end -->
+
+A row without a prerequisite is a suite that runs everywhere. A suite that can skip and does not
+declare one fails `cargo test -p inillucent-compat --test selection`, and so does a row that
+declares one whose suite cannot skip - which is what keeps this table equal to the workspace rather
+than equal to the last time somebody looked.
 
 The last two joined the list in task-1913 and are not a new absence. Those twenty-nine cases sit
 behind the `onnx` cargo feature, which the runner did not turn on, so they were in no binary at all
@@ -126,7 +161,13 @@ already removed the cause and nobody re-ran it, which is recorded in
 
 ## What the tests cover
 
-2,819 tests across 170 test targets in the workspace, in these classes:
+2,819 tests across 181 test targets in the workspace, in these classes:
+
+The 181 is the `[[target]]` row count in `tests/selection.toml`, which is what
+`tools/doc-facts/check.mjs` compares this sentence against and what the runner is asked to run.
+The number of `#[test]` attributes in the tree is higher - 2,959 at the time of writing - because
+a `#[cfg(windows)]` and a `#[cfg(unix)]` pair is two attributes and one test on any one machine,
+and five `onnx` cases are built only when that feature is on.
 
 - **A differential harness** that runs the same SQL through the pinned SQLite 3.53.4 and compares
   transcripts. 208 of those cases are `semantics.rs`, and 416 are the wider feature probe.
@@ -153,8 +194,11 @@ already removed the cause and nobody re-ran it, which is recorded in
   must release its locks.
 - **One conformance suite run three ways** — against the in memory file system, the real one, and the
   simulator — so "the simulator behaves like a disk" is a checked claim rather than a hope.
-- **100% branch coverage** held on the page pool's interior, latch, meta, extent, free map and swip
-  modules, and on the tree's key codec.
+- **Region and line coverage above 93% on the page pool's interior, latch, meta, extent, free map
+  and swip modules, and on the tree's key codec.** This used to say 100% *branch* coverage, sixteen
+  lines above the sentence that says branch coverage cannot be measured on the pinned toolchain;
+  both cannot be true, and it is the second one that is. The numbers here are what
+  `tools/coverage.mjs` measures, so they are in the table below.
 - **28 of the 29 crates deny `unwrap`, `expect`, `panic` and slice indexing**, and 21 forbid
   `unsafe`, on every path that reads SQL text, database pages, log frames, network bytes or file
   system results. The twenty-ninth is `inillucent-bench`, which has no library to put the attributes
@@ -168,6 +212,8 @@ runs every suite under `cargo llvm-cov` and prints this table. Region and line
 coverage, not branch: branch coverage needs `-Z coverage-options=branch`, a
 nightly option, and `rust-toolchain.toml` pins the compiler to stable for the
 reason written beside the pin.
+
+<!-- coverage:begin -->
 
 | crate | regions | region coverage | lines | line coverage |
 |---|---:|---:|---:|---:|
@@ -198,6 +244,16 @@ reason written beside the pin.
 | `inillucent-alloc` | 355 | 91.3% | 165 | 84.8% |
 | **total** | **222,894** | **77.2%** | **129,296** | **77.8%** |
 
+<!-- coverage:end -->
+
+The table is written into this page by `tools/coverage.mjs --per-crate --write`, between the two
+marker comments, rather than printed to a terminal for somebody to paste. It listed 25 crates
+against the workspace's 29: three are excluded from the run by name and the exclusion is stated
+below, and the fourth is `inillucent`, the facade, whose body is a re-export and which therefore
+emits no regions at all. `cargo test -p inillucent-compat --test documentation` fails when a
+workspace member is neither in the table, nor in `tools/coverage.mjs`'s `EXCLUDED`, nor named in a
+sentence here.
+
 Three rows need reading rather than ranking.
 
 `inillucent-driver-capi` reads 0.8%, and the C ABI is not untested: its
@@ -206,10 +262,12 @@ conformance suite drives the symbols through a C program that links the built
 measurement merges. What the number says is that no Rust test calls those
 functions, which is true and is what a C ABI is for.
 
-`inillucent-compat` at 40.9% and `inillucent-cli` at 47.9% are the two crates
-that are mostly *programs*: eighteen gate and profiling binaries between them,
-each run by hand or by a scheduled job rather than by `cargo test`. The library
-halves of both are covered by the suites that use them.
+`inillucent-compat` and `inillucent-cli` are the two crates that are mostly
+*programs*: eighteen gate and profiling binaries between them, each run by hand
+or by a scheduled job rather than by `cargo test`. The library halves of both
+are covered by the suites that use them. Their percentages are in the table
+above and are not repeated here, because they were repeated here, and the two
+copies said 40.6% and 40.9%.
 
 The three retrieval crates - `inillucent-core`, `inillucent-bench` and
 `inillucent-model` - are excluded from the run. They need ONNX Runtime and a

@@ -8,17 +8,29 @@
 # capability table nobody probes, which `drivers/README.md` already argues
 # against.
 #
-# Every stage prints its own name and the elapsed time, and the script stops at
-# the first failure with a non-zero exit code. Nothing here needs a network, a
-# server, or a corpus: what does is skipped by the suite that needs it and
-# counted by `inillucent-testrun --strict`.
+# Every stage prints its own name and the elapsed time. **The script runs every
+# stage and exits non-zero at the end naming all of them**, rather than stopping
+# at the first failure - `Invoke-Stage` has recorded and carried on since it was
+# written, and the header said otherwise (task-1969, 4.13). Nothing here needs a
+# network, a server, or a corpus: what does is skipped by the suite that needs it
+# and counted by `inillucent-testrun --strict`.
 #
 #   pwsh tools/validate.ps1              # everything
-#   pwsh tools/validate.ps1 -Quick       # fmt, lint, contracts and smoke only
-#   pwsh tools/validate.ps1 -Stage lint  # one stage by name
+#   pwsh tools/validate.ps1 -Quick       # stops after `smoke`: toolchain,
+#                                        # format, build, lint, defaults,
+#                                        # dependencies, docs, oracle, fixtures,
+#                                        # doctests, urls, contracts, compat,
+#                                        # smoke - fourteen stages, not the four
+#                                        # an earlier header claimed
+#   pwsh tools/validate.ps1 -Stage lint  # one stage by name, wherever it sits
 #
-# The Unix equivalent is `tools/validate.sh`, which runs the same stages in the
-# same order.
+# The Unix equivalent is `tools/validate.sh`, and the two run the same stages.
+# **Their order differs in one place and always did**: this script runs
+# `defaults` before `dependencies` and that one runs `dependencies` first.
+# Neither depends on the other. What was not the same, until task-1969, is where
+# `coverage` sits: it was above the quick exit there and below `tests` here, so
+# `--quick --coverage` measured on one platform and not the other while both
+# headers said the order was the same.
 
 [CmdletBinding()]
 param(
@@ -216,8 +228,12 @@ Invoke-Stage -Name 'urls' -Because 'a URL a shipped package names has to resolve
     node "$root/tools/check-public-urls.mjs"
 }
 
+# `gates_fail_closed` is here rather than only in the full run (task-1961,
+# criterion 10; task-1969, 4.13). It is the only test any gate program has, and a
+# quick run that skipped it was a quick run with nothing holding the programs
+# that decide pass or fail.
 Invoke-Stage -Name 'contracts' -Because 'dependencies, layering, the command table and the test map' -Body {
-    cargo test --manifest-path "$root/Cargo.toml" -p inillucent-compat --test policy --test selection --test command_parity --test harness
+    cargo test --manifest-path "$root/Cargo.toml" -p inillucent-compat --test policy --test selection --test command_parity --test harness --test gates_fail_closed
 }
 
 # **A published compatibility report may not carry its own unresolved Problems
@@ -247,7 +263,11 @@ Invoke-Stage -Name 'smoke' -Because 'a real file opened, written, reopened, read
     & "$root/target/debug/inillucent-testrun" --tier smoke
 }
 
-if ($Quick) {
+# **`-Stage` reaches past the quick exit (task-1969, 4.13).** `-Quick` means
+# "stop after smoke"; it does not mean "refuse to run the stage I named", and
+# `-Quick -Coverage -Stage coverage` has to measure on both platforms or the two
+# scripts disagree again.
+if ($Quick -and -not $Stage) {
     if ($failed.Count -gt 0) {
         Write-Host ''
         Write-Host "FAILED: $($failed -join ', ')" -ForegroundColor Red
@@ -275,14 +295,30 @@ Invoke-Stage -Name 'tests' -Because 'every selected suite, with missing prerequi
     & "$root/target/debug/inillucent-testrun" --strict
 }
 
+# **Every published count, against the engine that produced it (task-1969,
+# 4.4).** `tools/doc-facts/check.mjs` checks the 30 verbs, the 63 dot commands,
+# the 416 probe cases, the test and target counts and the private-reference
+# patterns, and it is checked by nothing else. Its only caller was
+# `packaging/release.ps1`, without `--run-tests`, so the two test facts it holds
+# were never in scope in any gate.
+#
+# After `build` and `tests`, because it reads the built binaries and the runner's
+# own summary, and both are fresh by the time it runs.
+Invoke-Stage -Name 'doc-facts' -Because 'every count a document states, against the engine that produced it' -Body {
+    node "$root/tools/doc-facts/check.mjs" --run-tests
+}
+
 # **Coverage, behind a switch, so the published number can be re-measured
 # (task-1961, T2).** Not `--branch`: that needs a nightly option and
 # `rust-toolchain.toml` pins the compiler to stable.
 if ($Coverage) {
     # The shell the `schema_forms` cases need is built by `our_shell`, into this
     # run's own target directory. See the note in tools/validate.sh.
+    # `--write` puts the table into `docs/repository.md` between two marker
+    # comments instead of printing it for somebody to paste, which is why the
+    # page's prose said 40.9% where its own table said 40.6% (task-1969, 4.12).
     Invoke-Stage -Name 'coverage' -Because 'the coverage number docs/repository.md publishes, re-measured' -Body {
-        node "$root/tools/coverage.mjs" --per-crate
+        node "$root/tools/coverage.mjs" --per-crate --write
     }
 }
 
