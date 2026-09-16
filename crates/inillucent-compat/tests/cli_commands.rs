@@ -1123,7 +1123,11 @@ fn mcp_answers_an_initialize_over_its_standard_input() {
 /// *every* one of them has been built, which is the stale case the design was
 /// guarding against: it says so and asks for another.
 const NOT_BUILT: [&str; 3] = [
-    "SELECT (SELECT 1, 2) FROM sqlite_schema",
+    // The first is the one `crates/inillucent-compat/tests/mcp_wire.rs` drives
+    // the server with, so the two sides of the claim - exit code 3 out of the
+    // binary, `unsupported` out of a JSON-RPC result - are about one statement.
+    // It names no table on purpose, so neither suite has to build one first.
+    "SELECT (SELECT 1, 2)",
     "SELECT * FROM sqlite_schema WHERE (name, type) IN (SELECT name, type FROM sqlite_schema)",
     "SELECT 1 FROM sqlite_schema WHERE name IN (SELECT name, type FROM sqlite_schema)",
 ];

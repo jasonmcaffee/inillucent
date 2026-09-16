@@ -1322,6 +1322,28 @@ covers = ["inillucent-cli"]
 requires = ["programs"]
 
 [[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "mcp_wire"
+tier = "e2e"
+covers = ["inillucent-cli"]
+# One `initialize` handshake over real pipes and one `tools/call` of each of
+# the 28 MCP tools. `command_parity` keeps the tool set equal to the registry;
+# nothing called a tool by name over the wire.
+requires = ["programs"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "dot_commands"
+tier = "e2e"
+covers = ["inillucent-cli"]
+# Every dot command `dot.rs` dispatches, driven through the built shell.
+# Thirty of the seventy dispatched names appeared in no test file, and nine of
+# those were named nowhere outside `dot.rs` and `help.rs`.
+requires = ["programs"]
+
+[[target]]
 package = "inillucent-driver"
 kind = "test"
 name = "import"
