@@ -195,11 +195,17 @@ and five `onnx` cases are built only when that feature is on.
   must release its locks.
 - **One conformance suite run three ways** — against the in memory file system, the real one, and the
   simulator — so "the simulator behaves like a disk" is a checked claim rather than a hope.
-- **Region and line coverage above 93% on the page pool's interior, latch, meta, extent, free map
-  and swip modules, and on the tree's key codec.** This used to say 100% *branch* coverage, sixteen
-  lines above the sentence that says branch coverage cannot be measured on the pinned toolchain;
-  both cannot be true, and it is the second one that is. The numbers here are what
-  `tools/coverage.mjs` measures, so they are in the table below.
+- **The page pool and the tree are the two most covered crates in the workspace**, at 93.4% and
+  92.0% of regions and 94.3% and 93.8% of lines - the page pool being the interior, latch, meta,
+  extent, free map and swip modules, and the tree being the key codec among them.
+
+  This sentence used to claim complete **branch** coverage of those modules, sixteen lines above the
+  sentence saying branch coverage cannot be measured on the pinned toolchain. Both cannot be true,
+  and it is the second one that is: branch coverage needs `-Z coverage-options=branch`, a nightly
+  option, and `rust-toolchain.toml` pins stable. What replaced it is the two crate numbers from the
+  table below, which is what `tools/coverage.mjs` actually measures. **Per-module numbers are not
+  published**, because `tools/coverage.mjs` aggregates to the crate and nothing here has measured
+  them.
 - **28 of the 29 crates deny `unwrap`, `expect`, `panic` and slice indexing**, and 21 forbid
   `unsafe`, on every path that reads SQL text, database pages, log frames, network bytes or file
   system results. The twenty-ninth is `inillucent-bench`, which has no library to put the attributes
