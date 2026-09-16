@@ -1964,8 +1964,8 @@ commands above rebuild all of it.
 
 The cases the engine's own suite carries are `crates/inillucent-compat/tests/semantics.rs` - **208
 now**, up from 164, every one of them a construct this document moved - plus `vector.rs` for the
-filtered-search recall and `new_engine_writes.rs` for the write path. They run in CI and fail when a
-construct changes its mind in either direction. The probe is wider than the suite deliberately: it is
+filtered-search recall and `new_engine_writes.rs` for the write path. They run in the selected suite and fail
+when a construct changes its mind in either direction. The probe is wider than the suite deliberately: it is
 the instrument that *finds* a difference, and a difference it finds becomes a case there.
 
 ---

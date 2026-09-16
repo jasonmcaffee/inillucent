@@ -72,7 +72,8 @@ pwsh tools/validate.ps1        # Windows
 sh   tools/validate.sh         # everything else
 ```
 
-That is the same gate CI runs. It builds the oracle and the fixtures, runs `fmt`,
+That is the whole gate, and it runs nowhere else. It builds the oracle and the
+fixtures, runs `fmt`,
 `clippy -D warnings`, `cargo deny check`, `cargo doc` with warnings denied, the
 four contracts, the security suites, and the whole selected suite with
 `--strict`.

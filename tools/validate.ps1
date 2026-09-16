@@ -1,4 +1,4 @@
-# The one validation entry point. CI runs this; so should you.
+# The one validation entry point, and the only thing that runs the checks at all.
 #
 # **There is one command rather than a list in a README**, and that is the whole
 # point of the file. Before task-1894 the checks existed - `cargo fmt`, the
@@ -108,8 +108,8 @@ Invoke-Stage -Name 'lint' -Because 'the strict lint set, which the pinned compil
 }
 
 # **The configuration a `cargo install` produces, which nothing built until
-# task-1961 (A14).** Every stage above and every CI job passes `--all-features`,
-# so the feature set a user gets by default was never compiled anywhere, and
+# task-1961 (A14).** Every stage above passes `--all-features`, so the feature
+# set a user gets by default was never compiled anywhere, and
 # `inillucent-storage`'s two independent features were never built crossed.
 Invoke-Stage -Name 'defaults' -Because 'the feature set a cargo install produces, which --all-features never builds' -Body {
     cargo check --manifest-path "$root/Cargo.toml" --workspace --all-targets --locked

@@ -112,9 +112,9 @@ dependencies() {
 stage dependencies 'advisories, licences and the resolved graph, which the manifest checks cannot see' dependencies
 
 # **The configuration a `cargo install` produces, which nothing built until
-# task-1961 (A14).** Every stage above and every CI job passes `--all-features`,
-# and `grep -rn 'no-default-features'` over every workflow, script and manifest
-# returned nothing, so the feature set a user gets by default was never compiled
+# task-1961 (A14).** Every stage above passes `--all-features`, and
+# `grep -rn 'no-default-features'` over every script and manifest returned
+# nothing, so the feature set a user gets by default was never compiled
 # anywhere. `inillucent-storage` has two independent features, `opcode-probe`
 # and `check`, with fifteen `cfg(feature)` sites between them, and no job built
 # them crossed.
