@@ -1364,6 +1364,29 @@ tier = "e2e"
 requires = ["programs", "tracked-fixtures"]
 
 [[target]]
+package = "inillucent-driver-capi"
+kind = "test"
+name = "python_conformance"
+tier = "e2e"
+# `drivers/bindings/python/run_conformance.py` drives `drivers/conformance/suite.json`
+# against the plain `ctypes` binding. `drivers/README.md` presents it as the
+# proof that a second language can implement the driver from the documents, and
+# nothing ran it.
+requires = ["python", "capi"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "rag_verify"
+tier = "retrieval"
+covers = ["inillucent-search"]
+# `examples/rag-agent/scripts/verify.sh` and `verify-indexed.sh`. Both are named
+# by `README.md`, `AGENTS.md` and `docs/closed-items.md`, three of the eight
+# skills point an agent at the example, and neither script was called by
+# anything.
+requires = ["onnx", "shell"]
+
+[[target]]
 package = "inillucent-driver"
 kind = "test"
 name = "import"

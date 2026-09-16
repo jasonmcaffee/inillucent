@@ -332,6 +332,31 @@
           ]
         }
       ]
+    },
+    {
+      "name": "a_vector_column_binds_and_reads_back_as_a_blob",
+      "about": "A VECTOR(N) column is N little-endian f32s and the driver carries it as a blob, so a binding that renders values as text or that uses C strings loses it: the first float of [1,0,0] is 0x0000803f and its first byte is a NUL. No case here named a vector before, so nothing proved that one bound as a parameter or read back as a blob survives the driver, the C ABI or any binding.",
+      "setup": ["CREATE TABLE point (id INTEGER PRIMARY KEY, at VECTOR(3))"],
+      "steps": [
+        {
+          "sql": "INSERT INTO point VALUES (1, ?1)",
+          "params": [{ "blob": [0, 0, 128, 63, 0, 0, 0, 0, 0, 0, 0, 0] }],
+          "affected": 1
+        },
+        {
+          "sql": "INSERT INTO point VALUES (2, ?1)",
+          "params": [{ "blob": [0, 0, 0, 0, 0, 0, 128, 63, 0, 0, 0, 0] }],
+          "affected": 1
+        },
+        {
+          "sql": "SELECT at FROM point WHERE id = 1",
+          "rows": [[{ "blob": [0, 0, 128, 63, 0, 0, 0, 0, 0, 0, 0, 0] }]]
+        },
+        {
+          "sql": "SELECT vector_dims(at) FROM point ORDER BY id",
+          "rows": [[{ "int": 3 }], [{ "int": 3 }]]
+        }
+      ]
     }
   ]
 }

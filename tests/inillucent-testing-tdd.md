@@ -125,7 +125,7 @@ the two numbers and what was expected of them.
 
 ## 2. The shape of the suite
 
-**181 test targets, 2,789 tests, in nine tiers.** A target is one binary
+**188 test targets, 2,789 tests, in nine tiers.** A target is one binary
 `cargo test` builds; a tier is a band you can ask for by name. Every target is
 in exactly one tier, so the tiers partition the suite rather than overlapping
 it. (Was 129 targets, 2,336 tests when this document was written; task-1911's
@@ -154,10 +154,10 @@ of a run rather than of the map and is not checked here.
 | `unit` | 31 | 1,242 | every crate's own `#[cfg(test)]` modules |
 | `engine` | 58 | 330 | SQL and storage behaviour over real database files |
 | `differential` | 31 | 309 | graded against the pinned SQLite 3.53.4 |
-| `durability` | 23 | 176 | crashes, injected faults, corruption and concurrency |
-| `e2e` | 21 | 130 | the public surfaces an application binds to, end to end |
+| `durability` | 24 | 176 | crashes, injected faults, corruption and concurrency |
+| `e2e` | 26 | 130 | the public surfaces an application binds to, end to end |
 | `perf` | 1 | 6 | the cost guards — **runs alone**, see §5 |
-| `retrieval` | 6 | 519 | the embedding and retrieval engine, and its graded harness |
+| `retrieval` | 7 | 519 | the embedding and retrieval engine, and its graded harness |
 | `tooling` | 9 | 69 | the checks that keep the repository's own rules true |
 
 The map that assigns them is `tests/selection.toml`, and it is data rather than

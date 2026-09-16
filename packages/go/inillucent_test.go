@@ -15,12 +15,27 @@ import (
 //
 // A test that fails because a tool is missing teaches somebody to ignore the
 // test. A test that skips with an instruction teaches them to install the tool.
+//
+// INILLUCENT_BIN is the exception, and it is the whole reason this helper was
+// changed (task-1969, 4.5). Setting it is a caller saying "the binary is
+// here"; a caller who says that and is wrong wants to know, not to have five
+// tests quietly report success. The gate that runs these built
+// target/release/inillucent and set neither the variable nor PATH, so all five
+// engine tests skipped, go test exited 0, and what actually ran was the five
+// cases in cmd/inillucent-install that check a platform string table. The
+// comment justifying the wrappers job says it exists because "a wrapper could
+// be broken for a whole release with nothing to say so"; for Go that was still
+// true of everything but the download table.
+//
+// This is the shape drivers/inillucent-driver-capi/tests/conformance.rs already
+// uses for INILLUCENT_CAPI_ASAN.
 func skipWithoutBinary(t *testing.T) {
 	t.Helper()
 	if named := os.Getenv("INILLUCENT_BIN"); named != "" {
-		if _, err := os.Stat(named); err == nil {
-			return
+		if _, err := os.Stat(named); err != nil {
+			t.Fatalf("INILLUCENT_BIN names %s and it is not there: %v", named, err)
 		}
+		return
 	}
 	if _, err := exec.LookPath("inillucent"); err != nil {
 		t.Skip("inillucent is not on PATH; install it with " +

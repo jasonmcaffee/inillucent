@@ -459,6 +459,12 @@ fn calls_the_skip_helper(file: &std::path::Path) -> bool {
     let name = file.to_string_lossy().replace('\\', "/");
     if name.ends_with("crates/inillucent-base/src/testing.rs")
         || name.ends_with("crates/inillucent-compat/src/differential.rs")
+        // `cliproc::program` announces on behalf of the suite that called it,
+        // the way `differential::announce_skip` does. It is harness code in
+        // `src/` rather than a suite, so counting it would put a `requires` on
+        // `inillucent-compat::lib` naming a prerequisite that crate's own unit
+        // tests do not have.
+        || name.ends_with("crates/inillucent-compat/src/cliproc.rs")
     {
         return false;
     }
@@ -478,6 +484,17 @@ fn calls_the_skip_helper(file: &std::path::Path) -> bool {
                 && line.contains(name)
         })
     };
+    // `cliproc::program` announces for its caller too, and for the same reason
+    // as `compare`: it has one way to answer `None` - the build did not produce
+    // the binary - and it calls the helper itself before returning it, so
+    // `let Some(binary) = program("inillucent") else { return; };` in the caller
+    // is a skip that has already been announced. Announcing there rather than
+    // at each of the forty call sites means the next case added cannot forget
+    // it, which is the argument `cli_arguments.rs` made first.
+    // The import may be written over several lines, which is what `rustfmt`
+    // does to a `use` of eight names, so what is looked for is the module
+    // rather than the name inside one line of its import list.
+    let uses_a_program = text.contains("cliproc");
     let compares = brings_in("compare");
     let compares_queries = brings_in("compare_queries");
     let announces = brings_in("announce_skip") || brings_in("skipping");
@@ -495,6 +512,7 @@ fn calls_the_skip_helper(file: &std::path::Path) -> bool {
                 // `pragma`, `registers`, `result_names_and_codes` - and each
                 // declares `requires = ["oracle"]` correctly.
                 || code.contains("differential::compare")
+                || (uses_a_program && code.contains("program(") && !code.contains("fn program("))
                 || (compares && code.contains("compare("))
                 || (compares_queries && code.contains("compare_queries("))
                 || (announces

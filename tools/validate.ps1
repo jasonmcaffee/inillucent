@@ -308,6 +308,66 @@ Invoke-Stage -Name 'doc-facts' -Because 'every count a document states, against 
     node "$root/tools/doc-facts/check.mjs" --run-tests
 }
 
+# **The four language wrappers, against the binary this run built (task-1969,
+# 4.5).** See the note in `tools/validate.sh`; the reasoning is the same and is
+# not repeated. `INILLUCENT_BIN` points all four at this build, and setting it
+# is what makes the Go suite fail rather than skip when the binary is absent.
+#
+# A toolchain that is not installed is announced with the `; skipping` marker
+# and passed over, which is the same answer `--strict` gives for a suite whose
+# prerequisite is absent.
+Invoke-Stage -Name 'wrappers' -Because 'the Go, Node, PHP and Python wrappers, against the binary this run built' -Body {
+    $binary = Join-Path $root 'target/release/inillucent.exe'
+    if (-not (Test-Path $binary)) { $binary = Join-Path $root 'target/debug/inillucent.exe' }
+    if (-not (Test-Path $binary)) {
+        Write-Host 'no built inillucent to point the wrappers at; run `cargo build --release -p inillucent-cli`; skipping'
+        $global:LASTEXITCODE = 1
+        return
+    }
+    $env:INILLUCENT_BIN = $binary
+    $wrong = 0
+
+    if (Get-Command go -ErrorAction SilentlyContinue) {
+        $said = & go -C (Join-Path $root 'packages/go') test ./... -v 2>&1 | Out-String
+        Write-Host $said
+        if ($said -match '--- SKIP') {
+            Write-Host 'the Go suite skipped a test with INILLUCENT_BIN set, which it may not'
+            $wrong = 1
+        }
+    } else {
+        Write-Host 'no go on PATH; install one from https://go.dev/dl/; skipping'
+    }
+
+    if (Get-Command node -ErrorAction SilentlyContinue) {
+        & node --test (Join-Path $root 'packages/npm/inillucent/*.test.mjs')
+        if ($LASTEXITCODE -ne 0) { $wrong = 1 }
+    } else {
+        Write-Host 'no node on PATH; install one from https://nodejs.org/; skipping'
+    }
+
+    if (Get-Command php -ErrorAction SilentlyContinue) {
+        & php (Join-Path $root 'packages/php/tests/target.php')
+        if ($LASTEXITCODE -ne 0) { $wrong = 1 }
+        & php (Join-Path $root 'packages/php/tests/roundtrip.php')
+        if ($LASTEXITCODE -ne 0) { $wrong = 1 }
+    } else {
+        Write-Host 'no php on PATH; install one from https://www.php.net/downloads; skipping'
+    }
+
+    $python = if (Get-Command python3 -ErrorAction SilentlyContinue) { 'python3' }
+              elseif (Get-Command python -ErrorAction SilentlyContinue) { 'python' }
+              else { $null }
+    if ($python) {
+        & $python (Join-Path $root 'drivers/bindings/python/run_conformance.py')
+        if ($LASTEXITCODE -ne 0) { $wrong = 1 }
+    } else {
+        Write-Host 'no python on PATH; install one from https://www.python.org/downloads/; skipping'
+    }
+
+    $global:LASTEXITCODE = $wrong
+}
+
+
 # **Coverage, behind a switch, so the published number can be re-measured
 # (task-1961, T2).** Not `--branch`: that needs a nightly option and
 # `rust-toolchain.toml` pins the compiler to stable.

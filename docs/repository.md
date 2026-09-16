@@ -106,7 +106,7 @@ If you do use `cargo test --workspace`, pass `--no-fail-fast`. Without it the ru
 failing binary, and has reported about a quarter of the suite.
 
 **No test fails today.** `inillucent-testrun --strict` reports 0 failed and 0 undetermined over the
-181 rows in `tests/selection.toml`. The wall clock was 840 seconds on a 24 processor desktop that
+188 rows in `tests/selection.toml`. The wall clock was 840 seconds on a 24 processor desktop that
 was carrying other work while it ran, so read it as one run on one machine rather than as a figure
 to plan against.
 
@@ -125,14 +125,15 @@ table.
 | prerequisite | rows | what provides it |
 |---|---:|---|
 | `oracle` | 27 | the pinned SQLite 3.53.4 comparison process: `pwsh tools/sqlite-reference.ps1`, `bash tools/sqlite-reference.sh` |
-| `programs` | 6 | the command surface built into this profile's target directory: `cargo build -p inillucent-cli` |
-| `shell` | 6 | the pinned `sqlite3` 3.53.4 shell, from the same two scripts as the oracle |
+| `programs` | 11 | the command surface built into this profile's target directory: `cargo build -p inillucent-cli` |
+| `shell` | 7 | the pinned `sqlite3` 3.53.4 shell, from the same two scripts as the oracle |
 | `fixtures` | 2 | the gate fixtures, which are 1.2 MB and 120 MB and are not tracked: `bash tools/build-gate-fixtures.sh _agent_output/fixtures` |
-| `onnx` | 2 | ONNX Runtime and the embedding weights: `inillucent setup-embeddings all` |
-| `tracked-fixtures` | 2 | the 35 files under `compat/fixtures/`, which are in the repository - declared for a checkout that has lost them, not for a fresh clone |
+| `onnx` | 3 | ONNX Runtime and the embedding weights: `inillucent setup-embeddings all` |
+| `tracked-fixtures` | 3 | the 35 files under `compat/fixtures/`, which are in the repository - declared for a checkout that has lost them, not for a fresh clone |
 | `asan` | 1 | a toolchain with the address sanitizer, which is nightly on every platform and absent on Windows |
 | `baseline` | 1 | a recorded performance baseline: `cargo run -p inillucent-compat --bin inillucent-baseline -- capture` |
 | `btree-corpus` | 1 | the retained sequences under `compat/corpus/btree/`, which are tracked |
+| `capi` | 1 | the C ABI shared library, built by `cargo build -p inillucent-driver-capi` into this run's own target directory |
 | `cc` | 1 | a C compiler on `PATH`, for the program that links the C ABI |
 | `directory-link` | 1 | permission to create a directory link, which Windows gives an elevated shell or a machine in developer mode |
 | `mysql` | 1 | a live MySQL server, named by `INILLUCENT_TEST_MYSQL_URL` |
@@ -140,7 +141,7 @@ table.
 | `network` | 1 | outbound network access, turned on by setting `INILLUCENT_NETWORK_TESTS` |
 | `openssl` | 1 | the `openssl` command, which generates the certificates the TLS suite serves |
 | `postgres` | 1 | a live PostgreSQL server, named by `INILLUCENT_TEST_POSTGRES_URL` |
-| `python` | 1 | a Python interpreter with `ssl`, for the TLS server and the `ctypes` conformance runner |
+| `python` | 2 | a Python interpreter with `ssl`, for the TLS server and the `ctypes` conformance runner |
 | `sqlite-bench` | 1 | the pinned benchmark driver, built by the same two reference scripts |
 | `testrun` | 1 | the runner itself: `cargo build -p inillucent-compat --bin inillucent-testrun --features testrun`, which a plain `cargo test` does not build |
 
@@ -161,9 +162,9 @@ already removed the cause and nobody re-ran it, which is recorded in
 
 ## What the tests cover
 
-2,819 tests across 181 test targets in the workspace, in these classes:
+2,819 tests across 188 test targets in the workspace, in these classes:
 
-The 181 is the `[[target]]` row count in `tests/selection.toml`, which is what
+The 188 is the `[[target]]` row count in `tests/selection.toml`, which is what
 `tools/doc-facts/check.mjs` compares this sentence against and what the runner is asked to run.
 The number of `#[test]` attributes in the tree is higher - 2,959 at the time of writing - because
 a `#[cfg(windows)]` and a `#[cfg(unix)]` pair is two attributes and one test on any one machine,

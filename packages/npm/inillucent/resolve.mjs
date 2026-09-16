@@ -13,7 +13,8 @@
 // unresolved import. That is what `resolveBinary` is for.
 
 import { createRequire } from 'node:module';
-import { accessSync, constants } from 'node:fs';
+import { accessSync, constants, existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 
 const require = createRequire(import.meta.url);
 
@@ -49,6 +50,32 @@ export function platformPackage() {
 export function resolveBinary(program) {
   if (!(program in PROGRAMS)) {
     throw new Error(`inillucent has no program called ${program}`);
+  }
+  // **`INILLUCENT_BIN` wins, the way it already does for the Go and PHP
+  // wrappers (task-1969, 4.5).** It names the `inillucent` binary; the others
+  // are looked for beside it, which is where a build and an install both put
+  // them. Without this the wrappers stage of `tools/validate` could point the
+  // other two languages at a freshly built binary and had no way to point this
+  // one, so the only npm test that could run was the one that reads the
+  // platform table as text.
+  //
+  // It throws rather than falling through when the named binary is not there:
+  // a caller who says where the binary is and is wrong wants to know, not to
+  // have the resolver quietly go looking somewhere else.
+  const named = process.env.INILLUCENT_BIN;
+  if (named) {
+    const suffix = process.platform === 'win32' ? '.exe' : '';
+    const beside = program === 'inillucent'
+      ? named
+      : join(dirname(named), `${program}${suffix}`);
+    if (!existsSync(beside)) {
+      throw new Error(
+        `INILLUCENT_BIN is set and ${beside} is not there.
+` +
+          `  Unset INILLUCENT_BIN to look for an installed copy instead.`,
+      );
+    }
+    return beside;
   }
   const name = platformPackage();
   if (!name) {

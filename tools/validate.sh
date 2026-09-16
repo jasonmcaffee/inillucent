@@ -267,6 +267,88 @@ stage tests 'every selected suite, with missing prerequisites named' \
 stage doc-facts 'every count a document states, against the engine that produced it' \
     node "$root/tools/doc-facts/check.mjs" --run-tests
 
+# **The four language wrappers, against the binary this run built (task-1969,
+# 4.5).** Each of them is somebody's entry point to this engine and each was
+# tested by reading its own source as text:
+#
+# - the Go suite's five engine tests skipped wherever the gate ran them,
+#   because the gate built `target/release/inillucent` and set neither
+#   `INILLUCENT_BIN` nor `PATH`, so `go test` exited 0 having run five cases
+#   that check a platform string table;
+# - `packages/npm/inillucent/resolve.test.mjs` and
+#   `packages/php/tests/target.php` read the platform table and never called
+#   `query` or `exec`;
+# - `drivers/bindings/python/run_conformance.py` is presented by
+#   `drivers/README.md` as the proof that a second language can implement the
+#   driver from the documents, and was run by nothing.
+#
+# `INILLUCENT_BIN` is what points all four at this build. Setting it is also
+# what makes the Go suite fail rather than skip when the binary is absent,
+# which is the shape `drivers/inillucent-driver-capi/tests/conformance.rs`
+# already uses for `INILLUCENT_CAPI_ASAN`.
+#
+# **A toolchain that is not installed is announced and skipped, not failed.**
+# The marker is the one `tests/inillucent-testing-tdd.md` §9 asks for, so a
+# reader sees which language did not run and what installs it. That is the same
+# answer `--strict` gives for a suite whose prerequisite is absent, and it is
+# why this stage can be in every validate run rather than behind a flag.
+wrappers() {
+    local binary="$root/target/release/inillucent"
+    if [ ! -x "$binary" ]; then
+        binary="$root/target/debug/inillucent"
+    fi
+    if [ ! -x "$binary" ]; then
+        echo "no built inillucent to point the wrappers at; run \`cargo build --release -p inillucent-cli\`; skipping"
+        return 1
+    fi
+    export INILLUCENT_BIN="$binary"
+    local failed=0
+
+    if command -v go >/dev/null 2>&1; then
+        # `-v` so a `--- SKIP` line is printed rather than folded away, and the
+        # grep below is what turns one into a failure: a wrapper suite that
+        # skipped every engine test is the state this stage exists to end.
+        local said
+        said="$(go -C "$root/packages/go" test ./... -v 2>&1)"
+        echo "$said"
+        if [ -n "$(printf '%s' "$said" | grep -F -- '--- SKIP')" ]; then
+            echo "the Go suite skipped a test with INILLUCENT_BIN set, which it may not"
+            failed=1
+        fi
+    else
+        echo "no go on PATH; install one from https://go.dev/dl/; skipping"
+    fi
+
+    if command -v node >/dev/null 2>&1; then
+        node --test "$root/packages/npm/inillucent/"*.test.mjs || failed=1
+    else
+        echo "no node on PATH; install one from https://nodejs.org/; skipping"
+    fi
+
+    if command -v php >/dev/null 2>&1; then
+        php "$root/packages/php/tests/target.php" || failed=1
+        php "$root/packages/php/tests/roundtrip.php" || failed=1
+    else
+        echo "no php on PATH; install one from https://www.php.net/downloads; skipping"
+    fi
+
+    local python=''
+    if command -v python3 >/dev/null 2>&1; then
+        python=python3
+    elif command -v python >/dev/null 2>&1; then
+        python=python
+    fi
+    if [ -n "$python" ]; then
+        "$python" "$root/drivers/bindings/python/run_conformance.py" || failed=1
+    else
+        echo "no python on PATH; install one from https://www.python.org/downloads/; skipping"
+    fi
+
+    return "$failed"
+}
+stage wrappers 'the Go, Node, PHP and Python wrappers, against the binary this run built' wrappers
+
+
 # **Coverage, behind a flag, so the published number can be re-measured
 # (task-1961, T2).** The only numbers on record before this named `rustdb-vm`, a
 # crate that no longer exists. Behind a flag because it rebuilds the whole
