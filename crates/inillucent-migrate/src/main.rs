@@ -16,8 +16,18 @@
 //!
 //! The second migrates a SQLite database file into the new engine's
 //! trees, verified by counts and digests and published by a rename. It takes
-//! no `--no-publish`, because it never publishes anything it has not verified
-//! and always leaves the staging file behind when it does not.
+//! no `--no-publish`, because it never publishes anything it has not verified.
+//! When it builds a staging file and then does not publish it, the staging file
+//! is left where it fell and its path is printed.
+//!
+//! **"Always" was too strong and is now stated where the test can reach it
+//! (task-1969, 7.5).** The staging file exists between the build and the
+//! rename, so a run refused before the build - a destination that is already
+//! there, a source that is not a database, a source that cannot be opened -
+//! leaves none, and there is nothing for a reader to go looking for.
+//! `tests/cli.rs` asserts both halves across a process boundary: the refusals
+//! write nothing at the destination and leave no staging file, and a run that
+//! publishes says so and leaves a file that opens.
 //!
 //! The third migrates from a **running** PostgreSQL or MySQL server, read
 //! over its own wire protocol inside one repeatable-read snapshot. It holds the

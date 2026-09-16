@@ -19,6 +19,15 @@ inillucent-catalog = { workspace = true }
 # The remote sources, so `--from postgres://…` runs here too.
 inillucent-remote = { workspace = true }
 
+[dev-dependencies]
+# The one skip helper, `inillucent_base::testing::skipping`.
+#
+# **A dev-dependency, so the feature is on for this crate's test targets and
+# off in a shipped build (task-1969, 4.6).** `tests/cli.rs` cannot reach the
+# compat harness - a production crate may not depend on it, even for tests -
+# so the helper it calls is the one in the crate below this whole workspace.
+inillucent-base = { workspace = true, features = ["testing"] }
+
 [[bin]]
 name = "inillucent-migrate"
 path = "src/main.rs"

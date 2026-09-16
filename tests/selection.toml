@@ -1344,6 +1344,26 @@ covers = ["inillucent-cli"]
 requires = ["programs"]
 
 [[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "process_crash"
+tier = "durability"
+covers = ["inillucent-engine"]
+# The one durability shape nothing exercised: the operating system ends a real
+# writer process and the file is reopened from the parent. Every other campaign
+# cuts at a fault the simulated file system injects.
+requires = ["programs"]
+
+[[target]]
+package = "inillucent-migrate"
+kind = "test"
+name = "cli"
+tier = "e2e"
+# `inillucent-migrate` as a process. It was the one of the four binaries that
+# no test ever spawned.
+requires = ["programs", "tracked-fixtures"]
+
+[[target]]
 package = "inillucent-driver"
 kind = "test"
 name = "import"
