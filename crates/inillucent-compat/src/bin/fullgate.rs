@@ -271,16 +271,27 @@ const AGREEMENT: [&str; 3] = [
 ///
 /// @param fixture - the SQLite database both engines read
 /// @param settings - what to measure and how
-fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
-    let bench = sqlite_bench().ok_or_else(|| {
-        "sqlite-bench is not built; run tools/sqlite-reference.ps1 first".to_string()
-    })?;
-
-    let mut plan = filtered_plan(settings)?;
-    plan.locking.clone_from(&settings.locking);
-    let pool_bytes = settings.frames.saturating_mul(settings.page_size);
-    plan.cache_size = -((pool_bytes / 1024) as i32);
-
+/// Prints the configuration block that opens the report.
+///
+/// **Lifted out of [`run`] because a banner is not a measurement
+/// (task-1969, 7.2).** `run` was 389 lines and the ratchet in `policy.rs`
+/// froze it there rather than shrinking it, which is how a criterion reading
+/// "no production function over 300 lines" was satisfied with eight functions
+/// over 300. This is the first seam: everything here is about telling a reader
+/// what was run, and none of it decides anything.
+///
+/// The block is what makes a report comparable between machines - the pool
+/// size, SQLite's cache in the same units, the lock mode - so it is printed
+/// before anything is measured and never conditionally.
+///
+/// @param settings - the command line this run was given
+/// @param plan - the workload plan both arms run
+/// @param pool_bytes - the page pool's size, which the report states in MiB
+fn print_configuration(
+    settings: &Settings,
+    plan: &inillucent_compat::perf::Plan,
+    pool_bytes: usize,
+) {
     println!("## configuration");
     println!("  scale       : {}", settings.scale);
     println!("  rounds      : {}", settings.rounds);
@@ -317,6 +328,155 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
     );
     println!("  durability  : synchronous = FULL on both arms");
     println!();
+}
+
+/// Prints the per-family verdict table, and returns whether every family met
+/// its bar and whether every one of them reported at all.
+///
+/// **Lifted out of [`run`] (task-1969, 7.2).** `run` was 354 lines, and this
+/// is one stage of it: it reads what was measured and answers one question.
+/// The answer comes back as a `bool` rather than being written into a captured
+/// binding, which is what makes it a stage rather than a block.
+///
+/// A family with no data is a miss, not a pass. That is the whole reason this
+/// returns a value: a gate that printed `NO DATA` and went on to say `MET`
+/// would be the defect `gates_fail_closed.rs` exists to refuse.
+///
+/// @param settings - the command line, for which families were asked for
+/// @param measured - every workload's paired rounds
+fn report_families(settings: &Settings, measured: &[Paired]) -> (bool, bool) {
+    let mut met_every_family = true;
+    // Whether every family the contract weights actually reported. A headline
+    // weighted over a plan that skipped one is a headline about a different
+    // plan, and `run` refuses to publish one.
+    let mut every_family_reported = true;
+    println!();
+    println!("## families");
+    println!(
+        "  {:<16} {:>9} {:>9} {:>9} {:>8} {:>9}  verdict",
+        "family", "ratio", "low", "high", "bar", "worst"
+    );
+    for (family, bar) in FAMILIES {
+        if !settings.families.iter().any(|name| name == family) {
+            continue;
+        }
+        let members: Vec<&Paired> = measured
+            .iter()
+            .filter(|entry| entry.family == family && entry.agreed && !entry.pairs.is_empty())
+            .collect();
+        if members.is_empty() {
+            println!(
+                "  {family:<16} {:>9} {:>9} {:>9} {bar:>7.2}x  NO DATA",
+                "-", "-", "-"
+            );
+            met_every_family = false;
+            every_family_reported = false;
+            continue;
+        }
+        // The family is one log ratio per workload per round, weighted equally
+        // per workload - `writegate`'s rollup, arrived at after two wrong ones.
+        // Pooling raw pairs lets a workload with a hundred times
+        // the absolute time decide the family alone; collapsing each workload to
+        // its median first makes a three-point bootstrap whose lower bound *is*
+        // the minimum.
+        let (low, high) = pooled_interval(&members, SEED);
+        let worst = members
+            .iter()
+            .map(|entry| entry.ratio())
+            .fold(f64::INFINITY, f64::min);
+        // **The lower bound against the bar, not the point estimate.**
+        let met = low >= bar;
+        met_every_family = met_every_family && met;
+        println!(
+            "  {family:<16} {:>8.2}x {:>8.2}x {:>8.2}x {bar:>7.2}x {:>8.2}x  {}",
+            geometric_mean(&members),
+            low,
+            high,
+            worst,
+            if met { "MET" } else { "MISSED" }
+        );
+    }
+    (met_every_family, every_family_reported)
+}
+
+/// Prints the per-workload result table, and returns whether every workload
+/// agreed with SQLite and produced a sample.
+///
+/// **Lifted out of [`run`] (task-1969, 7.2).** `run` was 309 lines; this is one
+/// stage of it, and the only thing it decides is the one value it returns.
+///
+/// **A family that produced no sample must not be renormalised away.**
+/// `weighted_mean` averages over the families a round actually has and divides
+/// by the weight it used, so a workload that fails outright can make the
+/// headline go *up*: at large, `schema.index` could not run at all and the
+/// headline read 4.16x; with the same runs and `schema` present at 0.58x it
+/// reads 3.86x. A number that improves when a family breaks is not a headline,
+/// and this is what stops it being printed as one.
+///
+/// @param measured - every workload's paired rounds
+/// @returns whether every workload agreed and produced a sample
+fn report_results(measured: &[Paired]) -> bool {
+    let mut every_workload_agreed = true;
+    println!();
+    println!("## result");
+    println!(
+        "  {:<24} {:>14} {:>14} {:>9} {:>9} {:>9}  agreed",
+        "workload", "inillucent ns", "sqlite ns", "ratio", "low", "high"
+    );
+    // **A family that produced no sample must not be renormalised away.**
+    // `weighted_mean` averages over the families a round actually has and
+    // divides by the weight it used, so a workload that fails outright makes
+    // the headline go *up*: at large, `schema.index` could not run at all and
+    // the headline read 4.16x; with the same runs and `schema` present at
+    // 0.58x it reads 3.86x. A number that improves when a family breaks is not
+    // a headline, and this is what stops it being printed as one.
+    for entry in measured {
+        if !entry.agreed || entry.pairs.is_empty() {
+            println!(
+                "  {:<24} {:>14} {:>14} {:>9} {:>9} {:>9}  NO: {}",
+                entry.workload, "-", "-", "-", "-", "-", entry.disagreement
+            );
+            every_workload_agreed = false;
+            continue;
+        }
+        let (ours, theirs) = entry.medians();
+        let (low, high) = entry.interval(SEED);
+        println!(
+            "  {:<24} {:>14.0} {:>14.0} {:>8.2}x {:>8.2}x {:>8.2}x  yes",
+            entry.workload,
+            ours,
+            theirs,
+            entry.ratio(),
+            low,
+            high
+        );
+        if entry.workload == "schema.index" {
+            let stages = INDEX_STAGES.with(|held| held.borrow().clone());
+            if !stages.is_empty() {
+                println!("  {:<24} {stages}", "  last round");
+            }
+        }
+        if entry.workload == "extension.fts.build" {
+            let stages = FTS_STAGES.with(|held| held.borrow().clone());
+            if !stages.is_empty() {
+                println!("  {:<24} {stages}", "  last round");
+            }
+        }
+    }
+    every_workload_agreed
+}
+
+fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
+    let bench = sqlite_bench().ok_or_else(|| {
+        "sqlite-bench is not built; run tools/sqlite-reference.ps1 first".to_string()
+    })?;
+
+    let mut plan = filtered_plan(settings)?;
+    plan.locking.clone_from(&settings.locking);
+    let pool_bytes = settings.frames.saturating_mul(settings.page_size);
+    plan.cache_size = -((pool_bytes / 1024) as i32);
+
+    print_configuration(settings, &plan, pool_bytes);
     println!("## workloads");
     for workload in &plan.workloads {
         println!(
@@ -432,101 +592,10 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
         settings.page_size,
     );
 
-    println!();
-    println!("## result");
-    println!(
-        "  {:<24} {:>14} {:>14} {:>9} {:>9} {:>9}  agreed",
-        "workload", "inillucent ns", "sqlite ns", "ratio", "low", "high"
-    );
-    let mut passed = true;
-    // **A family that produced no sample must not be renormalised away.**
-    // `weighted_mean` averages over the families a round actually has and
-    // divides by the weight it used, so a workload that fails outright makes
-    // the headline go *up*: at large, `schema.index` could not run at all and
-    // the headline read 4.16x; with the same runs and `schema` present at
-    // 0.58x it reads 3.86x. A number that improves when a family breaks is not
-    // a headline, and this is what stops it being printed as one.
-    let mut every_family_reported = true;
-    for entry in &measured {
-        if !entry.agreed || entry.pairs.is_empty() {
-            println!(
-                "  {:<24} {:>14} {:>14} {:>9} {:>9} {:>9}  NO: {}",
-                entry.workload, "-", "-", "-", "-", "-", entry.disagreement
-            );
-            passed = false;
-            continue;
-        }
-        let (ours, theirs) = entry.medians();
-        let (low, high) = entry.interval(SEED);
-        println!(
-            "  {:<24} {:>14.0} {:>14.0} {:>8.2}x {:>8.2}x {:>8.2}x  yes",
-            entry.workload,
-            ours,
-            theirs,
-            entry.ratio(),
-            low,
-            high
-        );
-        if entry.workload == "schema.index" {
-            let stages = INDEX_STAGES.with(|held| held.borrow().clone());
-            if !stages.is_empty() {
-                println!("  {:<24} {stages}", "  last round");
-            }
-        }
-        if entry.workload == "extension.fts.build" {
-            let stages = FTS_STAGES.with(|held| held.borrow().clone());
-            if !stages.is_empty() {
-                println!("  {:<24} {stages}", "  last round");
-            }
-        }
-    }
+    let mut passed = report_results(&measured);
 
-    println!();
-    println!("## families");
-    println!(
-        "  {:<16} {:>9} {:>9} {:>9} {:>8} {:>9}  verdict",
-        "family", "ratio", "low", "high", "bar", "worst"
-    );
-    for (family, bar) in FAMILIES {
-        if !settings.families.iter().any(|name| name == family) {
-            continue;
-        }
-        let members: Vec<&Paired> = measured
-            .iter()
-            .filter(|entry| entry.family == family && entry.agreed && !entry.pairs.is_empty())
-            .collect();
-        if members.is_empty() {
-            println!(
-                "  {family:<16} {:>9} {:>9} {:>9} {bar:>7.2}x  NO DATA",
-                "-", "-", "-"
-            );
-            passed = false;
-            every_family_reported = false;
-            continue;
-        }
-        // The family is one log ratio per workload per round, weighted equally
-        // per workload - `writegate`'s rollup, arrived at after two wrong ones.
-        // Pooling raw pairs lets a workload with a hundred times
-        // the absolute time decide the family alone; collapsing each workload to
-        // its median first makes a three-point bootstrap whose lower bound *is*
-        // the minimum.
-        let (low, high) = pooled_interval(&members, SEED);
-        let worst = members
-            .iter()
-            .map(|entry| entry.ratio())
-            .fold(f64::INFINITY, f64::min);
-        // **The lower bound against the bar, not the point estimate.**
-        let met = low >= bar;
-        passed = passed && met;
-        println!(
-            "  {family:<16} {:>8.2}x {:>8.2}x {:>8.2}x {bar:>7.2}x {:>8.2}x  {}",
-            geometric_mean(&members),
-            low,
-            high,
-            worst,
-            if met { "MET" } else { "MISSED" }
-        );
-    }
+    let (met_every_family, every_family_reported) = report_families(settings, &measured);
+    passed = passed && met_every_family;
 
     // **The headline, weighted and unweighted, in that order and both of them.**
     // The weights are the checked-in ones in `compat/perf/contract.toml`, fixed

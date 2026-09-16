@@ -192,6 +192,138 @@ fn flag(arguments: &[String], name: &str) -> Option<String> {
 ///
 /// @param fixture - the SQLite database both engines read from
 /// @param settings - what the command line asked for
+/// Prints the per-family verdict table, and returns whether every family met
+/// its bar.
+///
+/// **Lifted out of [`run`] (task-1969, 7.2).** `run` was 370 lines, and this
+/// is one stage of it: it reads what was measured and answers one question.
+/// The answer comes back as a `bool` rather than being written into a captured
+/// binding, which is what makes it a stage rather than a block.
+///
+/// A family with no data is a miss, not a pass. That is the whole reason this
+/// returns a value: a gate that printed `NO DATA` and went on to say `MET`
+/// would be the defect `gates_fail_closed.rs` exists to refuse.
+///
+/// @param settings - the command line, for which families were asked for
+/// @param measured - every workload's paired rounds
+fn report_families(settings: &Settings, measured: &[Paired]) -> bool {
+    let mut met_every_family = true;
+    println!();
+    println!("## families");
+    println!(
+        "  {:<18} {:>9} {:>9} {:>9} {:>8}  verdict",
+        "family", "ratio", "low", "high", "bar"
+    );
+    for (family, bar) in FAMILIES {
+        if !settings.families.iter().any(|name| name == family) {
+            continue;
+        }
+        // The family figure is the arithmetic mean of the paired log ratios,
+        // exponentiated - the geometric mean - pooled over every workload in
+        // the family. That is `family_interval` in `scorecard.rs`, character
+        // for character, and it is written that way here rather than more
+        // conveniently because a gate measured by a different statistic than
+        // the scorecard reports is a gate on a different number. Phase 1's
+        // first harness took the median and read 5.21x where the scorecard's
+        // statistic said 3.88x on the same samples.
+        let ratios: Vec<f64> = measured
+            .iter()
+            .filter(|entry| entry.family == family && entry.agreed)
+            .flat_map(|entry| entry.log_ratios())
+            .collect();
+        if ratios.is_empty() {
+            println!(
+                "  {family:<18} {:>9} {:>9} {:>9} {bar:>7.2}x  NO DATA",
+                "-", "-", "-"
+            );
+            met_every_family = false;
+            continue;
+        }
+        let point = (ratios.iter().sum::<f64>() / ratios.len() as f64).exp();
+        let (low, high) = inillucent_compat::perf::bootstrap(&ratios, SEED);
+        let (low, high) = (low.exp(), high.exp());
+        let met = low >= bar;
+        println!(
+            "  {family:<18} {point:>8.2}x {low:>8.2}x {high:>8.2}x {bar:>7.2}x  {}",
+            if met { "MET" } else { "MISSED" }
+        );
+        met_every_family = met_every_family && met;
+    }
+    met_every_family
+}
+
+/// Prints where one execution's time goes, stage by stage, in microseconds.
+///
+/// **Lifted out of [`run`] (task-1969, 7.2).** `run` was 330 lines; this is one
+/// stage of it, and it decides nothing - every line it prints is a measurement
+/// of the engine on its own, before any of it is compared to SQLite.
+///
+/// The breakdown exists because two rounds of optimising `scan.distinct` in
+/// phase 1 were spent on hypotheses a measurement would have refused in a
+/// minute.
+///
+/// @param database - the imported fixture both arms read
+/// @param prepared - every workload, already planned and prepared
+/// @param rows - how many rows the fixture holds, for the bind generator
+fn report_stage_breakdown(
+    database: &ImportedDatabase,
+    prepared: &[Prepared_],
+    rows: u32,
+) -> Result<(), String> {
+    println!();
+    println!("## where one execution goes, microseconds");
+    println!(
+        "  {:<18} {:>10} {:>10} {:>10} {:>8}",
+        "workload", "build", "+produce", "+digest", "rows"
+    );
+    for entry in prepared {
+        let iterations = 64u32;
+        let params = entry.params_for(1, rows);
+        let build = time_stage(iterations, || {
+            let sink = Box::new(DigestRows {
+                folded: Rc::new(RefCell::new(Folded::default())),
+            });
+            let built = database
+                .pipeline(&entry.plan, &entry.choice, &params, sink)
+                .map_err(|error| format!("{}: {}", entry.name, why(&error)))?;
+            drop(built);
+            Ok(())
+        })?;
+        let produce = time_stage(iterations, || {
+            let counter = Box::new(CountRows { rows: 0 });
+            let (mut pipeline, _) = database
+                .pipeline(&entry.plan, &entry.choice, &params, counter)
+                .map_err(|error| format!("{}: {}", entry.name, why(&error)))?;
+            pipeline
+                .run()
+                .map_err(|error| format!("{}: {}", entry.name, why(&error)))?;
+            Ok(())
+        })?;
+        let folded = Rc::new(RefCell::new(Folded::default()));
+        let whole = time_stage(iterations, || {
+            let sink = Box::new(DigestRows {
+                folded: Rc::clone(&folded),
+            });
+            let (mut pipeline, _) = database
+                .pipeline(&entry.plan, &entry.choice, &params, sink)
+                .map_err(|error| format!("{}: {}", entry.name, why(&error)))?;
+            pipeline
+                .run()
+                .map_err(|error| format!("{}: {}", entry.name, why(&error)))?;
+            Ok(())
+        })?;
+        let rows = folded.borrow().rows / u64::from(iterations);
+        println!(
+            "  {:<18} {:>10.2} {:>10.2} {:>10.2} {rows:>8}",
+            entry.name,
+            build / 1000.0,
+            produce / 1000.0,
+            whole / 1000.0
+        );
+    }
+    Ok(())
+}
+
 fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
     let bench = sqlite_bench().ok_or_else(|| {
         "sqlite-bench is not built; run tools/sqlite-reference.ps1 first".to_string()
@@ -309,57 +441,7 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
     // anything. This breakdown exists because two rounds of optimising
     // `scan.distinct` in Phase 1 were spent on hypotheses a measurement would
     // have refused in a minute.
-    println!();
-    println!("## where one execution goes, microseconds");
-    println!(
-        "  {:<18} {:>10} {:>10} {:>10} {:>8}",
-        "workload", "build", "+produce", "+digest", "rows"
-    );
-    for entry in &prepared {
-        let iterations = 64u32;
-        let params = entry.params_for(1, plan.rows);
-        let build = time_stage(iterations, || {
-            let sink = Box::new(DigestRows {
-                folded: Rc::new(RefCell::new(Folded::default())),
-            });
-            let built = database
-                .pipeline(&entry.plan, &entry.choice, &params, sink)
-                .map_err(|error| format!("{}: {}", entry.name, why(&error)))?;
-            drop(built);
-            Ok(())
-        })?;
-        let produce = time_stage(iterations, || {
-            let counter = Box::new(CountRows { rows: 0 });
-            let (mut pipeline, _) = database
-                .pipeline(&entry.plan, &entry.choice, &params, counter)
-                .map_err(|error| format!("{}: {}", entry.name, why(&error)))?;
-            pipeline
-                .run()
-                .map_err(|error| format!("{}: {}", entry.name, why(&error)))?;
-            Ok(())
-        })?;
-        let folded = Rc::new(RefCell::new(Folded::default()));
-        let whole = time_stage(iterations, || {
-            let sink = Box::new(DigestRows {
-                folded: Rc::clone(&folded),
-            });
-            let (mut pipeline, _) = database
-                .pipeline(&entry.plan, &entry.choice, &params, sink)
-                .map_err(|error| format!("{}: {}", entry.name, why(&error)))?;
-            pipeline
-                .run()
-                .map_err(|error| format!("{}: {}", entry.name, why(&error)))?;
-            Ok(())
-        })?;
-        let rows = folded.borrow().rows / u64::from(iterations);
-        println!(
-            "  {:<18} {:>10.2} {:>10.2} {:>10.2} {rows:>8}",
-            entry.name,
-            build / 1000.0,
-            produce / 1000.0,
-            whole / 1000.0
-        );
-    }
+    report_stage_breakdown(&database, &prepared, plan.rows)?;
 
     // `PointProbe` measured on its own, which is a TDD acceptance item in its
     // own right: "under 500 ns warm on the medium fixture". It is timed here
@@ -503,47 +585,7 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
         );
     }
 
-    println!();
-    println!("## families");
-    println!(
-        "  {:<18} {:>9} {:>9} {:>9} {:>8}  verdict",
-        "family", "ratio", "low", "high", "bar"
-    );
-    for (family, bar) in FAMILIES {
-        if !settings.families.iter().any(|name| name == family) {
-            continue;
-        }
-        // The family figure is the arithmetic mean of the paired log ratios,
-        // exponentiated - the geometric mean - pooled over every workload in
-        // the family. That is `family_interval` in `scorecard.rs`, character
-        // for character, and it is written that way here rather than more
-        // conveniently because a gate measured by a different statistic than
-        // the scorecard reports is a gate on a different number. Phase 1's
-        // first harness took the median and read 5.21x where the scorecard's
-        // statistic said 3.88x on the same samples.
-        let ratios: Vec<f64> = measured
-            .iter()
-            .filter(|entry| entry.family == family && entry.agreed)
-            .flat_map(|entry| entry.log_ratios())
-            .collect();
-        if ratios.is_empty() {
-            println!(
-                "  {family:<18} {:>9} {:>9} {:>9} {bar:>7.2}x  NO DATA",
-                "-", "-", "-"
-            );
-            passed = false;
-            continue;
-        }
-        let point = (ratios.iter().sum::<f64>() / ratios.len() as f64).exp();
-        let (low, high) = inillucent_compat::perf::bootstrap(&ratios, SEED);
-        let (low, high) = (low.exp(), high.exp());
-        let met = low >= bar;
-        println!(
-            "  {family:<18} {point:>8.2}x {low:>8.2}x {high:>8.2}x {bar:>7.2}x  {}",
-            if met { "MET" } else { "MISSED" }
-        );
-        passed = passed && met;
-    }
+    passed = passed && report_families(settings, &measured);
 
     if let Some(nanos) = probe_nanos {
         let met = nanos < 500.0;

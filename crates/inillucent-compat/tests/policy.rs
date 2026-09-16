@@ -1598,17 +1598,94 @@ fn announces_by_saying_so(block: &str) -> bool {
             || code.contains("differential::announce_skip")
             || code.contains("testing::skipping")
             || code.contains("; skipping")
-            // **`differential::compare` announces for its caller.** It has one
-            // way to return zero - `start_oracle` answering `None`, after which
-            // it calls `announce_skip()` - so `if compared == 0 { return; }` in
-            // the caller is a skip that has already been announced, by the only
-            // code that knows the oracle was the thing missing. Naming the
-            // function here rather than teaching the scan to follow calls across
-            // crates keeps the rule readable; the cost is that a second way for
-            // it to return zero would have to be added to its own doc comment.
-            || code.contains("compare(")
-            || code.contains("compare_queries(")
+            // A helper that announces for its caller - see [`ANNOUNCERS`].
+            || ANNOUNCERS
+                .iter()
+                .any(|(name, _)| code.contains(&format!("{name}(")))
     })
+}
+
+/// The helpers that announce a skip on behalf of whoever called them, and the
+/// file each is defined in.
+///
+/// **Naming them here rather than teaching the scan to follow calls across
+/// crates.** Each of these has one way to answer "nothing to do" and announces
+/// before it does: `differential::compare` returns zero only when
+/// `start_oracle` answered `None`, after which it has already called
+/// `announce_skip`; `cliproc::program` returns `None` only when the build did
+/// not produce the binary, after which it has already called `skipping`. So
+/// `let Some(binary) = program("inillucent") else { return; }` in a caller is a
+/// skip that was announced by the only code that knew what was missing.
+///
+/// The cost of naming them is that the list can go stale - a helper could stop
+/// announcing and forty call sites would silently become silent skips - and
+/// [`every_helper_this_check_trusts_actually_announces`] is what pays it.
+///
+/// **`program` joined the list in task-1970.** Forty call sites across
+/// `cli_commands.rs`, `mcp_wire.rs`, `dot_commands.rs`, `process_crash.rs` and
+/// `rag_verify.rs` were reported by this check as silent skips, and they are
+/// not: they go through a helper in `src/` rather than one in the same test
+/// file, which `announcing_helpers` below can see and this list is for.
+const ANNOUNCERS: [(&str, &str); 3] = [
+    ("compare", "crates/inillucent-compat/src/differential.rs"),
+    (
+        "compare_queries",
+        "crates/inillucent-compat/src/differential.rs",
+    ),
+    ("program", "crates/inillucent-compat/src/cliproc.rs"),
+];
+
+/// Every helper [`ANNOUNCERS`] trusts to announce a skip does announce one.
+///
+/// **A list of names is a claim, and this is the test that pays for it.**
+/// `announces_by_saying_so` accepts a call to any of them as an announcement,
+/// so a helper that stopped calling the skip helper would turn every one of its
+/// call sites into a silent skip at once - forty of them, in the case of
+/// `program` - and `every_early_return_in_a_test_says_why` would go on passing.
+/// That is the exact shape of the defect task-1969 4.2 found, one level up: a
+/// check that matched a helper by name.
+#[test]
+fn every_helper_this_check_trusts_actually_announces() {
+    let root = workspace_root();
+    let mut wrong: Vec<String> = Vec::new();
+    for (name, file) in ANNOUNCERS {
+        let path = root.join(file);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            wrong.push(format!(
+                "{file} is not there, and {name} is trusted to be in it"
+            ));
+            continue;
+        };
+        let Some(at) = text.find(&format!("pub fn {name}(")) else {
+            wrong.push(format!("{file} does not define `{name}`"));
+            continue;
+        };
+        // The body runs to the next closing brace at the file's own left
+        // margin, which is where a free function ends.
+        let rest = text.get(at..).unwrap_or_default();
+        let body = match rest.find("\n}\n") {
+            Some(end) => rest.get(..end).unwrap_or_default(),
+            None => rest,
+        };
+        let announces = body.contains("skipping(")
+            || body.contains("announce_skip(")
+            || ANNOUNCERS
+                .iter()
+                .any(|(other, _)| *other != name && body.contains(&format!("{other}(")));
+        if !announces {
+            wrong.push(format!(
+                "{file}::{name} is trusted to announce a skip for its callers and its body \
+                 calls no skip helper"
+            ));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "{}\n\
+         Every name in ANNOUNCERS is accepted as an announcement wherever it is called, so a \
+         helper that stops announcing turns every one of its call sites into a silent skip.",
+        wrong.join("\n")
+    );
 }
 
 /// Returns each line of some source with its trailing comment removed.
@@ -2126,7 +2203,7 @@ fn mentions_of(text: &str, name: &str) -> usize {
 /// A function that falls under 150 lines loses its row rather than keeping a
 /// lowered one: the list is what is over the threshold, and a row on a short
 /// function is a hole the width of its old number. Seven left in task-1962 A8.
-const FUNCTION_CEILINGS: [(&str, &str, usize); 61] = [
+const FUNCTION_CEILINGS: [(&str, &str, usize); 60] = [
     // 531 before task-1946 H6 moved the card's four path rows into
     // `runs::note_inputs` and `runs::note_run_files`.
     // 527 until task-1970's `cargo fmt --all` reflowed this crate to 588. The whitespace-stripped
@@ -2139,26 +2216,30 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 61] = [
         160,
     ),
     // 488 until task-1970's `cargo fmt --all` reflowed this crate to 568. Not growth: with all
-    // whitespace stripped this function gains 9 commas and its identifiers are unchanged
+    // whitespace stripped, this function gains 9 commas and its identifiers are unchanged
     // character for character (task-1966).
     ("crates/inillucent-bench/src/main.rs", "main", 568),
-    ("crates/inillucent-compat/src/perf.rs", "plan_for", 450),
     // 445 until the same formatting pass took it to 537. It sat exactly at its ceiling before,
     // which is why a reflow broke it (task-1966).
     ("crates/inillucent-bench/src/scenarios.rs", "grade", 537),
-    // Not on this list before the formatting pass: it was 148 lines and the limit for an
+    // Not on this list before task-1970's `cargo fmt --all`: it was 148 lines and the limit for an
     // unrecorded function is 150. Reflow took it to 160, adding 4 commas with its identifiers
-    // unchanged. Recorded rather than split, because the code did not change (task-1966).
-    ("crates/inillucent-bench/src/scenarios.rs", "filtered_vector", 160),
-    ("crates/inillucent-compat/src/bin/fullgate.rs", "run", 389),
-    ("crates/inillucent-compat/src/bin/readgate.rs", "run", 370),
-    ("crates/inillucent-compat/src/bin/writegate.rs", "run", 318),
+    // unchanged character for character. Recorded rather than split, because the code did not
+    // change (task-1966).
+    (
+        "crates/inillucent-bench/src/scenarios.rs",
+        "filtered_vector",
+        160,
+    ),
+    ("crates/inillucent-compat/src/bin/fullgate.rs", "run", 263),
+    ("crates/inillucent-compat/src/bin/readgate.rs", "run", 280),
+    ("crates/inillucent-compat/src/bin/writegate.rs", "run", 226),
     ("crates/inillucent-sql/src/bind.rs", "bind_expr", 303),
     ("crates/inillucent-engine/src/ddl.rs", "run_directive", 273),
     ("crates/inillucent-tree/src/paged/skip.rs", "skip_scan", 249),
     ("crates/inillucent-sql/src/bind.rs", "bind_call_with", 248),
-    // 243 until the same pass took it to 275: 4 commas, identifiers unchanged, and it also sat
-    // exactly at its ceiling (task-1966).
+    // 243 until the same pass took it to 275. Whitespace-stripped it gains 4 commas and nothing
+    // else; it sat exactly at its ceiling, so any reflow broke it (task-1966).
     ("crates/inillucent-bench/src/synth.rs", "build_source", 275),
     ("crates/inillucent-exec/src/expr/tree.rs", "compile", 242),
     (
@@ -2166,8 +2247,8 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 61] = [
         "encode_rows_with",
         239,
     ),
-    // 238 until the same pass took it to 258: one comma added, identifiers unchanged. It sat
-    // exactly at its ceiling, which is why a reflow broke it (task-1966).
+    // 238 until the same pass took it to 258. One comma added, identifiers unchanged. It too sat
+    // exactly at its ceiling (task-1966).
     ("crates/inillucent-bench/src/report.rs", "render", 258),
     (
         "crates/inillucent-compat/src/bin/readperf.rs",
@@ -2206,8 +2287,8 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 61] = [
         "update_at_cached",
         219,
     ),
-    // 214 until the same pass took it to 230, and this is the clearest case in the crate:
-    // whitespace-stripped it is 7,235 characters before and 7,235 after, with no punctuation
+    // 214 until the same pass took it to 230, and this one is the clearest case in the crate:
+    // whitespace-stripped it is **7,235 characters before and 7,235 after**, with no punctuation
     // added at all. Sixteen more lines holding character-for-character identical code, which is
     // what a line ceiling cannot tell apart from growth on its own (task-1966).
     ("crates/inillucent-bench/src/synth.rs", "check", 230),
@@ -2284,11 +2365,11 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 61] = [
     ("crates/inillucent-sql/src/plan.rs", "index_candidate", 167),
     ("crates/inillucent-compat/src/bin/testrun.rs", "report", 164),
     ("crates/inillucent-compat/src/bin/planperf.rs", "run", 163),
-    // 163 until the same pass took it to 179: two commas, identifiers unchanged, and it sat
+    // 163 until the same pass took it to 179. Two commas added, identifiers unchanged, and it sat
     // exactly at its ceiling (task-1966).
     ("crates/inillucent-bench/src/synth.rs", "build", 179),
     // New to this list for the same reason: 135 lines before the formatting pass and 158 after,
-    // two commas added, identifiers unchanged (task-1966).
+    // 2 commas added, identifiers unchanged (task-1966).
     ("crates/inillucent-bench/src/synth.rs", "embed", 158),
     (
         "crates/inillucent-engine/src/vtab.rs",
@@ -2591,4 +2672,304 @@ fn no_test_file_defines_its_own_skip_helper() {
          its own `[dev-dependencies]`.",
         defined.join("\n  ")
     );
+}
+
+/// The names the length cap lets through, and the ticket each is waiting on.
+///
+/// **A ratchet with no cap is how a criterion reading "no production function
+/// over 300 lines" was satisfied with eight functions over 300 (task-1969,
+/// 7.2).** `FUNCTION_CEILINGS` freezes a function at its current length and
+/// fails when it grows, which stops the tree getting worse and does nothing
+/// about what is already there: a new entry of any length is accepted, so a
+/// five-hundred-line function could be added tomorrow and the ratchet would
+/// record it.
+///
+/// So the list below is the whole of what is allowed to be over 300, every
+/// entry carries the ticket that removes it, and the test refuses anything
+/// else. An entry that is not on this list and not under 300 fails, and so
+/// does a *new* entry over 150 - which is the length the review counted at, so
+/// the recorded list is exactly what was over 150 when the ratchet was written.
+const OVER_THREE_HUNDRED: [(&str, &str, &str); 4] = [
+    // A15: an `Identifier` type and the `bind.rs` split. task-1962 re-measured
+    // that only 11 of the 114 byte-or-string identifier signatures are in this
+    // file, so A15 does not depend on the split; both are one ticket of their
+    // own, which section 6.4 of the task-1969 review designs.
+    ("crates/inillucent-sql/src/bind.rs", "bind_expr", "A15"),
+    // task-1973: the four `inillucent-bench` items. That crate was being
+    // rewritten by task-1966 for the whole of task-1970's run - `gradeembed::run`
+    // grew from 527 to 588 lines that afternoon - so a split written against it
+    // would have been undone by the next commit.
+    (
+        "crates/inillucent-bench/src/gradeembed.rs",
+        "run",
+        "task-1973",
+    ),
+    ("crates/inillucent-bench/src/main.rs", "main", "task-1973"),
+    (
+        "crates/inillucent-bench/src/scenarios.rs",
+        "grade",
+        "task-1973",
+    ),
+];
+
+/// No recorded ceiling is over 300 lines, and no new one is over 150.
+///
+/// The companion to [`no_function_grows_past_the_length_it_is_recorded_at`],
+/// which stops the list getting worse. This is what stops it staying bad:
+/// every entry over 300 is named in [`OVER_THREE_HUNDRED`] with the ticket that
+/// removes it, and the day a ticket lands its rows come out of both lists
+/// together.
+#[test]
+fn no_function_ceiling_is_over_three_hundred() {
+    let waiting: std::collections::BTreeMap<(&str, &str), &str> = OVER_THREE_HUNDRED
+        .iter()
+        .map(|(file, function, ticket)| ((*file, *function), *ticket))
+        .collect();
+
+    let mut unexcused: Vec<String> = Vec::new();
+    let mut stale: Vec<String> = Vec::new();
+    for (file, function, length) in FUNCTION_CEILINGS {
+        let excused = waiting.get(&(file, function));
+        if length > 300 && excused.is_none() {
+            unexcused.push(format!("{file}::{function} at {length}"));
+        }
+        if length <= 300 {
+            if let Some(ticket) = excused {
+                stale.push(format!(
+                    "{file}::{function} is {length} lines and is still listed as waiting on {ticket}"
+                ));
+            }
+        }
+    }
+    assert!(
+        unexcused.is_empty(),
+        "these recorded ceilings are over 300 lines and no ticket is named for them:\n  {}\n\
+         task-1961's seventh criterion is \"no production function over 300 lines\". Split one \
+         out, or add it to OVER_THREE_HUNDRED with the ticket that will.",
+        unexcused.join("\n  ")
+    );
+    assert!(
+        stale.is_empty(),
+        "these are under 300 and still listed as exceptions, so the list is describing a tree \
+         that has moved:\n  {}",
+        stale.join("\n  ")
+    );
+
+    // And the other half: a function recorded for the first time may not be
+    // over the length the review counted at. Without this the cap above is one
+    // ticket away from being wrong again.
+    let mut over: Vec<String> = Vec::new();
+    for (file, function, length) in FUNCTION_CEILINGS {
+        if length > LONGEST_NEW_FUNCTION
+            && length <= 300
+            && !waiting.contains_key(&(file, function))
+        {
+            over.push(format!("{file}::{function} at {length}"));
+        }
+    }
+    assert!(
+        over.len() <= RECORDED_OVER_THE_NEW_BAR,
+        "{} recorded ceilings are over {LONGEST_NEW_FUNCTION} lines, and {RECORDED_OVER_THE_NEW_BAR} \
+         were when this bar was written. A new function over {LONGEST_NEW_FUNCTION} lines does not \
+         get a row; it gets split.\n  {}",
+        over.len(),
+        over.join("\n  ")
+    );
+}
+
+/// How many recorded ceilings were between the new-function bar and 300 when
+/// this test was written.
+///
+/// A number rather than a list, because the list is `FUNCTION_CEILINGS` itself
+/// and a second copy of it would be a second thing to keep in step. What the
+/// count refuses is a *new* long function: the total may go down freely and may
+/// not go up.
+const RECORDED_OVER_THE_NEW_BAR: usize = 55;
+
+/// No function outside a test module takes more than eight parameters.
+///
+/// **There was no parameter check at all, which is how `synth_embed` keeps nine
+/// under an `#[allow]` (task-1969, 7.2).** task-1961's eighth criterion says no
+/// function takes more than eight parameters and that the ten which did now
+/// take structs; the ten do, and nothing stopped an eleventh. Thirty-eight
+/// functions take seven or eight today, so the bar is where the next one would
+/// cross it rather than where the tree already is.
+///
+/// The receiver does not count - `&self` is not an argument a caller passes -
+/// and neither does anything under `#[cfg(test)]`, because a test builder that
+/// takes ten values is a test fixture rather than an interface.
+#[test]
+fn no_function_takes_more_than_eight_parameters() {
+    // task-1973: `synth_embed` takes nine under `#[allow(clippy::too_many_arguments)]`,
+    // which is the only such allow in `crates/` or `drivers/`. It becomes a
+    // `SynthEmbedRequest` there, and this row comes out with the allow.
+    const WAITING: [(&str, &str, &str); 1] = [(
+        "crates/inillucent-bench/src/main.rs",
+        "synth_embed",
+        "task-1973",
+    )];
+
+    let root = workspace_root();
+    let mut wide: Vec<String> = Vec::new();
+    let mut read = 0usize;
+    for file in rust_sources(&root) {
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        read = read.saturating_add(1);
+        let relative = file
+            .strip_prefix(&root)
+            .unwrap_or(&file)
+            .to_string_lossy()
+            .replace('\\', "/");
+        for (function, count) in parameter_counts(&text) {
+            if count <= 8 {
+                continue;
+            }
+            if WAITING
+                .iter()
+                .any(|(held, named, _)| *held == relative && *named == function)
+            {
+                continue;
+            }
+            wide.push(format!("{relative}::{function} takes {count}"));
+        }
+    }
+    assert!(
+        read >= 300,
+        "read {read} source files, which means this is looking in the wrong place rather than \
+         that the workspace has no source"
+    );
+    assert!(
+        wide.is_empty(),
+        "these functions take more than eight parameters:\n  {}\n\
+         Group them into a struct, the way task-1961's A8 did for the ten that used to. A \
+         call with nine positional arguments is one nobody can read at the call site, and \
+         `#[allow(clippy::too_many_arguments)]` is not an answer - it is the warning being \
+         turned off.",
+        wide.join("\n  ")
+    );
+}
+
+/// Returns each function in a file and how many parameters it declares.
+///
+/// The receiver is not counted, and anything inside a `#[cfg(test)]` module is
+/// skipped: a test builder that takes ten values is a fixture rather than an
+/// interface, and holding it to an interface's bar would be asking the wrong
+/// question of the right rule.
+///
+/// The parameters are counted at the signature's own bracket depth, so a
+/// closure argument - `impl Fn(&str) -> bool` - is one parameter rather than
+/// two, and a generic bound with a comma in it is not two either.
+///
+/// @param text - the file's contents
+fn parameter_counts(text: &str) -> Vec<(String, usize)> {
+    let mut found = Vec::new();
+    let lines: Vec<&str> = text.lines().collect();
+    let mut test_module_at: Option<usize> = None;
+    let mut depth = 0i32;
+    for (at, line) in lines.iter().enumerate() {
+        if line.trim_start().starts_with("#[cfg(test)]") {
+            test_module_at = Some(depth.max(0) as usize);
+        }
+        let opened = depth;
+        depth += line.matches('{').count() as i32 - line.matches('}').count() as i32;
+        if let Some(held) = test_module_at {
+            if depth <= held as i32 && opened > held as i32 {
+                test_module_at = None;
+            }
+            continue;
+        }
+        let Some(name) = function_name(line) else {
+            continue;
+        };
+        // The signature runs to the line whose brackets balance, which is the
+        // same rule `declaration` uses one test above.
+        let mut signature = String::new();
+        let mut brackets = 0i32;
+        for later in lines.iter().skip(at) {
+            signature.push_str(later);
+            brackets += later.matches('(').count() as i32 - later.matches(')').count() as i32;
+            if brackets == 0 && signature.contains('(') {
+                break;
+            }
+            signature.push(' ');
+        }
+        let Some(inside) = parameter_list(&signature) else {
+            continue;
+        };
+        found.push((name, count_parameters(&inside)));
+    }
+    found
+}
+
+/// Returns the text between a signature's parameter brackets.
+///
+/// **The bracket that closes the parameters, not the last one on the line.**
+/// This read `rfind(')')`, which for `fn f(a: u8) -> Option<(usize, T)>` is the
+/// bracket inside the *return* type - so the "parameters" it counted ran past
+/// the end of the list and `find_equality`, which takes eight, was reported as
+/// taking ten.
+///
+/// @param signature - the function's signature, brackets balanced
+fn parameter_list(signature: &str) -> Option<String> {
+    let open = signature.find('(')?;
+    let mut depth = 0i32;
+    for (at, character) in signature.char_indices().skip(open) {
+        match character {
+            '(' => depth = depth.saturating_add(1),
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return signature
+                        .get(open.saturating_add(1)..at)
+                        .map(str::to_string);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Counts the parameters in a signature's bracket list.
+///
+/// Commas at the list's own depth, so a `Vec<(u8, u8)>` or an
+/// `impl Fn(&str) -> bool` is one parameter. A receiver - a parameter that is
+/// exactly `self`, `&self`, `&mut self` or `mut self` - is not counted.
+///
+/// @param inside - the text between the signature's outermost brackets
+fn count_parameters(inside: &str) -> usize {
+    let mut parameters: Vec<String> = Vec::new();
+    let mut held = String::new();
+    let mut depth = 0i32;
+    let mut previous = ' ';
+    for character in inside.chars() {
+        match character {
+            '(' | '<' | '[' => depth = depth.saturating_add(1),
+            // `->` inside a parameter - `impl Fn(&str) -> bool` - is an arrow
+            // rather than a closing angle bracket, and counting it as one put
+            // the depth below zero for the rest of the list.
+            '>' if previous == '-' => {}
+            ')' | '>' | ']' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parameters.push(std::mem::take(&mut held));
+                previous = character;
+                continue;
+            }
+            _ => {}
+        }
+        previous = character;
+        held.push(character);
+    }
+    if !held.trim().is_empty() {
+        parameters.push(held);
+    }
+    parameters
+        .iter()
+        .map(|held| held.trim())
+        .filter(|held| !held.is_empty())
+        .filter(|held| !matches!(*held, "self" | "&self" | "&mut self" | "mut self"))
+        .filter(|held| !held.starts_with("&'") || !held.ends_with(" self"))
+        .count()
 }

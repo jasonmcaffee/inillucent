@@ -637,6 +637,11 @@ fn foldgate_refuses_an_arm_it_does_not_have() {
 /// as child processes and each builds its own corpus; what is under test here
 /// is that an arm reports a count it actually wrote, which is the half a report
 /// of zeros would fail.
+///
+/// `inserted_total` rather than the commit timings: a run that wrote the corpus
+/// and folded nothing prints a hundred and twenty commit times and zero
+/// insertions, which is exactly the shape of a gate that measured the wrong
+/// thing and said a number.
 #[test]
 fn foldgate_measures_a_small_corpus() {
     let output = run(
@@ -650,6 +655,13 @@ fn foldgate_measures_a_small_corpus() {
             "4",
             "--dims",
             "8",
+            // **`--compact` is what makes 120 documents enough.** The default
+            // delta log length is `max(1024, rows / 8)`, so a corpus this small
+            // never reaches a fold and the arm reports `inserted_total = 0` -
+            // correctly, and with nothing for this case to measure. Pinning the
+            // log at 16 puts seven folds inside a run that takes six seconds.
+            "--compact",
+            "16",
         ],
     );
     measured("foldgate", &output, &|text| {
@@ -716,9 +728,12 @@ fn release_measures_the_artifacts_it_was_given() {
         let both = format!("{text}\n{report}");
         both.contains("scorecard.md")
             && a_positive_number_on_a_line_with(&both, "scorecard.md")
-            && report
-                .split_whitespace()
-                .any(|word| word.len() == 64 && word.chars().all(|c| c.is_ascii_hexdigit()))
+            // The digest is a table cell and the page writes it in backticks,
+            // so the whitespace-split word is 66 characters rather than 64.
+            && report.split_whitespace().any(|word| {
+                let bare = word.trim_matches('`');
+                bare.len() == 64 && bare.chars().all(|c| c.is_ascii_hexdigit())
+            })
     });
     let _ = std::fs::remove_dir_all(&directory);
 }
@@ -873,7 +888,17 @@ fn programs_named_in_the_reproduction_block(page: &str) -> Vec<String> {
         if !inside_fence || line.trim_start().starts_with('#') {
             continue;
         }
+        // `-p inillucent-compat` names the *package* a `cargo run` builds from,
+        // not a program. The block carries three of those, and reading them as
+        // programs asked for `target/debug/inillucent-compat.exe`, which cargo
+        // has no reason to produce.
+        let mut previous = "";
         for token in line.split_whitespace() {
+            let names_a_package = previous == "-p" || previous == "--package";
+            previous = token;
+            if names_a_package {
+                continue;
+            }
             let candidate = token.rsplit('/').next().unwrap_or(token);
             let candidate =
                 candidate.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-');

@@ -86,7 +86,7 @@ the difference you wanted.
 
 ## Reading a failure
 
-`status` is one of the driver's fourteen names, and it is what to branch on rather than the message:
+`status` is one of the driver's thirteen names, and it is what to branch on rather than the message:
 
 | status | what to do |
 |---|---|

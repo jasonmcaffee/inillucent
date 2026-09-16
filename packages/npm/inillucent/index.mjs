@@ -27,7 +27,7 @@ export { resolveBinary, PROGRAMS, platformPackage };
  * The command line's `--output json` contract: `{ ok, command, columns, rows,
  * total, more, changes, last_insert_rowid, elapsed_ms, text }` on success, and
  * `{ ok: false, status, message, ... }` on failure. `status` is one of the
- * driver's fourteen names, and `unsupported` is its own - a construct the
+ * driver's thirteen names, and `unsupported` is its own - a construct the
  * engine has not built is not a syntax error and should not be handled as one.
  *
  * A failure is returned rather than thrown, because the interesting failures

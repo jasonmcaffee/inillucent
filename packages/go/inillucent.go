@@ -44,7 +44,7 @@ import (
 )
 
 // Status is the class of a failure, as inillucent's driver names them. The same
-// fourteen words a C binding reads out of inillucent_error_status.
+// thirteen words a C binding reads out of inillucent_error_status.
 type Status string
 
 // The statuses. StatusUnsupported is the one worth branching on: it is the

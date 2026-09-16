@@ -1150,6 +1150,12 @@ fn an_unbuilt_statement_exits_three_and_says_unsupported() {
     };
     let database = populated(&binary, "exit-code-three");
     let mut tried: Vec<String> = Vec::new();
+    // A flag rather than a `return` out of the loop: `policy.rs`'s
+    // `every_early_return_in_a_test_says_why` reads every early return in a
+    // test and cannot tell one that succeeded from one that gave up, which is
+    // the right way round - a test that returns is a test that stopped, and the
+    // reason has to be visible at the `return` rather than four lines above it.
+    let mut refused_as_unsupported = false;
     for statement in NOT_BUILT {
         let ran = run(
             &binary,
@@ -1172,9 +1178,11 @@ fn an_unbuilt_statement_exits_three_and_says_unsupported() {
             "the binary exited 3 and the JSON does not say `unsupported`:\n{}",
             ran.stdout
         );
-        return;
+        refused_as_unsupported = true;
+        break;
     }
-    panic!(
+    assert!(
+        refused_as_unsupported,
         "no statement in NOT_BUILT produced exit code 3, so either the engine has built all \
          of them - in which case add one this engine has not built - or the mapping from \
          `Status::Unsupported` to 3 is broken:\n  {}",

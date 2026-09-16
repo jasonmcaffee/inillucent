@@ -8,7 +8,7 @@
 //! showed would be the one nobody checked.
 //!
 //! The failure side is [`Failed`], and its `status` is deliberately not a
-//! sentence: it is one of the driver's fourteen status names, so an MCP client,
+//! sentence: it is one of the driver's thirteen status names, so an MCP client,
 //! a shell script and a C binding all read the same word for the same class of
 //! failure. `drivers/README.md` argues the case for `unsupported` being its own
 //! status rather than a flavour of syntax error; this is that argument holding

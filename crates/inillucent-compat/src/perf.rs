@@ -728,9 +728,51 @@ pub fn counter_sql(wanted: u32) -> String {
 }
 
 /// Returns the plan for one scale.
+///
+/// **One function per workload family, rather than one four-hundred-line
+/// literal (task-1969, 7.2).** This was 450 lines and the ratchet in
+/// `policy.rs` froze it there rather than shrinking it, which is how a
+/// criterion that says "no production function over 300 lines" was met with
+/// eight functions over 300. The seams were already in the list: every
+/// `Workload` declares the family it belongs to, and the families were
+/// already contiguous.
+///
+/// @param scale - `small`, `medium` or `large`
 pub fn plan_for(scale: &str) -> Plan {
     let rows = rows_for(scale);
     let (point, scan, write) = repeats_for(scale);
+    let mut workloads: Vec<Workload> = Vec::new();
+    workloads.extend(preparing_workloads(point));
+    workloads.extend(point_read_workloads(point));
+    workloads.extend(range_read_workloads(point));
+    workloads.extend(analytical_read_workloads(scan));
+    workloads.extend(join_read_workloads(point));
+    workloads.extend(write_workloads(write));
+    workloads.extend(transaction_workloads(write));
+    workloads.extend(schema_workloads());
+    workloads.extend(extension_workloads(point, write));
+    workloads.extend(large_value_workloads(point, write));
+    Plan {
+        scale: scale.to_string(),
+        rows,
+        journal: "delete".to_string(),
+        locking: "normal".to_string(),
+        synchronous: "full".to_string(),
+        page_size: 4096,
+        cache_size: -2000,
+        setup: setup_for(rows),
+        workloads,
+    }
+}
+
+/// Returns the statements that build the fixture every workload runs against.
+///
+/// Split out of [`plan_for`] because it is the half that is about the *data*
+/// and the workloads are the half that is about the *queries*, and the two
+/// change for different reasons (task-1969, 7.2).
+///
+/// @param rows - how many rows the main table ends with at this scale
+fn setup_for(rows: u32) -> Vec<String> {
     let mut setup = vec![
         "CREATE TABLE main_table(id INTEGER PRIMARY KEY, key INTEGER NOT NULL, \
          category INTEGER NOT NULL, label TEXT NOT NULL, payload BLOB)"
@@ -771,10 +813,14 @@ pub fn plan_for(scale: &str) -> Plan {
     ));
     setup.push("ANALYZE".to_string());
 
-    // The `pre` that puts `side_table.note` back to what the fixture builder
-    // wrote, so a `transaction` workload measures updates that change a value.
-    let reset_notes = || Some("UPDATE side_table SET note = 'note ' || id".to_string());
-    let workloads = vec![
+    setup
+}
+
+/// Returns the `open.prepare` workloads: preparing a statement, which is the cost every other family pays before it measures anything.
+///
+/// @param point - how many times a point workload repeats at this scale
+fn preparing_workloads(point: u32) -> Vec<Workload> {
+    vec![
         Workload {
             name: "prepare.trivial".to_string(),
             family: "open.prepare".to_string(),
@@ -799,6 +845,14 @@ pub fn plan_for(scale: &str) -> Plan {
             binds: vec![Bind::Scatter],
             mutates: false,
         },
+    ]
+}
+
+/// Returns the `read.point` workloads: reading one row by a key, the shape an application does most.
+///
+/// @param point - how many times a point workload repeats at this scale
+fn point_read_workloads(point: u32) -> Vec<Workload> {
+    vec![
         Workload {
             name: "point.rowid".to_string(),
             family: "read.point".to_string(),
@@ -835,6 +889,14 @@ pub fn plan_for(scale: &str) -> Plan {
             binds: vec![Bind::Scatter],
             mutates: false,
         },
+    ]
+}
+
+/// Returns the `read.range` workloads: reading a run of rows, where an index either covers the query or does not.
+///
+/// @param point - how many times a point workload repeats at this scale
+fn range_read_workloads(point: u32) -> Vec<Workload> {
+    vec![
         Workload {
             name: "range.covering".to_string(),
             family: "read.range".to_string(),
@@ -872,6 +934,14 @@ pub fn plan_for(scale: &str) -> Plan {
             binds: vec![Bind::Scatter],
             mutates: false,
         },
+    ]
+}
+
+/// Returns the `read.analytical` workloads: grouping and ordering over the whole table, where the sorter and the grouper are the cost.
+///
+/// @param scan - how many times a scan workload repeats at this scale
+fn analytical_read_workloads(scan: u32) -> Vec<Workload> {
+    vec![
         Workload {
             name: "scan.aggregate".to_string(),
             family: "read.analytical".to_string(),
@@ -921,6 +991,14 @@ pub fn plan_for(scale: &str) -> Plan {
             binds: Vec::new(),
             mutates: false,
         },
+    ]
+}
+
+/// Returns the `read.join` workloads: joining two tables, where the planner's choice of driving table is the cost.
+///
+/// @param point - how many times a point workload repeats at this scale
+fn join_read_workloads(point: u32) -> Vec<Workload> {
+    vec![
         Workload {
             name: "join.selective".to_string(),
             family: "read.join".to_string(),
@@ -949,6 +1027,14 @@ pub fn plan_for(scale: &str) -> Plan {
             binds: vec![Bind::Scatter],
             mutates: false,
         },
+    ]
+}
+
+/// Returns the `write` workloads: inserting, updating and deleting, one statement at a time.
+///
+/// @param write - how many times a write workload repeats at this scale
+fn write_workloads(write: u32) -> Vec<Workload> {
+    vec![
         Workload {
             name: "write.insert.batch".to_string(),
             family: "write".to_string(),
@@ -1012,6 +1098,18 @@ pub fn plan_for(scale: &str) -> Plan {
             binds: vec![Bind::Rowid, Bind::Text],
             mutates: true,
         },
+    ]
+}
+
+/// Returns the `transaction` workloads: the same writes inside an explicit transaction, so the commit is amortised.
+///
+/// @param write - how many times a write workload repeats at this scale
+fn transaction_workloads(write: u32) -> Vec<Workload> {
+    // The `pre` that puts `side_table.note` back to what the fixture
+    // builder wrote, so a workload here measures updates that change a
+    // value rather than updates that write what is already there.
+    let reset_notes = || Some("UPDATE side_table SET note = 'note ' || id".to_string());
+    vec![
         Workload {
             name: "txn.autocommit".to_string(),
             family: "transaction".to_string(),
@@ -1060,18 +1158,32 @@ pub fn plan_for(scale: &str) -> Plan {
             binds: vec![Bind::Scatter, Bind::Text],
             mutates: true,
         },
-        Workload {
-            name: "schema.index".to_string(),
-            family: "schema".to_string(),
-            sql: "CREATE INDEX main_label ON main_table(label)".to_string(),
-            pre: Some("DROP INDEX IF EXISTS main_label".to_string()),
-            post: Some("DROP INDEX IF EXISTS main_label".to_string()),
-            repeat: 1,
-            grouping: Grouping::Autocommit,
-            prepare_each: true,
-            binds: Vec::new(),
-            mutates: true,
-        },
+    ]
+}
+
+/// Returns the `schema` workloads: changing the schema, which invalidates every compiled statement.
+///
+fn schema_workloads() -> Vec<Workload> {
+    vec![Workload {
+        name: "schema.index".to_string(),
+        family: "schema".to_string(),
+        sql: "CREATE INDEX main_label ON main_table(label)".to_string(),
+        pre: Some("DROP INDEX IF EXISTS main_label".to_string()),
+        post: Some("DROP INDEX IF EXISTS main_label".to_string()),
+        repeat: 1,
+        grouping: Grouping::Autocommit,
+        prepare_each: true,
+        binds: Vec::new(),
+        mutates: true,
+    }]
+}
+
+/// Returns the `extension` workloads: the parts SQLite gets from extensions - JSON, full text, a table-valued function.
+///
+/// @param point - how many times a point workload repeats at this scale
+/// @param write - how many times a write workload repeats at this scale
+fn extension_workloads(point: u32, write: u32) -> Vec<Workload> {
+    vec![
         Workload {
             name: "extension.json".to_string(),
             family: "extension".to_string(),
@@ -1141,6 +1253,15 @@ pub fn plan_for(scale: &str) -> Plan {
             binds: vec![Bind::Int],
             mutates: false,
         },
+    ]
+}
+
+/// Returns the `large.values` workloads: rows whose payload does not fit a page, so the overflow chain is the cost.
+///
+/// @param point - how many times a point workload repeats at this scale
+/// @param write - how many times a write workload repeats at this scale
+fn large_value_workloads(point: u32, write: u32) -> Vec<Workload> {
+    vec![
         Workload {
             name: "large.read".to_string(),
             family: "large.values".to_string(),
@@ -1165,18 +1286,7 @@ pub fn plan_for(scale: &str) -> Plan {
             binds: vec![Bind::Rowid, Bind::Text],
             mutates: true,
         },
-    ];
-    Plan {
-        scale: scale.to_string(),
-        rows,
-        journal: "delete".to_string(),
-        locking: "normal".to_string(),
-        synchronous: "full".to_string(),
-        page_size: 4096,
-        cache_size: -2000,
-        setup,
-        workloads,
-    }
+    ]
 }
 
 /// Feeds one borrowed value into a result digest.

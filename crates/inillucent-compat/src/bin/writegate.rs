@@ -148,6 +148,142 @@ const AGREEMENT: [&str; 3] = [
 ///
 /// @param fixture - the SQLite database both engines read
 /// @param settings - what to measure and how
+/// Prints the configuration block that opens the report.
+///
+/// **Lifted out of [`run`] because a banner is not a measurement
+/// (task-1969, 7.2).** `run` was 318 lines and the ratchet in `policy.rs`
+/// froze it there rather than shrinking it, which is how a criterion reading
+/// "no production function over 300 lines" was satisfied with eight functions
+/// over 300. This is the first seam: everything here is about telling a reader
+/// what was run, and none of it decides anything.
+///
+/// The block is what makes a report comparable between machines - the pool
+/// size, SQLite's cache in the same units, the lock mode - so it is printed
+/// before anything is measured and never conditionally.
+///
+/// @param settings - the command line this run was given
+/// @param plan - the workload plan both arms run
+/// @param pool_bytes - the page pool's size, which the report states in MiB
+fn print_configuration(
+    settings: &Settings,
+    plan: &inillucent_compat::perf::Plan,
+    pool_bytes: usize,
+) {
+    println!("## configuration");
+    println!("  scale       : {}", settings.scale);
+    println!("  rounds      : {}", settings.rounds);
+    println!(
+        "  pool        : {} frames of {} bytes = {:.1} MiB",
+        settings.frames,
+        settings.page_size,
+        pool_bytes as f64 / (1024.0 * 1024.0)
+    );
+    println!(
+        "  sqlite cache: {} = {:.1} MiB",
+        plan.cache_size,
+        -(plan.cache_size as f64) / 1024.0
+    );
+    println!("  fairness    : matched - one memory budget, both engines");
+    println!("  durability  : synchronous = FULL on both arms");
+    println!();
+}
+
+/// Prints the per-family verdict table, and returns whether every family met
+/// its bar.
+///
+/// **Lifted out of [`run`] (task-1969, 7.2).** `run` was 302 lines, and this
+/// is one stage of it: it reads what was measured and answers one question.
+/// The answer comes back as a `bool` rather than being written into a captured
+/// binding, which is what makes it a stage rather than a block.
+///
+/// A family with no data is a miss, not a pass. That is the whole reason this
+/// returns a value: a gate that printed `NO DATA` and went on to say `MET`
+/// would be the defect `gates_fail_closed.rs` exists to refuse.
+///
+/// @param settings - the command line, for which families were asked for
+/// @param measured - every workload's paired rounds
+fn report_families(settings: &Settings, measured: &[Paired]) -> bool {
+    let mut met_every_family = true;
+    println!();
+    println!("## families");
+    println!(
+        "  {:<14} {:>9} {:>9} {:>9} {:>8} {:>9}  verdict",
+        "family", "ratio", "low", "high", "bar", "worst"
+    );
+    for (family, bar) in FAMILIES {
+        if !settings.families.iter().any(|name| name == family) {
+            continue;
+        }
+        let members: Vec<&Paired> = measured
+            .iter()
+            .filter(|entry| entry.family == family && entry.agreed && !entry.pairs.is_empty())
+            .collect();
+        if members.is_empty() {
+            println!(
+                "  {family:<14} {:>9} {:>9} {:>9} {bar:>7.2}x  NO DATA",
+                "-", "-", "-"
+            );
+            met_every_family = false;
+            continue;
+        }
+        // **The family is every workload's every round, weighted per workload.**
+        //
+        // Two things had to be got right here and the first attempt got both
+        // wrong. Pooling the raw `(ours, theirs)` pairs - which is what the read
+        // gate does - lets a workload with a hundred times the absolute time
+        // decide the family on its own, and it mixes two statistics: the point
+        // estimate is a *median* of log ratios while the interval bootstraps
+        // their *mean*, so over a heterogeneous pool the estimate can fall
+        // outside its own interval. The first medium run printed `write` at
+        // ratio 0.38x with a lower bound of 0.40x, which is not a number
+        // anybody can act on.
+        //
+        // Collapsing each workload to its median first fixes the weighting and
+        // breaks the interval instead: with three workloads a bootstrap of
+        // three points has a 1-in-27 chance of drawing the minimum three times,
+        // so its 2.5th percentile *is* the minimum. `transaction`'s lower bound
+        // was its worst workload's ratio, exactly, and no amount of data would
+        // have moved it.
+        //
+        // So: one log ratio per workload per round - thirty times the sample -
+        // scaled so each workload contributes equally rather than in proportion
+        // to how long it happens to take. The `worst` column carries the
+        // information the collapse had, which is the workload holding the
+        // family back, and the per-workload table above carries the rest.
+        let rolled = Paired {
+            workload: family.to_string(),
+            family: family.to_string(),
+            pairs: members
+                .iter()
+                .flat_map(|entry| entry.pairs.iter().copied())
+                .collect(),
+            agreed: true,
+            disagreement: String::new(),
+        };
+        let (low, high) = pooled_interval(&members, SEED);
+        let worst = members
+            .iter()
+            .map(|entry| entry.ratio())
+            .fold(f64::INFINITY, f64::min);
+        // **The lower bound against the bar, not the point estimate.** A ratio
+        // that clears a bar with an interval straddling it has not cleared it,
+        // and saying otherwise is the one thing a gate must never do.
+        let met = low >= bar;
+        met_every_family = met_every_family && met;
+        println!(
+            "  {family:<14} {:>8.2}x {:>8.2}x {:>8.2}x {bar:>7.2}x {:>8.2}x  {}",
+            geometric_mean(&members),
+            low,
+            high,
+            worst,
+            if met { "MET" } else { "MISSED" }
+        );
+        let _ = &rolled;
+    }
+
+    met_every_family
+}
+
 fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
     let bench = sqlite_bench().ok_or_else(|| {
         "sqlite-bench is not built; run tools/sqlite-reference.ps1 first".to_string()
@@ -171,23 +307,7 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
     let pool_bytes = settings.frames.saturating_mul(settings.page_size);
     plan.cache_size = -((pool_bytes / 1024) as i32);
 
-    println!("## configuration");
-    println!("  scale       : {}", settings.scale);
-    println!("  rounds      : {}", settings.rounds);
-    println!(
-        "  pool        : {} frames of {} bytes = {:.1} MiB",
-        settings.frames,
-        settings.page_size,
-        pool_bytes as f64 / (1024.0 * 1024.0)
-    );
-    println!(
-        "  sqlite cache: {} = {:.1} MiB",
-        plan.cache_size,
-        -(plan.cache_size as f64) / 1024.0
-    );
-    println!("  fairness    : matched - one memory budget, both engines");
-    println!("  durability  : synchronous = FULL on both arms");
-    println!();
+    print_configuration(settings, &plan, pool_bytes);
     println!("## workloads");
     for workload in &plan.workloads {
         println!(
@@ -385,83 +505,7 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
         );
     }
 
-    println!();
-    println!("## families");
-    println!(
-        "  {:<14} {:>9} {:>9} {:>9} {:>8} {:>9}  verdict",
-        "family", "ratio", "low", "high", "bar", "worst"
-    );
-    for (family, bar) in FAMILIES {
-        if !settings.families.iter().any(|name| name == family) {
-            continue;
-        }
-        let members: Vec<&Paired> = measured
-            .iter()
-            .filter(|entry| entry.family == family && entry.agreed && !entry.pairs.is_empty())
-            .collect();
-        if members.is_empty() {
-            println!(
-                "  {family:<14} {:>9} {:>9} {:>9} {bar:>7.2}x  NO DATA",
-                "-", "-", "-"
-            );
-            passed = false;
-            continue;
-        }
-        // **The family is every workload's every round, weighted per workload.**
-        //
-        // Two things had to be got right here and the first attempt got both
-        // wrong. Pooling the raw `(ours, theirs)` pairs - which is what the read
-        // gate does - lets a workload with a hundred times the absolute time
-        // decide the family on its own, and it mixes two statistics: the point
-        // estimate is a *median* of log ratios while the interval bootstraps
-        // their *mean*, so over a heterogeneous pool the estimate can fall
-        // outside its own interval. The first medium run printed `write` at
-        // ratio 0.38x with a lower bound of 0.40x, which is not a number
-        // anybody can act on.
-        //
-        // Collapsing each workload to its median first fixes the weighting and
-        // breaks the interval instead: with three workloads a bootstrap of
-        // three points has a 1-in-27 chance of drawing the minimum three times,
-        // so its 2.5th percentile *is* the minimum. `transaction`'s lower bound
-        // was its worst workload's ratio, exactly, and no amount of data would
-        // have moved it.
-        //
-        // So: one log ratio per workload per round - thirty times the sample -
-        // scaled so each workload contributes equally rather than in proportion
-        // to how long it happens to take. The `worst` column carries the
-        // information the collapse had, which is the workload holding the
-        // family back, and the per-workload table above carries the rest.
-        let rolled = Paired {
-            workload: family.to_string(),
-            family: family.to_string(),
-            pairs: members
-                .iter()
-                .flat_map(|entry| entry.pairs.iter().copied())
-                .collect(),
-            agreed: true,
-            disagreement: String::new(),
-        };
-        let (low, high) = pooled_interval(&members, SEED);
-        let worst = members
-            .iter()
-            .map(|entry| entry.ratio())
-            .fold(f64::INFINITY, f64::min);
-        // **The lower bound against the bar, not the point estimate.** A ratio
-        // that clears a bar with an interval straddling it has not cleared it,
-        // and saying otherwise is the one thing a gate must never do.
-        let met = low >= bar;
-        passed = passed && met;
-        println!(
-            "  {family:<14} {:>8.2}x {:>8.2}x {:>8.2}x {bar:>7.2}x {:>8.2}x  {}",
-            geometric_mean(&members),
-            low,
-            high,
-            worst,
-            if met { "MET" } else { "MISSED" }
-        );
-        let _ = &rolled;
-    }
-
+    passed = passed && report_families(settings, &measured);
     println!();
     println!("## gate: {}", if passed { "MET" } else { "NOT MET" });
     Ok(passed)
