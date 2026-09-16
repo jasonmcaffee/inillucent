@@ -8,6 +8,111 @@ the shell, the MCP server, the migration tool, the C ABI library, and the Go,
 npm, PyPI and Composer wrappers are all one number. `tools/doc-facts/check.mjs`
 fails the build when any copy of it disagrees.
 
+## 0.1.4 — 2026-09-16
+
+**`embed(TEXT)` is `direct_only`, which is a behaviour change to a shipped
+function.** A schema may no longer name it: a `CHECK` constraint, an index
+expression, a generated column, a `DEFAULT`, a view or a trigger that calls
+`embed` is refused with "may only be used from top-level SQL". A statement may
+call it exactly as before.
+
+It was registered with `FunctionFlags { deterministic: true, ..Default::default() }`,
+and the `Default` derive is every flag false - so the flag said a schema may
+name it while the function's own doc comment said "It stays `direct_only`: a
+function that loads a 275 MB model has no business being called out of a `CHECK`
+constraint or an index expression". Nothing published promised the old
+behaviour: `PRAGMA function_list` does not report the bit, and no document said
+a schema could call it. A `CREATE INDEX i ON t (embed(body))` would load the
+model once per row of the table, inside the statement that creates the index.
+
+`UserFunction::external` is the constructor a registrant should use for this;
+`FunctionFlags::default()` exists for `builtin()`'s sake and is not what
+anything registered from outside wants.
+
+**The enforcement point is still open**, and it is a bigger gap than the flag:
+`Registry::authorize_function` has no caller, so `direct_only`, `innocuous` and
+`PRAGMA trusted_schema` are a policy with a passing unit test and no effect on
+the engine. The flag is correct the day the binder consults it.
+
+### The census: sixty-one places that could report success having checked nothing
+
+The rest of this release is the task-1969 review's answer to one question - how
+many places in this repository can print a green result without having checked
+anything - and the answer was 61, against a page that named 5.
+
+- **One skip helper.** `inillucent_base::testing::skipping` prints the one
+  marker and panics under `INILLUCENT_STRICT`, and it is below every crate, so
+  the three production crates that could not reach the test harness no longer
+  print their own sentence. Twenty-four raw prints across nine files are gone,
+  including a local `announce_skip` in `tests/differential.rs` that shadowed the
+  library one and let nine of that file's ten tests pass on a machine with no
+  SQLite oracle.
+- **The map and the suites have to agree.** `tests/selection.toml` gained a
+  prerequisite on seventeen rows and lost one from six that could not skip, and
+  `selection.rs` now fails in both directions: a suite that can skip without a
+  declared prerequisite, and a declared prerequisite whose suite cannot skip.
+- **The checks outside cargo fail when they cannot check.**
+  `tools/doc-facts/check.mjs` treats an instrument that cannot answer as a
+  failure rather than a skip - ten of its sixteen facts were skipping on any
+  fresh clone - refuses a feature-probe result recorded at another commit, and
+  runs as a stage of both validate scripts and of `packaging/release.sh`.
+
+### End to end
+
+The layer a user touches was the layer nothing exercised. Eighteen of the thirty
+command line verbs had never been passed to a spawned binary, no test had seen
+exit code 3 from outside a process, no MCP tool had been called by name over
+real pipes, thirty of the seventy-one dot commands appeared in no test file, and
+no durability test had ever killed a real writer.
+
+- `cli_commands.rs`: one subprocess test per verb, asserting a named field of
+  parsed `--output json` or a specific exit code, and one that drives a built
+  binary to exit code 3.
+- `mcp_wire.rs`: one handshake, twenty-eight `tools/call` requests, one process.
+- `dot_commands.rs`: every dispatched name through a real shell, and the
+  63-of-65 claim held to the pinned `sqlite3`'s own list in both directions.
+- `process_crash.rs`: the operating system ends a real writer twenty times and
+  the file is reopened from the parent.
+- `crates/inillucent-migrate/tests/cli.rs`: the migration tool as a process,
+  which it had never been.
+- Round trips for the npm and PHP wrappers, which had only ever read their own
+  source as text, and the Python conformance runner, which `drivers/README.md`
+  calls the proof that a second language can implement the driver and which was
+  run by nothing.
+
+**Two defects those tests found**, both in verbs nothing had spawned:
+`inillucent --db app.rdb shell` ignored `--db` and opened `:memory:`, and
+`inillucent restore <file>` accepted a backup that is not there, exited 0 and
+created an empty database.
+
+### Known not to do
+
+- `PRAGMA trusted_schema`, `innocuous` and `direct_only` are not enforced. See
+  above.
+- The Go wrapper's engine tests and the PHP round trip did not run on the
+  machine that cut this: neither toolchain is installed there. The `wrappers`
+  validate stage names each absent toolchain rather than passing over it
+  silently.
+
+## 0.1.3 — 2026-09-15
+
+**Tagged and not published.** The GitHub release is a draft waiting on the Linux
+archives; the tag `v0.1.3` is the tree it was cut from. This entry is written
+after the fact, because the release that cut it did not write one and a hole
+between 0.1.2 and 0.1.4 is the kind of thing a reader assumes is a mistake in
+their checkout.
+
+What is in it is task-1962: the public Rust surface reduced to one - the facade
+is a re-export of the driver rather than a second API over the same engine -
+`Connection::begin`, the engine's `lib.rs` from 7,307 lines to 1,279 and
+`physical.rs` from 5,708 to 297, the parameter lists that were really types,
+`ImportedDatabase`'s 63 fields in six groups behind their own cells, six
+roadmap items, and coverage measured at 77.2% of regions.
+
+Seven version pins moved together, because nothing downstream can tell which is
+the real one, and `tools/doc-facts/check.mjs` fails the build when any copy
+disagrees.
+
 ## 0.1.2 — 2026-09-13
 
 **`embed(TEXT)` answers in a published binary.** Every archive up to 0.1.1 was
