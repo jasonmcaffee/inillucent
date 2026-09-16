@@ -103,7 +103,7 @@ impl crate::ImportedDatabase {
         // transaction's own first record - which is what letting it proceed
         // would require - is exactly the no-steal argument `holds_uncommitted`
         // makes, so this is refused rather than made honest.
-        if self.writing.batch.get().is_some() && self.writing.touched.get() != 0 {
+        if self.writing.batch().is_some() && self.writing.touched() != 0 {
             return Err(DbError::primary(PrimaryCode::Locked)
                 .with_detail("cannot checkpoint: a transaction has written and not committed"));
         }
@@ -113,7 +113,7 @@ impl crate::ImportedDatabase {
         // write-ahead log has neither - which is a different statement from
         // "no frames moved". A caller polling the second column to decide
         // whether a checkpoint is due needs to be able to tell those apart.
-        if self.pragmas.journal_mode.get() != inillucent_pool::journal::JournalMode::Wal {
+        if self.pragmas.journal_mode() != inillucent_pool::journal::JournalMode::Wal {
             self.checkpoint()?;
             return Ok(Outcome {
                 rows: vec![vec![

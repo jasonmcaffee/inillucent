@@ -48,7 +48,7 @@ impl crate::ImportedDatabase {
             let parsed = match inillucent_sql::parser::parse_next_statement(
                 &sql,
                 0,
-                &self.pragmas.limits.borrow(),
+                &self.pragmas.limits().borrow(),
             ) {
                 Ok(parsed) => parsed,
                 Err(_) => continue,
@@ -155,7 +155,7 @@ impl crate::ImportedDatabase {
                 schema: at,
                 wrote: false,
                 // **The before-images a rollback needs.** Every ordinary write
-                // passes `Some(&self.writing.undo)`; this path passed `None`, so a
+                // passes `Some(self.writing.undo())`; this path passed `None`, so a
                 // virtual table's writes went into the pool with nothing
                 // recorded that could put them back. `ROLLBACK` then undid
                 // every ordinary table and left the module's shadow trees as
@@ -164,7 +164,7 @@ impl crate::ImportedDatabase {
                 // only thing that corrected it. The file itself was never
                 // wrong: no commit record was written, so recovery ignored
                 // the pages. Only the live connection was.
-                undo: Some(&self.writing.undo),
+                undo: Some(self.writing.undo()),
                 uncommitted: self.uncommitted_handle_of(at),
             };
             let store = WriteStore {
@@ -182,7 +182,7 @@ impl crate::ImportedDatabase {
             let mut context = Context {
                 host: &mut nowhere,
                 database: 0,
-                limits: &self.pragmas.limits.borrow(),
+                limits: &self.pragmas.limits().borrow(),
                 catalog: Some(&self.schema.catalog),
             };
             connected.table.update(&mut context, change)
@@ -380,7 +380,7 @@ impl crate::ImportedDatabase {
         }
         // Outside a transaction the statement is its own, so the module flushes
         // and the log commits here; inside one, `commit_batch` does both.
-        if self.writing.batch.get().is_none() {
+        if self.writing.batch().is_none() {
             self.sync_modules()?;
             self.seal()?;
         }
@@ -432,7 +432,7 @@ impl crate::ImportedDatabase {
                     // at a commit the buffer is cleared immediately after, and
                     // at a savepoint these writes are exactly what a later
                     // `ROLLBACK TO` an earlier point has to be able to undo.
-                    undo: Some(&self.writing.undo),
+                    undo: Some(self.writing.undo()),
                     uncommitted: self.uncommitted_handle_of(at),
                 };
                 let store = WriteStore {
@@ -450,7 +450,7 @@ impl crate::ImportedDatabase {
                 let mut context = Context {
                     host: &mut nowhere,
                     database: 0,
-                    limits: &self.pragmas.limits.borrow(),
+                    limits: &self.pragmas.limits().borrow(),
                     catalog: Some(&self.schema.catalog),
                 };
                 connected
@@ -618,7 +618,7 @@ impl crate::ImportedDatabase {
         let mut context = Context {
             host: &mut nowhere,
             database: 0,
-            limits: &self.pragmas.limits.borrow(),
+            limits: &self.pragmas.limits().borrow(),
             catalog: Some(&self.schema.catalog),
         };
         match moment {

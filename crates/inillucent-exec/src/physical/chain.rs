@@ -979,6 +979,29 @@ fn push_filters(
     Ok(chain)
 }
 
+/// Builds the whole of a statement's chain above the source, and returns it
+/// with what a later execution needs to rebuild the source against.
+///
+/// **This had no doc comment and read as though it had one (task-1961 A8,
+/// task-1969 6.3).** The `///` block eighty lines below - "Builds every
+/// operator above the source", which is where a reader's eye lands when
+/// scrolling - documents `build_chain`, the next function. So the only
+/// function in this file's decomposition without a comment was the one a
+/// reader was most likely to think they had just read the comment for.
+///
+/// What it does that `build_chain` does not: it refuses the parts of the
+/// `SELECT` this executor has not built, works out which columns are
+/// correlated and how wide they are, and hands `build_chain` the scan types
+/// that follow from that. `build_chain` is then the part that holds no borrow
+/// of the catalog, which is what lets a `Compiled` outlive the catalog it was
+/// built against.
+///
+/// @param plan - the physical plan to build a chain for
+/// @param catalog - the trees, borrowed only to resolve a function to its body
+/// @param prepared - the bound statement the plan came from
+/// @param space - the open databases the chain reads
+/// @param params - the values bound for this execution
+/// @param sink - where the topmost operator writes its rows
 pub(crate) fn build_upper(
     plan: &PhysicalPlan,
     catalog: &dyn TreeCatalog,

@@ -29,7 +29,7 @@ impl crate::ImportedDatabase {
     /// a commit between keeps the first transaction, because that is what
     /// `BEGIN` inside a transaction does.
     pub fn begin_batch(&mut self) {
-        if self.writing.batch.get().is_some() {
+        if self.writing.batch().is_some() {
             return;
         }
         // **The file is taken here, not at the first write.** A transaction
@@ -41,12 +41,12 @@ impl crate::ImportedDatabase {
         // reader follow a writer's log, and pretending otherwise is what would
         // corrupt a file.
         let _ = self.storage.database.begin_write_within(true);
-        let txn = self.writing.next_txn.get();
-        self.writing.next_txn.set(txn.saturating_add(1));
-        self.writing.batch.set(Some(txn));
-        self.writing.undo.borrow_mut().clear();
-        self.writing.marks.borrow_mut().clear();
-        self.writing.touched.set(0);
+        let txn = self.writing.next_txn();
+        self.writing.set_next_txn(txn.saturating_add(1));
+        self.writing.set_batch(Some(txn));
+        self.writing.undo().borrow_mut().clear();
+        self.writing.marks().borrow_mut().clear();
+        self.writing.set_touched(0);
     }
 
     /// Undoes everything the open transaction changed, newest first.
@@ -70,7 +70,7 @@ impl crate::ImportedDatabase {
                 // One borrow, held only long enough to find the savepoint:
                 // `undo_to_floor` below takes the group again.
                 let found = {
-                    let marks = self.writing.marks.borrow();
+                    let marks = self.writing.marks().borrow();
                     marks
                         .iter()
                         .rposition(|(held, _)| *held == folded)
@@ -102,8 +102,8 @@ impl crate::ImportedDatabase {
     ///   statement's own rather than `current_txn`: outside a batch `write` has
     ///   already taken a number and moved `next_txn` past it
     pub(crate) fn undo_to_floor(&mut self, floor: usize, reload: bool, txn: u64) -> DbResult<()> {
-        while self.writing.undo.borrow().len() > floor {
-            let Some(entry) = self.writing.undo.borrow_mut().pop() else {
+        while self.writing.undo().borrow().len() > floor {
+            let Some(entry) = self.writing.undo().borrow_mut().pop() else {
                 break;
             };
             // **The record says which file it came out of, and that is the
@@ -161,9 +161,9 @@ impl crate::ImportedDatabase {
                 }
             }
         }
-        let held = self.writing.undo.borrow().len();
+        let held = self.writing.undo().borrow().len();
         self.writing
-            .marks
+            .marks()
             .borrow_mut()
             .retain(|(_, at)| *at <= held);
         // **A DML statement cannot have changed the catalog, so undoing one has
@@ -431,13 +431,13 @@ impl crate::ImportedDatabase {
         self.session_state.modules_begun.set(false);
         let told = self.rollback_modules(None);
         let undone = self.undo_to(None);
-        self.writing.marks.borrow_mut().clear();
-        self.writing.batch.set(None);
-        self.writing.implicit_transaction.set(false);
+        self.writing.marks().borrow_mut().clear();
+        self.writing.set_batch(None);
+        self.writing.set_implicit_transaction(false);
         // Rolled back, so no-steal has nothing left to hold back on any
         // schema this transaction touched - read before `touched` is cleared
         // below, which is the only record of which schemas those were.
-        for at in schemas_in(self.writing.touched.get()) {
+        for at in schemas_in(self.writing.touched()) {
             if let Some(database) = self.schema_file(at) {
                 database.pool().set_uncommitted_lsn(u64::MAX);
             }
@@ -445,10 +445,10 @@ impl crate::ImportedDatabase {
         // Nothing to decide: an abandoned transaction has no commit for a
         // super-journal to be about, and the records it left are never replayed
         // because no `Commit` follows them.
-        self.writing.touched.set(0);
+        self.writing.set_touched(0);
         // The transaction's own setting goes with the transaction, which is
         // SQLite's rule for `PRAGMA defer_foreign_keys`.
-        self.pragmas.defer_foreign_keys.set(false);
+        self.pragmas.set_defer_foreign_keys(false);
         self.refresh_catalog();
         undone?;
         told?;
@@ -487,21 +487,21 @@ impl crate::ImportedDatabase {
         self.sync_modules()?;
         // `PRAGMA defer_foreign_keys` is the transaction's setting, not the
         // connection's, and SQLite clears it at each commit and rollback.
-        if self.pragmas.defer_foreign_keys.get() {
-            self.pragmas.defer_foreign_keys.set(false);
+        if self.pragmas.defer_foreign_keys() {
+            self.pragmas.set_defer_foreign_keys(false);
             self.forget_compiled_statements();
         }
         self.session_state.modules_begun.set(false);
         // Nothing to abandon once it is committed, and holding the before-images
         // would hold every row a long transaction touched.
-        self.writing.undo.borrow_mut().clear();
-        self.writing.marks.borrow_mut().clear();
-        self.writing.implicit_transaction.set(false);
-        let Some(txn) = self.writing.batch.take() else {
-            self.writing.touched.set(0);
+        self.writing.undo().borrow_mut().clear();
+        self.writing.marks().borrow_mut().clear();
+        self.writing.set_implicit_transaction(false);
+        let Some(txn) = self.writing.take_batch() else {
+            self.writing.set_touched(0);
             return Ok(());
         };
-        let participants = self.writing.touched.replace(0);
+        let participants = self.writing.replace_touched(0);
         self.commit_across(txn, participants)
     }
 
@@ -526,7 +526,7 @@ impl crate::ImportedDatabase {
         let durable: Vec<usize> = schemas_in(participants)
             .filter(|at| self.path_of(*at).is_some())
             .collect();
-        self.writing.decided_over.set(durable.len());
+        self.writing.set_decided_over(durable.len());
         if durable.len() < 2 {
             return self.vote(txn, participants);
         }
@@ -599,6 +599,6 @@ impl crate::ImportedDatabase {
     /// every statement the performance gate measures. Two or more is a
     /// super-journal.
     pub fn decided_over(&self) -> usize {
-        self.writing.decided_over.get()
+        self.writing.decided_over()
     }
 }

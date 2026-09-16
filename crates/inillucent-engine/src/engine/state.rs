@@ -37,7 +37,7 @@ use crate::*;
 /// reference enough to write through.
 pub(crate) struct Pragmas {
     /// The bounds a statement is parsed and planned under.
-    pub(crate) limits: std::cell::RefCell<Limits>,
+    limits: std::cell::RefCell<Limits>,
 
     /// Which planner optimizations are on.
     ///
@@ -45,7 +45,7 @@ pub(crate) struct Pragmas {
     /// about the *planner* - "is the answer the same with this off" - and a
     /// measurement that varied it per statement would be comparing two plans of
     /// two different queries.
-    pub(crate) levers: std::cell::Cell<Levers>,
+    levers: std::cell::Cell<Levers>,
 
     /// How long a writer waits for the writer slot, in milliseconds.
     ///
@@ -54,14 +54,14 @@ pub(crate) struct Pragmas {
     /// directly and never takes the writer slot - so what it can honestly do
     /// with the setting is remember it and report it, which is what the pragma
     /// is asked for far more often than it is relied on.
-    pub(crate) busy_timeout_ms: std::cell::Cell<u64>,
+    busy_timeout_ms: std::cell::Cell<u64>,
 
     /// Whether `PRAGMA foreign_keys` is on.
-    pub(crate) foreign_keys: std::cell::Cell<bool>,
+    foreign_keys: std::cell::Cell<bool>,
 
     /// Whether `PRAGMA defer_foreign_keys` has put every immediate check off
     /// until the commit, for the transaction now open.
-    pub(crate) defer_foreign_keys: std::cell::Cell<bool>,
+    defer_foreign_keys: std::cell::Cell<bool>,
 
     /// Whether the file lock is held between transactions.
     ///
@@ -72,7 +72,7 @@ pub(crate) struct Pragmas {
     /// transaction and released after it, so a second process may have the file
     /// in between - which is what the word means. `exclusive` keeps it, which
     /// is faster and is what a single-process application wants.
-    pub(crate) locking_exclusive: std::cell::Cell<bool>,
+    locking_exclusive: std::cell::Cell<bool>,
 
     /// How the pre-commit state is protected, which `PRAGMA journal_mode` sets.
     ///
@@ -80,14 +80,14 @@ pub(crate) struct Pragmas {
     /// one sync per commit against two. A rollback journal is what an
     /// application selects when it wants the database to be one file after a
     /// clean close, which is the reason a rollback journal is supported at all.
-    pub(crate) journal_mode: std::cell::Cell<inillucent_pool::journal::JournalMode>,
+    journal_mode: std::cell::Cell<inillucent_pool::journal::JournalMode>,
 
     /// Whether `PRAGMA ignore_check_constraints` has turned `CHECK` off.
     ///
     /// Like `foreign_keys` it is read by the *binder*, so changing it throws
     /// away the compiled statements: a plan built while checks were on carries
     /// them and would keep carrying them after the pragma turned them off.
-    pub(crate) ignore_check_constraints: std::cell::Cell<bool>,
+    ignore_check_constraints: std::cell::Cell<bool>,
 
     /// What `PRAGMA secure_delete` is set to: 0 off, 1 on, 2 fast.
     ///
@@ -95,14 +95,14 @@ pub(crate) struct Pragmas {
     /// reused, so a row that has been deleted is not still readable in the file
     /// by anyone who opens it with a hex editor. Off is SQLite default and
     /// this engine default, because the overwrite is a write.
-    pub(crate) secure_delete: std::cell::Cell<u8>,
+    secure_delete: std::cell::Cell<u8>,
 
     /// What `PRAGMA auto_vacuum` is set to: 0 none, 1 full, 2 incremental.
     ///
     /// Settable only while the database holds no table, which is SQLite rule -
     /// the mode decides how the file is laid out, and changing it afterwards is
     /// what `VACUUM` is for.
-    pub(crate) auto_vacuum: std::cell::Cell<u8>,
+    auto_vacuum: std::cell::Cell<u8>,
 
     /// Whether `PRAGMA automatic_index` lets the planner build one.
     ///
@@ -110,14 +110,14 @@ pub(crate) struct Pragmas {
     /// join is scanned once per outer row, and building a transient index over
     /// it first is cheaper as soon as the outer side has more than a handful of
     /// rows.
-    pub(crate) automatic_index: std::cell::Cell<bool>,
+    automatic_index: std::cell::Cell<bool>,
 
     /// What `PRAGMA cache_size` reads back, in SQLite's own signed units.
     ///
     /// `None` until a caller sets one, when it is the pool's own size in
     /// kibibytes; afterwards it is the caller's number, so reading it always
     /// describes the cache the engine is actually keeping.
-    pub(crate) cache_size: std::cell::Cell<Option<i64>>,
+    cache_size: std::cell::Cell<Option<i64>>,
 
     /// Whether `LIKE` compares ASCII letters exactly.
     ///
@@ -125,20 +125,20 @@ pub(crate) struct Pragmas {
     /// `TreeCatalog::like_is_case_sensitive`, and the statement cache is
     /// emptied when it changes so a compiled `LIKE` is never run under the
     /// other setting.
-    pub(crate) case_sensitive_like: std::cell::Cell<bool>,
+    case_sensitive_like: std::cell::Cell<bool>,
 
     /// What `PRAGMA analysis_limit` was set to, in rows.
     ///
     /// Recorded and exceeded: `ANALYZE` walks the whole table, which is more
     /// than any cap asks for.
-    pub(crate) analysis_limit: std::cell::Cell<i64>,
+    analysis_limit: std::cell::Cell<i64>,
 
     /// What `PRAGMA writable_schema` was set to.
     ///
     /// Recorded and reported. There is nothing for it to unlock: the binder
     /// refuses a write to a reserved-prefix table whatever it says, and a
     /// module's shadow table is an ordinary table a write reaches without it.
-    pub(crate) writable_schema: std::cell::Cell<bool>,
+    writable_schema: std::cell::Cell<bool>,
 
     /// Whether `SQLITE_DBCONFIG_DEFENSIVE` is in force.
     ///
@@ -148,28 +148,282 @@ pub(crate) struct Pragmas {
     /// `PRAGMA journal_mode = OFF`, which stops protecting anything, and
     /// `PRAGMA writable_schema = ON`, which lets a caller write a schema row
     /// the engine will later try to parse.
-    pub(crate) defensive: std::cell::Cell<bool>,
+    defensive: std::cell::Cell<bool>,
 
     /// Whether this connection refuses to write, set by `PRAGMA query_only`.
     ///
     /// Honoured rather than remembered: a caller sets it to make a mistake
     /// impossible, and one that recorded it and wrote anyway would be worse
     /// than an engine that refused the pragma outright.
-    pub(crate) query_only: std::cell::Cell<bool>,
+    query_only: std::cell::Cell<bool>,
 
     /// Whether a trigger's own writes fire triggers, set by
     /// `PRAGMA recursive_triggers`.
-    pub(crate) recursive_triggers: std::cell::Cell<bool>,
+    recursive_triggers: std::cell::Cell<bool>,
 
     /// The ceiling `PRAGMA max_page_count` set, in pages.
-    pub(crate) max_page_count: std::cell::Cell<i64>,
+    max_page_count: std::cell::Cell<i64>,
 
     /// What `PRAGMA temp_store` reports.
     ///
     /// The *setting* rather than the state, which is what SQLite reports: this
     /// engine keeps temporary tables in memory whatever the number says, and
     /// the one value it cannot be - `FILE` - is refused rather than recorded.
-    pub(crate) temp_store: std::cell::Cell<i64>,
+    temp_store: std::cell::Cell<i64>,
+}
+
+// The accessors, and why the fields below them are private.
+//
+// **Twenty `pub(crate)` fields written from seventeen other files
+// (task-1969, 7.3).** The module comment above says this split is the midpoint
+// and that A1 step 3 takes it further; this is that step for the two groups
+// whose callers are not the binder's neighbours. `Schema`, `Storage` and
+// `SessionState` follow in the `bind.rs` ticket, because their callers and that
+// split touch the same lines.
+//
+// What a private field buys here is not encapsulation of the value - every one
+// of these is a `Cell` and a caller could always read and write it - but a
+// single place where the read and the write are named. `set_journal_mode` is a
+// method a reader can find every caller of; `pragmas.journal_mode.set(...)` is
+// a pattern they have to grep for and hope they spelled the same way. It is
+// also what makes `set_automatic_index` below possible without being an
+// inconsistency: that one does more than assign, and now it sits beside the
+// nineteen that do not.
+//
+// task-1962 declined the full `RefCell` conversion with a reason that still
+// holds - `engine/compiled.rs` passes two disjoint `&mut` fields into a
+// `WriteView`, a proof the borrow checker does at compile time and a `RefCell`
+// would move to run time - and that reason says nothing about accessors.
+
+impl Pragmas {
+    /// Returns the cell holding limits.
+    ///
+    /// The cell rather than a borrow of it, because a caller that hands this to
+    /// another type needs the cell itself.
+    pub(crate) fn limits(&self) -> &std::cell::RefCell<Limits> {
+        &self.limits
+    }
+
+    /// Returns analysis limit.
+    pub(crate) fn analysis_limit(&self) -> i64 {
+        self.analysis_limit.get()
+    }
+
+    /// Sets analysis limit.
+    ///
+    /// @param value - what to set it to
+    pub(crate) fn set_analysis_limit(&self, value: i64) {
+        self.analysis_limit.set(value);
+    }
+
+    /// Returns auto vacuum.
+    pub(crate) fn auto_vacuum(&self) -> u8 {
+        self.auto_vacuum.get()
+    }
+
+    /// Sets auto vacuum.
+    ///
+    /// @param value - what to set it to
+    pub(crate) fn set_auto_vacuum(&self, value: u8) {
+        self.auto_vacuum.set(value);
+    }
+
+    /// Returns automatic index.
+    pub(crate) fn automatic_index(&self) -> bool {
+        self.automatic_index.get()
+    }
+
+    /// Returns busy timeout ms.
+    pub(crate) fn busy_timeout_ms(&self) -> u64 {
+        self.busy_timeout_ms.get()
+    }
+
+    /// Sets busy timeout ms.
+    ///
+    /// @param value - what to set it to
+    pub(crate) fn set_busy_timeout_ms(&self, value: u64) {
+        self.busy_timeout_ms.set(value);
+    }
+
+    /// Returns cache size.
+    pub(crate) fn cache_size(&self) -> Option<i64> {
+        self.cache_size.get()
+    }
+
+    /// Sets cache size.
+    ///
+    /// @param value - what to set it to
+    pub(crate) fn set_cache_size(&self, value: Option<i64>) {
+        self.cache_size.set(value);
+    }
+
+    /// Returns case sensitive like.
+    pub(crate) fn case_sensitive_like(&self) -> bool {
+        self.case_sensitive_like.get()
+    }
+
+    /// Sets case sensitive like.
+    ///
+    /// @param value - what to set it to
+    pub(crate) fn set_case_sensitive_like(&self, value: bool) {
+        self.case_sensitive_like.set(value);
+    }
+
+    /// Returns defensive.
+    pub(crate) fn defensive(&self) -> bool {
+        self.defensive.get()
+    }
+
+    /// Sets defensive.
+    ///
+    /// @param value - what to set it to
+    pub(crate) fn set_defensive(&self, value: bool) {
+        self.defensive.set(value);
+    }
+
+    /// Returns defer foreign keys.
+    pub(crate) fn defer_foreign_keys(&self) -> bool {
+        self.defer_foreign_keys.get()
+    }
+
+    /// Sets defer foreign keys.
+    ///
+    /// @param value - what to set it to
+    pub(crate) fn set_defer_foreign_keys(&self, value: bool) {
+        self.defer_foreign_keys.set(value);
+    }
+
+    /// Returns foreign keys.
+    pub(crate) fn foreign_keys(&self) -> bool {
+        self.foreign_keys.get()
+    }
+
+    /// Sets foreign keys.
+    ///
+    /// @param value - what to set it to
+    pub(crate) fn set_foreign_keys(&self, value: bool) {
+        self.foreign_keys.set(value);
+    }
+
+    /// Returns ignore check constraints.
+    pub(crate) fn ignore_check_constraints(&self) -> bool {
+        self.ignore_check_constraints.get()
+    }
+
+    /// Sets ignore check constraints.
+    ///
+    /// @param value - what to set it to
+    pub(crate) fn set_ignore_check_constraints(&self, value: bool) {
+        self.ignore_check_constraints.set(value);
+    }
+
+    /// Returns journal mode.
+    pub(crate) fn journal_mode(&self) -> inillucent_pool::journal::JournalMode {
+        self.journal_mode.get()
+    }
+
+    /// Sets journal mode.
+    ///
+    /// @param value - what to set it to
+    pub(crate) fn set_journal_mode(&self, value: inillucent_pool::journal::JournalMode) {
+        self.journal_mode.set(value);
+    }
+
+    /// Returns levers.
+    pub(crate) fn levers(&self) -> Levers {
+        self.levers.get()
+    }
+
+    /// Sets levers.
+    ///
+    /// @param value - what to set it to
+    pub(crate) fn set_levers(&self, value: Levers) {
+        self.levers.set(value);
+    }
+
+    /// Returns locking exclusive.
+    pub(crate) fn locking_exclusive(&self) -> bool {
+        self.locking_exclusive.get()
+    }
+
+    /// Sets locking exclusive.
+    ///
+    /// @param value - what to set it to
+    pub(crate) fn set_locking_exclusive(&self, value: bool) {
+        self.locking_exclusive.set(value);
+    }
+
+    /// Returns max page count.
+    pub(crate) fn max_page_count(&self) -> i64 {
+        self.max_page_count.get()
+    }
+
+    /// Sets max page count.
+    ///
+    /// @param value - what to set it to
+    pub(crate) fn set_max_page_count(&self, value: i64) {
+        self.max_page_count.set(value);
+    }
+
+    /// Returns query only.
+    pub(crate) fn query_only(&self) -> bool {
+        self.query_only.get()
+    }
+
+    /// Sets query only.
+    ///
+    /// @param value - what to set it to
+    pub(crate) fn set_query_only(&self, value: bool) {
+        self.query_only.set(value);
+    }
+
+    /// Returns recursive triggers.
+    pub(crate) fn recursive_triggers(&self) -> bool {
+        self.recursive_triggers.get()
+    }
+
+    /// Sets recursive triggers.
+    ///
+    /// @param value - what to set it to
+    pub(crate) fn set_recursive_triggers(&self, value: bool) {
+        self.recursive_triggers.set(value);
+    }
+
+    /// Returns secure delete.
+    pub(crate) fn secure_delete(&self) -> u8 {
+        self.secure_delete.get()
+    }
+
+    /// Sets secure delete.
+    ///
+    /// @param value - what to set it to
+    pub(crate) fn set_secure_delete(&self, value: u8) {
+        self.secure_delete.set(value);
+    }
+
+    /// Returns temp store.
+    pub(crate) fn temp_store(&self) -> i64 {
+        self.temp_store.get()
+    }
+
+    /// Sets temp store.
+    ///
+    /// @param value - what to set it to
+    pub(crate) fn set_temp_store(&self, value: i64) {
+        self.temp_store.set(value);
+    }
+
+    /// Returns writable schema.
+    pub(crate) fn writable_schema(&self) -> bool {
+        self.writable_schema.get()
+    }
+
+    /// Sets writable schema.
+    ///
+    /// @param value - what to set it to
+    pub(crate) fn set_writable_schema(&self, value: bool) {
+        self.writable_schema.set(value);
+    }
 }
 
 impl Pragmas {
@@ -460,7 +714,7 @@ pub(crate) struct Writing {
     /// one, which is why the difference has to be expressible - the gate's
     /// `transaction` family is exactly the question of what a commit costs, and
     /// a harness that could only run one grouping could not ask it.
-    pub(crate) batch: std::cell::Cell<Option<u64>>,
+    batch: std::cell::Cell<Option<u64>>,
     /// What the open transaction changed, newest last, so it can be abandoned.
     ///
     /// Empty outside a transaction, and never filled there: an autocommit
@@ -471,7 +725,7 @@ pub(crate) struct Writing {
     /// log, and all of them append here - so they hold it shared and take the
     /// cell when they have something to record, rather than one of them holding
     /// it mutably and the others going without.
-    pub(crate) undo: std::cell::RefCell<Vec<Before>>,
+    undo: std::cell::RefCell<Vec<Before>>,
     /// Which schemas the open transaction has written, one bit per schema.
     ///
     /// **The participant set a cross-file commit is decided over.** A
@@ -489,14 +743,14 @@ pub(crate) struct Writing {
     /// group need `&mut`. With all ten behind their own cells the group is
     /// reachable through a shared reference, which is what lets a connection
     /// hold the writer without borrowing the engine.
-    pub(crate) touched: std::cell::Cell<u16>,
+    touched: std::cell::Cell<u16>,
     /// Named savepoints, and where each one sits in `undo`.
     ///
     /// Behind a cell for the reason `touched` is, and it is a `RefCell` rather
     /// than a `Cell` because the list is read in place - `release` finds a name
     /// in it - and copying it to read one entry would allocate per savepoint
     /// statement.
-    pub(crate) marks: std::cell::RefCell<Vec<(Vec<u8>, usize)>>,
+    marks: std::cell::RefCell<Vec<(Vec<u8>, usize)>>,
     /// How many schemas the last commit was decided over.
     ///
     /// **The instrument for the one claim about this protocol that is otherwise
@@ -506,7 +760,7 @@ pub(crate) struct Writing {
     /// paths apart - and the first version of `seal` did take the two-file path
     /// for a one-file insert, silently. On the harness's own side, like
     /// `index_stages`, and nothing in the engine reads it.
-    pub(crate) decided_over: std::cell::Cell<usize>,
+    decided_over: std::cell::Cell<usize>,
     /// Whether the open transaction was started by `SAVEPOINT` rather than by
     /// `BEGIN`.
     ///
@@ -519,9 +773,9 @@ pub(crate) struct Writing {
     /// one - see `Directive::Savepoint` - and this is set there, at the
     /// instant it does, and cleared wherever the transaction ends
     /// (`commit_batch`, `rollback`).
-    pub(crate) implicit_transaction: std::cell::Cell<bool>,
+    implicit_transaction: std::cell::Cell<bool>,
     /// The transaction number the next statement takes.
-    pub(crate) next_txn: std::cell::Cell<u64>,
+    next_txn: std::cell::Cell<u64>,
     /// The transaction the statement in flight took, outside a batch.
     ///
     /// **Because `next_txn` is not the number of the statement that is
@@ -544,7 +798,7 @@ pub(crate) struct Writing {
     ///
     /// `None` inside a batch and between statements, where `next_txn` is the
     /// correct answer.
-    pub(crate) statement_txn: std::cell::Cell<Option<u64>>,
+    statement_txn: std::cell::Cell<Option<u64>>,
     /// How many statements are running, for the file lock.
     ///
     /// A statement runs statements - a trigger body, a foreign-key sweep, a
@@ -554,14 +808,14 @@ pub(crate) struct Writing {
     /// statement was still reading it.
     ///
     /// Behind a cell for the reason `touched` is.
-    pub(crate) running: std::cell::Cell<usize>,
+    running: std::cell::Cell<usize>,
     /// Whether a cyclic-key sweep is already running.
     ///
     /// The sweep runs statements, and a statement runs the sweep; without this
     /// the first cascade would recur until the stack ran out. It is a flag
     /// rather than a depth because there is exactly one sweep at a time by
     /// construction: it runs after a statement, at the outermost level.
-    pub(crate) settling: std::cell::Cell<bool>,
+    settling: std::cell::Cell<bool>,
 }
 
 /// The compiled statements this connection is holding on to.
@@ -751,6 +1005,160 @@ impl SessionState {
             return MAIN;
         }
         self.owner.get(&root).copied().unwrap_or(MAIN)
+    }
+}
+
+// The accessors. See the note above `impl Pragmas` for why the fields are
+// private; the `RefCell` ones hand back the cell rather than a borrow of it,
+// because six call sites pass `&self.writing.undo` into a `WriteView` and a
+// method returning a `Ref` cannot stand in for that.
+
+impl Writing {
+    /// Returns the cell holding marks.
+    ///
+    /// The cell rather than a borrow of it, because a caller that hands this to
+    /// another type needs the cell itself.
+    pub(crate) fn marks(&self) -> &std::cell::RefCell<Vec<(Vec<u8>, usize)>> {
+        &self.marks
+    }
+
+    /// Returns the cell holding undo.
+    ///
+    /// The cell rather than a borrow of it, because a caller that hands this to
+    /// another type needs the cell itself.
+    pub(crate) fn undo(&self) -> &std::cell::RefCell<Vec<Before>> {
+        &self.undo
+    }
+
+    /// Returns the write state a freshly opened database starts with.
+    ///
+    /// A constructor rather than a literal at each open path, because the
+    /// fields are private and because the two paths - a new file and a
+    /// recovered one - differ in exactly one value and used to restate the
+    /// other nine each.
+    ///
+    /// @param next_txn - the first transaction number this database will hand out
+    pub(crate) fn starting_at(next_txn: u64) -> Writing {
+        Writing {
+            next_txn: std::cell::Cell::new(next_txn),
+            statement_txn: std::cell::Cell::new(None),
+            batch: std::cell::Cell::new(None),
+            undo: std::cell::RefCell::new(Vec::new()),
+            touched: std::cell::Cell::new(0),
+            decided_over: std::cell::Cell::new(0),
+            marks: std::cell::RefCell::new(Vec::new()),
+            implicit_transaction: std::cell::Cell::new(false),
+            running: std::cell::Cell::new(0),
+            settling: std::cell::Cell::new(false),
+        }
+    }
+
+    /// Sets touched and returns what it was.
+    ///
+    /// @param value - what to set it to
+    pub(crate) fn replace_touched(&self, value: u16) -> u16 {
+        self.touched.replace(value)
+    }
+
+    /// Takes the batch's transaction number, leaving none behind.
+    pub(crate) fn take_batch(&self) -> Option<u64> {
+        self.batch.take()
+    }
+
+    /// Returns batch.
+    pub(crate) fn batch(&self) -> Option<u64> {
+        self.batch.get()
+    }
+
+    /// Sets batch.
+    ///
+    /// @param value - what to set it to
+    pub(crate) fn set_batch(&self, value: Option<u64>) {
+        self.batch.set(value);
+    }
+
+    /// Returns decided over.
+    pub(crate) fn decided_over(&self) -> usize {
+        self.decided_over.get()
+    }
+
+    /// Sets decided over.
+    ///
+    /// @param value - what to set it to
+    pub(crate) fn set_decided_over(&self, value: usize) {
+        self.decided_over.set(value);
+    }
+
+    /// Returns implicit transaction.
+    pub(crate) fn implicit_transaction(&self) -> bool {
+        self.implicit_transaction.get()
+    }
+
+    /// Sets implicit transaction.
+    ///
+    /// @param value - what to set it to
+    pub(crate) fn set_implicit_transaction(&self, value: bool) {
+        self.implicit_transaction.set(value);
+    }
+
+    /// Returns next txn.
+    pub(crate) fn next_txn(&self) -> u64 {
+        self.next_txn.get()
+    }
+
+    /// Sets next txn.
+    ///
+    /// @param value - what to set it to
+    pub(crate) fn set_next_txn(&self, value: u64) {
+        self.next_txn.set(value);
+    }
+
+    /// Returns running.
+    pub(crate) fn running(&self) -> usize {
+        self.running.get()
+    }
+
+    /// Sets running.
+    ///
+    /// @param value - what to set it to
+    pub(crate) fn set_running(&self, value: usize) {
+        self.running.set(value);
+    }
+
+    /// Returns settling.
+    pub(crate) fn settling(&self) -> bool {
+        self.settling.get()
+    }
+
+    /// Sets settling.
+    ///
+    /// @param value - what to set it to
+    pub(crate) fn set_settling(&self, value: bool) {
+        self.settling.set(value);
+    }
+
+    /// Returns statement txn.
+    pub(crate) fn statement_txn(&self) -> Option<u64> {
+        self.statement_txn.get()
+    }
+
+    /// Sets statement txn.
+    ///
+    /// @param value - what to set it to
+    pub(crate) fn set_statement_txn(&self, value: Option<u64>) {
+        self.statement_txn.set(value);
+    }
+
+    /// Returns touched.
+    pub(crate) fn touched(&self) -> u16 {
+        self.touched.get()
+    }
+
+    /// Sets touched.
+    ///
+    /// @param value - what to set it to
+    pub(crate) fn set_touched(&self, value: u16) {
+        self.touched.set(value);
     }
 }
 

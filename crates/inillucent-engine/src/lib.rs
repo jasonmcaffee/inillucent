@@ -175,7 +175,7 @@ use inillucent_sql::catalog_view::{StaticCatalog, TableInfo};
 use inillucent_sql::parser::parse_next_statement;
 use inillucent_sql::plan::Levers;
 use inillucent_sqlite_reader::SqliteFile;
-use inillucent_tree::datum::{Datum, OwnedDatum};
+use inillucent_tree::datum::Datum;
 use inillucent_tree::types::ColumnSpec;
 use inillucent_tree::write::TreeLog;
 use inillucent_tree::PagedTree;
@@ -220,9 +220,19 @@ pub use inillucent_ext::registry as extensions;
 
 /// A value going into a statement or coming out of one.
 ///
-/// Re-exported for the reason [`BoundParams`] is. It is named `Value` here
-/// because `Datum` is already the borrowed form in this crate's own imports.
-pub use inillucent_tree::datum::OwnedDatum as Value;
+/// Re-exported for the reason [`BoundParams`] is: a caller has to be able to
+/// name it, and making it reachable here is what keeps the driver's edge to
+/// this crate one edge rather than three.
+///
+/// **Under its own name, not as `Value` (task-1961 A6, task-1969 6.3).** This
+/// read `pub use inillucent_tree::datum::OwnedDatum as Value;` twenty-four
+/// lines below `pub use inillucent_value::Value as ExprValue;`, so this crate
+/// exported two different types and called one of them by the other's name.
+/// With `inillucent_driver::Value` as well that was three confusable types
+/// called `Value`, and A2 had already removed the facade's reason to need the
+/// alias. The type is `OwnedDatum` everywhere else in the workspace, including
+/// in this crate's own imports, and it is `OwnedDatum` here.
+pub use inillucent_tree::datum::OwnedDatum;
 
 /// How many frames the harness gives a pool when nothing says otherwise.
 ///
@@ -433,7 +443,7 @@ impl ImportedDatabase {
     ///
     /// @param sql - the script, positioned at the statement to measure
     pub fn statement_length(&self, sql: &str) -> DbResult<usize> {
-        let parsed = parse_next_statement(sql.as_bytes(), 0, &self.pragmas.limits.borrow())
+        let parsed = parse_next_statement(sql.as_bytes(), 0, &self.pragmas.limits().borrow())
             .map_err(refused)?;
         Ok(parsed.consumed)
     }
@@ -498,7 +508,7 @@ impl ImportedDatabase {
     /// schema's tables - so it stays on the database rather than moving onto
     /// either (task-1962, A1 step 2).
     pub(crate) fn has_deferred_foreign_keys(&self) -> bool {
-        self.pragmas.defer_foreign_keys.get()
+        self.pragmas.defer_foreign_keys()
             || self
                 .schema
                 .tables
@@ -532,7 +542,7 @@ impl ImportedDatabase {
         inillucent_sql::parser::parse_next_statement_into(
             sql.as_bytes(),
             0,
-            &self.pragmas.limits.borrow(),
+            &self.pragmas.limits().borrow(),
             arena,
         )
         .map_err(refused)
@@ -873,7 +883,7 @@ impl TreeCatalog for ImportedDatabase {
     /// compiled form - the plan cache is emptied when the pragma changes, so a
     /// `LIKE` compiled under one setting never runs under the other.
     fn like_is_case_sensitive(&self) -> bool {
-        self.pragmas.case_sensitive_like.get()
+        self.pragmas.case_sensitive_like()
     }
 
     fn tree(&self, root: u32) -> Option<&PagedTree> {

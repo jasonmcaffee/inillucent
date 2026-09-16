@@ -36,7 +36,7 @@ impl ImportedDatabase {
     /// It runs after the statement rather than inside it, and only on a schema
     /// that has such a key, so a schema without one pays a flag test.
     pub(crate) fn settle_foreign_keys(&mut self) -> DbResult<()> {
-        if !self.pragmas.foreign_keys.get() || !self.schema.has_cyclic_foreign_keys() {
+        if !self.pragmas.foreign_keys() || !self.schema.has_cyclic_foreign_keys() {
             return Ok(());
         }
         let mut statements = Vec::new();
@@ -95,7 +95,7 @@ impl ImportedDatabase {
     /// reason nobody can reproduce. Asking the question directly costs a query
     /// per deferred key per commit and cannot drift.
     pub(crate) fn check_deferred_foreign_keys(&mut self) -> DbResult<()> {
-        if !self.pragmas.foreign_keys.get() || !self.has_deferred_foreign_keys() {
+        if !self.pragmas.foreign_keys() || !self.has_deferred_foreign_keys() {
             return Ok(());
         }
         for query in self.schema.violation_queries(None)? {

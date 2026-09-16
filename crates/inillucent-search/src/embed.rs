@@ -128,26 +128,121 @@ fn embed(arguments: &[Value<'static>]) -> DbResult<Value<'static>> {
 /// against 1.48 for the same question written as a one-row subquery - 2,661
 /// embeddings of one sentence, and 2,660 of them thrown away.
 ///
-/// It stays `direct_only`: a function that loads a 275 MB model has no
-/// business being called out of a `CHECK` constraint or an index expression,
-/// and being deterministic says nothing about being cheap.
+/// **And `direct_only`, which until task-1970 it said it was and was not.** A
+/// function that loads a 275 MB model has no business being called out of a
+/// `CHECK` constraint or an index expression, and being deterministic says
+/// nothing about being cheap. The registration read
+/// `FunctionFlags { deterministic: true, ..FunctionFlags::default() }`, and the
+/// `Default` derive is every flag false - so with `PRAGMA trusted_schema` on,
+/// which is the default, `authorize_function` admitted `embed` from a schema.
+/// A `CREATE INDEX i ON t (embed(body))` would then load the model once per row
+/// of the table, inside the statement that creates the index, and a `CHECK`
+/// would load it on every insert.
+///
+/// It is a behaviour change to a shipped function and `CHANGELOG.md` records it
+/// under 0.1.4. Nothing promised the old behaviour: `PRAGMA function_list` does
+/// not report the bit (`engine/pragma.rs`), no document said a schema could
+/// name `embed`, and this comment said the opposite.
 ///
 /// @param registry - what a connection reaches functions through
 pub fn register(registry: &mut inillucent_ext::registry::Registry) {
     registry.register_function(inillucent_ext::registry::UserFunction {
-        name: "embed".to_string(),
-        arity: 1,
         flags: inillucent_ext::registry::FunctionFlags {
             deterministic: true,
-            ..inillucent_ext::registry::FunctionFlags::default()
+            ..inillucent_ext::registry::FunctionFlags::external()
         },
-        body: inillucent_ext::registry::UserBody::Scalar(Arc::new(embed)),
+        ..inillucent_ext::registry::UserFunction::external(
+            "embed",
+            1,
+            inillucent_ext::registry::UserBody::Scalar(Arc::new(embed)),
+        )
     });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `embed` is registered as a function a schema may not name.
+    ///
+    /// **This is the half of task-1969's 7.4 that is reachable from here, and
+    /// the half that was wrong.** The registration read
+    /// `FunctionFlags { deterministic: true, ..FunctionFlags::default() }`, and
+    /// the `Default` derive is every flag false - so `embed` was registered as
+    /// a function a `CHECK`, an index expression or a generated column may
+    /// name, while its own doc comment said "It stays `direct_only`".
+    #[test]
+    fn embed_is_registered_as_direct_only_and_deterministic() {
+        let mut registry = inillucent_ext::registry::Registry::with_builtins();
+        register(&mut registry);
+        let flags = registry.function_flags(b"embed");
+        assert!(
+            flags.direct_only,
+            "`embed` loads a 275 MB model and a schema may not name it"
+        );
+        assert!(
+            flags.deterministic,
+            "`embed` is deterministic, which is what lets one statement embed a phrase once"
+        );
+    }
+
+    /// The registry refuses `embed` from a schema and allows it from a
+    /// statement, with the schema trusted.
+    ///
+    /// `trusted_schema` is the lever `direct_only` has to beat:
+    /// `authorize_function` returns early for a trusted schema *unless* the
+    /// function is direct-only, so a build that lost the flag would let `embed`
+    /// through on every machine that had not turned the pragma off - which is
+    /// every machine, because it is on by default.
+    ///
+    /// The second assertion is what stops the first from being a test that
+    /// `embed` is unusable.
+    #[test]
+    fn a_trusted_schema_may_not_name_embed_and_a_statement_may() {
+        let mut registry = inillucent_ext::registry::Registry::with_builtins();
+        register(&mut registry);
+        assert!(
+            registry.policy().trusted_schema,
+            "this case is about the lever being on, and it is off"
+        );
+        let refused = registry
+            .authorize_function(b"embed", inillucent_ext::registry::CallSite::Schema)
+            .expect_err("a schema may not name embed");
+        assert!(
+            refused
+                .message()
+                .contains("may only be used from top-level SQL"),
+            "`embed` was refused from a schema for the wrong reason: {refused}"
+        );
+        assert!(
+            registry
+                .authorize_function(b"embed", inillucent_ext::registry::CallSite::Statement)
+                .is_ok(),
+            "a statement may name `embed`"
+        );
+    }
+
+    /// The constructor a registrant should reach for sets the flag, and the
+    /// `Default` derive does not.
+    ///
+    /// **The two are one word apart and mean opposite things**, which is how
+    /// this defect happened: `..FunctionFlags::external()` is direct-only and
+    /// `..FunctionFlags::default()` is not. Written down as an assertion rather
+    /// than as a comment, because the comment existed and was read as
+    /// describing the derive.
+    #[test]
+    fn the_external_constructor_is_the_one_that_sets_the_flag() {
+        assert!(inillucent_ext::registry::FunctionFlags::external().direct_only);
+        assert!(!inillucent_ext::registry::FunctionFlags::default().direct_only);
+        let made = inillucent_ext::registry::UserFunction::external(
+            "made",
+            1,
+            inillucent_ext::registry::UserBody::Scalar(Arc::new(embed)),
+        );
+        assert!(made.flags.direct_only);
+        assert_eq!(made.name, "made");
+        assert_eq!(made.arity, 1);
+    }
 
     /// A NULL text embeds to NULL rather than to a vector of zeroes.
     #[test]

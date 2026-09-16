@@ -23,8 +23,8 @@ impl ImportedDatabase {
     ///
     /// @param exclusive - whether to keep the lock
     pub(crate) fn set_locking_exclusive(&mut self, exclusive: bool) -> DbResult<()> {
-        self.pragmas.locking_exclusive.set(exclusive);
-        if !exclusive && self.writing.batch.get().is_none() {
+        self.pragmas.set_locking_exclusive(exclusive);
+        if !exclusive && self.writing.batch().is_none() {
             self.storage.database.end_access()?;
         }
         Ok(())
@@ -40,12 +40,11 @@ impl ImportedDatabase {
     /// @param writing - whether the statement changes the database
     pub(crate) fn enter(&mut self, writing: bool) -> DbResult<()> {
         self.writing
-            .running
-            .set(self.writing.running.get().saturating_add(1));
+            .set_running(self.writing.running().saturating_add(1));
         // **A transaction holds its lock from the first write to the commit.**
         // Once inside one, the retry loop's release would open a window another
         // process could write through - see `Database::begin_write_within`.
-        let inside = self.writing.batch.get().is_some() || self.writing.running.get() > 1;
+        let inside = self.writing.batch().is_some() || self.writing.running() > 1;
         let reloaded = if writing {
             self.storage.database.begin_write_within(!inside)?
         } else {
@@ -76,11 +75,10 @@ impl ImportedDatabase {
     /// could write through the middle of.
     pub(crate) fn leave(&mut self) -> DbResult<()> {
         self.writing
-            .running
-            .set(self.writing.running.get().saturating_sub(1));
-        if self.writing.running.get() > 0
-            || self.pragmas.locking_exclusive.get()
-            || self.writing.batch.get().is_some()
+            .set_running(self.writing.running().saturating_sub(1));
+        if self.writing.running() > 0
+            || self.pragmas.locking_exclusive()
+            || self.writing.batch().is_some()
         {
             return Ok(());
         }
@@ -114,16 +112,16 @@ impl ImportedDatabase {
         &mut self,
         mode: inillucent_pool::journal::JournalMode,
     ) -> DbResult<()> {
-        if mode == self.pragmas.journal_mode.get() {
+        if mode == self.pragmas.journal_mode() {
             return Ok(());
         }
-        if self.writing.batch.get().is_some() {
+        if self.writing.batch().is_some() {
             return Err(refusal(
                 "cannot change PRAGMA journal_mode from within a transaction",
             ));
         }
         self.checkpoint()?;
-        self.pragmas.journal_mode.set(mode);
+        self.pragmas.set_journal_mode(mode);
         // **WAL is the one mode the file remembers.** SQLite writes a
         // read/write version of 2 into its header for a WAL database and 1 for
         // everything else, so a reopen comes back in WAL and comes back at the

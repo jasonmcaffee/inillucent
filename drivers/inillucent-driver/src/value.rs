@@ -18,7 +18,7 @@
 //! is lost, and the loss is silent: an integer that arrives as a string still
 //! prints correctly and no longer compares correctly.
 
-use inillucent_engine::Value as EngineValue;
+use inillucent_engine::OwnedDatum as EngineValue;
 
 /// One cell.
 ///

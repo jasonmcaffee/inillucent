@@ -207,18 +207,7 @@ impl crate::ImportedDatabase {
                 scratch_ast: std::cell::RefCell::new(None),
                 index_stages: std::cell::Cell::new(StageTimings::default()),
             }),
-            writing: std::rc::Rc::new(Writing {
-                next_txn: std::cell::Cell::new(1),
-                statement_txn: std::cell::Cell::new(None),
-                batch: std::cell::Cell::new(None),
-                undo: std::cell::RefCell::new(Vec::new()),
-                touched: std::cell::Cell::new(0),
-                decided_over: std::cell::Cell::new(0),
-                marks: std::cell::RefCell::new(Vec::new()),
-                implicit_transaction: std::cell::Cell::new(false),
-                running: std::cell::Cell::new(0),
-                settling: std::cell::Cell::new(false),
-            }),
+            writing: std::rc::Rc::new(Writing::starting_at(1)),
             storage: Storage {
                 database,
                 page_size,
@@ -285,9 +274,9 @@ impl crate::ImportedDatabase {
         let mode = if self.storage.database.wal_mode() {
             inillucent_pool::journal::JournalMode::Wal
         } else {
-            self.pragmas.journal_mode.get()
+            self.pragmas.journal_mode()
         };
-        self.pragmas.journal_mode.set(mode);
+        self.pragmas.set_journal_mode(mode);
         let held: std::sync::Arc<dyn inillucent_vfs::Vfs> =
             std::sync::Arc::clone(&self.storage.vfs);
         let journal = journal_for(mode).map(|protection| {
@@ -480,18 +469,7 @@ impl crate::ImportedDatabase {
                 scratch_ast: std::cell::RefCell::new(None),
                 index_stages: std::cell::Cell::new(StageTimings::default()),
             }),
-            writing: std::rc::Rc::new(Writing {
-                next_txn: std::cell::Cell::new(highest_txn.saturating_add(1)),
-                statement_txn: std::cell::Cell::new(None),
-                batch: std::cell::Cell::new(None),
-                undo: std::cell::RefCell::new(Vec::new()),
-                touched: std::cell::Cell::new(0),
-                decided_over: std::cell::Cell::new(0),
-                marks: std::cell::RefCell::new(Vec::new()),
-                implicit_transaction: std::cell::Cell::new(false),
-                running: std::cell::Cell::new(0),
-                settling: std::cell::Cell::new(false),
-            }),
+            writing: std::rc::Rc::new(Writing::starting_at(highest_txn.saturating_add(1))),
             storage: Storage {
                 database,
                 page_size,

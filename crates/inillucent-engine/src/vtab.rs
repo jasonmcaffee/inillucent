@@ -207,7 +207,7 @@ impl ImportedDatabase {
                 schema: at,
                 wrote: false,
                 // **The before-images a rollback needs.** Every ordinary write
-                // passes `Some(&self.writing.undo)`; this path passed `None`, so a
+                // passes `Some(self.writing.undo())`; this path passed `None`, so a
                 // virtual table's writes went into the pool with nothing
                 // recorded that could put them back. `ROLLBACK` then undid
                 // every ordinary table and left the module's shadow trees as
@@ -216,7 +216,7 @@ impl ImportedDatabase {
                 // only thing that corrected it. The file itself was never
                 // wrong: no commit record was written, so recovery ignored
                 // the pages. Only the live connection was.
-                undo: Some(&self.writing.undo),
+                undo: Some(self.writing.undo()),
                 uncommitted: self.uncommitted_handle_of(at),
             };
             let store = WriteStore {
@@ -234,7 +234,7 @@ impl ImportedDatabase {
             let mut context = Context {
                 host: &mut nowhere,
                 database: 0,
-                limits: &self.pragmas.limits.borrow(),
+                limits: &self.pragmas.limits().borrow(),
                 catalog: Some(&self.schema.catalog),
             };
             let mut table = found.connect(&connect, true)?;
@@ -324,7 +324,7 @@ impl ImportedDatabase {
         let mut context = Context {
             host: &mut nowhere,
             database: 0,
-            limits: &self.pragmas.limits.borrow(),
+            limits: &self.pragmas.limits().borrow(),
             catalog: Some(&self.schema.catalog),
         };
         table.integrity(&mut context).map(ModuleIntegrity::of)
@@ -426,7 +426,7 @@ impl ImportedDatabase {
         let mut context = Context {
             host: &mut nowhere,
             database: 0,
-            limits: &self.pragmas.limits.borrow(),
+            limits: &self.pragmas.limits().borrow(),
             catalog: Some(&self.schema.catalog),
         };
         self.drive_cursor(
@@ -536,11 +536,7 @@ impl ImportedDatabase {
         cursor.filter(context, plan)?;
         while !cursor.eof() {
             let row = read_row(cursor, context, shape, params)?;
-            if !passes_rechecks(
-                &row,
-                &shape.rechecks,
-                self.pragmas.case_sensitive_like.get(),
-            )? {
+            if !passes_rechecks(&row, &shape.rechecks, self.pragmas.case_sensitive_like())? {
                 cursor.next(context)?;
                 continue;
             }
@@ -1047,7 +1043,7 @@ impl ImportedDatabase {
         let mut batch: Vec<Vec<OwnedDatum>> =
             Vec::with_capacity(inillucent_exec::batch::BATCH_ROWS);
         for row in rows {
-            if !passes_rechecks(&row, &rechecks, self.pragmas.case_sensitive_like.get())? {
+            if !passes_rechecks(&row, &rechecks, self.pragmas.case_sensitive_like())? {
                 continue;
             }
             batch.push(row);

@@ -89,7 +89,7 @@ impl crate::ImportedDatabase {
                 txn,
                 schema: at,
                 wrote: false,
-                undo: open.then_some(&self.writing.undo),
+                undo: open.then_some(self.writing.undo()),
                 uncommitted,
             };
             let session = self.session_state.session.get();
@@ -116,8 +116,7 @@ impl crate::ImportedDatabase {
         self.schema.trees.insert(root, tree);
         self.schema.layouts.insert(root, std::rc::Rc::new(layout));
         self.writing
-            .touched
-            .set(self.writing.touched.get() | crate::schema_bit(at));
+            .set_touched(self.writing.touched() | crate::schema_bit(at));
         Ok(page)
     }
     /// Gives one tree's pages back to the free map and forgets it.

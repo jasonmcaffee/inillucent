@@ -29,9 +29,12 @@ pub struct FunctionFlags {
     /// schema: not from a `DEFAULT`, a `CHECK`, a generated column, an index
     /// expression, a partial-index predicate, or a view.
     ///
-    /// This is the default for anything registered from outside, because the
-    /// safe assumption about code somebody else wrote is that it does
-    /// something.
+    /// [`FunctionFlags::external`] sets this, because the safe assumption about
+    /// code somebody else wrote is that it does something. **It is not what the
+    /// `Default` derive gives**, which is every flag false: a registrant who
+    /// writes `..FunctionFlags::default()` gets a function a schema may name.
+    /// That is the hole `embed` was registered through (task-1969, 7.4), and
+    /// [`UserFunction::external`] is the constructor to reach for instead.
     pub direct_only: bool,
     /// The function does nothing an ordinary expression could not: no side
     /// effects, no file access, no dependence on anything but its arguments.
@@ -142,6 +145,36 @@ pub struct UserFunction {
 }
 
 impl UserFunction {
+    /// Returns a scalar function registered from outside, with the flags such a
+    /// function carries.
+    ///
+    /// **The constructor exists because the `Default` derive was the trap
+    /// (task-1969, 7.4).** `FunctionFlags` derives `Default`, so
+    /// `FunctionFlags { deterministic: true, ..Default::default() }` is
+    /// `direct_only: false` - a registration that reads as "I set one flag and
+    /// took the defaults for the rest" and in fact says "a schema may name
+    /// this". `inillucent-search`'s `embed` was registered that way while its
+    /// own doc comment said "It stays `direct_only`", so with a trusted schema
+    /// a 275 MB model load was callable from a `CHECK` constraint or an index
+    /// expression.
+    ///
+    /// `FunctionFlags::default()` remains, because [`FunctionFlags::builtin`]
+    /// needs a `Default` to exist for the struct-update syntax the built-ins
+    /// use. What changed is that a registrant has a name to reach for that
+    /// means what the two doc comments above already claim the default means.
+    ///
+    /// @param name - the name as it should be registered
+    /// @param arity - how many arguments it takes, or -1 for any number
+    /// @param body - what it does
+    pub fn external(name: &str, arity: i32, body: UserBody) -> UserFunction {
+        UserFunction {
+            name: name.to_string(),
+            arity,
+            flags: FunctionFlags::external(),
+            body,
+        }
+    }
+
     /// Returns whether the function reduces a group rather than a row.
     pub fn is_aggregate(&self) -> bool {
         matches!(self.body, UserBody::Aggregate(_))
@@ -355,9 +388,24 @@ impl Registry {
 }
 
 /// Returns the refusal a policy check reports.
+///
+/// **The sentence is the message, not the detail (task-1969, 7.4).** It was
+/// `with_detail`, which `inillucent-base` documents as internal diagnostic text
+/// a caller sees only with diagnostics on - so `DbError::message()` answered the
+/// primary code's manifest text and a schema refused for naming a direct-only
+/// function said `SQL logic error`. That is the same shape task-1952 fixed in
+/// `inillucent-search`'s missing-model refusal: a sentence written for a person
+/// that never reached one.
+///
+/// The name is the only thing in it that came from the database, and it is a
+/// function or table name rather than a value, so there is nothing here to keep
+/// inside the process.
+///
+/// @param name - what was refused
+/// @param why - the rest of the sentence, which follows the name
 fn refused(name: &[u8], why: &str) -> DbError {
     DbError::primary(inillucent_base::PrimaryCode::Error)
-        .with_detail(format!("{} {why}", String::from_utf8_lossy(name)))
+        .with_message(format!("{} {why}", String::from_utf8_lossy(name)))
 }
 
 #[cfg(test)]

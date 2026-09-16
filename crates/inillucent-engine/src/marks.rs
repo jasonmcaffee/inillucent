@@ -37,11 +37,11 @@ impl ImportedDatabase {
         // level a module is given is how many savepoints were already open,
         // which is the same number `rollback_to` later hands it: a module
         // numbers its own marks by what it was told, so the two have to agree.
-        let level = i32::try_from(self.writing.marks.borrow().len()).unwrap_or(i32::MAX);
+        let level = i32::try_from(self.writing.marks().borrow().len()).unwrap_or(i32::MAX);
         self.savepoint_modules(level)?;
-        let held = self.writing.undo.borrow().len();
+        let held = self.writing.undo().borrow().len();
         self.writing
-            .marks
+            .marks()
             .borrow_mut()
             .push((name.to_ascii_lowercase(), held));
         Ok(())
@@ -65,7 +65,7 @@ impl ImportedDatabase {
         // back into the database, and the group is reachable from there.
         let found = self
             .writing
-            .marks
+            .marks()
             .borrow()
             .iter()
             .rposition(|(held, _)| *held == folded);
@@ -99,7 +99,7 @@ impl ImportedDatabase {
         // back into the database, and the group is reachable from there.
         let found = self
             .writing
-            .marks
+            .marks()
             .borrow()
             .iter()
             .rposition(|(held, _)| *held == folded);
@@ -115,7 +115,7 @@ impl ImportedDatabase {
         // savepoint had no moment at which to fold it into the transaction.
         let level = i32::try_from(position).unwrap_or(i32::MAX);
         let told = self.release_modules(level);
-        self.writing.marks.borrow_mut().truncate(position);
+        self.writing.marks().borrow_mut().truncate(position);
         told
     }
 }

@@ -239,7 +239,7 @@ impl ImportedDatabase {
         let mut context = inillucent_ext::vtab::Context {
             host: &mut nowhere,
             database: 0,
-            limits: &self.pragmas.limits.borrow(),
+            limits: &self.pragmas.limits().borrow(),
             catalog: None,
         };
         cursor.filter(&mut context, &plan)?;
@@ -487,7 +487,7 @@ impl ImportedDatabase {
         // Inside a batch the fold waits for `COMMIT`, because `sync_modules`
         // ends by telling every module its transaction is over and the batch's
         // is not.
-        if self.writing.batch.get().is_none() {
+        if self.writing.batch().is_none() {
             self.sync_modules()?;
         }
         // **The backfill is a write, so it needs the commit record every other

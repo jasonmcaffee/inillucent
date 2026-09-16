@@ -35,7 +35,7 @@ impl crate::ImportedDatabase {
         // cached by its text, and a value baked into the plan would answer with
         // whatever was true when it was first compiled.
         params.set_context(self.scalar_context());
-        params.set_recursive_triggers(self.pragmas.recursive_triggers.get());
+        params.set_recursive_triggers(self.pragmas.recursive_triggers());
         // **The file lock, taken here and released here.** Both entry points -
         // `execute_any` and `execute_statement` - come through this function, so
         // no statement can run without it. Under `exclusive`, which is the
@@ -57,10 +57,10 @@ impl crate::ImportedDatabase {
         // statement prepared and stepped - and a settle that only one of them
         // performed would leave the tree half-repaired depending on which API
         // the application happened to use.
-        if !self.writing.settling.get() {
-            self.writing.settling.set(true);
+        if !self.writing.settling() {
+            self.writing.set_settling(true);
             let settled = self.settle_foreign_keys();
-            self.writing.settling.set(false);
+            self.writing.set_settling(false);
             settled?;
         }
         Ok(outcome)
@@ -80,7 +80,7 @@ impl crate::ImportedDatabase {
         // mistake impossible, so recording it and writing anyway would be worse
         // than not having the pragma at all. The message is SQLite's own, which
         // is what an application's error handling is written against.
-        if self.pragmas.query_only.get() && writes_something(cached) {
+        if self.pragmas.query_only() && writes_something(cached) {
             return Err(inillucent_base::error::DbError::primary(
                 inillucent_base::error::PrimaryCode::ReadOnly,
             )
@@ -154,7 +154,7 @@ impl crate::ImportedDatabase {
                 let keys =
                     self.run_cached_query(&query.plan, &query.prepared, &query.slot, params)?;
                 let changed = self.update_module(statement, &keys, params)?;
-                if self.writing.batch.get().is_none() {
+                if self.writing.batch().is_none() {
                     self.sync_modules()?;
                     self.seal()?;
                 }
@@ -186,7 +186,7 @@ impl crate::ImportedDatabase {
                     )?;
                     changed = changed.saturating_add(1);
                 }
-                if self.writing.batch.get().is_none() {
+                if self.writing.batch().is_none() {
                     self.sync_modules()?;
                     self.seal()?;
                 }
@@ -282,15 +282,15 @@ impl crate::ImportedDatabase {
             .with_source(sql.as_bytes())
             .with_functions(&externals)
             .with_collations(&self.session_state.collations)
-            .with_limits(&self.pragmas.limits.borrow())
+            .with_limits(&self.pragmas.limits().borrow())
             .with_foreign_keys(
-                self.pragmas.foreign_keys.get(),
-                self.pragmas.defer_foreign_keys.get(),
+                self.pragmas.foreign_keys(),
+                self.pragmas.defer_foreign_keys(),
             );
         let bound = binder.bind_statement(inner).map_err(refused)?;
         let lines = match bound {
             BoundStatement::Select(select) => {
-                plan_select_with(*select, self.pragmas.levers.get()).describe()
+                plan_select_with(*select, self.pragmas.levers()).describe()
             }
             // A write's plan is the query that finds the rows it changes, and
             // that is the thing a reader is asking about - "did my DELETE use
@@ -347,7 +347,7 @@ impl crate::ImportedDatabase {
         self.compiled.recycle(parsed);
         match bound? {
             BoundStatement::Select(select) => {
-                let plan = plan_select_with(*select, self.pragmas.levers.get());
+                let plan = plan_select_with(*select, self.pragmas.levers());
                 let prepared = physical::prepare_any(&plan, self)?;
                 Ok(Cached::Select(
                     Box::new(plan),
@@ -367,7 +367,7 @@ impl crate::ImportedDatabase {
             BoundStatement::Insert(statement) => {
                 let source = match &statement.source {
                     inillucent_sql::dml::BoundInsertSource::Select(select) => {
-                        let plan = plan_select_with((**select).clone(), self.pragmas.levers.get());
+                        let plan = plan_select_with((**select).clone(), self.pragmas.levers());
                         let prepared = physical::prepare_any(&plan, self)?;
                         Some(CachedQuery::new(plan, prepared))
                     }
@@ -398,7 +398,7 @@ impl crate::ImportedDatabase {
                     statement.limit.as_ref(),
                     statement.offset.as_ref(),
                 );
-                let plan = plan_select_with(select, self.pragmas.levers.get());
+                let plan = plan_select_with(select, self.pragmas.levers());
                 let prepared = physical::prepare_any(&plan, self)?;
                 Ok(Cached::VirtualUpdate(
                     statement,
@@ -427,7 +427,7 @@ impl crate::ImportedDatabase {
                     statement.limit.as_ref(),
                     statement.offset.as_ref(),
                 );
-                let plan = plan_select_with(select, self.pragmas.levers.get());
+                let plan = plan_select_with(select, self.pragmas.levers());
                 let prepared = physical::prepare_any(&plan, self)?;
                 Ok(Cached::VirtualDelete(
                     statement,
@@ -439,7 +439,7 @@ impl crate::ImportedDatabase {
                     .view_rows
                     .as_ref()
                     .ok_or_else(|| refusal("a view delete with no query"))?;
-                let plan = plan_select_with((**rows).clone(), self.pragmas.levers.get());
+                let plan = plan_select_with((**rows).clone(), self.pragmas.levers());
                 let prepared = physical::prepare_any(&plan, self)?;
                 Ok(Cached::Delete(statement, CachedQuery::new(plan, prepared)))
             }
@@ -491,7 +491,7 @@ impl crate::ImportedDatabase {
             .get(&table.root)
             .ok_or_else(|| refusal("no layout imported for the table being written"))?;
         let select = dml::keys_query(table, source, filter, limit, offset, layout)?;
-        let mut plan = plan_select_with(select, self.pragmas.levers.get());
+        let mut plan = plan_select_with(select, self.pragmas.levers());
         // **The one place `Levers::INDEXED_WRITE` has to be applied by hand.**
         // `plan_select_with` is the ordinary read planner, shared with every
         // `SELECT`, so nothing in it ever consulted this lever -
@@ -499,7 +499,7 @@ impl crate::ImportedDatabase {
         // any more since the rearchitecture moved a write's row-finding onto
         // this bound `SELECT`. Forcing the sole source to a table scan below
         // is `write_path_with`'s own answer for "the lever is off".
-        if !self.pragmas.levers.get().has(Levers::INDEXED_WRITE) {
+        if !self.pragmas.levers().has(Levers::INDEXED_WRITE) {
             for planned in &mut plan.sources {
                 planned.path = inillucent_sql::plan::AccessPath::TableScan { root: table.root };
             }
@@ -535,7 +535,7 @@ impl crate::ImportedDatabase {
         // an `INSTEAD OF UPDATE` fires with `OLD` taken from running the view,
         // which is exactly the query the binder left on `view_rows`.
         if let Some(rows) = &statement.view_rows {
-            let plan = plan_select_with((**rows).clone(), self.pragmas.levers.get());
+            let plan = plan_select_with((**rows).clone(), self.pragmas.levers());
             let prepared = physical::prepare_any(&plan, self)?;
             return Ok((plan, prepared));
         }
@@ -568,7 +568,7 @@ impl crate::ImportedDatabase {
             &statement.from,
             &assigned,
         )?;
-        let plan = plan_select_with(select, self.pragmas.levers.get());
+        let plan = plan_select_with(select, self.pragmas.levers());
         let prepared = physical::prepare_any(&plan, self)?;
         Ok((plan, prepared))
     }
@@ -590,11 +590,11 @@ impl crate::ImportedDatabase {
     ) -> DbResult<Outcome> {
         // A statement inside an open batch joins it and does not commit; a
         // statement outside one is its own transaction and does.
-        let (txn, autocommit) = match self.writing.batch.get() {
+        let (txn, autocommit) = match self.writing.batch() {
             Some(held) => (held, false),
             None => {
-                let txn = self.writing.next_txn.get();
-                self.writing.next_txn.set(txn.saturating_add(1));
+                let txn = self.writing.next_txn();
+                self.writing.set_next_txn(txn.saturating_add(1));
                 // **What `current_txn()` answers for the rest of this
                 // statement.** `next_txn` has just moved past this number, so
                 // anything the statement reaches that asks for "the current
@@ -603,7 +603,7 @@ impl crate::ImportedDatabase {
                 // told the next one and log into a transaction nothing
                 // commits. Cleared on every exit below, including the failure
                 // one.
-                self.writing.statement_txn.set(Some(txn));
+                self.writing.set_statement_txn(Some(txn));
                 (txn, true)
             }
         };
@@ -620,14 +620,14 @@ impl crate::ImportedDatabase {
         // it when the statement ends, either way. Every schema's log appends to
         // the one buffer, because a rollback undoes one *transaction* rather
         // than one file - and each record carries the schema it came out of.
-        let undo = Some(&self.writing.undo);
+        let undo = Some(self.writing.undo());
         // **Where this statement's writes begin.** The success path does
         // nothing with it; the failure path rolls back to it. That asymmetry is
         // the whole cost of statement atomicity inside a transaction - one
         // integer read off a `Vec`'s length - which is why there is no
         // per-statement savepoint here and `txn.large`'s two thousand
         // statements do not pay for two thousand of them.
-        let mark = self.writing.undo.borrow().len();
+        let mark = self.writing.undo().borrow().len();
         let main_log = WalLog {
             wal: std::rc::Rc::clone(&self.storage.wal),
             txn,
@@ -732,7 +732,7 @@ impl crate::ImportedDatabase {
                 return Err(self.abandon(error, mark, autocommit, wrote, txn));
             }
         };
-        self.writing.touched.set(self.writing.touched.get() | wrote);
+        self.writing.set_touched(self.writing.touched() | wrote);
         // **Inside the same transaction, and after the trees rather than
         // during them.** The module is registered on the connection and the
         // write borrowed the connection apart, so this is the first moment both
@@ -778,7 +778,7 @@ impl crate::ImportedDatabase {
             // above can still be undone, and cleared before the commit so that
             // a commit which fails leaves nothing behind for the next
             // statement's mark to sit on top of.
-            self.writing.undo.borrow_mut().clear();
+            self.writing.undo().borrow_mut().clear();
         }
         self.remember_rowid(changes.last_rowid);
         // **Read off the view rather than off `Changes`**, so the success path
@@ -786,7 +786,7 @@ impl crate::ImportedDatabase {
         // `total_changes()` where SQLite puts them.
         self.record_changes(counted.0, counted.1);
         let committed = if autocommit {
-            let participants = self.writing.touched.replace(0);
+            let participants = self.writing.replace_touched(0);
             self.commit_across(txn, participants)
         } else {
             Ok(())
@@ -794,7 +794,7 @@ impl crate::ImportedDatabase {
         // **Cleared whether the commit worked or not**, because what comes next
         // is a different statement either way, and a number left behind here
         // would be handed to it by `current_txn()`.
-        self.writing.statement_txn.set(None);
+        self.writing.set_statement_txn(None);
         committed?;
         Ok(Outcome {
             rows: changes.returned.clone(),
@@ -844,16 +844,16 @@ impl crate::ImportedDatabase {
             Unwind::Transaction => self.rollback(),
         };
         if autocommit {
-            self.writing.undo.borrow_mut().clear();
-            self.writing.marks.borrow_mut().clear();
+            self.writing.undo().borrow_mut().clear();
+            self.writing.marks().borrow_mut().clear();
             if matches!(unwind, Unwind::Nothing) && undone.is_ok() {
                 // **`OR FAIL` outside a transaction commits.** The rows written
                 // before the failure are kept, and keeping them only in the
                 // page cache would make them a fact this process believes and
                 // the file does not. The statement failed; its transaction did
                 // not.
-                self.writing.touched.set(self.writing.touched.get() | wrote);
-                let participants = self.writing.touched.replace(0);
+                self.writing.set_touched(self.writing.touched() | wrote);
+                let participants = self.writing.replace_touched(0);
                 if let Err(failure) = self.commit_across(txn, participants) {
                     return failure;
                 }
@@ -871,13 +871,13 @@ impl crate::ImportedDatabase {
                         database.pool().set_uncommitted_lsn(u64::MAX);
                     }
                 }
-                self.writing.touched.set(0);
+                self.writing.set_touched(0);
             }
         }
         // The statement is over, so its transaction number stops being the
         // answer - cleared here rather than at the two call sites, so that
         // every way out of `write` clears it.
-        self.writing.statement_txn.set(None);
+        self.writing.set_statement_txn(None);
         undone.err().unwrap_or(error)
     }
 }

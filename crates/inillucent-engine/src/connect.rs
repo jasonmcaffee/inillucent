@@ -405,7 +405,7 @@ impl Database {
     ///
     /// @param limit - which limit
     pub fn limit(&self, limit: inillucent_base::limits::Limit) -> i64 {
-        self.settings.limits.borrow().get(limit)
+        self.settings.limits().borrow().get(limit)
     }
 
     /// Sets one run-time limit, and returns what it was before.
@@ -414,7 +414,7 @@ impl Database {
     /// @param requested - the value asked for
     /// @returns the value that was in force before this call
     pub fn set_limit(&self, limit: inillucent_base::limits::Limit, requested: i64) -> i64 {
-        self.settings.limits.borrow_mut().set(limit, requested)
+        self.settings.limits().borrow_mut().set(limit, requested)
     }
 
     /// Returns what the page cache has been asked to do.
@@ -763,7 +763,7 @@ impl<'d> Connection<'d> {
         // The plan cache is keyed by the levers rather than cleared by them -
         // see `ImportedDatabase::disable_optimizations` - so setting the value
         // is the whole of it, and it needs no borrow of the engine.
-        self.database.settings.levers.set(levers);
+        self.database.settings.set_levers(levers);
         Ok(())
     }
 
@@ -776,7 +776,7 @@ impl<'d> Connection<'d> {
     ///
     /// @param on - whether the flag is in force
     pub fn set_defensive(&self, on: bool) -> DbResult<()> {
-        self.database.settings.defensive.set(on);
+        self.database.settings.set_defensive(on);
         Ok(())
     }
 
@@ -898,7 +898,7 @@ impl<'d> Connection<'d> {
     /// One for an ordinary statement; two or more for a transaction that wrote
     /// two files and was therefore committed through a super-journal.
     pub fn decided_over(&self) -> DbResult<usize> {
-        Ok(self.database.writer.decided_over.get())
+        Ok(self.database.writer.decided_over())
     }
 
     /// Returns whether every statement is its own transaction.
@@ -912,7 +912,7 @@ impl<'d> Connection<'d> {
     /// is documented as callable from a callback. It reads the writer the
     /// database holds beside the engine instead, and takes no cell at all.
     pub fn autocommit(&self) -> DbResult<bool> {
-        Ok(self.database.writer.batch.get().is_none())
+        Ok(self.database.writer.batch().is_none())
     }
 
     /// Opens a transaction that rolls back unless it is committed.

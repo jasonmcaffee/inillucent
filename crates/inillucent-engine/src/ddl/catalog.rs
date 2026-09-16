@@ -319,7 +319,7 @@ impl crate::ImportedDatabase {
         self.compiled.statements.borrow_mut().clear();
     }
     /// Returns what a catalog-row write on `self.schema.ddl_schema` needs that is not
-    /// the borrow of `self.writing.undo` a method cannot hand back - callers still
+    /// the borrow of `self.writing.undo()` a method cannot hand back - callers still
     /// write their own `WalLog` literal so that borrow stays disjoint from the
     /// `&mut self.storage.database` they take right after, the reason
     /// [`crate::file_of`] is a free function too.
@@ -331,7 +331,7 @@ impl crate::ImportedDatabase {
         Ok((
             at,
             self.current_txn(),
-            self.writing.batch.get().is_some(),
+            self.writing.batch().is_some(),
             wal,
             self.uncommitted_handle_of(at),
         ))
@@ -360,7 +360,7 @@ impl crate::ImportedDatabase {
                 schema: at,
                 wrote: false,
                 // **A before-image whether or not a transaction is open
-                // (task-1932, H3).** This was `open.then_some(&self.writing.undo)`, so
+                // (task-1932, H3).** This was `open.then_some(self.writing.undo())`, so
                 // outside an explicit transaction a catalog write recorded
                 // nothing to put back - and `execute_ddl`, which now takes an
                 // undo floor the way `write` does, would have had an empty
@@ -369,7 +369,7 @@ impl crate::ImportedDatabase {
                 // `build_tree_rows` is deliberately still gated: a bulk build's
                 // before-images are one record per row of the table, and a
                 // freshly built tree has no earlier state to restore to.
-                undo: Some(&self.writing.undo),
+                undo: Some(self.writing.undo()),
                 uncommitted,
             };
             let tree = self
@@ -393,8 +393,7 @@ impl crate::ImportedDatabase {
         // A schema change is a write, and a transaction that made one in two
         // files commits both or neither like any other.
         self.writing
-            .touched
-            .set(self.writing.touched.get() | crate::schema_bit(at));
+            .set_touched(self.writing.touched() | crate::schema_bit(at));
         Ok(())
     }
     /// Returns the shape of a tree, for its catalog row.
@@ -602,7 +601,7 @@ impl crate::ImportedDatabase {
                 wrote: false,
                 // See `record` above: the before-image is kept whether or not
                 // an explicit transaction is open (task-1932, H3).
-                undo: Some(&self.writing.undo),
+                undo: Some(self.writing.undo()),
                 uncommitted,
             };
             let catalog_handle = self.catalog_handle_of(at);
@@ -643,7 +642,7 @@ impl crate::ImportedDatabase {
                 wrote: false,
                 // See `record` above: the before-image is kept whether or not
                 // an explicit transaction is open (task-1932, H3).
-                undo: Some(&self.writing.undo),
+                undo: Some(self.writing.undo()),
                 uncommitted,
             };
             let catalog_handle = self.catalog_handle_of(at);
@@ -681,13 +680,12 @@ impl crate::ImportedDatabase {
     /// *after* the one about to commit. Everything logged under that number is
     /// written and never committed. See `statement_txn` for what that cost.
     pub(crate) fn current_txn(&self) -> u64 {
-        match self.writing.batch.get() {
+        match self.writing.batch() {
             Some(held) => held,
             None => self
                 .writing
-                .statement_txn
-                .get()
-                .unwrap_or_else(|| self.writing.next_txn.get()),
+                .statement_txn()
+                .unwrap_or_else(|| self.writing.next_txn()),
         }
     }
     /// Commits a schema change that was its own transaction.
@@ -695,11 +693,11 @@ impl crate::ImportedDatabase {
     /// Inside a batch this does nothing: the batch's `COMMIT` is what makes the
     /// change durable, which is the whole difference between the two groupings.
     pub(crate) fn seal(&mut self) -> DbResult<()> {
-        if self.writing.batch.get().is_some() {
+        if self.writing.batch().is_some() {
             return Ok(());
         }
-        let txn = self.writing.next_txn.get();
-        self.writing.next_txn.set(txn.saturating_add(1));
+        let txn = self.writing.next_txn();
+        self.writing.set_next_txn(txn.saturating_add(1));
         let at = self.schema.ddl_schema;
         let wal = self
             .log_of(at)
@@ -716,7 +714,7 @@ impl crate::ImportedDatabase {
         // statement would find a schema in it that it had not written: a
         // one-file insert paying for a two-file protocol, and a `Commit` record
         // in a log for a transaction that never touched it.
-        let participants = self.writing.touched.replace(0) | crate::schema_bit(at);
+        let participants = self.writing.replace_touched(0) | crate::schema_bit(at);
         self.commit_across(txn, participants)
     }
 }

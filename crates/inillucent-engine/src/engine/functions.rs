@@ -131,7 +131,7 @@ impl crate::ImportedDatabase {
     ///
     /// @param on - whether the flag is in force
     pub fn set_defensive(&mut self, on: bool) {
-        self.pragmas.defensive.set(on);
+        self.pragmas.set_defensive(on);
     }
 
     /// Installs the authorizer every later statement is bound under.
@@ -189,11 +189,11 @@ impl crate::ImportedDatabase {
         // two settings is two entries; clearing would make the second arm's
         // first execution pay a compile the first arm's did not, and that
         // difference is the size of the thing such a measurement looks for.
-        self.pragmas.levers.set(levers);
+        self.pragmas.set_levers(levers);
     }
 
     /// Returns which planner optimizations this connection has on.
     pub fn levers(&self) -> Levers {
-        self.pragmas.levers.get()
+        self.pragmas.levers()
     }
 }

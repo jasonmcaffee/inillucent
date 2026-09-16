@@ -172,8 +172,8 @@ impl ImportedDatabase {
         // one integer read off a `Vec`'s length - and the reload is what puts
         // the connection's derived schema back in step with the catalog tree
         // the undo has just restored.
-        let autocommit = self.writing.batch.get().is_none();
-        let mark = self.writing.undo.borrow().len();
+        let autocommit = self.writing.batch().is_none();
+        let mark = self.writing.undo().borrow().len();
         let txn = self.current_txn();
         let outcome = self.run_directive(*directive, sql);
         self.schema.ddl_schema = previous;
@@ -182,7 +182,7 @@ impl ImportedDatabase {
             Err(error) => {
                 let undone = self.undo_to_floor(mark, true, txn);
                 if autocommit {
-                    self.writing.undo.borrow_mut().clear();
+                    self.writing.undo().borrow_mut().clear();
                 }
                 // **The undo's own failure is the one worth reporting.** A
                 // "no such function" describing a database that is now in a
@@ -197,7 +197,7 @@ impl ImportedDatabase {
             // before-images stop being useful - and leaving them would put a
             // committed `CREATE TABLE` inside the reach of the next explicit
             // `ROLLBACK`, which undoes to floor zero.
-            self.writing.undo.borrow_mut().clear();
+            self.writing.undo().borrow_mut().clear();
         }
         if changes_schema {
             self.storage.database.bump_schema_cookie();
@@ -354,14 +354,14 @@ impl ImportedDatabase {
             // transaction underneath it: the `COMMIT` that follows has nothing
             // left to commit and has to say so.
             Directive::Begin(_) => {
-                if self.writing.batch.get().is_some() {
+                if self.writing.batch().is_some() {
                     return Err(refusal("cannot start a transaction within a transaction"));
                 }
                 self.begin_batch();
                 Ok(Outcome::empty())
             }
             Directive::Commit => {
-                if self.writing.batch.get().is_none() {
+                if self.writing.batch().is_none() {
                     return Err(refusal("cannot commit - no transaction is active"));
                 }
                 self.commit_batch()?;
@@ -378,7 +378,7 @@ impl ImportedDatabase {
                     Ok(Outcome::empty())
                 }
                 None => {
-                    if self.writing.batch.get().is_none() {
+                    if self.writing.batch().is_none() {
                         return Err(refusal("cannot rollback - no transaction is active"));
                     }
                     self.rollback()?;
@@ -392,9 +392,9 @@ impl ImportedDatabase {
             // the savepoint stack's own, and not one an explicit `BEGIN`
             // opened around it - see that field's own doc comment.
             Directive::Savepoint(name) => {
-                if self.writing.batch.get().is_none() {
+                if self.writing.batch().is_none() {
                     self.begin_batch();
-                    self.writing.implicit_transaction.set(true);
+                    self.writing.set_implicit_transaction(true);
                 }
                 self.savepoint(&name)?;
                 Ok(Outcome::empty())
@@ -407,8 +407,7 @@ impl ImportedDatabase {
                 // released, and that transaction stays open for the `COMMIT`
                 // that follows - `implicit_transaction` is what tells the two
                 // apart.
-                if self.writing.marks.borrow().is_empty() && self.writing.implicit_transaction.get()
-                {
+                if self.writing.marks().borrow().is_empty() && self.writing.implicit_transaction() {
                     self.commit_batch()?;
                 }
                 Ok(Outcome::empty())
@@ -444,7 +443,7 @@ impl ImportedDatabase {
             // are not committed. The message is SQLite's, and so is the code:
             // `SQLITE_ERROR` (1), not `refusal`'s `SQLITE_MISUSE` (21) -
             // `dml_differential.rs`'s `vacuum_matches_sqlite` grades it.
-            Directive::Vacuum { .. } if self.writing.batch.get().is_some() => {
+            Directive::Vacuum { .. } if self.writing.batch().is_some() => {
                 Err(statement_refusal("cannot VACUUM from within a transaction"))
             }
             Directive::Vacuum { into: None, .. } => {

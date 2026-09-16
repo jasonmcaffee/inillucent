@@ -600,9 +600,14 @@ fn function_row(name: &str, builtin: bool, kind: &str, arity: i64, flags: i64) -
 /// Returns the flag word `function_list` reports for a registered function.
 ///
 /// The same two bits a built-in is described with, so one column means one
-/// thing. `direct_only` has no bit in this column and is not reported: it is
-/// the default for anything registered from outside, and what it governs is
-/// whether a *schema* may name the function rather than what the function is.
+/// thing. `direct_only` has no bit in this column and is not reported: what it
+/// governs is whether a *schema* may name the function rather than what the
+/// function is, and SQLite's own `function_list` does not report it either.
+///
+/// It is what `FunctionFlags::external` sets, which is the constructor anything
+/// registered from outside should use - not what the `Default` derive gives,
+/// which is every flag false (task-1969, 7.4). This sentence said "the default"
+/// and `inillucent-search`'s `embed` took the derive at its word.
 ///
 /// @param flags - what the registration promised about itself
 fn registered_flags(flags: inillucent_ext::registry::FunctionFlags) -> i64 {
