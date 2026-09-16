@@ -247,8 +247,10 @@ mod tests {
     /// timed against the first one's model while the card reported three model ids.
     #[test]
     fn each_model_can_name_its_own_server() {
-        let mut options = ArmOptions::default();
-        options.endpoint = "127.0.0.1:8189".into();
+        let mut options = ArmOptions {
+            endpoint: "127.0.0.1:8189".into(),
+            ..Default::default()
+        };
         options
             .endpoint_overrides
             .insert("v2moe-q8".into(), "127.0.0.1:8190".into());
