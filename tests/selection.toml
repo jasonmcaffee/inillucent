@@ -1310,6 +1310,18 @@ name = "conformance"
 tier = "e2e"
 
 [[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "cli_commands"
+tier = "e2e"
+covers = ["inillucent-cli"]
+# One subprocess test per command line verb, against the built binary, each
+# asserting a named field of parsed `--output json` or a specific exit code.
+# Eighteen of the thirty verbs were never passed to a spawned binary before
+# this row existed, and `--output json` was read from one for two of them.
+requires = ["programs"]
+
+[[target]]
 package = "inillucent-driver"
 kind = "test"
 name = "import"

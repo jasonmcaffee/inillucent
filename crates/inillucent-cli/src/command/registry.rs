@@ -666,8 +666,14 @@ pub static COMMANDS: &[Command] = &[
     },
     Command {
         name: "restore",
-        summary: "Replace this database's contents from a backup file.",
-        detail: "The opposite of 'backup', and it overwrites what is there. There is no undo.",
+        summary: "Point this session at a backup file, in place of the database it opened.",
+        detail: "The opposite of 'backup', and it does not overwrite anything: this engine's \
+                 databases are whole files, so restoring is opening the other file rather than \
+                 writing its pages over the one you are in. That means it lasts as long as the \
+                 session does - useful from the shell and from 'run', where the statements after \
+                 it read the restored file, and of no effect on its own, because a one-shot \
+                 process ends immediately after. To replace a file, copy the backup over it. A \
+                 backup file that is not there is refused rather than created empty.",
         params: RESTORE_PARAMS,
         cli_only: None,
         writes: true,

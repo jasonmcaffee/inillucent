@@ -694,6 +694,22 @@ pub fn backup(context: &mut Context, arguments: &Arguments) -> Result<Outcome, F
 pub fn restore(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
     let file = arguments.required_text("file")?.to_string();
     let confined = context.confine(&file)?;
+    // **A backup that is not there is a refusal, not a new empty database
+    // (task-1969, 5.2).** `.restore` is implemented as "open the file the
+    // caller named" - see `dot.rs`, which explains why - and opening a file
+    // that is not there creates it. So `inillucent --db app.rdb restore
+    // typo.rdb` exited 0, said `ok`, and left the caller with an empty
+    // database and no message. It is the shape task-1951 shipped in the
+    // signing gate: a check that passed having checked nothing.
+    if !confined.is_file() {
+        return Err(Failed::said(
+            Status::NotFound,
+            format!(
+                "{}: there is no such backup file to restore from",
+                confined.to_string_lossy()
+            ),
+        ));
+    }
     dot(
         context,
         "restore",

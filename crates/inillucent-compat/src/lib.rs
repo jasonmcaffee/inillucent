@@ -24,6 +24,10 @@
     )
 )]
 
+// Running the shipped programs as processes, and reading what they printed.
+// Every end-to-end suite added by task-1969 section 5 goes through it, so the
+// way a binary is found and a JSON envelope is read is written once.
+pub mod cliproc;
 pub mod corpus;
 pub mod crashcampaign;
 pub mod differential;

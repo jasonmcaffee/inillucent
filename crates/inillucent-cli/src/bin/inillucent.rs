@@ -111,7 +111,26 @@ fn main() -> ExitCode {
         return unknown_verb(&verb);
     };
     match command.name {
-        "shell" => shell_like(&invocation.rest),
+        // **The database the caller named has to reach the shell (task-1969,
+        // 5.2).** This handed over `invocation.rest` - everything after the
+        // verb - and `--db` is parsed before the verb, so
+        // `inillucent --db app.rdb shell` started `inillucent-shell` with no
+        // arguments at all and it opened `:memory:`. A statement that needed no
+        // table answered, which is why nobody noticed: `SELECT 1` worked and
+        // `SELECT body FROM note` said "no such table". `shell` is one of the
+        // eighteen verbs no test had ever passed to a spawned binary.
+        //
+        // The path goes first, which is the position the shell reads a database
+        // from, and only when one was explicitly named: without `--db` the
+        // caller wants the shell's own default rather than this process's.
+        "shell" => {
+            let mut handed: Vec<String> = Vec::new();
+            if invocation.database_was_named {
+                handed.push(invocation.database.clone());
+            }
+            handed.extend(invocation.rest.iter().cloned());
+            shell_like(&handed)
+        }
         "mcp" => serve(&invocation),
         "create" if invocation.database_was_named => {
             eprintln!("create takes its database path as its argument and does not accept --db.");
