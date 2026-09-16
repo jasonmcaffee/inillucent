@@ -9,6 +9,18 @@ description = "Checked binary primitives, identifiers, buffers, limits, and the 
 
 [dependencies]
 
+# The one skip helper, compiled only when a consumer's test targets ask for it.
+#
+# **A feature rather than an always-on module (task-1969, 4.6).** `testing`
+# carries `src/testing.rs`, which three production crates' `#[cfg(test)]`
+# modules and the compat harness call so that every skip in the workspace
+# prints one phrase and panics under one lever. A shipped `inillucent-base`
+# has no reason to carry it, and every consumer turns it on from
+# `[dev-dependencies]`, which is active for that crate's test targets and for
+# nothing else.
+[features]
+testing = []
+
 # The workspace's lint table; see the note beside it in the root manifest.
 [lints]
 workspace = true

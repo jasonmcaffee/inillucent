@@ -20,6 +20,7 @@ use std::cmp::Ordering;
 use std::path::{Path, PathBuf};
 
 use inillucent_compat::corpus;
+use inillucent_compat::differential;
 use inillucent_compat::fixtures::{malformed_fixtures, valid_fixtures};
 use inillucent_compat::oracle::{Driver, Op, TaggedValue};
 use inillucent_compat::workspace_root;
@@ -55,11 +56,6 @@ fn start_oracle() -> Option<Driver> {
     let hello = driver.send(&Op::Hello).ok()?;
     assert!(hello.ok, "the oracle did not answer hello");
     Some(driver)
-}
-
-/// Announces a skipped run, once, in the words the harness uses elsewhere.
-fn announce_skip() {
-    eprintln!("the pinned SQLite oracle is not built; run tools/sqlite-reference.{{ps1,sh}}");
 }
 
 /// Returns a scratch directory the oracle may open databases in.
@@ -175,7 +171,7 @@ fn pair_values() -> Vec<TaggedValue> {
 #[test]
 fn sqlite_and_inillucent_agree_on_every_row_of_every_fixture() {
     let Some(mut oracle) = start_oracle() else {
-        announce_skip();
+        differential::announce_skip();
         return;
     };
     let mut compared = 0usize;
@@ -254,7 +250,7 @@ fn sqlite_and_inillucent_agree_on_every_row_of_every_fixture() {
 #[test]
 fn index_order_matches_sqlites_own_order_by() {
     let Some(mut oracle) = start_oracle() else {
-        announce_skip();
+        differential::announce_skip();
         return;
     };
     let copy = scratch_copy("collations-p1024-utf8.db");
@@ -299,7 +295,7 @@ fn index_order_matches_sqlites_own_order_by() {
 #[test]
 fn cast_matches_sqlite() {
     let Some(mut oracle) = start_oracle() else {
-        announce_skip();
+        differential::announce_skip();
         return;
     };
     oracle
@@ -350,7 +346,7 @@ fn cast_matches_sqlite() {
 #[test]
 fn affinity_on_store_matches_sqlite() {
     let Some(mut oracle) = start_oracle() else {
-        announce_skip();
+        differential::announce_skip();
         return;
     };
     oracle
@@ -422,7 +418,7 @@ fn affinity_on_store_matches_sqlite() {
 #[test]
 fn comparison_matches_sqlite() {
     let Some(mut oracle) = start_oracle() else {
-        announce_skip();
+        differential::announce_skip();
         return;
     };
     oracle
@@ -476,7 +472,7 @@ fn sql_ordering_from(row: &[TaggedValue]) -> SqlOrdering {
 #[test]
 fn collations_match_sqlite() {
     let Some(mut oracle) = start_oracle() else {
-        announce_skip();
+        differential::announce_skip();
         return;
     };
     oracle
@@ -560,7 +556,7 @@ fn collations_match_sqlite() {
 #[test]
 fn every_value_survives_a_round_trip_through_a_file() {
     let Some(mut oracle) = start_oracle() else {
-        announce_skip();
+        differential::announce_skip();
         return;
     };
     let values = matrix_values();
@@ -633,7 +629,7 @@ fn every_value_survives_a_round_trip_through_a_file() {
 #[test]
 fn sqlite_and_inillucent_both_refuse_the_malformed_corpus() {
     let Some(mut oracle) = start_oracle() else {
-        announce_skip();
+        differential::announce_skip();
         return;
     };
     for fixture in malformed_fixtures() {
@@ -707,7 +703,7 @@ fn sqlite_and_inillucent_both_refuse_the_malformed_corpus() {
 #[test]
 fn every_limit_matches_sqlites_default() {
     let Some(mut oracle) = start_oracle() else {
-        announce_skip();
+        differential::announce_skip();
         return;
     };
     let answer = oracle

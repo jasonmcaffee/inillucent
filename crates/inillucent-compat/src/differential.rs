@@ -65,24 +65,18 @@ pub fn announce_skip() {
 /// §9 asks for. Before this there were three phrasings and a list of six
 /// substrings trying to catch them, and two of the phrasings - the TLS
 /// transport suite's `case skipped` and the ONNX suites' `skipping:` prefix -
-/// matched none of them. The TLS suite in particular runs other tests in the
-/// same binary, so it was invisible to `--strict` by both routes: a CI image
-/// without Python's `ssl` module passed the TLS verification suite without
-/// running it.
+/// matched none of them.
 ///
-/// **`INILLUCENT_STRICT` makes the skip a failure of the test rather than a
-/// classification of the binary.** `inillucent-testrun --strict` sets it, and
-/// the panic then names the test and the thing that is missing. The classifier
-/// stays as the backstop for a suite that skips some other way; this is the
-/// same decision made one layer earlier, where there is still a test on the
-/// stack to name.
+/// **The body moved down to `inillucent-base` (task-1969, 4.6).** Three
+/// production crates skip and none of them may depend on this harness, so
+/// each printed its own `eprintln!` and `--strict` dropped all three. This is
+/// now the harness's name for one function that lives below every crate that
+/// needs it; keeping the name here means the 400-odd call sites in this crate
+/// did not move.
 ///
 /// @param reason - what is missing, without the marker
 pub fn skipping(reason: &str) {
-    if std::env::var("INILLUCENT_STRICT").is_ok_and(|value| !value.is_empty()) {
-        panic!("{reason}; skipping{STRICT_SKIP}");
-    }
-    eprintln!("{reason}; skipping");
+    inillucent_base::testing::skipping(reason);
 }
 
 /// What a strict run's skip panic says after the marker.
@@ -92,10 +86,14 @@ pub fn skipping(reason: &str) {
 /// what names the case rather than the binary - but a suite that skipped did
 /// not evidence a problem, it evidenced nothing, and listing it under FAILED
 /// would put a second wrong label on the same event. `missing_prerequisites`
-/// reads this sentinel to tell one from the other: a target whose every failure
-/// carries it is hollow, and a target with even one failure that does not is a
-/// failure.
-pub const STRICT_SKIP: &str = " - and this run is strict, so a skip is a failure";
+/// reads this sentinel to tell one from the other: a target whose every
+/// failure carries it is hollow, and a target with even one failure that does
+/// not is a failure.
+///
+/// It is re-exported from `inillucent-base` rather than typed again here: two
+/// copies of a sentinel that has to match exactly is the defect this const
+/// exists to prevent.
+pub use inillucent_base::testing::STRICT_SKIP;
 
 /// Reports whether every failure in a transcript is a strict skip.
 ///

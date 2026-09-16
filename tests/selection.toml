@@ -233,6 +233,11 @@ tier = "unit"
 package = "inillucent-cli"
 kind = "lib"
 tier = "unit"
+# The unit half of root confinement makes a directory link, which Windows
+# refuses without developer mode or an elevated shell. `confinement` is the
+# same prerequisite one layer up and is what made the runner read a suite's
+# own words in the first place.
+requires = ["directory-link"]
 
 [[target]]
 package = "inillucent-cli"
@@ -279,6 +284,11 @@ tier = "unit"
 package = "inillucent-remote"
 kind = "lib"
 tier = "unit"
+# `http.rs`'s download cases reach a real host and only run when
+# `INILLUCENT_NETWORK_TESTS` is set. The target was counted before this row
+# said so, but only because the crate kept a private copy of the panicking
+# helper; the row is what the rule actually reads.
+requires = ["network"]
 
 [[target]]
 package = "inillucent-pool"
@@ -319,6 +329,10 @@ tier = "unit"
 package = "inillucent-tree"
 kind = "lib"
 tier = "unit"
+# `a_value_too_wide_for_the_slot_is_refused` needs the narrow integer slots,
+# which are a compile-time constant in `leaf.rs`; with them off the case has
+# nothing to refuse.
+requires = ["narrow-slots"]
 
 [[target]]
 package = "inillucent-txn"
@@ -460,6 +474,9 @@ covers = ["inillucent-engine"]
 package = "inillucent-compat"
 kind = "test"
 name = "new_engine_log_lead"
+# It reads `_agent_output/fixtures/medium.db`, which `tools/build-gate-fixtures.sh`
+# builds and no clone carries.
+requires = ["fixtures"]
 tier = "engine"
 covers = ["inillucent-engine"]
 
@@ -481,6 +498,9 @@ covers = ["inillucent-engine"]
 package = "inillucent-compat"
 kind = "test"
 name = "new_engine_search"
+# It opens a tracked fixture under `compat/fixtures/`, so this is declared for
+# a checkout missing one rather than for a fresh clone.
+requires = ["tracked-fixtures"]
 tier = "engine"
 covers = ["inillucent-engine", "inillucent-search"]
 
@@ -516,6 +536,8 @@ covers = ["inillucent-engine"]
 package = "inillucent-compat"
 kind = "test"
 name = "new_engine_tree_identity"
+# The same tracked fixture corpus under `compat/fixtures/`.
+requires = ["tracked-fixtures"]
 tier = "engine"
 covers = ["inillucent-engine"]
 
@@ -574,7 +596,6 @@ kind = "test"
 name = "sql"
 tier = "engine"
 covers = ["inillucent-engine"]
-requires = ["fixtures"]
 
 [[target]]
 package = "inillucent-compat"
@@ -582,7 +603,6 @@ kind = "test"
 name = "storage"
 tier = "engine"
 covers = ["inillucent-storage"]
-requires = ["fixtures"]
 
 [[target]]
 package = "inillucent-compat"
@@ -610,6 +630,10 @@ package = "inillucent-compat"
 kind = "test"
 name = "vtab"
 tier = "engine"
+# Its `json_each` and `json_tree` cases are compared against the pinned
+# SQLite through `differential::compare_queries`, which returns zero and
+# announces when the oracle is not built.
+requires = ["oracle"]
 covers = ["inillucent-engine", "inillucent-ext"]
 
 [[target]]
@@ -624,14 +648,12 @@ package = "inillucent-migrate"
 kind = "test"
 name = "corpus"
 tier = "engine"
-requires = ["fixtures"]
 
 [[target]]
 package = "inillucent-migrate"
 kind = "test"
 name = "equivalence"
 tier = "engine"
-requires = ["fixtures"]
 
 [[target]]
 package = "inillucent-migrate"
@@ -1018,7 +1040,6 @@ kind = "test"
 name = "services"
 tier = "differential"
 covers = ["inillucent-engine"]
-requires = ["shell"]
 
 [[target]]
 package = "inillucent-compat"
@@ -1043,6 +1064,10 @@ package = "inillucent-compat"
 kind = "test"
 name = "btree_model"
 tier = "durability"
+# `every_retained_sequence_still_passes` replays `compat/corpus/btree/`, which
+# is tracked - so this is declared for the case where somebody has moved it
+# rather than for a fresh clone.
+requires = ["btree-corpus"]
 covers = ["inillucent-storage"]
 
 [[target]]
@@ -1289,6 +1314,10 @@ package = "inillucent-driver"
 kind = "test"
 name = "import"
 tier = "e2e"
+# Four cases build their source file with the pinned SQLite shell, and one of
+# them reproduces a shipped defect: a table whose columns are named `left` and
+# `right` answered `Corrupt` before the fix.
+requires = ["shell"]
 
 [[target]]
 package = "inillucent-driver"
@@ -1310,7 +1339,11 @@ package = "inillucent-driver-capi"
 kind = "test"
 name = "conformance"
 tier = "e2e"
-requires = ["cc"]
+# `cc` for the C program that links the `cdylib`, and `asan` for the sanitized
+# run - the case whose own doc comment says it "would have caught the defect it
+# guards", and which skipped on a toolchain without the sanitizer while the row
+# named only the compiler.
+requires = ["cc", "asan"]
 
 # --- perf: the cost guards, so a regression fails a test rather than a benchmark
 
@@ -1342,7 +1375,6 @@ features = ["inillucent-core/onnx"]
 package = "inillucent-model"
 kind = "lib"
 tier = "retrieval"
-requires = ["onnx"]
 
 [[target]]
 package = "inillucent-model"
@@ -1396,6 +1428,11 @@ package = "inillucent-compat"
 kind = "test"
 name = "gates_fail_closed"
 tier = "tooling"
+# Seven of its cases skip when the fixture, the pinned benchmark driver or the
+# runner is absent, and the row said nothing, so `--strict` dropped the target
+# before it looked at it. The file written so a gate cannot pass having
+# measured nothing could itself pass with seven of its cases not run.
+requires = ["fixtures", "sqlite-bench", "testrun"]
 
 [[target]]
 package = "inillucent-compat"
@@ -1428,6 +1465,8 @@ package = "inillucent-compat"
 kind = "test"
 name = "cli_batch"
 tier = "e2e"
+# It pipes statements into the built command line.
+requires = ["programs"]
 covers = ["inillucent-cli"]
 
 # What each command line does before it opens anything. Arrived in task-1936
@@ -1440,6 +1479,9 @@ package = "inillucent-compat"
 kind = "test"
 name = "cli_arguments"
 tier = "e2e"
+# Every case runs the built command line; the file builds it and skips when
+# the build did not produce it.
+requires = ["programs"]
 covers = ["inillucent-cli"]
 
 # The `inillucent` binary's own unit tests, which grew a `#[test]` in task-1936
@@ -1461,6 +1503,8 @@ package = "inillucent-compat"
 kind = "test"
 name = "setup_embeddings"
 tier = "e2e"
+# It runs `inillucent setup-embeddings` as a child process.
+requires = ["programs"]
 covers = ["inillucent-cli"]
 
 # `--root` against the file system rather than against path text.
@@ -1478,6 +1522,8 @@ package = "inillucent-compat"
 kind = "test"
 name = "mcp_cancel"
 tier = "e2e"
+# It starts the MCP server as a child process and cancels a request in flight.
+requires = ["programs"]
 covers = ["inillucent-cli"]
 
 [[target]]
@@ -1485,6 +1531,9 @@ package = "inillucent-compat"
 kind = "test"
 name = "budgets"
 tier = "e2e"
+# It starts the command line and the MCP server as child processes and skips
+# when either did not build.
+requires = ["programs"]
 covers = ["inillucent-cli"]
 
 [[target]]
@@ -1492,6 +1541,8 @@ package = "inillucent-compat"
 kind = "test"
 name = "confinement"
 tier = "e2e"
+# It drives the built command line and the MCP server under `--root`.
+requires = ["programs"]
 covers = ["inillucent-cli"]
 
 # The documentation, checked against the engine beside it. Prose
@@ -1508,6 +1559,9 @@ package = "inillucent-compat"
 kind = "test"
 name = "harness"
 tier = "tooling"
+# Two cases skip: one wants a captured performance baseline, the other the
+# downloaded reference.
+requires = ["baseline", "shell"]
 covers = ["inillucent-compat"]
 
 [[target]]

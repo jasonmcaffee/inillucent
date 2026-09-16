@@ -311,11 +311,11 @@ fn judge(printed: &str, code: Option<i32>, how: &str) {
 #[test]
 fn the_c_conformance_program_passes() {
     let Some(library) = build_library() else {
-        eprintln!("the C ABI static library did not build; skipping");
+        inillucent_base::testing::skipping("the C ABI static library did not build");
         return;
     };
     let Some(exe) = compile(&library, false) else {
-        eprintln!("no usable C compiler; skipping");
+        inillucent_base::testing::skipping("no usable C compiler");
         return;
     };
     let (printed, code) = run(&exe, "lifecycle");
@@ -333,7 +333,7 @@ fn the_c_conformance_program_passes() {
 fn the_c_conformance_program_passes_under_a_sanitizer() {
     let required = std::env::var("INILLUCENT_CAPI_ASAN").is_ok_and(|value| value != "0");
     let Some(library) = build_library() else {
-        eprintln!("the C ABI static library did not build; skipping");
+        inillucent_base::testing::skipping("the C ABI static library did not build");
         return;
     };
     let Some(exe) = compile(&library, true) else {
@@ -341,7 +341,7 @@ fn the_c_conformance_program_passes_under_a_sanitizer() {
             !required,
             "INILLUCENT_CAPI_ASAN is set and the sanitized build did not compile"
         );
-        eprintln!("no address sanitizer in this toolchain; skipping");
+        inillucent_base::testing::skipping("no address sanitizer in this toolchain");
         return;
     };
     let (printed, code) = run(&exe, "lifecycle_asan");

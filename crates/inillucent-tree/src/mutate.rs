@@ -1291,7 +1291,7 @@ mod tests {
     #[test]
     fn a_value_too_wide_for_the_slot_is_refused() {
         if !crate::leaf::NARROW_INT_SLOTS {
-            eprintln!("narrow integer slots are compiled out; skipping");
+            inillucent_base::testing::skipping("narrow integer slots are compiled out");
             return;
         }
         let mut page = leaf_of(4096, 8);

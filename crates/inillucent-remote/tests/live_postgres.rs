@@ -49,7 +49,9 @@ fn url() -> Option<ConnectionUrl> {
     match ConnectionUrl::parse(&text) {
         Ok(url) => Some(url),
         Err(error) => {
-            eprintln!("INILLUCENT_TEST_POSTGRES_URL is not a connection URL ({error}); skipping");
+            inillucent_base::testing::skipping(&format!(
+                "INILLUCENT_TEST_POSTGRES_URL is not a connection URL ({error})"
+            ));
             None
         }
     }

@@ -558,11 +558,26 @@ may_depend_on = [
   "inillucent-core",
 ]
 
+# **`may_test_with` on a production crate at the same layer, and the one edge
+# this contract gained in task-1969 (4.6).** `inillucent-core` sits at layer 0
+# beside `inillucent-base` deliberately: the retrieval engine shares no code
+# with the relational one, so a defect in one cannot be a defect in both. Its
+# `#[cfg(test)]` modules still have to skip when the ONNX weights are absent,
+# and a skip the strict runner can see is a call to
+# `inillucent_base::testing::skipping` - the one function in the workspace that
+# prints the marker and panics under `INILLUCENT_STRICT`. Seven of this crate's
+# cases printed their own sentence instead and were classified as runs.
+#
+# The edge is a dev-dependency to the bottom crate, so it cannot be a cycle and
+# it is not in the production graph at all. It is declared rather than allowed
+# silently, because `check_development_edge` is otherwise strict on direction
+# and a same-layer dev edge is exactly what it refuses.
 [[crate]]
 name = "inillucent-core"
 kind = "production"
 layer = 0
 may_depend_on = []
+may_test_with = ["inillucent-base"]
 
 # `inillucent-search` reaching `inillucent-value` is the same refinement `inillucent-ext`
 # makes and for the same reason: a virtual-table module is handed

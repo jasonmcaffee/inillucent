@@ -140,7 +140,7 @@ fn a_table_whose_columns_are_named_left_and_right_imports() {
          INSERT INTO pairs VALUES ('a','b'); \
          INSERT INTO pairs VALUES ('c','d');",
     ) else {
-        eprintln!("the pinned SQLite shell is not in this checkout; skipping");
+        inillucent_base::testing::skipping("the pinned SQLite shell is not in this checkout");
         return;
     };
     let database = match Database::import_sqlite(&source) {
@@ -187,7 +187,7 @@ fn the_join_keywords_are_names_in_every_position_sqlite_allows() {
          INSERT INTO left VALUES ('i','o','c','x'); \
          CREATE INDEX right ON left (inner);",
     ) else {
-        eprintln!("the pinned SQLite shell is not in this checkout; skipping");
+        inillucent_base::testing::skipping("the pinned SQLite shell is not in this checkout");
         return;
     };
     let database = match Database::import_sqlite(&source) {
@@ -234,7 +234,7 @@ fn a_left_join_is_still_read_as_a_join() {
          CREATE TABLE u (a INTEGER PRIMARY KEY, c TEXT); \
          INSERT INTO t VALUES (1,'x'); INSERT INTO u VALUES (1,'y');",
     ) else {
-        eprintln!("the pinned SQLite shell is not in this checkout; skipping");
+        inillucent_base::testing::skipping("the pinned SQLite shell is not in this checkout");
         return;
     };
     let database = Database::import_sqlite(&source).expect("it imports");
@@ -286,7 +286,7 @@ fn a_schema_statement_that_will_not_parse_is_not_reported_as_a_damaged_file() {
          UPDATE sqlite_schema SET sql = 'this is not sql' WHERE name = 'good'; \
          PRAGMA writable_schema = OFF;",
     ) else {
-        eprintln!("the pinned SQLite shell is not in this checkout; skipping");
+        inillucent_base::testing::skipping("the pinned SQLite shell is not in this checkout");
         return;
     };
     let failure = match Database::import_sqlite(&source) {

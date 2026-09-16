@@ -1144,39 +1144,57 @@ fn no_module_grows_past_the_size_it_is_recorded_at() {
     );
 }
 
-/// H10 (task-1920): every skip site ends its message with the one marker.
+/// H10 (task-1920, task-1969): every skip site goes through the one helper.
 ///
 /// **A skip nobody can see is a suite that reports green having asserted
 /// nothing, which is exactly what `--strict` exists to make visible.** Before
-/// this there were three phrasings and `testrun`'s classifier held a list of
-/// six substrings trying to catch them. Two of the three matched none of the
+/// task-1932 there were three phrasings and `testrun`'s classifier held a list
+/// of six substrings trying to catch them. Two of the three matched none of the
 /// six: `crates/inillucent-remote/tests/transport.rs` printed `...; case
 /// skipped` and the ONNX suites printed `skipping: ...`. The TLS one mattered
 /// most, because that binary runs other tests too - so it was invisible to
 /// `--strict` by both routes at once, and a CI image without Python's `ssl`
 /// module passed the TLS verification suite without running any of it.
 ///
-/// The rule this checks is the one `tests/inillucent-testing-tdd.md` §9 states:
-/// a message that precedes an early return ends with `; skipping`. It is a grep
-/// rather than a type because a skip is a `return`, and no type can be put on
-/// the absence of work.
+/// **The rule got stricter in task-1969 (4.6), and this check moved with it.**
+/// It used to read the *message* of an `eprintln!` that preceded an early
+/// return and demand the `; skipping` marker, which let a print that carried
+/// the marker pass while doing only half the job: it printed the phrase, and
+/// under `INILLUCENT_STRICT` it did not panic, so the case returned and
+/// `--strict` counted it as a run. Twenty-four sites in nine files were in that
+/// state, including the nine in `differential.rs` that shadowed the library
+/// helper with a local one of the same name.
+///
+/// So the marker is no longer a thing a print may carry. It is what
+/// `inillucent_base::testing::skipping` writes, and the check is that nothing
+/// else writes it: a print followed by an early return is a skip that did not
+/// go through the helper, whatever it says. The floor below counts helper call
+/// sites rather than print sites, because the old floor counted the thing the
+/// fix removes and would have failed the moment the fix was complete - which is
+/// how this check first reported "no skip site was found at all".
 #[test]
-fn every_skip_site_carries_the_one_marker() {
+fn every_skip_site_goes_through_the_one_helper() {
     let root = workspace_root();
-    let mut wrong: Vec<String> = Vec::new();
-    let mut found = 0usize;
+    let mut printed: Vec<String> = Vec::new();
+    let mut through_the_helper = 0usize;
     for file in rust_sources(&root) {
         let Ok(text) = std::fs::read_to_string(&file) else {
             continue;
         };
         let lines: Vec<&str> = text.lines().collect();
         for (at, line) in lines.iter().enumerate() {
-            let Some(message) = quoted_after(line, "eprintln!(") else {
+            if line.contains("skipping(") && !line.contains("fn skipping(") {
+                through_the_helper = through_the_helper.saturating_add(1);
+            }
+            let message = quoted_after(line, "eprintln!(")
+                .or_else(|| quoted_after(line, "println!("))
+                .unwrap_or_default();
+            if !message.contains("skipping") {
                 continue;
-            };
+            }
             // A skip is an announcement followed by an early return. Anything
-            // else an `eprintln!` says is progress or a warning, and neither is
-            // a claim that a suite ran.
+            // else a print says is progress or a warning, and neither is a
+            // claim that a suite ran.
             let follows = lines
                 .get(at..at.saturating_add(4))
                 .unwrap_or_default()
@@ -1189,27 +1207,28 @@ fn every_skip_site_carries_the_one_marker() {
             if !returns {
                 continue;
             }
-            found = found.saturating_add(1);
-            if !message.contains("; skipping") {
-                wrong.push(format!(
-                    "{}:{}: {message}",
-                    file.strip_prefix(&root).unwrap_or(&file).display(),
-                    at.saturating_add(1)
-                ));
-            }
+            printed.push(format!(
+                "{}:{}: {message}",
+                file.strip_prefix(&root).unwrap_or(&file).display(),
+                at.saturating_add(1)
+            ));
         }
     }
     assert!(
-        found > 0,
-        "no skip site was found at all, which means this check is looking in \
-         the wrong place rather than that every suite runs"
+        through_the_helper >= 40,
+        "found {through_the_helper} calls to the skip helper, which means this check is \
+         looking in the wrong place rather than that the workspace barely skips"
     );
     assert!(
-        wrong.is_empty(),
-        "these skip messages do not end with `; skipping`, so `--strict` cannot \
-         see them:\n{}\n`inillucent-testrun` matches that one phrase, and \
-         `tests/inillucent-testing-tdd.md` §9 asks for it.",
-        wrong.join("\n")
+        printed.is_empty(),
+        "these skips print their own sentence instead of calling \
+         `inillucent_base::testing::skipping`:\n{}\n\
+         A print carries the marker `inillucent-testrun` matches and does not panic under \
+         `INILLUCENT_STRICT`, so the case returns and the run counts it. The helper does \
+         both. A production crate that cannot depend on this harness reaches it from its \
+         own `[dev-dependencies]`, which is the edge `docs/invariants/layering.toml` \
+         records for `inillucent-core`.",
+        printed.join("\n")
     );
 }
 
@@ -1560,7 +1579,18 @@ fn announces(block: &str) -> bool {
 fn announces_by_saying_so(block: &str) -> bool {
     code_of(block).any(|code| {
         code.contains("skipping(")
-            || code.contains("announce_skip")
+            // **Qualified, because the bare name was a hole (task-1969,
+            // 4.2).** `crates/inillucent-compat/tests/differential.rs` - the
+            // file the differential tier is named after - defined its own
+            // `announce_skip` that printed neither the marker nor the panic,
+            // and this check waved through all nine of its call sites because
+            // the *name* matched the library helper written for. Nine of that
+            // file's ten tests passed on a fresh clone having compared nothing
+            // to SQLite. Only the library function announces; a local one of
+            // the same name is now a defect by itself, which
+            // `no_test_file_defines_its_own_skip_helper` below refuses.
+            || code.contains("differential::announce_skip")
+            || code.contains("testing::skipping")
             || code.contains("; skipping")
             // **`differential::compare` announces for its caller.** It has one
             // way to return zero - `start_oracle` answering `None`, after which
@@ -2451,4 +2481,83 @@ fn no_function_grows_past_the_length_it_is_recorded_at() {
         joined.join("\n")
     );
     assert!(gone.is_empty(), "{}", gone.join("\n"));
+}
+
+/// No test file may define its own skip helper.
+///
+/// **The defect this refuses shipped and hid nine tests (task-1969, 4.2).**
+/// `crates/inillucent-compat/tests/differential.rs` defined
+///
+/// ```ignore
+/// fn announce_skip() {
+///     eprintln!("the pinned SQLite oracle is not built; run tools/sqlite-reference.{ps1,sh}");
+/// }
+/// ```
+///
+/// which shadowed `inillucent_compat::differential::announce_skip` at nine call
+/// sites. Neither guard saw it. `every_skip_site_carries_the_one_marker` reads
+/// an `eprintln!` only when a `return;` follows within four lines, and here the
+/// `eprintln!` was a helper body followed by a closing brace.
+/// `every_early_return_in_a_test_says_why` accepted every call site because it
+/// matched the helper by name. `inillucent-testrun --strict` printed `ok`,
+/// because the output carried no `; skipping` and the tests that returned still
+/// counted as run. So the namesake of the differential tier compared nothing to
+/// SQLite on any machine without the oracle, and said it had.
+///
+/// The rule is stated on the definition rather than on the call, because a call
+/// to a local helper and a call to the library one are the same three words.
+/// There is exactly one `skipping` in this workspace -
+/// `inillucent_base::testing::skipping` - and exactly one `announce_skip` -
+/// `inillucent_compat::differential::announce_skip`, which calls it. Anything
+/// else with either name is a second implementation of a thing whose whole
+/// value is that there is one of it.
+#[test]
+fn no_test_file_defines_its_own_skip_helper() {
+    let root = workspace_root();
+    // The two definitions there are meant to be, by path rather than by name:
+    // naming them would let a third file take the same name and pass.
+    let allowed = [
+        "crates/inillucent-base/src/testing.rs",
+        "crates/inillucent-compat/src/differential.rs",
+    ];
+    let mut defined: Vec<String> = Vec::new();
+    let mut read = 0usize;
+    for file in rust_sources(&root) {
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        read = read.saturating_add(1);
+        let relative = file
+            .strip_prefix(&root)
+            .unwrap_or(&file)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if allowed.contains(&relative.as_str()) {
+            continue;
+        }
+        for (at, line) in text.lines().enumerate() {
+            let Some(name) = function_name(line) else {
+                continue;
+            };
+            if name == "skipping" || name == "announce_skip" {
+                defined.push(format!("{relative}:{}", at.saturating_add(1)));
+            }
+        }
+    }
+    assert!(
+        read >= 300,
+        "read {read} source files, which means this is looking in the wrong place \
+         rather than that the workspace has no source"
+    );
+    assert!(
+        defined.is_empty(),
+        "these files define their own `skipping` or `announce_skip`:\n  {}\n\
+         There is one of each in the workspace - `inillucent_base::testing::skipping` \
+         and `inillucent_compat::differential::announce_skip` - and a local copy \
+         prints no marker and does not panic under `INILLUCENT_STRICT`, so the \
+         suite that calls it skips invisibly. A production crate that cannot \
+         depend on this harness uses `inillucent_base::testing::skipping` from \
+         its own `[dev-dependencies]`.",
+        defined.join("\n  ")
+    );
 }

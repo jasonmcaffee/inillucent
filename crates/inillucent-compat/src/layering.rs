@@ -475,6 +475,10 @@ fn unused_allowances(rule: &CrateRule, manifest: &CrateManifest, violations: &mu
 /// production graph, and it makes the lower crate impossible to test in
 /// isolation, which is the property the layering exists for.
 ///
+/// A production crate named in the depending crate's `may_test_with` is
+/// skipped too, which is the one way a sideways or same-layer dev edge is
+/// allowed. It is written down per crate rather than granted by a rule.
+///
 /// A test-only crate is skipped: it is not in the production graph at all, so
 /// the layer numbers do not order it against a production crate, and the edge
 /// to one is what `may_test_with` above governs. `inillucent-pool`,
@@ -486,6 +490,17 @@ fn unused_allowances(rule: &CrateRule, manifest: &CrateManifest, violations: &mu
 /// @param violations - where a finding is recorded
 fn check_development_edge(rule: &CrateRule, target: &CrateRule, violations: &mut Vec<String>) {
     if target.kind == CrateKind::TestOnly {
+        return;
+    }
+    // **`may_test_with` names a production crate a test may reach sideways
+    // (task-1969, 4.6).** `inillucent-core` is at layer 0 beside
+    // `inillucent-base`, so the direction rule below refuses the edge - and the
+    // edge it refuses is a dev-dependency on the one skip helper, without which
+    // seven of that crate's cases print their own sentence and read as runs.
+    // The field already means "this crate's tests may use that one"; what is
+    // new is that it is read for a production target as well as a test-only
+    // one. A row has to be written for it, so nothing is allowed silently.
+    if rule.may_test_with.iter().any(|name| name == &target.name) {
         return;
     }
     if target.layer >= rule.layer && rule.name != target.name {

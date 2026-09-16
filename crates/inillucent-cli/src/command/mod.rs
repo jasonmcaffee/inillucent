@@ -858,7 +858,7 @@ mod tests {
             #[cfg(unix)]
             let made = std::os::unix::fs::symlink(&outside, &link).is_ok();
             if !made {
-                eprintln!("this machine cannot create a symlink here; skipping");
+                inillucent_base::testing::skipping("this machine cannot create a symlink here");
                 return;
             }
         }

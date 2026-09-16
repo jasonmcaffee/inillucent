@@ -32,3 +32,12 @@ default = []
 # Runs nomic-embed-text-v1.5 as ONNX in process. Off by default so the engine
 # stays free of a native library for callers that supply their own vectors.
 onnx = ["dep:ort", "dep:tokenizers"]
+
+[dev-dependencies]
+# The one skip helper, `inillucent_base::testing::skipping`.
+#
+# **A dev-dependency, so the feature is on for this crate's test targets and
+# off in a shipped build (task-1969, 4.6).** The skip sites this crate used to
+# print itself were invisible to `inillucent-testrun --strict`, which reads the
+# panic rather than the phrase.
+inillucent-base = { workspace = true, features = ["testing"] }

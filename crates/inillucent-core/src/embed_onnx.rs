@@ -1140,7 +1140,7 @@ mod tests {
                         return Some(dir);
                     }
                 }
-                eprintln!("no model root holds nomic-embed-text-v1.5; skipping");
+                inillucent_base::testing::skipping("no model root holds nomic-embed-text-v1.5");
                 None
             })?;
         if dir.join("model.onnx").exists() && dir.join("tokenizer.json").exists() {
@@ -1148,7 +1148,10 @@ mod tests {
         } else {
             // The five cases that call this reported green on a machine with no
             // weights and said nothing at all (task-1946, H10).
-            eprintln!("{} holds no complete model; skipping", dir.display());
+            inillucent_base::testing::skipping(&format!(
+                "{} holds no complete model",
+                dir.display()
+            ));
             None
         }
     }
@@ -1160,13 +1163,15 @@ mod tests {
         ($opts:expr) => {
             match model_dir() {
                 None => {
-                    eprintln!("no ONNX weights found; skipping");
+                    inillucent_base::testing::skipping("no ONNX weights found");
                     return;
                 }
                 Some(dir) => match OnnxEmbedder::open(&dir, $opts) {
                     Ok(e) => e,
                     Err(err) => {
-                        eprintln!("could not load the model ({err:#}); skipping");
+                        inillucent_base::testing::skipping(&format!(
+                            "could not load the model ({err:#})"
+                        ));
                         return;
                     }
                 },
@@ -1477,13 +1482,13 @@ mod tests {
     #[test]
     fn a_tokenizer_that_pads_and_truncates_for_itself_is_disarmed() {
         let Some(dir) = model_dir() else {
-            eprintln!("no ONNX weights found; skipping");
+            inillucent_base::testing::skipping("no ONNX weights found");
             return;
         };
         let mut armed = match Tokenizer::from_file(dir.join("tokenizer.json")) {
             Ok(t) => t,
             Err(e) => {
-                eprintln!("{e}; skipping");
+                inillucent_base::testing::skipping(&format!("{e}"));
                 return;
             }
         };

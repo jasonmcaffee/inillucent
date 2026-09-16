@@ -580,7 +580,7 @@ mod tests {
         // One embedding up front, so a machine that has the weights but cannot
         // load the runtime skips rather than failing inside the assertions.
         if managed.embed_query("a warm up").is_err() {
-            eprintln!("the ONNX runtime would not load; skipping");
+            inillucent_base::testing::skipping("the ONNX runtime would not load");
             return None;
         }
         Some(managed)

@@ -160,8 +160,18 @@ fn analyze_writes_statistics_sqlite_reads() {
     drop(connection);
     drop(database);
 
+    // **A skip rather than a panic, so the row and the suite agree
+    // (task-1969, 4.9).** This file's row declares `requires = ["oracle"]`,
+    // which says the suite reports success when the oracle is absent. It did
+    // not: it panicked, so a fresh clone read as a failure of the planner
+    // rather than as a machine without the reference. The helper prints the
+    // one marker and panics under `INILLUCENT_STRICT`, so a strict run still
+    // names the case, and an ordinary run names the prerequisite.
     let Some(program) = oracle_path() else {
-        panic!("the pinned SQLite oracle is not built");
+        inillucent_compat::differential::skipping(
+            "the pinned SQLite oracle is not built; run tools/sqlite-reference.{ps1,sh}",
+        );
+        return;
     };
     let mirror = scratch("analyze-mirror");
     let mut driver = Driver::start("sqlite", &program).expect("the oracle starts");
@@ -475,8 +485,18 @@ fn a_comparison_proves_a_partial_index_predicate_of_is_not_null() {
 #[test]
 fn statistics_sqlite_wrote_are_read_back() {
     let path = scratch("stats-from-sqlite");
+    // **A skip rather than a panic, so the row and the suite agree
+    // (task-1969, 4.9).** This file's row declares `requires = ["oracle"]`,
+    // which says the suite reports success when the oracle is absent. It did
+    // not: it panicked, so a fresh clone read as a failure of the planner
+    // rather than as a machine without the reference. The helper prints the
+    // one marker and panics under `INILLUCENT_STRICT`, so a strict run still
+    // names the case, and an ordinary run names the prerequisite.
     let Some(program) = oracle_path() else {
-        panic!("the pinned SQLite oracle is not built");
+        inillucent_compat::differential::skipping(
+            "the pinned SQLite oracle is not built; run tools/sqlite-reference.{ps1,sh}",
+        );
+        return;
     };
     let mut driver = Driver::start("sqlite", &program).expect("the oracle starts");
     driver.send(&Op::Hello).expect("the oracle answers");

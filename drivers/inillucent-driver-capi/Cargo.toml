@@ -27,6 +27,15 @@ crate-type = ["lib", "cdylib", "staticlib"]
 # there would be two answers to every question in `capability.rs`.
 inillucent-driver = { workspace = true }
 
+[dev-dependencies]
+# The one skip helper, `inillucent_base::testing::skipping`.
+#
+# **A dev-dependency, so the feature is on for this crate's test targets and
+# off in a shipped build (task-1969, 4.6).** The skip sites this crate used to
+# print itself were invisible to `inillucent-testrun --strict`, which reads the
+# panic rather than the phrase.
+inillucent-base = { workspace = true, features = ["testing"] }
+
 # The workspace's lint table; see the note beside it in the root manifest.
 [lints]
 workspace = true

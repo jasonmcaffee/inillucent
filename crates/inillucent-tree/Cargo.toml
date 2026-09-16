@@ -14,6 +14,13 @@ inillucent-value = { workspace = true }
 inillucent-wal = { workspace = true }
 
 [dev-dependencies]
+# The one skip helper, `inillucent_base::testing::skipping`.
+#
+# **A dev-dependency, so the feature is on for this crate's test targets and
+# off in a shipped build (task-1969, 4.6).** The skip site this crate used to
+# print itself was invisible to `inillucent-testrun --strict`, which reads the
+# panic rather than the phrase.
+inillucent-base = { workspace = true, features = ["testing"] }
 inillucent-vfs = { workspace = true }
 
 # The workspace's lint table; see the note beside it in the root manifest.

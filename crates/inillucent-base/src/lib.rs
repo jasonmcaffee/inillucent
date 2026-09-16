@@ -52,6 +52,16 @@ pub mod page;
 pub mod probe;
 pub mod rng;
 pub mod sha3;
+// The one skip helper, below every crate that needs one.
+//
+// **It is here because of the layering contract, not in spite of it
+// (task-1969, 4.6).** A production crate may not depend on the test harness,
+// so `inillucent-driver`, `inillucent-cli` and `inillucent-tree` each wrote
+// their own `eprintln!` and were dropped by the strict runner's classifier.
+// This crate is below all of them. The feature keeps it out of a shipped
+// build; each consumer turns it on from its own `[dev-dependencies]`.
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
 pub mod varint;
 
 pub use error::{DbError, DbResult, ExtendedCode, PrimaryCode, Unwind};

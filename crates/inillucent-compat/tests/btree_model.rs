@@ -664,6 +664,18 @@ fn every_retained_sequence_still_passes() {
         }
         replayed += 1;
     }
+    // **A loop over a directory that asserts per item and never asserts the
+    // count (task-1969, 4.8).** Renaming the two files under `compat/corpus/btree/`
+    // left the directory present and empty, so the skip above did not fire, the
+    // loop replayed nothing, and the case printed `replayed 0` and passed. Rule
+    // 1.2 of the testing standard names this shape; `policy.rs`'s
+    // `assert!(checked >= 40, ...)` and `syntax.rs`'s `assert!(compared > 200, ...)`
+    // are the pattern.
+    assert!(
+        replayed > 0,
+        "the retained corpus at {} holds no .jsonl sequence, so this replayed nothing",
+        directory.display()
+    );
     println!("replayed {replayed} retained sequences");
 }
 

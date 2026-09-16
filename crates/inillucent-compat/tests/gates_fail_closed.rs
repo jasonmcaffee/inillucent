@@ -125,7 +125,7 @@ fn built(path: &'static str, how: &str) -> Option<&'static str> {
     if Path::new(path).is_file() {
         return Some(path);
     }
-    println!("{path} is not built; run `{how}`; skipping");
+    inillucent_compat::differential::skipping(&format!("{path} is not built; run `{how}`"));
     None
 }
 
@@ -225,7 +225,9 @@ fn a_positive_number_on_a_line_with(text: &str, marker: &str) -> bool {
 #[test]
 fn readgate_refuses_a_fixture_that_is_not_there() {
     if !sqlite_bench_built() {
-        println!("sqlite-bench is not built; skipping");
+        inillucent_compat::differential::skipping(
+            "sqlite-bench is not built; run tools/sqlite-reference.{ps1,sh}",
+        );
         return;
     }
     let missing = std::env::temp_dir().join("inillucent-gates-no-such-fixture.db");
@@ -250,7 +252,9 @@ fn readgate_refuses_a_fixture_that_is_not_there() {
 #[test]
 fn readgate_refuses_a_family_that_selects_no_workload() {
     let Some(fixture) = fixture_copy("readgate-families") else {
-        println!("the small gate fixture is not built; skipping");
+        inillucent_compat::differential::skipping(
+            "the small gate fixture is not built; run tools/build-gate-fixtures.sh",
+        );
         return;
     };
     let output = run(
@@ -272,11 +276,15 @@ fn readgate_refuses_a_family_that_selects_no_workload() {
 #[test]
 fn readgate_measures_the_small_fixture() {
     if !sqlite_bench_built() {
-        println!("sqlite-bench is not built; skipping");
+        inillucent_compat::differential::skipping(
+            "sqlite-bench is not built; run tools/sqlite-reference.{ps1,sh}",
+        );
         return;
     }
     let Some(fixture) = fixture_copy("readgate-small") else {
-        println!("the small gate fixture is not built; skipping");
+        inillucent_compat::differential::skipping(
+            "the small gate fixture is not built; run tools/build-gate-fixtures.sh",
+        );
         return;
     };
     let output = run(
@@ -324,11 +332,15 @@ fn writegate_refuses_a_fixture_that_is_not_there() {
 #[test]
 fn writegate_measures_the_small_fixture() {
     if !sqlite_bench_built() {
-        println!("sqlite-bench is not built; skipping");
+        inillucent_compat::differential::skipping(
+            "sqlite-bench is not built; run tools/sqlite-reference.{ps1,sh}",
+        );
         return;
     }
     let Some(fixture) = fixture_copy("writegate-small") else {
-        println!("the small gate fixture is not built; skipping");
+        inillucent_compat::differential::skipping(
+            "the small gate fixture is not built; run tools/build-gate-fixtures.sh",
+        );
         return;
     };
     let output = run(
@@ -376,11 +388,15 @@ fn fullgate_refuses_a_fixture_that_is_not_there() {
 #[test]
 fn fullgate_measures_the_small_fixture() {
     if !sqlite_bench_built() {
-        println!("sqlite-bench is not built; skipping");
+        inillucent_compat::differential::skipping(
+            "sqlite-bench is not built; run tools/sqlite-reference.{ps1,sh}",
+        );
         return;
     }
     let Some(fixture) = fixture_copy("fullgate-small") else {
-        println!("the small gate fixture is not built; skipping");
+        inillucent_compat::differential::skipping(
+            "the small gate fixture is not built; run tools/build-gate-fixtures.sh",
+        );
         return;
     };
     let output = run(
@@ -461,6 +477,46 @@ fn walperf_refuses_a_scratch_it_cannot_create() {
     refused("walperf", &output, &["cannot create", "scratch"]);
 }
 
+/// The log gate measures a scratch directory it can create.
+///
+/// **The gate that had one case (task-1969, 4.3).** `walperf` had a refusal and
+/// no measuring twin, so a build where every timing read zero would have passed
+/// the only test it had. The assertion is on the report's own commit timings
+/// rather than the exit code, for the reason the header gives: a debug build
+/// misses production bars correctly, and what separates "measured and missed"
+/// from "measured nothing" is whether a number reached the page.
+#[test]
+fn walperf_measures_the_small_fixture() {
+    let directory = std::env::temp_dir().join(format!(
+        "inillucent-gates-walperf-measures-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("a scratch directory");
+    let scratch = directory.join("scratch");
+    let out = directory.join("out");
+    let output = run(
+        env!("CARGO_BIN_EXE_inillucent-walperf"),
+        &[
+            "--scratch",
+            &scratch.to_string_lossy(),
+            "--out",
+            &out.to_string_lossy(),
+        ],
+    );
+    // The gate prints one line - the path it wrote - and puts every number in
+    // the report, so the report is what the measurement has to be read out of.
+    // Asserting on the one stdout line would pass on a run that wrote a table
+    // of zeros, which is the shape this file exists to refuse.
+    let report = out.join("phase10-concurrency-baselines.md");
+    let written = std::fs::read_to_string(&report).unwrap_or_default();
+    measured("walperf", &output, &|text| {
+        a_positive_number_on_a_line_with(&format!("{text}\n{written}"), "commit")
+    });
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 // --- scorecard --------------------------------------------------------------
 
 /// The scorecard refuses a lever name it does not know.
@@ -517,6 +573,156 @@ fn scorecard_says_when_it_cannot_measure() {
     );
 }
 
+/// The scorecard measures a lever it knows.
+///
+/// **The gate whose only two cases were both refusals (task-1969, 4.3).** A
+/// scorecard that produced a table of zeros satisfied everything this file
+/// asked of it. The measurement is read out of `scorecard.md` rather than out
+/// of the summary line, because the summary quotes a headline ratio that a run
+/// measuring nothing would still print.
+#[test]
+fn scorecard_measures_a_lever_it_knows() {
+    if !sqlite_bench_built() {
+        inillucent_compat::differential::skipping(
+            "sqlite-bench is not built; run tools/sqlite-reference.{ps1,sh}",
+        );
+        return;
+    }
+    let directory = std::env::temp_dir().join(format!(
+        "inillucent-gates-scorecard-measures-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    let output = run(
+        env!("CARGO_BIN_EXE_inillucent-scorecard"),
+        &[
+            "--out",
+            &directory.to_string_lossy(),
+            "--disable",
+            "covering-index",
+            "--scale",
+            "small",
+            "--rounds",
+            "1",
+        ],
+    );
+    let card = std::fs::read_to_string(directory.join("scorecard.md")).unwrap_or_default();
+    measured("scorecard", &output, &|text| {
+        a_positive_number_on_a_line_with(&format!("{text}\n{card}"), "ms")
+    });
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+// --- foldgate ---------------------------------------------------------------
+
+/// The fold gate refuses an arm it does not have.
+///
+/// `foldgate` is one of the two programs under `src/bin/` that decide pass or
+/// fail and had no test at all (task-1969, 4.3); it is the roadmap's M8
+/// measurement, so a run of it that graded nothing would be published as the
+/// evidence for a closed roadmap item.
+#[test]
+fn foldgate_refuses_an_arm_it_does_not_have() {
+    let output = run(
+        env!("CARGO_BIN_EXE_inillucent-foldgate"),
+        &["--arm", "no-such-arm", "--documents", "8", "--dims", "4"],
+    );
+    refused("foldgate", &output, &["no such arm", "arm"]);
+}
+
+/// The fold gate measures one arm on a corpus it builds.
+///
+/// One arm rather than the comparison, because the comparison spawns both arms
+/// as child processes and each builds its own corpus; what is under test here
+/// is that an arm reports a count it actually wrote, which is the half a report
+/// of zeros would fail.
+#[test]
+fn foldgate_measures_a_small_corpus() {
+    let output = run(
+        env!("CARGO_BIN_EXE_inillucent-foldgate"),
+        &[
+            "--arm",
+            "fold",
+            "--documents",
+            "120",
+            "--queries",
+            "4",
+            "--dims",
+            "8",
+        ],
+    );
+    measured("foldgate", &output, &|text| {
+        a_positive_number_on_a_line_with(text, "inserted_total")
+    });
+}
+
+// --- release ----------------------------------------------------------------
+
+/// The release gate refuses a candidate directory it cannot create.
+///
+/// The other of the two deciding programs with no test (task-1969, 4.3). It
+/// returns `ExitCode::FAILURE` from two places and nothing exercised either.
+#[test]
+fn release_refuses_a_candidate_directory_it_cannot_create() {
+    let directory = std::env::temp_dir().join(format!(
+        "inillucent-gates-release-refuses-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("a scratch directory");
+    let blocker = directory.join("not-a-directory");
+    std::fs::write(&blocker, b"this is a file").expect("the blocking file is written");
+    let output = run(
+        env!("CARGO_BIN_EXE_inillucent-release"),
+        &["--out", &blocker.join("candidate").to_string_lossy()],
+    );
+    refused("release", &output, &["cannot create", "cannot"]);
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+/// The release gate digests the measurement files it was pointed at.
+///
+/// A planted scorecard rather than the repository's own, so the case measures
+/// something whose bytes it chose: the report has to carry that file's name, a
+/// SHA-256 of the right length, and its byte count. A gate that wrote a
+/// candidate naming no artifact at all is the failure this catches, and it is
+/// the one `packaging/sign-sums.ps1` shipped in task-1951.
+#[test]
+fn release_measures_the_artifacts_it_was_given() {
+    let directory = std::env::temp_dir().join(format!(
+        "inillucent-gates-release-measures-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&directory);
+    let measurements = directory.join("measurements");
+    let out = directory.join("candidate");
+    std::fs::create_dir_all(&measurements).expect("a measurements directory");
+    let planted = b"# scorecard\n\nthis file exists so the gate has something to digest\n";
+    std::fs::write(measurements.join("scorecard.md"), planted).expect("the scorecard is planted");
+    let output = run(
+        env!("CARGO_BIN_EXE_inillucent-release"),
+        &[
+            "--out",
+            &out.to_string_lossy(),
+            "--measurements",
+            &measurements.to_string_lossy(),
+        ],
+    );
+    let report = std::fs::read_to_string(out.join("release.md")).unwrap_or_default();
+    measured("release", &output, &|text| {
+        let both = format!("{text}\n{report}");
+        both.contains("scorecard.md")
+            && a_positive_number_on_a_line_with(&both, "scorecard.md")
+            && report
+                .split_whitespace()
+                .any(|word| word.len() == 64 && word.chars().all(|c| c.is_ascii_hexdigit()))
+    });
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
 // --- testrun ----------------------------------------------------------------
 
 /// The runner refuses a tier that is not in the map.
@@ -535,11 +741,15 @@ fn testrun_refuses_a_tier_that_does_not_exist() {
 
 /// The runner lists the smoke tier, and the tier holds targets.
 ///
+/// Named `_measures_` because what it measures is the size of the selection.
+/// The runner's "nothing was checked" failure is a tier that resolves to an
+/// empty set: every suite in it then reports ok, because there were none.
+///
 /// `--list` rather than a run, because the run is what every other suite in
 /// this file is already inside: what is asserted is that the selection is not
 /// empty, which is the thing that would make a green run meaningless.
 #[test]
-fn testrun_selects_targets_for_the_smoke_tier() {
+fn testrun_measures_the_smoke_tier_selection() {
     let Some(gate) = built(TESTRUN, BUILDS_TESTRUN) else {
         return;
     };
@@ -560,28 +770,119 @@ fn testrun_selects_targets_for_the_smoke_tier() {
     );
 }
 
-/// Every gate this file covers is a binary the workspace still builds.
+/// Every program `docs/repository.md` tells a reader to run is one that exists.
 ///
-/// A rename that left a test naming a program nobody builds would make this
-/// whole file a check of nothing, which is the defect it exists to prevent.
+/// **Forty-one bin targets sit outside `tests/selection.toml` by design, and
+/// the design had no floor (task-1969, 4.10).** `selection.rs`'s
+/// `every_target_has_a_row` excludes a `Kind::Bin` target holding no `#[test]`,
+/// which is safe for a *program's tests* and says nothing about the program:
+/// `inillucent-compat` has 45 bins against four rows, so any of them could be
+/// renamed or deleted and no test would change. `docs/repository.md`'s
+/// reproduction block is the page that tells a reader which ones to run to get
+/// the published numbers back, so it is the list with a reason to be right.
 ///
-/// `inillucent-testrun` is not in the list: it is behind a feature, so its
-/// absence is a fact about the build rather than a rename, and the two cases
-/// that drive it skip by name instead. Everything else here is an ordinary
-/// binary of this package and a `cargo test` builds all of them.
+/// The names are read off that page rather than typed here as well, because two
+/// lists of the same thing is how one of them goes stale - which is the defect
+/// §4.14 of the same review found in the three published target counts.
+///
+/// `inillucent-testrun` is not reachable this way: it is behind
+/// `required-features = ["testrun"]`, so its absence is a fact about the build
+/// rather than a rename, and the two cases that drive it skip by name instead.
 #[test]
 fn every_gate_under_test_is_a_binary_that_exists() {
-    for gate in [
-        env!("CARGO_BIN_EXE_inillucent-readgate"),
-        env!("CARGO_BIN_EXE_inillucent-writegate"),
-        env!("CARGO_BIN_EXE_inillucent-fullgate"),
-        env!("CARGO_BIN_EXE_inillucent-searchgate"),
-        env!("CARGO_BIN_EXE_inillucent-walperf"),
-        env!("CARGO_BIN_EXE_inillucent-scorecard"),
+    let page = workspace_root().join("docs/repository.md");
+    let text = std::fs::read_to_string(&page)
+        .unwrap_or_else(|error| panic!("cannot read {}: {error}", page.display()));
+    let named = programs_named_in_the_reproduction_block(&text);
+    assert!(
+        named.len() >= 5,
+        "read {} program names out of the reproduction block in {}, which means this is \
+         reading the wrong block rather than that the page names no programs",
+        named.len(),
+        page.display()
+    );
+
+    // The gates this file drives, which have to be in the list as well as on
+    // the page: a program with a test here and no line on the page is one a
+    // reader cannot reproduce, and a program on the page with no test here is
+    // what §4.10 is about.
+    let mut wanted: Vec<String> = named;
+    for driven in [
+        "inillucent-readgate",
+        "inillucent-writegate",
+        "inillucent-fullgate",
+        "inillucent-searchgate",
+        "inillucent-walperf",
+        "inillucent-scorecard",
+        "inillucent-foldgate",
+        "inillucent-release",
     ] {
-        assert!(
-            Path::new(gate).is_file(),
-            "{gate} is named by this suite and is not built"
-        );
+        wanted.push(driven.to_string());
     }
+    wanted.sort();
+    wanted.dedup();
+
+    // Every bin of this package lands beside every other one, so one known
+    // `CARGO_BIN_EXE_*` gives the directory the rest are in. Reading it from a
+    // resolved path rather than assuming `target/debug` is what makes this work
+    // under `cargo llvm-cov`, which builds into a target directory of its own.
+    let known = Path::new(env!("CARGO_BIN_EXE_inillucent-readgate"));
+    let directory = known
+        .parent()
+        .unwrap_or_else(|| panic!("{} has no parent directory", known.display()));
+    let mut absent: Vec<String> = Vec::new();
+    for program in &wanted {
+        let path = directory.join(format!("{program}{}", std::env::consts::EXE_SUFFIX));
+        if !path.is_file() {
+            absent.push(path.to_string_lossy().to_string());
+        }
+    }
+    assert!(
+        absent.is_empty(),
+        "these programs are named by docs/repository.md or driven by this suite and this \
+         build produced none of them, so either the name is stale or the target is gone:\n  {}",
+        absent.join("\n  ")
+    );
+}
+
+/// Returns every `inillucent-*` program named in the reproduction block.
+///
+/// The block is the fenced `sh` listing under `## Reproducing the
+/// measurements`. A name counts when it is the last path component of a token,
+/// so `target/release/inillucent-fullgate` and a bare `inillucent-manifest`
+/// both read as the same program, and a prose mention elsewhere on the page
+/// does not.
+///
+/// @param page - the text of `docs/repository.md`
+fn programs_named_in_the_reproduction_block(page: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let mut inside_section = false;
+    let mut inside_fence = false;
+    for line in page.lines() {
+        if line.starts_with("## ") {
+            inside_section = line.trim() == "## Reproducing the measurements";
+            continue;
+        }
+        if !inside_section {
+            continue;
+        }
+        if line.trim_start().starts_with("```") {
+            inside_fence = !inside_fence;
+            continue;
+        }
+        if !inside_fence || line.trim_start().starts_with('#') {
+            continue;
+        }
+        for token in line.split_whitespace() {
+            let candidate = token.rsplit('/').next().unwrap_or(token);
+            let candidate =
+                candidate.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-');
+            if candidate.starts_with("inillucent-") && !candidate.contains('.') {
+                names.push(candidate.to_string());
+            }
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
 }

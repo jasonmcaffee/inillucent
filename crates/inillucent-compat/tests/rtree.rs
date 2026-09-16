@@ -238,9 +238,18 @@ fn a_wide_coordinate_rounds_outwards() {
 }
 
 /// The oracle has to be present for the comparisons above to mean anything.
+///
+/// **This was the one `#[test]` in the workspace that could not fail
+/// (task-1969, 4.7).** Its body printed a sentence and returned, so it passed
+/// whether the oracle was there or not, while its name and its doc comment
+/// both said it checked something. The row already declares
+/// `requires = ["shell"]`, so a machine without the oracle is named by
+/// `--strict` from the row rather than needing this case to stay quiet - which
+/// makes the assertion the right form, not a stricter one.
 #[test]
 fn the_oracle_is_available() {
-    if sqlite_oracle().is_none() {
-        eprintln!("the pinned SQLite oracle is not built; run tools/sqlite-reference.{{ps1,sh}}");
-    }
+    assert!(
+        sqlite_oracle().is_some(),
+        "the pinned SQLite oracle is not built; run tools/sqlite-reference.{{ps1,sh}}"
+    );
 }

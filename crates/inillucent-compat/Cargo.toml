@@ -13,7 +13,11 @@ description = "Parity manifest, compatibility report generator, and the SQLite o
 
 [dependencies]
 inillucent-alloc = { workspace = true }
-inillucent-base = { workspace = true }
+# `features = ["testing"]` because `src/differential.rs` calls
+# `inillucent_base::testing::skipping` and is compiled without `cfg(test)`:
+# every `tests/*.rs` target in this crate uses it, so it has to be in the
+# library rather than behind a test cfg (task-1969, 4.6).
+inillucent-base = { workspace = true, features = ["testing"] }
 inillucent-value = { workspace = true }
 inillucent-storage = { workspace = true, features = ["check"] }
 inillucent-vfs = { workspace = true }

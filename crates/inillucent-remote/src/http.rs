@@ -702,28 +702,17 @@ fn parse_content_range_total(value: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
 
-    /// Says why a case did not run, and fails the case when the run is strict.
-    ///
-    /// **The same helper `inillucent_compat::differential::skipping` is, written
-    /// here because the layering contract will not let a production crate depend
-    /// on the test harness (task-1932, H10).** Every skip message in the workspace
-    /// ends with `; skipping`, which is the one marker
-    /// `tests/inillucent-testing-tdd.md` §9 asks for and the one phrase
-    /// `inillucent-testrun`'s classifier matches. `INILLUCENT_STRICT`, which
-    /// `inillucent-testrun --strict` sets, turns the skip into a failure that names
-    /// the test - which matters most here, because this binary runs other tests,
-    /// so a skip of its own was invisible to `--strict` by both routes: a CI image
-    /// without Python's `ssl` module passed the TLS verification suite without
-    /// running any of it.
-    ///
-    /// @param reason - what is missing, without the marker
-    fn skipping(reason: &str) {
-        if std::env::var("INILLUCENT_STRICT").is_ok_and(|value| !value.is_empty()) {
-            panic!("{reason}; skipping - and this run is strict, so a skip is a failure");
-        }
-        eprintln!("{reason}; skipping");
-    }
+    // Every skip here goes through `inillucent_base::testing::skipping`, the
+    // one function in the workspace that prints the `; skipping` marker and
+    // panics under `INILLUCENT_STRICT`. This module used to define its own
+    // copy, because the layering contract will not let a production crate
+    // reach the compat harness; task-1969 §4.6 moved the body to the bottom
+    // crate, which is below this one, so the copy is gone. It matters most
+    // here, because this binary runs other tests, so a skip of its own was
+    // invisible to `--strict` by both routes: an image without Python's `ssl`
+    // module passed the TLS verification suite without running any of it.
     use super::*;
+    use inillucent_base::testing::skipping;
 
     /// A URL splits into the four things a request needs, with the port
     /// defaulted from the scheme.
