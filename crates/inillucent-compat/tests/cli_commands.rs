@@ -31,7 +31,7 @@
 //! `every_registry_command_has_a_subprocess_test`, the same way
 //! `help_lists_everything` keeps the verb list in step with the registry.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use inillucent_compat::cliproc::{
     column_names, number_field, program, rows, run, run_with_input, text_field, Ran,
@@ -63,7 +63,7 @@ fn area(case: &str) -> PathBuf {
 ///
 /// @param binary - the built `inillucent`
 /// @param case - what to name this case's directory after
-fn populated(binary: &PathBuf, case: &str) -> PathBuf {
+fn populated(binary: &Path, case: &str) -> PathBuf {
     let database = area(case).join("app.rdb");
     let path = database.to_string_lossy().to_string();
     for arguments in [

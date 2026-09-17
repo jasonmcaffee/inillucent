@@ -97,7 +97,7 @@ fn script(directory: &Path) -> PathBuf {
 ///
 /// @param binary - the built `inillucent`
 /// @param directory - where to put it
-fn prepared(binary: &PathBuf, directory: &Path) -> PathBuf {
+fn prepared(binary: &Path, directory: &Path) -> PathBuf {
     let database = directory.join("app.rdb");
     let path = database.to_string_lossy().to_string();
     for arguments in [
@@ -133,7 +133,7 @@ fn prepared(binary: &PathBuf, directory: &Path) -> PathBuf {
 /// @param database - the file to write to
 /// @param feed - the script to read
 /// @param wanted - how many acknowledgements to read before killing
-fn killed_after(shell: &PathBuf, database: &Path, feed: &Path, wanted: usize) -> u64 {
+fn killed_after(shell: &Path, database: &Path, feed: &Path, wanted: usize) -> u64 {
     let input = std::fs::File::open(feed).expect("the script opens");
     let mut child = Command::new(shell)
         .arg(database.to_string_lossy().replace('\\', "/"))
@@ -171,7 +171,7 @@ fn killed_after(shell: &PathBuf, database: &Path, feed: &Path, wanted: usize) ->
 /// @param binary - the built `inillucent`
 /// @param database - the file to read
 /// @param sql - the statement, which must answer one row of one column
-fn scalar(binary: &PathBuf, database: &Path, sql: &str) -> String {
+fn scalar(binary: &Path, database: &Path, sql: &str) -> String {
     let ran = run(
         binary,
         &[

@@ -23,7 +23,7 @@
 //! `explain`, the version from `version`.
 
 use std::io::{BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 use inillucent_compat::cliproc::program;
@@ -48,7 +48,7 @@ impl Session {
     ///
     /// @param server - the built `inillucent-mcp`
     /// @param database - the file to open
-    fn start(server: &PathBuf, database: &PathBuf) -> Session {
+    fn start(server: &Path, database: &Path) -> Session {
         let mut child = Command::new(server)
             .args(["--db", &database.to_string_lossy()])
             .stdin(Stdio::piped())
@@ -154,7 +154,7 @@ impl Drop for Session {
 /// leave the program's own write path out of what is exercised.
 ///
 /// @param binary - the built `inillucent`
-fn populated(binary: &PathBuf) -> PathBuf {
+fn populated(binary: &Path) -> PathBuf {
     let directory = workspace_root().join("_agent_output/mcp-wire");
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).expect("a scratch directory");

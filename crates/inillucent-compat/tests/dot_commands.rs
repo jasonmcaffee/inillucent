@@ -27,7 +27,7 @@
 //! dispatcher, and it is the one this suite can assert without launching a
 //! browser on whatever machine the tests are running on.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use inillucent_compat::cliproc::{program, run, run_with_input};
 use inillucent_compat::workspace_root;
@@ -145,7 +145,7 @@ fn area(case: &str) -> PathBuf {
 ///
 /// @param binary - the built `inillucent`
 /// @param directory - where to put it
-fn populated(binary: &PathBuf, directory: &PathBuf) -> PathBuf {
+fn populated(binary: &Path, directory: &Path) -> PathBuf {
     let database = directory.join("app.rdb");
     let path = database.to_string_lossy().to_string();
     for arguments in [
@@ -554,13 +554,7 @@ const CASES: &[Case] = &[
 /// @param directory - this run's scratch directory
 /// @param case - the case to run
 /// @param safely - whether to pass `-safe`
-fn drive(
-    shell: &PathBuf,
-    database: &PathBuf,
-    directory: &str,
-    case: &Case,
-    safely: bool,
-) -> String {
+fn drive(shell: &Path, database: &Path, directory: &str, case: &Case, safely: bool) -> String {
     let typed = format!("{}\n.quit\n", case.input.replace("{dir}", directory));
     let path = database.to_string_lossy().replace('\\', "/");
     let arguments: Vec<&str> = if safely {

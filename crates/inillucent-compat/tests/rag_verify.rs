@@ -63,7 +63,7 @@ fn shell() -> Option<String> {
 /// every fresh clone is in.
 ///
 /// @param binary - the built `inillucent`
-fn can_embed(binary: &PathBuf) -> bool {
+fn can_embed(binary: &Path) -> bool {
     let ran = run(
         binary,
         &["--db", ":memory:", "query", "SELECT embed('a word')"],

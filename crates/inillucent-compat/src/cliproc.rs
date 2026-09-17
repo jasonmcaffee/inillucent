@@ -16,7 +16,22 @@
 //! perfectly good shell sat somewhere else. So the profile and the target
 //! directory are both read back off the calling test's own path.
 
-use std::path::PathBuf;
+// **This module may panic, and the crate-level deny does not reach it.** It is
+// the same case `differential.rs` makes: a helper every `tests/*.rs` target
+// uses has to live in `src/`, which means it is compiled without `cfg(test)`
+// and the crate's test-only relaxation does not apply.
+//
+// What it panics on is a broken environment rather than a result - a binary
+// that will not start, a process that will not finish, `--output json` that
+// produced something that is not a JSON document, a field of that document
+// that is absent or of the wrong type. Returning an `Option` for those would
+// put the caller back where this ticket started: a test that reads `None` and
+// passes. The one absence that is *not* a broken environment - the binary is
+// not built on this machine - is the one thing here that returns `None`, and
+// `program` announces it through `differential::skipping` before it does.
+#![allow(clippy::panic)]
+
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
 use inillucent_scalar::json::node::Node;
@@ -83,7 +98,7 @@ pub fn program(name: &str) -> Option<PathBuf> {
 ///
 /// @param program - the binary to run
 /// @param arguments - the command line
-pub fn run(program: &PathBuf, arguments: &[&str]) -> Ran {
+pub fn run(program: &Path, arguments: &[&str]) -> Ran {
     let output = Command::new(program)
         .args(arguments)
         .stdin(Stdio::null())
@@ -97,7 +112,7 @@ pub fn run(program: &PathBuf, arguments: &[&str]) -> Ran {
 /// @param program - the binary to run
 /// @param arguments - the command line
 /// @param input - what to write to its standard input
-pub fn run_with_input(program: &PathBuf, arguments: &[&str], input: &str) -> Ran {
+pub fn run_with_input(program: &Path, arguments: &[&str], input: &str) -> Ran {
     use std::io::Write;
     let mut child = Command::new(program)
         .args(arguments)
