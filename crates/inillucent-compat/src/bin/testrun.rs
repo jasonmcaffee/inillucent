@@ -1248,6 +1248,68 @@ fn missing_prerequisites<'run>(
     hollow
 }
 
+/// Prints what the selected suites needed, and returns how many went without.
+///
+/// **What a fully provisioned machine gets to say (task-1969, 9).** Until the
+/// first of these two lines, a run where every prerequisite was present printed
+/// nothing about prerequisites at all - identical output to a run on a
+/// workspace that declares none. So the reader of a green run could not tell
+/// "the oracle, the shell and the fixtures were all here and forty suites used
+/// them" from "nothing here needs anything", and the second is what the page
+/// used to imply.
+///
+/// It counts rows rather than suites that skipped, because that is the
+/// question: of the targets this selection included that declare a
+/// prerequisite, how many ran with it present.
+///
+/// @param outcomes - what ran
+/// @param map - the selection map, for what each target requires
+/// @param strict - whether a missing prerequisite is a failure
+fn report_prerequisites(outcomes: &[Outcome], map: &Map, strict: bool) -> usize {
+    let hollow = missing_prerequisites(outcomes, map);
+    let declared = outcomes
+        .iter()
+        .filter(|outcome| {
+            map.row(&outcome.target)
+                .is_some_and(|row| !row.requires.is_empty())
+        })
+        .count();
+    if declared > 0 {
+        println!();
+        println!(
+            "{} of {declared} selected suite(s) that declare a prerequisite had it",
+            declared.saturating_sub(hollow.len())
+        );
+    }
+    if hollow.is_empty() {
+        return 0;
+    }
+    println!(
+        "{} suite(s) ran without a prerequisite and evidenced nothing{}:",
+        hollow.len(),
+        if strict {
+            ""
+        } else {
+            " (--strict makes this a failure)"
+        }
+    );
+    for (outcome, requires) in &hollow {
+        // **"needs" only in front of a `requires` row.** Those are names of
+        // things - `postgres`, `oracle`, `shell` - and read as a need. A reason
+        // the suite printed is a whole sentence about this machine, and putting
+        // "needs" in front of one produces "needs this platform would not make a
+        // directory link" (task-1932, H10).
+        let said = requires.join(", ");
+        let lead = if said.split_whitespace().count() > 3 {
+            ""
+        } else {
+            "needs "
+        };
+        println!("  {:<44} {lead}{}", outcome.target.label(), said);
+    }
+    hollow.len()
+}
+
 /// Prints the summary, and every failure in full.
 ///
 /// @param outcomes - what ran
@@ -1327,60 +1389,7 @@ fn report(outcomes: &[Outcome], wall: Duration, map: &Map, strict: bool) {
         );
     }
 
-    let hollow = missing_prerequisites(outcomes, map);
-
-    // **What a fully provisioned machine gets to say (task-1969, 9).** Until
-    // this line, a run where every prerequisite was present printed nothing
-    // about prerequisites at all - identical output to a run where the map
-    // declared none. So the reader of a green run could not tell "the oracle,
-    // the shell and the fixtures were all here and 40 suites used them" from
-    // "nothing in this workspace needs anything", and the second is what the
-    // page used to imply.
-    //
-    // It counts rows rather than suites that skipped, because that is the
-    // question: of the targets this selection included that declare a
-    // prerequisite, how many ran with it present.
-    let declared: Vec<&Outcome> = outcomes
-        .iter()
-        .filter(|outcome| {
-            map.row(&outcome.target)
-                .is_some_and(|row| !row.requires.is_empty())
-        })
-        .collect();
-    if !declared.is_empty() {
-        println!();
-        println!(
-            "{} of {} selected suite(s) that declare a prerequisite had it",
-            declared.len().saturating_sub(hollow.len()),
-            declared.len()
-        );
-    }
-
-    if !hollow.is_empty() {
-        println!(
-            "{} suite(s) ran without a prerequisite and evidenced nothing{}:",
-            hollow.len(),
-            if strict {
-                ""
-            } else {
-                " (--strict makes this a failure)"
-            }
-        );
-        for (outcome, requires) in &hollow {
-            // **"needs" only in front of a `requires` row.** Those are names of
-            // things - `postgres`, `oracle`, `shell` - and read as a need. A
-            // reason the suite printed is a whole sentence about this machine,
-            // and putting "needs" in front of one produces "needs this platform
-            // would not make a directory link" (task-1932, H10).
-            let said = requires.join(", ");
-            let lead = if said.split_whitespace().count() > 3 {
-                ""
-            } else {
-                "needs "
-            };
-            println!("  {:<44} {lead}{}", outcome.target.label(), said);
-        }
-    }
+    let hollow = report_prerequisites(outcomes, map, strict);
 
     let settled: Vec<&Outcome> = outcomes
         .iter()
@@ -1408,11 +1417,8 @@ fn report(outcomes: &[Outcome], wall: Duration, map: &Map, strict: bool) {
         // nothing installed pass for evidence, and as a target recorded FAILED
         // with all 156 of its tests passing: the report and the exit status
         // have to agree, or one of them stops being read.
-        if strict && !hollow.is_empty() {
-            println!(
-                "\nnot ok - every test passed, and {} suite(s) evidenced nothing",
-                hollow.len()
-            );
+        if strict && hollow > 0 {
+            println!("\nnot ok - every test passed, and {hollow} suite(s) evidenced nothing");
             return;
         }
         println!("\nok");

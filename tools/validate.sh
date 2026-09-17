@@ -332,12 +332,18 @@ wrappers() {
         echo "no php on PATH; install one from https://www.php.net/downloads; skipping"
     fi
 
+    # **Being on PATH is not the question; answering is (task-1970).** See the
+    # note in tools/validate.ps1: Windows puts a Python app execution alias on
+    # PATH that resolves and then will not start, and Git Bash sees the same
+    # entry. A candidate that cannot print its own version is not a Python.
     local python=''
-    if command -v python3 >/dev/null 2>&1; then
-        python=python3
-    elif command -v python >/dev/null 2>&1; then
-        python=python
-    fi
+    local candidate
+    for candidate in python3 python; do
+        if command -v "$candidate" >/dev/null 2>&1 && "$candidate" --version >/dev/null 2>&1; then
+            python="$candidate"
+            break
+        fi
+    done
     if [ -n "$python" ]; then
         "$python" "$root/drivers/bindings/python/run_conformance.py" || failed=1
     else

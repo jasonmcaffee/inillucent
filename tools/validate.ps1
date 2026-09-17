@@ -354,9 +354,22 @@ Invoke-Stage -Name 'wrappers' -Because 'the Go, Node, PHP and Python wrappers, a
         Write-Host 'no php on PATH; install one from https://www.php.net/downloads; skipping'
     }
 
-    $python = if (Get-Command python3 -ErrorAction SilentlyContinue) { 'python3' }
-              elseif (Get-Command python -ErrorAction SilentlyContinue) { 'python' }
-              else { $null }
+    # **A `python3` that `Get-Command` finds and that will not start
+    # (task-1970).** Windows puts an app execution alias for the Store's Python
+    # on PATH at `WindowsApps\python3.exe`. It is a reparse point into a package
+    # this account cannot execute, so `Get-Command` answers with it and starting
+    # it fails with "The system cannot find the path specified" - which ended
+    # this stage with an unhandled error rather than running the conformance
+    # suite, on a machine that has a working `python` further down PATH. Being
+    # on PATH is not the question; answering is. So each candidate is asked its
+    # version and the first that answers is the one used.
+    $python = $null
+    foreach ($name in 'python3', 'python') {
+        $found = Get-Command $name -ErrorAction SilentlyContinue
+        if (-not $found) { continue }
+        try { & $found.Source --version *> $null } catch { continue }
+        if ($LASTEXITCODE -eq 0) { $python = $found.Source; break }
+    }
     if ($python) {
         & $python (Join-Path $root 'drivers/bindings/python/run_conformance.py')
         if ($LASTEXITCODE -ne 0) { $wrong = 1 }
