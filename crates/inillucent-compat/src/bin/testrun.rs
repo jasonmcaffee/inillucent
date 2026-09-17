@@ -1328,9 +1328,37 @@ fn report(outcomes: &[Outcome], wall: Duration, map: &Map, strict: bool) {
     }
 
     let hollow = missing_prerequisites(outcomes, map);
+
+    // **What a fully provisioned machine gets to say (task-1969, 9).** Until
+    // this line, a run where every prerequisite was present printed nothing
+    // about prerequisites at all - identical output to a run where the map
+    // declared none. So the reader of a green run could not tell "the oracle,
+    // the shell and the fixtures were all here and 40 suites used them" from
+    // "nothing in this workspace needs anything", and the second is what the
+    // page used to imply.
+    //
+    // It counts rows rather than suites that skipped, because that is the
+    // question: of the targets this selection included that declare a
+    // prerequisite, how many ran with it present.
+    let declared: Vec<&Outcome> = outcomes
+        .iter()
+        .filter(|outcome| {
+            map.row(&outcome.target)
+                .is_some_and(|row| !row.requires.is_empty())
+        })
+        .collect();
+    if !declared.is_empty() {
+        println!();
+        println!(
+            "{} of {} selected suite(s) that declare a prerequisite had it",
+            declared.len().saturating_sub(hollow.len()),
+            declared.len()
+        );
+    }
+
     if !hollow.is_empty() {
         println!(
-            "\n{} suite(s) ran without a prerequisite and evidenced nothing{}:",
+            "{} suite(s) ran without a prerequisite and evidenced nothing{}:",
             hollow.len(),
             if strict {
                 ""
