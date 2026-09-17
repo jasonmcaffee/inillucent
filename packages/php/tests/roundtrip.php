@@ -129,11 +129,23 @@ same('total is exact', $result['total'], 2);
 $rows = $db->query('SELECT name FROM people WHERE age > ?1 ORDER BY age', [40]);
 same('the rows and their order', array_column($rows, 'name'), ['Alan', 'Grace']);
 
-same('the table list names the table', in_array('people', $db->tables(), true), true);
+// `tables()` is the one method here that reshapes what the command line
+// answered: it turns each `[name, type]` row into a map, so a caller reads
+// `$row['name']` rather than `$row[0]`. `describe()` does not reshape anything
+// - its doc comment says it returns columns, indexes, DDL and the row count,
+// and those only fit in the whole envelope - so its column names are field 1 of
+// each row of the `PRAGMA table_info` result it carries.
 same(
-    'describe names the columns',
-    array_column($db->describe('people'), 'name'),
-    ['id', 'name', 'age']
+    'the table list names the table',
+    in_array('people', array_column($db->tables(), 'name'), true),
+    true
+);
+$described = $db->describe('people');
+same('describe names the columns', array_column($described['rows'], 1), ['id', 'name', 'age']);
+same(
+    'describe carries the DDL',
+    $described['ddl'],
+    'CREATE TABLE people (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)'
 );
 
 // --- a parameter is bound rather than pasted --------------------------------
