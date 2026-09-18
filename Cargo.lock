@@ -792,6 +792,7 @@ dependencies = [
  "inillucent-base",
  "inillucent-sql",
  "inillucent-value",
+ "inillucent-vfs",
 ]
 
 [[package]]

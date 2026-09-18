@@ -184,6 +184,16 @@ pub struct BoundTrigger {
     pub when: Option<BoundExpr>,
     /// The body statements, in written order.
     pub body: Vec<BoundTriggerStatement>,
+    /// Whether the binder synthesised this from a `REFERENCES` clause rather
+    /// than reading it from a `CREATE TRIGGER`.
+    ///
+    /// **Read by `DROP TABLE` (task-1979, F6).** Dropping a table with foreign
+    /// keys on runs an implicit `DELETE FROM` first, so the keys that reference
+    /// it are enforced - and SQLite's rule is that the implicit delete fires no
+    /// triggers of its own while still performing every foreign key action. A
+    /// delete bound for that purpose keeps the triggers this flag marks and
+    /// drops the rest.
+    pub foreign_key: bool,
 }
 
 /// A bound `INSERT`.
@@ -266,8 +276,18 @@ pub struct BoundUpsert {
 /// One `SET` assignment.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoundAssignment {
-    /// The column being assigned.
+    /// The column being assigned, as a declared position.
     pub column: u16,
+    /// Whether the assignment names the row's own rowid rather than a declared
+    /// column, in which case `column` says nothing.
+    ///
+    /// **`UPDATE t SET rowid = 100` was `no such column: rowid` (task-1979,
+    /// F9).** An assignment target was looked up with `column_position`, which
+    /// only knows the columns the table declares, and a table with no INTEGER
+    /// PRIMARY KEY declares none for its rowid. SQLite accepts all three
+    /// spellings of the rowid on either kind of table and moves the row to the
+    /// new key.
+    pub rowid: bool,
     /// The new value.
     pub value: BoundExpr,
 }
@@ -420,6 +440,7 @@ fn fault_applies(
 /// only difference between the two is which constraint asked - so it is set
 /// here, on the bodies this binder generated, and nowhere else.
 fn report_as_foreign_key(trigger: &mut BoundTrigger) {
+    trigger.foreign_key = true;
     for statement in &mut trigger.body {
         let BoundTriggerStatement::Select(select) = statement else {
             continue;
@@ -605,6 +626,26 @@ impl<'a> Binder<'a> {
             let bound = self.bind_expr(*value)?;
             for name in names {
                 let folded = self.ast.folded(*name).to_vec();
+                // `rowid`, `oid` and `_rowid_` name the row's key rather than a
+                // declared column, unless the table declares a column by one of
+                // those names - which is what `is_rowid_name` decides.
+                if table.is_rowid_name(&folded) {
+                    if assignments.iter().any(|held: &BoundAssignment| held.rowid) {
+                        return Err(refused(
+                            format!(
+                                "column {} is assigned twice",
+                                String::from_utf8_lossy(self.ast.text(*name))
+                            ),
+                            Span::default(),
+                        ));
+                    }
+                    assignments.push(BoundAssignment {
+                        column: 0,
+                        rowid: true,
+                        value: bound.clone(),
+                    });
+                    continue;
+                }
                 let Some(position) = table.column_position(&folded) else {
                     return Err(no_such_column(self.ast.text(*name), Span::default()));
                 };
@@ -631,11 +672,15 @@ impl<'a> Binder<'a> {
                 }
                 assignments.push(BoundAssignment {
                     column: position,
+                    rowid: false,
                     value: bound.clone(),
                 });
             }
         }
-        assignments.sort_by_key(|assignment| assignment.column);
+        // The rowid assignment sorts with the declared columns rather than
+        // ahead of them, because `column` says nothing for it and the order
+        // only has to be stable.
+        assignments.sort_by_key(|assignment| (assignment.rowid, assignment.column));
         let filter = match update.filter {
             Some(expr) => Some(self.bind_expr(expr)?),
             None => None,
@@ -653,8 +698,11 @@ impl<'a> Binder<'a> {
             Some(expr) => Some(self.bind_expr(expr)?),
             None => None,
         };
+        // The rowid is not a declared column, so no `UPDATE OF` trigger and no
+        // foreign key can be keyed on it and it contributes no name here.
         let changed: Vec<Vec<u8>> = assignments
             .iter()
+            .filter(|assignment| !assignment.rowid)
             .filter_map(|assignment| table.column(assignment.column))
             .map(|column| column.folded.clone())
             .collect();
@@ -947,6 +995,7 @@ impl<'a> Binder<'a> {
             time: trigger.time,
             when,
             body,
+            foreign_key: false,
         })
     }
 
@@ -1065,10 +1114,26 @@ impl<'a> Binder<'a> {
         let Some(term) = self.ast.from_term(id) else {
             return Err(unsupported("missing target", Span::default()));
         };
-        let ast::FromSource::Table { database, name, .. } = term.source else {
+        let ast::FromSource::Table {
+            database,
+            name,
+            indexed_by,
+            ..
+        } = term.source
+        else {
             return Err(unsupported("a target that is not a table", term.span));
         };
         let table = self.writable_target(database, name, term.span, event)?;
+        // The same rule as a SELECT's: an `INDEXED BY` that names no index of
+        // the table is refused rather than ignored (task-1979, F7). This path
+        // has the table in hand rather than a bound source, so it asks the
+        // table directly.
+        if let ast::IndexHint::IndexedBy(index) = indexed_by {
+            let folded = self.ast.folded(index).to_vec();
+            if !table.indexes.iter().any(|held| held.folded == folded) {
+                return Err(crate::bind::no_such_index(self.ast.text(index), term.span));
+            }
+        }
         let alias = match term.alias {
             Some(alias) => self.ast.text(alias).to_vec(),
             None => table.name.clone(),
@@ -1423,6 +1488,7 @@ impl<'a> Binder<'a> {
             };
             generated.push(BoundAssignment {
                 column: position,
+                rowid: false,
                 value: expr,
             });
         }
@@ -1644,6 +1710,7 @@ impl<'a> Binder<'a> {
                 };
                 assignments.push(BoundAssignment {
                     column: position,
+                    rowid: false,
                     value: bound.clone(),
                 });
             }

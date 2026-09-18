@@ -168,6 +168,9 @@ impl crate::ImportedDatabase {
                     self.seal()?;
                     return Ok(Outcome::empty());
                 }
+                // After the virtual-table branch, because a virtual table keeps
+                // no rows of its own and no foreign key can name one.
+                self.empty_before_dropping(&owner)?;
                 // Every row that names the table: the table, its indexes and its
                 // triggers. Collected before anything is removed, because the
                 // list is what decides what to remove.
@@ -692,6 +695,57 @@ impl crate::ImportedDatabase {
         }
         Ok(())
     }
+
+    /// Deletes every row of a table that is about to be dropped.
+    ///
+    /// **`DROP TABLE` ignored foreign keys entirely (task-1979, F6).** It removed
+    /// the catalog rows and released the trees, so a child row left pointing at a
+    /// parent that no longer existed was never noticed and an `ON DELETE CASCADE`
+    /// never ran: with `PRAGMA foreign_keys = ON`, `DROP TABLE p` succeeded where
+    /// SQLite answers `FOREIGN KEY constraint failed`, and with a cascade the child
+    /// rows stayed.
+    ///
+    /// SQLite's own words for what it does instead: "the DROP TABLE command
+    /// performs an implicit DELETE FROM before removing the table from the database
+    /// schema... The implicit DELETE FROM does not cause any triggers to fire, but
+    /// may cause foreign key actions or foreign key constraint violations." That is
+    /// what this is: the delete is bound as an ordinary statement, so there is one
+    /// implementation of what a foreign key means rather than a second one here,
+    /// and the triggers the user wrote are dropped from it before it runs.
+    ///
+    /// Nothing happens when the pragma is off, when the object is a view or a
+    /// virtual table, or when no foreign key mentions the table - which is the
+    /// optimisation SQLite documents in the same paragraph, and the reason an
+    /// ordinary `DROP TABLE` still costs what it always did.
+    ///
+    /// @param owner - the table about to be dropped
+    fn empty_before_dropping(&mut self, owner: &TableInfo) -> DbResult<()> {
+        if !self.pragmas.foreign_keys()
+            || owner.kind != inillucent_sql::catalog_view::TableKind::Table
+            || owner.module.is_some()
+        {
+            return Ok(());
+        }
+        if owner.foreign_key_triggers.is_empty() {
+            return Ok(());
+        }
+        let statement = delete_every_row(
+            inillucent_sql::catalog_view::CatalogView::database_name(
+                &self.schema.catalog,
+                owner.database,
+            ),
+            &owner.name,
+        );
+        let mut compiled = self.compile(&statement)?;
+        if let Cached::Delete(delete, _) = &mut compiled {
+            delete.triggers.retain(|trigger| trigger.foreign_key);
+        }
+        // `apply_compiled` rather than `execute_compiled`: the file lock is already
+        // held by the `DROP TABLE` this is part of, and the settle that follows a
+        // statement will run once for that statement rather than twice.
+        self.apply_compiled(&std::rc::Rc::new(compiled), &Params::new())?;
+        Ok(())
+    }
 }
 
 /// Applies a column's affinity to the value its `DEFAULT` evaluates to.
@@ -744,4 +798,19 @@ fn rows_in_the_new_shape(old_rows: &[Vec<OwnedDatum>], from: &[Fill]) -> Vec<Vec
                 .collect()
         })
         .collect()
+}
+
+/// Returns the `DELETE FROM` that empties one table, by its qualified name.
+///
+/// The name is quoted rather than interpolated bare, because a table may be
+/// called `my"table` and the statement this builds is parsed again.
+///
+/// @param database - the schema the table is in
+/// @param name - the table's name, as the catalog holds it
+fn delete_every_row(database: &[u8], name: &[u8]) -> String {
+    format!(
+        "DELETE FROM \"{}\".\"{}\"",
+        String::from_utf8_lossy(database).replace('"', "\"\""),
+        String::from_utf8_lossy(name).replace('"', "\"\"")
+    )
 }

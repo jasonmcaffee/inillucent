@@ -1004,7 +1004,14 @@ fn round(arguments: &[Value<'static>]) -> Value<'static> {
         return Value::Real(scaled.round() / factor);
     }
     let places = usize::try_from(digits).unwrap_or(0);
-    match format!("{real:.places$}").parse::<f64>() {
+    // **`printf::fixed` rather than Rust's own formatting.** Rust rounds a half
+    // to even and SQLite's printf rounds it away from zero, and the two disagree
+    // exactly where the double sits on the midpoint: `round(99.25, 1)` is 99.3
+    // in 3.53.4 and `{:.1}` of it is "99.2", and `round(0.125, 2)` is 0.13
+    // against "0.12". `printf::fixed` is the rendering `printf('%.1f', x)`
+    // already uses here, so the two agree by construction rather than by
+    // coincidence.
+    match crate::printf::fixed(real, places).parse::<f64>() {
         Ok(rounded) => Value::Real(rounded),
         // A magnitude no decimal form can carry is already rounded to this many
         // places, so it is its own answer.

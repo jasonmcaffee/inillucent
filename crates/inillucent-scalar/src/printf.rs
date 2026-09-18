@@ -428,7 +428,7 @@ fn real(spec: &Spec, argument: Option<&Value<'static>>) -> Vec<u8> {
 /// value is exactly on the midpoint and rounds away; if they are all nines the
 /// first dropped digit is a nine and rounds away too. Every other case is
 /// decided by the first dropped digit alone.
-fn fixed(value: f64, precision: usize) -> String {
+pub(crate) fn fixed(value: f64, precision: usize) -> String {
     if !value.is_finite() {
         return format!("{value:.precision$}");
     }

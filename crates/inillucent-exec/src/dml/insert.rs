@@ -155,7 +155,7 @@ pub fn insert_at(
             supplied_row,
             &space,
             &mut next_rowid,
-            || highest_rowid(&mut Borrowed(target), table),
+            &mut TableKeys::over(target, table),
             table.autoincrement.then_some(table),
         )?;
         // **`BEFORE` fires on the row as it will be written**, which is where
@@ -321,7 +321,9 @@ fn insert_into_view(
     let mut changes = Changes::default();
     let mut never = None;
     for supplied_row in &rows {
-        let image = plan.build_row(supplied_row, &space, &mut never, || Ok(0), None)?;
+        // A view has no tree to allocate a key in, and its rows never reach one:
+        // an `INSTEAD OF` trigger writes whatever it writes.
+        let image = plan.build_row(supplied_row, &space, &mut never, &mut NoKeys, None)?;
         if trigger::fire(
             &statement.triggers,
             TriggerTime::InsteadOf,
@@ -934,5 +936,49 @@ mod tests {
             Unwind::Transaction,
             "the clause a deeper statement set survives a caller that has none"
         );
+    }
+}
+
+/// One table's keys, for the allocation an insert with no rowid needs.
+struct TableKeys<'a> {
+    /// The file and its trees.
+    target: Borrowed<'a>,
+    /// The table being written.
+    table: &'a TableInfo,
+}
+
+impl<'a> TableKeys<'a> {
+    /// Returns the keys of one table, borrowing the write target.
+    ///
+    /// @param target - the file and its trees
+    /// @param table - the table being written
+    fn over(target: &'a mut dyn WriteTarget, table: &'a TableInfo) -> TableKeys<'a> {
+        TableKeys {
+            target: Borrowed(target),
+            table,
+        }
+    }
+}
+
+impl crate::insert_plan::RowidKeys for TableKeys<'_> {
+    fn highest(&mut self) -> DbResult<i64> {
+        highest_rowid(&mut self.target, self.table)
+    }
+
+    fn holds(&mut self, rowid: i64) -> DbResult<bool> {
+        row_exists(self.table, &mut self.target, &[OwnedDatum::Int(rowid)])
+    }
+}
+
+/// The keys of a table that is not there, for the `INSTEAD OF` path.
+struct NoKeys;
+
+impl crate::insert_plan::RowidKeys for NoKeys {
+    fn highest(&mut self) -> DbResult<i64> {
+        Ok(0)
+    }
+
+    fn holds(&mut self, _rowid: i64) -> DbResult<bool> {
+        Ok(false)
     }
 }

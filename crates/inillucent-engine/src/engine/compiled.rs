@@ -70,7 +70,7 @@ impl crate::ImportedDatabase {
     ///
     /// @param cached - the compiled statement
     /// @param params - the bound parameters
-    fn apply_compiled(
+    pub(crate) fn apply_compiled(
         &mut self,
         cached: &std::rc::Rc<Cached>,
         params: &Params,

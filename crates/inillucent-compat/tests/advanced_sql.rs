@@ -588,24 +588,22 @@ fn math_functions_match_the_oracle() {
     );
 }
 
-/// The two time zone modifiers differ from SQLite, and that is held in place.
+/// The two time zone modifiers answer what SQLite answers.
 ///
-/// **The one deliberate difference in the date and time table (task-1932, M8).**
-/// `datetime(x, 'localtime')` answers NULL here and `datetime(x, 'utc')`
-/// returns its argument unchanged; SQLite converts between the machine's zone
-/// and UTC for both. The reason is in `compat/sqlite-3.53.4.toml`'s
-/// `functions.date-time` row and in `docs/feature-comparison.md`: both of
-/// SQLite's answers depend on the operating system's time zone database and on
-/// the zone the process is running in, so the same query answers differently on
-/// two machines and differently again after a daylight saving change.
+/// **They used to be the one deliberate difference in the date and time table
+/// (task-1932, M8; reversed by task-1979, F13).** `datetime(x, 'localtime')`
+/// answered NULL and `datetime(x, 'utc')` returned its argument unchanged, on
+/// the argument that an answer which depends on the machine's zone cannot be
+/// graded against a second process. It can: both processes run here, on one
+/// machine, and what this asserts is that the two agree.
 ///
-/// What this asserts is the deviation itself, in both directions: that this
-/// engine still does what it has decided to do, *and* that SQLite still does
-/// something else. A decision nobody checks becomes a defect the day somebody
-/// implements the modifier and forgets the note - and one that is checked only
-/// on this side would go on passing after SQLite changed its mind.
+/// The value itself cannot be written down, because it is whatever the zone
+/// this machine is set to makes it, and a test that hard-coded one would pass
+/// in one office and fail in another. Asking the oracle is the assertion. The
+/// `utc` case also checks that the answer moved at all, so a pair of engines
+/// that both did nothing could not pass.
 #[test]
-fn the_time_zone_modifiers_are_a_deliberate_deviation() {
+fn the_time_zone_modifiers_agree_with_sqlite() {
     let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("advanced-sql");
     let _ = std::fs::create_dir_all(&directory);
     let Some((mut driver, database)) = build(&directory, "timezone") else {
@@ -619,36 +617,39 @@ fn the_time_zone_modifiers_are_a_deliberate_deviation() {
     // A fixed instant, so nothing here reads a clock.
     const STAMP: &str = "2026-09-03 14:30:00";
 
-    let local = format!("SELECT datetime('{STAMP}', 'localtime') IS NULL");
-    let ours = inillucent_rows(&connection, &local).expect("the statement runs");
-    assert_eq!(
-        ours,
-        vec!["int:1".to_string()],
-        "`datetime(x, 'localtime')` no longer answers NULL. If that is deliberate, the note \
-         on `functions.date-time` in compat/sqlite-3.53.4.toml and the row in \
-         docs/feature-comparison.md have to move with it."
-    );
-    let theirs = driver
-        .send(&Op::Query(local.clone()))
-        .expect("the oracle answers");
-    let said = theirs
-        .rows
-        .first()
-        .and_then(|row| row.first())
-        .map(|value| format!("{value:?}"))
-        .unwrap_or_default();
-    assert!(
-        theirs.ok && !said.contains('1'),
-        "SQLite now answers NULL for `localtime` as well, so this is no longer a deviation: \
-         {said}"
-    );
+    for modifier in ["localtime", "utc"] {
+        let query = format!("SELECT datetime('{STAMP}', '{modifier}')");
+        let ours = inillucent_rows(&connection, &query).expect("the statement runs");
+        let theirs = driver
+            .send(&Op::Query(query.clone()))
+            .expect("the oracle answers");
+        let said = theirs
+            .rows
+            .first()
+            .and_then(|row| row.first())
+            .map(render_tagged)
+            .unwrap_or_default();
+        let held = ours.first().cloned().unwrap_or_default();
+        assert!(
+            theirs.ok && said == held,
+            "`datetime(x, '{modifier}')` is {held} here and {said} in SQLite"
+        );
+    }
 
-    let utc = format!("SELECT datetime('{STAMP}', 'utc')");
-    let ours = inillucent_rows(&connection, &utc).expect("the statement runs");
+    // A machine set to UTC would make the two answers equal for an honest
+    // reason, so the check is that this engine is not simply echoing its
+    // argument back while SQLite converts: whatever the offset is, the two
+    // modifiers move the value in opposite directions by the same amount.
+    let both = format!(
+        "SELECT julianday(datetime('{STAMP}', 'utc')) + julianday(datetime('{STAMP}', \
+         'localtime')) - 2 * julianday('{STAMP}')"
+    );
+    let ours = inillucent_rows(&connection, &both).expect("the statement runs");
     assert_eq!(
         ours,
-        vec![format!("text:{STAMP}")],
-        "`datetime(x, 'utc')` is no longer a no-op"
+        vec!["real:0.0".to_string()],
+        "`utc` and `localtime` do not move the same instant by the same offset in \
+         opposite directions"
     );
 }
 

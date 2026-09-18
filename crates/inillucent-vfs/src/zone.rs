@@ -23,6 +23,10 @@
 #[cfg(unix)]
 pub fn local_offset_seconds(utc_seconds: i64) -> Option<i64> {
     let instant = utc_seconds as libc::time_t;
+    // SAFETY: `libc::tm` is a plain C struct of integers and a pointer, and a
+    // zeroed one is what every caller of `localtime_r` hands it. Its fields
+    // differ between platforms, so there is no field list to write out here
+    // that would compile everywhere.
     let mut broken: libc::tm = unsafe { core::mem::zeroed() };
     // SAFETY: `localtime_r` writes into a `tm` this call owns and reads one
     // `time_t` by pointer. It is the reentrant form on purpose: the shared
@@ -55,7 +59,7 @@ const TICKS_PER_SECOND: i64 = 10_000_000;
 /// @param utc_seconds - the instant, in seconds since 1970-01-01 00:00 UTC
 #[cfg(windows)]
 pub fn local_offset_seconds(utc_seconds: i64) -> Option<i64> {
-    use windows_sys::Win32::Foundation::{FILETIME, SYSTEMTIME};
+    use windows_sys::Win32::Foundation::FILETIME;
     use windows_sys::Win32::System::Time::{
         FileTimeToSystemTime, SystemTimeToFileTime, SystemTimeToTzSpecificLocalTime,
     };
@@ -70,9 +74,12 @@ pub fn local_offset_seconds(utc_seconds: i64) -> Option<i64> {
         dwLowDateTime: held as u32,
         dwHighDateTime: (held >> 32) as u32,
     };
-    let mut broken: SYSTEMTIME = unsafe { core::mem::zeroed() };
-    let mut local: SYSTEMTIME = unsafe { core::mem::zeroed() };
-    let mut converted: FILETIME = unsafe { core::mem::zeroed() };
+    let mut broken = empty_system_time();
+    let mut local = empty_system_time();
+    let mut converted = FILETIME {
+        dwLowDateTime: 0,
+        dwHighDateTime: 0,
+    };
     // SAFETY: every pointer is to a local of the right type, and the null
     // zone argument is what asks for the process's own zone rather than a
     // caller-supplied one. Each call reports failure through its return value,
@@ -89,6 +96,24 @@ pub fn local_offset_seconds(utc_seconds: i64) -> Option<i64> {
     Some((after - ticks) / TICKS_PER_SECOND)
 }
 
+/// Returns a zeroed `SYSTEMTIME`, for a call that is about to fill one.
+///
+/// Written out field by field rather than zeroed through `core::mem`, so that
+/// nothing in this module needs `unsafe` for a struct of eight integers.
+#[cfg(windows)]
+fn empty_system_time() -> windows_sys::Win32::Foundation::SYSTEMTIME {
+    windows_sys::Win32::Foundation::SYSTEMTIME {
+        wYear: 0,
+        wMonth: 0,
+        wDayOfWeek: 0,
+        wDay: 0,
+        wHour: 0,
+        wMinute: 0,
+        wSecond: 0,
+        wMilliseconds: 0,
+    }
+}
+
 /// Returns `None`, because this target has no zone lookup.
 ///
 /// @param utc_seconds - the instant, in seconds since 1970-01-01 00:00 UTC
@@ -102,17 +127,21 @@ pub fn local_offset_seconds(utc_seconds: i64) -> Option<i64> {
 mod tests {
     use super::local_offset_seconds;
 
+    /// 2020-01-01 12:00 UTC, the winter instant both tests ask about.
+    const WINTER: i64 = 1_577_880_000;
+
+    /// 2020-07-01 12:00 UTC, the summer one.
+    const SUMMER: i64 = 1_593_604_800;
+
     /// The offset is a whole number of minutes, and one a zone can hold.
     ///
-    /// The value itself is the machine's and cannot be asserted, so what is
-    /// asserted is the shape every real zone has: between UTC-12 and UTC+14,
-    /// and a whole minute. A stub that answered a constant would pass this and
-    /// a stub that answered nonsense would not.
+    /// The value itself is the machine's and cannot be written down here, so
+    /// what is asserted is the shape every real zone has: an answer at all,
+    /// between UTC-12 and UTC+14, and a whole minute. A lookup that gave up
+    /// would fail the first of those rather than skip the test.
     #[test]
     fn the_offset_is_a_whole_minute_inside_the_range_zones_use() {
-        let Some(offset) = local_offset_seconds(1_577_880_000) else {
-            return;
-        };
+        let offset = local_offset_seconds(WINTER).expect("the machine has a zone");
         assert_eq!(offset % 60, 0, "the offset is {offset} seconds");
         assert!(
             (-12 * 3600..=14 * 3600).contains(&offset),
@@ -124,16 +153,13 @@ mod tests {
     ///
     /// A zone that observes daylight saving answers two different offsets for
     /// January and July, and one that does not answers the same twice. Either
-    /// is right; what would be wrong is a lookup that ignores its argument and
-    /// a difference larger than any daylight saving rule uses.
+    /// is right; what would be wrong is a difference larger than any daylight
+    /// saving rule uses, which is what a lookup that read the wrong field or
+    /// the wrong instant would give.
     #[test]
     fn a_summer_instant_and_a_winter_one_differ_by_at_most_an_hour() {
-        let (Some(winter), Some(summer)) = (
-            local_offset_seconds(1_577_880_000),
-            local_offset_seconds(1_593_604_800),
-        ) else {
-            return;
-        };
+        let winter = local_offset_seconds(WINTER).expect("the machine has a zone");
+        let summer = local_offset_seconds(SUMMER).expect("the machine has a zone");
         assert!(
             (winter - summer).abs() <= 3600,
             "winter {winter} and summer {summer} are further apart than a daylight saving rule"

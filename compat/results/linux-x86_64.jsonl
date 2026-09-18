@@ -1006,7 +1006,7 @@
 {"test_id": "inillucent-compat::the_streaming_group_arm_changes_the_plan_and_not_the_answer", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "inillucent-compat::the_table_valued_functions_match", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "inillucent-compat::the_three_connection_scalars_answer_what_sqlite_answers", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
-{"test_id": "inillucent-compat::the_time_zone_modifiers_are_a_deliberate_deviation", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
+{"test_id": "inillucent-compat::the_time_zone_modifiers_agree_with_sqlite", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "inillucent-compat::the_tokenizer_folds_case_and_splits_on_punctuation", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "inillucent-compat::the_tool_schema_says_there_is_a_ceiling", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}
 {"test_id": "inillucent-compat::the_trigger_forms_sqlite_omits_are_refused", "platform": "linux-x86_64", "passed": true, "seed": 0, "artifact_sha256": ""}

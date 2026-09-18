@@ -744,19 +744,24 @@ and the ordering agree.
 | Modifiers: ceiling, floor, subsec, auto | yes | **yes** |
 | timediff | yes | **yes** |
 | Julian day round trip | yes | **yes** |
-| Modifiers: localtime, utc | yes | **no, on purpose** |
+| Modifiers: localtime, utc | yes | **yes** |
 
-The two time zone modifiers are the one deliberate difference in this table.
-`datetime(x, 'localtime')` answers NULL here and `datetime(x, 'utc')` returns
-its argument unchanged, where SQLite converts between the machine's zone and
-UTC: on a machine set to UTC-6, `datetime('2026-09-03 14:30:00', 'utc')` is
-`2026-09-03 20:30:00` in SQLite and `2026-09-03 14:30:00` here.
+Both time zone modifiers convert against the zone the process is running in, as
+SQLite's do. The offset is asked for one instant at a time, so a value on the
+far side of a daylight saving boundary uses the offset in force there rather
+than the one in force now.
 
-Both of SQLite's answers depend on the operating system's time zone database
-and on the zone the process is running in, so the same query answers differently
-on two machines and differently again after a daylight saving change. Store the
-offset with the value and convert it in the application, which is what a query
-that has to give the same answer twice already does.
+That makes the answer depend on the machine: on a machine set to UTC-6,
+`datetime('2026-09-03 14:30:00', 'utc')` is `2026-09-03 20:30:00`, and the same
+query on a machine set to UTC is `2026-09-03 14:30:00`. A query that has to give
+the same answer on two machines should store the offset with the value and
+convert it in the application.
+
+Until task-1981 these two modifiers were a deliberate difference: `localtime`
+answered NULL and `utc` returned its argument unchanged, on the argument that an
+answer which moves with the machine cannot be graded against a second process.
+task-1979's differential corpus is that grading, it runs both processes on one
+machine, and `'now'` has always had the same property.
 
 ### Maths - 4 of 4
 

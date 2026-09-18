@@ -107,7 +107,7 @@ const UNSAFE_CRATES: [&str; 1] = ["inillucent-driver-capi"];
 // are FFI. Each call installs a handler and reads nothing back; each handler
 // stores `true` into an already-allocated `AtomicBool` and returns, which is
 // the whole of what a handler is allowed to do.
-const UNSAFE_ALLOWED: [&str; 14] = [
+const UNSAFE_ALLOWED: [&str; 15] = [
     "crates/inillucent-cli/src/interrupt.rs",
     // The allocator's own concurrency suite, added in task-1932 (H9). It
     // allocates on one thread and frees on another through `GlobalAlloc`, which
@@ -133,6 +133,12 @@ const UNSAFE_ALLOWED: [&str; 14] = [
     "crates/inillucent-remote/src/tls/windows.rs",
     "crates/inillucent-vfs/src/os/windows.rs",
     "crates/inillucent-vfs/src/os/unix.rs",
+    // The local zone's offset from UTC, for the `utc` and `localtime` date
+    // modifiers (task-1979, F13). It stands on the same ground as the two files
+    // above: `localtime_r` on Unix and `SystemTimeToTzSpecificLocalTime` on
+    // Windows are the only way to ask what the offset is, and both are reached
+    // through FFI.
+    "crates/inillucent-vfs/src/zone.rs",
     "crates/inillucent-compat/src/bin/sqlperf.rs",
     "crates/inillucent-compat/src/bin/planperf.rs",
     // The same counting global allocator as the two profiling binaries above:
