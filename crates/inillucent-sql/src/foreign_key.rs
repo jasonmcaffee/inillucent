@@ -531,11 +531,17 @@ fn plan_table(
                     String::from_utf8_lossy(&key.parent)
                 ),
                 true,
+                key.parent_folded == table.folded,
             ));
             continue;
         };
         if !parent_key_is_unique(parent, key) {
-            planned.push(unusable(key, mismatch(table, parent), true));
+            planned.push(unusable(
+                key,
+                mismatch(table, parent),
+                true,
+                parent.folded == table.folded,
+            ));
             continue;
         }
         for event in [ForeignKeyEvent::ChildInsert, ForeignKeyEvent::ChildUpdate] {
@@ -545,6 +551,7 @@ fn plan_table(
                     deferred: key.is_deferred(),
                     trigger: Some(trigger),
                     fault: Vec::new(),
+                    self_referencing: parent.folded == table.folded,
                 });
             }
         }
@@ -558,7 +565,12 @@ fn plan_table(
                 continue;
             }
             if !parent_key_is_unique(table, key) {
-                planned.push(unusable(key, mismatch(child, table), false));
+                planned.push(unusable(
+                    key,
+                    mismatch(child, table),
+                    false,
+                    child.folded == table.folded,
+                ));
                 continue;
             }
             for event in [ForeignKeyEvent::ParentDelete, ForeignKeyEvent::ParentUpdate] {
@@ -578,6 +590,7 @@ fn plan_table(
                     deferred: key.is_deferred(),
                     trigger: Some(trigger),
                     fault: Vec::new(),
+                    self_referencing: child.folded == table.folded,
                 });
             }
         }
@@ -595,12 +608,23 @@ fn mismatch(child: &TableInfo, parent: &TableInfo) -> String {
 }
 
 /// Returns an entry that reports a fault instead of enforcing anything.
-fn unusable(key: &ForeignKeyInfo, message: String, is_check: bool) -> ForeignKeyTrigger {
+///
+/// @param key - the key that cannot be enforced
+/// @param message - what to report when something writes
+/// @param is_check - whether it would have refused rather than repaired
+/// @param self_referencing - whether the key's child and parent are one table
+fn unusable(
+    key: &ForeignKeyInfo,
+    message: String,
+    is_check: bool,
+    self_referencing: bool,
+) -> ForeignKeyTrigger {
     ForeignKeyTrigger {
         is_check,
         deferred: key.is_deferred(),
         trigger: None,
         fault: message.into_bytes(),
+        self_referencing,
     }
 }
 

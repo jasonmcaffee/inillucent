@@ -752,7 +752,9 @@ impl crate::ImportedDatabase {
         );
         let mut compiled = self.compile(&statement)?;
         if let Cached::Delete(delete, _) = &mut compiled {
-            delete.triggers.retain(|trigger| trigger.foreign_key);
+            delete
+                .triggers
+                .retain(|trigger| trigger.foreign_key && !trigger.self_referencing);
         }
         // `apply_compiled` rather than `execute_compiled`: the file lock is already
         // held by the `DROP TABLE` this is part of, and the settle that follows a

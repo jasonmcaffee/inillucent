@@ -194,6 +194,15 @@ pub struct BoundTrigger {
     /// delete bound for that purpose keeps the triggers this flag marks and
     /// drops the rest.
     pub foreign_key: bool,
+    /// Whether the foreign key this enforces has one table as both its child
+    /// and its parent.
+    ///
+    /// **Also read by `DROP TABLE` (task-1979, F6).** The implicit delete keeps
+    /// the foreign key triggers and drops this one, because emptying a table
+    /// cannot leave a row of that same table pointing at nothing - see
+    /// `ForeignKeyTrigger::self_referencing`, which is where the value comes
+    /// from. Always false on a trigger the schema wrote.
+    pub self_referencing: bool,
 }
 
 /// A bound `INSERT`.
@@ -911,7 +920,9 @@ impl<'a> Binder<'a> {
             if self.firing_foreign_keys.contains(&trigger.folded) {
                 continue;
             }
-            bound.push(self.bind_foreign_key_trigger(table, trigger, &event)?);
+            let mut one = self.bind_foreign_key_trigger(table, trigger, &event)?;
+            one.self_referencing = planned.self_referencing;
+            bound.push(one);
         }
         Ok(bound)
     }
@@ -996,6 +1007,7 @@ impl<'a> Binder<'a> {
             when,
             body,
             foreign_key: false,
+            self_referencing: false,
         })
     }
 

@@ -127,7 +127,7 @@ pub fn run_compound(
         let (right, _) = run_arm(arm, catalog, params)?;
         rows = combine(kind_of(*op), &collations, rows, right)?;
     }
-    let ordered = order_compound(&plan.select, rows, &collations, params)?;
+    let ordered = order_compound(&plan.select, rows, params)?;
     Ok((ordered, shape))
 }
 /// Runs one arm of a compound, without the compound's own ordering or limit.
@@ -309,12 +309,10 @@ fn combine(
 ///
 /// @param select - the head arm's bound statement, which carries them
 /// @param rows - the combined rows
-/// @param collations - the collation of each result column
 /// @param params - the bound parameters
 fn order_compound(
     select: &BoundSelect,
     rows: Vec<Vec<OwnedDatum>>,
-    collations: &[Collation],
     params: &Params,
 ) -> DbResult<Vec<Vec<OwnedDatum>>> {
     if select.order_by.is_empty() && select.limit.is_none() && select.offset.is_none() {
@@ -333,10 +331,15 @@ fn order_compound(
         keys.push(SortKey {
             column: usize::from(*column),
             descending,
-            collation: collations
-                .get(usize::from(*column))
-                .copied()
-                .unwrap_or(term.collation),
+            // **The collation the term resolved to, not the result column's
+            // (task-1979, F15).** Reading it off the column threw away a
+            // `COLLATE` written on the term, so
+            // `SELECT 'B' AS a UNION SELECT 'a' ORDER BY a COLLATE NOCASE`
+            // sorted `B` before `a` where SQLite sorts `a` first. The binder
+            // has already chosen between the two: the name on the term when
+            // there is one, and the result column's own collation when there is
+            // not, which is the value this line used to read.
+            collation: term.collation,
             // The binder has already resolved the default, which is NULLS
             // FIRST ascending and NULLS LAST descending.
             nulls_first: match term.nulls {
