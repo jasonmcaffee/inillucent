@@ -18,18 +18,55 @@ use inillucent_value::Value;
 
 /// A database file of this test's own, under the gitignored agent-output root.
 ///
-/// Each test gets its own directory so nothing has to be deleted before a run
-/// and two tests running in parallel cannot collide on one file.
+/// Each test gets its own directory, and a serial keeps two tests running in
+/// parallel off one another's file.
+///
+/// **The file is removed before the path is handed out.** It used to be handed
+/// out as it was, on the argument that a process id in the name makes every run
+/// name a file no earlier run had written. Windows hands process ids back out,
+/// so the same name does come round again, and nothing here ever deleted one:
+/// when task-1978 counted them, `_agent_output/plan-cache/` held 1,125
+/// databases written by 143 process ids, the oldest dated 2026-09-09 and none
+/// of them removed. When a run drew a name one of them was already
+/// sitting at, `Database::open_with_busy_timeout` opened that database with its
+/// schema, and the `CREATE TABLE t` in every fixture below failed on the table
+/// the earlier run had created. Six of the seven tests in this file failed that
+/// way in the run of 2026-09-17 21:56 and passed on their own afterwards.
+///
+/// The WAL segment beside the database is left where it is. A segment records
+/// the uuid of the database that wrote it, a uuid a new file draws at random,
+/// and `inillucent_wal::recover::read_chain` ends the chain at a segment
+/// belonging to another database rather than replaying it - so the schema
+/// cannot come back that way, and the new database truncates the segment and
+/// writes its own header over it. `a_leftover_database_does_not_reach_the_next_run`
+/// is the case for both halves of that.
 ///
 /// @param name - the test's name, which names its directory
 fn scratch(name: &str) -> std::path::PathBuf {
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    scratch_at(
+        name,
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+/// The same thing for a serial the caller chose.
+///
+/// Split out so `a_leftover_database_does_not_reach_the_next_run` can ask for
+/// one path twice. The counter above hands out a different serial every call,
+/// which is what every other test here wants and is exactly what a case about
+/// one path being reused cannot use.
+///
+/// @param name - the test's name, which names its directory
+/// @param serial - which of that directory's files to name
+fn scratch_at(name: &str, serial: u32) -> std::path::PathBuf {
     let root = inillucent_compat::workspace_root()
         .join("_agent_output/plan-cache")
         .join(name);
     std::fs::create_dir_all(&root).expect("the scratch directory");
-    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    root.join(format!("{}-{serial}.db", std::process::id()))
+    let path = root.join(format!("{}-{serial}.db", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    path
 }
 
 /// Opens a fresh database with the given schema and rows.
@@ -38,8 +75,8 @@ fn scratch(name: &str) -> std::path::PathBuf {
 /// @param setup - the statements to run before the test
 fn open(name: &str, setup: &[&str]) -> Database {
     let path = scratch(name);
-    // A fresh file per run: the process id is in the name, so a second run does
-    // not inherit the first one's schema and nothing has to be removed.
+    // Nothing is at this path: `scratch` deleted whatever an earlier run left
+    // there, so this open creates the database and `setup` is its whole schema.
     let database =
         Database::open_with_busy_timeout(&path, std::time::Duration::from_secs(5)).expect("open");
     let connection = database.session().expect("connect");
@@ -319,4 +356,65 @@ fn the_cache_changes_no_answer() {
         answers.push(held);
     }
     assert_eq!(answers[0], answers[1]);
+}
+
+/// A database an earlier run left at the path does not reach the next run.
+///
+/// The fixture's own case, and it is here because the fixture was wrong. Every
+/// other test in this file opens a database and asserts what the plan cache did
+/// with a known schema, so every one of them depends on `scratch` returning a
+/// path nothing is at - and across the 143 process ids task-1978 counted in
+/// that directory, it did not.
+/// The case writes a database at one of those paths and then asks the fixture for
+/// that same path, which is what a run that drew a process id Windows had
+/// handed out before was doing.
+///
+/// It fails against the fixture as it was, on the assertion that the path the
+/// fixture handed back holds nothing. That is one step earlier than what the
+/// other tests saw - they reported `table t already exists` from the fixture's
+/// own `CREATE TABLE t`, six of the seven of them in the run of 2026-09-17
+/// 21:56 - and the last statement here is that same `CREATE TABLE t`, so the
+/// symptom they had is covered as well as the cause.
+///
+/// The log segment is asserted as well as the database, because the fixture
+/// deletes one of the two. A segment records the uuid of the database that
+/// wrote it and `inillucent_wal::recover::read_chain` ends the chain at a
+/// segment belonging to a different database, so a segment left beside a
+/// deleted file cannot replay the old schema into the new one - and the
+/// assertion keeps this case from quietly stopping to cover that half.
+#[test]
+fn a_leftover_database_does_not_reach_the_next_run() {
+    let path = scratch_at("leftover", 0);
+    {
+        let database = Database::open_with_busy_timeout(&path, std::time::Duration::from_secs(5))
+            .expect("open");
+        let connection = database.session().expect("connect");
+        connection
+            .execute_batch("CREATE TABLE t(a INTEGER)")
+            .expect("the leftover schema is written");
+    }
+    assert!(path.exists(), "the run left no database to be inherited");
+    let segment = path.with_file_name(format!(
+        "{}-wal.0000000001",
+        path.file_name().unwrap_or_default().to_string_lossy()
+    ));
+    assert!(
+        segment.exists(),
+        "no log segment at {}, so this case is not checking what it says it is",
+        segment.display()
+    );
+
+    let again = scratch_at("leftover", 0);
+    assert_eq!(again, path, "the fixture named a different file");
+    assert!(
+        !again.exists(),
+        "the fixture handed back the database the first run left at {}",
+        again.display()
+    );
+    let database = Database::open_with_busy_timeout(&again, std::time::Duration::from_secs(5))
+        .expect("reopen");
+    let connection = database.session().expect("connect");
+    connection
+        .execute_batch("CREATE TABLE t(a INTEGER)")
+        .expect("the earlier run's schema must not have come back");
 }

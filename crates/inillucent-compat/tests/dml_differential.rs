@@ -814,6 +814,15 @@ fn vacuum_carries_an_attached_database_across_like_sqlite() {
         "inillucent-vacuum-attach-aux-{}.rdb",
         std::process::id()
     ));
+    // Removed here as well as at the end. The two names hold nothing but this
+    // process id, Windows hands process ids back out, and the removal below
+    // runs only when every assertion passed - so one failed run leaves both
+    // files behind and the next run that draws the same id creates `main.t`
+    // against a database that already has it. That is the defect task-1978
+    // found in `plan_cache.rs`, which had the same kind of name and no removal
+    // at all.
+    let _ = std::fs::remove_file(&main_path);
+    let _ = std::fs::remove_file(&file_aux_path);
     let mut engine =
         ImportedDatabase::create(main_path.clone(), 4096, 256).expect("main is created");
     engine
