@@ -999,9 +999,6 @@ tier = "differential"
 covers = ["inillucent-search", "inillucent-engine"]
 requires = ["oracle"]
 
-["inillucent-engine", "inillucent-sql"]
-requires = ["oracle"]
-
 [[target]]
 package = "inillucent-compat"
 kind = "test"

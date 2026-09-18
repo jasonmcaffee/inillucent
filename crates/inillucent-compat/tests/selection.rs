@@ -30,6 +30,14 @@
 //! is declared. Both are typos that would otherwise turn into a suite that is
 //! never selected - a `covers` entry naming a crate that was renamed matches
 //! nothing, forever, and says nothing about it.
+//!
+//! ## And one the map can be wrong in a way no check above can see
+//!
+//! Every check here reads the map through its parser, so a line the parser
+//! drops is a line no check looks at.
+//! `every_line_of_the_map_is_one_the_parser_reads` compares the file to itself
+//! instead: a bare value the parser discards, or a key written twice in one row
+//! where it keeps only the last, is a line somebody wrote and nothing acts on.
 
 use std::collections::BTreeSet;
 
@@ -114,6 +122,88 @@ fn no_test_hides_outside_the_map() {
 }
 
 /// Every row's tier must be one the file declares.
+/// Every line of the map is one the parser reads.
+///
+/// **The two lines that made this worth writing (task-1970).** The file held
+///
+/// ```text
+/// ["inillucent-engine", "inillucent-sql"]
+/// requires = ["oracle"]
+/// ```
+///
+/// directly under the `registers` row, with no `[[target]]` header above them
+/// and no `covers = ` in front of the list - the remains of a row an earlier
+/// edit removed half of. `toml_lite` reads a bare value as nothing and a
+/// repeated key as the last one, so the file parsed, 188 rows came back, every
+/// other check in this suite passed, and the only visible trace was that
+/// `registers` had `requires = ["oracle"]` twice and the published count of
+/// `oracle` rows was 27 where a line count said 28.
+///
+/// That is the failure this whole ticket is about: a contract file quietly
+/// absorbing something nobody meant, and every check over it still reporting
+/// green. A map is a file whose content is only ever read through a parser, so
+/// the lines the parser ignores are exactly the lines nothing else looks at
+/// either.
+///
+/// The shapes allowed are a blank line, a comment, one of the three array
+/// headers, and `key = value` for a key this map defines. Anything else fails
+/// and is quoted with its line number.
+#[test]
+fn every_line_of_the_map_is_one_the_parser_reads() {
+    const KEYS: [&str; 12] = [
+        "package",
+        "kind",
+        "name",
+        "tier",
+        "purpose",
+        "exclusive",
+        "covers",
+        "requires",
+        "features",
+        "prefix",
+        "packages",
+        "reason",
+    ];
+    const HEADERS: [&str; 3] = ["[[target]]", "[[tier]]", "[[path]]"];
+
+    let text = std::fs::read_to_string(workspace_root().join("tests/selection.toml"))
+        .expect("the selection map");
+    let mut stray: Vec<String> = Vec::new();
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for (index, line) in text.lines().enumerate() {
+        let trimmed = line.trim_end();
+        if trimmed.is_empty() || trimmed.trim_start().starts_with('#') {
+            continue;
+        }
+        if HEADERS.contains(&trimmed) {
+            seen.clear();
+            continue;
+        }
+        let key = trimmed.split(" = ").next().unwrap_or("");
+        if !trimmed.contains(" = ") || !KEYS.contains(&key) {
+            stray.push(format!("{}: {trimmed}", index + 1));
+            continue;
+        }
+        // The other half of the same defect. A bare value is dropped and a
+        // repeated key resolves to the last one, and the row that carried both
+        // read as correct in every check but the count.
+        if !seen.insert(key) {
+            stray.push(format!(
+                "{}: {trimmed} - `{key}` is written twice in this row",
+                index + 1
+            ));
+        }
+    }
+    assert!(
+        stray.is_empty(),
+        "these lines of tests/selection.toml are not a header, a comment or a key this map \
+         defines once, so the parser folds them into the row above, drops them, or keeps only \
+         the last of them:\n  {}\n\
+         A line nothing reads is a line nothing checks.",
+        stray.join("\n  ")
+    );
+}
+
 #[test]
 fn every_tier_is_declared() {
     let map = map();
