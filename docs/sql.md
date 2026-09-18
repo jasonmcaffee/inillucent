@@ -60,6 +60,16 @@ It also names what the connection itself has registered - anything an applicatio
 read the static built-in list alone, so `embed` answered `SELECT length(embed('hello'))` with 3072
 and `inillucent functions embed` printed nothing.
 
+**Where a registered function may be called from is decided by its flags.** A registration is
+`direct_only` unless it says otherwise, and a `direct_only` function may be named by a statement and
+not by the schema: not by a `DEFAULT`, a `CHECK`, a generated column, an index expression, a
+partial-index predicate, a view or a trigger. A function that is neither `direct_only` nor
+`innocuous` may be named by the schema only while `PRAGMA trusted_schema` is on, which it is by
+default. A schema that names one it may not is refused with `<name> may only be used from top-level
+SQL`, when the statement that reads it is bound - and at `CREATE INDEX` for an index expression,
+because that is the one form this engine binds while it builds it. `embed(TEXT)` is `direct_only`:
+it loads a 275 MB model, and a `CHECK` that named it would load that model on every insert.
+
 ```sh
 inillucent functions --output json --limit 0
 node tools/feature-probe/registers.js    # both registers, compared name by name

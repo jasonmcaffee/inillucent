@@ -774,9 +774,15 @@ impl<'d> Connection<'d> {
     /// `PRAGMA writable_schema = ON`, both of which let a caller lose or
     /// corrupt a database with one statement.
     ///
+    /// **Through the engine, so the registry hears it too (task-1972).** It
+    /// used to set the shared pragma record and nothing else, and
+    /// `Registry::authorize_shadow_write` reads `Policy::defensive` - so the
+    /// half of this flag that is about a module's private storage was set on
+    /// one copy and read from another, and refused nothing.
+    ///
     /// @param on - whether the flag is in force
     pub fn set_defensive(&self, on: bool) -> DbResult<()> {
-        self.database.settings.set_defensive(on);
+        self.engine_mut()?.set_defensive(on);
         Ok(())
     }
 

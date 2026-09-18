@@ -785,6 +785,11 @@ impl<'a> Binder<'a> {
             let saved_scopes = core::mem::take(&mut self.scopes);
             let saved_aliases = self.row_aliases.take();
             let saved_target = self.view_target.take();
+            // A trigger body is schema text: the statements in it were written
+            // by whoever wrote the file, and they run because a write happened
+            // rather than because anybody submitted them.
+            let saved_site = self.call_site;
+            self.call_site = crate::function::CallSite::Schema;
             self.ast = &trigger.ast;
             self.row_aliases = Some(crate::bind::RowAliases {
                 table: table.clone(),
@@ -792,6 +797,7 @@ impl<'a> Binder<'a> {
                 new,
             });
             let result = self.bind_trigger_body(trigger, table);
+            self.call_site = saved_site;
             self.ast = saved_ast;
             self.scopes = saved_scopes;
             self.row_aliases = saved_aliases;
@@ -877,6 +883,11 @@ impl<'a> Binder<'a> {
         let saved_scopes = core::mem::take(&mut self.scopes);
         let saved_aliases = self.row_aliases.take();
         let saved_target = self.view_target.take();
+        // A synthesised key action is generated from a `REFERENCES` clause the
+        // schema wrote, so it is schema too - the same site a written trigger
+        // gets, because the binder turns both into the same text.
+        let saved_site = self.call_site;
+        self.call_site = crate::function::CallSite::Schema;
         self.ast = &trigger.ast;
         self.row_aliases = Some(crate::bind::RowAliases {
             table: table.clone(),
@@ -884,6 +895,7 @@ impl<'a> Binder<'a> {
             new,
         });
         let result = self.bind_trigger_body(trigger, table);
+        self.call_site = saved_site;
         self.ast = saved_ast;
         self.scopes = saved_scopes;
         self.row_aliases = saved_aliases;
@@ -1509,6 +1521,20 @@ impl<'a> Binder<'a> {
         let (ast, expr) = parse_expression(sql, &limits)?;
         let mut nested = Binder::new(self.catalog, &ast, self.authorizer);
         nested.trigger_depth = self.trigger_depth;
+        // **This is where a `DEFAULT`, a `CHECK`, a generated column, an index
+        // expression and a partial-index predicate all become a bound tree, so
+        // it is where all five are told they are a schema (task-1972).** The
+        // nested binder also inherits the connection's registrations and
+        // collations, which it did not before: without the registrations
+        // `bind_external_call` never sees the call at all, because the name
+        // does not resolve to a registered function and the expression fails as
+        // "no such function" - an error for the wrong reason, and one that
+        // disappears the moment an application registers the same name at a
+        // different arity.
+        nested.externals = self.externals;
+        nested.collations = self.collations;
+        nested.trusted_schema = self.trusted_schema;
+        nested.call_site = crate::function::CallSite::Schema;
         nested.sources = self.sources.clone();
         nested.scopes = self.scopes.clone();
         let bound = nested.bind_expr(expr)?;

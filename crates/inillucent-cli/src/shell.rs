@@ -263,6 +263,15 @@ impl Shell {
         // below is not enough: the engine has to be told, or
         // `PRAGMA journal_mode = OFF` is honoured here and refused there.
         let _ = database.session_as(session).set_defensive(true);
+        // **And turns this one off, for the same reason (task-1972).** The
+        // library's default is on, which is SQLite's, and the reference's shell
+        // turns it off at startup - so `.dbconfig` on the reference prints
+        // `trusted_schema off` on a connection whose library default was on.
+        // A shell is a program that opens files it did not write, which is the
+        // case the flag exists for.
+        let _ = database
+            .session_as(session)
+            .execute_batch("PRAGMA trusted_schema = OFF;");
         Ok(Opened {
             database,
             session,

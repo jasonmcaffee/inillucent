@@ -164,6 +164,46 @@ impl crate::ImportedDatabase {
             }
         }
     }
+    /// Reads or sets whether the connection trusts the schema it read.
+    ///
+    /// **It used to be a constant that said the opposite of what the engine did
+    /// (task-1972).** `PRAGMA trusted_schema` answered 0 from the fixed-answer
+    /// table, beside the comment "a schema object is never treated as trusted
+    /// input here", while the connection's own policy said `true` and nothing
+    /// read either one: `Registry::authorize_function` had no caller, so the
+    /// setting had no effect to be honest or dishonest about. The binder
+    /// consults it now, which makes a constant answer a lie rather than a
+    /// simplification.
+    ///
+    /// **The default is on, which is SQLite's.** Turning it off refuses every
+    /// registered function a schema names unless the registration said
+    /// `innocuous`, and that is a promise about every database the application
+    /// will ever open rather than about the one in front of it. A
+    /// `direct_only` function is refused either way.
+    ///
+    /// The compiled statements go with it, for the reason `foreign_keys`
+    /// throws them away: whether a schema may name a function is decided by the
+    /// binder, once, when a statement is compiled.
+    ///
+    /// @param argument - the value it was given, when it was given one
+    pub(crate) fn pragma_trusted_schema(
+        &mut self,
+        argument: Option<&PragmaArgument>,
+    ) -> DbResult<Outcome> {
+        let held = self.session_state.registry.policy().trusted_schema;
+        match argument {
+            None => Ok(named_integer("trusted_schema", i64::from(held))),
+            Some(argument) => {
+                let asked = argument_boolean(argument);
+                if asked != held {
+                    self.forget_compiled_statements();
+                }
+                self.session_state.registry.policy_mut().trusted_schema = asked;
+                Ok(Outcome::empty())
+            }
+        }
+    }
+
     /// Reads or sets whether every immediate key check waits for the commit.
     ///
     /// It is a transaction's setting rather than a connection's - SQLite clears

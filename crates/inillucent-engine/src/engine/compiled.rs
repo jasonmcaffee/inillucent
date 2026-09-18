@@ -282,6 +282,7 @@ impl crate::ImportedDatabase {
             .with_source(sql.as_bytes())
             .with_functions(&externals)
             .with_collations(&self.session_state.collations)
+            .with_trusted_schema(self.session_state.registry.policy().trusted_schema)
             .with_limits(&self.pragmas.limits().borrow())
             .with_foreign_keys(
                 self.pragmas.foreign_keys(),

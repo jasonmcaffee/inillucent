@@ -235,8 +235,18 @@ impl crate::ImportedDatabase {
             return Vec::new();
         };
         let authorizer = inillucent_sql::bind::AllowAll;
+        // **The body is read as what it is: schema (task-1972).** A view over a
+        // registered function reports the columns it would produce only if the
+        // binder can resolve the name, which needs the connection's
+        // registrations; and a view naming a function a schema may not name
+        // reports no columns, which is the same answer selecting from it gives.
+        let externals = self.external_functions();
         let mut binder =
-            inillucent_sql::bind::Binder::new(&self.schema.catalog, &body.ast, &authorizer);
+            inillucent_sql::bind::Binder::new(&self.schema.catalog, &body.ast, &authorizer)
+                .with_functions(&externals)
+                .with_collations(&self.session_state.collations)
+                .with_trusted_schema(self.session_state.registry.policy().trusted_schema)
+                .in_schema();
         let Ok(bound) = binder.bind_select(body.select) else {
             return Vec::new();
         };

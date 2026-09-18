@@ -125,7 +125,7 @@ the two numbers and what was expected of them.
 
 ## 2. The shape of the suite
 
-**188 test targets, 2,789 tests, in nine tiers.** A target is one binary
+**190 test targets, 2,806 tests, in nine tiers.** A target is one binary
 `cargo test` builds; a tier is a band you can ask for by name. Every target is
 in exactly one tier, so the tiers partition the suite rather than overlapping
 it. (Was 129 targets, 2,336 tests when this document was written; task-1911's
@@ -152,7 +152,7 @@ of a run rather than of the map and is not checked here.
 |---|---:|---:|---|
 | `smoke` | 1 | 8 | the ten-second answer: a real file opened, written, reopened, read |
 | `unit` | 31 | 1,242 | every crate's own `#[cfg(test)]` modules |
-| `engine` | 58 | 330 | SQL and storage behaviour over real database files |
+| `engine` | 60 | 347 | SQL and storage behaviour over real database files |
 | `differential` | 31 | 309 | graded against the pinned SQLite 3.53.4 |
 | `durability` | 24 | 176 | crashes, injected faults, corruption and concurrency |
 | `e2e` | 26 | 130 | the public surfaces an application binds to, end to end |

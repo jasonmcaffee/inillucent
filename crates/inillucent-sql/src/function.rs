@@ -304,10 +304,110 @@ pub enum AggregateFunc {
     External,
 }
 
+/// What a registered function promises about itself.
+///
+/// It lives here, below `inillucent-ext`, because two different layers have to
+/// read the same promise: `inillucent_ext::registry::Registry` records it when
+/// an application registers a function, and the binder enforces it when a
+/// schema names one. `inillucent-ext` re-exports this type, so a registrant
+/// writes `inillucent_ext::registry::FunctionFlags` exactly as before.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FunctionFlags {
+    /// The function may only be called from top-level SQL, never from a
+    /// schema: not from a `DEFAULT`, a `CHECK`, a generated column, an index
+    /// expression, a partial-index predicate, a view or a trigger.
+    ///
+    /// [`FunctionFlags::external`] sets this, because the safe assumption about
+    /// code somebody else wrote is that it does something. **It is not what the
+    /// `Default` derive gives**, which is every flag false: a registrant who
+    /// writes `..FunctionFlags::default()` gets a function a schema may name.
+    /// That is the hole `embed` was registered through (task-1969, 7.4), and
+    /// `inillucent_ext::registry::UserFunction::external` is the constructor to
+    /// reach for instead.
+    pub direct_only: bool,
+    /// The function does nothing an ordinary expression could not: no side
+    /// effects, no file access, no dependence on anything but its arguments.
+    pub innocuous: bool,
+    /// The function returns the same answer for the same arguments within one
+    /// statement, so the planner may call it once.
+    pub deterministic: bool,
+}
+
+impl FunctionFlags {
+    /// Returns the flags a built-in carries: safe for a schema to call.
+    pub fn builtin() -> FunctionFlags {
+        FunctionFlags {
+            direct_only: false,
+            innocuous: true,
+            deterministic: true,
+        }
+    }
+
+    /// Returns the flags anything registered from outside carries by default.
+    pub fn external() -> FunctionFlags {
+        FunctionFlags {
+            direct_only: true,
+            innocuous: false,
+            deterministic: false,
+        }
+    }
+}
+
+/// Which context a name is being resolved from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallSite {
+    /// The statement an application submitted.
+    Statement,
+    /// A `DEFAULT`, `CHECK`, generated column, index expression, partial-index
+    /// predicate, view or trigger stored in the schema.
+    Schema,
+}
+
+/// Returns why a schema may not call this function, or nothing when it may.
+///
+/// **One rule, read by two layers (task-1972).** `Registry::authorize_function`
+/// wraps the answer in a `DbError` for an application that asks the registry
+/// directly, and the binder wraps it in a `ParseError` for the statement it is
+/// compiling. Writing the rule twice is how the two would eventually disagree,
+/// and the half nobody exercised would be the permissive one.
+///
+/// The rule reads the same way SQLite's does: a direct-only function is never
+/// callable from a schema; anything else is callable from a schema only when
+/// the connection trusts the schema or the function is innocuous.
+///
+/// @param flags - what the function promises about itself
+/// @param site - where the call was written
+/// @param trusted_schema - whether the connection trusts the schema it read
+pub fn schema_refusal(
+    flags: FunctionFlags,
+    site: CallSite,
+    trusted_schema: bool,
+) -> Option<&'static str> {
+    if site == CallSite::Statement {
+        return None;
+    }
+    if flags.direct_only {
+        return Some("may only be used from top-level SQL");
+    }
+    if trusted_schema || flags.innocuous {
+        return None;
+    }
+    Some("is not allowed in a schema")
+}
+
 /// A function an application registered, as the binder needs to see it.
 ///
-/// Only what resolution needs: a name, how many arguments it takes, and whether
-/// it reduces a group. What it does is the machine's business.
+/// Only what resolution needs: a name, how many arguments it takes, whether it
+/// reduces a group, and what it promises about itself. What it *does* is the
+/// machine's business.
+///
+/// **The flags are here because the binder is where the promise is kept
+/// (task-1972).** `Registry::authorize_function` had no caller, so
+/// `direct_only`, `innocuous` and `PRAGMA trusted_schema` were a policy with a
+/// passing unit test and no effect on the engine: a `CHECK`, an index
+/// expression or a generated column could name any registered function whatever
+/// its flags. `inillucent-sql` sits below `inillucent-ext` and cannot reach the
+/// registry, so what the registry knows travels down here with the name.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExternalFunction {
     /// The folded name.
@@ -316,6 +416,9 @@ pub struct ExternalFunction {
     pub arity: i32,
     /// Whether it reduces a group rather than a row.
     pub aggregate: bool,
+    /// What it promises about itself, which decides whether a schema may name
+    /// it.
+    pub flags: FunctionFlags,
 }
 
 impl ExternalFunction {

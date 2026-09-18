@@ -12,10 +12,15 @@ use inillucent_sql::plan::Levers;
 impl crate::ImportedDatabase {
     /// Returns what the binder needs to know about the registered functions.
     ///
-    /// The name, the arity and whether it reduces a group - and nothing else.
-    /// A binder that held the *body* would be a bound tree that depends on who
-    /// was holding it, which is why the machinery looks the body up when it
-    /// runs rather than carrying it.
+    /// The name, the arity, whether it reduces a group, and what it promises
+    /// about itself - and nothing else. A binder that held the *body* would be
+    /// a bound tree that depends on who was holding it, which is why the
+    /// machinery looks the body up when it runs rather than carrying it.
+    ///
+    /// **The flags travel with the name (task-1972).** They are what
+    /// `direct_only` and `innocuous` are made of, and the binder is where a
+    /// schema's call to a function is refused, so a list that left them behind
+    /// left the binder unable to keep the promise the registration made.
     pub(crate) fn external_functions(&self) -> Vec<inillucent_sql::function::ExternalFunction> {
         self.session_state
             .registry
@@ -25,6 +30,7 @@ impl crate::ImportedDatabase {
                 name: held.name.to_ascii_lowercase().into_bytes(),
                 arity: held.arity,
                 aggregate: held.is_aggregate(),
+                flags: held.flags,
             })
             .collect()
     }
@@ -129,9 +135,23 @@ impl crate::ImportedDatabase {
 
     /// Puts the connection into or out of defensive mode.
     ///
+    /// **The registry's copy is set with it (task-1972).** `Policy::defensive`
+    /// is what `Registry::authorize_shadow_write` reads, and nothing ever wrote
+    /// it - so a connection that had been made defensive still allowed a
+    /// statement to rewrite a module's private storage. The two are one
+    /// setting; keeping the pragma's copy and the registry's copy in step here
+    /// is what makes them read as one.
+    ///
+    /// The compiled statements go with it, because whether a write of a shadow
+    /// table is refused is decided when the statement is bound.
+    ///
     /// @param on - whether the flag is in force
     pub fn set_defensive(&mut self, on: bool) {
+        if on != self.pragmas.defensive() {
+            self.forget_compiled_statements();
+        }
         self.pragmas.set_defensive(on);
+        self.session_state.registry.policy_mut().defensive = on;
     }
 
     /// Installs the authorizer every later statement is bound under.

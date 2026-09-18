@@ -103,6 +103,7 @@ impl ImportedDatabase {
             b"synchronous" => self.pragma_synchronous(argument),
             b"busy_timeout" => self.pragma_busy_timeout(argument),
             b"foreign_keys" => self.pragma_flag(argument),
+            b"trusted_schema" => self.pragma_trusted_schema(argument),
             b"defer_foreign_keys" => self.pragma_defer(argument),
             b"foreign_key_check" => self.pragma_foreign_key_check(argument),
             b"journal_mode" => self.pragma_journal_mode(argument),
@@ -715,9 +716,6 @@ fn reported_value(name: &[u8]) -> Option<(i64, &'static [&'static str])> {
         b"reverse_unordered_selects" => (0, OFF),
         // Single threaded by design; the sorter and the tree builder are too.
         b"threads" => (0, OFF),
-        // A schema object is never treated as trusted input here, and the
-        // catalog is not writable as a table.
-        b"trusted_schema" => (0, OFF),
         // The log is folded in at an explicit checkpoint rather than every N
         // frames, so there is no frame count to set.
         b"wal_autocheckpoint" => (0, OFF),

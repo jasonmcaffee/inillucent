@@ -149,10 +149,16 @@ const FLAGS: [Flag; 22] = [
         default: Value::Switch(false),
         settable: false,
     },
+    // **On and settable, which it was not until task-1972.** It said off and
+    // could not be moved, on the reasoning that a schema object is never
+    // treated as trusted input here - and that was a claim about a policy with
+    // no enforcement behind it. The binder consults `PRAGMA trusted_schema`
+    // now, the connection's default is on, which is SQLite's, and this reads
+    // and writes that one setting rather than a constant beside it.
     Flag {
         name: "trusted_schema",
-        default: Value::Switch(false),
-        settable: false,
+        default: Value::Switch(true),
+        settable: true,
     },
     Flag {
         name: "writable_schema",
@@ -251,6 +257,7 @@ fn current(shell: &mut Shell, flag: &Flag) -> Value {
         "defensive" => Value::Switch(shell.defensive),
         "enable_fkey" => Value::Switch(shell.boolean_pragma("foreign_keys")),
         "writable_schema" => Value::Switch(shell.boolean_pragma("writable_schema")),
+        "trusted_schema" => Value::Switch(shell.boolean_pragma("trusted_schema")),
         _ => flag.default,
     }
 }
@@ -274,6 +281,7 @@ fn apply(shell: &mut Shell, flag: &Flag, wanted: bool) -> bool {
         }
         "enable_fkey" => shell.set_boolean_pragma("foreign_keys", wanted),
         "writable_schema" => shell.set_boolean_pragma("writable_schema", wanted),
+        "trusted_schema" => shell.set_boolean_pragma("trusted_schema", wanted),
         _ => false,
     }
 }

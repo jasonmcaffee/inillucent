@@ -1368,6 +1368,15 @@ fn an_alter_adding_a_column_to_an_empty_table_matches_the_oracle() {
 /// registered, and the connection running the `REINDEX` no longer has it. That
 /// is a real state - a function one connection registered and another did not -
 /// and reaching it needs no fault injection.
+///
+/// **`keeps` is registered innocuous, and it has to be (task-1972).** It used to
+/// be `FunctionFlags::external()`, which is `direct_only` - the flags anything
+/// registered from outside carries unless it says otherwise - and a
+/// direct-only function may not be named by a schema at all, so the
+/// `CREATE INDEX` that sets this case up is now refused before the case starts.
+/// `keeps(a)` is `a % 2 == 0`: no side effects, nothing but its argument, which
+/// is what `innocuous` means, so the honest registration is the one that lets a
+/// schema name it.
 #[test]
 fn a_reindex_that_fails_partway_changes_nothing() {
     let path = scratch("reindex-failed");
@@ -1377,7 +1386,7 @@ fn a_reindex_that_fails_partway_changes_nothing() {
         .create_scalar_function(
             "keeps",
             1,
-            inillucent_ext::registry::FunctionFlags::external(),
+            inillucent_ext::registry::FunctionFlags::builtin(),
             std::sync::Arc::new(|arguments: &[Value<'static>]| {
                 let value = arguments
                     .first()

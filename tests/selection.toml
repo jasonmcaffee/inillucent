@@ -400,6 +400,32 @@ name = "functions"
 tier = "engine"
 covers = ["inillucent-engine", "inillucent-ext"]
 
+# What a schema is allowed to name, and what a defensive connection is allowed
+# to write. `Registry::authorize_function` and `authorize_shadow_write` were the
+# whole of both policies and neither had a caller, so `direct_only`, `innocuous`,
+# `PRAGMA trusted_schema` and the shadow-table half of `PRAGMA defensive` were
+# policies with passing unit tests and no effect on the engine (task-1972). It
+# registers its own function, so it needs no feature and no model.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "schema_function_policy"
+tier = "engine"
+covers = ["inillucent-engine", "inillucent-ext"]
+
+# The same policy over the one shipped function it was found on. Behind `embed`
+# because that feature is what registers the name: with it off there is no
+# `embed` to refuse, and the suite would be testing that an unknown function is
+# unknown. It needs no `onnx` model, because every case is refused while the
+# statement is bound and nothing ever calls `embed`.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "embed_direct_only"
+tier = "engine"
+covers = ["inillucent-engine", "inillucent-ext", "inillucent-search"]
+features = ["inillucent-engine/embed"]
+
 [[target]]
 package = "inillucent-compat"
 kind = "test"

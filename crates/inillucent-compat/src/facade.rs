@@ -277,6 +277,16 @@ impl Connection {
             .create_aggregate_function(name, arity, flags, body)
     }
 
+    /// Puts the connection into or out of defensive mode.
+    ///
+    /// The shell reaches this through `.dbconfig defensive`; there is no pragma
+    /// for it, here or in SQLite, so a test has to ask the connection.
+    ///
+    /// @param on - whether the flag is in force
+    pub fn set_defensive(&self, on: bool) -> DbResult<()> {
+        self.open().set_defensive(on)
+    }
+
     /// Removes a function by name and arity, reporting whether one went.
     ///
     /// @param name - the name it was registered under

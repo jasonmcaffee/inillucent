@@ -434,6 +434,11 @@ impl crate::ImportedDatabase {
                 quoted(&owner.name)
             ),
         };
+        // **The index's own expressions are schema, even though the query that
+        // evaluates them is a statement (task-1972).** They came out of a
+        // `CREATE INDEX` that a database file may carry, so they are checked
+        // against the schema-function policy before a single row is read.
+        self.refuse_untrusted_schema_query(&query)?;
         let rows = self
             .execute_any(&query, &inillucent_exec::physical::Params::new())?
             .rows;

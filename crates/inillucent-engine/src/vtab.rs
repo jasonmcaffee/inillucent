@@ -288,6 +288,35 @@ impl ImportedDatabase {
             })
     }
 
+    /// Returns whether a name is a shadow table of a connected virtual table.
+    ///
+    /// **What `PRAGMA defensive` needs to refuse a write (task-1972).**
+    /// `Registry::authorize_shadow_write` existed, said exactly this, and had
+    /// no caller - so a defensive connection refused nothing, and a shadow
+    /// table was an ordinary table that any `INSERT` could rewrite into
+    /// something no module ever wrote. That is the class of bug the flag exists
+    /// to close: a module reads its own storage trusting that it wrote it.
+    ///
+    /// The names are derived from what each connected table was handed rather
+    /// than guessed from the spelling. `reconnect_modules` connects every
+    /// virtual table in the catalog when the database is opened, so the set is
+    /// complete from the first statement; deriving it instead from "the text
+    /// before the last underscore names a virtual table" would refuse
+    /// `docs_backup` beside `docs_data`.
+    ///
+    /// **An empty suffix is not a shadow.** An external-content FTS5 index is
+    /// handed the content table itself under the empty suffix (see
+    /// [`shadow_table_name`]), and that table is the application's own.
+    ///
+    /// @param name - the table a statement is about to write
+    pub(crate) fn is_shadow_table(&self, name: &[u8]) -> bool {
+        let folded = name.to_ascii_lowercase();
+        self.session_state
+            .virtual_tables
+            .values()
+            .any(|connected| shadow_names(&connected.arguments).any(|held| held == folded))
+    }
+
     /// Returns what a module says about its own storage.
     ///
     /// `None` when the name is not a connected virtual table, which is what
@@ -1083,6 +1112,17 @@ impl ImportedDatabase {
         let table = module.connect(&arguments, false)?;
         Ok(Some(Connected { table, arguments }))
     }
+}
+
+/// Returns the folded names of one connected table's shadow tables.
+///
+/// @param arguments - what the module was connected with
+fn shadow_names(arguments: &ModuleArguments) -> impl Iterator<Item = Vec<u8>> + '_ {
+    arguments
+        .shadows
+        .iter()
+        .filter(|shadow| !shadow.suffix.is_empty())
+        .map(|shadow| shadow_table_name(&arguments.table, &shadow.suffix).to_ascii_lowercase())
 }
 
 /// Returns the name one shadow table is created under.

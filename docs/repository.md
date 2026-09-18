@@ -106,7 +106,7 @@ If you do use `cargo test --workspace`, pass `--no-fail-fast`. Without it the ru
 failing binary, and has reported about a quarter of the suite.
 
 **No test fails today.** `inillucent-testrun --strict` reports 0 failed and 0 undetermined over the
-188 rows in `tests/selection.toml`. The wall clock was 840 seconds on a 24 processor desktop that
+190 rows in `tests/selection.toml`. The wall clock was 840 seconds on a 24 processor desktop that
 was carrying other work while it ran, so read it as one run on one machine rather than as a figure
 to plan against.
 
@@ -162,11 +162,11 @@ already removed the cause and nobody re-ran it, which is recorded in
 
 ## What the tests cover
 
-3,016 tests across 188 test targets in the workspace, in these classes:
+3,033 tests across 190 test targets in the workspace, in these classes:
 
-The 188 is the `[[target]]` row count in `tests/selection.toml`, which is what
+The 190 is the `[[target]]` row count in `tests/selection.toml`, which is what
 `tools/doc-facts/check.mjs` compares this sentence against and what the runner is asked to run.
-The number of `#[test]` attributes in the tree is higher - 3,034 at the time of writing - because
+The number of `#[test]` attributes in the tree is higher - 3,051 at the time of writing - because
 a `#[cfg(windows)]` and a `#[cfg(unix)]` pair is two attributes and one test on any one machine,
 and five `onnx` cases are built only when that feature is on.
 

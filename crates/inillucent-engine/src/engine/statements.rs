@@ -183,6 +183,7 @@ impl crate::ImportedDatabase {
             .with_source(sql.as_bytes())
             .with_functions(&externals)
             .with_collations(&self.session_state.collations)
+            .with_trusted_schema(self.session_state.registry.policy().trusted_schema)
             .with_limits(&self.pragmas.limits().borrow())
             .with_foreign_keys(
                 self.pragmas.foreign_keys(),
@@ -288,12 +289,96 @@ impl ImportedDatabase {
             .with_source(sql.as_bytes())
             .with_functions(&externals)
             .with_collations(&self.session_state.collations)
+            .with_trusted_schema(self.session_state.registry.policy().trusted_schema)
             .with_limits(&self.pragmas.limits().borrow())
             .with_foreign_keys(
                 self.pragmas.foreign_keys(),
                 self.pragmas.defer_foreign_keys(),
             );
-        binder.bind_statement(&parsed.statement).map_err(refused)
+        let bound = binder.bind_statement(&parsed.statement).map_err(refused)?;
+        self.refuse_shadow_write(&bound)?;
+        Ok(bound)
+    }
+
+    /// Refuses a write of a module's private storage on a defensive connection.
+    ///
+    /// **The second half of task-1972.** `Registry::authorize_shadow_write` had
+    /// the same defect `authorize_function` had: it was the whole of what
+    /// `PRAGMA defensive` promises about shadow tables, it read a flag nothing
+    /// set, and nothing called it. So `.dbconfig defensive on` - which the
+    /// shell turns on for every connection it opens - refused a
+    /// `journal_mode=off` and nothing else, while an `INSERT` into `docs_data`
+    /// put rows into an FTS5 index that the module would later read back as
+    /// its own.
+    ///
+    /// It is checked after the bind rather than inside it because what a shadow
+    /// table *is* is a question only a module can answer, and the binder sits
+    /// below the crate the modules live in.
+    ///
+    /// A module writes its own storage through `ShadowStore` and root pages
+    /// rather than through SQL, so nothing a module does reaches this.
+    ///
+    /// @param bound - the statement that was just bound
+    fn refuse_shadow_write(&self, bound: &BoundStatement) -> DbResult<()> {
+        // The registry's policy is asked rather than the pragma record, because
+        // the registry is what `authorize_shadow_write` reads and one setting
+        // read from two places is how the two stopped agreeing in the first
+        // place. `ImportedDatabase::set_defensive` writes both.
+        if !self.session_state.registry.policy().defensive {
+            return Ok(());
+        }
+        let written = match bound {
+            BoundStatement::Insert(statement) => &statement.table.name,
+            BoundStatement::Update(statement) => &statement.table.name,
+            BoundStatement::Delete(statement) => &statement.table.name,
+            _ => return Ok(()),
+        };
+        if !self.is_shadow_table(written) {
+            return Ok(());
+        }
+        self.session_state.registry.authorize_shadow_write(written)
+    }
+
+    /// Binds a statement whose expressions came out of the schema.
+    ///
+    /// **What `CREATE INDEX` on an expression checks itself with
+    /// (task-1972).** Such an index is filled by a `SELECT` this engine builds
+    /// out of the index's own expression and partial predicate, and a `SELECT`
+    /// is a statement - so that one query was the place a schema expression
+    /// reached the machine with a statement's permissions. Without this,
+    /// `CREATE INDEX i ON t (embed(body))` ran `embed` once per row of `t`
+    /// while it built the index, and only the *next* write of `t` was refused
+    /// for naming a function a schema may not name: the index was built, the
+    /// model was loaded, and the table could no longer be written.
+    ///
+    /// The result is thrown away. It is a check, and the statement is bound
+    /// again by the ordinary path when it runs, which costs one bind per
+    /// `CREATE INDEX` and nothing per row.
+    ///
+    /// @param sql - the query the index build will run
+    pub(crate) fn refuse_untrusted_schema_query(&self, sql: &str) -> DbResult<()> {
+        let parsed = self.parse_once(sql)?;
+        let fallback = AllowAll;
+        let authorizer: &dyn inillucent_sql::bind::Authorizer = match &self.session_state.authorizer
+        {
+            Some(held) => held.as_ref(),
+            None => &fallback,
+        };
+        let externals = self.external_functions();
+        let mut binder = Binder::new(&self.schema.catalog, &parsed.ast, authorizer)
+            .with_source(sql.as_bytes())
+            .with_functions(&externals)
+            .with_collations(&self.session_state.collations)
+            .with_trusted_schema(self.session_state.registry.policy().trusted_schema)
+            .with_limits(&self.pragmas.limits().borrow())
+            .with_foreign_keys(
+                self.pragmas.foreign_keys(),
+                self.pragmas.defer_foreign_keys(),
+            )
+            .in_schema();
+        let bound = binder.bind_statement(&parsed.statement).map_err(refused);
+        self.compiled.recycle(parsed);
+        bound.map(|_| ())
     }
 
     /// Parses, plans and runs one statement of any kind.

@@ -1332,6 +1332,29 @@ pub struct Binder<'a> {
     pub(crate) externals: &'a [function::ExternalFunction],
     /// The collations an application defined on this connection.
     pub(crate) collations: &'a [(String, Collation)],
+    /// Whether the expression being bound was written in the schema.
+    ///
+    /// **The whole of `direct_only` and `innocuous` enforcement (task-1972).**
+    /// A `DEFAULT`, a `CHECK`, a generated column's expression, an index
+    /// expression, a partial-index predicate, a view's body and a trigger's
+    /// body are all strings in a file somebody else may have written, and a
+    /// binder with no notion of where it was reading could not tell one from
+    /// the statement an application submitted. `Registry::authorize_function`
+    /// existed and had no caller for exactly that reason.
+    ///
+    /// It only ever moves from `Statement` to `Schema`: once inside a schema
+    /// expression, everything the binder reaches through it - a view over a
+    /// view, a generated column a `CHECK` reads, a subquery in a trigger body -
+    /// is schema too, and each of those sites saves and restores this rather
+    /// than clearing it.
+    pub(crate) call_site: function::CallSite,
+    /// Whether the connection trusts the schema it read, which
+    /// `PRAGMA trusted_schema` decides.
+    ///
+    /// It is read with the call site above and nowhere else: a trusted schema
+    /// may name a function that is merely not innocuous, and may still not name
+    /// a direct-only one.
+    pub(crate) trusted_schema: bool,
     pub(crate) sources: Vec<BoundSource>,
     /// One entry per query block currently being bound, innermost last, each
     /// holding the ids of the FROM terms that block owns.
@@ -1519,6 +1542,38 @@ impl<'a> Binder<'a> {
         self
     }
 
+    /// Says whether the connection trusts the schema it read.
+    ///
+    /// `PRAGMA trusted_schema` is the lever, and it is read at bind time, so a
+    /// connection that changes it throws its compiled statements away - a plan
+    /// bound under one answer is that answer.
+    ///
+    /// @param trusted - whether a schema may name a function that is not
+    ///   innocuous
+    pub fn with_trusted_schema(mut self, trusted: bool) -> Binder<'a> {
+        self.trusted_schema = trusted;
+        self
+    }
+
+    /// Binds as though every expression had been written in the schema.
+    ///
+    /// For a caller that already knows what it is holding is schema text and
+    /// has no enclosing statement to inherit the site from: the query
+    /// `CREATE INDEX` builds to fill an index on an expression, and the view
+    /// body `PRAGMA table_info` binds to find out a view's columns.
+    ///
+    /// **The index build is why this exists (task-1972).** An index on an
+    /// expression is filled by running a `SELECT` the engine writes out of that
+    /// expression, and a `SELECT` is a statement - so the build was the one
+    /// place a schema expression reached the machine with a statement's
+    /// permissions, and `CREATE INDEX i ON t (embed(body))` loaded a 275 MB
+    /// model once per row before any later write of the table was refused for
+    /// naming it.
+    pub fn in_schema(mut self) -> Binder<'a> {
+        self.call_site = function::CallSite::Schema;
+        self
+    }
+
     /// Returns a binder over one catalog snapshot and one parse.
     pub fn new(
         catalog: &'a dyn CatalogView,
@@ -1532,6 +1587,12 @@ impl<'a> Binder<'a> {
             authorizer,
             externals: &[],
             collations: &[],
+            call_site: function::CallSite::Statement,
+            // SQLite's default, and `Policy::default()`'s. A connection that
+            // wants the stricter stance says so; a binder built with no
+            // connection behind it - a test over a hand-built catalog - gets
+            // the same answer the engine's default gives.
+            trusted_schema: true,
             sources: Vec::new(),
             scopes: Vec::new(),
             aggregates: Vec::new(),
@@ -2126,8 +2187,16 @@ impl<'a> Binder<'a> {
             // body be bound in place rather than re-parsed here.
             let columns = body.columns.clone();
             let saved = self.ast;
+            // A view's body is a string in the schema, so everything it names
+            // is named from a schema - including anything a further view or a
+            // generated column it reads goes on to name. The site is saved and
+            // restored rather than set, because a view inside a view is still
+            // inside the outer one.
+            let saved_site = self.call_site;
             self.ast = &body.ast;
+            self.call_site = function::CallSite::Schema;
             let bound = self.bind_select(body.select);
+            self.call_site = saved_site;
             self.ast = saved;
             let bound = bound?;
             return self.push_subquery_source(bound, view_alias, columns, join, span);
@@ -2247,6 +2316,15 @@ impl<'a> Binder<'a> {
         let (ast, expr) = crate::parser::parse_expression(sql, &limits).ok()?;
         let mut nested = Binder::new(self.catalog, &ast, self.authorizer);
         nested.trigger_depth = self.trigger_depth;
+        // **The nested binder inherits what the connection registered, and
+        // reads as a schema (task-1972).** It used to inherit neither, so an
+        // index expression naming a registered function did not resolve at all
+        // here and the planner silently left the index out; and had it
+        // resolved, it would have resolved with a statement's permissions.
+        nested.externals = self.externals;
+        nested.collations = self.collations;
+        nested.trusted_schema = self.trusted_schema;
+        nested.call_site = function::CallSite::Schema;
         nested.sources = vec![alone.clone()];
         nested.scopes = vec![vec![alone.id]];
         nested.bind_expr(expr).ok()
@@ -2873,6 +2951,19 @@ impl<'a> Binder<'a> {
         let Some(found) = function::lookup_external(self.externals, folded, arguments.len()) else {
             return Ok(None);
         };
+        // **Where a schema is stopped from choosing what code runs
+        // (task-1972).** The rule is `inillucent-sql`'s own, and
+        // `Registry::authorize_function` reads the same one over the same
+        // flags, so an application that asks the registry directly and a
+        // statement the binder compiles get the same answer.
+        if let Some(why) =
+            function::schema_refusal(found.flags, self.call_site, self.trusted_schema)
+        {
+            return Err(refused(
+                format!("{} {why}", String::from_utf8_lossy(folded)),
+                span,
+            ));
+        }
         let aggregate = found.aggregate;
         if !aggregate {
             if distinct {

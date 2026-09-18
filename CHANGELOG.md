@@ -29,10 +29,64 @@ model once per row of the table, inside the statement that creates the index.
 `FunctionFlags::default()` exists for `builtin()`'s sake and is not what
 anything registered from outside wants.
 
-**The enforcement point is still open**, and it is a bigger gap than the flag:
-`Registry::authorize_function` has no caller, so `direct_only`, `innocuous` and
-`PRAGMA trusted_schema` are a policy with a passing unit test and no effect on
-the engine. The flag is correct the day the binder consults it.
+**And the binder consults it**, which it did not until task-1972.
+`Registry::authorize_function` had no caller anywhere in the workspace, so
+`direct_only`, `innocuous` and `PRAGMA trusted_schema` were a policy with a
+passing unit test and no effect on the engine: a `CHECK`, an index expression,
+a generated column, a `DEFAULT`, a partial-index predicate, a view and a trigger
+could each name any registered function whatever its flags said.
+
+The rule itself moved down to `inillucent_sql::function::schema_refusal`, below
+the binder that enforces it, and `Registry::authorize_function` calls that same
+function - so an application asking the registry directly and a statement the
+binder compiles cannot answer differently. `FunctionFlags` and `CallSite` moved
+with it and are re-exported from `inillucent_ext::registry`, so every path an
+application already writes resolves to the same type it did.
+
+The binder carries a call site that is set at seven places: a `DEFAULT`, a
+`CHECK`, a generated column's expression, an index expression, a partial-index
+predicate, a view's body and a trigger's body. Two of those paths - the nested
+binders in `Binder::bind_alone` and `dml.rs::bind_schema_expr` - also dropped
+the connection's registered functions and collations on the way, so a schema
+expression naming a registered function did not resolve at all; they inherit
+them now.
+
+**`CREATE INDEX` on an expression is refused when the index is created**, not on
+the next write of the table. Such an index is filled by a `SELECT` the engine
+builds out of the index's own expression, and a `SELECT` is a statement - so
+that one query was the place a schema expression reached the machine with a
+statement's permissions, and `CREATE INDEX i ON t (embed(body))` loaded the model
+once per row before anything was refused.
+
+**`PRAGMA trusted_schema` reports and sets the connection's own policy.** It
+used to answer a constant 0 from the fixed-answer table while the connection's
+policy said the opposite, which was harmless only for as long as nothing read
+either one. The library's default is on, which is SQLite's; turning it off
+refuses every registered function a schema names unless the registration said
+`innocuous`.
+
+**And `inillucent-shell` turns it off at startup**, which is what the reference's
+shell does and why `.dbconfig` on the reference prints `trusted_schema off` on a
+connection whose library default was on. A shell is a program that opens files it
+did not write, which is the case the flag exists for. `.dbconfig trusted_schema`
+reads and writes that setting now instead of printing a constant beside it.
+`semantics.rs`'s `shell.dbconfig` case grades the whole listing against the
+pinned SQLite and is what caught the difference.
+
+**`PRAGMA defensive` refuses a write to a module's shadow table**, which is the
+same defect in the same file: `Registry::authorize_shadow_write` was the whole of
+that promise, it read a `Policy::defensive` nothing ever set, and nothing called
+it. The shell turns defensive on for every connection it opens, so what
+`.dbconfig defensive on` actually refused was `PRAGMA journal_mode = OFF` and
+nothing else. Which names are shadow tables is derived from the roots each module
+was connected with rather than from the spelling, so `docs_backup` is still an
+ordinary table beside `docs_data`.
+
+`Registry::authorize_extension` still has no caller and that is not the same
+defect: nothing in this engine loads a shared library. `load_extension(path)`
+refuses every path and so does the shell's `.load`, and those two refusals are
+what `crates/inillucent-compat/tests/schema_function_policy.rs` checks, because
+they are the guarantee a caller has. There is no `authorize_module` at all.
 
 ### The census: sixty-one places that could report success having checked nothing
 
@@ -102,8 +156,11 @@ created an empty database.
 
 ### Known not to do
 
-- `PRAGMA trusted_schema`, `innocuous` and `direct_only` are not enforced. See
-  above.
+- A `CHECK`, a `DEFAULT`, a generated column or an index expression that names a
+  function a schema may not name is refused when the statement that reads it is
+  bound, not when the schema object is created. SQLite refuses the `CREATE`
+  itself. `CREATE INDEX` is the exception and is refused at creation, because
+  that is the one form this engine binds while it builds it.
 - The Go wrapper's engine tests did not run on the machine that cut this: Go
   is not installed there, and `winget install --id GoLang.Go -e` downloaded
   1.27.0, verified its hash and ended with `Installer failed with exit code:
