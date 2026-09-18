@@ -657,12 +657,85 @@ export function judgeTestRun(outcome) {
   return result;
 }
 
+/**
+ * Every `.rs` file under a directory, so a binary can be dated against its own sources.
+ *
+ * @param directory - where to look
+ */
+function sourcesUnder(directory) {
+  if (!fs.existsSync(directory)) return [];
+  const found = [];
+  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+    const full = path.join(directory, entry.name);
+    if (entry.isDirectory()) found.push(...sourcesUnder(full));
+    else if (entry.name.endsWith('.rs')) found.push(full);
+  }
+  return found;
+}
+
+/**
+ * Returns the test runner to measure with, and why it is that one.
+ *
+ * **The stale instrument that answered a published number (task-1970).**
+ * `binary()` prefers `target/release`, which is right for the shipped programs
+ * and wrong for this one. Both validate scripts build the runner into
+ * `target/debug` and run it from there, and the `provision` string this file
+ * carries for the instrument is that same debug build - so a
+ * `target/release/inillucent-testrun.exe` left over from an earlier release
+ * build was preferred over the one the run had just made. The copy on this
+ * machine was four days and twenty commits old, and the `tests` fact it
+ * answered was 3,010 where the debug runner, the `tests` stage of both
+ * validate scripts and a direct run all said 3,016. Nothing reported the
+ * difference, because a stale answer looks exactly like a fresh one.
+ *
+ * So the newer of the two is used, and one older than either of the two files
+ * that decide what it runs and how it reports - the map and its own source - is
+ * refused by name rather than believed.
+ *
+ * @returns `{exe, error}`; `exe` is null when there is none to trust
+ */
+function testRunner() {
+  const name = process.platform === 'win32' ? 'inillucent-testrun.exe' : 'inillucent-testrun';
+  const built = ['release', 'debug']
+    .map((profile) => path.join(ROOT, 'target', profile, name))
+    .filter((file) => fs.existsSync(file))
+    .sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs);
+  if (built.length === 0) return { exe: null, error: null };
+  const exe = built[0];
+  const made = fs.statSync(exe).mtimeMs;
+  // Its own sources, not the map: the map is read at run time, so a newer
+  // `tests/selection.toml` is a newer question rather than a stale instrument.
+  const newer = sourcesUnder(path.join(ROOT, 'crates', 'inillucent-compat', 'src')).filter(
+    (file) => fs.statSync(file).mtimeMs > made,
+  );
+  if (newer.length > 0) {
+    const named = path.relative(ROOT, newer[0]).replace(/\\/g, '/');
+    const rest = newer.length > 1 ? ` and ${newer.length - 1} other file(s)` : '';
+    return {
+      exe: null,
+      error:
+        `the test runner at ${path.relative(ROOT, exe).replace(/\\/g, '/')} was built before ${named}${rest}, ` +
+        'so its answer is a measurement of an older tree; rebuild it with ' +
+        '`cargo build -p inillucent-compat --bin inillucent-testrun --features testrun`',
+    };
+  }
+  return { exe, error: null };
+}
+
 function testRun() {
   if (!process.argv.includes('--run-tests')) return null;
-  if (!binary('inillucent-testrun')) return judgeTestRun({ built: false, text: '', status: null, timedOut: false });
+  const runner = testRunner();
+  if (runner.error) return { error: runner.error };
+  if (!runner.exe) return judgeTestRun({ built: false, text: '', status: null, timedOut: false });
   // The whole suite is about five minutes, and a two minute cap killed it and read the missing
   // summary line as "the runner is not built" rather than as "it was cut off".
-  return judgeTestRun(runDetailed('inillucent-testrun', ['--strict'], undefined, 1_800_000));
+  const said = spawnSync(runner.exe, ['--strict'], { encoding: 'utf8', timeout: 1_800_000 });
+  return judgeTestRun({
+    built: true,
+    text: `${said.stdout || ''}${said.stderr || ''}`,
+    status: said.status,
+    timedOut: said.error?.code === 'ETIMEDOUT',
+  });
 }
 
 /**

@@ -162,7 +162,7 @@ already removed the cause and nobody re-ran it, which is recorded in
 
 ## What the tests cover
 
-3,010 tests across 188 test targets in the workspace, in these classes:
+3,016 tests across 188 test targets in the workspace, in these classes:
 
 The 188 is the `[[target]]` row count in `tests/selection.toml`, which is what
 `tools/doc-facts/check.mjs` compares this sentence against and what the runner is asked to run.

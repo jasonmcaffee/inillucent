@@ -8,7 +8,7 @@ the shell, the MCP server, the migration tool, the C ABI library, and the Go,
 npm, PyPI and Composer wrappers are all one number. `tools/doc-facts/check.mjs`
 fails the build when any copy of it disagrees.
 
-## 0.1.4 — 2026-09-16
+## 0.1.4 — 2026-09-17
 
 **`embed(TEXT)` is `direct_only`, which is a behaviour change to a shipped
 function.** A schema may no longer name it: a `CHECK` constraint, an index
@@ -51,6 +51,21 @@ anything - and the answer was 61, against a page that named 5.
   prerequisite on seventeen rows and lost one from six that could not skip, and
   `selection.rs` now fails in both directions: a suite that can skip without a
   declared prerequisite, and a declared prerequisite whose suite cannot skip.
+- **An instrument can answer about an older tree, which looks exactly like an
+  answer about this one.** `tools/doc-facts/check.mjs` measured the published
+  test count with `target/release/inillucent-testrun.exe`, because its binary
+  lookup prefers a release build - while both validate scripts build the runner
+  into `target/debug` and run it from there. The release copy on the machine
+  that cut this was four days old and reported 3,010 tests where the current one
+  reports 3,016. The check now takes the newer of the two and refuses one older
+  than any source it was built from, naming the file and the rebuild command.
+- **A contract file is only as good as the lines its parser reads.**
+  `tests/selection.toml` was carrying a bare array and a repeated key, left by an
+  edit that removed half a row. `toml_lite` drops the first and keeps the last of
+  the second, so the file parsed, 188 rows came back and every check over it
+  passed. `every_line_of_the_map_is_one_the_parser_reads` compares the file to
+  itself rather than through the parser, because a line the parser drops is a
+  line no other check looks at.
 - **The checks outside cargo fail when they cannot check.**
   `tools/doc-facts/check.mjs` treats an instrument that cannot answer as a
   failure rather than a skip - ten of its sixteen facts were skipping on any
@@ -89,10 +104,18 @@ created an empty database.
 
 - `PRAGMA trusted_schema`, `innocuous` and `direct_only` are not enforced. See
   above.
-- The Go wrapper's engine tests and the PHP round trip did not run on the
-  machine that cut this: neither toolchain is installed there. The `wrappers`
-  validate stage names each absent toolchain rather than passing over it
-  silently.
+- The Go wrapper's engine tests did not run on the machine that cut this: Go
+  is not installed there, and `winget install --id GoLang.Go -e` downloaded
+  1.27.0, verified its hash and ended with `Installer failed with exit code:
+  1603`, which is the MSI declining to install without elevation. The `wrappers`
+  validate stage names the absent toolchain and the install URL rather than
+  passing over it silently. The other three wrappers ran: the npm suite 8 of 8,
+  both PHP suites, and the Python conformance runner's 18 cases and 69 steps.
+- The retrieval baseline names 19 files under `crates/inillucent-bench` that
+  moved without an amendment, so `the_retrieval_baseline_is_unchanged` fails and
+  with it the `contracts`, `tests` and `doc-facts` stages of both validate
+  scripts. Every other stage of `tools/validate.ps1` passes. The amendment
+  belongs to whoever changed those files.
 
 ## 0.1.3 — 2026-09-15
 
