@@ -343,7 +343,6 @@ pub(crate) fn conflicting_row(
 /// @param clash - the conflict, naming the row already there
 /// @param excluded - the row that was being inserted
 /// @param arm - which `ON CONFLICT` clause the conflict selected
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn upsert_row(
     statement: &BoundInsert,
     table: &TableInfo,

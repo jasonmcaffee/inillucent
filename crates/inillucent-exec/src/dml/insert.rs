@@ -361,7 +361,6 @@ fn insert_into_view(
 /// @param plan - the compiled statement
 /// @param target - the file and its trees
 /// @param row - the row image, in tree-column order
-#[allow(clippy::too_many_arguments)]
 fn write_one(
     statement: &BoundInsert,
     space: &RowSpace,

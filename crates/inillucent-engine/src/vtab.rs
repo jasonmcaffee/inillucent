@@ -95,7 +95,6 @@ impl ImportedDatabase {
     /// @param arguments - the arguments inside the parentheses
     /// @param exists - whether a table of that name is already there
     /// @param if_not_exists - whether the statement said so
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn create_virtual_table(
         &mut self,
         source: &[u8],
@@ -263,7 +262,6 @@ impl ImportedDatabase {
     /// @param term - which FROM term of the plan
     /// @param path - the access path the planner chose for it
     /// @param params - the values bound to `?1`, `?2`, ...
-    #[allow(clippy::too_many_arguments)]
     /// Returns the root of a shadow table another object already owns.
     ///
     /// The catalog rows are the authority, as they are at open time, and a name

@@ -59,7 +59,6 @@ pub fn keys_query(
 /// @param layout - the table tree's layout
 /// @param joined - the extra FROM terms, in written order
 /// @param assigned - the assignment expressions to project, in order
-#[allow(clippy::too_many_arguments)]
 pub fn keys_query_joined(
     table: &TableInfo,
     source: usize,

@@ -68,7 +68,6 @@ impl<'t> LateralModule<'t> {
     /// @param catalog - where the module's rows come from
     /// @param width - how many columns the module declares
     /// @param downstream - what to push joined rows into
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         table: TableInfo,
         path: AccessPath,

@@ -652,7 +652,6 @@ fn add_segments(segments: &mut Vec<Segment>, events: &mut Vec<Event>, polygon: &
 /// @param x1 - the second endpoint's first coordinate
 /// @param y1 - the second endpoint's second coordinate
 /// @param side - `1` or `2`, which polygon this is
-#[allow(clippy::too_many_arguments)]
 fn add_one_segment(
     segments: &mut Vec<Segment>,
     events: &mut Vec<Event>,

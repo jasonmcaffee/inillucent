@@ -177,8 +177,6 @@ fn delta(before: PagerCounters, after: PagerCounters) -> PagerCounters {
     }
 }
 
-/// Records one measurement from a timed block and its counters.
-#[allow(clippy::too_many_arguments)]
 /// One timed run, as `record` turns it into a row.
 ///
 /// **A type rather than eight of nine arguments (task-1962, A9).** Four of them
@@ -204,6 +202,7 @@ struct Timed<'a> {
     cache_bytes: u64,
 }
 
+/// Records one measurement from a timed block and its counters.
 fn record(into: &mut Vec<Measurement>, timed: Timed<'_>) {
     let Timed {
         workload,

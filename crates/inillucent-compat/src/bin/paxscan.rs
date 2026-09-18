@@ -222,7 +222,6 @@ fn reference_aggregate(rows: &[Vec<OwnedDatum>], shape: Shape) -> Aggregate {
 /// @param shape - which columns hold `key` and `category`
 /// @param reference - the aggregate every round must reproduce
 /// @param rounds - how many timed rounds
-#[allow(clippy::too_many_arguments)]
 fn measure_tree(
     label: &str,
     page_size: usize,

@@ -1094,7 +1094,7 @@ fn no_new_crate_reaches_into_the_retired_engine() {
 // below already fails loudly with "is not there any more; remove its row"
 // for exactly this reason - removing them here is answering that failure
 // before it happens rather than after.
-const CEILINGS: [(&str, usize); 12] = [
+const CEILINGS: [(&str, usize); 13] = [
     // Added at its post-split size in task-1946 (M12). It was 2,728 lines
     // holding the frame table, eviction, the journal's sync gating and the
     // swip logic together; the last three are child modules now.
@@ -1247,7 +1247,22 @@ const CEILINGS: [(&str, usize); 12] = [
     // have. Recorded at its post-split size, which is what `pool.rs` above was
     // recorded at for the same reason. **Splitting the file itself is not this
     // ticket**: the review asked for the row.
-    ("crates/inillucent-bench/src/gradeembed.rs", 3_815),
+    //
+    // **Lowered to 3,094 in task-1977, which is the ticket that split it.**
+    // `type LaneScores` through `print_summary` was one contiguous run of 733
+    // lines answering one question - turn the collected scores into the card -
+    // and it is `gradeembed/card.rs` now. Nothing in there reads a cache,
+    // embeds a query or times a model, which is the line the split is on. The
+    // test module stayed where it is: its fixtures build a whole grading run on
+    // disk and are shared by the tests of both halves, so splitting it would
+    // mean two copies of them or a `#[cfg(test)]` module reaching into a
+    // sibling, and either is a worse thing to keep in step than one test module
+    // that imports the card by name.
+    ("crates/inillucent-bench/src/gradeembed.rs", 3_094),
+    // Its own row from the day it was split out of `gradeembed.rs`
+    // (task-1977), so it cannot do what `gradeembed.rs` did and grow through
+    // four tickets with nothing watching.
+    ("crates/inillucent-bench/src/gradeembed/card.rs", 766),
 ];
 
 /// No module grows past the size it is recorded at, and the record only comes
@@ -2919,9 +2934,24 @@ const RECORDED_OVER_THE_NEW_BAR: usize = 48;
 /// **There was no parameter check at all, which is how `synth_embed` keeps nine
 /// under an `#[allow]` (task-1969, 7.2).** task-1961's eighth criterion says no
 /// function takes more than eight parameters and that the ten which did now
-/// take structs; the ten do, and nothing stopped an eleventh. Thirty-eight
-/// functions take seven or eight today, so the bar is where the next one would
-/// cross it rather than where the tree already is.
+/// take structs; the ten do, and nothing stopped an eleventh. Fifty functions
+/// take seven or eight today - thirty-six take seven and fourteen take eight -
+/// so the bar is where the next one would cross it rather than where the tree
+/// already is.
+///
+/// Eight is also the bar `clippy.toml` sets, where
+/// `too-many-arguments-threshold = 8` carries the argument for it. Clippy
+/// lints above its threshold and counts the receiver, so it fires at nine
+/// arguments with the receiver among them, and this test fails at nine
+/// without it. They are the same bar, and
+/// `no_attribute_turns_off_the_parameter_lint` below is what stops an
+/// `#[allow]` from moving it for one function.
+///
+/// **The count was thirty-eight when this was written, and it was wrong.**
+/// `parameter_list` read `pub(crate) fn foo(` as a list whose one parameter was
+/// `crate`, so every `pub(crate) fn` and `pub(super) fn` in the workspace was
+/// counted as taking one. task-1977 fixed that and re-measured: forty-two of
+/// the functions that were invisible take five parameters or more.
 ///
 /// The receiver does not count - `&self` is not an argument a caller passes -
 /// and neither does anything under `#[cfg(test)]`, because a test builder that
@@ -2965,6 +2995,69 @@ fn no_function_takes_more_than_eight_parameters() {
          `#[allow(clippy::too_many_arguments)]` is not an answer - it is the warning being \
          turned off.",
         wide.join("\n  ")
+    );
+}
+
+/// No attribute in `crates/` or `drivers/` turns off `too_many_arguments`.
+///
+/// **Thirty-two of them were left behind by the refactors that fixed the
+/// functions they guarded (task-1977).** `clippy.toml` sets
+/// `too-many-arguments-threshold = 8` and clippy lints above its threshold, so
+/// an `#[allow]` only does something for a function taking nine arguments
+/// counting the receiver. The widest function carrying one took eight.
+/// `bench/src/tune.rs` carried one above `label_for(dials: &Dials<'_>)`, which
+/// takes one parameter, and `compat/src/bin/walperf.rs` and
+/// `compat/src/bin/writeperf.rs` carried one above `struct Timed<'a>` - not
+/// above a function at all - left there when task-1962 turned those argument
+/// lists into types, with the doc comment of the function each used to guard
+/// stranded above it.
+///
+/// **The check is for the attribute rather than for the word.** Criterion 28 of
+/// the task-1969 part six TDD asks for `grep -rn 'too_many_arguments' crates/
+/// drivers/` to return nothing, and six of that grep's hits are sentences
+/// explaining why an argument list became a struct. Deleting those would delete
+/// the argument, so no state of this tree can satisfy the criterion as it is
+/// written; what it is asking for is this.
+///
+/// An `#[expect]` is refused on the same terms as an `#[allow]`: both turn the
+/// lint off, and which one is written is a question about whether the warning
+/// is expected to come back rather than about the parameter list.
+#[test]
+fn no_attribute_turns_off_the_parameter_lint() {
+    let root = workspace_root();
+    let mut found: Vec<String> = Vec::new();
+    let mut read = 0usize;
+    for file in rust_sources(&root) {
+        let Ok(text) = std::fs::read_to_string(&file) else {
+            continue;
+        };
+        read = read.saturating_add(1);
+        let relative = file
+            .strip_prefix(&root)
+            .unwrap_or(&file)
+            .to_string_lossy()
+            .replace('\\', "/");
+        for (at, line) in text.lines().enumerate() {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with("#[") || !trimmed.contains("too_many_arguments") {
+                continue;
+            }
+            found.push(format!("{relative}:{}", at.saturating_add(1)));
+        }
+    }
+    assert!(
+        read >= 300,
+        "read {read} source files, which means this is looking in the wrong place rather than \
+         that the workspace has no source"
+    );
+    assert!(
+        found.is_empty(),
+        "these attributes turn off `clippy::too_many_arguments`:\n  {}\n\
+         The threshold is set once, in `clippy.toml`, with the argument for where it is. A \
+         function that has grown past it takes a struct, the way task-1961's A8 did for the \
+         ten that used to; an attribute here moves the bar for one function and says nothing \
+         about why.",
+        found.join("\n  ")
     );
 }
 
@@ -3028,9 +3121,18 @@ fn parameter_counts(text: &str) -> Vec<(String, usize)> {
 /// the end of the list and `find_equality`, which takes eight, was reported as
 /// taking ten.
 ///
+/// **And the bracket that opens them is not the first one either (task-1977).**
+/// This read `find('(')`, which for `pub(crate) fn create_index(` is the
+/// bracket inside `pub(crate)` - so the parameter list it returned was the text
+/// `crate`, and every `pub(crate) fn` and `pub(super) fn` in the workspace was
+/// counted as taking one parameter. Forty-two of them take five or more. None
+/// was over the bar when this was found, so the test had been passing for the
+/// wrong reason rather than hiding a failure, but a new `pub(crate) fn` taking
+/// twelve would have passed it too.
+///
 /// @param signature - the function's signature, brackets balanced
 fn parameter_list(signature: &str) -> Option<String> {
-    let open = signature.find('(')?;
+    let open = parameter_bracket(signature)?;
     let mut depth = 0i32;
     for (at, character) in signature.char_indices().skip(open) {
         match character {
@@ -3045,6 +3147,93 @@ fn parameter_list(signature: &str) -> Option<String> {
             }
             _ => {}
         }
+    }
+    None
+}
+
+/// `parameter_counts` reads a `pub(crate) fn`'s real parameter list.
+///
+/// **The bug this holds shut made the whole check blind to two thirds of the
+/// engine (task-1977).** `parameter_list` took the signature's first `(`, which
+/// for `pub(crate) fn` is the bracket in the visibility, so the list it counted
+/// was the text `crate` and the function was recorded as taking one parameter.
+/// Every `pub(crate) fn` and `pub(super) fn` in `crates/` was counted that way.
+///
+/// The `pub(crate) fn` case is asserted at nine rather than at eight, because
+/// nine is the count that has to fail
+/// `no_function_takes_more_than_eight_parameters` and eight is the count that
+/// has to pass it - an assertion at one or the other alone would still hold if
+/// the bracket moved by one.
+#[test]
+fn parameter_counts_reads_past_a_visibility_bracket() {
+    let counts = parameter_counts(
+        "pub(crate) fn wide(a: u8, b: u8, c: u8, d: u8, e: u8, f: u8, g: u8, h: u8, i: u8) {}\n\
+         pub(super) fn narrow(&self, a: u8, b: u8) {}\n\
+         fn generic<F: Fn(u8) -> bool>(first: F, second: u8) {}\n\
+         pub fn plain(only: u8) {}\n",
+    );
+    assert_eq!(
+        counts,
+        vec![
+            ("wide".to_string(), 9),
+            ("narrow".to_string(), 2),
+            ("generic".to_string(), 2),
+            ("plain".to_string(), 1),
+        ],
+        "the parameter list is the one after the name, and the receiver is not in it"
+    );
+}
+
+/// Returns where a signature's parameter list opens.
+///
+/// The search starts after the `fn` keyword and skips the generic list, because
+/// both `pub(crate) fn f(` and `fn f<F: Fn(u8) -> bool>(` have a bracket before
+/// the one that opens the parameters.
+///
+/// @param signature - the function's signature, brackets balanced
+fn parameter_bracket(signature: &str) -> Option<usize> {
+    let keyword = signature.find("fn ")?;
+    let mut at = keyword.saturating_add(3);
+    let after_keyword = signature.get(at..)?;
+    let name_end = after_keyword
+        .char_indices()
+        .find(|(_, letter)| !(letter.is_alphanumeric() || *letter == '_' || letter.is_whitespace()))
+        .map(|(offset, _)| offset)?;
+    at = at.saturating_add(name_end);
+    if signature
+        .get(at..)
+        .is_some_and(|rest| rest.starts_with('<'))
+    {
+        at = at.saturating_add(generic_list_end(signature.get(at..)?)?);
+    }
+    signature
+        .get(at..)
+        .and_then(|rest| rest.find('('))
+        .map(|offset| at.saturating_add(offset))
+}
+
+/// Returns the offset one past a generic list's closing angle bracket.
+///
+/// The `>` of an `->` inside a bound is an arrow rather than a closing bracket,
+/// which is the same distinction `count_parameters` makes one function below.
+///
+/// @param text - the signature from its opening `<` onwards
+fn generic_list_end(text: &str) -> Option<usize> {
+    let mut depth = 0i32;
+    let mut previous = ' ';
+    for (offset, letter) in text.char_indices() {
+        match letter {
+            '<' => depth = depth.saturating_add(1),
+            '>' if previous == '-' => {}
+            '>' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(offset.saturating_add(1));
+                }
+            }
+            _ => {}
+        }
+        previous = letter;
     }
     None
 }

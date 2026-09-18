@@ -2438,7 +2438,6 @@ fn consider_index_candidate(
 }
 
 /// Builds the best path over one index, or `None` if it cannot be used.
-#[allow(clippy::too_many_arguments)]
 fn index_candidate(
     context: &CandidateContext<'_>,
     index: &IndexInfo,
@@ -2696,7 +2695,6 @@ fn find_equality(
 /// @param terms - the statement's `WHERE` conjuncts
 /// @param consumed - which terms an earlier stage already used
 /// @param used - which terms this candidate has already used
-#[allow(clippy::too_many_arguments)]
 fn find_expr_equality(
     position: usize,
     ids: &[usize],

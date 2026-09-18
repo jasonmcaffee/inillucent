@@ -699,7 +699,6 @@ fn scores_match(
 /// The legacy engine excludes a tombstoned document's chunks at query time,
 /// with the chunks still in the inverted index. A migrated database does the
 /// same thing in SQL, and this is the check that the two agree.
-#[allow(clippy::too_many_arguments)]
 fn live_filter(
     source: &Index,
     sql: &mut SqlIndex,

@@ -178,7 +178,6 @@ impl<'t> SpanScan<'t> {
     /// @param low_inclusive - whether a key equal to `low` is in the range
     /// @param high - the upper bound, or `None`
     /// @param high_inclusive - whether a key equal to `high` is in the range
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         tree: &'t PagedTree,
         projection: Projection,

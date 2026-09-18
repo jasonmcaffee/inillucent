@@ -38,9 +38,15 @@ sha256 = "fb0792c4483c9ef452769c933eb5f3dcfc9bab32c8b3753840fb35d9e7b294a3"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/gradeembed.rs"
-ticket = "task-1973"
-reason = "task-1973 turned on the four lints and missing_docs for this crate (#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)] on main.rs). 191 sites answered; every one in this file now propagates a caught error or reads through .get(). No measurement changed: the crate's 178 tests pass unchanged. run was 610 lines and is 94, over ten named stages (baseline_named_by, read_the_shared_corpus, score_one_arm, the four lane functions, assemble_the_lanes, provenance_of, manifest_of) plus the Shared, Tables and QuerySource structs. corpus_keys replaces the same format! in two places, because the sidecar writer and the grading run have to spell a key the same way or the sidecar holds vectors of text the run never asked about. Doc comments on run, render and print_summary."
-sha256 = "114de2a3f83d1a9e2f5b87129f7e9d443ce7c210e3edf57284c6db422a249fe9"
+ticket = "task-1977"
+reason = "task-1977: the card moved out of this file. 'type LaneScores' through 'print_summary' is crates/inillucent-bench/src/gradeembed/card.rs now, 733 lines, and this file is 3,094 rather than 3,815. The one dead #[allow(clippy::too_many_arguments)] above score_family also came off: clippy.toml sets too-many-arguments-threshold = 8 and score_family takes six. Nothing else changed and the 178 bench tests pass unchanged. This entry replaces task-1973's, which declared the lint work on the same file."
+sha256 = "26c5e8f0dfe993325b29d1ce6f4f5eb02085ff81d891316c4bf933d6a7af9c64"
+
+[[amendment]]
+path = "crates/inillucent-bench/src/gradeembed/card.rs"
+ticket = "task-1977"
+reason = "task-1977: the file the card moved into. The 733 lines are the ones deleted from gradeembed.rs, with pub(super) on the eleven items the parent still calls, pub on rejudge, render and print_summary which main.rs calls, and the use statements a module of its own needs."
+sha256 = "6b6f70a68c9c611d1ad15a0ef7290711d72b91fc1c69156e3689532f2204f4bf"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/http.rs"
@@ -134,9 +140,9 @@ sha256 = "056d843526453f3a1d8d0d2e64c93bd0ba9b19a97321e1839fbbc3d442bf7661"
 
 [[amendment]]
 path = "crates/inillucent-bench/src/tune.rs"
-ticket = "task-1973"
-reason = "task-1973 turned on the four lints and missing_docs for this crate (#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)] on main.rs). 191 sites answered; every one in this file now propagates a caught error or reads through .get(). No measurement changed: the crate's 178 tests pass unchanged. score_arm is fallible: it expect-ed on a hybrid search Result three times and read corpus keys by index, and a sweep that scored an empty key would report a tuning setting as worse than it is."
-sha256 = "9e63207e8b7f05d2d906bb3f4b2d1aa92a388e70d0abc0353fce5540b6bc64a4"
+ticket = "task-1977"
+reason = "task-1977: two dead #[allow(clippy::too_many_arguments)] attributes came off. clippy.toml sets too-many-arguments-threshold = 8; run takes eight arguments and label_for takes one &Dials. Nothing else in the file changed. This entry replaces task-1973's, which declared the lint work on the same file."
+sha256 = "a5cbcefa51bbf1a500e0cd6d0a96de1633eaa97e92f0f07444ecde33ffa695fd"
 
 [[amendment]]
 path = "crates/inillucent-core/Cargo.toml"

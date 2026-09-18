@@ -36,7 +36,6 @@ impl crate::ImportedDatabase {
     /// @param unique - whether `UNIQUE` was written
     /// @param exists - whether an index of that name is already there
     /// @param if_not_exists - whether the statement said so
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn create_index(
         &mut self,
         source: &[u8],

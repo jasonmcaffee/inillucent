@@ -196,7 +196,6 @@ struct Round {
 /// @param frames - the buffer pool size, in pages
 /// @param iterations - how many inserts to run
 /// @param with_indexes - whether `main_key` and `main_category` are kept
-#[allow(clippy::too_many_arguments)]
 fn attribute_one(
     fixture: &Path,
     scratch: &Path,

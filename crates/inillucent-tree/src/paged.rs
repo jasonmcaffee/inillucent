@@ -852,7 +852,6 @@ impl PagedTree {
     /// @param first_leaf - the leftmost leaf
     /// @param leaf_count - how many leaves
     /// @param row_count - how many rows
-    #[allow(clippy::too_many_arguments)]
     pub fn attach(
         pool: &Pool,
         tree_id: u64,

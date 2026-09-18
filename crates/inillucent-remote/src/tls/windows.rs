@@ -437,7 +437,6 @@ fn read_more(socket: &mut TcpStream, into: &mut Vec<u8>, host: &str) -> DbResult
 /// @param leftover - application bytes that arrived with the last flight
 /// @param extra_root - a DER authority to trust, when the URL named one
 /// @param requested - the context flags that were asked for
-#[allow(clippy::too_many_arguments)]
 fn finish(
     socket: TcpStream,
     host: &str,

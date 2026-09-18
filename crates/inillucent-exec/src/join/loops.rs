@@ -57,7 +57,6 @@ impl<'t> IndexNestedLoopJoin<'t> {
     /// @param inner_projection - which inner columns to emit
     /// @param full_key - whether the key names every inner key column
     /// @param downstream - what to push joined rows into
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         kind: JoinKind,
         inner: &'t PagedTree,

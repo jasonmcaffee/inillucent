@@ -621,7 +621,7 @@ AGENTS.md says "every row". Either the three get probes or AGENTS.md names the c
 | 5 | no `Option<Option<`, `StageTimings`, `Levers` | met | `lib.rs:474, 1019`; three `disable_optimizations` take `Levers` |
 | 6 | engine `lib.rs` under 1,500, `physical.rs` under 800, nothing over 2,000 | met | 1,279; 297; largest `physical/chain.rs` 1,617 |
 | 7 | no production function over 300; six named under 100 | **partly** | the six: 32, 78, 53, 25, 18, 80. Eight functions over 300 remain, all ratcheted: `gradeembed.rs:892 run` 497, `bench/main.rs:883 main` 486, `compat/perf.rs:731 plan_for` 450, `scenarios.rs:263 grade` 445, `fullgate::run` 389, `readgate::run` 370, `writegate::run` 318, `bind.rs:3325 bind_expr` 303 |
-| 8 | no function over 8 parameters; the ten take structs | **partly** | the ten do. `bench/main.rs:856 synth_embed` takes 9 under `#[allow(clippy::too_many_arguments)]`; no test enforces a parameter ceiling; 38 functions take 7 or 8 |
+| 8 | no function over 8 parameters; the ten take structs | met | the ten do. `synth_embed` takes a `SynthEmbedRequest` (task-1973); `no_function_takes_more_than_eight_parameters` and `no_attribute_turns_off_the_parameter_lint` enforce it (task-1977); 50 functions take 7 or 8, none more |
 | 9 | a scalar function calling its own connection errors, no panic | **partly** | `reentrant_connection.rs` explains the scalar scenario cannot be written (`ScalarBody` is `Send + Sync`, `Connection` is neither) and proves the invariant through `set_authorizer`; the criterion was never reworded |
 | 10 | `gates_fail_closed.rs` two cases per gate, run by `tools/validate` | met by the full run only | 4.3, 4.13 |
 | 11 | dated coverage table, `--coverage` reproduces it | met in letter | 4.12: no checker, contradicts itself |
@@ -717,7 +717,15 @@ exceeds 150 (the eight over 300 shrink first: `gradeembed::run`, `main`, `plan_f
 three gate `run` functions are stage loops with the "one stage, one helper" shape A8 already used;
 `bind_expr` waits for section 6.4). A `no_function_takes_more_than_eight_parameters` test over
 `crates/` and `drivers/`, counting outside `#[cfg(test)]` and excluding the receiver. `synth_embed`
-takes a `SynthEmbedRequest`. `grep -rn 'too_many_arguments' crates/ drivers/` returns nothing.
+takes a `SynthEmbedRequest`. No attribute in `crates/` or `drivers/` turns the lint off.
+
+**The clause here first said `grep -rn 'too_many_arguments' crates/ drivers/` returns nothing, and no
+state of this tree can do that.** Six of that grep's hits are sentences in doc comments explaining why
+an argument list became a struct, so the criterion as written asked for those explanations to be
+deleted. task-1977 measured the other 32, found that every one was an attribute suppressing a warning
+that could not fire - `clippy.toml` sets `too-many-arguments-threshold = 8` and the widest function
+carrying one took eight arguments - deleted all 32, and replaced the clause with a test over the
+attribute.
 
 ### 7.3 The six engine state groups are written through `pub(crate)` fields from 8 to 24 files
 
@@ -962,7 +970,7 @@ Each is a command or a file state a reviewer can check without reading the diff.
 25. `grep -c no_run crates/inillucent/src/lib.rs` returns 0 and `cargo test --doc -p inillucent` reports `1 passed`.
 26. `crates/inillucent-bench/src/main.rs` carries `#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]` and `#![deny(missing_docs)]`; `cargo clippy -p inillucent-bench --all-targets -- -D warnings` is clean; `docs/repository.md` says 29 of 29 and the sentence about "no library to put the attributes in" is gone; `gradeembed.rs` has a row in `CEILINGS`.
 27. A `policy.rs` test fails when any `FUNCTION_CEILINGS` entry exceeds 300 or a new entry exceeds 150; `FUNCTION_CEILINGS` has no entry over 300 except `bind_expr`, which is named in the test as the A15 exception with the ticket number.
-28. A `policy.rs` test fails when a function outside `#[cfg(test)]` in `crates/` or `drivers/` takes more than 8 parameters excluding the receiver; `grep -rn 'too_many_arguments' crates/ drivers/` returns nothing; `synth_embed` takes one struct.
+28. A `policy.rs` test fails when a function outside `#[cfg(test)]` in `crates/` or `drivers/` takes more than 8 parameters excluding the receiver; a second `policy.rs` test fails when any attribute in `crates/` or `drivers/` names `too_many_arguments`, so `grep -rn '#\[allow(clippy::too_many_arguments)\]' crates/ drivers/` returns nothing while the doc comments that explain the rule keep the word; `synth_embed` takes one struct.
 29. `grep -n 'OwnedDatum as Value' crates/inillucent-engine/src/lib.rs` returns nothing.
 30. `grep -rn '\.pragmas\.\w\|\.writing\.\w' crates/inillucent-engine/src | grep -v 'engine/state.rs\|/pragma/'` returns nothing; every field of `Pragmas` and `Writing` is private.
 31. `crates/inillucent-search/src/embed.rs` registers `embed` with `direct_only: true`; a test asserts `CREATE INDEX` and `CHECK` naming `embed` are refused with `may only be used from top-level SQL` and statement level `embed` is not; `registry.rs:32-34` and `pragma.rs:603-605` name `external()`; `UserFunction::external` exists; `CHANGELOG.md` records the change.

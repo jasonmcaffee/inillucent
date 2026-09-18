@@ -129,7 +129,6 @@ pub fn delete_at(
 /// @param triggers - the triggers this delete fires
 /// @param params - the bound parameters
 /// @param depth - how many triggers deep this write already is
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn remove_with_triggers(
     table: &TableInfo,
     target: &mut dyn WriteTarget,

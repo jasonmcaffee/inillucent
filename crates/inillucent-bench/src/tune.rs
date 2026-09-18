@@ -105,7 +105,6 @@ const PRIMARY: &str = "passage evidence";
 /// @param seed_offset - added to the query set seeds, so the settings are chosen
 ///   on queries the graded run will not use
 /// @param stats_seed - fixes every interval and p-value the sweep prints
-#[allow(clippy::too_many_arguments)]
 pub fn run(
     corpus: &Corpus,
     limit: Option<usize>,
@@ -618,7 +617,6 @@ pub fn fusion_named(name: &str, vector_weight: f32) -> Option<Fusion> {
 
 /// A label that names every setting the arm differs by, so a table row can be
 /// turned back into a command line.
-#[allow(clippy::too_many_arguments)]
 fn label_for(dials: &Dials<'_>) -> String {
     let Dials {
         coverage,

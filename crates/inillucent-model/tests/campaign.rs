@@ -410,7 +410,6 @@ fn run(trace: &Trace, policy: Synchronous) -> Vec<Divergence> {
 /// @param from - where to start
 /// @param policy - the sync policy
 /// @param failures - where a disagreement is recorded
-#[allow(clippy::too_many_arguments)]
 fn segment(
     engine: &Engine,
     trees: &mut BTreeMap<u32, PagedTree>,

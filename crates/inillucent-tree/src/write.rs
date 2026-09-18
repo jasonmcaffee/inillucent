@@ -1137,7 +1137,6 @@ impl PagedTree {
     /// @param rows - the rows to pack, sorted
     /// @param carried - the reference each already-out-of-line value is in
     /// @param appending - whether the rows are arriving in key order
-    #[allow(clippy::too_many_arguments)]
     fn repack(
         &mut self,
         database: &mut Database,
@@ -1298,7 +1297,6 @@ impl PagedTree {
     /// @param rows - its live rows, sorted
     /// @param carried - the reference each already-out-of-line value is in
     /// @param fill - how full to pack the left half
-    #[allow(clippy::too_many_arguments)]
     fn split_carrying(
         &mut self,
         database: &mut Database,
@@ -1507,7 +1505,6 @@ impl PagedTree {
     /// @param separator - the right half's first key, encoded
     /// @param right - the right half's page
     /// @param folded_by_caller - whether the immediate caller logs this page's image itself
-    #[allow(clippy::too_many_arguments)]
     fn insert_separator(
         &mut self,
         database: &mut Database,

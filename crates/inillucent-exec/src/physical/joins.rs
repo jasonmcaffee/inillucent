@@ -208,7 +208,6 @@ fn surviving_rows(
 /// @param stage - the inner stage
 /// @param index - the stage's position
 /// @param downstream - what to push joined rows into
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn build_nested<'t>(
     plan: &PhysicalPlan,
     catalog: &'t dyn TreeCatalog,

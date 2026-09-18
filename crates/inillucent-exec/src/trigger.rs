@@ -376,7 +376,6 @@ fn run_select(
 /// @param target - the file and its trees
 /// @param params - the bound parameters
 /// @param depth - how deep this body already is
-#[allow(clippy::too_many_arguments)]
 fn run_body(
     statement: &BoundTriggerStatement,
     trigger: &BoundTrigger,

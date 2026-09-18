@@ -665,7 +665,6 @@ fn snapshot(database: &Database) -> (inillucent_engine::connect::LogStats, u64) 
 }
 
 /// Builds the measurement from what the counters moved by.
-#[allow(clippy::too_many_arguments)]
 fn finish(
     workload: &str,
     synchronous: Synchronous,

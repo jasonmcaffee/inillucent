@@ -374,7 +374,6 @@ fn excluded(
 /// @param order_value - the ordering value of a row, for a `RANGE` offset, and
 ///   `None` when that value is NULL
 /// @param descending - whether the ordering term is descending
-#[allow(clippy::too_many_arguments)]
 fn bound_of(
     partition: &Partition,
     row: usize,
@@ -498,7 +497,6 @@ fn group_bound(
 /// @param is_start - whether this is the frame's start
 /// @param order_value - the ordering value of a row, `None` when it is NULL
 /// @param descending - whether the ordering term is descending
-#[allow(clippy::too_many_arguments)]
 fn range_bound(
     partition: &Partition,
     row: usize,

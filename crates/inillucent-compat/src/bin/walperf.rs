@@ -740,8 +740,6 @@ impl Counters {
     }
 }
 
-/// Builds a measurement from a family's timings and what its counters did.
-#[allow(clippy::too_many_arguments)]
 /// One timed run of a log workload, as `measure` turns it into a row.
 ///
 /// **A type rather than eight of nine arguments (task-1962, A9).** Three of
@@ -769,6 +767,7 @@ struct Timed<'a> {
     note: &'a str,
 }
 
+/// Builds a measurement from a family's timings and what its counters did.
 fn measure(timed: Timed<'_>) -> Measurement {
     let Timed {
         family,
