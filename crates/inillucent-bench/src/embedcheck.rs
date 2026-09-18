@@ -60,6 +60,7 @@ use crate::arm::{Arm, ArmOptions};
 use crate::corpus::{short, Corpus};
 use crate::metrics::percentile;
 use crate::models::{self, ResolvedModel};
+use inillucent_core::store::ChunkInput;
 
 /// Agreement below this is further out than re-running one model over one text
 /// should land, so a sample under it is re-embedded on its own and reported.
@@ -112,11 +113,11 @@ fn describe(label: &str, mut values: Vec<f64>) {
     println!(
         "  {label}: n={} min={:.6} p5={:.6} p50={:.6} mean={:.6} max={:.6}",
         values.len(),
-        values[0],
+        values.first().copied().unwrap_or(0.0),
         percentile(&values, 0.05),
         percentile(&values, 0.50),
         mean,
-        values[values.len() - 1]
+        values.last().copied().unwrap_or(0.0)
     );
 }
 
@@ -261,8 +262,11 @@ pub fn run(
     );
     let texts: Vec<String> = chosen
         .iter()
-        .map(|&i| crate::synth::sanitize_for_model(&corpus.chunks[i].content))
-        .collect();
+        .map(|&i| {
+            let chunk = chunk_at(corpus, i)?;
+            Ok(crate::synth::sanitize_for_model(&chunk.content))
+        })
+        .collect::<Result<Vec<String>>>()?;
     let fresh = embedder
         .embed_documents(&texts)
         .context("re-embedding the sample")?;
@@ -291,6 +295,37 @@ pub fn run(
     verdict(&agreements, &low, chosen.len(), &manifest.id)
 }
 
+/// One chunk of the loaded cache, by the index a sample drew.
+///
+/// **Fallible, because a sample index the corpus does not hold means the
+/// sampler and the cache disagree about how many chunks were loaded.** The
+/// check would otherwise compare a vector against the wrong text, which is the
+/// exact failure it exists to find.
+///
+/// @param corpus - the loaded cache
+/// @param at - the chunk index the sample drew
+fn chunk_at(corpus: &Corpus, at: usize) -> Result<&ChunkInput> {
+    corpus.chunks.get(at).with_context(|| {
+        format!(
+            "chunk {at} is past the {} the cache holds",
+            corpus.chunks.len()
+        )
+    })
+}
+
+/// One chunk's stored vector, by the same index.
+///
+/// @param corpus - the loaded cache
+/// @param at - the chunk index the sample drew
+fn stored_vector(corpus: &Corpus, at: usize) -> Result<Vec<f32>> {
+    corpus.vectors.get(at).cloned().with_context(|| {
+        format!(
+            "chunk {at} has no stored vector: the cache holds {}",
+            corpus.vectors.len()
+        )
+    })
+}
+
 /// Cosine between each sampled chunk's stored vector and its re-embedding.
 /// @param corpus - the loaded cache, for the stored vectors
 /// @param chosen - the sampled chunk indices, in the order they were embedded
@@ -298,15 +333,22 @@ pub fn run(
 fn agreements_against(corpus: &Corpus, chosen: &[usize], fresh: &[Vec<f32>]) -> Result<Vec<f64>> {
     let mut agreements = Vec::with_capacity(chosen.len());
     for (row, &i) in chosen.iter().enumerate() {
-        let mut stored = corpus.vectors[i].clone();
+        let mut stored = stored_vector(corpus, i)?;
         inillucent_core::distance::normalize(&mut stored);
+        let made = fresh.get(row).with_context(|| {
+            format!(
+                "the model returned {} vectors for {} sampled chunks",
+                fresh.len(),
+                chosen.len()
+            )
+        })?;
         anyhow::ensure!(
-            fresh[row].len() == stored.len(),
+            made.len() == stored.len(),
             "the model produced {} dimensions and the cache holds {}",
-            fresh[row].len(),
+            made.len(),
             stored.len()
         );
-        agreements.push(dot(&fresh[row], &stored) as f64);
+        agreements.push(dot(made, &stored) as f64);
     }
     Ok(agreements)
 }
@@ -354,20 +396,22 @@ fn below(agreements: &[f64], chosen: &[usize], bound: f64) -> Vec<Low> {
 /// @param low - the chunks below the floor, worst first; filled in place
 fn measure_alone(embedder: &Arm, corpus: &Corpus, low: &mut [Low]) -> Result<()> {
     for entry in low.iter_mut().take(ALONE_SAMPLES) {
-        let text = crate::synth::sanitize_for_model(&corpus.chunks[entry.index].content);
+        let text = crate::synth::sanitize_for_model(&chunk_at(corpus, entry.index)?.content);
         let fresh = embedder
             .embed_documents(&[text])
             .with_context(|| format!("re-embedding chunk {} on its own", entry.index))?;
-        let mut stored = corpus.vectors[entry.index].clone();
+        let mut stored = stored_vector(corpus, entry.index)?;
         inillucent_core::distance::normalize(&mut stored);
+        let made = fresh.first();
         anyhow::ensure!(
-            fresh.len() == 1 && fresh[0].len() == stored.len(),
+            fresh.len() == 1 && made.map(Vec::len) == Some(stored.len()),
             "re-embedding chunk {} on its own produced {} vectors of {} dimensions",
             entry.index,
             fresh.len(),
-            fresh.first().map(|v| v.len()).unwrap_or(0)
+            made.map(Vec::len).unwrap_or(0)
         );
-        entry.alone = Some(dot(&fresh[0], &stored) as f64);
+        let made = made.context("the reply carried no vector at all")?;
+        entry.alone = Some(dot(made, &stored) as f64);
     }
     Ok(())
 }
@@ -405,11 +449,21 @@ fn report_low(corpus: &Corpus, low: &[Low], sampled: usize, served: bool) {
             Some(a) => format!("{a:.6} embedded alone"),
             None => "not re-embedded alone".to_string(),
         };
+        // This whole function prints; a chunk the corpus does not hold is
+        // reported as such rather than ending the report.
+        let Some(chunk) = corpus.chunks.get(entry.index) else {
+            println!(
+                "    chunk {} is past the {} the corpus holds",
+                entry.index,
+                corpus.chunks.len()
+            );
+            continue;
+        };
         println!(
             "    chunk {} ({}, {} chars): {:.6} in the sample, {alone}",
             entry.index,
-            corpus.chunks[entry.index].source,
-            corpus.chunks[entry.index].content.len(),
+            chunk.source,
+            chunk.content.len(),
             entry.in_sample
         );
     }
@@ -762,17 +816,23 @@ mod tests {
     /// population fails here rather than in somebody's cache.
     #[test]
     fn the_mispairing_bar_sits_between_the_noise_and_a_real_mispairing() {
-        const WORST_HONEST_READING: f64 = 0.999409;
-        const BEST_MISPAIRED_READING: f64 = 0.881375;
-        assert!(MISPAIRED_BELOW < AGREEMENT_FLOOR);
+        // Measurements rather than settings, so they are bindings: the bar
+        // is the constant and these are what it was placed between.
+        let worst_honest_reading: f64 = 0.999409;
+        let best_mispaired_reading: f64 = 0.881375;
+        // A relation between two of this module's own constants, so it holds
+        // when the crate compiles rather than when this test runs.
+        const {
+            assert!(MISPAIRED_BELOW < AGREEMENT_FLOOR);
+        }
         assert!(
-            BEST_MISPAIRED_READING < MISPAIRED_BELOW,
-            "a vector made from the nearest other chunk's text reads {BEST_MISPAIRED_READING} \
+            best_mispaired_reading < MISPAIRED_BELOW,
+            "a vector made from the nearest other chunk's text reads {best_mispaired_reading} \
              and has to fall below {MISPAIRED_BELOW}"
         );
         assert!(
-            WORST_HONEST_READING > MISPAIRED_BELOW,
-            "the worst honest reading measured is {WORST_HONEST_READING} and has to stay above \
+            worst_honest_reading > MISPAIRED_BELOW,
+            "the worst honest reading measured is {worst_honest_reading} and has to stay above \
              {MISPAIRED_BELOW}"
         );
     }

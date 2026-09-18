@@ -206,10 +206,13 @@ and five `onnx` cases are built only when that feature is on.
   table below, which is what `tools/coverage.mjs` actually measures. **Per-module numbers are not
   published**, because `tools/coverage.mjs` aggregates to the crate and nothing here has measured
   them.
-- **28 of the 29 crates deny `unwrap`, `expect`, `panic` and slice indexing**, and 21 forbid
+- **29 of the 29 crates deny `unwrap`, `expect`, `panic` and slice indexing**, and 21 forbid
   `unsafe`, on every path that reads SQL text, database pages, log frames, network bytes or file
-  system results. The twenty-ninth is `inillucent-bench`, which has no library to put the attributes
-  in.
+  system results. The twenty-ninth to arrive was `inillucent-bench`, in task-1973: it is a binary
+  crate, and the attributes go on `main.rs` because a `#![deny(..)]` is a crate root inner attribute
+  and `main.rs` is a crate root. Turning them on there produced 191 errors - 154 slice indexes, 18
+  slices, 8 `unwrap`s and 11 `expect`s - in the harness that scores the numbers on this page and in
+  `docs/retrieval-quality.md`.
 
 ### How much of it is covered
 

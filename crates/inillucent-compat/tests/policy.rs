@@ -370,6 +370,141 @@ fn every_governed_crate_denies_undocumented_items() {
     }
 }
 
+/// Every `pub fn` in a crate whose root is `main.rs` carries a doc comment.
+///
+/// **`#![deny(missing_docs)]` compiles in a binary crate and reaches nothing
+/// in it (task-1973).** The lint fires on items that are publicly reachable
+/// from the crate root, and a binary's modules are declared `mod arm;` rather
+/// than `pub mod arm;` - so nothing inside them is reachable from outside and
+/// the lint has no surface to check. Measured: with the attribute on
+/// `crates/inillucent-bench/src/main.rs` and twenty-seven undocumented
+/// `pub fn` in the crate, the compiler reported **zero** missing-docs errors.
+/// Changing one `mod metrics;` to `pub mod metrics;` made it report two
+/// immediately, which is the proof that the attribute is live and its reach is
+/// the problem.
+///
+/// So `docs/repository.md` says 29 of the 29 crates deny `missing_docs`, and in
+/// the twenty-ninth this test is what the sentence is true because of. The
+/// attribute stays on `main.rs`: it holds the day a module becomes `pub`, and
+/// `every_governed_crate_denies_undocumented_items` above reads it.
+///
+/// A doc comment is `///` on the line above the signature, past any attribute
+/// lines, which is the same rule the task-1969 review counted by. Anything
+/// inside a `#[cfg(test)]` module is skipped, for the reason the other checks
+/// here skip it: a test function's name is its description.
+#[test]
+fn every_public_function_in_a_binary_crate_is_documented() {
+    let root = workspace_root();
+    let mut undocumented: Vec<String> = Vec::new();
+    let mut read = 0usize;
+    let mut crates = 0usize;
+    for group in ["crates", "drivers"] {
+        let Ok(entries) = std::fs::read_dir(root.join(group)) else {
+            continue;
+        };
+        let mut paths: Vec<PathBuf> = entries
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .collect();
+        paths.sort();
+        for path in paths {
+            // A crate with a library is one the lint already covers.
+            if path.join("src/lib.rs").is_file() || !path.join("src/main.rs").is_file() {
+                continue;
+            }
+            crates = crates.saturating_add(1);
+            for file in rust_files(&path.join("src")) {
+                let Ok(text) = std::fs::read_to_string(&file) else {
+                    continue;
+                };
+                read = read.saturating_add(1);
+                let named = relative(&root, &file);
+                undocumented.extend(
+                    undocumented_public_functions(&text)
+                        .into_iter()
+                        .map(|(at, name)| format!("{named}:{at} {name}")),
+                );
+            }
+        }
+    }
+    assert!(
+        crates >= 1,
+        "found no crate whose root is `main.rs`, which means this is looking in the wrong place \
+         rather than that the workspace has no binary crate"
+    );
+    assert!(
+        read >= 15,
+        "read {read} source files across {crates} binary crate(s), which is too few to be the \
+         whole of one"
+    );
+    assert!(
+        undocumented.is_empty(),
+        "these public functions have no doc comment:\n  {}\n\
+         `#![deny(missing_docs)]` does not reach them: a binary crate's modules are private, so \
+         nothing in them is publicly reachable and the lint has no surface to check. This test is \
+         that lint's reach, and `docs/repository.md`'s \"29 of the 29 crates deny\" is true \
+         because of it.",
+        undocumented.join("\n  ")
+    );
+}
+
+/// Returns every `pub fn` in a file with no doc comment above it.
+///
+/// The line above the signature, past any attribute lines, has to start with
+/// `///`. A `#[cfg(test)]` module is skipped whole: it ends at the first line
+/// that is exactly the closing brace at the attribute's own indent, which is
+/// how [`function_lengths`] finds the end of a body too.
+///
+/// @param text - the file's contents
+fn undocumented_public_functions(text: &str) -> Vec<(usize, String)> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut found = Vec::new();
+    let mut closing: Option<String> = None;
+    for (at, line) in lines.iter().enumerate() {
+        if let Some(brace) = &closing {
+            if *line == *brace {
+                closing = None;
+            }
+            continue;
+        }
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("#[cfg(test)]") {
+            let indent = line.len().saturating_sub(trimmed.len());
+            closing = Some(format!("{}}}", " ".repeat(indent)));
+            continue;
+        }
+        if !trimmed.starts_with("pub ") {
+            continue;
+        }
+        let Some(name) = opens_a_function(trimmed) else {
+            continue;
+        };
+        if declaration(&lines, at) {
+            continue;
+        }
+        // Back past the attributes, to whatever is above the signature.
+        let mut above = at;
+        while above > 0 {
+            let previous = lines
+                .get(above.saturating_sub(1))
+                .unwrap_or(&"")
+                .trim_start();
+            if previous.starts_with("#[") {
+                above = above.saturating_sub(1);
+                continue;
+            }
+            break;
+        }
+        let documented = above > 0
+            && lines
+                .get(above.saturating_sub(1))
+                .is_some_and(|previous| previous.trim_start().starts_with("///"));
+        if !documented {
+            found.push((at.saturating_add(1), name));
+        }
+    }
+    found
+}
+
 /// Returns where a crate's manifest lives.
 ///
 /// **Two directories, because the driver crates are in `drivers/`.** Every
@@ -959,7 +1094,7 @@ fn no_new_crate_reaches_into_the_retired_engine() {
 // below already fails loudly with "is not there any more; remove its row"
 // for exactly this reason - removing them here is answering that failure
 // before it happens rather than after.
-const CEILINGS: [(&str, usize); 11] = [
+const CEILINGS: [(&str, usize); 12] = [
     // Added at its post-split size in task-1946 (M12). It was 2,728 lines
     // holding the frame table, eviction, the journal's sync gating and the
     // swip logic together; the last three are child modules now.
@@ -1093,7 +1228,26 @@ const CEILINGS: [(&str, usize); 11] = [
     // added commas and rebalanced braces, and every identifier removed reappears added - rustfmt
     // reordering `use` statements. The ratchet's own rule is that the numbers only go down, so this
     // one is raised deliberately and said out loud (task-1966).
-    ("crates/inillucent-bench/src/synth.rs", 2_799),
+    // **Lowered to 2,662 in task-1973.** Its 3,214 lines were 415 past the
+    // 2,799 recorded here, from the doc comments the crate now carries and from
+    // splitting `build`, `build_source`, `check` and `embed` - and the
+    // ratchet's rule is that a module comes down by an extraction rather than
+    // up by a raised number. Two halves came out whole, each answering a
+    // question of its own and each reached from one place: `synth/check.rs`,
+    // which is the whole of what `synth-check` does, and `synth/postgres.rs`,
+    // which is the only part of the module that talks to a database.
+    ("crates/inillucent-bench/src/synth.rs", 2_662),
+    // **Its first row, added in task-1973 (the task-1969 part six review, 7.2).**
+    // It is the second largest file in the workspace after
+    // `inillucent-sql/src/bind.rs` and it has never had a ceiling, so every
+    // addition to it since the crate was written was invisible to this test.
+    // 3,048 when the review measured it, 3,430 by the time task-1973 started
+    // and 3,815 after splitting `run` into the ten functions above it - the
+    // structs and the doc comments a split needs are lines the file did not
+    // have. Recorded at its post-split size, which is what `pool.rs` above was
+    // recorded at for the same reason. **Splitting the file itself is not this
+    // ticket**: the review asked for the row.
+    ("crates/inillucent-bench/src/gradeembed.rs", 3_815),
 ];
 
 /// No module grows past the size it is recorded at, and the record only comes
@@ -2208,25 +2362,19 @@ fn mentions_of(text: &str, name: &str) -> usize {
 /// A function that falls under 150 lines loses its row rather than keeping a
 /// lowered one: the list is what is over the threshold, and a row on a short
 /// function is a hole the width of its old number. Seven left in task-1962 A8.
-const FUNCTION_CEILINGS: [(&str, &str, usize); 60] = [
-    // 531 before task-1946 H6 moved the card's four path rows into
-    // `runs::note_inputs` and `runs::note_run_files`.
-    // 527 until task-1970's `cargo fmt --all` reflowed this crate to 588. The whitespace-stripped
-    // diff of this file adds 38 commas, three brace pairs and five semicolons and removes nothing
-    // at all, so no logic grew (task-1966).
-    ("crates/inillucent-bench/src/gradeembed.rs", "run", 588),
+const FUNCTION_CEILINGS: [(&str, &str, usize); 52] = [
+    // `gradeembed.rs::run`, `main.rs::main`, `scenarios.rs::grade`,
+    // `report.rs::render`, `synth.rs::build`, `synth.rs::build_source`,
+    // `synth.rs::check` and `synth.rs::embed` came off this list in task-1973,
+    // which split all eight. They are 94, 127, 86, 14, 8, 25, 20 and 77 lines
+    // now, and a row for a function that is not over 150 is a row nobody can
+    // act on: the unrecorded bar below catches it if it ever grows back, and
+    // this list is meant to be exactly what was over 150 when it was written.
     (
         "crates/inillucent-engine/src/engine/open.rs",
         "open_on",
         160,
     ),
-    // 488 until task-1970's `cargo fmt --all` reflowed this crate to 568. Not growth: with all
-    // whitespace stripped, this function gains 9 commas and its identifiers are unchanged
-    // character for character (task-1966).
-    ("crates/inillucent-bench/src/main.rs", "main", 568),
-    // 445 until the same formatting pass took it to 537. It sat exactly at its ceiling before,
-    // which is why a reflow broke it (task-1966).
-    ("crates/inillucent-bench/src/scenarios.rs", "grade", 537),
     // Not on this list before task-1970's `cargo fmt --all`: it was 148 lines and the limit for an
     // unrecorded function is 150. Reflow took it to 160, adding 4 commas with its identifiers
     // unchanged character for character. Recorded rather than split, because the code did not
@@ -2243,18 +2391,12 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 60] = [
     ("crates/inillucent-engine/src/ddl.rs", "run_directive", 273),
     ("crates/inillucent-tree/src/paged/skip.rs", "skip_scan", 249),
     ("crates/inillucent-sql/src/bind.rs", "bind_call_with", 248),
-    // 243 until the same pass took it to 275. Whitespace-stripped it gains 4 commas and nothing
-    // else; it sat exactly at its ceiling, so any reflow broke it (task-1966).
-    ("crates/inillucent-bench/src/synth.rs", "build_source", 275),
     ("crates/inillucent-exec/src/expr/tree.rs", "compile", 242),
     (
         "crates/inillucent-tree/src/leaf/encode.rs",
         "encode_rows_with",
         239,
     ),
-    // 238 until the same pass took it to 258. One comma added, identifiers unchanged. It too sat
-    // exactly at its ceiling (task-1966).
-    ("crates/inillucent-bench/src/report.rs", "render", 258),
     (
         "crates/inillucent-compat/src/bin/readperf.rs",
         "measure",
@@ -2292,11 +2434,6 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 60] = [
         "update_at_cached",
         219,
     ),
-    // 214 until the same pass took it to 230, and this one is the clearest case in the crate:
-    // whitespace-stripped it is **7,235 characters before and 7,235 after**, with no punctuation
-    // added at all. Sixteen more lines holding character-for-character identical code, which is
-    // what a line ceiling cannot tell apart from growth on its own (task-1966).
-    ("crates/inillucent-bench/src/synth.rs", "check", 230),
     ("crates/inillucent-model/tests/campaign.rs", "segment", 213),
     // The group name in front of the fields it reads, from task-1962 A1
     // step 2; the formatter then wraps what it used to fit on one line.
@@ -2370,12 +2507,6 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 60] = [
     ("crates/inillucent-sql/src/plan.rs", "index_candidate", 167),
     ("crates/inillucent-compat/src/bin/testrun.rs", "report", 164),
     ("crates/inillucent-compat/src/bin/planperf.rs", "run", 163),
-    // 163 until the same pass took it to 179. Two commas added, identifiers unchanged, and it sat
-    // exactly at its ceiling (task-1966).
-    ("crates/inillucent-bench/src/synth.rs", "build", 179),
-    // New to this list for the same reason: 135 lines before the formatting pass and 158 after,
-    // 2 commas added, identifiers unchanged (task-1966).
-    ("crates/inillucent-bench/src/synth.rs", "embed", 158),
     (
         "crates/inillucent-engine/src/vtab.rs",
         "create_virtual_table",
@@ -2694,27 +2825,16 @@ fn no_test_file_defines_its_own_skip_helper() {
 /// else. An entry that is not on this list and not under 300 fails, and so
 /// does a *new* entry over 150 - which is the length the review counted at, so
 /// the recorded list is exactly what was over 150 when the ratchet was written.
-const OVER_THREE_HUNDRED: [(&str, &str, &str); 4] = [
+const OVER_THREE_HUNDRED: [(&str, &str, &str); 1] = [
     // A15: an `Identifier` type and the `bind.rs` split. task-1962 re-measured
     // that only 11 of the 114 byte-or-string identifier signatures are in this
     // file, so A15 does not depend on the split; both are one ticket of their
     // own, which section 6.4 of the task-1969 review designs.
     ("crates/inillucent-sql/src/bind.rs", "bind_expr", "A15"),
-    // task-1973: the four `inillucent-bench` items. That crate was being
-    // rewritten by task-1966 for the whole of task-1970's run - `gradeembed::run`
-    // grew from 527 to 588 lines that afternoon - so a split written against it
-    // would have been undone by the next commit.
-    (
-        "crates/inillucent-bench/src/gradeembed.rs",
-        "run",
-        "task-1973",
-    ),
-    ("crates/inillucent-bench/src/main.rs", "main", "task-1973"),
-    (
-        "crates/inillucent-bench/src/scenarios.rs",
-        "grade",
-        "task-1973",
-    ),
+    // The three `inillucent-bench` rows that were here came off in task-1973,
+    // which split all three: `gradeembed.rs::run` is 94 lines, `main.rs::main`
+    // is 127 and `scenarios.rs::grade` is 86. `bind_expr` is the last function
+    // in the workspace over 300 lines.
 ];
 
 /// No recorded ceiling is over 300 lines, and no new one is over 150.
@@ -2789,7 +2909,10 @@ fn no_function_ceiling_is_over_three_hundred() {
 /// and a second copy of it would be a second thing to keep in step. What the
 /// count refuses is a *new* long function: the total may go down freely and may
 /// not go up.
-const RECORDED_OVER_THE_NEW_BAR: usize = 55;
+///
+/// 55 when this was written; 48 since task-1973 split seven `inillucent-bench`
+/// functions and took five of their rows out of this band.
+const RECORDED_OVER_THE_NEW_BAR: usize = 48;
 
 /// No function outside a test module takes more than eight parameters.
 ///
@@ -2805,15 +2928,10 @@ const RECORDED_OVER_THE_NEW_BAR: usize = 55;
 /// takes ten values is a test fixture rather than an interface.
 #[test]
 fn no_function_takes_more_than_eight_parameters() {
-    // task-1973: `synth_embed` takes nine under `#[allow(clippy::too_many_arguments)]`,
-    // which is the only such allow in `crates/` or `drivers/`. It becomes a
-    // `SynthEmbedRequest` there, and this row comes out with the allow.
-    const WAITING: [(&str, &str, &str); 1] = [(
-        "crates/inillucent-bench/src/main.rs",
-        "synth_embed",
-        "task-1973",
-    )];
-
+    // **Nothing is excused.** `synth_embed` was, in task-1970, because it took
+    // nine parameters under an `#[allow(clippy::too_many_arguments)]`; task-1973
+    // gave it a `SynthEmbedRequest` and the allow came off with the exemption.
+    // A new function that crosses the bar has no list to be added to.
     let root = workspace_root();
     let mut wide: Vec<String> = Vec::new();
     let mut read = 0usize;
@@ -2829,12 +2947,6 @@ fn no_function_takes_more_than_eight_parameters() {
             .replace('\\', "/");
         for (function, count) in parameter_counts(&text) {
             if count <= 8 {
-                continue;
-            }
-            if WAITING
-                .iter()
-                .any(|(held, named, _)| *held == relative && *named == function)
-            {
                 continue;
             }
             wide.push(format!("{relative}::{function} takes {count}"));

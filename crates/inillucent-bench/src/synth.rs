@@ -394,7 +394,7 @@ fn split_prose(text: &str, target: usize, want: usize) -> Vec<String> {
             }
             end = found.unwrap_or(ideal);
         }
-        let piece: String = chars[start..end].iter().collect();
+        let piece: String = chars.get(start..end).unwrap_or(&[]).iter().collect();
         let piece = piece.trim().to_string();
         if !piece.is_empty() {
             out.push(piece);
@@ -538,6 +538,24 @@ const CHANNELS: &[&str] = &[
     "hiring",
     "random",
 ];
+/// One entry of a fixed table, by an index of any size.
+///
+/// **Every table in this module is a non-empty constant and every index here
+/// is reduced modulo its length, so the fallback is unreachable.** It is
+/// written as a fallback rather than as an `unwrap` because the alternative
+/// under `deny(clippy::indexing_slicing)` is twenty `unwrap`s in a corpus
+/// generator, and one of those firing halfway through leaves a half-written
+/// corpus on disk for somebody to grade.
+///
+/// @param table - the fixed table to choose from
+/// @param at - any index; it is reduced modulo the table's length
+fn from_table<'a>(table: &[&'a str], at: usize) -> &'a str {
+    if table.is_empty() {
+        return "";
+    }
+    table.get(at % table.len()).copied().unwrap_or("")
+}
+
 const PROJECTS: &[&str] = &[
     "PLAT", "SRCH", "DATA", "INFRA", "WEB", "MOB", "API", "BILL", "SUP", "DOC", "TOOL", "PERF",
     "SEC", "ANL", "REL", "DES", "ONB", "QA", "OPS", "ML", "CORE", "EXP",
@@ -549,8 +567,8 @@ fn authors_for(name: &str, count: usize) -> Vec<(String, String)> {
     let mut seen = std::collections::HashSet::new();
     let mut i = 0usize;
     while out.len() < count {
-        let given = GIVEN[i % GIVEN.len()];
-        let family = FAMILY[(i / GIVEN.len() + i * 7) % FAMILY.len()];
+        let given = from_table(GIVEN, i);
+        let family = from_table(FAMILY, i / GIVEN.len() + i * 7);
         let display = format!("{given} {family}");
         if seen.insert(display.clone()) {
             // The identifier is stable and obviously synthetic, which matters
@@ -561,7 +579,7 @@ fn authors_for(name: &str, count: usize) -> Vec<(String, String)> {
         i += 1;
         if i > count * 40 {
             // Exhausted the combinations; number the remainder.
-            let display = format!("{} {}", GIVEN[out.len() % GIVEN.len()], out.len());
+            let display = format!("{} {}", from_table(GIVEN, out.len()), out.len());
             let id = format!("{}-u{:04}", name, out.len() + 1);
             out.push((display, id));
         }
@@ -609,7 +627,7 @@ fn labels_for(rng: &mut StdRng, mean: f64, extra: &[String]) -> Vec<String> {
     for _ in 0..count {
         // A skewed draw, so a handful of labels are common and the rest are rare.
         let i = (rng.gen::<f64>().powf(2.0) * LABELS.len() as f64) as usize;
-        let label = LABELS[i.min(LABELS.len() - 1)].to_string();
+        let label = from_table(LABELS, i.min(LABELS.len().saturating_sub(1))).to_string();
         if !out.contains(&label) {
             out.push(label);
         }
@@ -637,7 +655,7 @@ fn labels_for(rng: &mut StdRng, mean: f64, extra: &[String]) -> Vec<String> {
 /// sources because real documents reference tickets, and because the identifier
 /// scenario needs rare literal tokens to search for.
 fn ticket_key(rng: &mut StdRng) -> String {
-    let project = PROJECTS[rng.gen_range(0..PROJECTS.len())];
+    let project = from_table(PROJECTS, rng.gen_range(0..PROJECTS.len()));
     format!("{project}-{}", rng.gen_range(100..9999))
 }
 
@@ -741,14 +759,17 @@ fn heading_path(depth: usize, headings: &[String], nth: usize, total: usize) -> 
         return Vec::new();
     }
     // Which section this chunk falls in, from how far through the document it is.
+    let last = headings.len().saturating_sub(1);
     let section = if total <= 1 {
         0
     } else {
-        (nth * headings.len() / total).min(headings.len() - 1)
+        (nth * headings.len() / total).min(last)
     };
     let first = section + 1 - depth.min(section + 1);
     let mut path = Vec::with_capacity(depth);
-    for h in &headings[first..=section] {
+    // `section` is clamped to the last heading and `first` is no greater than
+    // it, so the range is one the slice holds.
+    for h in headings.get(first..=section).unwrap_or(&[]) {
         let h = h.trim();
         if h.is_empty() || path.iter().any(|p| p == h) {
             continue;
@@ -756,7 +777,9 @@ fn heading_path(depth: usize, headings: &[String], nth: usize, total: usize) -> 
         path.push(h.to_string());
     }
     if path.is_empty() {
-        path.push(headings[section].trim().to_string());
+        if let Some(only) = headings.get(section) {
+            path.push(only.trim().to_string());
+        }
     }
     path
 }
@@ -850,292 +873,443 @@ fn allocate_articles(
             })
             .map(|(i, _)| i);
         let Some(i) = pick else { break };
-        needs[i].documents_left -= 1;
-        needs[i].chars_left = (needs[i].chars_left - article.text.len() as f64).max(0.0);
-        out.get_mut(needs[i].name)
-            .expect("allocated above")
-            .push(article);
+        // `pick` is an index `needs.iter().enumerate()` produced, so this is
+        // the same element written where the compiler can see it.
+        let Some(need) = needs.get_mut(i) else { break };
+        need.documents_left -= 1;
+        need.chars_left = (need.chars_left - article.text.len() as f64).max(0.0);
+        let Some(slice) = out.get_mut(need.name) else {
+            // Every source in `needs` is given a slice above, so this cannot
+            // happen; the article is left in the pool rather than dropped
+            // silently into a source nobody asked for.
+            break;
+        };
+        slice.push(article);
     }
     out
 }
 
+/// One raw item taken from a pool, reshaped into the fields a document needs.
+///
+/// **The seven fields used to be a seven-tuple built by a 166-line `match`
+/// inside `build_source`.** Four of them are `String` and two are
+/// `Option<String>`, so the tuple's order was the only thing saying which was
+/// the title and which the url, and each material arm restated that order from
+/// memory.
+struct RawDocument {
+    /// The document's title, which is also the identity family's query.
+    title: String,
+    /// The section headings, deepest last, that a chunk's breadcrumb is cut from.
+    headings: Vec<String>,
+    /// What a real system would have recorded as labels or components.
+    categories: Vec<String>,
+    /// The raw item's own timestamp, when it carried one.
+    timestamp: Option<String>,
+    /// The text the chunks are cut out of.
+    text: String,
+    /// The space, channel or project this document belongs to.
+    space: Option<String>,
+    /// A url in the reserved `example.invalid` domain.
+    url: String,
+    /// How many chunks to cut, which the article materials cap at what their
+    /// raw text actually has room for.
+    chunks: usize,
+}
+
 /// Documents for one source, consuming from the pools so no raw item is used
 /// twice anywhere in the corpus.
-#[allow(clippy::too_many_lines)]
+///
+/// **Three stages, each its own function.** The chunk counts are decided for
+/// every document before any text is read, then one raw item is taken per
+/// document, then the document is assembled from it. A pool that runs out ends
+/// the loop, and `build` reports the shortfall against the plan.
+///
+/// @param plan - the source being built
+/// @param pools - the raw material, consumed as it is used
+/// @param rng - the source's own generator, so a source is reproducible
 fn build_source(plan: &SourcePlan, pools: &mut Pools, rng: &mut StdRng) -> Result<Vec<Document>> {
     let authors = authors_for(plan.name, plan.authors);
     let mut docs: Vec<Document> = Vec::with_capacity(plan.documents);
-
-    // Decide the chunk count of every document first, then scale the counts so
-    // they sum to the source's measured chunk total. Drawing and then correcting
-    // keeps the measured shape and still hits the measured size.
-    let mut counts: Vec<usize> = (0..plan.documents)
-        .map(|_| chunks_per_doc(rng, plan.per_doc))
-        .collect();
-    let drawn: usize = counts.iter().sum();
-    if drawn > 0 && plan.chunks > 0 {
-        let factor = plan.chunks as f64 / drawn as f64;
-        for c in counts.iter_mut() {
-            *c = ((*c as f64) * factor).round() as usize;
-            *c = (*c).max(plan.per_doc.0);
-        }
-        // Correct the rounding residue one chunk at a time, on documents that can
-        // absorb it without leaving the measured range.
-        let mut total: usize = counts.iter().sum();
-        let mut guard = 0usize;
-        while total != plan.chunks && guard < plan.documents * 60 {
-            let i = rng.gen_range(0..counts.len());
-            if total < plan.chunks && counts[i] < plan.per_doc.3 {
-                counts[i] += 1;
-                total += 1;
-            } else if total > plan.chunks && counts[i] > plan.per_doc.0 {
-                counts[i] -= 1;
-                total -= 1;
-            }
-            guard += 1;
-        }
-    }
+    let counts = chunk_counts_for(plan, rng);
 
     // Documents needing the most text are filled first, so the longest raw items
     // go where they are needed and nothing is wasted.
     let mut order: Vec<usize> = (0..counts.len()).collect();
-    order.sort_by(|a, b| counts[*b].cmp(&counts[*a]));
+    order.sort_by(|a, b| counts.get(*b).cmp(&counts.get(*a)));
 
     for &slot in &order {
-        let mut want = counts[slot];
+        let want = counts.get(slot).copied().unwrap_or(0);
         if want == 0 {
             continue;
         }
-
-        let (title, headings, categories, timestamp, text, space, url) = match plan.material {
-            Material::Articles | Material::DesignFiles | Material::Boards => {
-                // This source's own slice of the article pool, longest first, paired
-                // rank for rank with documents ordered by how much text they need.
-                let slice = pools
-                    .articles
-                    .get_mut(plan.name)
-                    .expect("every article source is allocated a slice");
-                let a = match slice.pop() {
-                    Some(a) => a,
-                    None => break, // Slice exhausted; the caller reports the shortfall.
-                };
-                let a = &a;
-                // A document cannot hold more chunks than its article has text for.
-                // Capping here rather than skipping keeps the document, which is what
-                // makes the document count reachable.
-                let available = ((a.text.len() as f64) * expansion(plan.material)) as usize;
-                want = want
-                    .min((available / plan.mean_chars).max(plan.per_doc.0))
-                    .max(1);
-                let space = match plan.spaces {
-                    Spaces::Shared(1) => Some("ENG".to_string()),
-                    Spaces::Shared(n) => Some(format!("SPACE{:02}", rng.gen_range(0..n))),
-                    Spaces::PerDocument => Some(format!(
-                        "{}-{}",
-                        plan.name,
-                        a.title
-                            .chars()
-                            .filter(|c| c.is_alphanumeric())
-                            .take(24)
-                            .collect::<String>()
-                            .to_lowercase()
-                    )),
-                };
-                let url = format!(
-                    "https://example.invalid/{}/{}",
-                    plan.name,
-                    a.title.replace(' ', "_")
-                );
-                (
-                    a.title.clone(),
-                    a.headings.clone(),
-                    a.categories.clone(),
-                    a.timestamp.clone(),
-                    a.text.clone(),
-                    space,
-                    url,
-                )
-            }
-            Material::Discussions => {
-                let t = match pools.talk.pop() {
-                    Some(t) => t,
-                    None => break,
-                };
-                // A thread, not a whole page: one heading and the exchange under it.
-                let threads = split_threads(&t.text, &t.headings);
-                let (heading, body) = threads
-                    .into_iter()
-                    .max_by_key(|(_, b)| b.len())
-                    .unwrap_or((String::new(), t.text.clone()));
-                // The title names the page and the thread, both written by people,
-                // which keeps it descriptive and unique.
-                let title = if heading.trim().is_empty() {
-                    t.title.clone()
-                } else {
-                    format!(
-                        "{}: {}",
-                        t.title.trim_start_matches("Talk:"),
-                        heading.trim()
-                    )
-                };
-                let channel = CHANNELS[rng.gen_range(
-                    0..CHANNELS.len().min(match plan.spaces {
-                        Spaces::Shared(n) => n,
-                        Spaces::PerDocument => CHANNELS.len(),
-                    }),
-                )];
-                let space = Some(channel.to_string());
-                let url = format!("https://example.invalid/{}/{}", plan.name, rng.gen::<u32>());
-                (
-                    title,
-                    if heading.trim().is_empty() {
-                        vec![t.title.clone()]
-                    } else {
-                        vec![heading]
-                    },
-                    Vec::new(),
-                    t.timestamp.clone(),
-                    body,
-                    space,
-                    url,
-                )
-            }
-            Material::Code => {
-                let c = match pools.code.pop() {
-                    Some(c) => c,
-                    None => break,
-                };
-                // The repository and the path together are the title. The path alone
-                // was written by a person, is unique and is full of the compound
-                // identifiers the tokenizer has specific handling for, but it holds
-                // no spaces, and the document identity ground truth requires two or
-                // more words. With the path alone this source contributed no graded
-                // queries at all, silently.
-                let title = format!("{} {}", c.repo, c.path);
-                let dirs: Vec<String> = Path::new(&c.path)
-                    .parent()
-                    .map(|p| {
-                        p.components()
-                            .map(|x| x.as_os_str().to_string_lossy().to_string())
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                let url = format!(
-                    "https://example.invalid/{}/{}/{}",
-                    plan.name, c.repo, c.path
-                );
-                (
-                    title,
-                    dirs,
-                    vec![c.repo.clone()],
-                    None,
-                    c.text.clone(),
-                    Some(c.repo.clone()),
-                    url,
-                )
-            }
-            Material::Issues => {
-                let i = match pools.issues.pop() {
-                    Some(i) => i,
-                    None => break,
-                };
-                let project = PROJECTS[rng.gen_range(
-                    0..PROJECTS.len().min(match plan.spaces {
-                        Spaces::Shared(n) => n,
-                        Spaces::PerDocument => PROJECTS.len(),
-                    }),
-                )];
-                // A ticket key of its own, so the ticket shaped source reads like a
-                // tracker and its keys are searchable literals.
-                let key = format!("{project}-{}", 1000 + (i.number % 9000));
-                let title = format!("{key} {}", i.title);
-                let url = format!("https://example.invalid/{}/{}", plan.name, key);
-                // The repository stands in for the component a real tracker records.
-                let mut categories = vec![i.repo.clone()];
-                categories.extend(i.labels.iter().cloned());
-                (
-                    title,
-                    vec![
-                        "Description".to_string(),
-                        "Steps to reproduce".to_string(),
-                        "Acceptance".to_string(),
-                    ],
-                    categories,
-                    i.updated_at.clone(),
-                    i.body.clone(),
-                    Some(project.to_string()),
-                    url,
-                )
-            }
+        let Some(raw) = raw_document_for(plan, pools, rng, want)? else {
+            break;
         };
-
-        // Reformat the raw text into the register the source is standing in for.
-        let text = match plan.material {
-            Material::DesignFiles => as_design_file(&title, &headings, &text),
-            Material::Boards => as_board(&title, &text),
-            _ => text,
-        };
-
-        // The breadcrumb is part of the chunk, so the body gets what is left of the
-        // target after it. A floor keeps a long title from collapsing the body.
-        let body_target = plan
-            .mean_chars
-            .saturating_sub(breadcrumb_estimate(&title, &headings, &plan.heading_depth))
-            .max(plan.mean_chars / 3);
-        let bodies = match plan.material {
-            Material::Code => split_code(&text, body_target, want),
-            _ => split_prose(&text, body_target, want),
-        };
-        if bodies.is_empty() {
-            continue;
+        if let Some(doc) = document_from(plan, rng, &authors, raw) {
+            docs.push(doc);
         }
-
-        // Needed so a chunk's position in the document can be mapped onto the
-        // section it falls in.
-        let chunk_count = bodies.len();
-        let mut chunks = Vec::with_capacity(chunk_count);
-        for (nth, mut body) in bodies.into_iter().enumerate() {
-            if plan.material != Material::Code {
-                thread_identifiers(rng, &mut body, plan.name);
-            }
-            let depth = heading_depth(rng, &plan.heading_depth);
-            let path = heading_path(depth, &headings, nth, chunk_count);
-            chunks.push((path.clone(), breadcrumbed(&title, &path, &body)));
-        }
-
-        let (author, author_id) = if authors.is_empty() {
-            (None, None)
-        } else {
-            let (name, id) = &authors[rng.gen_range(0..authors.len())];
-            (Some(name.clone()), Some(id.clone()))
-        };
-
-        // Spread over the same span the original corpus covered, so the
-        // `updated_after` filter selects a comparable share.
-        let updated_at = timestamp
-            .as_deref()
-            .and_then(epoch_seconds)
-            .or(Some(1_515_628_800 + rng.gen_range(0..274_000_000)));
-
-        docs.push(Document {
-            source: plan.name,
-            title,
-            chunks,
-            space_key: space,
-            author,
-            author_id,
-            updated_at,
-            labels: labels_for(rng, plan.mean_labels, &categories),
-            url,
-            // A very small share of documents are soft deleted, as in the original,
-            // because every filter has to exclude them and a corpus with none would
-            // never catch a query that forgets to.
-            deleted: rng.gen::<f64>() < 0.0016,
-            phase: phase_of(rng, plan),
-        });
     }
 
     Ok(docs)
+}
+
+/// How many chunks each of this source's documents gets.
+///
+/// **Drawn from the measured shape and then scaled to the measured total.**
+/// Drawing alone reproduces the distribution and misses the size; setting every
+/// document to the mean would hit the size and make the per document result cap
+/// measure nothing.
+///
+/// @param plan - the source being built
+/// @param rng - the source's own generator
+fn chunk_counts_for(plan: &SourcePlan, rng: &mut StdRng) -> Vec<usize> {
+    let mut counts: Vec<usize> = (0..plan.documents)
+        .map(|_| chunks_per_doc(rng, plan.per_doc))
+        .collect();
+    let drawn: usize = counts.iter().sum();
+    if drawn == 0 || plan.chunks == 0 {
+        return counts;
+    }
+    let factor = plan.chunks as f64 / drawn as f64;
+    for c in counts.iter_mut() {
+        *c = ((*c as f64) * factor).round() as usize;
+        *c = (*c).max(plan.per_doc.0);
+    }
+    // Correct the rounding residue one chunk at a time, on documents that can
+    // absorb it without leaving the measured range.
+    let mut total: usize = counts.iter().sum();
+    let mut guard = 0usize;
+    while total != plan.chunks && guard < plan.documents * 60 {
+        let i = rng.gen_range(0..counts.len());
+        guard += 1;
+        let Some(count) = counts.get_mut(i) else {
+            continue;
+        };
+        if total < plan.chunks && *count < plan.per_doc.3 {
+            *count += 1;
+            total += 1;
+        } else if total > plan.chunks && *count > plan.per_doc.0 {
+            *count -= 1;
+            total -= 1;
+        }
+    }
+    counts
+}
+
+/// One raw item for one document, taken from whichever pool this source's
+/// material comes from.
+///
+/// `Ok(None)` means that pool is exhausted, which ends the source.
+///
+/// @param plan - the source being built
+/// @param pools - the raw material, consumed as it is used
+/// @param rng - the source's own generator
+/// @param want - how many chunks this document is meant to hold
+fn raw_document_for(
+    plan: &SourcePlan,
+    pools: &mut Pools,
+    rng: &mut StdRng,
+    want: usize,
+) -> Result<Option<RawDocument>> {
+    match plan.material {
+        Material::Articles | Material::DesignFiles | Material::Boards => {
+            raw_from_articles(plan, pools, rng, want)
+        }
+        Material::Discussions => Ok(raw_from_discussions(plan, pools, rng, want)),
+        Material::Code => Ok(raw_from_code(plan, pools, want)),
+        Material::Issues => Ok(raw_from_issues(plan, pools, rng, want)),
+    }
+}
+
+/// A document from the article pool, which three of the six sources stand on.
+///
+/// The slice is this source's own, longest first, paired rank for rank with
+/// documents ordered by how much text they need.
+///
+/// @param plan - the source being built
+/// @param pools - the raw material, consumed as it is used
+/// @param rng - the source's own generator
+/// @param want - how many chunks this document is meant to hold
+fn raw_from_articles(
+    plan: &SourcePlan,
+    pools: &mut Pools,
+    rng: &mut StdRng,
+    want: usize,
+) -> Result<Option<RawDocument>> {
+    let slice = pools
+        .articles
+        .get_mut(plan.name)
+        .with_context(|| format!("source {} was never allocated an article slice", plan.name))?;
+    let Some(a) = slice.pop() else {
+        return Ok(None);
+    };
+    let a = &a;
+    // A document cannot hold more chunks than its article has text for.
+    // Capping here rather than skipping keeps the document, which is what
+    // makes the document count reachable.
+    let available = ((a.text.len() as f64) * expansion(plan.material)) as usize;
+    let want = want
+        .min((available / plan.mean_chars).max(plan.per_doc.0))
+        .max(1);
+    let space = match plan.spaces {
+        Spaces::Shared(1) => Some("ENG".to_string()),
+        Spaces::Shared(n) => Some(format!("SPACE{:02}", rng.gen_range(0..n))),
+        Spaces::PerDocument => Some(format!(
+            "{}-{}",
+            plan.name,
+            a.title
+                .chars()
+                .filter(|c| c.is_alphanumeric())
+                .take(24)
+                .collect::<String>()
+                .to_lowercase()
+        )),
+    };
+    let url = format!(
+        "https://example.invalid/{}/{}",
+        plan.name,
+        a.title.replace(' ', "_")
+    );
+    Ok(Some(RawDocument {
+        title: a.title.clone(),
+        headings: a.headings.clone(),
+        categories: a.categories.clone(),
+        timestamp: a.timestamp.clone(),
+        text: a.text.clone(),
+        space,
+        url,
+        chunks: want,
+    }))
+}
+
+/// A document from the discussion pool: one thread out of a talk page.
+///
+/// A thread rather than the whole page, which is one heading and the exchange
+/// under it. The title names the page and the thread, both written by people,
+/// which keeps it descriptive and unique.
+///
+/// @param plan - the source being built
+/// @param pools - the raw material, consumed as it is used
+/// @param rng - the source's own generator
+/// @param want - how many chunks this document is meant to hold
+fn raw_from_discussions(
+    plan: &SourcePlan,
+    pools: &mut Pools,
+    rng: &mut StdRng,
+    want: usize,
+) -> Option<RawDocument> {
+    let t = pools.talk.pop()?;
+    let threads = split_threads(&t.text, &t.headings);
+    let (heading, body) = threads
+        .into_iter()
+        .max_by_key(|(_, b)| b.len())
+        .unwrap_or((String::new(), t.text.clone()));
+    let title = if heading.trim().is_empty() {
+        t.title.clone()
+    } else {
+        format!(
+            "{}: {}",
+            t.title.trim_start_matches("Talk:"),
+            heading.trim()
+        )
+    };
+    let channel = from_table(
+        CHANNELS,
+        rng.gen_range(
+            0..CHANNELS.len().min(match plan.spaces {
+                Spaces::Shared(n) => n,
+                Spaces::PerDocument => CHANNELS.len(),
+            }),
+        ),
+    );
+    Some(RawDocument {
+        title,
+        headings: if heading.trim().is_empty() {
+            vec![t.title.clone()]
+        } else {
+            vec![heading]
+        },
+        categories: Vec::new(),
+        timestamp: t.timestamp.clone(),
+        text: body,
+        space: Some(channel.to_string()),
+        url: format!("https://example.invalid/{}/{}", plan.name, rng.gen::<u32>()),
+        chunks: want,
+    })
+}
+
+/// A document from the code pool: one source file.
+///
+/// **The repository and the path together are the title.** The path alone was
+/// written by a person, is unique and is full of the compound identifiers the
+/// tokenizer has specific handling for, but it holds no spaces - and the
+/// document identity ground truth requires two or more words, so with the path
+/// alone this source contributed no graded queries at all, silently.
+///
+/// @param plan - the source being built
+/// @param pools - the raw material, consumed as it is used
+/// @param want - how many chunks this document is meant to hold
+fn raw_from_code(plan: &SourcePlan, pools: &mut Pools, want: usize) -> Option<RawDocument> {
+    let c = pools.code.pop()?;
+    let title = format!("{} {}", c.repo, c.path);
+    let dirs: Vec<String> = Path::new(&c.path)
+        .parent()
+        .map(|p| {
+            p.components()
+                .map(|x| x.as_os_str().to_string_lossy().to_string())
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(RawDocument {
+        title,
+        headings: dirs,
+        categories: vec![c.repo.clone()],
+        timestamp: None,
+        text: c.text.clone(),
+        space: Some(c.repo.clone()),
+        url: format!(
+            "https://example.invalid/{}/{}/{}",
+            plan.name, c.repo, c.path
+        ),
+        chunks: want,
+    })
+}
+
+/// A document from the issue pool: one ticket.
+///
+/// The ticket gets a key of its own, so the ticket shaped source reads like a
+/// tracker and its keys are searchable literals. The repository stands in for
+/// the component a real tracker records.
+///
+/// @param plan - the source being built
+/// @param pools - the raw material, consumed as it is used
+/// @param rng - the source's own generator
+/// @param want - how many chunks this document is meant to hold
+fn raw_from_issues(
+    plan: &SourcePlan,
+    pools: &mut Pools,
+    rng: &mut StdRng,
+    want: usize,
+) -> Option<RawDocument> {
+    let i = pools.issues.pop()?;
+    let project = from_table(
+        PROJECTS,
+        rng.gen_range(
+            0..PROJECTS.len().min(match plan.spaces {
+                Spaces::Shared(n) => n,
+                Spaces::PerDocument => PROJECTS.len(),
+            }),
+        ),
+    );
+    let key = format!("{project}-{}", 1000 + (i.number % 9000));
+    let mut categories = vec![i.repo.clone()];
+    categories.extend(i.labels.iter().cloned());
+    Some(RawDocument {
+        title: format!("{key} {}", i.title),
+        headings: vec![
+            "Description".to_string(),
+            "Steps to reproduce".to_string(),
+            "Acceptance".to_string(),
+        ],
+        categories,
+        timestamp: i.updated_at.clone(),
+        text: i.body.clone(),
+        space: Some(project.to_string()),
+        url: format!("https://example.invalid/{}/{}", plan.name, key),
+        chunks: want,
+    })
+}
+
+/// One raw item as a document: reformatted into the register its source stands
+/// in for, split into chunks, and given the author, timestamp and labels a real
+/// system would have recorded.
+///
+/// `None` when the text did not split into a single chunk, which is a raw item
+/// too short for this source's chunk length rather than an error.
+///
+/// @param plan - the source being built
+/// @param rng - the source's own generator
+/// @param authors - this source's author list
+/// @param raw - the raw item taken from the pool
+fn document_from(
+    plan: &SourcePlan,
+    rng: &mut StdRng,
+    authors: &[(String, String)],
+    raw: RawDocument,
+) -> Option<Document> {
+    let RawDocument {
+        title,
+        headings,
+        categories,
+        timestamp,
+        text,
+        space,
+        url,
+        chunks: want,
+    } = raw;
+
+    // Reformat the raw text into the register the source is standing in for.
+    let text = match plan.material {
+        Material::DesignFiles => as_design_file(&title, &headings, &text),
+        Material::Boards => as_board(&title, &text),
+        _ => text,
+    };
+
+    // The breadcrumb is part of the chunk, so the body gets what is left of the
+    // target after it. A floor keeps a long title from collapsing the body.
+    let body_target = plan
+        .mean_chars
+        .saturating_sub(breadcrumb_estimate(&title, &headings, &plan.heading_depth))
+        .max(plan.mean_chars / 3);
+    let bodies = match plan.material {
+        Material::Code => split_code(&text, body_target, want),
+        _ => split_prose(&text, body_target, want),
+    };
+    if bodies.is_empty() {
+        return None;
+    }
+
+    // Needed so a chunk's position in the document can be mapped onto the
+    // section it falls in.
+    let chunk_count = bodies.len();
+    let mut chunks = Vec::with_capacity(chunk_count);
+    for (nth, mut body) in bodies.into_iter().enumerate() {
+        if plan.material != Material::Code {
+            thread_identifiers(rng, &mut body, plan.name);
+        }
+        let depth = heading_depth(rng, &plan.heading_depth);
+        let path = heading_path(depth, &headings, nth, chunk_count);
+        chunks.push((path.clone(), breadcrumbed(&title, &path, &body)));
+    }
+
+    let (author, author_id) = match authors.get(rng.gen_range(0..authors.len().max(1))) {
+        Some((name, id)) => (Some(name.clone()), Some(id.clone())),
+        None => (None, None),
+    };
+
+    // Spread over the same span the original corpus covered, so the
+    // `updated_after` filter selects a comparable share.
+    let updated_at = timestamp
+        .as_deref()
+        .and_then(epoch_seconds)
+        .or(Some(1_515_628_800 + rng.gen_range(0..274_000_000)));
+
+    Some(Document {
+        source: plan.name,
+        title,
+        chunks,
+        space_key: space,
+        author,
+        author_id,
+        updated_at,
+        labels: labels_for(rng, plan.mean_labels, &categories),
+        url,
+        // A very small share of documents are soft deleted, as in the original,
+        // because every filter has to exclude them and a corpus with none would
+        // never catch a query that forgets to.
+        deleted: rng.gen::<f64>() < 0.0016,
+        phase: phase_of(rng, plan),
+    })
 }
 
 /// An article rewritten as the text layers of a design file. A design file has no
@@ -1218,6 +1392,13 @@ pub struct SynthChunk {
 }
 
 impl SynthChunk {
+    /// This chunk as the input the index and the cache both take.
+    ///
+    /// **The conversion is here rather than in the index, because the
+    /// generated corpus is the only thing that has a `SynthChunk`.** What it
+    /// drops is the external chunk identifier: the generator has no source
+    /// system to have taken one from, and inventing one would put a
+    /// synthetic identifier in a field a real corpus fills from a real API.
     pub fn to_input(&self) -> ChunkInput {
         ChunkInput {
             source: self.source.clone(),
@@ -1249,14 +1430,38 @@ pub struct BuildReport {
 }
 
 /// Build the corpus and write it as JSONL.
+///
+/// **Four stages, each its own function: read the raw material, fill every
+/// source's documents from it, decide the order they are laid down in, and
+/// write them.** The order stage is the one that is easy to lose: a corpus
+/// written source by source throughout would make a prefix of it
+/// unrepresentative of the whole, which is what `strided_sample` exists for,
+/// and one written interleaved throughout would make the stride pointless.
+///
+/// @param derived - the directory the public material was extracted to
+/// @param out - where the JSONL corpus goes
+/// @param scale - a multiplier on every source's document and chunk targets
 pub fn build(derived: &Path, out: &Path, scale: f64) -> Result<BuildReport> {
     let mut rng = StdRng::seed_from_u64(SEED);
+    let plan_list = plans(scale);
+    let mut pools = read_the_raw_material(derived, &plan_list)?;
+    let all = fill_every_source(&plan_list, &mut pools, &mut rng)?;
+    let ordered = in_ingestion_order(all, &mut rng);
+    write_the_corpus(out, &ordered)
+}
 
+/// Every pool of raw material, read off disk and allocated per source.
+///
+/// **Two article pools, and both are used when both are present.** The Simple
+/// English dump is small and its articles are short; the English dump supplies
+/// the long articles the page shaped and design file shaped sources need, and a
+/// much larger vocabulary. The pipeline still works with only the small one
+/// available, which is what the `path.exists()` test is for.
+///
+/// @param derived - the directory the public material was extracted to
+/// @param plan_list - the sources being built, which decide the article split
+fn read_the_raw_material(derived: &Path, plan_list: &[SourcePlan]) -> Result<Pools> {
     eprintln!("reading the public material from {}", derived.display());
-    // Two article pools. The Simple English dump is small and its articles are
-    // short; the English dump supplies the long articles the page shaped and design
-    // file shaped sources need, and a much larger vocabulary. Both are used when
-    // both are present, so the pipeline works with only the small one available.
     let mut articles: Vec<RawArticle> = Vec::new();
     for name in ["enwiki-articles.jsonl", "articles.jsonl"] {
         let path = derived.join(name);
@@ -1300,10 +1505,9 @@ pub fn build(derived: &Path, out: &Path, scale: f64) -> Result<BuildReport> {
         (!usable, std::cmp::Reverse(a.text.len()))
     });
 
-    let plan_list = plans(scale);
     // Each article based source gets its own slice. They are stored ascending by
     // length because documents are filled from the back, largest need first.
-    let mut allocated = allocate_articles(articles, &plan_list);
+    let mut allocated = allocate_articles(articles, plan_list);
     for slice in allocated.values_mut() {
         slice.reverse();
     }
@@ -1317,10 +1521,27 @@ pub fn build(derived: &Path, out: &Path, scale: f64) -> Result<BuildReport> {
     pools.talk.sort_by_key(|t| t.text.len());
     pools.code.sort_by_key(|c| c.text.len());
     pools.issues.sort_by_key(|i| i.body.len());
+    Ok(pools)
+}
 
+/// Every source's documents, and a line per source saying what it reached
+/// against its target.
+///
+/// A source that falls short says so rather than being silently smaller: the
+/// shortfall is a pool that ran out, which is a fact about the extracted
+/// material rather than about the plan.
+///
+/// @param plan_list - the sources being built
+/// @param pools - the raw material, consumed as it is used
+/// @param rng - the corpus generator
+fn fill_every_source(
+    plan_list: &[SourcePlan],
+    pools: &mut Pools,
+    rng: &mut StdRng,
+) -> Result<Vec<Document>> {
     let mut all: Vec<Document> = Vec::new();
-    for plan in &plan_list {
-        let docs = build_source(plan, &mut pools, &mut rng)?;
+    for plan in plan_list {
+        let docs = build_source(plan, pools, rng)?;
         let chunks: usize = docs.iter().map(|d| d.chunks.len()).sum();
         eprintln!(
             "  {:<11} {:>6} documents {:>7} chunks (target {} / {})",
@@ -1338,10 +1559,18 @@ pub fn build(derived: &Path, out: &Path, scale: f64) -> Result<BuildReport> {
         }
         all.extend(docs);
     }
+    Ok(all)
+}
 
-    // Ingestion order. Documents are grouped by phase, and inside the tail the
-    // sources are interleaved, which is what makes a prefix of the corpus
-    // unrepresentative of the whole and `strided_sample` necessary.
+/// The documents in the order they are laid down.
+///
+/// Grouped by phase, and inside the tail the sources are interleaved - which is
+/// what makes a prefix of the corpus unrepresentative of the whole and
+/// `strided_sample` necessary.
+///
+/// @param all - every document, grouped by source
+/// @param rng - the corpus generator, which shuffles the tail
+fn in_ingestion_order(all: Vec<Document>, rng: &mut StdRng) -> Vec<Document> {
     let mut bulk: Vec<Document> = Vec::new();
     let mut tail: Vec<Document> = Vec::new();
     for d in all {
@@ -1352,11 +1581,19 @@ pub fn build(derived: &Path, out: &Path, scale: f64) -> Result<BuildReport> {
         }
     }
     bulk.sort_by_key(|d| d.phase);
-    tail.shuffle(&mut rng);
-    let ordered: Vec<Document> = bulk.into_iter().chain(tail).collect();
+    tail.shuffle(rng);
+    bulk.into_iter().chain(tail).collect()
+}
 
-    // Write, assigning document identifiers in the order they are laid down so the
-    // identifier ordering correlates with source exactly as it did originally.
+/// Write the corpus as JSONL, and report what was written.
+///
+/// Document identifiers are assigned in the order the documents are laid down,
+/// so the identifier ordering correlates with source exactly as it did in the
+/// corpus this one reproduces.
+///
+/// @param out - where the JSONL corpus goes
+/// @param ordered - the documents, in ingestion order
+fn write_the_corpus(out: &Path, ordered: &[Document]) -> Result<BuildReport> {
     let file = File::create(out).with_context(|| format!("creating {}", out.display()))?;
     let mut w = BufWriter::new(file);
     let mut per_source: HashMap<&str, (usize, usize, usize)> = HashMap::new();
@@ -1524,23 +1761,7 @@ pub fn embed(
     let dims = manifest.dims;
     let bytes_per = dims * 4;
 
-    // How many vectors already exist, rounded down so a partly written vector from
-    // an interrupted run is redone rather than trusted.
-    let done = match std::fs::metadata(&vectors_path) {
-        Ok(m) => (m.len() as usize) / bytes_per,
-        Err(_) => 0,
-    };
-    if done > 0 {
-        eprintln!(
-            "resuming: {done} vectors already written to {}",
-            vectors_path.display()
-        );
-        // Discard any partial trailing vector.
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .open(&vectors_path)?;
-        file.set_len((done * bytes_per) as u64)?;
-    }
+    let done = vectors_already_written(&vectors_path, bytes_per)?;
     if done >= chunks.len() {
         eprintln!("every chunk is already embedded");
         // A run that embedded nothing cannot report how much was truncated, so it
@@ -1565,83 +1786,25 @@ pub fn embed(
         .open(&vectors_path)
         .with_context(|| format!("opening {}", vectors_path.display()))?;
 
-    let start = std::time::Instant::now();
-    let mut position = done;
-    let mut since_report = 0usize;
     // A window is `window_batches` batches per device. It has to be several rather
     // than one: the devices are synchronised at the end of every window, so a window
     // of one batch each pays that synchronisation on every 32 chunks and the faster
     // card spends its time waiting. Measured on two 5090s at batch 32: one batch per
     // device ran 613/sec against 450 for a single card, 1.36x rather than 2x.
     let window = options.batch_size * embedders.len() * window_batches.max(1);
-    while position < chunks.len() {
-        let end = (position + window).min(chunks.len());
-        let texts: Vec<String> = chunks[position..end]
-            .iter()
-            .map(|c| sanitize_for_model(&c.content))
-            .collect();
-        let vectors = embed_window(&embedders, &texts)
-            .with_context(|| format!("embedding chunks {position} to {end}"))?;
-        anyhow::ensure!(
-            vectors.len() == texts.len(),
-            "the embedder returned {} vectors for {} texts",
-            vectors.len(),
-            texts.len()
-        );
-        // Appended in corpus order, so position N in this file is chunk N. The
-        // resume above depends on that, and so does every vector belonging to the
-        // right chunk.
-        for v in &vectors {
-            anyhow::ensure!(
-                v.len() == dims,
-                "the embedder returned {} dimensions",
-                v.len()
-            );
-            for x in v {
-                out.write_all(&x.to_le_bytes())?;
-            }
-        }
-        position = end;
-        since_report += texts.len();
-
-        if since_report >= report_every || position == chunks.len() {
-            // Flushed before reporting, so the progress printed is progress that
-            // would survive an interruption.
-            out.flush()?;
-            let elapsed = start.elapsed().as_secs_f64();
-            let rate = (position - done) as f64 / elapsed.max(0.001);
-            let left = (chunks.len() - position) as f64 / rate.max(0.001);
-            eprintln!(
-                "  {}/{} chunks ({:.1}%) at {:.1}/sec, {:.0} min remaining",
-                position,
-                chunks.len(),
-                100.0 * position as f64 / chunks.len() as f64,
-                rate,
-                left / 60.0
-            );
-            since_report = 0;
-        }
-    }
-    out.flush()?;
+    write_every_window(
+        &embedders,
+        &chunks,
+        &mut out,
+        done,
+        report_every,
+        window,
+        dims,
+    )?;
     drop(out);
 
-    // Summed across every session, plus a recount of whatever an earlier run had
-    // already embedded, so the share the card prints describes the whole corpus
-    // rather than the tail this process happened to reach.
-    let texts: usize = embedders.iter().map(|e| e.truncation().texts).sum();
-    let tokens: usize = embedders.iter().map(|e| e.truncation().tokens).sum();
-    let mut truncated: usize = embedders.iter().map(|e| e.truncation().truncated).sum();
-    if texts > 0 {
-        eprintln!(
-            "  {tokens} tokens over {texts} chunks ({:.1} per chunk); {truncated} ({:.2}%) hit the {} token bound",
-            tokens as f64 / texts as f64,
-            100.0 * truncated as f64 / texts as f64,
-            manifest.max_tokens
-        );
-    }
-    if done > 0 {
-        truncated += crate::truncation::count_truncated(model_dir, manifest, &chunks[..done])?;
-    }
+    let truncated =
+        truncation_over_the_whole_corpus(&embedders, &chunks, done, model_dir, manifest)?;
 
     assemble_cache(
         &chunks,
@@ -1721,6 +1884,146 @@ fn open_arms(
     Ok(embedders)
 }
 
+/// How many whole vectors the vector file already holds.
+///
+/// **Rounded down, and the file is then truncated to that count.** A run
+/// interrupted mid-write leaves a partial trailing vector, and a resume that
+/// trusted it would pair every later chunk with the wrong record - so the
+/// partial one is discarded and redone.
+///
+/// @param vectors_path - the append-only vector file
+/// @param bytes_per - one vector's width in bytes
+fn vectors_already_written(vectors_path: &Path, bytes_per: usize) -> Result<usize> {
+    let done = match std::fs::metadata(vectors_path) {
+        Ok(m) => (m.len() as usize) / bytes_per,
+        Err(_) => 0,
+    };
+    if done > 0 {
+        eprintln!(
+            "resuming: {done} vectors already written to {}",
+            vectors_path.display()
+        );
+        let file = std::fs::OpenOptions::new().write(true).open(vectors_path)?;
+        file.set_len((done * bytes_per) as u64)?;
+    }
+    Ok(done)
+}
+
+/// Embeds the corpus one window at a time and appends every vector in corpus
+/// order.
+///
+/// **Corpus order is the invariant.** Position N in the vector file is chunk N
+/// whichever device ran it, which is what the resume above depends on and what
+/// makes every vector belong to the right chunk.
+///
+/// @param embedders - one arm per device
+/// @param chunks - the corpus, in corpus order
+/// @param out - the append-only vector file
+/// @param done - the chunk to start at, from a previous run
+/// @param report_every - chunks between progress lines
+/// @param window - chunks handed to the devices between synchronisations
+/// @param dims - the width every vector has to have
+fn write_every_window(
+    embedders: &[Arm],
+    chunks: &[SynthChunk],
+    out: &mut std::fs::File,
+    done: usize,
+    report_every: usize,
+    window: usize,
+    dims: usize,
+) -> Result<()> {
+    let start = std::time::Instant::now();
+    let mut position = done;
+    let mut since_report = 0usize;
+    while position < chunks.len() {
+        let end = (position + window).min(chunks.len());
+        let texts: Vec<String> = chunks
+            .get(position..end)
+            .with_context(|| format!("chunks {position} to {end} of {}", chunks.len()))?
+            .iter()
+            .map(|c| sanitize_for_model(&c.content))
+            .collect();
+        let vectors = embed_window(embedders, &texts)
+            .with_context(|| format!("embedding chunks {position} to {end}"))?;
+        anyhow::ensure!(
+            vectors.len() == texts.len(),
+            "the embedder returned {} vectors for {} texts",
+            vectors.len(),
+            texts.len()
+        );
+        for v in &vectors {
+            anyhow::ensure!(
+                v.len() == dims,
+                "the embedder returned {} dimensions",
+                v.len()
+            );
+            for x in v {
+                out.write_all(&x.to_le_bytes())?;
+            }
+        }
+        position = end;
+        since_report += texts.len();
+
+        if since_report >= report_every || position == chunks.len() {
+            // Flushed before reporting, so the progress printed is progress that
+            // would survive an interruption.
+            out.flush()?;
+            let elapsed = start.elapsed().as_secs_f64();
+            let rate = (position - done) as f64 / elapsed.max(0.001);
+            let left = (chunks.len() - position) as f64 / rate.max(0.001);
+            eprintln!(
+                "  {}/{} chunks ({:.1}%) at {:.1}/sec, {:.0} min remaining",
+                position,
+                chunks.len(),
+                100.0 * position as f64 / chunks.len() as f64,
+                rate,
+                left / 60.0
+            );
+            since_report = 0;
+        }
+    }
+    out.flush()?;
+    Ok(())
+}
+
+/// How many chunks of the whole corpus hit the model's token bound.
+///
+/// **Summed across every session, plus a recount of whatever an earlier run
+/// had already embedded.** Without the recount the share the card prints would
+/// describe the tail this process happened to reach rather than the corpus, and
+/// a resumed run that embedded its last hundred chunks would publish a
+/// truncation share measured over a hundred chunks.
+///
+/// @param embedders - one arm per device, each holding its own counts
+/// @param chunks - the corpus, in corpus order
+/// @param done - how many chunks an earlier run had already embedded
+/// @param model_dir - the model directory, for the tokenizer the recount uses
+/// @param manifest - the model's manifest, which states the token bound
+fn truncation_over_the_whole_corpus(
+    embedders: &[Arm],
+    chunks: &[SynthChunk],
+    done: usize,
+    model_dir: &str,
+    manifest: &ModelManifest,
+) -> Result<usize> {
+    let texts: usize = embedders.iter().map(|e| e.truncation().texts).sum();
+    let tokens: usize = embedders.iter().map(|e| e.truncation().tokens).sum();
+    let mut truncated: usize = embedders.iter().map(|e| e.truncation().truncated).sum();
+    if texts > 0 {
+        eprintln!(
+            "  {tokens} tokens over {texts} chunks ({:.1} per chunk); {truncated} ({:.2}%) hit the {} token bound",
+            tokens as f64 / texts as f64,
+            100.0 * truncated as f64 / texts as f64,
+            manifest.max_tokens
+        );
+    }
+    if done > 0 {
+        let embedded = chunks.get(..done).unwrap_or(chunks);
+        truncated += crate::truncation::count_truncated(model_dir, manifest, embedded)?;
+    }
+    Ok(truncated)
+}
+
 /// Embeds one window of texts, spread across the embedders and reassembled in the
 /// caller's order.
 ///
@@ -1736,11 +2039,11 @@ fn open_arms(
 /// @param embedders - one per device
 /// @param texts - the window, already sanitized, in corpus order
 fn embed_window(embedders: &[Arm], texts: &[String]) -> Result<Vec<Vec<f32>>> {
-    if embedders.len() == 1 {
-        return embedders[0].embed_documents(texts);
+    if let [only] = embedders {
+        return only.embed_documents(texts);
     }
     let mut order: Vec<usize> = (0..texts.len()).collect();
-    order.sort_by_key(|&i| std::cmp::Reverse(texts[i].len()));
+    order.sort_by_key(|&i| std::cmp::Reverse(texts.get(i).map(String::len).unwrap_or(0)));
     let mut assigned: Vec<Vec<usize>> = vec![Vec::new(); embedders.len()];
     let mut load: Vec<usize> = vec![0; embedders.len()];
     for i in order {
@@ -1750,8 +2053,14 @@ fn embed_window(embedders: &[Arm], texts: &[String]) -> Result<Vec<Vec<f32>>> {
             .min_by_key(|(_, bytes)| **bytes)
             .map(|(d, _)| d)
             .unwrap_or(0);
-        load[lightest] += texts[i].len();
-        assigned[lightest].push(i);
+        // `lightest` is an index into `load`, which has one entry per
+        // embedder, and `assigned` was built the same length.
+        if let Some(bytes) = load.get_mut(lightest) {
+            *bytes += texts.get(i).map(String::len).unwrap_or(0);
+        }
+        if let Some(slice) = assigned.get_mut(lightest) {
+            slice.push(i);
+        }
     }
     // Back into corpus order within each device, so the length sorting the embedder
     // does for batching starts from the same arrangement a single device would see.
@@ -1761,7 +2070,11 @@ fn embed_window(embedders: &[Arm], texts: &[String]) -> Result<Vec<Vec<f32>>> {
 
     let batches: Vec<Vec<String>> = assigned
         .iter()
-        .map(|ids| ids.iter().map(|&i| texts[i].clone()).collect())
+        .map(|ids| {
+            ids.iter()
+                .filter_map(|&i| texts.get(i).cloned())
+                .collect::<Vec<String>>()
+        })
         .collect();
     let results: Vec<Result<Vec<Vec<f32>>>> = std::thread::scope(|scope| {
         let handles: Vec<_> = batches
@@ -1788,7 +2101,10 @@ fn embed_window(embedders: &[Arm], texts: &[String]) -> Result<Vec<Vec<f32>>> {
             ids.len()
         );
         for (&i, v) in ids.iter().zip(vectors) {
-            out[i] = v;
+            let slot = out
+                .get_mut(i)
+                .with_context(|| format!("text {i} of the {} in this window", texts.len()))?;
+            *slot = v;
         }
     }
     Ok(out)
@@ -1828,9 +2144,12 @@ pub fn assemble_cache(
     let mut buf = vec![0u8; bytes_per];
     for _ in 0..chunks.len() {
         reader.read_exact(&mut buf)?;
+        // `chunks_exact(4)` yields slices of exactly four bytes, so the
+        // array conversion is the same fact stated where it can be checked.
         let v: Vec<f32> = buf
             .chunks_exact(4)
-            .map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+            .filter_map(|b| <[u8; 4]>::try_from(b).ok())
+            .map(f32::from_le_bytes)
             .collect();
         vectors.push(v);
     }
@@ -1879,475 +2198,19 @@ pub fn sanitize_for_model(text: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Loading the corpus into PostgreSQL for the baseline.
+// The two halves that answer a question of their own.
 // ---------------------------------------------------------------------------
 
-/// The schema the pgvector baseline queries. It is the schema the original stack
-/// used, reproduced here so the baseline SQL in `engine.rs` runs unchanged: the
-/// same two tables, the same columns it joins and filters on, the same HNSW index
-/// with the same parameters, and the same English full text index.
-const SCHEMA: &str = "
-    DROP TABLE IF EXISTS chunks;
-    DROP TABLE IF EXISTS documents;
-
-    CREATE TABLE documents (
-      id           bigint PRIMARY KEY,
-      source       text NOT NULL,
-      source_id    text NOT NULL,
-      space_key    text,
-      title        text NOT NULL,
-      url          text NOT NULL,
-      author       text,
-      author_id    text,
-      created_at   timestamptz,
-      updated_at   timestamptz,
-      labels       text[] NOT NULL DEFAULT '{}',
-      content_hash text NOT NULL,
-      deleted_at   timestamptz,
-      synced_at    timestamptz NOT NULL DEFAULT now(),
-      UNIQUE (source, source_id)
-    );
-
-    CREATE TABLE chunks (
-      id              bigserial PRIMARY KEY,
-      document_id     bigint NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
-      chunk_index     integer NOT NULL,
-      heading_path    text[] NOT NULL DEFAULT '{}',
-      content         text NOT NULL,
-      token_count     integer,
-      embedding       vector(768),
-      embedding_model text,
-      UNIQUE (document_id, chunk_index)
-    );
-";
-
-/// The indexes, created after the rows are inserted because building an HNSW index
-/// once over a full table is far quicker than maintaining it per insert.
-const INDEXES: &[(&str, &str)] = &[
-    ("documents_source_idx", "CREATE INDEX documents_source_idx ON documents (source)"),
-    ("documents_deleted_at_idx", "CREATE INDEX documents_deleted_at_idx ON documents (deleted_at)"),
-    ("documents_space_key_idx", "CREATE INDEX documents_space_key_idx ON documents (space_key)"),
-    ("documents_author_id_idx", "CREATE INDEX documents_author_id_idx ON documents (author_id)"),
-    ("documents_updated_at_idx", "CREATE INDEX documents_updated_at_idx ON documents (updated_at DESC)"),
-    ("documents_labels_gin_idx", "CREATE INDEX documents_labels_gin_idx ON documents USING gin (labels)"),
-    ("chunks_document_id_idx", "CREATE INDEX chunks_document_id_idx ON chunks (document_id)"),
-    (
-        "chunks_content_fts",
-        "CREATE INDEX chunks_content_fts ON chunks USING gin (to_tsvector('english', content))",
-    ),
-    (
-        "chunks_embedding_hnsw",
-        "CREATE INDEX chunks_embedding_hnsw ON chunks USING hnsw (embedding vector_cosine_ops) WITH (m = 16, ef_construction = 64)",
-    ),
-];
-
-/// Makes sure the connected database can store and index a vector, whichever way
-/// pgvector was installed into it.
+/// Checking the generated corpus before paying for the embedding run.
+mod check;
+/// Loading the generated corpus into PostgreSQL for the pgvector baseline.
 ///
-/// `CREATE EXTENSION vector` is the normal path and is tried first. It fails on a
-/// cluster where pgvector was installed by running its SQL with absolute paths to
-/// the shared library, which is what a machine does when the PostgreSQL install
-/// directory is not writable — the types, operators and both access methods are
-/// all there, but no `vector.control` is on the extension path, so the extension
-/// does not exist by name. Refusing to run there would be refusing over a name.
-/// So the failure is only fatal when the type really is absent.
-/// @param client - a connection to the database being loaded
-fn ensure_pgvector(client: &mut postgres::Client) -> Result<()> {
-    if client
-        .batch_execute("CREATE EXTENSION IF NOT EXISTS vector")
-        .is_ok()
-    {
-        return Ok(());
-    }
-    let row = client
-        .query_one("SELECT to_regtype('vector') IS NOT NULL", &[])
-        .context("checking whether the vector type exists")?;
-    let present: bool = row.get(0);
-    anyhow::ensure!(
-        present,
-        "this database has no pgvector: CREATE EXTENSION vector failed and there is no vector type. \
-         Install the extension, or run pgvector's SQL with absolute paths to vector.dll/vector.so."
-    );
-    Ok(())
-}
+/// The only part of this module that talks to a database, and the schema it
+/// writes is the one `engine.rs`'s baseline SQL was written against.
+mod postgres;
 
-/// Insert the corpus and its vectors, then build the indexes.
-///
-/// The vectors written here are the same bytes the cache holds, so the two engines
-/// are compared on identical input. Nothing is recomputed.
-pub fn load_postgres(
-    url: &str,
-    chunks: &[SynthChunk],
-    corpus: &crate::corpus::Corpus,
-    build_indexes: bool,
-) -> Result<()> {
-    use pgvector::Vector;
-    use postgres::{Client, NoTls};
-
-    anyhow::ensure!(
-        chunks.len() == corpus.chunks.len(),
-        "the corpus file holds {} chunks and the cache holds {}; rebuild the cache",
-        chunks.len(),
-        corpus.chunks.len()
-    );
-
-    let mut client = Client::connect(url, NoTls).with_context(|| {
-        format!("connecting to {url}. Create the database first: createdb inillucent_synth")
-    })?;
-
-    eprintln!("creating the schema");
-    ensure_pgvector(&mut client)?;
-    client
-        .batch_execute(SCHEMA)
-        .context("creating the schema")?;
-
-    // One row per document, taken from the first chunk that mentions it.
-    eprintln!("inserting documents");
-    let mut seen: HashMap<i64, ()> = HashMap::new();
-    let mut documents = 0usize;
-    {
-        let mut tx = client.transaction()?;
-        let statement = tx.prepare(
-            "INSERT INTO documents
-               (id, source, source_id, space_key, title, url, author, author_id,
-                created_at, updated_at, labels, content_hash, deleted_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
-        )?;
-        for c in chunks {
-            if seen.insert(c.doc_id, ()).is_some() {
-                continue;
-            }
-            let updated = c
-                .updated_at
-                .map(|s| std::time::UNIX_EPOCH + std::time::Duration::from_secs(s.max(0) as u64));
-            // A soft deleted document carries a deletion time, which is what every
-            // filter excludes on.
-            let deleted_at = if c.deleted {
-                updated.or(Some(std::time::SystemTime::now()))
-            } else {
-                None
-            };
-            tx.execute(
-                &statement,
-                &[
-                    &c.doc_id,
-                    &c.source,
-                    &format!("{}-{}", c.source, c.doc_id),
-                    &c.space_key,
-                    &c.title,
-                    &c.url,
-                    &c.author,
-                    &c.author_id,
-                    &updated,
-                    &updated,
-                    &c.labels,
-                    &format!("{:016x}", c.doc_id),
-                    &deleted_at,
-                ],
-            )?;
-            documents += 1;
-            if documents.is_multiple_of(5_000) {
-                eprintln!("  {documents} documents");
-            }
-        }
-        tx.commit()?;
-    }
-    eprintln!("  {documents} documents inserted");
-
-    eprintln!("inserting chunks and their vectors");
-    {
-        let mut tx = client.transaction()?;
-        let statement = tx.prepare(
-            "INSERT INTO chunks
-               (document_id, chunk_index, heading_path, content, token_count, embedding, embedding_model)
-             VALUES ($1,$2,$3,$4,$5,$6,$7)",
-        )?;
-        let model = "nomic-embed-text-v1.5";
-        for (i, c) in chunks.iter().enumerate() {
-            let vector = Vector::from(corpus.vectors[i].clone());
-            // A rough token count, which the original column also held; nothing
-            // queries it, but leaving it null would misrepresent the schema.
-            let tokens = (c.content.len() / 4) as i32;
-            tx.execute(
-                &statement,
-                &[
-                    &c.doc_id,
-                    &(c.chunk_index as i32),
-                    &c.heading_path,
-                    &c.content,
-                    &tokens,
-                    &vector,
-                    &model,
-                ],
-            )?;
-            if (i + 1) % 20_000 == 0 {
-                eprintln!("  {}/{} chunks", i + 1, chunks.len());
-            }
-        }
-        tx.commit()?;
-    }
-    eprintln!("  {} chunks inserted", chunks.len());
-
-    if build_indexes {
-        for (name, sql) in INDEXES {
-            let start = std::time::Instant::now();
-            eprintln!("building {name}");
-            client
-                .batch_execute(sql)
-                .with_context(|| format!("building {name}"))?;
-            eprintln!("  {name} in {:.1}s", start.elapsed().as_secs_f64());
-        }
-        client.batch_execute("ANALYZE documents; ANALYZE chunks;")?;
-    } else {
-        eprintln!("skipping indexes as asked; the baseline needs them before grading");
-    }
-
-    Ok(())
-}
-
-// ---------------------------------------------------------------------------
-// Checking the corpus before paying for the embedding run.
-// ---------------------------------------------------------------------------
-
-/// Report whether the corpus supports the three ground truths, and whether it has
-/// the structural properties the scenarios rely on.
-///
-/// This exists because embedding the corpus takes hours. A corpus that cannot
-/// supply identifier queries, or whose chunk order does not correlate with source,
-/// produces a score card with empty or misleading scenarios, and finding that out
-/// after the embedding run wastes most of a day. Every count here is produced by
-/// the same functions the graded run uses, so agreement is not a matter of
-/// reimplementing the filters and hoping they match.
-pub fn check(corpus_path: &Path, per_source: usize) -> Result<()> {
-    let chunks = read_corpus(corpus_path)?;
-    anyhow::ensure!(!chunks.is_empty(), "the corpus file is empty");
-    let inputs: Vec<ChunkInput> = chunks.iter().map(SynthChunk::to_input).collect();
-    let keys: Vec<String> = chunks
-        .iter()
-        .map(|c| format!("{}#{}", c.doc_id, c.chunk_index))
-        .collect();
-
-    println!("corpus: {} chunks", chunks.len());
-
-    // Keys have to be unique, or two different chunks would be the same answer.
-    let unique: std::collections::HashSet<&String> = keys.iter().collect();
-    println!("  distinct keys: {} of {}", unique.len(), keys.len());
-    anyhow::ensure!(
-        unique.len() == keys.len(),
-        "the corpus contains duplicate keys"
-    );
-
-    // Chunk order against source. The scenarios sample with a stride precisely
-    // because a prefix is one source, so that property is asserted, not assumed.
-    let tenth = chunks.len() / 10;
-    let prefix_sources: std::collections::BTreeSet<&str> =
-        chunks[..tenth].iter().map(|c| c.source.as_str()).collect();
-    let all_sources: std::collections::BTreeSet<&str> =
-        chunks.iter().map(|c| c.source.as_str()).collect();
-    println!(
-        "  sources in the first tenth: {:?}, in the whole corpus: {:?}",
-        prefix_sources, all_sources
-    );
-    anyhow::ensure!(
-        prefix_sources.len() < all_sources.len(),
-        "a prefix of the corpus covers every source, so the ingestion order was not reproduced \
-         and strided sampling is measuring nothing"
-    );
-
-    // The last tenth should interleave, which is what makes a stride work.
-    let tail_sources: std::collections::BTreeSet<&str> = chunks[chunks.len() - tenth..]
-        .iter()
-        .map(|c| c.source.as_str())
-        .collect();
-    println!("  sources in the last tenth: {:?}", tail_sources);
-    anyhow::ensure!(
-        tail_sources.len() == all_sources.len(),
-        "the tail does not interleave every source"
-    );
-
-    println!("\nground truth");
-    let identity = crate::queryset::document_identity_queries(&inputs, &keys, per_source, 11);
-    let mut by_source: HashMap<&str, usize> = HashMap::new();
-    for q in &identity {
-        *by_source.entry(q.source.as_str()).or_insert(0) += 1;
-    }
-    println!("  document identity queries: {} in total", identity.len());
-    // Iterating the sources present in the tally would skip a source that supplies
-    // none, which is exactly the failure worth catching: the code shaped source
-    // contributed nothing until its titles were given a second word.
-    for source in &all_sources {
-        let count = by_source.get(source).copied().unwrap_or(0);
-        println!("    {source:<11} {count}");
-        anyhow::ensure!(
-            count >= per_source.min(10),
-            "{source} supplies only {count} document identity queries; its titles are not usable \
-             as queries, which empties the ground truth that grades fusion"
-        );
-    }
-
-    let headings = crate::queryset::heading_queries(&inputs, &keys, per_source * 3, 12);
-    println!("  natural language heading queries: {}", headings.len());
-    anyhow::ensure!(
-        headings.len() >= per_source,
-        "only {} heading queries; headings need to be 15 or more characters and three or more \
-         words, appearing in at most four chunks",
-        headings.len()
-    );
-
-    let identifiers = crate::queryset::identifier_queries(&inputs, &keys, per_source * 3, 13);
-    println!("  rare identifier queries: {}", identifiers.len());
-    anyhow::ensure!(
-        identifiers.len() >= per_source,
-        "only {} identifier queries; the corpus needs more rare literal tokens, which come from \
-         source code and from the ticket keys threaded through the prose sources",
-        identifiers.len()
-    );
-    if let Some(example) = identifiers.first() {
-        println!(
-            "    for example {:?}, correct in {} chunk(s)",
-            example.text,
-            example.correct.len()
-        );
-    }
-
-    // Can the ground truths be *answered*, not merely generated?
-    //
-    // This is the check that was missing, and its absence cost two full embedding
-    // runs. The generation checks above pass happily on a corpus where the queries
-    // are unanswerable: a title query whose document never mentions its own title, or
-    // a heading query whose chunks do not contain the heading. Both engines then
-    // score near zero together, which reads like a corpus that is merely harder.
-    //
-    // The corpus this one reproduces had both properties at 100%: every chunk carried
-    // its document title in its body, and every chunk with a heading carried that
-    // heading. So the check is that a correct answer contains the query text, which
-    // is the weakest thing that makes the question answerable at all.
-    println!("\nare the ground truths answerable");
-    let content_of: HashMap<&str, &str> = keys
-        .iter()
-        .zip(chunks.iter())
-        .map(|(k, c)| (k.as_str(), c.content.as_str()))
-        .collect();
-
-    // An identifier query is not a substring of the chunk. The generator strips every
-    // character that is not alphanumeric, a dash or an underscore from a whitespace
-    // separated word, so `exists_method(return_value)` yields the token
-    // `exists_methodreturn_value`, which appears nowhere literally. Checking those by
-    // substring would report a defect that is really a property of the generator, so
-    // they are checked by applying the same filtering to the chunk's own words.
-    let filtered_words = |content: &str| -> Vec<String> {
-        content
-            .split_whitespace()
-            .map(|raw| {
-                raw.chars()
-                    .filter(|ch| ch.is_alphanumeric() || *ch == '-' || *ch == '_')
-                    .collect::<String>()
-            })
-            .collect()
-    };
-
-    for (label, queries, substring, floor) in [
-        ("document identity", &identity, true, 0.99),
-        ("natural language headings", &headings, true, 0.99),
-        ("rare identifiers", &identifiers, false, 0.99),
-    ] {
-        let mut answerable = 0usize;
-        let mut total = 0usize;
-        for q in queries.iter() {
-            let needle = q.text.trim().to_lowercase();
-            let reachable = q.correct.iter().any(|k| {
-                content_of
-                    .get(k.as_str())
-                    .map(|c| {
-                        if substring {
-                            c.to_lowercase().contains(&needle)
-                        } else {
-                            // Lowercased the same way the needle was, rather than
-                            // compared ASCII case insensitively. Tokens are cut with
-                            // `char::is_alphanumeric`, which is Unicode aware, so a
-                            // token can hold a letter outside ASCII: `Bogotá-2019`
-                            // lowercases to `bogotá-2019` while an ASCII fold leaves
-                            // the accented letter alone and the two never match. That
-                            // reported a perfectly answerable query as unanswerable.
-                            filtered_words(c).iter().any(|w| w.to_lowercase() == needle)
-                        }
-                    })
-                    .unwrap_or(false)
-            });
-            total += 1;
-            answerable += usize::from(reachable);
-        }
-        let share = if total == 0 {
-            0.0
-        } else {
-            answerable as f64 / total as f64
-        };
-        println!("  {label:<26} {answerable}/{total} have a correct chunk containing the query text ({:.1}%)", share * 100.0);
-        anyhow::ensure!(
-            share >= floor,
-            "only {:.1}% of {label} queries have any correct chunk that contains the query text. \
-             Those queries cannot be answered by either engine, so the scenario measures nothing \
-             and both engines will score near zero on it. In the corpus this one reproduces, every \
-             chunk carried its document title and its heading in its own text",
-            share * 100.0
-        );
-    }
-
-    // The two structural properties that make the above true, asserted directly so a
-    // change to the chunk format cannot quietly remove them.
-    let mut with_title = 0usize;
-    let mut with_heading = 0usize;
-    let mut heading_bearing = 0usize;
-    for c in &chunks {
-        if c.content
-            .to_lowercase()
-            .contains(&c.title.trim().to_lowercase())
-        {
-            with_title += 1;
-        }
-        if let Some(leaf) = c.heading_path.last() {
-            heading_bearing += 1;
-            if c.content
-                .to_lowercase()
-                .contains(&leaf.trim().to_lowercase())
-            {
-                with_heading += 1;
-            }
-        }
-    }
-    println!(
-        "  chunks carrying their own title: {with_title}/{} ({:.1}%)",
-        chunks.len(),
-        100.0 * with_title as f64 / chunks.len() as f64
-    );
-    println!(
-        "  chunks carrying their own leaf heading: {with_heading}/{heading_bearing} ({:.1}%)",
-        100.0 * with_heading as f64 / heading_bearing.max(1) as f64
-    );
-    anyhow::ensure!(
-        with_title * 100 >= chunks.len() * 99,
-        "only {with_title} of {} chunks contain their document title; the original corpus had all \
-         of them, and the document identity scenario depends on it",
-        chunks.len()
-    );
-    anyhow::ensure!(
-        heading_bearing == 0 || with_heading * 100 >= heading_bearing * 99,
-        "only {with_heading} of {heading_bearing} chunks with a heading contain that heading; the \
-         original corpus had all of them, and the heading scenarios depend on it"
-    );
-
-    // Deleted documents exist so that a filter forgetting to exclude them fails a
-    // test rather than passing quietly.
-    let deleted = chunks.iter().filter(|c| c.deleted).count();
-    println!("\n  soft deleted chunks: {deleted}");
-    anyhow::ensure!(
-        deleted > 0,
-        "no soft deleted documents, so no scenario can catch a filter that forgets them"
-    );
-
-    println!("\nthe corpus supports every graded scenario");
-    Ok(())
-}
+pub use check::check;
+pub use postgres::load_postgres;
 
 #[cfg(test)]
 mod tests {

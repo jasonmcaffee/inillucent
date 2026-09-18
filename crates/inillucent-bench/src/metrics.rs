@@ -201,9 +201,10 @@ pub fn percentile(sorted_ms: &[f64], p: f64) -> f64 {
     if sorted_ms.is_empty() {
         return 0.0;
     }
+    let last = sorted_ms.len().saturating_sub(1);
     let rank = (p * sorted_ms.len() as f64).ceil() as usize;
-    let idx = rank.saturating_sub(1).min(sorted_ms.len() - 1);
-    sorted_ms[idx]
+    let idx = rank.saturating_sub(1).min(last);
+    sorted_ms.get(idx).copied().unwrap_or(0.0)
 }
 
 #[derive(Default, Clone)]
@@ -212,10 +213,22 @@ pub struct Accumulator {
 }
 
 impl Accumulator {
+    /// Adds one sample.
+    ///
+    /// The samples are kept rather than summed as they arrive, because
+    /// `len` reports how much evidence a figure rests on and the paired tests
+    /// in `stats.rs` need the per-query series rather than its mean.
+    ///
+    /// @param v - the sample
     pub fn push(&mut self, v: f32) {
         self.values.push(v);
     }
 
+    /// The mean of the samples, or zero when there are none.
+    ///
+    /// Zero rather than an error, because an empty family is a family whose
+    /// queries the corpus could not produce, and the card reports that as a
+    /// query count of zero beside the figure.
     pub fn mean(&self) -> f32 {
         if self.values.is_empty() {
             return 0.0;

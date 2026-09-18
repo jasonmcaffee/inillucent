@@ -69,6 +69,11 @@ pub enum PgMode {
 }
 
 impl PgMode {
+    /// What the score card calls this arm.
+    ///
+    /// The label says which pgvector is being measured, because the two
+    /// differ by more than a setting: one is the extension as installed and
+    /// one is the extension as its own documentation asks for it.
     pub fn label(&self) -> &'static str {
         match self {
             PgMode::Default => "pgvector (extension defaults)",
@@ -226,6 +231,15 @@ pub struct PgVectorEngine {
 }
 
 impl PgVectorEngine {
+    /// Opens one connection and holds it for the whole run.
+    ///
+    /// **One connection rather than a pool, because the session settings are
+    /// the arm.** `hnsw.ef_search` and the rest are set on this session per
+    /// query, and a pooled connection would hand the next query somebody
+    /// else's settings - so the arm being measured would not be the arm named.
+    ///
+    /// @param url - the PostgreSQL connection string
+    /// @param mode - which pgvector configuration this arm is
     pub fn connect(url: &str, mode: PgMode) -> Result<Self> {
         let client = Client::connect(url, NoTls).context("connecting to PostgreSQL")?;
         Ok(PgVectorEngine {
@@ -279,8 +293,11 @@ impl PgVectorEngine {
         scores.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let at = ((percentile * scores.len() as f64).ceil() as usize)
             .saturating_sub(1)
-            .min(scores.len() - 1);
-        let ceiling = scores[at].max(f32::EPSILON);
+            .min(scores.len().saturating_sub(1));
+        // `at` is clamped to the last index and `scores` is not empty, so the
+        // fallback is unreachable; it is written rather than asserted because an
+        // absent ceiling is a floor of `f32::EPSILON` either way.
+        let ceiling = scores.get(at).copied().unwrap_or(0.0).max(f32::EPSILON);
         self.lexical_ceiling = ceiling;
         Ok(ceiling)
     }
@@ -524,6 +541,17 @@ pub struct InillucentEngine {
 }
 
 impl InillucentEngine {
+    /// Wraps a built index as a graded arm.
+    ///
+    /// The key list is inverted here rather than searched later: the
+    /// correctness and invariant scenarios ask for the ordinal of a returned
+    /// key, and scanning the corpus keys per returned row costs more than
+    /// every query in the suite put together.
+    ///
+    /// @param index - the built index this arm searches
+    /// @param keys - the corpus key per chunk ordinal, in corpus order
+    /// @param name - what the score card calls this arm
+    /// @param ef_search - the traversal width, or the index's own default
     pub fn new(index: Index, keys: Vec<String>, name: String, ef_search: Option<usize>) -> Self {
         let ordinal_of = keys
             .iter()
@@ -553,10 +581,31 @@ impl InillucentEngine {
         }
     }
 
-    fn key(&self, chunk: u32) -> String {
-        self.keys[chunk as usize].clone()
+    /// The source database identifier a chunk ordinal stands for.
+    ///
+    /// **Fallible, because an ordinal with no key means the index and the key
+    /// list disagree about what was loaded.** Answering an empty string there
+    /// would score a hit against a document that is not in the corpus, which
+    /// moves a published recall number rather than failing the run.
+    ///
+    /// @param chunk - the chunk ordinal a search returned
+    fn key(&self, chunk: u32) -> Result<String> {
+        self.keys.get(chunk as usize).cloned().with_context(|| {
+            format!(
+                "chunk {chunk} has no key: the index returned an ordinal past the \
+                 {} keys the harness loaded with it",
+                self.keys.len()
+            )
+        })
     }
 
+    /// The chunk ordinal a corpus key stands for, or `None` when this arm
+    /// was not built with that chunk.
+    ///
+    /// The inverse of [`InillucentEngine::key`], and the reason `new` builds a
+    /// map.
+    ///
+    /// @param key - the corpus key a hit carried
     pub fn ordinal(&self, key: &str) -> Option<u32> {
         self.ordinal_of.get(key).copied()
     }
@@ -569,16 +618,17 @@ impl SearchEngine for InillucentEngine {
 
     fn vector_search(&mut self, query: &[f32], filter: &Filter, k: usize) -> Result<Vec<Hit>> {
         let compiled = self.index.compile(filter);
-        Ok(self
-            .index
+        self.index
             .vector_search(query, &compiled, k, self.budget_for(filter))?
             .into_iter()
-            .map(|n| Hit {
-                key: self.key(n.chunk),
-                score: 1.0 - n.distance,
-                confidence: (1.0 - n.distance).clamp(0.0, 1.0),
+            .map(|n| {
+                Ok(Hit {
+                    key: self.key(n.chunk)?,
+                    score: 1.0 - n.distance,
+                    confidence: (1.0 - n.distance).clamp(0.0, 1.0),
+                })
             })
-            .collect())
+            .collect()
     }
 
     fn lexical_search(&mut self, query: &str, filter: &Filter, k: usize) -> Result<Vec<Hit>> {
@@ -586,20 +636,21 @@ impl SearchEngine for InillucentEngine {
         // The query's own BM25 saturation point, which is what turns a raw score
         // into an absolute one. It does not depend on the results.
         let ceiling = self.index.lexical_score_ceiling(query);
-        Ok(self
-            .index
+        self.index
             .lexical_search(query, &compiled, k)
             .into_iter()
-            .map(|h| Hit {
-                key: self.key(h.chunk),
-                score: h.score,
-                confidence: if ceiling > f32::EPSILON {
-                    (h.score / ceiling).clamp(0.0, 1.0)
-                } else {
-                    0.0
-                },
+            .map(|h| {
+                Ok(Hit {
+                    key: self.key(h.chunk)?,
+                    score: h.score,
+                    confidence: if ceiling > f32::EPSILON {
+                        (h.score / ceiling).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    },
+                })
             })
-            .collect())
+            .collect()
     }
 
     fn hybrid_search(
@@ -610,16 +661,17 @@ impl SearchEngine for InillucentEngine {
         k: usize,
     ) -> Result<Vec<Hit>> {
         let compiled = self.index.compile(filter);
-        Ok(self
-            .index
+        self.index
             .hybrid_search(query, query_vector, &compiled, k, self.budget_for(filter))?
             .into_iter()
-            .map(|h| Hit {
-                key: self.key(h.chunk),
-                score: h.score,
-                confidence: h.confidence,
+            .map(|h| {
+                Ok(Hit {
+                    key: self.key(h.chunk)?,
+                    score: h.score,
+                    confidence: h.confidence,
+                })
             })
-            .collect())
+            .collect()
     }
 }
 
@@ -631,14 +683,14 @@ pub fn exhaustive_reference(
     query: &[f32],
     filter: &Filter,
     k: usize,
-) -> Vec<String> {
+) -> Result<Vec<String>> {
     let compiled = engine.index.compile(filter);
     engine
         .index
         .exhaustive_search(query, &compiled, k)
-        .expect("the harness embeds at the index's width")
+        .context("the exhaustive reference search")?
         .into_iter()
-        .map(|n| engine.keys[n.chunk as usize].clone())
+        .map(|n| engine.key(n.chunk))
         .collect()
 }
 
@@ -796,13 +848,13 @@ pub fn fuse_with(
     filter: &Filter,
     k: usize,
     fusion: Fusion,
-) -> Vec<Hit> {
+) -> Result<Vec<Hit>> {
     let compiled = engine.index.compile(filter);
     let candidates = engine.index.config().candidates.max(k);
     let vector_hits = engine
         .index
         .vector_search(query_vector, &compiled, candidates, engine.ef_search)
-        .expect("the harness embeds at the index's width");
+        .context("the vector half of the fusion under test")?;
     let lexical_hits = engine.index.lexical_search(query, &compiled, candidates);
     rank::fuse(
         &vector_hits,
@@ -820,10 +872,12 @@ pub fn fuse_with(
         },
     )
     .into_iter()
-    .map(|h| Hit {
-        key: engine.keys[h.chunk as usize].clone(),
-        score: h.score,
-        confidence: h.confidence,
+    .map(|h| {
+        Ok(Hit {
+            key: engine.key(h.chunk)?,
+            score: h.score,
+            confidence: h.confidence,
+        })
     })
     .collect()
 }

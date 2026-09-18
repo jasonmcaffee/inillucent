@@ -11,6 +11,39 @@
 //!   models       write or reseal a model manifest
 //!   embed-residency  what loading the embedding model costs, and what moves it
 
+// The harness connects to live databases and scores the numbers
+// `docs/performance.md` and `docs/retrieval-quality.md` publish, so a bad
+// `unwrap` in it crashes the box producing a score card rather than writing a
+// caught error into the card. `docs/repository.md` used to say this crate had
+// "no library to put the attributes in"; a `#![deny(...)]` is a crate root
+// inner attribute and `main.rs` is a crate root, which is what
+// `crates/inillucent-search/src/bin/write_latency.rs` already relies on.
+//
+// One attribute per lint, which is the form every governed crate uses and the
+// form `policy.rs`'s `every_governed_crate_denies_undocumented_items` looks
+// for - so adding this crate to `GOVERNED` is a one-line change rather than a
+// reformat. It is not on that list yet: the other tests it carries ask for
+// things this ticket did not scope, and the four lints and `missing_docs` are
+// what the review asked for.
+#![deny(missing_docs)]
+#![deny(clippy::indexing_slicing)]
+#![deny(clippy::unwrap_used)]
+#![deny(clippy::expect_used)]
+#![deny(clippy::panic)]
+// The four lints are about a path that must return an error instead of
+// aborting. A test that has already decided the value is there is asserting,
+// and an assertion that cannot fail is not a test - so the relaxation is the
+// same one every governed crate carries.
+#![cfg_attr(
+    test,
+    allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::indexing_slicing
+    )
+)]
+
 mod arm;
 mod corpus;
 mod embedcheck;
@@ -34,7 +67,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 use inillucent_core::embed_onnx::Device;
 use inillucent_core::rank::{AdaptiveWeights, Fusion};
 
@@ -361,217 +394,16 @@ enum Command {
     /// `grade` rebuilds the index for every run and takes twenty minutes; nothing
     /// swept here needs a new index, so this asks the same graph a few hundred more
     /// questions instead. Use it to choose a default, then confirm it with `grade`.
-    Tune {
-        #[arg(long)]
-        limit: Option<usize>,
-        #[arg(long, default_value_t = 30)]
-        per_source: usize,
-        #[arg(long, default_value = DEFAULT_MODEL_DIR)]
-        model_dir: String,
-        #[arg(long, default_value = "model.onnx")]
-        model_file: String,
-        /// Processor the queries are embedded on: `cpu`, `cuda` or `cuda:N`.
-        #[arg(long, default_value = "cpu")]
-        device: String,
-        /// Lexical coverage exponents to try, comma separated.
-        #[arg(long, default_value = "0,0.5,1,1.5,2")]
-        coverages: String,
-        /// Vector weights to try for the two score based fusions, comma separated.
-        #[arg(long, default_value = "0.3,0.5,0.7,0.8,0.9")]
-        weights: String,
-        /// Lexical proximity weights to try, comma separated.
-        #[arg(long, default_value = "0,0.25,0.5,0.75,1")]
-        proximities: String,
-        /// Whether a query term also matches the terms it prefixes: `true`, `false`
-        /// or both, comma separated.
-        #[arg(long, default_value = "true,false")]
-        prefixes: String,
-        /// Whether the count of matched query terms outranks the score: `true`,
-        /// `false` or both, comma separated.
-        #[arg(long, default_value = "true,false")]
-        tiers: String,
-        /// Ordered-phrase weights to try, comma separated.
-        #[arg(long, default_value = "0")]
-        phrases: String,
-        /// Fusion methods to try, comma separated: `rrf`, `minmax`, `convex`,
-        /// `tmm`.
-        #[arg(long, default_value = "minmax")]
-        fusions: String,
-        /// Diversity lambdas to try, comma separated. 1 selects purely by score.
-        #[arg(long, default_value = "1")]
-        mmrs: String,
-        /// Adaptive weighting rules to try, as `oov:identifier:separation:coverage`
-        /// gain quadruples, several separated by commas. The arm with no adaptive
-        /// rule at all is always included alongside them.
-        #[arg(long, default_value = "")]
-        adaptive: String,
-        /// Added to the query set seeds, so a setting can be chosen on queries the
-        /// graded run will not use. 0 uses the same queries `grade` does.
-        #[arg(long, default_value_t = 100)]
-        seed_offset: u64,
-        /// Fixes every interval and p-value the sweep prints.
-        #[arg(long, default_value_t = 20260901)]
-        stats_seed: u64,
-    },
+    Tune(TuneArgs),
     /// Run the full graded suite and write the score card.
-    Grade {
-        #[arg(long)]
-        limit: Option<usize>,
-        /// Queries per source for the document identity scenarios.
-        #[arg(long, default_value_t = 40)]
-        per_source: usize,
-        #[arg(long, default_value = DEFAULT_MODEL_DIR)]
-        model_dir: String,
-        #[arg(long, default_value = "model.onnx")]
-        model_file: String,
-        /// Relative to the working directory, so running from the repository root
-        /// writes the card into the repository. The previous default was
-        /// `../inillucent-scorecard.md`, which from the repository root wrote it to the
-        /// parent directory instead.
-        #[arg(long, default_value = "inillucent-scorecard.md")]
-        out: PathBuf,
-        /// Processor the queries are embedded on: `cpu`, `cuda` or `cuda:N`.
-        #[arg(long, default_value = "cpu")]
-        device: String,
-        /// How the vector and lexical lists are combined: `rrf`, `minmax`,
-        /// `convex` or `tmm`. Applied to BOTH engines, so the hybrid family stays
-        /// a measurement of retrieval rather than of ranking policy.
-        #[arg(long, default_value = "minmax")]
-        fusion: String,
-        /// Weight on the vector side for the two score based fusions.
-        #[arg(long, default_value_t = 0.35)]
-        vector_weight: f32,
-        /// Exponent on the share of the query a lexical hit contains. inillucent only:
-        /// PostgreSQL already requires every term, so it has nothing to weight.
-        #[arg(long, default_value_t = 3.0)]
-        lexical_coverage: f32,
-        /// How much of a lexical score is scaled by how tightly the matched query
-        /// terms sit together. inillucent only: `ts_rank_cd` already does this.
-        #[arg(long, default_value_t = 1.0)]
-        lexical_proximity: f32,
-        /// Whether a query term also matches the terms it prefixes.
-        #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
-        lexical_prefix: bool,
-        /// Whether the count of matched query terms outranks the score.
-        #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
-        lexical_tier: bool,
-        /// How much of a lexical score is scaled by whether the matched query
-        /// terms appear in the query's own order, on top of how close together
-        /// they sit. inillucent only.
-        #[arg(long, default_value_t = 0.75)]
-        lexical_phrase: f32,
-        /// How far down the BM25 ranking the position aware rescoring reaches, as
-        /// a multiple of the requested k.
-        #[arg(long, default_value_t = 6)]
-        lexical_rescore_depth: usize,
-        /// Choose the vector weight per query from the query's own shape and from
-        /// how well each side separated its leader, rather than using one weight
-        /// for every question.
-        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
-        adaptive_fusion: bool,
-        /// Adaptive weighting: added in proportion to the share of query terms the
-        /// dictionary has never seen.
-        #[arg(long, default_value_t = 0.10)]
-        adaptive_oov_gain: f32,
-        /// Adaptive weighting: subtracted in proportion to the share of query terms
-        /// that look like identifiers.
-        #[arg(long, default_value_t = 0.10)]
-        adaptive_identifier_gain: f32,
-        /// Adaptive weighting: added in proportion to how much better the vector
-        /// list separates its leader than the lexical list separates its own.
-        #[arg(long, default_value_t = 0.10)]
-        adaptive_separation_gain: f32,
-        /// Adaptive weighting: subtracted in proportion to how much of the query
-        /// the best lexical hit holds.
-        #[arg(long, default_value_t = 0.10)]
-        adaptive_coverage_gain: f32,
-        /// Maximal Marginal Relevance: 1.0 selects purely by fused score, lower
-        /// values trade score for novelty against what is already selected.
-        #[arg(long, default_value_t = 1.0)]
-        mmr_lambda: f32,
-        /// Where per-query run artifacts are collected, one directory per run.
-        #[arg(long, default_value = "runs")]
-        runs_dir: PathBuf,
-        /// Fixes every bootstrap interval and p-value the card reports, so two
-        /// readings of one run reach the same verdict.
-        #[arg(long, default_value_t = 20260901)]
-        stats_seed: u64,
-        /// Skip the two pgvector configurations, for iterating on inillucent alone.
-        #[arg(long, default_value_t = false)]
-        inillucent_only: bool,
-    },
+    Grade(GradeArgs),
     /// Compare two or more embedding models over one corpus.
     ///
     /// Each cache is one model's vectors for the same corpus. The run refuses
     /// before it starts unless every cache agrees on the corpus digest, the chunk
     /// count and the query seed table, and unless every model's manifest still
     /// digests to what its cache was embedded against.
-    GradeEmbedding {
-        /// The caches, one per model. Two or more.
-        #[arg(long = "cache-set", num_args = 1.., required = true)]
-        cache_set: Vec<PathBuf>,
-        /// The model every other model is compared against. Defaults to the
-        /// first cache's model.
-        #[arg(long)]
-        baseline: Option<String>,
-        #[arg(long)]
-        limit: Option<usize>,
-        /// Queries per source for the document identity family.
-        #[arg(long, default_value_t = 40)]
-        per_source: usize,
-        /// Query vectors an arm's own model produced elsewhere, as
-        /// `<model id>=<path.f32>`, repeatable. Use it for a model this harness cannot
-        /// open - a safetensors checkpoint with no export - after writing the texts
-        /// with `query-texts`. The `.meta.json` beside the file has to name the same
-        /// corpus, seed table, `--per-source`, model and width, or the run refuses.
-        #[arg(long = "query-vectors", value_name = "MODEL=PATH")]
-        query_vectors: Vec<String>,
-        /// Processor the queries are embedded on: `cpu`, `cuda` or `cuda:N`.
-        #[arg(long, default_value = "cpu")]
-        device: String,
-        #[arg(long, default_value = "embedding-scorecard.md")]
-        out: PathBuf,
-        #[arg(long, default_value = "runs")]
-        runs_dir: PathBuf,
-        #[arg(long, default_value_t = 20260901)]
-        stats_seed: u64,
-        /// Exhaustive cosine over every family: the embedding on its own.
-        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
-        dense: bool,
-        /// The real pipeline with the shipped fusion, which is what an agent gets.
-        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
-        hybrid: bool,
-        /// Throughput, weights on disk, tokens per chunk and truncation share.
-        /// Re-embeds a sample per model per device, so it costs minutes.
-        #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
-        cost: bool,
-        /// Each model's narrowed ranking against its own full-width ranking.
-        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
-        matryoshka: bool,
-        /// Gate G4: how often each model answers confidently when nothing in
-        /// the corpus answers the question, on its own calibrated threshold.
-        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
-        abstention: bool,
-        /// BM25 with no embedding model at all, so the card says what the
-        /// lexical half of the shipped pipeline is worth on its own. Scored
-        /// inside the hybrid lane, so it measures nothing when hybrid is off.
-        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
-        lexical: bool,
-        /// Distinct chunks re-embedded to time each model.
-        #[arg(long, default_value_t = 2000)]
-        cost_samples: usize,
-        /// Processors the cost lane times each model on, comma separated.
-        #[arg(long, default_value = "cpu,cuda:0")]
-        cost_devices: String,
-        /// Timed passes per model per device, each over a disjoint slice of
-        /// chunks. One timing is not a measurement: the same model on this
-        /// machine has varied 3.7x between runs.
-        #[arg(long, default_value_t = 3)]
-        cost_repeats: usize,
-        /// Chunks the Matryoshka lane ranks over.
-        #[arg(long, default_value_t = 25000)]
-        matryoshka_chunks: usize,
-    },
+    GradeEmbedding(GradeEmbeddingArgs),
     /// Embed a stride sample of the corpus with one model and write the texts
     /// and the vectors out, so another implementation can be compared against
     /// this one.
@@ -642,6 +474,237 @@ enum Command {
         #[arg(long)]
         dir: PathBuf,
     },
+}
+
+/// The flags `tune` takes.
+///
+/// **A struct rather than fields on the variant, so the function that runs
+/// this subcommand takes one parameter.** Three of `main`'s arms turn twenty
+/// or more flags into one options struct, and a helper taking those flags
+/// positionally would be the nine-argument call `policy.rs`'s parameter check
+/// refuses - twenty times over.
+#[derive(Args)]
+struct TuneArgs {
+    #[arg(long)]
+    limit: Option<usize>,
+    #[arg(long, default_value_t = 30)]
+    per_source: usize,
+    #[arg(long, default_value = DEFAULT_MODEL_DIR)]
+    model_dir: String,
+    #[arg(long, default_value = "model.onnx")]
+    model_file: String,
+    /// Processor the queries are embedded on: `cpu`, `cuda` or `cuda:N`.
+    #[arg(long, default_value = "cpu")]
+    device: String,
+    /// Lexical coverage exponents to try, comma separated.
+    #[arg(long, default_value = "0,0.5,1,1.5,2")]
+    coverages: String,
+    /// Vector weights to try for the two score based fusions, comma separated.
+    #[arg(long, default_value = "0.3,0.5,0.7,0.8,0.9")]
+    weights: String,
+    /// Lexical proximity weights to try, comma separated.
+    #[arg(long, default_value = "0,0.25,0.5,0.75,1")]
+    proximities: String,
+    /// Whether a query term also matches the terms it prefixes: `true`, `false`
+    /// or both, comma separated.
+    #[arg(long, default_value = "true,false")]
+    prefixes: String,
+    /// Whether the count of matched query terms outranks the score: `true`,
+    /// `false` or both, comma separated.
+    #[arg(long, default_value = "true,false")]
+    tiers: String,
+    /// Ordered-phrase weights to try, comma separated.
+    #[arg(long, default_value = "0")]
+    phrases: String,
+    /// Fusion methods to try, comma separated: `rrf`, `minmax`, `convex`,
+    /// `tmm`.
+    #[arg(long, default_value = "minmax")]
+    fusions: String,
+    /// Diversity lambdas to try, comma separated. 1 selects purely by score.
+    #[arg(long, default_value = "1")]
+    mmrs: String,
+    /// Adaptive weighting rules to try, as `oov:identifier:separation:coverage`
+    /// gain quadruples, several separated by commas. The arm with no adaptive
+    /// rule at all is always included alongside them.
+    #[arg(long, default_value = "")]
+    adaptive: String,
+    /// Added to the query set seeds, so a setting can be chosen on queries the
+    /// graded run will not use. 0 uses the same queries `grade` does.
+    #[arg(long, default_value_t = 100)]
+    seed_offset: u64,
+    /// Fixes every interval and p-value the sweep prints.
+    #[arg(long, default_value_t = 20260901)]
+    stats_seed: u64,
+}
+
+/// The flags `grade` takes.
+///
+/// **A struct rather than fields on the variant, so the function that runs
+/// this subcommand takes one parameter.** Three of `main`'s arms turn twenty
+/// or more flags into one options struct, and a helper taking those flags
+/// positionally would be the nine-argument call `policy.rs`'s parameter check
+/// refuses - twenty times over.
+#[derive(Args)]
+struct GradeArgs {
+    #[arg(long)]
+    limit: Option<usize>,
+    /// Queries per source for the document identity scenarios.
+    #[arg(long, default_value_t = 40)]
+    per_source: usize,
+    #[arg(long, default_value = DEFAULT_MODEL_DIR)]
+    model_dir: String,
+    #[arg(long, default_value = "model.onnx")]
+    model_file: String,
+    /// Relative to the working directory, so running from the repository root
+    /// writes the card into the repository. The previous default was
+    /// `../inillucent-scorecard.md`, which from the repository root wrote it to the
+    /// parent directory instead.
+    #[arg(long, default_value = "inillucent-scorecard.md")]
+    out: PathBuf,
+    /// Processor the queries are embedded on: `cpu`, `cuda` or `cuda:N`.
+    #[arg(long, default_value = "cpu")]
+    device: String,
+    /// How the vector and lexical lists are combined: `rrf`, `minmax`,
+    /// `convex` or `tmm`. Applied to BOTH engines, so the hybrid family stays
+    /// a measurement of retrieval rather than of ranking policy.
+    #[arg(long, default_value = "minmax")]
+    fusion: String,
+    /// Weight on the vector side for the two score based fusions.
+    #[arg(long, default_value_t = 0.35)]
+    vector_weight: f32,
+    /// Exponent on the share of the query a lexical hit contains. inillucent only:
+    /// PostgreSQL already requires every term, so it has nothing to weight.
+    #[arg(long, default_value_t = 3.0)]
+    lexical_coverage: f32,
+    /// How much of a lexical score is scaled by how tightly the matched query
+    /// terms sit together. inillucent only: `ts_rank_cd` already does this.
+    #[arg(long, default_value_t = 1.0)]
+    lexical_proximity: f32,
+    /// Whether a query term also matches the terms it prefixes.
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+    lexical_prefix: bool,
+    /// Whether the count of matched query terms outranks the score.
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+    lexical_tier: bool,
+    /// How much of a lexical score is scaled by whether the matched query
+    /// terms appear in the query's own order, on top of how close together
+    /// they sit. inillucent only.
+    #[arg(long, default_value_t = 0.75)]
+    lexical_phrase: f32,
+    /// How far down the BM25 ranking the position aware rescoring reaches, as
+    /// a multiple of the requested k.
+    #[arg(long, default_value_t = 6)]
+    lexical_rescore_depth: usize,
+    /// Choose the vector weight per query from the query's own shape and from
+    /// how well each side separated its leader, rather than using one weight
+    /// for every question.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    adaptive_fusion: bool,
+    /// Adaptive weighting: added in proportion to the share of query terms the
+    /// dictionary has never seen.
+    #[arg(long, default_value_t = 0.10)]
+    adaptive_oov_gain: f32,
+    /// Adaptive weighting: subtracted in proportion to the share of query terms
+    /// that look like identifiers.
+    #[arg(long, default_value_t = 0.10)]
+    adaptive_identifier_gain: f32,
+    /// Adaptive weighting: added in proportion to how much better the vector
+    /// list separates its leader than the lexical list separates its own.
+    #[arg(long, default_value_t = 0.10)]
+    adaptive_separation_gain: f32,
+    /// Adaptive weighting: subtracted in proportion to how much of the query
+    /// the best lexical hit holds.
+    #[arg(long, default_value_t = 0.10)]
+    adaptive_coverage_gain: f32,
+    /// Maximal Marginal Relevance: 1.0 selects purely by fused score, lower
+    /// values trade score for novelty against what is already selected.
+    #[arg(long, default_value_t = 1.0)]
+    mmr_lambda: f32,
+    /// Where per-query run artifacts are collected, one directory per run.
+    #[arg(long, default_value = "runs")]
+    runs_dir: PathBuf,
+    /// Fixes every bootstrap interval and p-value the card reports, so two
+    /// readings of one run reach the same verdict.
+    #[arg(long, default_value_t = 20260901)]
+    stats_seed: u64,
+    /// Skip the two pgvector configurations, for iterating on inillucent alone.
+    #[arg(long, default_value_t = false)]
+    inillucent_only: bool,
+}
+
+/// The flags `grade-embedding` takes.
+///
+/// **A struct rather than fields on the variant, so the function that runs
+/// this subcommand takes one parameter.** Three of `main`'s arms turn twenty
+/// or more flags into one options struct, and a helper taking those flags
+/// positionally would be the nine-argument call `policy.rs`'s parameter check
+/// refuses - twenty times over.
+#[derive(Args)]
+struct GradeEmbeddingArgs {
+    /// The caches, one per model. Two or more.
+    #[arg(long = "cache-set", num_args = 1.., required = true)]
+    cache_set: Vec<PathBuf>,
+    /// The model every other model is compared against. Defaults to the
+    /// first cache's model.
+    #[arg(long)]
+    baseline: Option<String>,
+    #[arg(long)]
+    limit: Option<usize>,
+    /// Queries per source for the document identity family.
+    #[arg(long, default_value_t = 40)]
+    per_source: usize,
+    /// Query vectors an arm's own model produced elsewhere, as
+    /// `<model id>=<path.f32>`, repeatable. Use it for a model this harness cannot
+    /// open - a safetensors checkpoint with no export - after writing the texts
+    /// with `query-texts`. The `.meta.json` beside the file has to name the same
+    /// corpus, seed table, `--per-source`, model and width, or the run refuses.
+    #[arg(long = "query-vectors", value_name = "MODEL=PATH")]
+    query_vectors: Vec<String>,
+    /// Processor the queries are embedded on: `cpu`, `cuda` or `cuda:N`.
+    #[arg(long, default_value = "cpu")]
+    device: String,
+    #[arg(long, default_value = "embedding-scorecard.md")]
+    out: PathBuf,
+    #[arg(long, default_value = "runs")]
+    runs_dir: PathBuf,
+    #[arg(long, default_value_t = 20260901)]
+    stats_seed: u64,
+    /// Exhaustive cosine over every family: the embedding on its own.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    dense: bool,
+    /// The real pipeline with the shipped fusion, which is what an agent gets.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    hybrid: bool,
+    /// Throughput, weights on disk, tokens per chunk and truncation share.
+    /// Re-embeds a sample per model per device, so it costs minutes.
+    #[arg(long, default_value_t = false, action = clap::ArgAction::Set)]
+    cost: bool,
+    /// Each model's narrowed ranking against its own full-width ranking.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    matryoshka: bool,
+    /// Gate G4: how often each model answers confidently when nothing in
+    /// the corpus answers the question, on its own calibrated threshold.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    abstention: bool,
+    /// BM25 with no embedding model at all, so the card says what the
+    /// lexical half of the shipped pipeline is worth on its own. Scored
+    /// inside the hybrid lane, so it measures nothing when hybrid is off.
+    #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+    lexical: bool,
+    /// Distinct chunks re-embedded to time each model.
+    #[arg(long, default_value_t = 2000)]
+    cost_samples: usize,
+    /// Processors the cost lane times each model on, comma separated.
+    #[arg(long, default_value = "cpu,cuda:0")]
+    cost_devices: String,
+    /// Timed passes per model per device, each over a disjoint slice of
+    /// chunks. One timing is not a measurement: the same model on this
+    /// machine has varied 3.7x between runs.
+    #[arg(long, default_value_t = 3)]
+    cost_repeats: usize,
+    /// Chunks the Matryoshka lane ranks over.
+    #[arg(long, default_value_t = 25000)]
+    matryoshka_chunks: usize,
 }
 
 /// Parses a comma separated device list into the devices the embedder opens a
@@ -730,15 +793,18 @@ fn parse_adaptive(text: &str) -> Result<Vec<AdaptiveWeights>> {
                     .map_err(|e| anyhow::anyhow!("{p} is not a number: {e}"))
             })
             .collect::<Result<_>>()?;
-        anyhow::ensure!(
-            parts.len() == 4,
-            "an adaptive rule needs four gains, oov:identifier:separation:coverage, got {rule}"
-        );
+        let [out_of_vocabulary_gain, identifier_gain, separation_gain, coverage_gain] =
+            parts.as_slice()
+        else {
+            anyhow::bail!(
+                "an adaptive rule needs four gains, oov:identifier:separation:coverage, got {rule}"
+            );
+        };
         out.push(AdaptiveWeights {
-            out_of_vocabulary_gain: parts[0],
-            identifier_gain: parts[1],
-            separation_gain: parts[2],
-            coverage_gain: parts[3],
+            out_of_vocabulary_gain: *out_of_vocabulary_gain,
+            identifier_gain: *identifier_gain,
+            separation_gain: *separation_gain,
+            coverage_gain: *coverage_gain,
             ..Default::default()
         });
     }
@@ -753,8 +819,8 @@ fn parse_adaptive(text: &str) -> Result<Vec<AdaptiveWeights>> {
 /// a refusal here is a defect in this program rather than a condition to handle.
 ///
 /// @param answered - what the search returned
-fn probe<T>(answered: anyhow::Result<T>) -> T {
-    answered.expect("the probe vector comes from this index")
+fn probe<T>(answered: anyhow::Result<T>) -> anyhow::Result<T> {
+    answered.context("the probe vector was copied out of this index, so a refused width here is a defect in this program")
 }
 
 fn expand_home(path: &str) -> Result<String> {
@@ -861,90 +927,111 @@ fn arm_options_for(cli: &Cli) -> Result<arm::ArmOptions> {
     })
 }
 
+/// What one `synth-embed` run is asked to do.
+///
+/// **A struct rather than nine positional arguments, which is what task-1961's
+/// A8 did for the ten functions that used to take more than eight.** This one
+/// kept its nine under an `#[allow(clippy::too_many_arguments)]` - the only
+/// such allow in `crates/` or `drivers/` - because nothing measured parameter
+/// counts until task-1970 added `no_function_takes_more_than_eight_parameters`
+/// to `policy.rs`. Four of the nine are `&str` or `usize` in a row, so a
+/// transposed pair at the call site was a compiling change of meaning.
+struct SynthEmbedRequest<'a> {
+    /// The chunk file to embed.
+    corpus: &'a std::path::Path,
+    /// Where the cache goes.
+    cache: &'a std::path::Path,
+    /// The model directory, with `~` not yet expanded.
+    model_dir: &'a str,
+    /// The weights file inside the model directory.
+    model_file: &'a str,
+    /// The processors to spread the work over, comma separated as given.
+    devices: &'a str,
+    /// Texts per request.
+    batch: usize,
+    /// How often to print progress, in chunks.
+    report_every: usize,
+    /// Batches per progress window.
+    window_batches: usize,
+    /// The arm options built from the global flags.
+    base: &'a arm::ArmOptions,
+}
+
 /// Embed a corpus into a cache with one model, on one or more processors.
 ///
 /// The weights are verified before a chunk is read. A cache is trusted for the rest of the
 /// ticket - every lane reads it and nothing re-embeds - so a model that is not the model its
 /// manifest describes has to be refused here or not at all.
 ///
-/// @param corpus - the chunk file to embed
-/// @param cache - where the cache goes
-/// @param model_dir - the model directory, `~` expanded
-/// @param model_file - the weights file inside it
-/// @param devices - the processors to spread the work over, comma separated as given
-/// @param batch - texts per request
-/// @param report_every - how often to print progress, in chunks
-/// @param window_batches - batches per progress window
-/// @param base - the arm options built from the global flags
-#[allow(clippy::too_many_arguments)]
-fn synth_embed(
-    corpus: &std::path::Path,
-    cache: &std::path::Path,
-    model_dir: &str,
-    model_file: &str,
-    devices: &str,
-    batch: usize,
-    report_every: usize,
-    window_batches: usize,
-    base: &arm::ArmOptions,
-) -> Result<()> {
-    let dir = expand_home(model_dir)?;
-    let devices = parse_devices(devices)?;
-    let model = models::resolve_dir(std::path::Path::new(&dir), model_file)?;
+/// @param request - what to embed, with which model, on which processors
+fn synth_embed(request: &SynthEmbedRequest<'_>) -> Result<()> {
+    let dir = expand_home(request.model_dir)?;
+    let devices = parse_devices(request.devices)?;
+    // `parse_devices` answers at least one device or an error, so this names
+    // the first of the list the caller gave rather than defaulting to one.
+    let first = devices
+        .first()
+        .copied()
+        .context("no device to embed on: the device list parsed to nothing")?;
+    let model = models::resolve_dir(std::path::Path::new(&dir), request.model_file)?;
     model.verify_files()?;
     synth::embed(
-        corpus,
-        cache,
+        request.corpus,
+        request.cache,
         &model,
         &scenarios::seeds(),
         &arm::ArmOptions {
-            batch_size: batch,
-            device: devices[0],
-            ..base.clone()
+            batch_size: request.batch,
+            device: first,
+            ..request.base.clone()
         },
-        report_every,
+        request.report_every,
         &devices,
-        window_batches,
+        request.window_batches,
     )
 }
 
+/// The flags that belong to no one subcommand.
+///
+/// **Cloned out of `Cli` before the `match`, because matching on
+/// `cli.command` moves it and a partially moved `Cli` cannot be borrowed.**
+/// Two clones once per process, against every subcommand function having to
+/// take the two fields separately.
+struct Global {
+    /// The corpus cache every subcommand reads or writes.
+    cache: PathBuf,
+    /// The PostgreSQL baseline the corpus is loaded from and graded against.
+    database_url: String,
+}
+
+/// Parses the command line and runs the one subcommand it names.
+///
+/// **A dispatcher, with one function per subcommand.** It used to be a single
+/// `match` of 576 lines: eighteen arms, three of which turned twenty or more
+/// flags into one options struct, so a reader looking for what `grade` does had
+/// to find it among seventeen other commands. The three widest arms take an
+/// `Args` struct now, which is what lets each of their functions take one
+/// parameter instead of twenty.
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let models_root = cli
         .models_root
         .clone()
         .unwrap_or_else(models::default_models_root);
-    // Before the match, which moves the command out of `cli`.
     let base = arm_options_for(&cli)?;
+    // Taken before the `match`, which moves the command out of `cli` and so
+    // leaves `cli` itself unborrowable.
+    let global = Global {
+        cache: cli.cache.clone(),
+        database_url: cli.database_url.clone(),
+    };
     match cli.command {
         Command::SynthBuild {
             derived,
             out,
             scale,
-        } => {
-            let derived = derived.unwrap_or_else(synth::default_derived_dir);
-            let report = synth::build(&derived, &out, scale)?;
-            eprintln!(
-                "\nwrote {} chunks across {} documents to {}",
-                report.chunks,
-                report.documents,
-                out.display()
-            );
-            eprintln!(
-                "{:<12} {:>7} {:>8} {:>7}",
-                "source", "docs", "chunks", "mean"
-            );
-            for (source, docs, chunks, mean) in &report.per_source {
-                eprintln!("{source:<12} {docs:>7} {chunks:>8} {mean:>7}");
-            }
-            eprintln!(
-                "titles unique to one document: {}, of which usable as identity queries: {}",
-                report.unique_titles, report.identity_usable
-            );
-        }
-        Command::SynthCheck { corpus, per_source } => {
-            synth::check(&corpus, per_source)?;
-        }
+        } => synth_build(derived, &out, scale),
+        Command::SynthCheck { corpus, per_source } => synth::check(&corpus, per_source),
         Command::SynthEmbed {
             corpus,
             model_dir,
@@ -953,39 +1040,24 @@ fn main() -> Result<()> {
             report_every,
             devices,
             window_batches,
-        } => {
-            synth_embed(
-                &corpus,
-                &cli.cache,
-                &model_dir,
-                &model_file,
-                &devices,
-                batch,
-                report_every,
-                window_batches,
-                &base,
-            )?;
-        }
-        Command::Rejudge { card, out } => {
-            let (rescored, before, after) = gradeembed::rejudge(&card)?;
-            eprintln!(
-                "rejudged {}: {before} judgements -> {after}, stats seed {}, baseline {}",
-                card.display(),
-                rescored.stats_seed,
-                rescored.baseline
-            );
-            let json_path = out.unwrap_or_else(|| card.clone());
-            write_card(&rescored, &json_path.with_extension("md"))?;
-        }
+        } => synth_embed(&SynthEmbedRequest {
+            corpus: &corpus,
+            cache: &cli.cache,
+            model_dir: &model_dir,
+            model_file: &model_file,
+            devices: &devices,
+            batch,
+            report_every,
+            window_batches,
+            base: &base,
+        }),
+        Command::Rejudge { card, out } => rejudge(&card, out),
         Command::QueryTexts {
             from_cache,
             per_source,
             limit,
             out,
-        } => {
-            let total = gradeembed::write_query_texts(&from_cache, per_source, limit, &out)?;
-            eprintln!("wrote {total} queries to {}", out.display());
-        }
+        } => query_texts(&from_cache, per_source, limit, &out),
         Command::CacheFromVectors {
             corpus,
             model_dir,
@@ -993,354 +1065,43 @@ fn main() -> Result<()> {
             vectors,
             truncated,
             unverified_weights,
-        } => {
-            cache_from_vectors(
-                &corpus,
-                &model_dir,
-                &model_file,
-                &vectors,
-                &cli.cache,
-                truncated,
-                unverified_weights,
-            )?;
-        }
-        Command::SynthLoad { corpus, no_indexes } => {
-            let chunks = synth::read_corpus(&corpus)?;
-            let c = corpus::load_cache(&cli.cache)?;
-            synth::load_postgres(&cli.database_url, &chunks, &c, !no_indexes)?;
-        }
-        Command::Load { limit } => {
-            eprintln!("loading corpus from {}", cli.database_url);
-            let start = Instant::now();
-            let c = corpus::load_from_postgres(&cli.database_url, limit)?;
-            eprintln!(
-                "loaded {} chunks at {} dimensions in {:.1}s",
-                c.len(),
-                c.dims,
-                start.elapsed().as_secs_f64()
-            );
-            corpus::save_cache(&c, &cli.cache)?;
-            let bytes = std::fs::metadata(&cli.cache)?.len();
-            eprintln!(
-                "cached {} ({:.1} MB)",
-                cli.cache.display(),
-                bytes as f64 / 1e6
-            );
-        }
-        Command::Build { limit, quantized } => {
-            let c = corpus::load_cache(&cli.cache)?;
-            eprintln!("cache holds {} chunks", c.len());
-            let (index, _keys, stats, elapsed) = scenarios::build_index(&c, limit, quantized)?;
-            eprintln!(
-                "built {} chunks / {} documents in {:.1}s",
-                stats.chunks, stats.documents, elapsed
-            );
-            eprintln!(
-                "  graph: {} layers, {} edges\n  lexical: {} terms, {} postings\n  vectors: {:.1} MB, int8 codes: {:.1} MB",
-                stats.graph_layers,
-                stats.graph_edges,
-                stats.lexical_terms,
-                stats.lexical_postings,
-                stats.vector_bytes as f64 / 1e6,
-                stats.quantized_bytes as f64 / 1e6,
-            );
-            drop(index);
-        }
+        } => cache_from_vectors(
+            &corpus,
+            &model_dir,
+            &model_file,
+            &vectors,
+            &cli.cache,
+            truncated,
+            unverified_weights,
+        ),
+        Command::SynthLoad { corpus, no_indexes } => synth_load(&global, &corpus, no_indexes),
+        Command::Load { limit } => load(&global, limit),
+        Command::Build { limit, quantized } => build(&global, limit, quantized),
         Command::Save {
             limit,
             quantized,
             dir,
-        } => {
-            let c = corpus::load_cache(&cli.cache)?;
-            let (index, _keys, stats, seconds) = scenarios::build_index(&c, limit, quantized)?;
-            eprintln!("built {} chunks in {:.1}s", stats.chunks, seconds);
-            let start = Instant::now();
-            inillucent_core::persist::save(&index, &dir)?;
-            eprintln!(
-                "saved to {} in {:.1}s",
-                dir.display(),
-                start.elapsed().as_secs_f64()
-            );
-            let mut total = 0u64;
-            for entry in std::fs::read_dir(&dir)? {
-                let entry = entry?;
-                let size = entry.metadata()?.len();
-                eprintln!("  {:>12} {}", size, entry.file_name().to_string_lossy());
-                total += size;
-            }
-            eprintln!("  {:>12} total ({:.1} MB)", total, total as f64 / 1e6);
-        }
-        Command::Open { dir } => {
-            let start = Instant::now();
-            let index = inillucent_core::persist::load(&dir)?;
-            let load_seconds = start.elapsed().as_secs_f64();
-            eprintln!(
-                "loaded {} chunks / {} documents in {:.1}s",
-                index.store().n_chunks(),
-                index.store().n_documents(),
-                load_seconds
-            );
-
-            // Exercise every query path so the reported memory reflects a process
-            // that has actually served traffic, not one that only opened files.
-            let query = index.vectors().copy_of(7);
-            for (label, filter) in [
-                ("no predicate", inillucent_core::filter::Filter::default()),
-                (
-                    "source = slack",
-                    inillucent_core::filter::Filter::source("slack"),
-                ),
-            ] {
-                let compiled = index.compile(&filter);
-                let start = Instant::now();
-                let hits = probe(index.vector_search(&query, &compiled, 10, None));
-                let vector_ms = start.elapsed().as_secs_f64() * 1000.0;
-                let start = Instant::now();
-                let lexical = index.lexical_search("offer eligibility rules", &compiled, 10);
-                let lexical_ms = start.elapsed().as_secs_f64() * 1000.0;
-                let start = Instant::now();
-                let hybrid = probe(index.hybrid_search(
-                    "offer eligibility rules",
-                    &query,
-                    &compiled,
-                    10,
-                    None,
-                ));
-                let hybrid_ms = start.elapsed().as_secs_f64() * 1000.0;
-                eprintln!(
-                    "  {label}: {} passing chunks, path {} | vector {} hits {:.2}ms | lexical {} hits {:.2}ms | hybrid {} hits {:.2}ms",
-                    compiled.pass_count(),
-                    index.path_for(&compiled, None),
-                    hits.len(),
-                    vector_ms,
-                    lexical.len(),
-                    lexical_ms,
-                    hybrid.len(),
-                    hybrid_ms
-                );
-            }
-        }
+        } => save(&global, limit, quantized, &dir),
+        Command::Open { dir } => open_saved(&dir),
         Command::EmbedCheck {
             model_dir,
             model_file,
             samples,
             batch,
             device,
-        } => {
-            let dir = model_dir.map(|d| expand_home(&d)).transpose()?;
-            let c = corpus::load_cache(&cli.cache)?;
-            embedcheck::run(
-                &c,
-                &models_root,
-                dir.as_deref(),
-                &model_file,
-                samples,
-                &arm::ArmOptions {
-                    batch_size: batch,
-                    device: Device::parse(&device)?,
-                    ..base.clone()
-                },
-            )?;
-        }
-        Command::Tune {
-            limit,
-            per_source,
+        } => embed_check(EmbedCheckRequest {
+            global: &global,
+            base: &base,
+            models_root: &models_root,
             model_dir,
-            model_file,
-            device,
-            coverages,
-            weights,
-            proximities,
-            prefixes,
-            tiers,
-            phrases,
-            fusions,
-            mmrs,
-            adaptive,
-            seed_offset,
-            stats_seed,
-        } => {
-            let c = corpus::load_cache(&cli.cache)?;
-            let dir = expand_home(&model_dir)?;
-            // The arm the engine currently ships, spelled out so every other arm
-            // in the sweep is compared against it rather than against whichever of
-            // themselves happened to come first.
-            let defaults = inillucent_core::index::IndexConfig::default();
-            let baseline = tune::Setting {
-                label: "baseline (shipped defaults)".to_string(),
-                coverage: defaults.lexical_coverage,
-                proximity: defaults.lexical_proximity,
-                prefix: defaults.lexical_prefix,
-                tier: defaults.lexical_tier,
-                phrase: defaults.lexical_phrase,
-                fusion: defaults.fusion,
-                adaptive: None,
-                mmr_lambda: defaults.mmr_lambda,
-            };
-            let names: Vec<String> = fusions
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string)
-                .collect();
-            anyhow::ensure!(!names.is_empty(), "--fusions named no method");
-            let settings = tune::build_settings(
-                baseline,
-                &tune::Sweep {
-                    coverages: &parse_floats(&coverages)?,
-                    weights: &parse_floats(&weights)?,
-                    proximities: &parse_floats(&proximities)?,
-                    prefixes: &parse_bools(&prefixes)?,
-                    tiers: &parse_bools(&tiers)?,
-                    phrases: &parse_floats(&phrases)?,
-                    fusions: &names,
-                    mmrs: &parse_floats(&mmrs)?,
-                    adaptive: &parse_adaptive(&adaptive)?,
-                },
-            );
-            let model = models::resolve_dir(std::path::Path::new(&dir), &model_file)?;
-            tune::run(
-                &c,
-                limit,
-                per_source,
-                &model,
-                Device::parse(&device)?,
-                &settings,
-                seed_offset,
-                stats_seed,
-            )?;
-        }
-        Command::Grade {
-            limit,
-            per_source,
-            model_dir,
-            model_file,
-            out,
-            inillucent_only,
-            fusion,
-            vector_weight,
-            lexical_coverage,
-            lexical_proximity,
-            lexical_prefix,
-            lexical_tier,
-            lexical_phrase,
-            lexical_rescore_depth,
-            adaptive_fusion,
-            adaptive_oov_gain,
-            adaptive_identifier_gain,
-            adaptive_separation_gain,
-            adaptive_coverage_gain,
-            mmr_lambda,
-            runs_dir,
-            stats_seed,
-            device,
-        } => {
-            let c = corpus::load_cache(&cli.cache)?;
-            let dir = expand_home(&model_dir)?;
-            let options = scenarios::GradeOptions {
-                limit,
-                per_source,
-                arm_options: arm::ArmOptions {
-                    device: Device::parse(&device)?,
-                    ..base.clone()
-                },
-                model: models::resolve_dir(std::path::Path::new(&dir), &model_file)?,
-                database_url: cli.database_url.clone(),
-                inillucent_only,
-                device: Device::parse(&device)?,
-                fusion: parse_fusion(&fusion, vector_weight)?,
-                lexical_coverage,
-                lexical_proximity,
-                lexical_prefix,
-                lexical_tier,
-                lexical_phrase,
-                lexical_rescore_depth,
-                adaptive_fusion,
-                adaptive: AdaptiveWeights {
-                    // The base is the same weight a fixed fusion would use, so
-                    // every gain at zero reproduces that fusion exactly.
-                    base: vector_weight,
-                    out_of_vocabulary_gain: adaptive_oov_gain,
-                    identifier_gain: adaptive_identifier_gain,
-                    separation_gain: adaptive_separation_gain,
-                    coverage_gain: adaptive_coverage_gain,
-                    ..Default::default()
-                },
-                mmr_lambda,
-                runs_dir,
-                stats_seed,
-                cache_path: cli.cache.clone(),
-            };
-            let card = scenarios::grade(&c, &options)?;
-            let markdown = report::render(&card);
-            std::fs::write(&out, markdown)?;
-            // The measurements are also saved as JSON, so the card can be
-            // re-rendered or re-judged without repaying the twenty minutes the
-            // run costs.
-            let json_path = out.with_extension("json");
-            std::fs::write(&json_path, serde_json::to_string_pretty(&card)?)?;
-            eprintln!(
-                "score card written to {}, measurements to {}",
-                out.display(),
-                json_path.display()
-            );
-            report::print_summary(&card);
-        }
-        Command::GradeEmbedding {
-            cache_set,
-            baseline,
-            limit,
-            per_source,
-            query_vectors,
-            device,
-            out,
-            runs_dir,
-            stats_seed,
-            dense,
-            hybrid,
-            cost,
-            matryoshka,
-            abstention,
-            lexical,
-            cost_samples,
-            cost_devices,
-            cost_repeats,
-            matryoshka_chunks,
-        } => {
-            let options = gradeembed::EmbeddingGradeOptions {
-                caches: cache_set,
-                models_root: models_root.clone(),
-                baseline,
-                limit,
-                per_source,
-                device: Device::parse(&device)?,
-                runs_dir,
-                out: out.clone(),
-                stats_seed,
-                dense,
-                hybrid,
-                cost,
-                matryoshka,
-                abstention,
-                lexical,
-                cost_samples,
-                cost_devices: if cost {
-                    parse_devices(&cost_devices)?
-                } else {
-                    Vec::new()
-                },
-                cost_repeats,
-                matryoshka_chunks,
-                query_vectors: parse_query_vectors(&query_vectors)?,
-                arm_options: arm::ArmOptions {
-                    device: Device::parse(&device)?,
-                    ..base.clone()
-                },
-            };
-            let card = gradeembed::run(&options)?;
-            write_card(&card, &out)?;
-            gradeembed::print_summary(&card);
-        }
+            model_file: &model_file,
+            samples,
+            batch,
+            device: &device,
+        }),
+        Command::Tune(args) => tune_command(&global, &args),
+        Command::Grade(args) => grade_command(&global, &base, &args),
+        Command::GradeEmbedding(args) => grade_embedding(&base, &models_root, args),
         Command::ExportVectors {
             corpus,
             model_dir,
@@ -1350,78 +1111,16 @@ fn main() -> Result<()> {
             device,
             batch,
             as_queries,
-        } => {
-            use inillucent_core::embed::Embedder;
-            let dir = expand_home(&model_dir)?;
-            let model = models::resolve_dir(std::path::Path::new(&dir), "model.onnx")?;
-            model.verify_files()?;
-            let chunks = synth::read_corpus(&corpus)?;
-            let chosen = scenarios::strided_sample(chunks.len(), samples);
-            let texts: Vec<String> = chosen
-                .iter()
-                .map(|&i| synth::sanitize_for_model(&chunks[i].content))
-                .collect();
-            eprintln!(
-                "embedding {} chunks with {} as {}",
-                texts.len(),
-                model.manifest.id,
-                if as_queries { "queries" } else { "documents" }
-            );
-            let embedder = inillucent_core::embed_onnx::OnnxEmbedder::open_manifest(
-                &model.dir,
-                &model.manifest,
-                batch,
-                Device::parse(&device)?,
-            )?;
-            let start = Instant::now();
-            let vectors = if as_queries {
-                let prefix = &model.manifest.prefixes.query;
-                let prefixed: Vec<String> = texts.iter().map(|t| format!("{prefix}{t}")).collect();
-                embedder.embed_prefixed(&prefixed)?
-            } else {
-                embedder.embed_documents(&texts)?
-            };
-            eprintln!(
-                "  {} vectors of {} dimensions in {:.1}s",
-                vectors.len(),
-                vectors.first().map(|v| v.len()).unwrap_or(0),
-                start.elapsed().as_secs_f64()
-            );
-            let facts = embedder.truncation();
-            eprintln!(
-                "  {:.1} tokens per chunk, {} of {} truncated at {}",
-                facts.tokens_per_text(),
-                facts.truncated,
-                facts.texts,
-                model.manifest.max_tokens
-            );
-
-            use std::io::Write as _;
-            let mut text_file = std::io::BufWriter::new(std::fs::File::create(&texts_out)?);
-            for (row, (&i, text)) in chosen.iter().zip(&texts).enumerate() {
-                let record = serde_json::json!({
-                    "row": row,
-                    "chunk": i,
-                    "source": chunks[i].source,
-                    "text": text,
-                });
-                writeln!(text_file, "{record}")?;
-            }
-            text_file.flush()?;
-
-            let mut vector_file = std::io::BufWriter::new(std::fs::File::create(&vectors_out)?);
-            for v in &vectors {
-                for x in v {
-                    vector_file.write_all(&x.to_le_bytes())?;
-                }
-            }
-            vector_file.flush()?;
-            eprintln!(
-                "wrote {} and {}",
-                texts_out.display(),
-                vectors_out.display()
-            );
-        }
+        } => export_vectors(ExportVectorsRequest {
+            corpus: &corpus,
+            model_dir: &model_dir,
+            samples,
+            texts_out: &texts_out,
+            vectors_out: &vectors_out,
+            device: &device,
+            batch,
+            as_queries,
+        }),
         Command::EmbedResidency {
             model_dir,
             optimized_dir,
@@ -1429,50 +1128,627 @@ fn main() -> Result<()> {
             repeats,
             steady,
             skip_optimized,
-        } => {
-            let dir = expand_home(&model_dir)?;
-            let dir = std::path::Path::new(&dir);
-            let model = models::resolve_dir(dir, "model.onnx")?;
-            let optimized_dir = optimized_dir
-                .unwrap_or_else(|| std::env::temp_dir().join("inillucent-optimized-graph"));
-            if !skip_optimized {
-                match residency::prepare_optimized(dir, &model.manifest, &optimized_dir) {
-                    Ok(path) => eprintln!("optimized graph at {}", path.display()),
-                    Err(err) => eprintln!("no pre-optimized arm: {err:#}"),
-                }
-            }
-            let devices = parse_devices(&devices)?;
-            let arms = residency::arms(dir, &optimized_dir, &devices);
-            let mut measurements = Vec::new();
-            for arm in &arms {
-                eprintln!("measuring {}", arm.name);
-                match residency::measure(arm, &model.manifest, repeats, steady) {
-                    Ok(m) => measurements.push(m),
-                    Err(err) => eprintln!("  skipped: {err:#}"),
-                }
-            }
-            residency::report(&measurements);
+        } => embed_residency(
+            &model_dir,
+            optimized_dir,
+            &devices,
+            repeats,
+            steady,
+            skip_optimized,
+        ),
+        Command::Models { dir } => seal_model(&dir),
+    }
+}
+
+/// Assembles the graded corpus from the downloaded public material.
+///
+/// @param derived - the directory the material was extracted to, or the default
+/// @param out - where the JSONL corpus goes
+/// @param scale - a multiplier on every source's document and chunk targets
+fn synth_build(derived: Option<PathBuf>, out: &std::path::Path, scale: f64) -> Result<()> {
+    let derived = derived.unwrap_or_else(synth::default_derived_dir);
+    let report = synth::build(&derived, out, scale)?;
+    eprintln!(
+        "\nwrote {} chunks across {} documents to {}",
+        report.chunks,
+        report.documents,
+        out.display()
+    );
+    eprintln!(
+        "{:<12} {:>7} {:>8} {:>7}",
+        "source", "docs", "chunks", "mean"
+    );
+    for (source, docs, chunks, mean) in &report.per_source {
+        eprintln!("{source:<12} {docs:>7} {chunks:>8} {mean:>7}");
+    }
+    eprintln!(
+        "titles unique to one document: {}, of which usable as identity queries: {}",
+        report.unique_titles, report.identity_usable
+    );
+    Ok(())
+}
+
+/// Re-judges a saved card and writes it out again.
+///
+/// The judgements are recomputed from the measurements the card already holds,
+/// so nothing is re-run: a change to how a verdict is decided can be applied to
+/// a run that cost twenty minutes without paying for it twice.
+///
+/// @param card - the saved card's JSON
+/// @param out - where to write it, or over the card it came from
+fn rejudge(card: &std::path::Path, out: Option<PathBuf>) -> Result<()> {
+    let (rescored, before, after) = gradeembed::rejudge(card)?;
+    eprintln!(
+        "rejudged {}: {before} judgements -> {after}, stats seed {}, baseline {}",
+        card.display(),
+        rescored.stats_seed,
+        rescored.baseline
+    );
+    let json_path = out.unwrap_or_else(|| card.to_path_buf());
+    write_card(&rescored, &json_path.with_extension("md"))
+}
+
+/// Writes the query set a graded run would generate, as text.
+///
+/// @param from_cache - the cache the queries are generated from
+/// @param per_source - queries per source for the identity family
+/// @param limit - grade only the first N chunks of the cache
+/// @param out - where the queries go
+fn query_texts(
+    from_cache: &std::path::Path,
+    per_source: usize,
+    limit: Option<usize>,
+    out: &std::path::Path,
+) -> Result<()> {
+    let total = gradeembed::write_query_texts(from_cache, per_source, limit, out)?;
+    eprintln!("wrote {total} queries to {}", out.display());
+    Ok(())
+}
+
+/// Loads the generated corpus and its vectors into PostgreSQL for the baseline.
+///
+/// @param global - the global flags, for the cache and the database
+/// @param corpus - the JSONL corpus produced by `synth-build`
+/// @param no_indexes - load the rows and leave the indexes unbuilt
+fn synth_load(global: &Global, corpus: &std::path::Path, no_indexes: bool) -> Result<()> {
+    let chunks = synth::read_corpus(corpus)?;
+    let c = corpus::load_cache(&global.cache)?;
+    synth::load_postgres(&global.database_url, &chunks, &c, !no_indexes)
+}
+
+/// Pulls a corpus and its vectors out of PostgreSQL into a cache.
+///
+/// @param global - the global flags, for the cache and the database
+/// @param limit - read only the first N chunks, for a fast iteration cycle
+fn load(global: &Global, limit: Option<usize>) -> Result<()> {
+    eprintln!("loading corpus from {}", global.database_url);
+    let start = Instant::now();
+    let c = corpus::load_from_postgres(&global.database_url, limit)?;
+    eprintln!(
+        "loaded {} chunks at {} dimensions in {:.1}s",
+        c.len(),
+        c.dims,
+        start.elapsed().as_secs_f64()
+    );
+    corpus::save_cache(&c, &global.cache)?;
+    let bytes = std::fs::metadata(&global.cache)?.len();
+    eprintln!(
+        "cached {} ({:.1} MB)",
+        global.cache.display(),
+        bytes as f64 / 1e6
+    );
+    Ok(())
+}
+
+/// Builds an index from the cache and reports what it built.
+///
+/// @param global - the global flags, for the cache
+/// @param limit - index only the first N chunks
+/// @param quantized - also build the int8 codes
+fn build(global: &Global, limit: Option<usize>, quantized: bool) -> Result<()> {
+    let c = corpus::load_cache(&global.cache)?;
+    eprintln!("cache holds {} chunks", c.len());
+    let (index, _keys, stats, elapsed) = scenarios::build_index(&c, limit, quantized)?;
+    eprintln!(
+        "built {} chunks / {} documents in {:.1}s",
+        stats.chunks, stats.documents, elapsed
+    );
+    eprintln!(
+        "  graph: {} layers, {} edges\n  lexical: {} terms, {} postings\n  vectors: {:.1} MB, int8 codes: {:.1} MB",
+        stats.graph_layers,
+        stats.graph_edges,
+        stats.lexical_terms,
+        stats.lexical_postings,
+        stats.vector_bytes as f64 / 1e6,
+        stats.quantized_bytes as f64 / 1e6,
+    );
+    drop(index);
+    Ok(())
+}
+
+/// Builds an index and saves it to a directory, with the size of every file.
+///
+/// @param global - the global flags, for the cache
+/// @param limit - index only the first N chunks
+/// @param quantized - also build the int8 codes
+/// @param dir - where the index goes
+fn save(
+    global: &Global,
+    limit: Option<usize>,
+    quantized: bool,
+    dir: &std::path::Path,
+) -> Result<()> {
+    let c = corpus::load_cache(&global.cache)?;
+    let (index, _keys, stats, seconds) = scenarios::build_index(&c, limit, quantized)?;
+    eprintln!("built {} chunks in {:.1}s", stats.chunks, seconds);
+    let start = Instant::now();
+    inillucent_core::persist::save(&index, dir)?;
+    eprintln!(
+        "saved to {} in {:.1}s",
+        dir.display(),
+        start.elapsed().as_secs_f64()
+    );
+    let mut total = 0u64;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let size = entry.metadata()?.len();
+        eprintln!("  {:>12} {}", size, entry.file_name().to_string_lossy());
+        total += size;
+    }
+    eprintln!("  {:>12} total ({:.1} MB)", total, total as f64 / 1e6);
+    Ok(())
+}
+
+/// Loads a saved index and exercises every query path against it.
+///
+/// **Every path, not just the open.** The resident memory this reports is
+/// meant to describe a process that has actually served traffic; one that only
+/// opened files has not paged in the graph, the postings or the codes.
+///
+/// @param dir - the saved index directory
+fn open_saved(dir: &std::path::Path) -> Result<()> {
+    let start = Instant::now();
+    let index = inillucent_core::persist::load(dir)?;
+    let load_seconds = start.elapsed().as_secs_f64();
+    eprintln!(
+        "loaded {} chunks / {} documents in {:.1}s",
+        index.store().n_chunks(),
+        index.store().n_documents(),
+        load_seconds
+    );
+
+    let query = index.vectors().copy_of(7);
+    for (label, filter) in [
+        ("no predicate", inillucent_core::filter::Filter::default()),
+        (
+            "source = slack",
+            inillucent_core::filter::Filter::source("slack"),
+        ),
+    ] {
+        let compiled = index.compile(&filter);
+        let start = Instant::now();
+        let hits = probe(index.vector_search(&query, &compiled, 10, None))?;
+        let vector_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let start = Instant::now();
+        let lexical = index.lexical_search("offer eligibility rules", &compiled, 10);
+        let lexical_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let start = Instant::now();
+        let hybrid =
+            probe(index.hybrid_search("offer eligibility rules", &query, &compiled, 10, None))?;
+        let hybrid_ms = start.elapsed().as_secs_f64() * 1000.0;
+        eprintln!(
+            "  {label}: {} passing chunks, path {} | vector {} hits {:.2}ms | lexical {} hits {:.2}ms | hybrid {} hits {:.2}ms",
+            compiled.pass_count(),
+            index.path_for(&compiled, None),
+            hits.len(),
+            vector_ms,
+            lexical.len(),
+            lexical_ms,
+            hybrid.len(),
+            hybrid_ms
+        );
+    }
+    Ok(())
+}
+
+/// What one `embed-check` run is asked to do.
+struct EmbedCheckRequest<'a> {
+    /// The global flags, for the cache.
+    global: &'a Global,
+    /// The arm options built from the global flags.
+    base: &'a arm::ArmOptions,
+    /// Where the models live, for a cache that names its own model.
+    models_root: &'a std::path::Path,
+    /// The model directory, when the caller named one.
+    model_dir: Option<String>,
+    /// The weights file inside it.
+    model_file: &'a str,
+    /// Chunks re-embedded, spread evenly across the whole corpus.
+    samples: usize,
+    /// Texts per request.
+    batch: usize,
+    /// The processor to re-embed on.
+    device: &'a str,
+}
+
+/// Re-embeds a sample of the cache and checks it against the stored vectors.
+///
+/// @param request - the cache to check, and the model to check it with
+fn embed_check(request: EmbedCheckRequest<'_>) -> Result<()> {
+    let dir = request.model_dir.map(|d| expand_home(&d)).transpose()?;
+    let c = corpus::load_cache(&request.global.cache)?;
+    embedcheck::run(
+        &c,
+        request.models_root,
+        dir.as_deref(),
+        request.model_file,
+        request.samples,
+        &arm::ArmOptions {
+            batch_size: request.batch,
+            device: Device::parse(request.device)?,
+            ..request.base.clone()
+        },
+    )
+}
+
+/// Sweeps the ranking settings over one index build.
+///
+/// The baseline arm is the configuration the engine currently ships, spelled
+/// out so every other arm in the sweep is compared against it rather than
+/// against whichever of themselves happened to come first.
+///
+/// @param global - the global flags, for the cache
+/// @param args - the sweep's own flags
+fn tune_command(global: &Global, args: &TuneArgs) -> Result<()> {
+    let c = corpus::load_cache(&global.cache)?;
+    let dir = expand_home(&args.model_dir)?;
+    let defaults = inillucent_core::index::IndexConfig::default();
+    let baseline = tune::Setting {
+        label: "baseline (shipped defaults)".to_string(),
+        coverage: defaults.lexical_coverage,
+        proximity: defaults.lexical_proximity,
+        prefix: defaults.lexical_prefix,
+        tier: defaults.lexical_tier,
+        phrase: defaults.lexical_phrase,
+        fusion: defaults.fusion,
+        adaptive: None,
+        mmr_lambda: defaults.mmr_lambda,
+    };
+    let names: Vec<String> = args
+        .fusions
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    anyhow::ensure!(!names.is_empty(), "--fusions named no method");
+    let settings = tune::build_settings(
+        baseline,
+        &tune::Sweep {
+            coverages: &parse_floats(&args.coverages)?,
+            weights: &parse_floats(&args.weights)?,
+            proximities: &parse_floats(&args.proximities)?,
+            prefixes: &parse_bools(&args.prefixes)?,
+            tiers: &parse_bools(&args.tiers)?,
+            phrases: &parse_floats(&args.phrases)?,
+            fusions: &names,
+            mmrs: &parse_floats(&args.mmrs)?,
+            adaptive: &parse_adaptive(&args.adaptive)?,
+        },
+    );
+    let model = models::resolve_dir(std::path::Path::new(&dir), &args.model_file)?;
+    tune::run(
+        &c,
+        args.limit,
+        args.per_source,
+        &model,
+        Device::parse(&args.device)?,
+        &settings,
+        args.seed_offset,
+        args.stats_seed,
+    )
+}
+
+/// Runs the full graded suite and writes the score card.
+///
+/// The measurements are saved as JSON beside the markdown, so the card can be
+/// re-rendered or re-judged without repaying the twenty minutes the run costs.
+///
+/// @param global - the global flags, for the cache and the database
+/// @param base - the arm options built from the global flags
+/// @param args - the run's own flags
+fn grade_command(global: &Global, base: &arm::ArmOptions, args: &GradeArgs) -> Result<()> {
+    let c = corpus::load_cache(&global.cache)?;
+    let dir = expand_home(&args.model_dir)?;
+    let options = scenarios::GradeOptions {
+        limit: args.limit,
+        per_source: args.per_source,
+        arm_options: arm::ArmOptions {
+            device: Device::parse(&args.device)?,
+            ..base.clone()
+        },
+        model: models::resolve_dir(std::path::Path::new(&dir), &args.model_file)?,
+        database_url: global.database_url.clone(),
+        inillucent_only: args.inillucent_only,
+        device: Device::parse(&args.device)?,
+        fusion: parse_fusion(&args.fusion, args.vector_weight)?,
+        lexical_coverage: args.lexical_coverage,
+        lexical_proximity: args.lexical_proximity,
+        lexical_prefix: args.lexical_prefix,
+        lexical_tier: args.lexical_tier,
+        lexical_phrase: args.lexical_phrase,
+        lexical_rescore_depth: args.lexical_rescore_depth,
+        adaptive_fusion: args.adaptive_fusion,
+        adaptive: AdaptiveWeights {
+            // The base is the same weight a fixed fusion would use, so
+            // every gain at zero reproduces that fusion exactly.
+            base: args.vector_weight,
+            out_of_vocabulary_gain: args.adaptive_oov_gain,
+            identifier_gain: args.adaptive_identifier_gain,
+            separation_gain: args.adaptive_separation_gain,
+            coverage_gain: args.adaptive_coverage_gain,
+            ..Default::default()
+        },
+        mmr_lambda: args.mmr_lambda,
+        runs_dir: args.runs_dir.clone(),
+        stats_seed: args.stats_seed,
+        cache_path: global.cache.clone(),
+    };
+    let card = scenarios::grade(&c, &options)?;
+    let markdown = report::render(&card);
+    std::fs::write(&args.out, markdown)?;
+    let json_path = args.out.with_extension("json");
+    std::fs::write(&json_path, serde_json::to_string_pretty(&card)?)?;
+    eprintln!(
+        "score card written to {}, measurements to {}",
+        args.out.display(),
+        json_path.display()
+    );
+    report::print_summary(&card);
+    Ok(())
+}
+
+/// Compares two or more embedding models over one corpus.
+///
+/// @param base - the arm options built from the global flags
+/// @param models_root - where the models live
+/// @param args - the run's own flags
+fn grade_embedding(
+    base: &arm::ArmOptions,
+    models_root: &std::path::Path,
+    args: GradeEmbeddingArgs,
+) -> Result<()> {
+    let options = gradeembed::EmbeddingGradeOptions {
+        caches: args.cache_set,
+        models_root: models_root.to_path_buf(),
+        baseline: args.baseline,
+        limit: args.limit,
+        per_source: args.per_source,
+        device: Device::parse(&args.device)?,
+        runs_dir: args.runs_dir,
+        out: args.out.clone(),
+        stats_seed: args.stats_seed,
+        dense: args.dense,
+        hybrid: args.hybrid,
+        cost: args.cost,
+        matryoshka: args.matryoshka,
+        abstention: args.abstention,
+        lexical: args.lexical,
+        cost_samples: args.cost_samples,
+        cost_devices: if args.cost {
+            parse_devices(&args.cost_devices)?
+        } else {
+            Vec::new()
+        },
+        cost_repeats: args.cost_repeats,
+        matryoshka_chunks: args.matryoshka_chunks,
+        query_vectors: parse_query_vectors(&args.query_vectors)?,
+        arm_options: arm::ArmOptions {
+            device: Device::parse(&args.device)?,
+            ..base.clone()
+        },
+    };
+    let card = gradeembed::run(&options)?;
+    write_card(&card, &args.out)?;
+    gradeembed::print_summary(&card);
+    Ok(())
+}
+
+/// What one `export-vectors` run is asked to do.
+struct ExportVectorsRequest<'a> {
+    /// The JSONL corpus to sample from.
+    corpus: &'a std::path::Path,
+    /// The model directory, which must hold a manifest.
+    model_dir: &'a str,
+    /// Chunks embedded, spread evenly across the whole corpus.
+    samples: usize,
+    /// Where the sampled texts go, one JSON object per line.
+    texts_out: &'a std::path::Path,
+    /// Where the vectors go, as raw little-endian `f32`.
+    vectors_out: &'a std::path::Path,
+    /// The processor to embed on.
+    device: &'a str,
+    /// Texts per request.
+    batch: usize,
+    /// Embed with the query prefix rather than the document prefix.
+    as_queries: bool,
+}
+
+/// Embeds a sample of the corpus and writes the texts and the vectors out.
+///
+/// **This is how gate G10 is measured.** Parity between what the harness runs
+/// and what the model's own framework produces cannot be checked from inside
+/// either of them; it needs both, over the same real chunks, and this is the
+/// side of it that speaks ONNX.
+///
+/// @param request - what to embed, with which model, and where to put it
+fn export_vectors(request: ExportVectorsRequest<'_>) -> Result<()> {
+    use inillucent_core::embed::Embedder;
+    let dir = expand_home(request.model_dir)?;
+    let model = models::resolve_dir(std::path::Path::new(&dir), "model.onnx")?;
+    model.verify_files()?;
+    let chunks = synth::read_corpus(request.corpus)?;
+    let chosen = scenarios::strided_sample(chunks.len(), request.samples);
+    let texts: Vec<String> = chosen
+        .iter()
+        .map(|&i| {
+            let chunk = chunks
+                .get(i)
+                .with_context(|| format!("chunk {i} of {}", chunks.len()))?;
+            Ok(synth::sanitize_for_model(&chunk.content))
+        })
+        .collect::<Result<Vec<String>>>()?;
+    eprintln!(
+        "embedding {} chunks with {} as {}",
+        texts.len(),
+        model.manifest.id,
+        if request.as_queries {
+            "queries"
+        } else {
+            "documents"
         }
-        Command::Models { dir } => {
-            let mut model = models::resolve_dir(&dir, "model.onnx")?;
-            let before = model.digest();
-            let path = model.seal()?;
-            eprintln!(
-                "sealed {} ({} -> {})",
-                path.display(),
-                corpus::short(&before),
-                corpus::short(&model.digest())
-            );
-            eprintln!(
-                "  weights   {} {}",
-                model.manifest.model_file, model.manifest.weights_sha256
-            );
-            eprintln!(
-                "  tokenizer tokenizer.json {}",
-                model.manifest.tokenizer_sha256
-            );
-            eprintln!("  manifest  {}", model.digest());
+    );
+    let embedder = inillucent_core::embed_onnx::OnnxEmbedder::open_manifest(
+        &model.dir,
+        &model.manifest,
+        request.batch,
+        Device::parse(request.device)?,
+    )?;
+    let start = Instant::now();
+    let vectors = if request.as_queries {
+        let prefix = &model.manifest.prefixes.query;
+        let prefixed: Vec<String> = texts.iter().map(|t| format!("{prefix}{t}")).collect();
+        embedder.embed_prefixed(&prefixed)?
+    } else {
+        embedder.embed_documents(&texts)?
+    };
+    eprintln!(
+        "  {} vectors of {} dimensions in {:.1}s",
+        vectors.len(),
+        vectors.first().map(|v| v.len()).unwrap_or(0),
+        start.elapsed().as_secs_f64()
+    );
+    let facts = embedder.truncation();
+    eprintln!(
+        "  {:.1} tokens per chunk, {} of {} truncated at {}",
+        facts.tokens_per_text(),
+        facts.truncated,
+        facts.texts,
+        model.manifest.max_tokens
+    );
+    write_exported_vectors(&request, &chunks, &chosen, &texts, &vectors)
+}
+
+/// Writes the sampled texts and their vectors, in the order they were embedded.
+///
+/// Row N of the text file is vector N of the vector file, which is what makes
+/// the two comparable against another implementation's output.
+///
+/// @param request - where the two files go
+/// @param chunks - the corpus the sample was drawn from
+/// @param chosen - the sampled chunk indices, in the order they were embedded
+/// @param texts - the sanitized texts, one per chosen index
+/// @param vectors - the vectors, one per text
+fn write_exported_vectors(
+    request: &ExportVectorsRequest<'_>,
+    chunks: &[synth::SynthChunk],
+    chosen: &[usize],
+    texts: &[String],
+    vectors: &[Vec<f32>],
+) -> Result<()> {
+    use std::io::Write as _;
+    let mut text_file = std::io::BufWriter::new(std::fs::File::create(request.texts_out)?);
+    for (row, (&i, text)) in chosen.iter().zip(texts).enumerate() {
+        let chunk = chunks
+            .get(i)
+            .with_context(|| format!("chunk {i} of {}", chunks.len()))?;
+        let record = serde_json::json!({
+            "row": row,
+            "chunk": i,
+            "source": chunk.source,
+            "text": text,
+        });
+        writeln!(text_file, "{record}")?;
+    }
+    text_file.flush()?;
+
+    let mut vector_file = std::io::BufWriter::new(std::fs::File::create(request.vectors_out)?);
+    for v in vectors {
+        for x in v {
+            vector_file.write_all(&x.to_le_bytes())?;
         }
     }
+    vector_file.flush()?;
+    eprintln!(
+        "wrote {} and {}",
+        request.texts_out.display(),
+        request.vectors_out.display()
+    );
+    Ok(())
+}
+
+/// Measures what loading the embedding model costs, and what moves it.
+///
+/// @param model_dir - the model directory, `~` not yet expanded
+/// @param optimized_dir - where to write the pre-optimized graph
+/// @param devices - the processors to measure, comma separated as given
+/// @param repeats - how many times to load and drop the model
+/// @param steady - queries per arm after the load, for the steady-state figure
+/// @param skip_optimized - measure only the arms that need no graph pass
+fn embed_residency(
+    model_dir: &str,
+    optimized_dir: Option<PathBuf>,
+    devices: &str,
+    repeats: usize,
+    steady: usize,
+    skip_optimized: bool,
+) -> Result<()> {
+    let dir = expand_home(model_dir)?;
+    let dir = std::path::Path::new(&dir);
+    let model = models::resolve_dir(dir, "model.onnx")?;
+    let optimized_dir =
+        optimized_dir.unwrap_or_else(|| std::env::temp_dir().join("inillucent-optimized-graph"));
+    if !skip_optimized {
+        match residency::prepare_optimized(dir, &model.manifest, &optimized_dir) {
+            Ok(path) => eprintln!("optimized graph at {}", path.display()),
+            Err(err) => eprintln!("no pre-optimized arm: {err:#}"),
+        }
+    }
+    let devices = parse_devices(devices)?;
+    let arms = residency::arms(dir, &optimized_dir, &devices);
+    let mut measurements = Vec::new();
+    for arm in &arms {
+        eprintln!("measuring {}", arm.name);
+        match residency::measure(arm, &model.manifest, repeats, steady) {
+            Ok(m) => measurements.push(m),
+            Err(err) => eprintln!("  skipped: {err:#}"),
+        }
+    }
+    residency::report(&measurements);
+    Ok(())
+}
+
+/// Writes or reseals a model manifest, and prints what it sealed.
+///
+/// @param dir - the model directory
+fn seal_model(dir: &std::path::Path) -> Result<()> {
+    let mut model = models::resolve_dir(dir, "model.onnx")?;
+    let before = model.digest();
+    let path = model.seal()?;
+    eprintln!(
+        "sealed {} ({} -> {})",
+        path.display(),
+        corpus::short(&before),
+        corpus::short(&model.digest())
+    );
+    eprintln!(
+        "  weights   {} {}",
+        model.manifest.model_file, model.manifest.weights_sha256
+    );
+    eprintln!(
+        "  tokenizer tokenizer.json {}",
+        model.manifest.tokenizer_sha256
+    );
+    eprintln!("  manifest  {}", model.digest());
     Ok(())
 }

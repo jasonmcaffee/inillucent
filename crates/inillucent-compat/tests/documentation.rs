@@ -503,8 +503,22 @@ fn crate_libraries() -> Vec<(String, String)> {
         let mut paths: Vec<PathBuf> = entries.flat_map(|entry| entry.map(|e| e.path())).collect();
         paths.sort();
         for path in paths {
+            // **The crate root, which is `main.rs` in a binary crate.** This
+            // read `src/lib.rs` and nothing else until task-1973, so
+            // `inillucent-bench` - `main.rs` plus modules, no library - was
+            // invisible to it, and `docs/repository.md` could say "28 of the 29
+            // crates deny" with the twenty-ninth excused for having "no library
+            // to put the attributes in". A `#![deny(..)]` is a crate root inner
+            // attribute and `main.rs` is a crate root, which is what
+            // `crates/inillucent-search/src/bin/write_latency.rs` already
+            // relies on.
             let lib = path.join("src/lib.rs");
-            let Ok(source) = std::fs::read_to_string(&lib) else {
+            let root_file = if lib.is_file() {
+                lib
+            } else {
+                path.join("src/main.rs")
+            };
+            let Ok(source) = std::fs::read_to_string(&root_file) else {
                 continue;
             };
             let name = path

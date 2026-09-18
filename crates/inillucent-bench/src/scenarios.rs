@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use inillucent_core::embed::MATRYOSHKA_WIDTHS;
 use inillucent_core::filter::Filter;
 use inillucent_core::hnsw::HnswParams;
@@ -95,7 +95,9 @@ pub fn build_selected(
 
     let chunks: Vec<ChunkInput> = selected
         .iter()
-        .map(|&i| &corpus.chunks[i])
+        .map(|&i| chunk_at(corpus, i))
+        .collect::<Result<Vec<&ChunkInput>>>()?
+        .into_iter()
         .map(|c| ChunkInput {
             source: c.source.clone(),
             external_doc_id: c.external_doc_id.clone(),
@@ -119,18 +121,29 @@ pub fn build_selected(
     let vectors: Vec<Vec<f32>> = selected
         .iter()
         .map(|&i| {
-            if dims == corpus.dims {
-                corpus.vectors[i].clone()
+            let stored = corpus.vectors.get(i).with_context(|| {
+                format!(
+                    "chunk {i} has no stored vector: the cache holds {}",
+                    corpus.vectors.len()
+                )
+            })?;
+            Ok(if dims == corpus.dims {
+                stored.clone()
             } else {
-                inillucent_core::distance::truncate_normalized(&corpus.vectors[i], dims)
-            }
+                inillucent_core::distance::truncate_normalized(stored, dims)
+            })
         })
-        .collect();
+        .collect::<Result<Vec<Vec<f32>>>>()?;
 
-    let keys: Vec<String> = selected.iter().map(|&i| corpus_key(corpus, i)).collect();
+    let keys: Vec<String> = selected
+        .iter()
+        .map(|&i| corpus_key(corpus, i))
+        .collect::<Result<Vec<String>>>()?;
 
     let start = Instant::now();
-    index.add(chunks, &vectors).expect("the chunks are added");
+    index
+        .add(chunks, &vectors)
+        .context("adding the selected chunks to the index under test")?;
     let stats = index.commit();
     let elapsed = start.elapsed().as_secs_f64();
 
@@ -140,11 +153,27 @@ pub fn build_selected(
 /// The key both engines agree on: the document identifier and the chunk index.
 /// The pgvector side selects `d.id || '#' || c.chunk_index` so the two match
 /// exactly; without a shared key every comparison would silently score zero.
-fn corpus_key(corpus: &Corpus, ordinal: usize) -> String {
-    format!(
-        "{}#{}",
-        corpus.chunks[ordinal].external_doc_id, corpus.chunks[ordinal].chunk_index
-    )
+fn corpus_key(corpus: &Corpus, ordinal: usize) -> Result<String> {
+    let chunk = chunk_at(corpus, ordinal)?;
+    Ok(format!("{}#{}", chunk.external_doc_id, chunk.chunk_index))
+}
+
+/// One chunk of the loaded cache, by ordinal.
+///
+/// **Fallible, because an ordinal the cache does not hold means the sample and
+/// the cache disagree about how many chunks were loaded.** Both engines are
+/// graded on the key this builds, so a guessed one would score every
+/// comparison against a document that is not in the corpus.
+///
+/// @param corpus - the loaded cache
+/// @param ordinal - the chunk ordinal a sample drew
+fn chunk_at(corpus: &Corpus, ordinal: usize) -> Result<&ChunkInput> {
+    corpus.chunks.get(ordinal).with_context(|| {
+        format!(
+            "chunk {ordinal} is past the {} the cache holds",
+            corpus.chunks.len()
+        )
+    })
 }
 
 fn keys_of(hits: &[crate::engine::Hit]) -> Vec<String> {
@@ -158,18 +187,34 @@ pub struct KeySpace {
 }
 
 impl KeySpace {
+    /// An empty key space.
+    ///
+    /// One per comparison rather than one per run: the ordinals only have to
+    /// agree between the two lists being compared, and a space shared across
+    /// comparisons would grow to the size of the corpus.
     pub fn new() -> Self {
         KeySpace {
             ids: std::collections::HashMap::new(),
         }
     }
+    /// The ordinal for one key, assigning the next one if it is new.
+    ///
+    /// @param key - the corpus key to number
     pub fn id(&mut self, key: &str) -> u32 {
         let next = self.ids.len() as u32;
         *self.ids.entry(key.to_string()).or_insert(next)
     }
+    /// The ordinals for a ranked list, in the list's own order.
+    ///
+    /// Order is kept, because this is what a ranking metric reads.
+    ///
+    /// @param keys - the ranked corpus keys
     pub fn ids_of(&mut self, keys: &[String]) -> Vec<u32> {
         keys.iter().map(|k| self.id(k)).collect()
     }
+    /// The ordinals for a ground truth set, where order means nothing.
+    ///
+    /// @param keys - the corpus keys a judgement names as correct
     pub fn set_of(&mut self, keys: &[String]) -> HashSet<u32> {
         keys.iter().map(|k| self.id(k)).collect()
     }
@@ -267,54 +312,226 @@ pub fn seeds() -> BTreeMap<String, u64> {
     .collect()
 }
 
+/// The fixed seed one query family is generated from.
+///
+/// **Zero for a name that is not in the table, which is a seed like any
+/// other.** The seeds are published in the card's provenance and digested
+/// into the cache header, so a family generated from an unnamed seed would
+/// show up there rather than silently differing between runs.
+///
+/// @param name - the family's name, as `seeds` spells it
 pub fn seed(name: &str) -> u64 {
     seeds().get(name).copied().unwrap_or(0)
 }
 
-pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
-    let GradeOptions {
-        limit,
-        per_source,
-        model,
-        database_url,
-        inillucent_only,
-        device,
-        fusion,
-        lexical_coverage,
-        lexical_proximity,
-        lexical_prefix,
-        lexical_tier,
-        ..
-    } = options;
-    let (limit, per_source, device) = (*limit, *per_source, *device);
-    let (fusion, inillucent_only) = (*fusion, *inillucent_only);
-    let database_url = database_url.as_str();
-    let model_dir = model.dir.display().to_string();
-    let model_file = model.manifest.model_file.clone();
-    let (lexical_coverage, lexical_proximity) = (*lexical_coverage, *lexical_proximity);
-    let (lexical_prefix, lexical_tier) = (*lexical_prefix, *lexical_tier);
+/// Every query family a graded run generates.
+///
+/// **Nine families as nine named fields rather than nine locals threaded
+/// through one 540-line function.** Eight of the nine carry a matching vector
+/// list in [`QueryVectors`], and the two were declared eighty lines apart -
+/// which is how a family gets scored against another family's vectors without
+/// anything saying so.
+struct QuerySets {
+    /// A document's own title as the query.
+    identity: Vec<GradedQuery>,
+    /// A section heading as the query.
+    headings: Vec<GradedQuery>,
+    /// A rare literal token, which only the lexical side is asked for.
+    identifiers: Vec<GradedQuery>,
+    /// A sentence out of a passage, graded by evidence.
+    passage: Vec<GradedQuery>,
+    /// The passage family with one word transposed.
+    typo: Vec<GradedQuery>,
+    /// The passage family reduced to its rarest content words.
+    shorthand: Vec<GradedQuery>,
+    /// Questions nothing in the corpus answers.
+    unanswerable: Vec<GradedQuery>,
+    /// Queries whose evidence is spread over two sources.
+    multi_source: Vec<GradedQuery>,
+    /// Answerable queries the report never scores, used only to choose each
+    /// engine's abstention threshold.
+    calibration: Vec<GradedQuery>,
+}
 
+/// The query vectors for every family that has them.
+///
+/// `identifiers` has none: it is graded on the lexical side alone.
+struct QueryVectors {
+    /// Vectors for [`QuerySets::identity`].
+    identity: Vec<Vec<f32>>,
+    /// Vectors for [`QuerySets::headings`].
+    headings: Vec<Vec<f32>>,
+    /// Vectors for [`QuerySets::passage`].
+    passage: Vec<Vec<f32>>,
+    /// Vectors for [`QuerySets::typo`].
+    typo: Vec<Vec<f32>>,
+    /// Vectors for [`QuerySets::shorthand`].
+    shorthand: Vec<Vec<f32>>,
+    /// Vectors for [`QuerySets::unanswerable`].
+    unanswerable: Vec<Vec<f32>>,
+    /// Vectors for [`QuerySets::multi_source`].
+    multi_source: Vec<Vec<f32>>,
+    /// Vectors for [`QuerySets::calibration`].
+    calibration: Vec<Vec<f32>>,
+}
+
+/// The PostgreSQL arms, and the engine names the card's columns are in.
+struct Baselines {
+    /// Every engine's name, inillucent first, in the card's column order.
+    names: Vec<String>,
+    /// pgvector as the extension installs it.
+    default: Option<PgVectorEngine>,
+    /// pgvector as its own documentation asks for it.
+    well_configured: Option<PgVectorEngine>,
+}
+
+/// What a run records about itself, for the manifest and the provenance table.
+struct RunFacts {
+    /// The run directory's name.
+    run_id: String,
+    /// The commit the harness was built from.
+    git_commit: String,
+    /// Whether that commit had uncommitted changes beside it.
+    git_dirty: bool,
+}
+
+/// Runs every scenario against both engines and returns the score card.
+///
+/// **One index build and one query set, shared by every scenario.** A second
+/// build costs another three minutes and another 1.5 GB resident, and a second
+/// query set would mean two scenarios were not answering the same question.
+///
+/// **One stage per helper below, in the order they have to happen.** The index
+/// is built and configured, the families are generated from the same slice of
+/// the corpus the index holds, every family is embedded by the one model that
+/// embedded the documents, the baselines are connected and calibrated, the
+/// scenarios run, and the manifest is written last - so a manifest on disk
+/// means the run finished.
+///
+/// @param corpus - the loaded cache both engines are graded over
+/// @param options - everything the run is configured with
+pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
+    let (mut inillucent, keys, stats, build_seconds) = build_the_graded_engine(corpus, options)?;
+
+    // Query sets. Generated from the same slice of the corpus the index holds.
+    let n = options.limit.unwrap_or(corpus.len()).min(corpus.len());
+    // Query generation reads the chunks; it does not need a second copy of them.
+    // Cloning every chunk with its text cost about a gigabyte resident.
+    let sliced = corpus
+        .chunks
+        .get(..n)
+        .with_context(|| format!("the corpus holds {} chunks, not {n}", corpus.chunks.len()))?;
+    let sets = generate_query_sets(sliced, &keys, options.per_source);
+    let query_counts = query_counts_of(&sets);
+    let vectors = embed_every_family(corpus, options, &sets)?;
+
+    // The run's own directory, opened before the first query so a run that dies
+    // half way still leaves the evidence it had gathered.
+    let (git_commit, git_dirty) = runs::git_revision(std::path::Path::new("."));
+    let facts = RunFacts {
+        run_id: runs::run_id(&git_commit),
+        git_commit,
+        git_dirty,
+    };
+    let mut writer = match RunWriter::create(&options.runs_dir, &facts.run_id) {
+        Ok(w) => Some(w),
+        Err(e) => {
+            eprintln!(
+                "  could not open the run directory, continuing without per-query records: {e:#}"
+            );
+            None
+        }
+    };
+
+    let mut baselines = connect_the_baselines(options, &sets.calibration)?;
+    let scenarios = run_every_scenario(
+        &mut inillucent,
+        &mut baselines,
+        corpus,
+        options,
+        &sets,
+        &vectors,
+        &mut writer,
+    )?;
+
+    let build = vec![BuildFacts {
+        engine: INILLUCENT.to_string(),
+        chunks: stats.chunks,
+        documents: stats.documents,
+        build_seconds,
+        graph_layers: stats.graph_layers,
+        graph_edges: stats.graph_edges,
+        lexical_terms: stats.lexical_terms,
+        lexical_postings: stats.lexical_postings,
+        vector_megabytes: stats.vector_bytes as f64 / 1e6,
+        quantized_megabytes: stats.quantized_bytes as f64 / 1e6,
+    }];
+
+    // Provenance last, so the manifest records the run that actually completed.
+    let manifest = manifest_for(&facts, corpus, options, &stats, &query_counts);
+    let mut provenance = provenance_for(&facts, corpus, options);
+    match writer {
+        Some(w) => {
+            let records = w.written();
+            let dir = w.finish(&manifest)?;
+            runs::note_run_files(&mut provenance, records, &dir);
+        }
+        None => {
+            provenance.insert("per-query records".into(), "**not written**".into());
+        }
+    }
+
+    Ok(ScoreCard {
+        corpus_chunks: stats.chunks,
+        corpus_documents: stats.documents,
+        dimensions: corpus.dims,
+        model_id: options.model.manifest.id.clone(),
+        engines: baselines.names,
+        scenarios,
+        build,
+        caveats: caveats(),
+        generated_at: timestamp(),
+        stats_seed: options.stats_seed,
+        provenance,
+        query_counts,
+    })
+}
+
+/// Builds the index and puts this run's ranking policy on it.
+///
+/// **The filtered traversal width is the one asymmetry both engines get.** A
+/// filtered walk has to step past everything the predicate rejects, so pgvector
+/// is given `hnsw.ef_search` 400 on a filtered query against 100 unfiltered;
+/// without the same asymmetry here inillucent was walking a quarter as wide on
+/// the one family that is entirely about filtered search.
+///
+/// Only the lexical coverage exponent is one-sided, and only because PostgreSQL
+/// already has what it buys: `to_tsquery` joins the terms with `&`, so every row
+/// it returns contains all of them. inillucent scores any term, which returns
+/// far more rows, and the exponent is what stops the extra rows outranking the
+/// complete ones.
+///
+/// @param corpus - the loaded cache to index
+/// @param options - everything the run is configured with
+fn build_the_graded_engine(
+    corpus: &Corpus,
+    options: &GradeOptions,
+) -> Result<(InillucentEngine, Vec<String>, BuildStats, f64)> {
     eprintln!("building the inillucent index");
-    let (index, keys, stats, build_seconds) = build_index(corpus, limit, true)?;
+    let (index, keys, stats, build_seconds) = build_index(corpus, options.limit, true)?;
     eprintln!("  built in {build_seconds:.1}s");
 
     let mut inillucent =
         InillucentEngine::new(index, keys.clone(), INILLUCENT.to_string(), Some(128));
-    // The same asymmetry the well configured baseline is given: a wider traversal on
-    // a filtered query, because a filtered walk has to step past everything the
-    // predicate rejects. pgvector gets hnsw.ef_search 400 filtered against 100
-    // unfiltered; without this inillucent was walking a quarter as wide on the one
-    // family that is entirely about filtered search.
     inillucent.filtered_ef_search = Some(FILTERED_EF_SEARCH);
-    // Both engines get the same ranking policy. Only the lexical coverage is
-    // one-sided, and only because PostgreSQL already has what it buys: to_tsquery
-    // joins the terms with `&`, so every row it returns contains all of them.
-    // inillucent scores any term, which returns far more rows, and the exponent is
-    // what stops the extra rows outranking the complete ones.
-    inillucent.index.set_lexical_coverage(lexical_coverage);
-    inillucent.index.set_lexical_proximity(lexical_proximity);
-    inillucent.index.set_lexical_prefix(lexical_prefix);
-    inillucent.index.set_lexical_tier(lexical_tier);
+    inillucent
+        .index
+        .set_lexical_coverage(options.lexical_coverage);
+    inillucent
+        .index
+        .set_lexical_proximity(options.lexical_proximity);
+    inillucent.index.set_lexical_prefix(options.lexical_prefix);
+    inillucent.index.set_lexical_tier(options.lexical_tier);
     inillucent.index.set_lexical_phrase(options.lexical_phrase);
     inillucent
         .index
@@ -323,57 +540,115 @@ pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
         .index
         .set_adaptive_fusion(options.adaptive_fusion, options.adaptive);
     inillucent.index.set_mmr_lambda(options.mmr_lambda);
-    inillucent.index.set_fusion(fusion);
+    inillucent.index.set_fusion(options.fusion);
+    Ok((inillucent, keys, stats, build_seconds))
+}
 
-    // Query sets. Generated from the same slice of the corpus the index holds.
-    let n = limit.unwrap_or(corpus.len()).min(corpus.len());
-    // Query generation reads the chunks; it does not need a second copy of them.
-    // Cloning every chunk with its text cost about a gigabyte resident.
-    let sliced = &corpus.chunks[..n];
-
+/// Every query family, generated from one slice of the corpus.
+///
+/// The document frequencies are one pass over the chunks rather than one per
+/// family: the passage, perturbed and unanswerable families all need to know
+/// how rare a word is in this corpus.
+///
+/// @param sliced - the corpus slice the index holds
+/// @param keys - the corpus key per chunk, in corpus order
+/// @param per_source - how many queries to draw from each source
+fn generate_query_sets(sliced: &[ChunkInput], keys: &[String], per_source: usize) -> QuerySets {
     eprintln!("generating query sets");
-    let identity = queryset::document_identity_queries(sliced, &keys, per_source, seed("identity"));
-    let headings = queryset::heading_queries(sliced, &keys, per_source * 3, seed("heading"));
-    let identifiers =
-        queryset::identifier_queries(sliced, &keys, per_source * 3, seed("identifier"));
-
-    // The hard families all need to know how rare a word is in this corpus, which
-    // is one pass over the chunks rather than one per family.
     let df = queryset::document_frequencies(sliced);
     let passage =
-        queryset::passage_evidence_queries(sliced, &keys, &df, per_source, seed("passage"));
-    let typo = queryset::perturbed_queries(&passage, Perturbation::Typo, &df);
-    let shorthand = queryset::perturbed_queries(&passage, Perturbation::Shorthand, &df);
-    let unanswerable =
-        queryset::unanswerable_queries(sliced, &df, per_source * 2, seed("unanswerable"));
-    let multi_source =
-        queryset::multi_source_queries(sliced, &keys, per_source * 2, seed("multi_source"));
-    // Answerable queries the report never scores, used only to choose each
-    // engine's abstention threshold. A threshold fitted on the queries it is then
-    // judged against would measure the fit rather than the engine.
-    let calibration = queryset::heading_queries(sliced, &keys, per_source * 2, seed("calibration"));
+        queryset::passage_evidence_queries(sliced, keys, &df, per_source, seed("passage"));
+    let sets = QuerySets {
+        identity: queryset::document_identity_queries(sliced, keys, per_source, seed("identity")),
+        headings: queryset::heading_queries(sliced, keys, per_source * 3, seed("heading")),
+        identifiers: queryset::identifier_queries(sliced, keys, per_source * 3, seed("identifier")),
+        typo: queryset::perturbed_queries(&passage, Perturbation::Typo, &df),
+        shorthand: queryset::perturbed_queries(&passage, Perturbation::Shorthand, &df),
+        unanswerable: queryset::unanswerable_queries(
+            sliced,
+            &df,
+            per_source * 2,
+            seed("unanswerable"),
+        ),
+        multi_source: queryset::multi_source_queries(
+            sliced,
+            keys,
+            per_source * 2,
+            seed("multi_source"),
+        ),
+        // Answerable queries the report never scores, used only to choose each
+        // engine's abstention threshold. A threshold fitted on the queries it is
+        // then judged against would measure the fit rather than the engine.
+        calibration: queryset::heading_queries(sliced, keys, per_source * 2, seed("calibration")),
+        passage,
+    };
 
     eprintln!(
         "  {} document identity, {} heading, {} identifier, {} passage evidence, {} typo, {} shorthand, {} unanswerable, {} multi-source, {} calibration",
-        identity.len(),
-        headings.len(),
-        identifiers.len(),
-        passage.len(),
-        typo.len(),
-        shorthand.len(),
-        unanswerable.len(),
-        multi_source.len(),
-        calibration.len()
+        sets.identity.len(),
+        sets.headings.len(),
+        sets.identifiers.len(),
+        sets.passage.len(),
+        sets.typo.len(),
+        sets.shorthand.len(),
+        sets.unanswerable.len(),
+        sets.multi_source.len(),
+        sets.calibration.len()
     );
+    sets
+}
 
+/// How many queries each family holds, as the card publishes it.
+///
+/// The calibration family is named as not scored, because it is the one family
+/// whose count a reader would otherwise add to the total.
+///
+/// @param sets - the generated families
+fn query_counts_of(sets: &QuerySets) -> BTreeMap<String, usize> {
+    let mut query_counts: BTreeMap<String, usize> = BTreeMap::new();
+    for (name, n) in [
+        ("document identity", sets.identity.len()),
+        ("heading", sets.headings.len()),
+        ("identifier", sets.identifiers.len()),
+        ("passage evidence", sets.passage.len()),
+        ("passage evidence, typo", sets.typo.len()),
+        ("passage evidence, shorthand", sets.shorthand.len()),
+        ("multi-source", sets.multi_source.len()),
+        ("unanswerable", sets.unanswerable.len()),
+        (
+            "abstention calibration (not scored)",
+            sets.calibration.len(),
+        ),
+    ] {
+        query_counts.insert(name.to_string(), n);
+    }
+    query_counts
+}
+
+/// Embeds every family with the model that embedded the documents.
+///
+/// **The cache's own header is checked against that model first.** Documents
+/// embedded by one model and queries by another is a comparison of two
+/// coordinate systems, and it produces a plausible-looking card rather than an
+/// error - which is why this is a refusal rather than a warning.
+///
+/// One session for all eight families: opening a CUDA session costs tens of
+/// seconds and there is no reason to pay for it eight times.
+///
+/// @param corpus - the loaded cache, for the header that says what embedded it
+/// @param options - everything the run is configured with
+/// @param sets - the generated families
+fn embed_every_family(
+    corpus: &Corpus,
+    options: &GradeOptions,
+    sets: &QuerySets,
+) -> Result<QueryVectors> {
+    let model = &options.model;
+    let model_dir = model.dir.display().to_string();
     eprintln!(
         "embedding queries with {} from {model_dir}",
         model.manifest.id
     );
-    // The cache's own header, checked against the model about to embed the
-    // queries. Documents embedded by one model and queries by another is a
-    // comparison of two coordinate systems, and it produces a plausible-looking
-    // card rather than an error, which is why this is a refusal.
     if corpus.header.has_provenance() {
         anyhow::ensure!(
             corpus.header.model_id == model.manifest.id,
@@ -391,12 +666,10 @@ pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
         );
     }
     model.verify_files()?;
-    // One session for all nine families. Opening a CUDA session costs tens of
-    // seconds and there is no reason to pay for it nine times.
     let embedder = queryset::open_query_embedder(
         model,
         &crate::arm::ArmOptions {
-            device,
+            device: options.device,
             ..options.arm_options.clone()
         },
     )?;
@@ -404,83 +677,62 @@ pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
         let texts: Vec<String> = qs.iter().map(|q| q.text.clone()).collect();
         queryset::embed_with(&embedder, &texts)
     };
-    let identity_vectors = embed(&identity)?;
-    let heading_vectors = embed(&headings)?;
-    let passage_vectors = embed(&passage)?;
-    let typo_vectors = embed(&typo)?;
-    let shorthand_vectors = embed(&shorthand)?;
-    let unanswerable_vectors = embed(&unanswerable)?;
-    let multi_vectors = embed(&multi_source)?;
-    let calibration_vectors = embed(&calibration)?;
-    let embedded = identity_vectors.len()
-        + heading_vectors.len()
-        + passage_vectors.len()
-        + typo_vectors.len()
-        + shorthand_vectors.len()
-        + unanswerable_vectors.len()
-        + multi_vectors.len()
-        + calibration_vectors.len();
+    let vectors = QueryVectors {
+        identity: embed(&sets.identity)?,
+        headings: embed(&sets.headings)?,
+        passage: embed(&sets.passage)?,
+        typo: embed(&sets.typo)?,
+        shorthand: embed(&sets.shorthand)?,
+        unanswerable: embed(&sets.unanswerable)?,
+        multi_source: embed(&sets.multi_source)?,
+        calibration: embed(&sets.calibration)?,
+    };
+    let embedded = vectors.identity.len()
+        + vectors.headings.len()
+        + vectors.passage.len()
+        + vectors.typo.len()
+        + vectors.shorthand.len()
+        + vectors.unanswerable.len()
+        + vectors.multi_source.len()
+        + vectors.calibration.len();
     eprintln!("  embedded {embedded} queries");
+    Ok(vectors)
+}
 
-    let mut query_counts: BTreeMap<String, usize> = BTreeMap::new();
-    for (name, n) in [
-        ("document identity", identity.len()),
-        ("heading", headings.len()),
-        ("identifier", identifiers.len()),
-        ("passage evidence", passage.len()),
-        ("passage evidence, typo", typo.len()),
-        ("passage evidence, shorthand", shorthand.len()),
-        ("multi-source", multi_source.len()),
-        ("unanswerable", unanswerable.len()),
-        ("abstention calibration (not scored)", calibration.len()),
-    ] {
-        query_counts.insert(name.to_string(), n);
-    }
-
-    // The run's own directory, opened before the first query so a run that dies
-    // half way still leaves the evidence it had gathered.
-    let (git_commit, git_dirty) = runs::git_revision(std::path::Path::new("."));
-    let run_id = runs::run_id(&git_commit);
-    let mut writer = match RunWriter::create(&options.runs_dir, &run_id) {
-        Ok(w) => Some(w),
-        Err(e) => {
-            eprintln!(
-                "  could not open the run directory, continuing without per-query records: {e:#}"
-            );
-            None
-        }
-    };
-
-    let mut engines: Vec<String> = vec![INILLUCENT.to_string()];
-    let mut pg_default = if inillucent_only {
-        None
-    } else {
-        engines.push(PgMode::Default.label().to_string());
-        Some(PgVectorEngine::connect(database_url, PgMode::Default)?)
-    };
-    let mut pg_well_configured = if inillucent_only {
-        None
-    } else {
-        engines.push(PgMode::WellConfigured.label().to_string());
-        Some(PgVectorEngine::connect(
+/// Connects both pgvector arms and gives them this run's ranking policy.
+///
+/// **The baseline is fused the same way**, so the hybrid family measures
+/// retrieval rather than which engine was handed the better ranking policy.
+///
+/// Theoretical min-max needs a bound on each engine's lexical scores. inillucent
+/// has one analytically; `ts_rank_cd` does not, so the baseline's is measured
+/// from its own scores on the calibration queries - which the report does not
+/// score.
+///
+/// @param options - everything the run is configured with
+/// @param calibration - the queries the lexical ceiling is measured on
+fn connect_the_baselines(options: &GradeOptions, calibration: &[GradedQuery]) -> Result<Baselines> {
+    let database_url = options.database_url.as_str();
+    let mut names: Vec<String> = vec![INILLUCENT.to_string()];
+    let mut default = None;
+    let mut well_configured = None;
+    if !options.inillucent_only {
+        names.push(PgMode::Default.label().to_string());
+        default = Some(PgVectorEngine::connect(database_url, PgMode::Default)?);
+        names.push(PgMode::WellConfigured.label().to_string());
+        well_configured = Some(PgVectorEngine::connect(
             database_url,
             PgMode::WellConfigured,
-        )?)
-    };
+        )?);
+    }
 
-    // The baseline is fused the same way, so the hybrid family measures retrieval
-    // rather than which engine was handed the better ranking policy.
     let calibration_texts: Vec<String> = calibration.iter().map(|q| q.text.clone()).collect();
-    for engine in [pg_default.as_mut(), pg_well_configured.as_mut()]
+    for engine in [default.as_mut(), well_configured.as_mut()]
         .into_iter()
         .flatten()
     {
-        engine.set_fusion(fusion);
-        // Theoretical min-max needs a bound on each engine's lexical scores.
-        // inillucent has one analytically; `ts_rank_cd` does not, so the baseline's is
-        // measured from its own scores on the calibration queries, which the
-        // report does not score.
-        if matches!(fusion, Fusion::TheoreticalMinMax { .. }) {
+        engine.set_fusion(options.fusion);
+        if matches!(options.fusion, Fusion::TheoreticalMinMax { .. }) {
             let ceiling = engine.calibrate_lexical_ceiling(&calibration_texts, 0.99)?;
             eprintln!(
                 "  {} lexical ceiling calibrated to {ceiling:.4}",
@@ -488,194 +740,196 @@ pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
             );
         }
     }
+    Ok(Baselines {
+        names,
+        default,
+        well_configured,
+    })
+}
 
+/// Every scenario family, in the order the card prints them.
+///
+/// @param inillucent - the engine under test
+/// @param baselines - the pgvector arms
+/// @param corpus - the loaded cache both engines are graded over
+/// @param options - everything the run is configured with
+/// @param sets - the generated families
+/// @param vectors - the embedded queries, one list per family
+/// @param writer - the run directory, when one could be opened
+fn run_every_scenario(
+    inillucent: &mut InillucentEngine,
+    baselines: &mut Baselines,
+    corpus: &Corpus,
+    options: &GradeOptions,
+    sets: &QuerySets,
+    vectors: &QueryVectors,
+    writer: &mut Option<RunWriter>,
+) -> Result<Vec<Scenario>> {
+    let n = options.limit.unwrap_or(corpus.len()).min(corpus.len());
     let mut scenarios = Vec::new();
 
     // ---- Family: approximation accuracy against exhaustive cosine ----
+    // An unfiltered query is never routed to an exhaustive scan, so this figure
+    // is genuinely the graph's. The filtered family below reports, per source,
+    // which path the cost model chose.
     eprintln!("scenario: vector accuracy against exhaustive cosine");
     scenarios.push(vector_accuracy(
-        &mut inillucent,
-        &identity,
-        &identity_vectors,
-    ));
-    // An unfiltered query is never routed to an exhaustive scan, so the figure
-    // above is genuinely the graph's. The filtered family below reports, per
-    // source, which path the cost model chose.
+        inillucent,
+        &sets.identity,
+        &vectors.identity,
+    )?);
 
     // ---- Family: how ef_search trades accuracy against latency ----
     eprintln!("scenario: ef_search sweep");
-    scenarios.push(ef_sweep(&mut inillucent, &identity_vectors)?);
+    scenarios.push(ef_sweep(inillucent, &vectors.identity)?);
 
     // ---- Family: filtered vector accuracy and rows actually returned ----
     eprintln!("scenario: filtered vector search");
     scenarios.push(filtered_vector(
-        &mut inillucent,
-        pg_default.as_mut(),
-        pg_well_configured.as_mut(),
-        &identity_vectors,
+        inillucent,
+        baselines.default.as_mut(),
+        baselines.well_configured.as_mut(),
+        &vectors.identity,
     )?);
 
     // ---- Family: filter correctness gate ----
     eprintln!("scenario: filter correctness");
     scenarios.push(filter_correctness(
-        &mut inillucent,
-        &identity_vectors,
+        inillucent,
+        &vectors.identity,
         corpus,
         n,
-    ));
+    )?);
 
     // ---- Family: lexical retrieval ----
     eprintln!("scenario: lexical retrieval");
     scenarios.push(lexical(
-        &mut inillucent,
-        pg_default.as_mut(),
-        &headings,
-        &identifiers,
+        inillucent,
+        baselines.default.as_mut(),
+        &sets.headings,
+        &sets.identifiers,
     )?);
 
-    // ---- Family: hybrid retrieval end to end ----
-    eprintln!("scenario: hybrid retrieval");
-    {
-        let per_doc_cap = inillucent.index.config().per_doc_cap;
-        let mut engines: Vec<&mut dyn SearchEngine> = vec![&mut inillucent];
-        if let Some(e) = pg_default.as_mut() {
-            engines.push(e);
-        }
-        if let Some(e) = pg_well_configured.as_mut() {
-            engines.push(e);
-        }
-        let filter = Filter::default();
-
-        let identity_scores = run_family(
-            &mut engines,
-            &identity,
-            &identity_vectors,
-            &filter,
-            per_doc_cap,
-            10,
-            &mut writer,
-        )?;
-        let heading_scores = run_family(
-            &mut engines,
-            &headings,
-            &heading_vectors,
-            &filter,
-            per_doc_cap,
-            10,
-            &mut writer,
-        )?;
-        scenarios.push(hybrid(&identity_scores, &heading_scores));
-
-        // ---- Family: the hard packs ----
-        eprintln!("scenario: passage evidence, perturbations and multi-source");
-        let passage_scores = run_family(
-            &mut engines,
-            &passage,
-            &passage_vectors,
-            &filter,
-            per_doc_cap,
-            10,
-            &mut writer,
-        )?;
-        let typo_scores = run_family(
-            &mut engines,
-            &typo,
-            &typo_vectors,
-            &filter,
-            per_doc_cap,
-            10,
-            &mut writer,
-        )?;
-        let shorthand_scores = run_family(
-            &mut engines,
-            &shorthand,
-            &shorthand_vectors,
-            &filter,
-            per_doc_cap,
-            10,
-            &mut writer,
-        )?;
-        let multi_scores = run_family(
-            &mut engines,
-            &multi_source,
-            &multi_vectors,
-            &filter,
-            per_doc_cap,
-            10,
-            &mut writer,
-        )?;
-        scenarios.push(hard_retrieval(
-            &passage_scores,
-            &typo_scores,
-            &shorthand_scores,
-            &multi_scores,
-        ));
-
-        // ---- Family: abstention on questions nothing answers ----
-        eprintln!("scenario: abstention");
-        let calibration_scores = run_family(
-            &mut engines,
-            &calibration,
-            &calibration_vectors,
-            &filter,
-            per_doc_cap,
-            10,
-            &mut writer,
-        )?;
-        let negative_scores = run_family(
-            &mut engines,
-            &unanswerable,
-            &unanswerable_vectors,
-            &filter,
-            per_doc_cap,
-            10,
-            &mut writer,
-        )?;
-        scenarios.push(abstention(&calibration_scores, &negative_scores));
-    }
+    scenarios.extend(score_the_shared_families(
+        inillucent, baselines, sets, vectors, writer,
+    )?);
 
     // ---- Family: fusion comparison ----
     eprintln!("scenario: fusion methods");
-    scenarios.push(fusion_methods(&inillucent, &identity, &identity_vectors));
+    scenarios.push(fusion_methods(
+        inillucent,
+        &sets.identity,
+        &vectors.identity,
+    )?);
 
     // ---- Family: quantization and the Matryoshka ladder ----
     eprintln!("scenario: quantization ladder");
-    scenarios.push(quantization_ladder(corpus, limit, &identity_vectors)?);
+    scenarios.push(quantization_ladder(
+        corpus,
+        options.limit,
+        &vectors.identity,
+    )?);
 
     // ---- Family: latency ----
     eprintln!("scenario: latency");
     scenarios.push(latency(
-        &mut inillucent,
-        pg_default.as_mut(),
-        pg_well_configured.as_mut(),
-        &identity,
-        &identity_vectors,
+        inillucent,
+        baselines.default.as_mut(),
+        baselines.well_configured.as_mut(),
+        &sets.identity,
+        &vectors.identity,
     )?);
 
     // ---- Family: invariants ----
     eprintln!("scenario: invariants");
-    scenarios.push(invariants(&mut inillucent, &identity_vectors));
+    scenarios.push(invariants(inillucent, &vectors.identity)?);
 
-    let build = vec![BuildFacts {
-        engine: INILLUCENT.to_string(),
-        chunks: stats.chunks,
-        documents: stats.documents,
-        build_seconds,
-        graph_layers: stats.graph_layers,
-        graph_edges: stats.graph_edges,
-        lexical_terms: stats.lexical_terms,
-        lexical_postings: stats.lexical_postings,
-        vector_megabytes: stats.vector_bytes as f64 / 1e6,
-        quantized_megabytes: stats.quantized_bytes as f64 / 1e6,
-    }];
+    Ok(scenarios)
+}
 
-    // Provenance last, so the manifest records the run that actually completed.
+/// The three families every engine answers the same query set for: hybrid
+/// retrieval, the hard packs, and abstention.
+///
+/// **One engine list for all seven query sets.** Each of them is asked of every
+/// engine in turn through `run_family`, which is what makes a per-query paired
+/// test possible: the same query, the same `k`, the same per-document cap.
+///
+/// @param inillucent - the engine under test
+/// @param baselines - the pgvector arms
+/// @param sets - the generated families
+/// @param vectors - the embedded queries, one list per family
+/// @param writer - the run directory, when one could be opened
+fn score_the_shared_families(
+    inillucent: &mut InillucentEngine,
+    baselines: &mut Baselines,
+    sets: &QuerySets,
+    vectors: &QueryVectors,
+    writer: &mut Option<RunWriter>,
+) -> Result<Vec<Scenario>> {
+    let per_doc_cap = inillucent.index.config().per_doc_cap;
+    let mut engines: Vec<&mut dyn SearchEngine> = vec![inillucent];
+    if let Some(e) = baselines.default.as_mut() {
+        engines.push(e);
+    }
+    if let Some(e) = baselines.well_configured.as_mut() {
+        engines.push(e);
+    }
+    let filter = Filter::default();
+    let mut score = |queries: &[GradedQuery], qvs: &[Vec<f32>]| -> Result<FamilyScores> {
+        run_family(&mut engines, queries, qvs, &filter, per_doc_cap, 10, writer)
+    };
+
+    // ---- Family: hybrid retrieval end to end ----
+    eprintln!("scenario: hybrid retrieval");
+    let identity_scores = score(&sets.identity, &vectors.identity)?;
+    let heading_scores = score(&sets.headings, &vectors.headings)?;
+
+    // ---- Family: the hard packs ----
+    eprintln!("scenario: passage evidence, perturbations and multi-source");
+    let passage_scores = score(&sets.passage, &vectors.passage)?;
+    let typo_scores = score(&sets.typo, &vectors.typo)?;
+    let shorthand_scores = score(&sets.shorthand, &vectors.shorthand)?;
+    let multi_scores = score(&sets.multi_source, &vectors.multi_source)?;
+
+    // ---- Family: abstention on questions nothing answers ----
+    eprintln!("scenario: abstention");
+    let calibration_scores = score(&sets.calibration, &vectors.calibration)?;
+    let negative_scores = score(&sets.unanswerable, &vectors.unanswerable)?;
+
+    Ok(vec![
+        hybrid(&identity_scores, &heading_scores),
+        hard_retrieval(
+            &passage_scores,
+            &typo_scores,
+            &shorthand_scores,
+            &multi_scores,
+        ),
+        abstention(&calibration_scores, &negative_scores),
+    ])
+}
+
+/// The run manifest: what this run was, in the form another run can be compared
+/// against.
+///
+/// @param facts - the run identifier and the commit it was built from
+/// @param corpus - the loaded cache both engines were graded over
+/// @param options - everything the run was configured with
+/// @param stats - what the index build reported
+/// @param query_counts - how many queries each family held
+fn manifest_for(
+    facts: &RunFacts,
+    corpus: &Corpus,
+    options: &GradeOptions,
+    stats: &BuildStats,
+    query_counts: &BTreeMap<String, usize>,
+) -> RunManifest {
+    let model = &options.model;
     let cache_meta = std::fs::metadata(&options.cache_path).ok();
-    let manifest = RunManifest {
-        run_id: run_id.clone(),
+    RunManifest {
+        run_id: facts.run_id.clone(),
         generated_at_unix: runs::now_unix(),
-        git_commit: git_commit.clone(),
-        git_dirty,
+        git_commit: facts.git_commit.clone(),
+        git_dirty: facts.git_dirty,
         command: runs::command_line(),
         corpus: runs::CorpusFacts {
             chunks: stats.chunks,
@@ -689,15 +943,15 @@ pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
         },
-        model_dir: model_dir.clone(),
-        model_file: model_file.clone(),
+        model_dir: model.dir.display().to_string(),
+        model_file: model.manifest.model_file.clone(),
         model_id: model.manifest.id.clone(),
         model_manifest_sha256: model.digest(),
         model_dims: model.manifest.dims,
         model_max_tokens: model.manifest.max_tokens,
         cache_header: corpus.header.clone(),
-        device: format!("{device:?}"),
-        database: runs::redact(database_url),
+        device: format!("{:?}", options.device),
+        database: runs::redact(options.database_url.as_str()),
         seeds: seeds(),
         arm: options.arm(),
         host: runs::host_facts(),
@@ -708,16 +962,29 @@ pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
         ]
         .into_iter()
         .collect(),
-    };
+    }
+}
 
+/// The provenance table the card prints.
+///
+/// @param facts - the run identifier and the commit it was built from
+/// @param corpus - the loaded cache both engines were graded over
+/// @param options - everything the run was configured with
+fn provenance_for(
+    facts: &RunFacts,
+    corpus: &Corpus,
+    options: &GradeOptions,
+) -> BTreeMap<String, String> {
+    let model = &options.model;
+    let model_dir = model.dir.display().to_string();
     let mut provenance: BTreeMap<String, String> = BTreeMap::new();
-    provenance.insert("run id".into(), run_id.clone());
+    provenance.insert("run id".into(), facts.run_id.clone());
     provenance.insert(
         "commit".into(),
         format!(
             "{}{}",
-            git_commit,
-            if git_dirty {
+            facts.git_commit,
+            if facts.git_dirty {
                 " (working tree dirty)"
             } else {
                 ""
@@ -729,7 +996,7 @@ pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
         &mut provenance,
         &options.cache_path,
         &model_dir,
-        &model_file,
+        &model.manifest.model_file,
     );
     // Beside the path, what the path was taken to mean. A directory says where
     // the weights were; only this says which prefixes, pooling, width and token
@@ -750,8 +1017,11 @@ pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
         ),
     );
     provenance.insert("corpus cache header".into(), corpus.header.describe());
-    provenance.insert("device".into(), format!("{device:?}"));
-    provenance.insert("baseline database".into(), runs::redact(database_url));
+    provenance.insert("device".into(), format!("{:?}", options.device));
+    provenance.insert(
+        "baseline database".into(),
+        runs::redact(options.database_url.as_str()),
+    );
     provenance.insert(
         "host".into(),
         format!(
@@ -781,32 +1051,7 @@ pub fn grade(corpus: &Corpus, options: &GradeOptions) -> Result<ScoreCard> {
             .collect::<Vec<_>>()
             .join(", "),
     );
-
-    match writer {
-        Some(w) => {
-            let records = w.written();
-            let dir = w.finish(&manifest)?;
-            runs::note_run_files(&mut provenance, records, &dir);
-        }
-        None => {
-            provenance.insert("per-query records".into(), "**not written**".into());
-        }
-    }
-
-    Ok(ScoreCard {
-        corpus_chunks: stats.chunks,
-        corpus_documents: stats.documents,
-        dimensions: corpus.dims,
-        model_id: model.manifest.id.clone(),
-        engines,
-        scenarios,
-        build,
-        caveats: caveats(),
-        generated_at: timestamp(),
-        stats_seed: options.stats_seed,
-        provenance,
-        query_counts,
-    })
+    provenance
 }
 
 fn timestamp() -> String {
@@ -833,7 +1078,7 @@ fn vector_accuracy(
     inillucent: &mut InillucentEngine,
     queries: &[GradedQuery],
     vectors: &[Vec<f32>],
-) -> Scenario {
+) -> Result<Scenario> {
     let mut rows = Vec::new();
     let filter = Filter::default();
 
@@ -841,7 +1086,7 @@ fn vector_accuracy(
         let mut acc = Accumulator::default();
         for (q, v) in queries.iter().zip(vectors) {
             let _ = q;
-            let reference = exhaustive_reference(inillucent, v, &filter, k);
+            let reference = exhaustive_reference(inillucent, v, &filter, k)?;
             let got = keys_of(&inillucent.vector_search(v, &filter, k).unwrap_or_default());
             let mut space = KeySpace::new();
             let ref_ids = space.ids_of(&reference);
@@ -859,12 +1104,12 @@ fn vector_accuracy(
         ));
     }
 
-    Scenario {
+    Ok(Scenario {
         name: "Approximation accuracy against exhaustive cosine".to_string(),
         rationale: "Exhaustive cosine over the whole corpus defines the exact answer, so this is the measure of how much the graph gives up for its speed. It is reported for inillucent only: the same question cannot be asked of pgvector without reading its index internals, and pgvector's own accuracy against exact search is a property of the same HNSW algorithm at the same parameters. A figure well below what HNSW should reach at m = 16 and ef_construction = 64 would indicate a graph defect rather than a tuning choice.".to_string(),
         rows,
         gate: None,
-    }
+    })
 }
 
 /// How accuracy and latency move with `ef_search`, the one knob a caller has.
@@ -890,7 +1135,7 @@ fn ef_sweep(engine: &mut InillucentEngine, vectors: &[Vec<f32>]) -> Result<Scena
     let references: Vec<Vec<String>> = sample
         .iter()
         .map(|v| exhaustive_reference(engine, v, &filter, 10))
-        .collect();
+        .collect::<Result<Vec<Vec<String>>>>()?;
 
     for ef in [64usize, 128, 256, 512] {
         engine.ef_search = Some(ef);
@@ -905,7 +1150,7 @@ fn ef_sweep(engine: &mut InillucentEngine, vectors: &[Vec<f32>]) -> Result<Scena
             let got_ids = space.ids_of(&got);
             acc.push(recall_at_k(&got_ids, &ref_ids, 10));
         }
-        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         recall.push(Measure {
             engine: format!("ef_search = {ef}"),
             value: acc.mean() as f64,
@@ -983,7 +1228,7 @@ fn filtered_vector(
             if hits.len() < k.min(pass) {
                 short += 1;
             }
-            let reference = exhaustive_reference(inillucent, v, &filter, 10);
+            let reference = exhaustive_reference(inillucent, v, &filter, 10)?;
             let mut space = KeySpace::new();
             let ref_ids = space.ids_of(&reference);
             let got_ids = space.ids_of(&keys_of(&hits));
@@ -1025,7 +1270,7 @@ fn filtered_vector(
                 }
                 // The reference is exhaustive cosine over the same passing set,
                 // computed by inillucent because it is exact.
-                let reference = exhaustive_reference(inillucent, v, &filter, 10);
+                let reference = exhaustive_reference(inillucent, v, &filter, 10)?;
                 let mut space = KeySpace::new();
                 let ref_ids = space.ids_of(&reference);
                 let got_ids = space.ids_of(&keys_of(&hits));
@@ -1100,7 +1345,16 @@ fn filter_correctness(
     vectors: &[Vec<f32>],
     corpus: &Corpus,
     n: usize,
-) -> Scenario {
+) -> Result<Scenario> {
+    // One probe vector for every gate below, and the corpus slice they read,
+    // both named once.
+    let probe = vectors
+        .first()
+        .context("no query vector to probe the filters with")?;
+    let sliced = corpus
+        .chunks
+        .get(..n)
+        .with_context(|| format!("the corpus holds {} chunks, not {n}", corpus.chunks.len()))?;
     let mut violations = 0usize;
     let mut checked = 0usize;
     let mut detail = String::new();
@@ -1108,7 +1362,7 @@ fn filter_correctness(
     // A source that exists, a label that exists, a timestamp in the middle of the
     // range, and combinations of them.
     let mut label_pool: Vec<String> = Vec::new();
-    for c in corpus.chunks[..n].iter() {
+    for c in sliced.iter() {
         for l in &c.labels {
             if !label_pool.contains(l) {
                 label_pool.push(l.clone());
@@ -1121,10 +1375,7 @@ fn filter_correctness(
             break;
         }
     }
-    let mut timestamps: Vec<i64> = corpus.chunks[..n]
-        .iter()
-        .filter_map(|c| c.updated_at)
-        .collect();
+    let mut timestamps: Vec<i64> = sliced.iter().filter_map(|c| c.updated_at).collect();
     timestamps.sort_unstable();
     let midpoint = timestamps.get(timestamps.len() / 2).copied();
 
@@ -1205,7 +1456,7 @@ fn filter_correctness(
         // A filter naming a value the corpus lacks has to return nothing.
         if label.contains("does not contain") {
             let hits = inillucent
-                .vector_search(&vectors[0], filter, 50)
+                .vector_search(probe, filter, 50)
                 .unwrap_or_default();
             if !hits.is_empty() {
                 violations += 1;
@@ -1222,12 +1473,12 @@ fn filter_correctness(
         );
     }
 
-    Scenario {
+    Ok(Scenario {
         name: "Filter correctness".to_string(),
         rationale: "Checks that every row an engine returns actually satisfies the predicate it was given, across single source, several sources, timestamp, label overlap, a combination, and a value the corpus does not contain. This gates rather than scores.".to_string(),
         rows: Vec::new(),
         gate: Some(GateResult { passed: violations == 0, detail }),
-    }
+    })
 }
 
 fn lexical(
@@ -1751,7 +2002,7 @@ fn fusion_methods(
     inillucent: &InillucentEngine,
     queries: &[GradedQuery],
     vectors: &[Vec<f32>],
-) -> Scenario {
+) -> Result<Scenario> {
     let filter = Filter::default();
     let mut rows = Vec::new();
 
@@ -1791,7 +2042,7 @@ fn fusion_methods(
         let mut a_ndcg = Accumulator::default();
         let mut a_s1 = Accumulator::default();
         for (q, v) in queries.iter().zip(vectors) {
-            let hits = fuse_with(inillucent, &q.text, v, &filter, 10, *fusion);
+            let hits = fuse_with(inillucent, &q.text, v, &filter, 10, *fusion)?;
             let mut space = KeySpace::new();
             let correct = space.set_of(&q.correct);
             let got = space.ids_of(&keys_of(&hits));
@@ -1825,12 +2076,12 @@ fn fusion_methods(
         true,
     ));
 
-    Scenario {
+    Ok(Scenario {
         name: "Fusion methods compared".to_string(),
         rationale: "Reciprocal Rank Fusion keeps only position and discards score magnitude, which makes it robust across two scoring scales that are not comparable but blind to how good the top hit actually was. Normalized score fusion keeps the magnitude. This family decides which one inillucent should default to on this corpus, rather than inheriting the choice. The columns here are fusion methods, not engines.".to_string(),
         rows,
         gate: None,
-    }
+    })
 }
 
 /// Chunks the ladder builds on. Eleven index builds at the full corpus would cost
@@ -1880,7 +2131,7 @@ fn quantization_ladder(
             let mut acc = Accumulator::default();
             for v in &sample {
                 let narrowed = inillucent_core::distance::truncate_normalized(v, width);
-                let reference = exhaustive_reference(&reference_engine, v, &filter, 10);
+                let reference = exhaustive_reference(&reference_engine, v, &filter, 10)?;
                 let got = keys_of(&engine.vector_search(&narrowed, &filter, 10)?);
                 let mut space = KeySpace::new();
                 let ref_ids = space.ids_of(&reference);
@@ -1982,7 +2233,7 @@ fn latency(
                 engine: name.clone(),
                 value: mean,
             });
-            samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
             p50.push(Measure {
                 engine: name.clone(),
                 value: percentile(&samples, 0.5),
@@ -2035,19 +2286,24 @@ fn latency(
     })
 }
 
-fn invariants(inillucent: &mut InillucentEngine, vectors: &[Vec<f32>]) -> Scenario {
+fn invariants(inillucent: &mut InillucentEngine, vectors: &[Vec<f32>]) -> Result<Scenario> {
     let filter = Filter::default();
     let mut failures: Vec<String> = Vec::new();
+    // Every gate below asks the same query, so the vector is named once.
+    let probe = vectors
+        .first()
+        .context("no query vector to check the invariants with")?
+        .clone();
 
     // Determinism: the same query twice must give the same answer.
     let a = keys_of(
         &inillucent
-            .vector_search(&vectors[0], &filter, 20)
+            .vector_search(&probe, &filter, 20)
             .unwrap_or_default(),
     );
     let b = keys_of(
         &inillucent
-            .vector_search(&vectors[0], &filter, 20)
+            .vector_search(&probe, &filter, 20)
             .unwrap_or_default(),
     );
     if a != b {
@@ -2055,12 +2311,12 @@ fn invariants(inillucent: &mut InillucentEngine, vectors: &[Vec<f32>]) -> Scenar
     }
     let ha = keys_of(
         &inillucent
-            .hybrid_search("offer eligibility", &vectors[0], &filter, 10)
+            .hybrid_search("offer eligibility", &probe, &filter, 10)
             .unwrap_or_default(),
     );
     let hb = keys_of(
         &inillucent
-            .hybrid_search("offer eligibility", &vectors[0], &filter, 10)
+            .hybrid_search("offer eligibility", &probe, &filter, 10)
             .unwrap_or_default(),
     );
     if ha != hb {
@@ -2069,12 +2325,15 @@ fn invariants(inillucent: &mut InillucentEngine, vectors: &[Vec<f32>]) -> Scenar
 
     // The per document cap.
     let hits = inillucent
-        .hybrid_search("offer eligibility rules", &vectors[0], &filter, 20)
+        .hybrid_search("offer eligibility rules", &probe, &filter, 20)
         .unwrap_or_default();
     let mut per_doc: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
     for h in &hits {
-        if let Some(o) = inillucent.ordinal(&h.key) {
-            let doc = inillucent.index.store().chunks[o as usize].doc;
+        // An ordinal the store does not hold is the disagreement
+        // `InillucentEngine::key` reports; here it is counted rather than
+        // reported, because this gate is about the cap and a missing chunk
+        // cannot break it.
+        if let Some(doc) = document_of(inillucent, &h.key) {
             *per_doc.entry(doc).or_insert(0) += 1;
         }
     }
@@ -2088,11 +2347,17 @@ fn invariants(inillucent: &mut InillucentEngine, vectors: &[Vec<f32>]) -> Scenar
     // Soft deleted documents must never appear.
     let mut deleted_leaked = 0;
     for h in &hits {
-        if let Some(o) = inillucent.ordinal(&h.key) {
-            let doc = inillucent.index.store().chunks[o as usize].doc;
-            if inillucent.index.store().documents[doc as usize].deleted {
-                deleted_leaked += 1;
-            }
+        let Some(doc) = document_of(inillucent, &h.key) else {
+            continue;
+        };
+        if inillucent
+            .index
+            .store()
+            .documents
+            .get(doc as usize)
+            .is_some_and(|d| d.deleted)
+        {
+            deleted_leaked += 1;
         }
     }
     if deleted_leaked > 0 {
@@ -2115,7 +2380,7 @@ fn invariants(inillucent: &mut InillucentEngine, vectors: &[Vec<f32>]) -> Scenar
 
     // k = 0 must return nothing.
     if !inillucent
-        .vector_search(&vectors[0], &filter, 0)
+        .vector_search(&probe, &filter, 0)
         .unwrap_or_default()
         .is_empty()
     {
@@ -2129,10 +2394,30 @@ fn invariants(inillucent: &mut InillucentEngine, vectors: &[Vec<f32>]) -> Scenar
         failures.join("; ")
     };
 
-    Scenario {
+    Ok(Scenario {
         name: "Invariants".to_string(),
         rationale: "Properties that have to hold regardless of accuracy: the same query gives the same answer, no document contributes more chunks than the cap allows, soft deleted content never surfaces, and a degenerate query returns nothing rather than failing.".to_string(),
         rows: Vec::new(),
         gate: Some(GateResult { passed, detail }),
-    }
+    })
+}
+
+/// The document a returned key belongs to, or `None` when the store does not
+/// hold the chunk the key names.
+///
+/// **A `None` rather than an error, because both callers are counting.** One
+/// counts chunks per document and one counts soft-deleted leaks, and a chunk
+/// the store cannot name cannot break either invariant - so it is skipped
+/// rather than ending the gate that was about to report on the rest.
+///
+/// @param engine - the engine whose store holds the chunks
+/// @param key - the corpus key a hit carried
+fn document_of(engine: &InillucentEngine, key: &str) -> Option<u32> {
+    let ordinal = engine.ordinal(key)?;
+    engine
+        .index
+        .store()
+        .chunks
+        .get(ordinal as usize)
+        .map(|c| c.doc)
 }

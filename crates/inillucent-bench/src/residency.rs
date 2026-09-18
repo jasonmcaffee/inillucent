@@ -87,10 +87,15 @@ impl Measurement {
         let mut sorted = values.to_vec();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let middle = sorted.len() / 2;
+        let upper = sorted.get(middle).copied().unwrap_or(0.0);
         if sorted.len() % 2 == 1 {
-            sorted[middle]
+            upper
         } else {
-            (sorted[middle - 1] + sorted[middle]) / 2.0
+            let lower = sorted
+                .get(middle.saturating_sub(1))
+                .copied()
+                .unwrap_or(upper);
+            (lower + upper) / 2.0
         }
     }
 

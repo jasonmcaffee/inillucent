@@ -173,6 +173,10 @@ pub struct Corpus {
 }
 
 impl Corpus {
+    /// How many chunks the corpus holds.
+    ///
+    /// The chunk count rather than the document count, because every scenario
+    /// is scored per chunk and `--limit` is a count of chunks too.
     pub fn len(&self) -> usize {
         self.chunks.len()
     }
@@ -203,6 +207,17 @@ const CORPUS_SQL: &str = "
     ORDER BY c.id
 ";
 
+/// Reads the corpus and its vectors out of PostgreSQL.
+///
+/// **Through a portal, one batch at a time.** The result set is 186,000 rows
+/// carrying a vector each, and holding all of them on the client heap at once
+/// is what an earlier version of this did.
+///
+/// The rows come back in `c.id` order, which is the order both engines are
+/// given them in, so a score difference cannot come from ingestion order.
+///
+/// @param url - the PostgreSQL connection string
+/// @param limit - how many chunks to read, or every one of them
 pub fn load_from_postgres(url: &str, limit: Option<usize>) -> Result<Corpus> {
     let mut client = Client::connect(url, NoTls).context("connecting to PostgreSQL")?;
 
@@ -421,6 +436,15 @@ fn read_header_from(r: &mut impl Read, path: &Path) -> Result<CacheHeader> {
     })
 }
 
+/// Reads a corpus cache off disk, at whichever version wrote it.
+///
+/// **Version 4 names the model that embedded it and version 3 does not.** A
+/// version 3 cache is still readable, because a cache written before the
+/// header existed is not a corrupt cache; what it cannot answer is which model
+/// made its vectors, and `grade-embedding` refuses to compare two arms that
+/// cannot both answer that.
+///
+/// @param path - the cache file to read
 pub fn load_cache(path: &Path) -> Result<Corpus> {
     let mut r = BufReader::new(
         File::open(path).with_context(|| format!("opening the cache {}", path.display()))?,

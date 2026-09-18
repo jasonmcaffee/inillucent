@@ -283,7 +283,14 @@ function registers() {
   };
 }
 
-/** Counts the crates under each lint, which the repository page publishes. */
+/**
+ * Counts the crates under each lint, which the repository page publishes.
+ *
+ * Reads the crate root, which is `main.rs` in a binary crate: this read
+ * `lib.rs` alone until task-1973, so `inillucent-bench` was not counted and the
+ * page's "28 of the 29" was checked against a measurement that could not see
+ * the twenty-ninth.
+ */
 function crateLints() {
   const libs = [];
   for (const group of ['crates', 'drivers']) {
@@ -291,7 +298,9 @@ function crateLints() {
     if (!fs.existsSync(base)) continue;
     for (const entry of fs.readdirSync(base)) {
       const lib = path.join(base, entry, 'src', 'lib.rs');
-      if (fs.existsSync(lib)) libs.push(fs.readFileSync(lib, 'utf8'));
+      const main = path.join(base, entry, 'src', 'main.rs');
+      const root = fs.existsSync(lib) ? lib : main;
+      if (fs.existsSync(root)) libs.push(fs.readFileSync(root, 'utf8'));
     }
   }
   const members = (fs.readFileSync(path.join(ROOT, 'Cargo.toml'), 'utf8').match(/^\s{4}"(?:crates|drivers)\/[^"]+",$/gm) || []).length;

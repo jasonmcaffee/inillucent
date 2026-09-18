@@ -92,6 +92,10 @@ pub enum Verdict {
 }
 
 impl Verdict {
+    /// What the score card prints for this verdict.
+    ///
+    /// `Worse` is the one that is emphasised, because a reader skimming a
+    /// table of verdicts is looking for the row that says the change lost.
     pub fn label(&self) -> &'static str {
         match self {
             Verdict::Better => "better",
@@ -151,15 +155,22 @@ fn bootstrap_interval(diffs: &[f64], seed: u64) -> (f64, f64) {
     for _ in 0..ITERATIONS {
         let mut total = 0.0;
         for _ in 0..n {
-            total += diffs[rng.below(n)];
+            total += diffs.get(rng.below(n)).copied().unwrap_or(0.0);
         }
         means.push(total / n as f64);
     }
     means.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     // Nearest rank on each tail, so the bounds are values the resampling actually
     // produced rather than an interpolation between two of them.
-    let lo = means[((0.025 * ITERATIONS as f64) as usize).min(ITERATIONS - 1)];
-    let hi = means[((0.975 * ITERATIONS as f64) as usize).min(ITERATIONS - 1)];
+    let last = ITERATIONS.saturating_sub(1);
+    let lo = means
+        .get(((0.025 * ITERATIONS as f64) as usize).min(last))
+        .copied()
+        .unwrap_or(0.0);
+    let hi = means
+        .get(((0.975 * ITERATIONS as f64) as usize).min(last))
+        .copied()
+        .unwrap_or(0.0);
     (lo, hi)
 }
 

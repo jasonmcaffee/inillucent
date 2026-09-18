@@ -142,7 +142,10 @@ pub fn file_digest(path: &Path) -> Result<String> {
         if read == 0 {
             break;
         }
-        hasher.update(&buf[..read]);
+        let chunk = buf
+            .get(..read)
+            .context("the reader answered with more bytes than the buffer holds")?;
+        hasher.update(chunk);
     }
     Ok(hasher.hex())
 }

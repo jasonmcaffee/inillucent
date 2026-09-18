@@ -28,7 +28,7 @@ the attack surface:
 - **A crafted `.rdb` file** that makes the engine read out of bounds, allocate
   without bound, loop forever, or return another file's bytes. Every path that
   reads a page, a log frame or a network byte is written without `unwrap`,
-  `expect`, `panic!` or slice indexing, and 28 of the 29 crates deny all four —
+  `expect`, `panic!` or slice indexing, and all 29 crates deny all four —
   so a panic reached from a file is a defect, not a hardening request.
 - **A crafted SQL statement** that does the same, or that escapes a limit the
   connection set.

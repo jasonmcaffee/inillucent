@@ -149,6 +149,24 @@ pub fn get(host: &str, port: u16, path: &str, timeout: Duration) -> Result<Strin
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }
 
+/// The first `most` bytes of a reply, for an error message that quotes it.
+///
+/// **A character boundary rather than a byte one.** `&reply[..200]` on a body
+/// whose 200th byte is the middle of a multi-byte character panics, and the one
+/// place that happens is the error path of a parse that has already failed - so
+/// the harness would abort while reporting the thing it caught. The bound walks
+/// back to the nearest boundary instead.
+///
+/// @param reply - the reply body
+/// @param most - the largest number of bytes to quote
+pub fn head_of(reply: &str, most: usize) -> &str {
+    let mut end = most.min(reply.len());
+    while end > 0 && !reply.is_char_boundary(end) {
+        end = end.saturating_sub(1);
+    }
+    reply.get(..end).unwrap_or("")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

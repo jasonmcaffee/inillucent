@@ -277,25 +277,23 @@ pub fn judge(card: &ScoreCard) -> Vec<Judgement> {
                 .iter()
                 .filter(|m| m.engine != "inillucent" && card.engines.contains(&m.engine))
                 .collect();
-            if baselines.is_empty() {
+            // `reduce` answers `None` for an empty iterator and nothing
+            // else, so this is the same guard the explicit `is_empty` check
+            // used to be, written as the one the compiler can see.
+            let Some(best) = baselines.iter().copied().reduce(|a, b| {
+                let a_better = if row.higher_is_better {
+                    a.value >= b.value
+                } else {
+                    a.value <= b.value
+                };
+                if a_better {
+                    a
+                } else {
+                    b
+                }
+            }) else {
                 continue;
-            }
-            let best = baselines
-                .iter()
-                .copied()
-                .reduce(|a, b| {
-                    let a_better = if row.higher_is_better {
-                        a.value >= b.value
-                    } else {
-                        a.value <= b.value
-                    };
-                    if a_better {
-                        a
-                    } else {
-                        b
-                    }
-                })
-                .unwrap();
+            };
 
             let threshold = practical_threshold(&row.metric, best.value);
             // Both series oriented so that higher is better, whatever the metric's
@@ -386,9 +384,36 @@ fn scenario_columns(scenario: &Scenario, engines: &[String]) -> Vec<String> {
     columns
 }
 
-/// Render the score card as markdown.
+/// Renders the score card as markdown.
+///
+/// **One function per section, in the order a reader meets them.** The card is
+/// a sequence of independent tables, and the thing that used to make this hard
+/// to change was that all of them shared one `String` and one 260-line
+/// function - so a change to the verdict paragraph was a change inside the
+/// same body as the build-cost table. Each helper below appends its own
+/// section and reads nothing the others wrote.
+///
+/// @param card - the finished score card
 pub fn render(card: &ScoreCard) -> String {
+    let judgements = judge(card);
     let mut s = String::new();
+    push_header(&mut s, card);
+    push_verdict(&mut s, card, &judgements);
+    push_every_comparison(&mut s, &judgements);
+    push_query_counts(&mut s, card);
+    push_gates(&mut s, card);
+    push_families(&mut s, card);
+    push_build_cost(&mut s, card);
+    push_provenance(&mut s, card);
+    push_caveats(&mut s, card);
+    s
+}
+
+/// What the run was and what makes the comparison fair.
+///
+/// @param s - the card being built
+/// @param card - the finished score card
+fn push_header(s: &mut String, card: &ScoreCard) {
     s.push_str("# inillucent Score Card\n\n");
     s.push_str(&format!(
         "Generated {}. Corpus: {} chunks across {} documents, {} dimensional embeddings from `{}` run in process at full precision.\n\n",
@@ -406,9 +431,20 @@ pub fn render(card: &ScoreCard) -> String {
         s.push_str(&format!("- {e}\n"));
     }
     s.push('\n');
+}
 
-    // The verdict, so a reader gets the answer before the evidence.
-    let judgements = judge(card);
+/// The answer before the evidence: the verdict counts, and every measurement
+/// that lost.
+///
+/// **The losses are a table rather than a sentence, and they are here rather
+/// than at the end.** A score card that cannot report a loss is not measuring
+/// anything, and one that reports it after nine tables is reporting it where
+/// nobody reads.
+///
+/// @param s - the card being built
+/// @param card - the finished score card
+/// @param judgements - the primary comparisons, already judged
+fn push_verdict(s: &mut String, card: &ScoreCard, judgements: &[Judgement]) {
     let gates_pass = card
         .scenarios
         .iter()
@@ -454,14 +490,21 @@ pub fn render(card: &ScoreCard) -> String {
         }
         s.push('\n');
     }
+}
 
+/// Every primary comparison with its interval, its p-value and how many
+/// queries it rests on.
+///
+/// @param s - the card being built
+/// @param judgements - the primary comparisons, already judged
+fn push_every_comparison(s: &mut String, judgements: &[Judgement]) {
     // The evidence behind the headline, one line per primary comparison.
     if !judgements.is_empty() {
         s.push_str("### Every primary comparison, with its uncertainty\n\n");
         s.push_str("`delta` is inillucent minus the baseline, oriented so positive is better whatever the metric's own direction. The interval is the 95% paired bootstrap on that delta; `p` is the paired randomization test. `n` is the queries behind it and `moved` is how many of them the two engines answered differently — a comparison resting on three queries is worth reading with suspicion however small its p-value.\n\n");
         s.push_str("| family | measurement | metric | inillucent | baseline | delta | 95% interval | p | n | moved | threshold | verdict |\n");
         s.push_str("|---|---|---|---|---|---|---|---|---|---|---|---|\n");
-        for j in &judgements {
+        for j in judgements {
             let (delta, interval, pv, n, moved) = match &j.paired {
                 Some(p) => (
                     fmt(p.delta),
@@ -508,7 +551,13 @@ pub fn render(card: &ScoreCard) -> String {
         }
         s.push('\n');
     }
+}
 
+/// How many queries each family was scored on.
+///
+/// @param s - the card being built
+/// @param card - the finished score card
+fn push_query_counts(s: &mut String, card: &ScoreCard) {
     if !card.query_counts.is_empty() {
         s.push_str("### Queries behind each family\n\n");
         s.push_str("| family | queries |\n|---|---|\n");
@@ -517,7 +566,16 @@ pub fn render(card: &ScoreCard) -> String {
         }
         s.push('\n');
     }
+}
 
+/// The correctness gates, before any accuracy number.
+///
+/// A gate failure changes how every other number on the card should be read,
+/// so it is printed before them rather than among them.
+///
+/// @param s - the card being built
+/// @param card - the finished score card
+fn push_gates(s: &mut String, card: &ScoreCard) {
     // Gates first: a correctness failure changes how every other number should be read.
     let gates: Vec<&Scenario> = card
         .scenarios
@@ -529,7 +587,11 @@ pub fn render(card: &ScoreCard) -> String {
         s.push_str("These pass or fail rather than scoring. An engine that returns rows it was told to exclude is not a faster engine, it is a wrong one, so a failure here caps the result regardless of any accuracy number.\n\n");
         s.push_str("| gate | result | detail |\n|---|---|---|\n");
         for sc in gates {
-            let g = sc.gate.as_ref().unwrap();
+            // `gates` is filtered on `gate.is_some()`, so this is that filter
+            // restated where the compiler can check it.
+            let Some(g) = sc.gate.as_ref() else {
+                continue;
+            };
             s.push_str(&format!(
                 "| {} | {} | {} |\n",
                 sc.name,
@@ -539,7 +601,13 @@ pub fn render(card: &ScoreCard) -> String {
         }
         s.push('\n');
     }
+}
 
+/// One table per scenario family, with whichever columns that family measured.
+///
+/// @param s - the card being built
+/// @param card - the finished score card
+fn push_families(s: &mut String, card: &ScoreCard) {
     for sc in &card.scenarios {
         if sc.gate.is_some() && sc.rows.is_empty() {
             continue;
@@ -602,7 +670,13 @@ pub fn render(card: &ScoreCard) -> String {
         }
         s.push('\n');
     }
+}
 
+/// What each engine paid to build its index, and what it occupies.
+///
+/// @param s - the card being built
+/// @param card - the finished score card
+fn push_build_cost(s: &mut String, card: &ScoreCard) {
     if !card.build.is_empty() {
         s.push_str("## Build cost and footprint\n\n");
         s.push_str("| engine | chunks | documents | build seconds | graph layers | graph edges | lexical terms | lexical postings | vectors MB | int8 codes MB |\n");
@@ -624,7 +698,13 @@ pub fn render(card: &ScoreCard) -> String {
         }
         s.push('\n');
     }
+}
 
+/// What this run was, so a number on the card can be reproduced.
+///
+/// @param s - the card being built
+/// @param card - the finished score card
+fn push_provenance(s: &mut String, card: &ScoreCard) {
     if !card.provenance.is_empty() {
         s.push_str("## Provenance\n\n");
         s.push_str("What this run was, so a number on this card can be reproduced rather than only repeated. The per-query file named here holds one line per engine per query, with the ranking, the component scores and the metrics that query contributed, which is what makes the intervals above recomputable without paying for the run again.\n\n");
@@ -634,7 +714,13 @@ pub fn render(card: &ScoreCard) -> String {
         }
         s.push('\n');
     }
+}
 
+/// What these numbers do not say.
+///
+/// @param s - the card being built
+/// @param card - the finished score card
+fn push_caveats(s: &mut String, card: &ScoreCard) {
     if !card.caveats.is_empty() {
         s.push_str("## What these numbers do not say\n\n");
         for c in &card.caveats {
@@ -642,10 +728,15 @@ pub fn render(card: &ScoreCard) -> String {
         }
         s.push('\n');
     }
-
-    s
 }
 
+/// Prints the verdict counts to standard error.
+///
+/// **On standard error, so a run that is piping the markdown card to a file
+/// still says what it decided.** The detail is in the card; this is the line
+/// somebody watching the run reads.
+///
+/// @param card - the finished score card
 pub fn print_summary(card: &ScoreCard) {
     let j = judge(card);
     let count = |v: Verdict| j.iter().filter(|x| x.verdict == v).count();

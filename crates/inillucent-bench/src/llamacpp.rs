@@ -133,7 +133,7 @@ impl LlamaCppEmbedder {
         // up but not serving embeddings fails here rather than at chunk 40,000.
         let probe = embedder.embed_prefixed(&["a probe".to_string()])?;
         anyhow::ensure!(
-            probe.len() == 1 && probe[0].len() == manifest.dims,
+            probe.len() == 1 && probe.first().map(Vec::len) == Some(manifest.dims),
             "the server returned {} dimensions and {}'s manifest declares {}",
             probe.first().map(|v| v.len()).unwrap_or(0),
             manifest.id,
@@ -172,11 +172,11 @@ impl LlamaCppEmbedder {
             let body = serde_json::json!({ "content": text }).to_string();
             let reply =
                 http::post_json(&self.host, self.port, "/tokenize", &body, REQUEST_TIMEOUT)?;
-            let parsed: serde_json::Value = serde_json::from_str(&reply).with_context(|| {
-                format!("parsing /tokenize: {}", &reply[..reply.len().min(200)])
-            })?;
-            let served = parsed["tokens"]
-                .as_array()
+            let parsed: serde_json::Value = serde_json::from_str(&reply)
+                .with_context(|| format!("parsing /tokenize: {}", http::head_of(&reply, 200)))?;
+            let served = parsed
+                .get("tokens")
+                .and_then(serde_json::Value::as_array)
                 .context("the /tokenize reply carried no tokens array")?
                 .len();
             // Exact agreement is not required and would be brittle: llama.cpp may
@@ -198,6 +198,12 @@ impl LlamaCppEmbedder {
         self.tokens.store(0, Relaxed);
     }
 
+    /// How much text this arm has cut, counted since the last reset.
+    ///
+    /// **Counted here rather than read back from the server, because the
+    /// server does not say.** It silently drops what does not fit its context,
+    /// so a truncation share of zero taken from the server is a share nobody
+    /// measured - which is the failure this whole harness exists against.
     pub fn truncation(&self) -> TruncationFacts {
         use std::sync::atomic::Ordering::Relaxed;
         TruncationFacts {
@@ -207,6 +213,10 @@ impl LlamaCppEmbedder {
         }
     }
 
+    /// The manifest this arm was opened against.
+    ///
+    /// The dimensions, the token bound and the prefixes a caller has to apply
+    /// all come from it, and they are the arm's own rather than a default.
     pub fn manifest(&self) -> &ModelManifest {
         &self.manifest
     }
@@ -306,7 +316,15 @@ impl LlamaCppEmbedder {
         // The over-long ones, cut in tokens and checked. Done after the counting
         // pass so the common case - every text under the bound - pays nothing.
         for &i in &over {
-            prepared[i] = self.truncate_to_bound(&texts[i])?;
+            let text = texts
+                .get(i)
+                .with_context(|| format!("text {i} of {} is over the bound", texts.len()))?;
+            let cut = self.truncate_to_bound(text)?;
+            let held = prepared.len();
+            let slot = prepared
+                .get_mut(i)
+                .with_context(|| format!("no prepared slot {i} of {held}"))?;
+            *slot = cut;
         }
 
         // The batches, decided before any of them is sent, so they can be sent in
@@ -317,7 +335,7 @@ impl LlamaCppEmbedder {
             let mut end = start;
             let mut budget = 0usize;
             while end < prepared.len() {
-                let cost = counts[end].min(bound).max(1);
+                let cost = counts.get(end).copied().unwrap_or(0).min(bound).max(1);
                 // A single text over the whole budget still goes on its own: the
                 // alternative is dropping a chunk from the corpus.
                 if end > start
@@ -335,7 +353,10 @@ impl LlamaCppEmbedder {
         let mut out: Vec<Vec<f32>> = Vec::with_capacity(prepared.len());
         if self.concurrency <= 1 || batches.len() <= 1 {
             for &(from, to) in &batches {
-                out.extend(self.request(&prepared[from..to])?);
+                let batch = prepared
+                    .get(from..to)
+                    .with_context(|| format!("batch {from}..{to} of {}", prepared.len()))?;
+                out.extend(self.request(batch)?);
             }
             anyhow::ensure!(
                 out.len() == texts.len(),
@@ -363,15 +384,26 @@ impl LlamaCppEmbedder {
                     let Some(&(from, to)) = batches.get(index) else {
                         return;
                     };
-                    let answer = self.request(&prepared[from..to]);
-                    if let Ok(mut slot) = slots[index].lock() {
+                    let answer = match prepared.get(from..to) {
+                        Some(batch) => self.request(batch),
+                        None => Err(anyhow::anyhow!(
+                            "batch {from}..{to} of {} is not a range of the prepared texts",
+                            prepared.len()
+                        )),
+                    };
+                    // A slot that is not there is a slot nobody can write, and
+                    // the loop below reports the missing answer by index.
+                    if let Some(Ok(mut slot)) = slots.get(index).map(std::sync::Mutex::lock) {
                         *slot = Some(answer);
                     }
                 });
             }
         });
         for (index, slot) in slots.into_iter().enumerate() {
-            results[index] = slot.into_inner().unwrap_or(None);
+            let held = results
+                .get_mut(index)
+                .with_context(|| format!("no result slot {index} of {}", batches.len()))?;
+            *held = slot.into_inner().unwrap_or(None);
         }
         for (index, answer) in results.into_iter().enumerate() {
             let vectors = answer.with_context(|| {
@@ -403,9 +435,10 @@ impl LlamaCppEmbedder {
         )
         .with_context(|| format!("embedding {} texts", texts.len()))?;
         let parsed: serde_json::Value = serde_json::from_str(&reply)
-            .with_context(|| format!("parsing the reply: {}", &reply[..reply.len().min(300)]))?;
-        let data = parsed["data"]
-            .as_array()
+            .with_context(|| format!("parsing the reply: {}", http::head_of(&reply, 300)))?;
+        let data = parsed
+            .get("data")
+            .and_then(serde_json::Value::as_array)
             .context("the reply carried no data array")?;
         anyhow::ensure!(
             data.len() == texts.len(),
@@ -419,14 +452,18 @@ impl LlamaCppEmbedder {
         // which is cheaper to prevent here.
         let mut out = vec![Vec::new(); texts.len()];
         for row in data {
-            let index = row["index"].as_u64().context("a row carried no index")? as usize;
+            let index = row
+                .get("index")
+                .and_then(serde_json::Value::as_u64)
+                .context("a row carried no index")? as usize;
             anyhow::ensure!(
                 index < texts.len(),
                 "the reply indexed row {index} of {}",
                 texts.len()
             );
-            let values = row["embedding"]
-                .as_array()
+            let values = row
+                .get("embedding")
+                .and_then(serde_json::Value::as_array)
                 .context("a row carried no embedding")?;
             let mut v: Vec<f32> = values
                 .iter()
@@ -441,7 +478,10 @@ impl LlamaCppEmbedder {
             // llama.cpp does not always normalise, and every scenario here
             // computes cosine as a dot product.
             normalize(&mut v);
-            out[index] = v;
+            let slot = out
+                .get_mut(index)
+                .with_context(|| format!("the reply indexed row {index} of {}", texts.len()))?;
+            *slot = v;
         }
         anyhow::ensure!(
             out.iter().all(|v| !v.is_empty()),

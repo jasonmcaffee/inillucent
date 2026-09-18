@@ -29,7 +29,7 @@
 
 use std::collections::HashMap;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use inillucent_core::embed_onnx::Device;
 use inillucent_core::filter::Filter;
 use inillucent_core::rank::{AdaptiveWeights, Fusion};
@@ -128,7 +128,10 @@ pub fn run(
     // Generated from the same slice of the corpus the index holds, exactly as the
     // graded run does, so a number here is comparable with a number on the card.
     let n = limit.unwrap_or(corpus.len()).min(corpus.len());
-    let chunks = &corpus.chunks[..n];
+    let chunks = corpus
+        .chunks
+        .get(..n)
+        .with_context(|| format!("the corpus holds {} chunks, not {n}", corpus.chunks.len()))?;
     let identity = queryset::document_identity_queries(chunks, &keys, per_source, 11 + seed_offset);
     let headings = queryset::heading_queries(chunks, &keys, per_source * 3, 12 + seed_offset);
     let identifiers = queryset::identifier_queries(chunks, &keys, per_source * 3, 13 + seed_offset);
@@ -205,7 +208,7 @@ pub fn run(
             &identifiers,
             (&calibration, &calibration_vectors),
             (&unanswerable, &unanswerable_vectors),
-        ));
+        )?);
         eprint!(".");
     }
     eprintln!();
@@ -245,6 +248,32 @@ enum Grading {
     Binary,
 }
 
+/// The corpus keys a result list stands for.
+///
+/// **Fallible for the reason `InillucentEngine::key` is.** An ordinal past the
+/// end of the key list means the index and the keys disagree about what was
+/// loaded, and a sweep that scored an empty key would report a tuning setting
+/// as worse than it is.
+///
+/// @param engine - the engine whose key list the ordinals index
+/// @param chunks - the chunk ordinals a search returned, in order
+fn keys_of_chunks(
+    engine: &InillucentEngine,
+    chunks: impl Iterator<Item = u32>,
+) -> Result<Vec<String>> {
+    chunks
+        .map(|chunk| {
+            engine.keys.get(chunk as usize).cloned().with_context(|| {
+                format!(
+                    "chunk {chunk} has no key: the index returned an ordinal past the \
+                     {} keys the sweep loaded with it",
+                    engine.keys.len()
+                )
+            })
+        })
+        .collect()
+}
+
 /// Score one arm on every family.
 #[allow(clippy::type_complexity)]
 fn score_arm(
@@ -254,7 +283,7 @@ fn score_arm(
     identifiers: &[GradedQuery],
     calibration: (&Vec<GradedQuery>, &Vec<Vec<f32>>),
     unanswerable: (&Vec<GradedQuery>, &Vec<Vec<f32>>),
-) -> ArmScores {
+) -> Result<ArmScores> {
     let filter = Filter::default();
     let compiled = engine.index.compile(&filter);
     let cap = engine.index.config().per_doc_cap;
@@ -267,11 +296,8 @@ fn score_arm(
             let hits = engine
                 .index
                 .hybrid_search(&q.text, v, &compiled, 10, engine.ef_search)
-                .expect("the harness embeds at the index's width");
-            let keys: Vec<String> = hits
-                .iter()
-                .map(|h| engine.keys[h.chunk as usize].clone())
-                .collect();
+                .context("the hybrid search this family is scored on")?;
+            let keys = keys_of_chunks(engine, hits.iter().map(|h| h.chunk))?;
             let mut space = KeySpace::new();
             let correct = space.set_of(&q.correct);
             let grades = q.grades(&mut space);
@@ -292,10 +318,7 @@ fn score_arm(
     let mut identifier_mrr: Vec<f64> = Vec::new();
     for q in identifiers {
         let hits = engine.index.lexical_search(&q.text, &compiled, 50);
-        let keys: Vec<String> = hits
-            .iter()
-            .map(|h| engine.keys[h.chunk as usize].clone())
-            .collect();
+        let keys = keys_of_chunks(engine, hits.iter().map(|h| h.chunk))?;
         let mut space = KeySpace::new();
         let correct = space.set_of(&q.correct);
         let got = space.ids_of(&keys);
@@ -308,25 +331,25 @@ fn score_arm(
     // on the top hit's confidence rather than its fused score: the fused score's
     // scale is read out of the candidate list, so it is the same for a good list
     // and a hopeless one and there is no threshold on it to set.
-    let top_scores = |queries: &[GradedQuery], vectors: &[Vec<f32>]| -> Vec<f64> {
+    let top_scores = |queries: &[GradedQuery], vectors: &[Vec<f32>]| -> Result<Vec<f64>> {
         queries
             .iter()
             .zip(vectors)
             .map(|(q, v)| {
-                engine
+                Ok(engine
                     .index
                     .hybrid_search(&q.text, v, &compiled, 10, engine.ef_search)
-                    .expect("the harness embeds at the index's width")
+                    .context("the hybrid search the abstention threshold is read from")?
                     .first()
                     .map(|h| h.confidence as f64)
-                    .unwrap_or(0.0)
+                    .unwrap_or(0.0))
             })
             .collect()
     };
-    let mut answerable = top_scores(calibration.0, calibration.1);
+    let mut answerable = top_scores(calibration.0, calibration.1)?;
     answerable.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     let threshold = percentile(&answerable, 0.05);
-    let flags: Vec<f64> = top_scores(unanswerable.0, unanswerable.1)
+    let flags: Vec<f64> = top_scores(unanswerable.0, unanswerable.1)?
         .into_iter()
         .map(|s| if s >= threshold { 1.0 } else { 0.0 })
         .collect();
@@ -341,11 +364,8 @@ fn score_arm(
             let hits = engine
                 .index
                 .hybrid_search(&q.text, v, &compiled, 10, engine.ef_search)
-                .expect("the harness embeds at the index's width");
-            let keys: Vec<String> = hits
-                .iter()
-                .map(|h| engine.keys[h.chunk as usize].clone())
-                .collect();
+                .context("the hybrid search success@10 is counted from")?;
+            let keys = keys_of_chunks(engine, hits.iter().map(|h| h.chunk))?;
             let mut space = KeySpace::new();
             let correct = space.set_of(&q.correct);
             let got = space.ids_of(&keys);
@@ -354,11 +374,11 @@ fn score_arm(
     }
     means.insert("passage success@10".to_string(), mean_of(&hits_at_10));
 
-    ArmScores {
+    Ok(ArmScores {
         label: setting.label.clone(),
         means,
         series,
-    }
+    })
 }
 
 fn mean_of(values: &[f64]) -> f64 {
@@ -540,7 +560,7 @@ pub fn build_settings(baseline: Setting, sweep: &Sweep<'_>) -> Vec<Setting> {
                                         // sweeping one would repeat the same arm
                                         // once per weight.
                                         if matches!(fusion, Fusion::ReciprocalRank { .. })
-                                            && w != weights[0]
+                                            && Some(w) != weights.first().copied()
                                         {
                                             continue;
                                         }

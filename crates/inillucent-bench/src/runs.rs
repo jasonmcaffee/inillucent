@@ -149,10 +149,18 @@ impl RunWriter {
         Ok(())
     }
 
+    /// How many per-query records have been appended so far.
+    ///
+    /// The card publishes this beside the run directory, so a reader can tell
+    /// a run that recorded every query from one that stopped partway.
     pub fn written(&self) -> usize {
         self.written
     }
 
+    /// Where this run's records are being written.
+    ///
+    /// @see [`RunWriter::finish`], which returns the same path once the
+    /// manifest is on disk.
     #[allow(dead_code)]
     pub fn dir(&self) -> &Path {
         &self.dir
@@ -344,6 +352,12 @@ fn looks_like_a_path(token: &str) -> bool {
     token.contains('/') || token.contains('\\')
 }
 
+/// The machine a run was measured on.
+///
+/// **Recorded because a latency number is about a box as much as about an
+/// engine.** Two runs of this harness on different machines are not
+/// comparable, and the manifest is what lets a reader tell that without
+/// having to remember where each one ran.
 pub fn host_facts() -> HostFacts {
     HostFacts {
         os: std::env::consts::OS.to_string(),
