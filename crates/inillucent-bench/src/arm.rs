@@ -171,6 +171,21 @@ impl Arm {
         }
     }
 
+    /// Whether this arm's vectors travel over a socket to a `llama-server`.
+    ///
+    /// Asked by `embed-check`, which has one thing to say about a disagreement that
+    /// is only true of a served arm: `llama-server` picks a slot by longest common
+    /// prefix once every slot has held a prompt, and reuses that slot's cached keys
+    /// and values for the matching tokens rather than recomputing them. Every text a
+    /// corpus is embedded from shares the model's document prefix, so from the second
+    /// pass against one server onward every request reuses something, and the reused
+    /// values were computed in a different batch. An in-process ONNX graph has no
+    /// slots and no cache, so the same sentence printed under it would send its reader
+    /// after a cause that cannot apply.
+    pub fn is_served(&self) -> bool {
+        matches!(self, Arm::Llama(_))
+    }
+
     /// How much of the text handed to this arm the model actually saw.
     pub fn truncation(&self) -> TruncationFacts {
         match self {

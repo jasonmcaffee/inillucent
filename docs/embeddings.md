@@ -401,6 +401,39 @@ takes hours in another, so rebuilding the text without running the embedding aga
 with the wrong chunk. Nothing would look broken: the index would build, queries would return rows,
 and every retrieval number would be quietly wrong.
 
+### What it decides on
+
+It re-embeds a sample spread across the corpus, and takes three bounds. None of them is the worst
+sample in the batch.
+
+| bound | what it measures |
+|---|---|
+| the median at or above **0.9995** | whether the sample as a whole reproduces |
+| at most **1%** of the sample below 0.9995 | whether a systematic part of it has shifted off its text |
+| every chunk **re-embedded on its own** at or above **0.99** | whether a vector was made from different text |
+
+The third is the only per-chunk bound, and it reads a request holding one text, which has no batch
+composition in it. Every chunk that falls below 0.9995 in the batch is re-embedded that way and both
+numbers are printed.
+
+**Why it is not a bound on the minimum.** It was, and it failed a sound cache. `nomic-embed-text-v2-moe`
+over an 18,685 chunk corpus put one sampled chunk at 0.999409 while the other 1,999 sat above 0.99998,
+and the error told the operator to delete the vectors and embed again — which reproduced 0.999409 to
+six figures, because the cache was never what varied. That chunk's stored vector agrees with the chunk
+re-embedded alone at 0.999998, and the nearest of the other 18,684 stored vectors is 0.881.
+
+**What varied was `llama-server`.** It picks a slot by LRU while any slot is still unused and by
+longest common prefix afterwards, reusing that slot's cached keys and values for the matching tokens
+instead of recomputing them. Every text a corpus is embedded from shares the model's document prefix,
+so the similarities run 0.10 to 0.31 and the 0.10 threshold accepts all of them. Measured on one cache
+and one set of flags: the first check after the server starts reads 0.999735, every later check
+against that same process reads 0.999409, and three checks against a server started with
+`--slot-prompt-similarity 0` read 0.999738, 0.999734 and 0.999738. Both phases are stable, so
+comparing two runs does not reveal it — neither of them is the first after a restart.
+
+So when a served arm's check reports a chunk below 0.9995 whose alone reading is fine, the cache is
+sound. Start the server with `--slot-prompt-similarity 0` to take the effect out of the measurement.
+
 ## Comparing embedding models
 
 `grade` holds the embedding constant and compares engines, and it says so in its own caveats. That is
