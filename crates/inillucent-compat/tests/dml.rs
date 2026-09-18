@@ -119,6 +119,59 @@ fn an_insert_past_the_largest_rowid_finds_a_free_one_per_row() {
         "the row that held the largest rowid is still there"
     );
 }
+/// A table whose foreign key points at itself can still be dropped, and a table
+/// another table points at still cannot.
+///
+/// **Both halves are the test (task-1979, F6).** Dropping a table with foreign
+/// keys on now runs an implicit `DELETE FROM` first, which is what makes the
+/// refusal happen at all - and that delete would refuse a self-referencing
+/// table too, because this engine checks an immediate foreign key as each row
+/// is written and deleting the first row leaves the second pointing at nothing.
+/// SQLite counts those violations to the end of the statement instead, so its
+/// count is back to nought once the last row is gone and the drop succeeds. The
+/// drop therefore keeps every foreign key trigger but the self-referencing one,
+/// and this is the pair that says so: without the second half the first could
+/// be passed by dropping the foreign key checks altogether.
+///
+/// A plain `DELETE FROM` on a self-referencing table is still refused here and
+/// still accepted by SQLite. That is the engine's per-row checking and it is a
+/// wider change than this ticket; the drop path is what F6 touched.
+#[test]
+fn a_self_referencing_table_drops_and_a_referenced_one_does_not() {
+    let (database, _path) = database(
+        "drop-self-reference.db",
+        "PRAGMA foreign_keys = ON;
+         CREATE TABLE node(id INTEGER PRIMARY KEY, parent REFERENCES node(id));
+         INSERT INTO node VALUES(1, NULL), (2, 1);
+         CREATE TABLE parent(id INTEGER PRIMARY KEY);
+         CREATE TABLE child(pid REFERENCES parent(id));
+         INSERT INTO parent VALUES(1);
+         INSERT INTO child VALUES(1);",
+    );
+    {
+        let connection = database.session();
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON; DROP TABLE node;")
+            .expect("a table that only references itself can be dropped");
+        let refused = connection.execute_batch("PRAGMA foreign_keys = ON; DROP TABLE parent;");
+        assert!(
+            refused.is_err(),
+            "a table a live child row points at cannot be dropped"
+        );
+    }
+    let gone = query(
+        &database,
+        "SELECT count(*) FROM sqlite_master WHERE name = 'node'",
+    );
+    assert_eq!(integer(&gone, 0, 0), Some(0), "node was dropped");
+    let kept = query(&database, "SELECT count(*) FROM parent");
+    assert_eq!(
+        integer(&kept, 0, 0),
+        Some(1),
+        "the refused drop left the parent row where it was"
+    );
+}
+
 /// The change counters report what a statement did.
 #[test]
 fn the_counters_report_what_a_statement_changed() {

@@ -1854,9 +1854,12 @@ impl<'a> Binder<'a> {
             let Some(column) = columns.get(index) else {
                 return Err(order_out_of_range(index.saturating_add(1), span));
             };
-            let collation = named
-                .or_else(|| column.expr.collation())
-                .unwrap_or(Collation::Binary);
+            // With no `COLLATE` on the term, the result column's own collation
+            // governs, read the same way the compound's duplicate removal reads
+            // it - an explicit `COLLATE` on the result column beats the implicit
+            // one - so the sort and the duplicate removal cannot disagree about
+            // a column.
+            let collation = named.unwrap_or_else(|| result_collation(&column.expr));
             let nulls = term.nulls.unwrap_or(match term.order {
                 SortOrder::Ascending => NullOrder::First,
                 SortOrder::Descending => NullOrder::Last,

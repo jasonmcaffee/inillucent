@@ -94,6 +94,24 @@ pub struct Civil {
     pub second: f64,
 }
 
+/// Which zone conversion a modifier has already applied.
+///
+/// **Repeating the same one is a no-op, and the other one is not (task-1979,
+/// F13's neighbour).** `datetime(x,'utc','utc')` is `datetime(x,'utc')` in
+/// SQLite, and `datetime(x,'utc','+1 day','utc')` is that shifted by a day - an
+/// ordinary modifier in between does not clear it. `datetime(x,'utc',
+/// 'localtime')` does convert twice and lands back where it started. All eight
+/// orderings were read off 3.53.4 rather than worked out from the rule.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Zone {
+    /// Neither modifier has run.
+    Unset,
+    /// The last one was `utc`.
+    Utc,
+    /// The last one was `localtime`.
+    Local,
+}
+
 /// A time value part-way through being resolved.
 ///
 /// SQLite's `DateTime` keeps a Julian day and the broken-down fields side by
@@ -123,6 +141,8 @@ struct Moment {
     /// and this holds 2; `floor` subtracts it and the answer is 29 February.
     /// `ceiling` is the default and only clears it.
     overflow: i64,
+    /// Which of the two zone conversions ran last - see [`Zone`].
+    zone: Zone,
 }
 
 impl Moment {
@@ -135,6 +155,7 @@ impl Moment {
             day,
             spelled: None,
             overflow: 0,
+            zone: Zone::Unset,
         }
     }
 
@@ -145,7 +166,7 @@ impl Moment {
         Moment {
             day,
             spelled: None,
-            overflow: self.overflow,
+            ..self
         }
     }
 
@@ -306,7 +327,14 @@ fn unix_epoch(arguments: &[Value<'static>], day: f64, encoding: TextEncoding) ->
     let _ = encoding;
     let seconds = (day - UNIX_EPOCH_JD) * SECONDS_PER_DAY;
     if asks_for_subsec(arguments) {
-        return Value::Real(seconds);
+        // **Rounded to the millisecond first, for the same reason
+        // `whole_seconds` rounds.** A Julian day is a binary fraction, so
+        // `unixepoch('2024-03-01 09:05:07','subsec')` came out as
+        // 1709283906.9999843 where SQLite answers 1709283907.0. SQLite holds
+        // the instant in whole milliseconds and divides, and a millisecond is
+        // as fine as `subsec` ever reports, so nothing a caller can ask for is
+        // lost by matching it.
+        return Value::Real(milliseconds_of(seconds) / 1000.0);
     }
     Value::Integer(whole_seconds(seconds))
 }
@@ -325,8 +353,18 @@ fn unix_epoch(arguments: &[Value<'static>], day: f64, encoding: TextEncoding) ->
 ///
 /// @param seconds - the difference from the epoch, in seconds
 fn whole_seconds(seconds: f64) -> i64 {
-    let milliseconds = (seconds * 1000.0).round() as i64;
-    milliseconds.div_euclid(1000)
+    (milliseconds_of(seconds) as i64).div_euclid(1000)
+}
+
+/// Returns the whole milliseconds a difference in seconds stands for.
+///
+/// The unit SQLite holds a time in, and the one both `unixepoch` answers are
+/// derived from - see `whole_seconds` for what flooring the double instead
+/// cost.
+///
+/// @param seconds - the difference from the epoch, in seconds
+fn milliseconds_of(seconds: f64) -> f64 {
+    (seconds * 1000.0).round()
 }
 
 /// Returns `timediff(a, b)` as SQLite's `+YYYY-MM-DD HH:MM:SS.SSS` string.
@@ -436,6 +474,7 @@ fn parse_time_value(value: &Value<'static>, now: f64, encoding: TextEncoding) ->
                     day,
                     spelled,
                     overflow: 0,
+                    zone: Zone::Unset,
                 });
             }
             // A numeric string is a Julian day, which is what makes
@@ -520,9 +559,11 @@ fn split_datetime(bytes: &[u8]) -> Option<(Option<&[u8]>, Option<&[u8]>)> {
     if bytes.is_empty() {
         return None;
     }
-    let separator = bytes
-        .iter()
-        .position(|byte| *byte == b' ' || *byte == b'T' || *byte == b't');
+    // **An upper-case `T` only.** SQLite accepts a space or a `T` between the
+    // date and the time and nothing else, so `datetime('2024-03-01t12:34:56')`
+    // is NULL there; accepting the lower-case one here turned a string SQLite
+    // says is not a date into one.
+    let separator = bytes.iter().position(|byte| *byte == b' ' || *byte == b'T');
     match separator {
         Some(at) => {
             let date = bytes.get(..at)?;
@@ -734,15 +775,25 @@ fn apply_modifier(moment: Moment, modifier: &[u8]) -> Option<Moment> {
         return Some(moment.moved_to(day));
     }
     if folded == b"localtime" {
-        return Some(moment.moved_to(day + zone_offset_days(day)?));
+        if moment.zone == Zone::Local {
+            return Some(moment);
+        }
+        let mut moved = moment.moved_to(day + zone_offset_days(day)?);
+        moved.zone = Zone::Local;
+        return Some(moved);
     }
     if folded == b"utc" {
+        if moment.zone == Zone::Utc {
+            return Some(moment);
+        }
         // Two steps, as SQLite does it: the offset is asked for again at the
         // instant the first step landed on, so a conversion that crosses a
         // daylight saving boundary uses the offset in force on the far side.
         let first = zone_offset_days(day)?;
         let second = zone_offset_days(day - first)?;
-        return Some(moment.moved_to(day - second));
+        let mut moved = moment.moved_to(day - second);
+        moved.zone = Zone::Utc;
+        return Some(moved);
     }
     if folded == b"ceiling" {
         // The default, so it only forgets what a `floor` would have taken off.
@@ -750,6 +801,7 @@ fn apply_modifier(moment: Moment, modifier: &[u8]) -> Option<Moment> {
             day,
             spelled: None,
             overflow: 0,
+            zone: moment.zone,
         });
     }
     if folded == b"floor" {
@@ -757,6 +809,7 @@ fn apply_modifier(moment: Moment, modifier: &[u8]) -> Option<Moment> {
             day: day - moment.overflow as f64,
             spelled: None,
             overflow: 0,
+            zone: moment.zone,
         });
     }
     if let Some(rest) = folded.strip_prefix(b"start of ") {
@@ -875,12 +928,12 @@ fn apply_offset(moment: Moment, folded: &[u8]) -> Option<Moment> {
             let total = civil.year * 12 + (civil.month - 1) + signed as i64;
             civil.year = total.div_euclid(12);
             civil.month = total.rem_euclid(12) + 1;
-            Some(moved_by_calendar(civil))
+            Some(moved_by_calendar(moment, civil))
         }
         b"year" => {
             let mut civil = civil_of(day);
             civil.year += signed as i64;
-            Some(moved_by_calendar(civil))
+            Some(moved_by_calendar(moment, civil))
         }
         _ => None,
     }
@@ -888,13 +941,15 @@ fn apply_offset(moment: Moment, folded: &[u8]) -> Option<Moment> {
 
 /// Returns the moment a calendar date names, with its carry recorded.
 ///
+/// @param moment - the moment the modifier was applied to
 /// @param civil - the date a month or year modifier built, which may name a day
 ///   the month does not have
-fn moved_by_calendar(civil: Civil) -> Moment {
+fn moved_by_calendar(moment: Moment, civil: Civil) -> Moment {
     Moment {
         day: julian_of(civil),
         spelled: None,
         overflow: days_past_the_month(civil),
+        zone: moment.zone,
     }
 }
 
@@ -1136,9 +1191,18 @@ fn week_from(civil: Civil, days_after_start: i64) -> i64 {
 /// that Thursday's - which is why the two have to be computed together and why
 /// `2023-01-01` is week 52 of 2022.
 ///
+/// **A Julian day starts at noon, so `floor` is the wrong midnight.** For a
+/// timestamp before noon it lands on the previous calendar day, and the week
+/// computed from it was a day early: `strftime('%V %G','2026-01-04')` answered
+/// week 53 of 2025 where SQLite answers week 01 of 2026, while the same date at
+/// 13:00 answered correctly - which is why this survived every case that
+/// carried a time. The calendar day's own midnight is `(day + 0.5).floor()
+/// - 0.5`, the basis `weekday` already counts from.
+///
 /// @param day - the julian day
 fn iso_week(day: f64) -> (i64, i64) {
-    let thursday = day.floor() + (3 - days_after_monday(day)) as f64;
+    let midnight = (day + 0.5).floor() - 0.5;
+    let thursday = midnight + (3 - days_after_monday(day)) as f64;
     let moved = civil_of(thursday);
     (moved.year, days_after_jan01(moved) / 7 + 1)
 }

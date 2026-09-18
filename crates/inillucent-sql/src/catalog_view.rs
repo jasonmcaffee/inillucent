@@ -408,6 +408,16 @@ pub struct ForeignKeyTrigger {
     /// something writes, not when the schema is read, so that a schema can be
     /// loaded in any order. The message is kept here and reported then.
     pub fault: Vec<u8>,
+    /// Whether the key's child table and its parent table are the same table.
+    ///
+    /// **Read by `DROP TABLE`'s implicit delete (task-1979, F6).** That delete
+    /// removes every row of one table, so a key whose child is that same table
+    /// cannot be violated once the statement has finished - the rows that would
+    /// be left pointing at nothing are themselves gone. SQLite reaches the same
+    /// answer a different way: its immediate foreign keys are a counter checked
+    /// at the end of the statement, so the violation deleting the first row
+    /// creates is cancelled by deleting the row that made it.
+    pub self_referencing: bool,
 }
 
 /// One foreign key, from the child table that declares it.

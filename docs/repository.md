@@ -124,7 +124,7 @@ table.
 
 | prerequisite | rows | what provides it |
 |---|---:|---|
-| `oracle` | 28 | the pinned SQLite 3.53.4 comparison process: `pwsh tools/sqlite-reference.ps1`, `bash tools/sqlite-reference.sh` |
+| `oracle` | 29 | the pinned SQLite 3.53.4 comparison process: `pwsh tools/sqlite-reference.ps1`, `bash tools/sqlite-reference.sh` |
 | `programs` | 14 | the command surface built into this profile's target directory: `cargo build -p inillucent-cli` |
 | `shell` | 7 | the pinned `sqlite3` 3.53.4 shell, from the same two scripts as the oracle |
 | `fixtures` | 2 | the gate fixtures, which are 1.2 MB and 120 MB and are not tracked: `bash tools/build-gate-fixtures.sh _agent_output/fixtures` |

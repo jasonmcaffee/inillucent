@@ -282,6 +282,38 @@ fn compounds_match_the_oracle() {
     );
 }
 
+/// A compound's `ORDER BY` sorts under the collation the term names.
+///
+/// **The differential corpus cannot catch this and this test can (task-1979,
+/// F15).** Its case `cmp-014` is
+/// `SELECT 'b' AS a UNION SELECT 'a' ORDER BY a COLLATE NOCASE`, and `'a'`
+/// sorts before `'b'` under `BINARY` and under `NOCASE` alike - so the case
+/// passes whether the named collation is applied or thrown away, which is the
+/// shape rule 4 of the testing standard calls a test that cannot fail. Every
+/// statement here mixes the cases, so the two collations disagree about the
+/// order and only the right one matches the oracle: under `BINARY` every
+/// capital sorts ahead of every lower-case letter, under `NOCASE` they
+/// interleave.
+///
+/// The last two are the control. They name no collation, so they must keep
+/// answering what they answered before - the result column's own collation,
+/// which for a compound is also the one its duplicate removal uses.
+#[test]
+fn a_compound_ordered_by_a_named_collation_matches_the_oracle() {
+    grade(
+        "compound-collation",
+        &[
+            "SELECT 'B' AS a UNION SELECT 'a' ORDER BY a COLLATE NOCASE",
+            "SELECT 'B' AS a UNION SELECT 'a' UNION SELECT 'C' ORDER BY a COLLATE NOCASE",
+            "SELECT 'B' AS a UNION SELECT 'a' ORDER BY a COLLATE NOCASE DESC",
+            "SELECT 'B' AS a UNION SELECT 'a' ORDER BY 1 COLLATE NOCASE",
+            "SELECT 'B' AS a UNION SELECT 'a' UNION SELECT 'C' ORDER BY a COLLATE BINARY",
+            "SELECT 'B' AS a UNION SELECT 'a' UNION SELECT 'C' ORDER BY a",
+            "SELECT 'B' AS a UNION SELECT 'a' UNION SELECT 'C' ORDER BY 1",
+        ],
+    );
+}
+
 /// Subqueries in every position, correlated and not.
 #[test]
 fn subqueries_match_the_oracle() {
