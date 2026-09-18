@@ -450,11 +450,18 @@ fn build_update_setup(
     let mut assignments = Vec::with_capacity(statement.assignments.len());
     let mut projected_slots: Vec<Option<usize>> = Vec::new();
     for assignment in &statement.assignments {
-        let slot = layout
-            .slots
-            .get(usize::from(assignment.column))
-            .copied()
-            .flatten();
+        // A rowid assignment writes the row image's rowid cell, which is the
+        // same cell an INTEGER PRIMARY KEY column is mapped to. That is what
+        // makes `UPDATE t SET rowid = 100` move the row exactly as
+        // `UPDATE t SET id = 100` already did on a table that declares one.
+        let slot = match assignment.rowid {
+            true => layout.rowid,
+            false => layout
+                .slots
+                .get(usize::from(assignment.column))
+                .copied()
+                .flatten(),
+        };
         if joined {
             projected_slots.push(slot);
             continue;

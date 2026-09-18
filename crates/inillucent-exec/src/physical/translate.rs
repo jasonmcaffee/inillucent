@@ -176,6 +176,26 @@ fn resolve_in_frame(expr: &BoundExpr, frame: Frame<'_>) -> DbResult<Option<Expr>
                     .saturating_add(at),
             )));
         }
+        // **A correlated subquery is carried the same way a bare column is
+        // (task-1979, F1's neighbour).** The block's answer is one extra column
+        // on the row the scan produces, and the aggregate below emits the
+        // grouped row, so the column number `space.correlated` holds points
+        // past the end of what the projection receives. Reading past the end of
+        // a row is this engine's "missing column", so
+        // `SELECT g, (SELECT count(*) FROM t u WHERE u.g = t.g) FROM t GROUP BY
+        // g` answered a NULL per group where SQLite answers the count. A
+        // subquery that is not correlated is a constant of the statement and
+        // falls through to be folded as it always was.
+        if matches!(expr, BoundExpr::Subquery { .. }) {
+            let bare = bare_columns(select);
+            if let Some(at) = bare.iter().position(|held| held == expr) {
+                return Ok(Some(Expr::Column(
+                    group_width
+                        .saturating_add(select.aggregates.len())
+                        .saturating_add(at),
+                )));
+            }
+        }
     }
     Ok(None)
 }
@@ -866,6 +886,21 @@ fn bare_columns(select: &BoundSelect) -> Vec<BoundExpr> {
                     found.push(node);
                 }
                 continue;
+            }
+            // A correlated block is one value per input row, computed before
+            // the aggregate sees the row, so it needs an accumulator to carry
+            // it through exactly as a bare column does. The test for "is it
+            // correlated" is the one `correlate::gather_expression` applies, so
+            // the two lists cannot disagree about which blocks exist. Nothing
+            // inside the block is bare: its outer references were rewritten
+            // into parameters when the block was prepared.
+            if let BoundExpr::Subquery { block, .. } = &node {
+                if !block.correlations.is_empty() {
+                    if !found.contains(&node) {
+                        found.push(node);
+                    }
+                    continue;
+                }
             }
             for child in node.children() {
                 stack.push(child.clone());

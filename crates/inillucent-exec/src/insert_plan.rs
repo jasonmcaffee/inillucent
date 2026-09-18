@@ -58,6 +58,62 @@ enum PlannedValue {
     Generated(Box<dyn Eval>),
 }
 
+/// What an insert asks about a table's existing keys.
+///
+/// Two questions, behind one object rather than two closures, because both of
+/// them borrow the write target and a pair of closures cannot each hold it.
+pub(crate) trait RowidKeys {
+    /// Returns the largest rowid the table holds, or zero when it holds none.
+    fn highest(&mut self) -> DbResult<i64>;
+
+    /// Reports whether the table already holds a row with this rowid.
+    ///
+    /// @param rowid - the candidate
+    fn holds(&mut self, rowid: i64) -> DbResult<bool>;
+}
+
+/// How many candidates are tried before an insert gives up.
+///
+/// SQLite's own limit, and the reason it has one: a table that holds every key
+/// in the range would otherwise be searched forever, and `SQLITE_FULL` is a
+/// better answer than a statement that does not return.
+const FREE_ROWID_ATTEMPTS: usize = 100;
+
+/// Which stream of candidates the next allocation draws from.
+///
+/// One statement can need several free rowids, and each one asks the tree
+/// whether the candidate is taken, so correctness does not depend on this at
+/// all - it only stops a second allocation from walking the same candidates as
+/// the first and paying for the collisions.
+static NEXT_PROBE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Returns a rowid the table does not hold.
+///
+/// **What SQLite does when the largest rowid is `i64::MAX`.** Its own
+/// documentation for `OP_NewRowid`: "If the largest ROWID is equal to the
+/// largest possible integer then the database engine starts picking positive
+/// candidate ROWIDs at random until it finds one that is not previously used."
+/// The candidates are drawn from 1 to 2^62, which is SQLite's range as well,
+/// and after `FREE_ROWID_ATTEMPTS` of them the statement fails full rather than
+/// searching on.
+///
+/// @param keys - what the table already holds
+fn free_rowid(keys: &mut dyn RowidKeys) -> DbResult<i64> {
+    let seed = NEXT_PROBE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let mut stream = inillucent_base::rng::Rng::new(seed);
+    for _ in 0..FREE_ROWID_ATTEMPTS {
+        let candidate = ((stream.next_u64() & (i64::MAX as u64 >> 1)) as i64).saturating_add(1);
+        if !keys.holds(candidate)? {
+            return Ok(candidate);
+        }
+    }
+    Err(DbError::primary(inillucent_base::PrimaryCode::Full)
+        .with_message("database or disk is full")
+        .with_detail(format!(
+            "no unused rowid was found in {FREE_ROWID_ATTEMPTS} attempts"
+        )))
+}
+
 /// Where an `INSERT`'s rowid comes from.
 enum PlannedRowid {
     /// Position in the supplied row.
@@ -153,14 +209,15 @@ impl InsertPlan {
     /// @param supplied - the values the statement's source produced
     /// @param space - the row space the expressions read
     /// @param next_rowid - the largest rowid handed out so far, advanced here
-    /// @param highest - what the first allocation counts up from
+    /// @param keys - what the table already holds, asked only when a rowid has
+    ///   to be made
     /// @param autoincrement - the table, when it never reuses a key
     pub(crate) fn build_row(
         &self,
         supplied: &[OwnedDatum],
         space: &RowSpace,
         next_rowid: &mut Option<i64>,
-        highest: impl FnOnce() -> DbResult<i64>,
+        keys: &mut dyn RowidKeys,
         autoincrement: Option<&TableInfo>,
     ) -> DbResult<Row> {
         let mut row: Row = vec![OwnedDatum::Null; space.width];
@@ -200,16 +257,32 @@ impl InsertPlan {
                 OwnedDatum::Null => {
                     let held = match *next_rowid {
                         Some(held) => held,
-                        None => highest()?,
+                        None => keys.highest()?,
                     };
                     // An `AUTOINCREMENT` table that has reached `i64::MAX` has
                     // no next key, and handing one out would mean handing out
                     // one that is already there. SQLite reports `SQLITE_FULL`.
+                    //
+                    // **An ordinary rowid table at `i64::MAX` looks for a free
+                    // key instead (task-1979, F8).** `held.saturating_add(1)`
+                    // answered `i64::MAX` again, so the insert collided with the
+                    // row already holding it and failed
+                    // `UNIQUE constraint failed`; SQLite fills the gaps.
                     let allocated = match autoincrement {
                         Some(table) => crate::sequence::allocate(table, held)?,
-                        None => held.saturating_add(1),
+                        None => match held == i64::MAX {
+                            true => free_rowid(keys)?,
+                            false => held.saturating_add(1),
+                        },
                     };
-                    *next_rowid = Some(allocated);
+                    // The mark stays at `i64::MAX` once the counting-up path is
+                    // exhausted, so the next row of the same statement looks for
+                    // its own free key rather than counting up from whichever
+                    // gap this one landed in - which would collide again.
+                    *next_rowid = Some(match held == i64::MAX {
+                        true => i64::MAX,
+                        false => allocated,
+                    });
                     allocated
                 }
                 // `INSERT INTO t(rowid) VALUES ('x')` is a mismatch rather than

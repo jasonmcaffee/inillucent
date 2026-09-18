@@ -2082,6 +2082,39 @@ impl<'a> Binder<'a> {
         })
     }
 
+    /// Refuses an `INDEXED BY` that names no index of the table just bound.
+    ///
+    /// **It was read and thrown away (task-1979, F7).** The hint reached the
+    /// AST and nothing below the parser looked at it, so
+    /// `SELECT * FROM t INDEXED BY nosuch WHERE a = 1` answered rows where
+    /// SQLite refuses the statement with `no such index: nosuch`. A caller who
+    /// wrote the hint to make a plan use a particular index, and misspelled it,
+    /// got a plan that did something else and no way to tell.
+    ///
+    /// `NOT INDEXED` names nothing and is a planner instruction rather than a
+    /// reference, so it passes through here untouched.
+    ///
+    /// @param hint - the hint as written
+    /// @param span - where to point the diagnostic
+    fn check_index_hint(&mut self, hint: ast::IndexHint, span: Span) -> Result<(), ParseError> {
+        let ast::IndexHint::IndexedBy(name) = hint else {
+            return Ok(());
+        };
+        let folded = self.ast.folded(name).to_vec();
+        let Some(source) = self.sources.last() else {
+            return Ok(());
+        };
+        if source
+            .table
+            .indexes
+            .iter()
+            .any(|index| index.folded == folded)
+        {
+            return Ok(());
+        }
+        Err(no_such_index(self.ast.text(name), span))
+    }
+
     /// Binds one FROM term, registering it as a source of the current block.
     ///
     /// A table, a CTE reference, a view and a parenthesised subquery all end up
@@ -2098,10 +2131,13 @@ impl<'a> Binder<'a> {
                 database,
                 name,
                 arguments,
+                indexed_by,
                 ..
             } => {
                 let arguments = arguments.clone();
+                let indexed_by = *indexed_by;
                 self.bind_table_term(*database, *name, term.alias, join, span)?;
+                self.check_index_hint(indexed_by, span)?;
                 if let Some(arguments) = arguments {
                     self.bind_table_arguments(&arguments, span)?;
                 }
@@ -3185,8 +3221,7 @@ impl<'a> Binder<'a> {
     ///
     /// A bare column reference is named after its declared name rather than
     /// the query's text - `rowid`/`oid`/`_rowid_` resolve to the column they
-    /// alias and take its name too, and are called `rowid` when they alias no
-    /// column. Everything else keeps the source text.
+    /// alias and take its name too. Everything else keeps the source text.
     fn default_column_name(&self, id: ExprId, bound: &BoundExpr) -> Vec<u8> {
         let name = match bound {
             BoundExpr::Column { source, column, .. } => self
@@ -3202,14 +3237,13 @@ impl<'a> Binder<'a> {
         if let Some(name) = name {
             return name.name.clone();
         }
-        // **A rowid with no alias column is called `rowid`, whichever of the
-        // three spellings was written (task-1979, F22).** `SELECT rowid, oid,
-        // _rowid_ FROM t` answers three columns all named `rowid` in SQLite,
-        // and the case written is not kept either: `SELECT OID FROM t` is
-        // `rowid`. Falling through to the source text below named them `oid`
-        // and `_rowid_`, so a caller reading results by column name got a name
-        // SQLite never reports. A table whose INTEGER PRIMARY KEY *is* the
-        // rowid is the branch above and keeps that column's own name.
+        // **The three spellings of the rowid are one column name (task-1979,
+        // F22).** `SELECT rowid, oid, _rowid_ FROM t` answers three columns
+        // called `rowid` in SQLite, whichever way each was written. On a table
+        // with no INTEGER PRIMARY KEY there is no declared column to take the
+        // name from, and the fallback below took the text as typed, so the
+        // last two came back called `oid` and `_rowid_` - names no caller
+        // could match against the one SQLite reports.
         if matches!(bound, BoundExpr::Rowid { .. }) {
             return b"rowid".to_vec();
         }
@@ -4843,6 +4877,17 @@ pub(crate) fn no_such_column_quoted(name: &[u8], quote: QuoteForm, span: Span) -
             "no such column: \"{}\" - should this be a string literal in single-quotes?",
             String::from_utf8_lossy(name)
         )),
+        span,
+    )
+}
+
+/// Returns a "no such index" failure, for an `INDEXED BY` that names none.
+///
+/// @param name - the index name as written
+/// @param span - where to point the diagnostic
+pub(crate) fn no_such_index(name: &[u8], span: Span) -> ParseError {
+    ParseError::new(
+        ParseErrorKind::Refused(format!("no such index: {}", String::from_utf8_lossy(name))),
         span,
     )
 }

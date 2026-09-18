@@ -84,6 +84,41 @@ fn a_table_round_trips_through_the_public_api() {
     assert!(is_null(&rows, 2, 2));
 }
 
+/// An insert with no rowid, into a table whose largest rowid is `i64::MAX`,
+/// finds a free one - and so does the next row of the same statement.
+///
+/// **It failed `UNIQUE constraint failed` (task-1979, F8).** The allocation was
+/// `largest + 1`, saturating, so at `i64::MAX` it answered `i64::MAX` again and
+/// the new row collided with the one already holding it. SQLite picks an unused
+/// key instead.
+///
+/// The *second* row is what this test is for, and what the differential corpus
+/// does not reach: the high-water mark stays at `i64::MAX` once the counting-up
+/// path is exhausted, so each row looks for its own key. A mark that moved to
+/// the first free key would make the second row count up from it and collide
+/// with whatever sits above it.
+#[test]
+fn an_insert_past_the_largest_rowid_finds_a_free_one_per_row() {
+    let (database, _path) = database(
+        "past-max-rowid.db",
+        "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT);
+         INSERT INTO t VALUES(9223372036854775807, 'held');
+         INSERT INTO t(b) VALUES('first'), ('second');",
+    );
+    let rows = query(&database, "SELECT count(*), count(DISTINCT a) FROM t");
+    assert_eq!(integer(&rows, 0, 0), Some(3), "three rows were inserted");
+    assert_eq!(
+        integer(&rows, 0, 1),
+        Some(3),
+        "each row should have taken a key of its own"
+    );
+    let held = query(&database, "SELECT b FROM t WHERE a = 9223372036854775807");
+    assert_eq!(
+        held.len(),
+        1,
+        "the row that held the largest rowid is still there"
+    );
+}
 /// The change counters report what a statement did.
 #[test]
 fn the_counters_report_what_a_statement_changed() {

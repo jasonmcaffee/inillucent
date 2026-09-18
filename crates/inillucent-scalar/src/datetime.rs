@@ -154,6 +154,36 @@ impl Moment {
         self.spelled.unwrap_or_else(|| civil_of(self.day))
     }
 
+    /// Returns the same instant with the calendar date recomputed from the
+    /// Julian day and the clock left as it was spelled.
+    ///
+    /// **A day of the month the month does not have is normalised, and the hour
+    /// is not.** `date('2020-02-30')` is `2020-03-01` in SQLite and
+    /// `datetime('2020-02-30 24:00:00')` is `2020-03-02 24:00:00`: the date
+    /// carried and the hour stayed at 24. Its `isDate` says so in one line -
+    /// `if( argc==1 && p->validYMD && p->D>28 ) p->validYMD = 0;` - and the
+    /// fields it clears are the calendar ones only. With a modifier written
+    /// after it the rule does not apply at all, which is why
+    /// `datetime('2020-02-30','subsec')` is `2020-02-30 00:00:00.000`.
+    fn with_recomputed_date(self) -> Moment {
+        let Some(spelled) = self.spelled else {
+            return self;
+        };
+        if spelled.day <= 28 {
+            return self;
+        }
+        let recomputed = civil_of(self.day);
+        Moment {
+            spelled: Some(Civil {
+                year: recomputed.year,
+                month: recomputed.month,
+                day: recomputed.day,
+                ..spelled
+            }),
+            ..self
+        }
+    }
+
     /// Reports whether the date is one SQLite will answer with.
     ///
     /// Outside it every date function answers NULL rather than a year nobody
@@ -259,22 +289,14 @@ fn resolve(arguments: &[Value<'static>], now: f64, encoding: TextEncoding) -> Op
         Some(value) => parse_time_value(value, now, encoding)?,
         None => Moment::at(now),
     };
+    if arguments.len() <= 1 {
+        moment = moment.with_recomputed_date();
+    }
     for modifier in arguments.get(1..).unwrap_or(&[]) {
         let Value::Text(text) = modifier else {
             return None;
         };
         moment = apply_modifier(moment, &text.utf8_bytes())?;
-    }
-    // **A day of the month past 28 is normalised; an hour 24 is not.** SQLite's
-    // `isDate` throws the spelled fields away when the call carried no modifier
-    // and the day of the month is greater than 28, so `date('2020-02-30')` is
-    // `2020-03-01` and `date('2020-04-31')` is `2020-05-01`. The hour is never
-    // part of that check, which is why `date('2020-01-01 24:00:00')` still
-    // answers `2020-01-01` - see [`Moment::spelled`]. Keeping the fields for
-    // both put `2020-02-30` back out unchanged, which is a date that does not
-    // exist.
-    if arguments.len() <= 1 && moment.spelled.is_some_and(|civil| civil.day > 28) {
-        moment.spelled = None;
     }
     moment.inside_the_range().then_some(moment)
 }
@@ -318,8 +340,9 @@ fn timediff(arguments: &[Value<'static>], now: f64, encoding: TextEncoding) -> V
     ) else {
         return Value::Null;
     };
-    // `timediff` is a difference between two instants, so it reads the Julian
-    // day of each rather than the fields they were spelled with.
+    if !left.inside_the_range() || !right.inside_the_range() {
+        return Value::Null;
+    }
     let (left, right) = (left.day, right.day);
     let (sign, low, high) = if left >= right {
         ('+', right, left)
@@ -875,18 +898,19 @@ fn moved_by_calendar(civil: Civil) -> Moment {
     }
 }
 
-/// Renders a moment through a `strftime` format.
+/// Renders one moment through a `strftime` format.
 ///
-/// `day` and `civil` are given separately on purpose. `%s` and `%J` ask for the
-/// instant and every other specifier asks for the fields, and the two disagree
-/// for an hour 24: `strftime('%H %s','2020-01-01 24:00:00')` is hour `24` at
-/// the next day's midnight - see [`Moment::spelled`].
+/// The specifiers that name a field of the calendar read `civil`, which is what
+/// the input spelled when it spelled one; the specifiers that name a position
+/// in time - `%s`, `%J`, the week and weekday numbers - read `day`. That split
+/// is SQLite's, and it is what makes `strftime('%H','2020-01-01 24:00:00')`
+/// answer `24` while `strftime('%s', ...)` answers the next day's midnight.
 ///
-/// @param day - the Julian day, for `%s` and `%J`
-/// @param civil - the broken-down fields every other specifier reads
+/// @param day - the Julian day
+/// @param civil - the broken-down fields to read
 /// @param format - the format string
-/// @param style - how `%Y`, `%G` and `%F` write a year
-fn render(day: f64, civil: Civil, format: &[u8], style: YearStyle) -> Value<'static> {
+/// @param years - how to write a year out; the two SQLite formatters differ
+fn render(day: f64, civil: Civil, format: &[u8], years: YearStyle) -> Value<'static> {
     let mut out: Vec<u8> = Vec::new();
     let mut index = 0usize;
     while index < format.len() {
@@ -913,7 +937,7 @@ fn render(day: f64, civil: Civil, format: &[u8], style: YearStyle) -> Value<'sta
                 out.extend_from_slice(text.as_bytes());
             }
             b'F' => {
-                push_year(&mut out, civil.year, style);
+                push_year(&mut out, civil.year, years);
                 let text = format!("-{:02}-{:02}", civil.month, civil.day);
                 out.extend_from_slice(text.as_bytes());
             }
@@ -980,8 +1004,11 @@ fn render(day: f64, civil: Civil, format: &[u8], style: YearStyle) -> Value<'sta
             b'U' => push_padded(&mut out, week_from(civil, days_after_sunday(day)), 2),
             b'V' => push_padded(&mut out, iso_week(day).1, 2),
             b'W' => push_padded(&mut out, week_from(civil, days_after_monday(day)), 2),
-            b'G' => push_year(&mut out, iso_week(day).0, style),
-            b'Y' => push_year(&mut out, civil.year, style),
+            b'G' => {
+                let text = format!("{:04}", iso_week(day).0);
+                out.extend_from_slice(text.as_bytes());
+            }
+            b'Y' => push_year(&mut out, civil.year, years),
             // **A specifier SQLite does not have makes the whole call NULL**,
             // rather than putting the two characters back. `strftime('%y', d)`
             // is NULL in SQLite and was the literal text `%y` here, which is a
@@ -1017,24 +1044,25 @@ fn sixteen_significant(value: f64) -> String {
     trimmed.trim_end_matches('.').to_string()
 }
 
-/// Appends a year in the spelling its formatter uses.
+/// Appends a year.
 ///
-/// **The two formatters really do differ on a negative year.** `date()` writes
-/// the sign and then four digits, so the year of `date('0000-01-01','-1 day')`
-/// is `-0001`; `strftime('%Y', ...)` goes through C's `%04d`, which counts the
-/// sign against the width, so the same year is `-001`. Both spellings were read
-/// off SQLite 3.53.4.
+/// **The two SQLite formatters differ on a negative year (task-1979, F23).**
+/// `date('0000-01-01','-1 day')` is `-0001-12-31` because `dateFunc` writes the
+/// sign and then four digits of its own; `strftime('%Y', ...)` on the same
+/// value is `-001` because it hands the year to C's `%04d`, which counts the
+/// sign against the width. Both were checked against 3.53.4. This module
+/// answered `-001` for both, which was right for one of them.
 ///
-/// @param out - the bytes being built
-/// @param year - the proleptic Gregorian year
-/// @param style - which of the two spellings to write
+/// @param out - the buffer being built
+/// @param year - the year, which may be negative
+/// @param style - which of the two formatters is asking
 fn push_year(out: &mut Vec<u8>, year: i64, style: YearStyle) {
     let text = match style {
-        YearStyle::Signed => {
-            let sign = if year < 0 { "-" } else { "" };
-            format!("{sign}{:04}", year.abs())
-        }
         YearStyle::Printf => format!("{year:04}"),
+        YearStyle::Signed => match year < 0 {
+            true => format!("-{:04}", year.saturating_abs()),
+            false => format!("{year:04}"),
+        },
     };
     out.extend_from_slice(text.as_bytes());
 }
