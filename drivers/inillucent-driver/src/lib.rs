@@ -142,6 +142,30 @@ pub use inillucent_engine::connect::leading_trivia;
 /// should not have to name the engine to do it.
 pub use inillucent_engine::base::limits::Limit;
 
+/// What a read only connection is allowed to run.
+///
+/// **Re-exported so the command surface asks the driver rather than the
+/// engine.** `drivers/README.md`'s line is that a front end reaches the engine
+/// through this crate; the read only classifier is a rule about statements,
+/// which is exactly the kind of thing the driver is for, and both this crate's
+/// own `refuse_if_it_writes` and the command surface's read the same lists
+/// (task-1979, section 5.2).
+pub use inillucent_engine::readonly;
+
+/// How many frames a buffer pool holds when nobody says otherwise.
+pub use inillucent_engine::DEFAULT_FRAMES;
+
+/// Reading the names of the log segments beside a database.
+///
+/// **Here rather than in the command surface, and re-exported rather than
+/// reimplemented.** A caller looking for a segment the chain cannot reach
+/// (task-1979, C9) has to read a directory, which no layer below this one does;
+/// what a segment is *called* and what its header holds belong to
+/// `inillucent-wal`, and these are its own answers.
+pub mod log {
+    pub use inillucent_engine::recovery::{first_lsn_of, sequence_of_segment_name};
+}
+
 /// Arming a statement budget, for a front end that runs statements itself.
 ///
 /// The shell and the MCP server both arm one per call rather than going through
@@ -277,6 +301,29 @@ impl std::fmt::Debug for Database {
     }
 }
 
+/// What opening a database did to it.
+///
+/// Every number is the log scan's own counter; nothing is computed for this.
+/// See [`Database::recovery`] for why it exists.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct Recovery {
+    /// Whether the log held anything above the file's own checkpoint.
+    pub recovered: bool,
+    /// How many records the scan read.
+    pub scanned: u64,
+    /// How many records the second pass applied.
+    pub applied: u64,
+    /// How many transactions committed in the replayed window.
+    pub committed: u64,
+    /// How many transactions were open at the end of the log and were
+    /// discarded.
+    pub losers: u64,
+    /// The highest segment the live chain reaches.
+    pub last_sequence: u64,
+    /// The stream position the chain ended at.
+    pub last_lsn: u64,
+}
+
 impl Database {
     /// Opens a database, creating it when the path holds nothing.
     ///
@@ -303,8 +350,17 @@ impl Database {
                 format!("there is no database at {}.", path.display()),
             ));
         }
-        let engine = EngineDatabase::open_with(&path, options.cache_frames)
-            .map_err(|error| Error::from_engine(&error, options.diagnostics))?;
+        // **`read_only` reaches the file, not only the statement filter
+        // (task-1979, C5).** It used to be a filter on this driver's own
+        // `execute`, with the file opened for writing either way - so a read
+        // only connection took a writer's locks, waited out the busy budget
+        // against a live writer and reported the writer's lock. A read only
+        // open takes SHARED only and its handle refuses a write.
+        let engine = match options.read_only {
+            true => EngineDatabase::open_read_only(&path, options.cache_frames),
+            false => EngineDatabase::open_with(&path, options.cache_frames),
+        }
+        .map_err(|error| Error::from_engine(&error, options.diagnostics))?;
         engine.set_statement_cache_limit(options.statement_cache);
         Ok(Database {
             engine,
@@ -312,6 +368,24 @@ impl Database {
             options,
             cancel: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// Returns what opening this database did to it.
+    ///
+    /// See `inillucent_engine::recovery::RecoveryReport`. It is repeated here in
+    /// the driver's own shape because a binding reads this and nothing else of
+    /// the engine's types.
+    pub fn recovery(&self) -> Recovery {
+        let report = self.engine.recovery_report();
+        Recovery {
+            recovered: report.recovered,
+            scanned: report.scanned,
+            applied: report.applied,
+            committed: report.committed,
+            losers: report.losers,
+            last_sequence: report.last_sequence,
+            last_lsn: report.last_lsn,
+        }
     }
 
     /// Reads a SQLite file and builds a inillucent database beside it.
@@ -924,32 +998,21 @@ impl Connection<'_> {
 
     /// Refuses a statement that is not a query, for a read-only connection.
     ///
-    /// It asks the engine to *plan* the statement, which succeeds only for a
-    /// query - `plan` reports "is not a read-only statement" for anything else.
-    /// So the classification is the binder's own and cannot be talked past by a
-    /// comment, a case change or leading whitespace, which is what a scan of the
-    /// text would fall to.
+    /// **By the statement's class, from the one list the command surface also
+    /// reads (task-1979, section 5.2).** It used to ask the engine to *plan*
+    /// the statement and refuse on the text of the failure - and `explain`
+    /// answers `Ok` for an `INSERT`, a write pragma, an `ATTACH` and a
+    /// `VACUUM INTO`, so every one of them ran on a read only connection and
+    /// persisted.
     ///
     /// @param sql - the statement
     fn refuse_if_it_writes(&self, sql: &str) -> Result<()> {
-        match self.engine.explain(sql) {
-            Ok(_) => Ok(()),
-            Err(error) => {
-                let classified = self.database.classify(&error);
-                // A statement that failed to *plan* for any other reason - a
-                // missing table, a construct the engine cannot run - is that
-                // failure and not a read-only refusal, and reporting it as one
-                // would tell a caller to reopen the file over a typo.
-                match classified.status {
-                    Status::Syntax if classified.message.contains("not a read-only statement") => {
-                        Err(Error::said(
-                            Status::ReadOnly,
-                            "this connection is read only, and that statement changes something.",
-                        ))
-                    }
-                    _ => Err(classified),
-                }
-            }
+        match inillucent_engine::readonly::admits(sql) {
+            true => Ok(()),
+            false => Err(Error::said(
+                Status::ReadOnly,
+                "this connection is read only, and that statement changes something.",
+            )),
         }
     }
 

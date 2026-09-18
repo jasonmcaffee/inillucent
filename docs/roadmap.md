@@ -150,8 +150,16 @@ unchanged - under 512 MiB resident, p50 within 1.5x and p99 within 2x, identical
 ## 4. Threads
 
 Access from several **processes** works: the same SHARED, RESERVED, PENDING and EXCLUSIVE protocol
-as SQLite, under `PRAGMA locking_mode = normal`, measured over 37 stress rounds with two writing
-processes and no lost writes. Threads inside one process did not.
+as SQLite, under `PRAGMA locking_mode = normal`, which is the default. One writer holds the file at
+a time and a second writer is refused with `busy` after `PRAGMA busy_timeout`. What grades it is
+`crates/inillucent-compat/tests/process_concurrency.rs`, which spawns two real writer processes and
+asserts that the rows in the file equal the commits the engine acknowledged - one process per
+statement and two long-lived ones, under both locking modes, and through `ATTACH`. Threads inside
+one process did not.
+
+The line this replaces claimed two processes and zero lost writes over a stress campaign. That
+number came from `concurrency.rs`, which runs two *sessions* inside one process. Two real processes
+lost 43% of their acknowledged commits on every round until task-1980 (task-1979, section 4).
 
 **Built: `SharedDatabase`, which is serialized mode.** Any number of threads use one database,
 exactly one statement runs at a time, and a transaction holds its turn for its whole life. A web

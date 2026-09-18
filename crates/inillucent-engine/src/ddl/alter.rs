@@ -157,6 +157,17 @@ impl crate::ImportedDatabase {
                     .get(position)
                     .cloned()
                     .ok_or_else(|| refusal("the table that was just found is gone"))?;
+                // A virtual table's storage is its shadow tables, which are
+                // named after it and are not reachable from any row that names
+                // it - see `drop_module_table`.
+                if owner.module.is_some() {
+                    self.drop_module_table(name)?;
+                    self.rebuild_tables()?;
+                    self.refresh_catalog();
+                    self.refresh_vector_indexes();
+                    self.seal()?;
+                    return Ok(Outcome::empty());
+                }
                 // Every row that names the table: the table, its indexes and its
                 // triggers. Collected before anything is removed, because the
                 // list is what decides what to remove.
@@ -208,6 +219,32 @@ impl crate::ImportedDatabase {
                         String::from_utf8_lossy(name)
                     )));
                 };
+                // **A vector index is dropped by dropping the store that holds
+                // it (task-1979, R6).** `CREATE INDEX v ON t USING
+                // inillucent_hnsw (c)` records a virtual table, not an index
+                // row, so the loop below found nothing to forget and the
+                // `release_tree` underneath it was handed the zero root a module
+                // owned index carries: `DROP INDEX v` reported success, removed
+                // nothing, and the planner went on choosing the index for every
+                // query - which then failed, because the module had been told
+                // the statement dropped it.
+                let module = self
+                    .schema
+                    .tables
+                    .get(table_at)
+                    .and_then(|table| table.indexes.get(index_at))
+                    .is_some_and(|index| {
+                        index.origin == inillucent_sql::catalog_view::IndexOrigin::Module
+                    });
+                if module {
+                    self.drop_module_table(name)?;
+                    self.rebuild_tables()?;
+                    self.refresh_catalog();
+                    self.refresh_vector_indexes();
+                    self.sort_covering(table_root);
+                    self.seal()?;
+                    return Ok(Outcome::empty());
+                }
                 let index_root = self
                     .schema
                     .tables
@@ -588,7 +625,18 @@ impl crate::ImportedDatabase {
             else {
                 continue;
             };
+            // **The new column's affinity applies to its default (task-1979,
+            // F4).** `ADD COLUMN c INTEGER DEFAULT '5'` filled every existing
+            // row with the *text* `'5'` while an `INSERT` after it stored the
+            // integer 5, so one column of one table held two storage classes
+            // and `typeof(c)` answered differently per row. SQLite applies the
+            // column's affinity to a default wherever it is used, which is what
+            // makes the two halves agree.
             let value = self.constant_default(&default)?;
+            let value = with_column_affinity(
+                value,
+                info.columns.get(declared).map(|column| column.affinity),
+            );
             if let Some(cell) = from.get_mut(*slot) {
                 *cell = Fill::Constant(value);
             }
@@ -598,18 +646,7 @@ impl crate::ImportedDatabase {
                 *cell = Fill::From(old_rowid);
             }
         }
-        let rows: Vec<Vec<OwnedDatum>> = old_rows
-            .iter()
-            .map(|row| {
-                from.iter()
-                    .map(|source| match source {
-                        Fill::From(at) => row.get(*at).cloned().unwrap_or(OwnedDatum::Null),
-                        Fill::Constant(value) => value.clone(),
-                        Fill::Absent => OwnedDatum::Null,
-                    })
-                    .collect()
-            })
-            .collect();
+        let rows = rows_in_the_new_shape(&old_rows, &from);
         let rows = in_key_order(rows, &columns, key_columns);
         // The rebuild holds owned rows, so it does its own borrow. It runs once
         // per `ALTER TABLE` and is not on any measured path, which is exactly
@@ -655,4 +692,56 @@ impl crate::ImportedDatabase {
         }
         Ok(())
     }
+}
+
+/// Applies a column's affinity to the value its `DEFAULT` evaluates to.
+///
+/// **The same conversion an `INSERT` into that column would do (task-1979,
+/// F4).** `ADD COLUMN c INTEGER DEFAULT '5'` filled every existing row with the
+/// *text* `'5'` while an insert after it stored the integer 5, so one column of
+/// one table held two storage classes and `typeof(c)` answered differently per
+/// row. SQLite applies the column's affinity to a default wherever it is used,
+/// which is what makes the two halves agree.
+///
+/// @param value - what the default evaluated to
+/// @param affinity - the new column's affinity, when it has one
+fn with_column_affinity(
+    value: OwnedDatum,
+    affinity: Option<inillucent_value::Affinity>,
+) -> OwnedDatum {
+    let Some(affinity) = affinity else {
+        return value;
+    };
+    let held = inillucent_value::Value::from(&value);
+    match inillucent_value::affinity::apply_affinity(
+        held,
+        affinity,
+        inillucent_value::TextEncoding::Utf8,
+    ) {
+        Ok(applied) => OwnedDatum::from(applied),
+        Err(_) => value,
+    }
+}
+
+/// Returns every old row rewritten into the new column order.
+///
+/// One pass per row over the plan `rebuild_table_tree` built: a column that was
+/// there comes from its old position, a column that was added takes its
+/// default, and a column the new shape has and nothing fills is NULL.
+///
+/// @param old_rows - the table's rows as it was declared before
+/// @param from - where each column of the new shape gets its value
+fn rows_in_the_new_shape(old_rows: &[Vec<OwnedDatum>], from: &[Fill]) -> Vec<Vec<OwnedDatum>> {
+    old_rows
+        .iter()
+        .map(|row| {
+            from.iter()
+                .map(|source| match source {
+                    Fill::From(at) => row.get(*at).cloned().unwrap_or(OwnedDatum::Null),
+                    Fill::Constant(value) => value.clone(),
+                    Fill::Absent => OwnedDatum::Null,
+                })
+                .collect()
+        })
+        .collect()
 }

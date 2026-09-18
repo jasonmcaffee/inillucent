@@ -311,15 +311,23 @@ impl crate::ImportedDatabase {
             .enumerate()
             .map(|(seq, index)| {
                 let automatic = index.name.starts_with(b"sqlite_autoindex_");
+                // **`v` for an index a module owns, which SQLite has no value
+                // for because it has no such index (task-1979, R19).** It used
+                // to report `c`, the value for an index a `CREATE INDEX`
+                // statement made, and nothing else distinguished the two - so
+                // `inillucent indexes`, which reads `sqlite_master` and finds a
+                // vector index recorded there as a virtual table, had no second
+                // place to look. SQLite's three values keep their meanings.
+                let origin = match index.origin {
+                    inillucent_sql::catalog_view::IndexOrigin::Module => b"v".to_vec(),
+                    _ if automatic => b"pk".to_vec(),
+                    _ => b"c".to_vec(),
+                };
                 vec![
                     OwnedDatum::Int(seq as i64),
                     OwnedDatum::Text(index.name.clone()),
                     OwnedDatum::Int(i64::from(index.unique)),
-                    OwnedDatum::Text(if automatic {
-                        b"pk".to_vec()
-                    } else {
-                        b"c".to_vec()
-                    }),
+                    OwnedDatum::Text(origin),
                     // **The `partial` column, which was a hard zero while a
                     // partial index could not be created.** It can now, and an
                     // application asks this column precisely to find out

@@ -394,14 +394,31 @@ fn a_leftover_database_does_not_reach_the_next_run() {
             .expect("the leftover schema is written");
     }
     assert!(path.exists(), "the run left no database to be inherited");
-    let segment = path.with_file_name(format!(
-        "{}-wal.0000000001",
-        path.file_name().unwrap_or_default().to_string_lossy()
-    ));
+    // **Any segment, not segment one.** A checkpoint rolls the log to the next
+    // sequence and retires the ones below it, and `locking_mode = normal` -
+    // the default since task-1980 - checkpoints after every statement that
+    // wrote. So the segment a finished run leaves behind is whichever sequence
+    // it had reached, and naming 1 made this assertion fail on a case that was
+    // still testing exactly what it says it is.
+    let stem = path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned();
+    let left_behind = std::fs::read_dir(path.parent().unwrap_or(std::path::Path::new(".")))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|entry| {
+            entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(&format!("{stem}-wal."))
+        });
     assert!(
-        segment.exists(),
-        "no log segment at {}, so this case is not checking what it says it is",
-        segment.display()
+        left_behind,
+        "no log segment beside {}, so this case is not checking what it says it is",
+        path.display()
     );
 
     let again = scratch_at("leftover", 0);

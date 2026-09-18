@@ -147,16 +147,42 @@ inillucent --db app.rdb query "SELECT * FROM note" --output json
 
 ```json
 {
-  "status": "ok",
-  "columns": ["id", "body"],
-  "rows": [[1, "hello"]],
-  "total": 1
+  "ok": true,
+  "command": "query",
+  "columns": [
+    {
+      "name": "id",
+      "type": "integer"
+    },
+    {
+      "name": "body",
+      "type": "text"
+    }
+  ],
+  "rows": [
+    [
+      1,
+      "hello"
+    ]
+  ],
+  "row_count": 1,
+  "total": 1,
+  "more": false,
+  "changes": 0,
+  "last_insert_rowid": 0,
+  "elapsed_ms": 0.42,
+  "text": "id  body
+--  -----
+1   hello"
 }
 ```
 
+`elapsed_ms` is whatever the statement took, so it differs on every run; everything else is what the
+command above prints. Each column carries its name and the storage class its values came back as.
 The values are typed rather than rendered as text, `total` is the true row count and does not change
-when `--limit` does, and a failure carries the driver's own status name. Parse that rather than the
-aligned table a terminal prints.
+when `--limit` does, `more` says whether a `--limit` cut the answer short, and a failure carries the
+driver's own status name in place of `ok`. Parse that rather than the aligned table a terminal
+prints, which is also in the object as `text`.
 
 ## The exit codes
 

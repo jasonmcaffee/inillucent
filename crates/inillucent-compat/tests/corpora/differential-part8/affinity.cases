@@ -1,0 +1,27 @@
+# Differential cases, category `affinity`, from task-1979's review of commit 3073058.
+# One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
+# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+aff-001	SELECT '10' < 9, '10' < '9', 10 < '9', '10' = 10, typeof('10'+0)
+aff-002	CREATE TABLE t(a INTEGER); INSERT INTO t VALUES('10'),('9'); SELECT a, typeof(a) FROM t ORDER BY a
+aff-003	CREATE TABLE t(a TEXT); INSERT INTO t VALUES(10),(9); SELECT a, typeof(a) FROM t ORDER BY a
+aff-004	CREATE TABLE t(a TEXT); INSERT INTO t VALUES('10'),('9'); SELECT a FROM t WHERE a < 9 ORDER BY a
+aff-005	CREATE TABLE t(a INTEGER); INSERT INTO t VALUES('abc'); SELECT a, typeof(a) FROM t
+aff-006	CREATE TABLE t(a NUMERIC); INSERT INTO t VALUES('10'),('10.5'),('abc'),(1.0); SELECT a, typeof(a) FROM t
+aff-007	CREATE TABLE t(a REAL); INSERT INTO t VALUES(1),('2'),('x'); SELECT a, typeof(a) FROM t
+aff-008	CREATE TABLE t(a BLOB); INSERT INTO t VALUES(1),('2'); SELECT a, typeof(a) FROM t
+aff-009	CREATE TABLE t(a VARCHAR(10)); INSERT INTO t VALUES(1); SELECT typeof(a) FROM t
+aff-010	CREATE TABLE t(a FLOATING POINT); INSERT INTO t VALUES(1); SELECT typeof(a) FROM t
+aff-011	CREATE TABLE t(a BIGINT); INSERT INTO t VALUES('1'); SELECT typeof(a) FROM t
+aff-012	CREATE TABLE t(a DATETIME); INSERT INTO t VALUES('2020-01-01'); SELECT typeof(a) FROM t
+aff-013	CREATE TABLE t(a,b TEXT); INSERT INTO t VALUES(1,'1'); SELECT a=b, a<b, b<a FROM t
+aff-014	CREATE TABLE t(a INTEGER, b TEXT); INSERT INTO t VALUES(1,'1'); SELECT a=b FROM t
+aff-015	SELECT 1 < 'a', 'a' < x'00', x'00' < 1, NULL < 1, 1.5 < 2
+aff-016	SELECT hex(x'01') , x'01' = x'01', x'01' < x'02', x'0101' > x'02'
+aff-017	CREATE TABLE t(a); INSERT INTO t VALUES(1),(2.5),('a'),(x'00'),(NULL); SELECT typeof(a) FROM t ORDER BY a
+aff-018	CREATE TABLE t(a); INSERT INTO t VALUES(1),(1.0),('1'); SELECT DISTINCT a, typeof(a) FROM t ORDER BY typeof(a), a
+aff-019	SELECT '1' = 1, '1.0' = 1.0, '1' = 1.0, CAST('1' AS INTEGER) = 1
+aff-020	CREATE TABLE t(a INTEGER PRIMARY KEY, b); INSERT INTO t VALUES('5','x'); SELECT a, typeof(a) FROM t
+aff-021	SELECT 2 = 2.0, 2 IS 2.0, typeof(2), typeof(2.0)
+aff-022	CREATE TABLE t(a INT); INSERT INTO t VALUES(9223372036854775807),('9223372036854775808'); SELECT a, typeof(a) FROM t
+aff-023	SELECT '  10  ' + 0, '10abc' + 0, 'abc' + 0, '1e3' + 0, '0x10' + 0, typeof('1e3'+0)
+aff-024	SELECT '+5'+0, '-5'+0, '. 5'+0, '.5'+0, '5.'+0

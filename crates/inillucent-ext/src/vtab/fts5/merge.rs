@@ -64,6 +64,11 @@ impl Fts5Table {
                     &[Value::owned_text(name.as_bytes())?, value],
                 )
             }
+            // **Answered rather than always refused (task-1979, R5).** The
+            // message named the two kinds of table the command is for and the
+            // code never checked whether this was one of them, so the command
+            // was refused on exactly the tables SQLite accepts it on.
+            "delete-all" if self.stores_no_rows() => self.delete_all(context),
             "delete-all" => Err(failure(
                 "'delete-all' may only be used with a contentless or external content fts5 table",
             )),
@@ -79,6 +84,14 @@ impl Fts5Table {
     /// possible at all, and what makes it the repair for an index that has
     /// drifted.
     fn rebuild(&mut self, context: &mut Context<'_>) -> DbResult<()> {
+        // **A contentless table has nothing to rebuild from**, which is
+        // SQLite's own refusal word for word: the document text was never
+        // stored, so there is no truth to derive the index from again.
+        if self.contentless {
+            return Err(failure(
+                "'rebuild' may not be used with a contentless fts5 table",
+            ));
+        }
         // Every row is about to go, staged ones included: a doclist left in
         // the buffer would be written back after the wipe. This is also the
         // one place every remaining `%_data` term row - the ones an older
@@ -89,7 +102,6 @@ impl Fts5Table {
             held.doclists.clear();
             held.bytes = 0;
         }
-        let width = self.options.columns.len();
         let offsets = self.offsets(context);
         let mut rows: Vec<(i64, Vec<Value<'static>>)> = Vec::new();
         let suffix = self.content.clone();
@@ -103,6 +115,38 @@ impl Fts5Table {
             ));
             Ok(true)
         })?;
+        self.wipe_index(context)?;
+        for (rowid, values) in rows {
+            self.add(context, rowid, &values)?;
+        }
+        Ok(())
+    }
+
+    /// Empties an index that stores no document text of its own.
+    ///
+    /// **`delete-all`, which was refused on every table (task-1979, R5).** It
+    /// is the only way to empty a contentless table, because a row cannot be
+    /// deleted one at a time without the text that produced its terms. An
+    /// external content table takes it for the same reason and then rebuilds
+    /// from the owner.
+    ///
+    /// @param context - the running statement
+    pub(crate) fn delete_all(&mut self, context: &mut Context<'_>) -> DbResult<()> {
+        if let Ok(mut held) = self.pending.lock() {
+            held.doclists.clear();
+            held.bytes = 0;
+        }
+        self.wipe_index(context)
+    }
+
+    /// Removes every doclist, every dictionary row, every size and the totals.
+    ///
+    /// The body `rebuild` and `delete_all` share; the difference between the
+    /// two is only what is put back afterwards.
+    ///
+    /// @param context - the running statement
+    fn wipe_index(&mut self, context: &mut Context<'_>) -> DbResult<()> {
+        let width = self.options.columns.len();
         let mut doclists = Vec::new();
         self.shadows.scan(context, b"data", |rowid, _| {
             if rowid != TOTALS {
@@ -139,11 +183,7 @@ impl Fts5Table {
         for rowid in sizes {
             self.shadows.delete_row(context, b"docsize", rowid)?;
         }
-        put_totals(context, &self.shadows, &Totals::empty(width))?;
-        for (rowid, values) in rows {
-            self.add(context, rowid, &values)?;
-        }
-        Ok(())
+        put_totals(context, &self.shadows, &Totals::empty(width))
     }
 
     /// Adds one row to the content and to the index.
@@ -158,7 +198,7 @@ impl Fts5Table {
         // **Nothing is stored when the rows are somebody else's.** An
         // external content table's rows are written through the owner, and a
         // copy written here would be a second, diverging one.
-        if !self.borrows_rows() {
+        if !self.stores_no_rows() {
             let mut content = vec![Value::Null];
             for index in 0..width {
                 content.push(values.get(index).cloned().unwrap_or(Value::Null));
@@ -368,6 +408,16 @@ impl Fts5Table {
 
     /// Removes one row from the content and from every doclist it is in.
     pub(crate) fn remove(&mut self, context: &mut Context<'_>, rowid: i64) -> DbResult<()> {
+        // **A contentless table cannot be deleted from**, because un-posting a
+        // row needs the text that produced its terms and that text was never
+        // stored. SQLite refuses with this sentence; `delete-all` is what a
+        // contentless table has instead.
+        if self.contentless {
+            return Err(failure(format!(
+                "cannot DELETE from contentless fts5 table: {}",
+                String::from_utf8_lossy(&self.name)
+            )));
+        }
         let offsets = self.offsets(context);
         let suffix = self.content.clone();
         let Some(content) = self.shadows.read_row(context, &suffix, rowid)? else {
@@ -449,7 +499,7 @@ impl Fts5Table {
             None => vec![0; width],
         };
         self.shadows.delete_row(context, b"docsize", rowid)?;
-        if !self.borrows_rows() {
+        if !self.stores_no_rows() {
             self.shadows.delete_row(context, b"content", rowid)?;
         }
         let mut totals = buffered_totals(context, &self.shadows, &self.pending, width);

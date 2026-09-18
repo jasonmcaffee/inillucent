@@ -1,0 +1,15 @@
+# Differential cases, category `misc2`, from task-1979's review of commit 3073058.
+# One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
+# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+ms-001	CREATE TABLE t(a); INSERT INTO t VALUES(1); INSERT INTO t VALUES(2); SELECT count(*) FROM t
+ms-002	SELECT 1; SELECT 2
+ms-003	CREATE TABLE t(a); INSERT INTO t VALUES(1) ; ; SELECT a FROM t
+ms-004	CREATE TABLE t(a); INSERT INTO t SELECT 1 UNION ALL SELECT 2; SELECT count(*) FROM t
+ms-005	CREATE TABLE t(a); INSERT INTO t VALUES(1),(2); UPDATE t SET a=a*10 WHERE a=1 RETURNING a
+ms-006	CREATE TABLE t(a,b); INSERT INTO t VALUES(1,2); UPDATE t SET (a,b)=(3,4); SELECT * FROM t
+ms-007	CREATE TABLE t(a); INSERT INTO t VALUES(1),(2); DELETE FROM t ORDER BY a LIMIT 1; SELECT count(*) FROM t
+ms-008	CREATE TABLE t(a); INSERT INTO t VALUES(1),(2),(3); UPDATE t SET a=0 WHERE rowid IN (SELECT rowid FROM t ORDER BY a LIMIT 2); SELECT count(*) FROM t WHERE a=0
+ms-009	CREATE TABLE t(a); INSERT INTO t VALUES(1); SELECT a FROM t AS x(y)
+ms-010	SELECT * FROM (SELECT 1 AS a) AS x(y)
+ms-011	CREATE TABLE t(a); INSERT INTO t VALUES(1),(2); SELECT a FROM t WHERE a=+1
+ms-012	SELECT 1 AS "x y", 2 AS [z], 3 AS `q`

@@ -1,0 +1,11 @@
+# Differential cases, category `default`, from task-1979's review of commit 3073058.
+# One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
+# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+dfa-001	CREATE TABLE t(a INTEGER DEFAULT '5'); INSERT INTO t DEFAULT VALUES; SELECT a, typeof(a) FROM t
+dfa-002	CREATE TABLE t(a TEXT DEFAULT 5); INSERT INTO t DEFAULT VALUES; SELECT a, typeof(a) FROM t
+dfa-003	CREATE TABLE t(a); INSERT INTO t VALUES(1); ALTER TABLE t ADD COLUMN b TEXT DEFAULT 5; SELECT b, typeof(b) FROM t
+dfa-004	CREATE TABLE t(a); INSERT INTO t VALUES(1); ALTER TABLE t ADD COLUMN b REAL DEFAULT '5'; SELECT b, typeof(b) FROM t
+dfa-005	CREATE TABLE t(a); INSERT INTO t VALUES(1); ALTER TABLE t ADD COLUMN b INTEGER DEFAULT 5; SELECT b, typeof(b) FROM t
+dfa-006	CREATE TABLE t(a INTEGER DEFAULT (1+1)); INSERT INTO t DEFAULT VALUES; SELECT a FROM t
+dfa-007	CREATE TABLE t(a NUMERIC DEFAULT '1.0'); INSERT INTO t DEFAULT VALUES; SELECT a, typeof(a) FROM t
+dfa-008	CREATE TABLE t(a,b INTEGER); INSERT INTO t(a) VALUES(1); SELECT b, typeof(b) FROM t

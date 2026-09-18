@@ -1033,6 +1033,102 @@ pub fn segment_path(base: &str, directory: Option<&std::path::Path>, sequence: u
     }
 }
 
+/// Where the log beside a database currently ends, as the files say.
+///
+/// **Read from the directory rather than from a connection's memory**, because
+/// the position a connection remembers was discovered when it opened the file
+/// and another process may have appended since. Two processes that each
+/// computed the append position at `open` computed the same one and each wrote
+/// over the other's records - 120 acknowledged inserts, 60 rows present
+/// (task-1979, section 4).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LogTail {
+    /// The highest segment beside the database that belongs to it.
+    pub sequence: u64,
+    /// The stream position past that segment's last byte.
+    pub next_lsn: u64,
+}
+
+/// Returns where the log beside `base` ends, or nothing when no segment of it
+/// is there.
+///
+/// The walk starts at `from` and stops at the first sequence with no file,
+/// because segments are contiguous: `read_chain` stops a chain at a gap for the
+/// same reason, and a numbered file past a gap is a leftover rather than part
+/// of this log.
+///
+/// **Only a caller holding the file lock may act on the answer.** Without the
+/// lock another process can append between the read and the use, which is the
+/// defect this exists to close rather than one to repeat one layer up.
+///
+/// @param vfs - the file system the segments live on
+/// @param base - the database file the segments are named after
+/// @param uuid - the database's identity; a segment that disagrees is ignored
+/// @param from - the lowest sequence to look at
+pub fn tail_on_disk(
+    vfs: &dyn Vfs,
+    base: &DbPath,
+    uuid: u128,
+    from: u64,
+) -> DbResult<Option<LogTail>> {
+    let name = base.as_path().to_string_lossy().to_string();
+    let directory = base.as_path().parent().map(std::path::Path::to_path_buf);
+    let mut found: Option<LogTail> = None;
+    let mut sequence = from.max(1);
+    loop {
+        let path = segment_path(&name, directory.as_deref(), sequence);
+        let there = vfs
+            .access(&path, inillucent_vfs::AccessMode::Exists)
+            .map_err(inillucent_vfs::VfsError::into_db_error)?;
+        if !there {
+            return Ok(found);
+        }
+        match read_tail(vfs, &path, uuid)? {
+            Some(tail) => found = Some(tail),
+            // A file at this sequence that is not a segment of this database
+            // ends the walk: the chain cannot continue through it, and
+            // reporting a later one as this log's tail would name a position
+            // no record of this log occupies.
+            None => return Ok(found),
+        }
+        sequence = sequence.saturating_add(1);
+    }
+}
+
+/// Returns where one segment file ends, or nothing when it is not a segment of
+/// this database.
+///
+/// @param vfs - the file system
+/// @param path - the segment file
+/// @param uuid - the database's identity
+fn read_tail(vfs: &dyn Vfs, path: &DbPath, uuid: u128) -> DbResult<Option<LogTail>> {
+    let file = vfs
+        .open(path, OpenOptions::of_kind(FileKind::Wal))
+        .map_err(inillucent_vfs::VfsError::into_db_error)?;
+    let size = file
+        .file_size()
+        .map_err(inillucent_vfs::VfsError::into_db_error)?;
+    if size < segment::HEADER_BYTES as u64 {
+        return Ok(None);
+    }
+    let mut head = vec![0u8; segment::HEADER_BYTES];
+    if file.read_exact_at(0, &mut head).is_err() {
+        return Ok(None);
+    }
+    let Ok(header) = SegmentHeader::decode(&head) else {
+        return Ok(None);
+    };
+    if header.uuid != uuid {
+        return Ok(None);
+    }
+    Ok(Some(LogTail {
+        sequence: header.sequence,
+        next_lsn: header
+            .first_lsn
+            .saturating_add(size.saturating_sub(segment::HEADER_BYTES as u64)),
+    }))
+}
+
 /// Opens or creates one segment and writes its header.
 ///
 /// @param vfs - the file system

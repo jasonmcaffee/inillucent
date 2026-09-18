@@ -425,6 +425,9 @@ fn translate_comparison(
                     op: *op,
                     left,
                     right,
+                    // The connection's own `Limit::Length`, carried the same
+                    // way a scalar call's is.
+                    length_limit: params.context().length_limit,
                 },
             }
         }
@@ -765,7 +768,16 @@ pub(crate) fn translate_post(
     params: &Params,
     group_width: usize,
 ) -> DbResult<Expr> {
-    if select.aggregates.is_empty() {
+    // **A query that groups reads the grouped row, aggregate or not
+    // (task-1979, F1).** This asked only whether the statement had an
+    // aggregate, so `SELECT g FROM t GROUP BY g` translated its result column
+    // against the *input* row while the operator underneath emits the grouped
+    // one - keys first - and the column index therefore pointed past the end.
+    // The answer was one NULL per group: two NULL rows for `a` and `b`, exit 0,
+    // on a statement every ORM emits. It was hidden from the suite because
+    // `ordering.rs` groups on an indexed key, where the plan takes a different
+    // path and the answer is right.
+    if select.aggregates.is_empty() && select.group_by.is_empty() {
         return translate_scan(expr, space, params);
     }
     translate(

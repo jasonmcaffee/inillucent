@@ -1,0 +1,15 @@
+# Differential cases, category `misc`, from task-1979's review of commit 3073058.
+# One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
+# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+msc-001	SELECT iif(1,'a','b'), iif(0,'a','b'), iif(NULL,'a','b')
+msc-002	SELECT CASE WHEN 1 THEN 'a' WHEN 1 THEN 'b' END, CASE 2 WHEN 1 THEN 'a' END
+msc-003	SELECT typeof(1=1), 1=1, 1<>1, NOT 1, NOT 0, NOT 'a'
+msc-004	SELECT -'5', +'5', typeof(-'5'), - -5
+msc-005	SELECT 'a' IN ('a','b'), 'a' IN ('A'), 1 IN ('1')
+msc-006	SELECT sqlite_version() IS NOT NULL, length(sqlite_version())>0
+msc-007	SELECT changes(), total_changes()
+msc-008	CREATE TABLE t(a); INSERT INTO t VALUES(1),(2); UPDATE t SET a=a; SELECT changes()
+msc-009	SELECT likelihood(1,0.5), likely(1), unlikely(1)
+msc-010	SELECT nullif(1,1) IS NULL, coalesce(NULL,NULL,NULL) IS NULL
+msc-011	SELECT typeof(CAST(NULL AS TEXT)), CAST(NULL AS TEXT) IS NULL
+msc-012	SELECT 1 == 1, 1 != 2, 'a' || NULL IS NULL

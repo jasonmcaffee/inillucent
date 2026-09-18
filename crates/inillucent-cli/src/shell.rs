@@ -241,10 +241,32 @@ impl Shell {
     ///
     /// @param path - the file, or an in-memory name
     pub fn open_one(path: &str) -> Result<Opened, String> {
+        Shell::open_one_as(path, false)
+    }
+
+    /// Opens one database, read only when the surface asked for it.
+    ///
+    /// @param path - the file, or an in-memory name
+    /// @param read_only - whether this connection may write the file
+    pub fn open_one_as(path: &str, read_only: bool) -> Result<Opened, String> {
+        Shell::open_one_reporting(path, read_only).map_err(described)
+    }
+
+    /// [`Shell::open_one_as`], handing back the engine's own error.
+    ///
+    /// @param path - the file, or an in-memory name
+    /// @param read_only - whether this connection may write the file
+    pub fn open_one_reporting(
+        path: &str,
+        read_only: bool,
+    ) -> Result<Opened, inillucent_base::DbError> {
         // **The detail, not only the code.** An open that fails with "bad
         // parameter or other API misuse" and nothing else is an error nobody
         // can act on; the detail says which part of the file could not be read.
-        let database = Database::open(path).map_err(described)?;
+        let database = match read_only {
+            true => Database::open_read_only(path, inillucent_driver::DEFAULT_FRAMES),
+            false => Database::open(path),
+        }?;
         // **The shell adds `fsdir`, and the library does not.** A table-valued
         // function over the file system belongs to a program that asked for
         // one; the reference draws the same line, with `fsdir` in `shell.c`.
@@ -253,9 +275,7 @@ impl Shell {
                 as std::sync::Arc<dyn inillucent_driver::vtab::Module>,
             std::sync::Arc::new(inillucent_driver::vtab::zipfile::ZipFileModule),
         ] {
-            database
-                .register_module(module)
-                .map_err(|error| error.message().to_string())?;
+            database.register_module(module)?;
         }
         let session = database.session().session();
         // **The reference's shell turns this on and this one has to as well.**
@@ -281,9 +301,31 @@ impl Shell {
 
     /// Opens a shell on a database file, or on an in-memory one.
     pub fn open(path: &str) -> Result<Shell, String> {
+        Shell::open_as(path, false)
+    }
+
+    /// Opens a shell on a database file, read only when the surface asked.
+    ///
+    /// @param path - the file, or an in-memory name
+    /// @param read_only - whether this connection may write the file
+    pub fn open_as(path: &str, read_only: bool) -> Result<Shell, String> {
+        Shell::open_reporting(path, read_only).map_err(described)
+    }
+
+    /// Opens a shell, handing back the engine's own error.
+    ///
+    /// **So a caller can report the status the engine gave (task-1979, C6).**
+    /// `open_as` folds the failure into a sentence, and the command surface
+    /// then reported every open failure as `io` - including a file another
+    /// process holds, which is `busy` and is the one an agent or a script can
+    /// act on by retrying.
+    ///
+    /// @param path - the file, or an in-memory name
+    /// @param read_only - whether this connection may write the file
+    pub fn open_reporting(path: &str, read_only: bool) -> Result<Shell, inillucent_base::DbError> {
         let mut connections: Vec<Option<Opened>> = (0..CONNECTIONS).map(|_| None).collect();
         if let Some(first) = connections.first_mut() {
-            *first = Some(Shell::open_one(path)?);
+            *first = Some(Shell::open_one_reporting(path, read_only)?);
         }
         Ok(Shell {
             cancel: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -444,6 +486,29 @@ impl Shell {
             .and_then(|held| held.as_ref())
             .or_else(|| self.connections.first().and_then(|held| held.as_ref()))
             .expect("the shell always holds one open database")
+    }
+
+    /// Returns what opening the active database did to it.
+    ///
+    /// See `inillucent_driver::Recovery`; the caller decides whether to report
+    /// it, which for the command surface is "only when it says something
+    /// happened".
+    pub fn recovery(&self) -> inillucent_driver::Recovery {
+        let report = self.open_slot().database.recovery_report();
+        inillucent_driver::Recovery {
+            recovered: report.recovered,
+            scanned: report.scanned,
+            applied: report.applied,
+            committed: report.committed,
+            losers: report.losers,
+            last_sequence: report.last_sequence,
+            last_lsn: report.last_lsn,
+        }
+    }
+
+    /// Returns which segment of its log the active database is writing.
+    pub fn log_sequence(&self) -> u64 {
+        self.open_slot().database.log_sequence()
     }
 
     /// Returns which slot statements run on.
@@ -848,20 +913,17 @@ impl Shell {
             .map_err(|error| reason(&error))
     }
 
-    /// Returns whether a statement changes something, as the binder sees it.
+    /// Returns whether a statement changes something, by its class.
     ///
-    /// A statement that fails to plan for any other reason - a missing table, a
-    /// construct the engine has not built - answers `false`, so it reaches the
-    /// ordinary path and is reported as the failure it actually is. Telling a
-    /// caller to reopen the file over a typo would be worse than not having the
-    /// flag.
+    /// **From `inillucent_driver::readonly`, the same answer the command
+    /// surface and the driver use (task-1979, section 5.2).** It used to ask
+    /// the engine to plan the statement and read the text of the failure, and
+    /// `explain` answers `Ok` for an `INSERT`, a write pragma, an `ATTACH` and
+    /// a `VACUUM INTO` - so this reported that none of them writes.
     ///
     /// @param sql - the statement
     pub fn writes(&self, sql: &str) -> bool {
-        match self.connection().explain(sql) {
-            Ok(_) => false,
-            Err(error) => error.message().contains("not a read-only statement"),
-        }
+        !inillucent_driver::readonly::admits(sql)
     }
 
     /// Returns one column of one row, as text.

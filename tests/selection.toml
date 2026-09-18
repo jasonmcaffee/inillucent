@@ -439,6 +439,11 @@ kind = "test"
 name = "hostile"
 tier = "engine"
 covers = ["inillucent-engine", "inillucent-ext"]
+# The depth and value-bound cases drive the built binaries, because what they
+# assert is that a statement the parser accepts cannot end the process and that
+# a refusal comes before the allocation - neither of which an in-process case on
+# the harness's own thread can see (task-1979, sections 5.3 and 5.4).
+requires = ["programs"]
 
 [[target]]
 package = "inillucent-compat"
@@ -895,6 +900,14 @@ kind = "test"
 name = "fts5"
 tier = "differential"
 covers = ["inillucent-engine"]
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "fts5_parity"
+tier = "differential"
+covers = ["inillucent-ext"]
 requires = ["oracle"]
 
 [[target]]
@@ -1375,6 +1388,39 @@ covers = ["inillucent-engine"]
 # The one durability shape nothing exercised: the operating system ends a real
 # writer process and the file is reopened from the parent. Every other campaign
 # cuts at a fault the simulated file system injects.
+requires = ["programs"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "differential_part8"
+tier = "differential"
+covers = ["inillucent-sql", "inillucent-exec", "inillucent-engine"]
+# The 644 statements task-1979 asked both engines, run from the tree with an
+# allow list of the defects that are still open - and a check that the allow
+# list has no entry that now agrees.
+requires = ["oracle", "programs"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "readonly_pragmas"
+tier = "engine"
+covers = ["inillucent-engine", "inillucent-sql"]
+# The two lists a read only connection decides a pragma by have to cover the
+# pragma register exactly: one in neither is decided by whichever branch the
+# filter falls through to (task-1979, section 5.2).
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "process_concurrency"
+tier = "durability"
+covers = ["inillucent-engine", "inillucent-pool", "inillucent-wal"]
+# Two real writer processes on one file, which no suite in the tree ran: rows
+# present must equal commits acknowledged, under both locking modes, through
+# ATTACH, and with a read only process reading a file a writer holds
+# (task-1979, section 4).
 requires = ["programs"]
 
 [[target]]

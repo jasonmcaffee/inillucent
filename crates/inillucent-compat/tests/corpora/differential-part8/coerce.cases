@@ -1,0 +1,15 @@
+# Differential cases, category `coerce`, from task-1979's review of commit 3073058.
+# One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
+# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+s2n-001	SELECT '.5'+0, '.0'+0, '.'+0, '-.5'+0, '+.5'+0, '.5e2'+0
+s2n-002	SELECT '0.5'+0, '00.5'+0, '5e-1'+0, '5E-1'+0, ' .5 '+0
+s2n-003	SELECT typeof('.5'+0), typeof('.5'*1), '.5'*2, '.5'||''
+s2n-004	SELECT abs('.5'), round('.5'), '.5' > 0, '.5' + '.5'
+s2n-005	CREATE TABLE t(a NUMERIC); INSERT INTO t VALUES('.5'); SELECT a, typeof(a) FROM t
+s2n-006	CREATE TABLE t(a REAL); INSERT INTO t VALUES('.5'); SELECT a, typeof(a) FROM t
+s2n-007	CREATE TABLE t(a INTEGER); INSERT INTO t VALUES('.5'); SELECT a, typeof(a) FROM t
+s2n-008	SELECT '1e'+0, '1e+'+0, 'e1'+0, 'inf'+0, 'nan'+0, '0x1'+0
+s2n-009	SELECT '9223372036854775807'+0, '9223372036854775808'+0, typeof('9223372036854775808'+0)
+s2n-010	SELECT CAST('.5' AS INTEGER), CAST('.9' AS INTEGER), CAST(' .5' AS REAL)
+s2n-011	SELECT max('.5', 0), min('.5', 0), '.5' BETWEEN 0 AND 1
+s2n-012	CREATE TABLE t(a INTEGER); INSERT INTO t VALUES(1); SELECT count(*) FROM t WHERE a > '.5'

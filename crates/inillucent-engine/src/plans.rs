@@ -80,6 +80,13 @@ pub(crate) enum Cached {
     Program(Vec<(String, i64, i64, String, String)>),
     /// An insert into a virtual table, which the module applies.
     VirtualInsert(Box<inillucent_sql::dml::BoundInsert>),
+    /// An insert into `sqlite_schema` under `PRAGMA writable_schema`.
+    ///
+    /// It writes a catalog row through the same `record` every `CREATE` uses,
+    /// rather than through the ordinary insert path: the catalog tree has four
+    /// columns `sqlite_schema` does not declare, and a row written without them
+    /// names no tree. See `insert_into_schema` for what a dump needs it for.
+    SchemaInsert(Box<inillucent_sql::dml::BoundInsert>),
     /// A delete from a virtual table, with the query that finds its rowids.
     ///
     /// A module owns its storage, so the only handle on one of its rows is the

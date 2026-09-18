@@ -1,0 +1,11 @@
+# Differential cases, category `generated`, from task-1979's review of commit 3073058.
+# One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
+# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+gen-001	CREATE TABLE t(a INTEGER, b INTEGER AS (a*2)); INSERT INTO t(a) VALUES(3); SELECT a,b FROM t
+gen-002	CREATE TABLE t(a INTEGER, b INTEGER GENERATED ALWAYS AS (a*2) STORED); INSERT INTO t(a) VALUES(3); SELECT a,b FROM t
+gen-003	CREATE TABLE t(a INTEGER, b TEXT AS (a||'x') VIRTUAL); INSERT INTO t(a) VALUES(3); SELECT b, typeof(b) FROM t
+gen-004	CREATE TABLE t(a INTEGER, b INTEGER AS (a*2)); INSERT INTO t(a,b) VALUES(3,1)
+gen-005	CREATE TABLE t(a INTEGER, b INTEGER AS (a*2)); INSERT INTO t(a) VALUES(3); UPDATE t SET a=5; SELECT a,b FROM t
+gen-006	CREATE TABLE t(a INTEGER, b INTEGER AS (a*2) STORED); CREATE INDEX i ON t(b); INSERT INTO t(a) VALUES(3),(1); SELECT a FROM t WHERE b=2
+gen-007	CREATE TABLE t(a INTEGER, b INTEGER AS (a*2)); INSERT INTO t(a) VALUES(3); SELECT * FROM t
+gen-008	CREATE TABLE t(a INTEGER, b AS (a*2)); INSERT INTO t(a) VALUES('x'); SELECT b, typeof(b) FROM t

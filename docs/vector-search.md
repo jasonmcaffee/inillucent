@@ -20,11 +20,34 @@ CREATE TABLE passage (
 
 CREATE INDEX passage_v ON passage USING inillucent_hnsw (v);
 
+INSERT INTO passage (source, body, v)
+VALUES ('handbook.md', 'the discount applies here', '[0.10, -0.25, 0.81, ...]');
+
 SELECT id, body
 FROM   passage
 ORDER  BY vector_distance_cos(v, ?1)
 LIMIT  10;
 ```
+
+### Writing a vector
+
+A `VECTOR(N)` column holds N finite 32-bit floats. Three spellings reach it, and they store the same
+bytes:
+
+| | |
+|---|---|
+| a JSON array of numbers | `'[0.10, -0.25, 0.81]'` into a `VECTOR(3)` column, which is pgvector's own spelling |
+| a blob of little-endian `f32` | `x'cdcccc3d0000803e...'`, which is what the column stores and what `hex(v)` prints |
+| a parameter | `--params '[[0.10, -0.25, 0.81]]'` on the command line, and a byte string from a driver |
+
+The JSON form is also what the distance functions read, so `vector_distance_cos(v, '[1,0,0]')` works
+against a literal as well as against a bound parameter.
+
+**Anything else is refused where it is written.** A vector of the wrong width, a value that is not a
+vector at all, and a component that is NaN or infinite each report a `constraint` error naming the
+column. That is deliberate: a NaN component makes every distance against the row NaN, sorts it ahead
+of every real neighbour, and makes a later `CREATE INDEX` fail, so the write is the last place it can
+be caught by the application that made it.
 
 `CREATE INDEX ... USING inillucent_hnsw (v)` builds a store over the column and backfills the rows
 already in the table. It is kept in step by the engine applying a statement's row images to the index
@@ -167,8 +190,11 @@ hold, which is the exact judgement coverage weighting depends on.
 
 ## Hybrid retrieval
 
-The two result lists are fused into one. Reciprocal rank fusion is the default; two score based
-fusions are also available and were measured against it.
+The two result lists are fused into one. The default is a normalised score fusion: each list is
+rescaled onto its own range and the two are added with a weight of 0.35 on the vector side, adapted
+per query between 0.05 and 0.95 from the query's own shape. Reciprocal rank fusion and a convex
+combination are also available and were measured against it; the normalised score fusion won on every
+hybrid metric of the graded corpus, which is why it is the one that ships.
 
 Fusing is what lets one query answer both `PROJ-1932` and "how does the release process work". The
 graded comparison in [Retrieval quality](retrieval-quality.md) runs the whole pipeline, not either
@@ -229,6 +255,33 @@ whatever this is set to.
 - **The index probe orders by the metric the index was built under**, cosine by default and L2 when
   the index says `WITH (metric = 'l2')`. The distance functions answer for every metric whether or
   not an index does; an ordering by one the index was not built under plans as a scan.
+- **Deleting and reinserting the same rows grows the file, and `VACUUM` is what gives the space
+  back.** Measured on 2,000 rows of `VECTOR(16)` with a `USING inillucent_hnsw` index, where each
+  cycle deletes 1,000 rows and reinserts the same 1,000 in one transaction, checkpointing after
+  each:
+
+  | after | bytes |
+  |---|---|
+  | the build | 1,605,632 |
+  | 1 cycle | 2,064,384 |
+  | 3 cycles | 4,390,912 |
+  | 5 cycles | 5,308,416 |
+  | 10 cycles | 8,880,128 |
+
+  The row count is 2,000 at every measurement and recall is unaffected. `compact` does not shrink
+  the file - it writes a new generation, so the file grows again, to 9,666,560 - and
+  `drop-old-generations` frees b-tree pages without returning them to the operating system. The
+  sequence that reclaims is all three in order:
+
+  ```sql
+  INSERT INTO c_v(c_v) VALUES('compact');
+  INSERT INTO c_v(c_v) VALUES('drop-old-generations');
+  VACUUM;
+  ```
+
+  After it the file is **1,966,080 bytes, which is a fresh build of the same 2,000 rows to the
+  byte**. It was 2.5 times a fresh build until task-1980 stopped `VACUUM` writing a second copy of
+  every shadow table.
 
 ## Where to go next
 

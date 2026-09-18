@@ -173,21 +173,31 @@ fn own_answer(name: &str, sql: &'static str) -> OwnedDatum {
     statement.row().first().expect("one column").clone()
 }
 
-/// `page_size`, `locking_mode` and the default `cache_size` are measured,
-/// permanent design choices, not spellings this engine got wrong.
+/// `page_size` and the default `cache_size` are measured, permanent design
+/// choices, not spellings this engine got wrong; `locking_mode` is pinned here
+/// too, and agrees with the reference.
 ///
 /// `docs/feature-comparison.md` and `docs/sql.md` record all three: a 32 KiB
 /// page against the reference's 4 KiB cost the weighted performance gate
-/// 3.83x against 2.60x when 4096 was tried; `exclusive` locking put the
-/// headline at 3.83x against a 3.00x bar for `normal`; and the 128 MiB default
+/// 3.83x against 2.60x when 4096 was tried; and the 128 MiB default
 /// pool against SQLite's 2 MiB (`-131072` against `-2000`) is the same
 /// `cache_size` a caller can still set to whatever they want - it is the
 /// untouched *default* that differs, 64x, and is measured all through the
 /// "Where the memory goes" section. Asking the differential harness to agree
-/// on any of the three would fail on a difference this engine chose on
+/// on either would fail on a difference this engine chose on
 /// purpose and measured the cost of choosing otherwise - so this pins this
 /// engine's own answer instead, which turns red if any of the three ever
 /// moves without the documents being updated to match.
+///
+/// **`locking_mode` was the third difference and is no longer one
+/// (task-1980).** It answered `exclusive`, chosen because the weighted gate
+/// read 3.83x with it against 3.03x with `normal`. Under `exclusive` a
+/// connection never releases the file between statements, so a second process
+/// either waits out the whole life of the first or reads state from before it -
+/// and two writer processes lost 43% of their acknowledged commits on every
+/// round (task-1979, section 4). The default is `normal`, which is what SQLite
+/// answers, and `PRAGMA locking_mode = exclusive` is still a real switch for a
+/// program that never opens a second connection.
 #[test]
 fn the_documented_pager_choices_are_what_was_measured() {
     assert_eq!(
@@ -197,8 +207,9 @@ fn the_documented_pager_choices_are_what_was_measured() {
     );
     assert_eq!(
         own_answer("pager-locking-mode", "PRAGMA locking_mode"),
-        OwnedDatum::Text(b"exclusive".to_vec()),
-        "PRAGMA locking_mode is a measured, documented choice - see docs/feature-comparison.md"
+        OwnedDatum::Text(b"normal".to_vec()),
+        "PRAGMA locking_mode is `normal` so a second process can open the file - see \
+         docs/feature-comparison.md and crates/inillucent-compat/tests/process_concurrency.rs"
     );
     assert_eq!(
         own_answer("pager-cache-size", "PRAGMA cache_size"),

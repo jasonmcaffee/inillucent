@@ -976,3 +976,301 @@ fn an_ivfflat_takes_its_own_settings_and_refuses_another() {
         "a structure that does not exist is refused"
     );
 }
+
+/// A `VECTOR(N)` column refuses a component that is not a finite number.
+///
+/// **The byte length used to be the only check (task-1979, R8).** A NaN
+/// component was stored, every distance against that row was NaN, NaN sorts
+/// below every real number in this engine's ordering, and the row therefore
+/// came back ahead of every real neighbour of an exhaustive
+/// `ORDER BY vector_distance_cos`. It also made `CREATE INDEX` fail, because
+/// the HNSW builder refuses one - which is how R1 was reached with no crash.
+#[test]
+fn a_vector_column_refuses_a_component_that_is_not_finite() {
+    let held = database("finite");
+    let connection = held.session();
+    connection
+        .execute_batch("CREATE TABLE e (id INTEGER PRIMARY KEY, v VECTOR(4))")
+        .expect("the table is created");
+    connection
+        .execute_batch(&format!(
+            "INSERT INTO e(id, v) VALUES (1, {})",
+            literal(&[1.0, 2.0, 3.0, 4.0])
+        ))
+        .expect("a finite vector is stored");
+    for wrong in [
+        format!(
+            "INSERT INTO e(id, v) VALUES (2, {})",
+            literal(&[f32::NAN, 1.0, 1.0, 1.0])
+        ),
+        format!(
+            "INSERT INTO e(id, v) VALUES (3, {})",
+            literal(&[1.0, f32::INFINITY, 1.0, 1.0])
+        ),
+        format!(
+            "INSERT INTO e(id, v) VALUES (4, {})",
+            literal(&[1.0, 1.0, f32::NEG_INFINITY, 1.0])
+        ),
+        format!(
+            "UPDATE e SET v = {} WHERE id = 1",
+            literal(&[f32::NAN, 1.0, 1.0, 1.0])
+        ),
+        format!(
+            "INSERT INTO e(id, v) SELECT 5, {}",
+            literal(&[f32::NAN, 1.0, 1.0, 1.0])
+        ),
+    ] {
+        let failed = connection
+            .execute_batch(&wrong)
+            .expect_err(&format!("{wrong} should have been refused"));
+        assert_eq!(
+            failed.extended().primary(),
+            inillucent_base::PrimaryCode::Constraint,
+            "{wrong} reports a constraint failure: {failed:?}"
+        );
+    }
+    assert_eq!(
+        integers(&connection, "SELECT count(*) FROM e"),
+        vec![1],
+        "only the finite row is there"
+    );
+}
+
+/// A `CREATE INDEX ... USING inillucent_hnsw` that fails leaves nothing behind.
+///
+/// **It used to leave the catalog row and five shadow tables (task-1979, R1).**
+/// The synthesised `CREATE VIRTUAL TABLE` ran as its own autocommit statement,
+/// so it sealed and cleared the undo buffer before the backfill ran; when the
+/// backfill failed, the statement's own rollback had nothing to put back. What
+/// was left behind was worse than a leak: the planner went on choosing
+/// `SEARCH ... USING VECTOR INDEX`, every vector query on the column answered
+/// `bad parameter or other API misuse` for ever, and `CREATE INDEX` again was
+/// refused with "already exists".
+///
+/// The failure is a `WITHOUT ROWID` source table, which is a build that gets
+/// past the store's creation and then cannot read `rowid` out of the table.
+#[test]
+fn a_failed_index_build_leaves_no_catalog_row_and_no_shadow_table() {
+    let held = database("failed_build");
+    let connection = held.session();
+    connection
+        .execute_batch(
+            "CREATE TABLE w (id TEXT PRIMARY KEY, v VECTOR(32)) WITHOUT ROWID;
+             CREATE TABLE t (id INTEGER PRIMARY KEY, v VECTOR(32))",
+        )
+        .expect("the two tables are created");
+    connection
+        .execute_batch(&format!(
+            "INSERT INTO w(id, v) VALUES ('a', {east});
+             INSERT INTO t(id, v) VALUES (1, {east});
+             INSERT INTO t(id, v) VALUES (2, {north})",
+            east = literal(&tilt(0.0)),
+            north = literal(&tilt(1.0))
+        ))
+        .expect("both tables hold rows");
+
+    connection
+        .execute_batch("CREATE INDEX w_v ON w USING inillucent_hnsw (v)")
+        .expect_err("a table with no rowid cannot back a vector index");
+    assert_eq!(
+        texts(
+            &connection,
+            "SELECT name FROM sqlite_master WHERE name LIKE 'w\\_v%' ESCAPE '\\' ORDER BY name"
+        ),
+        Vec::<String>::new(),
+        "the refused build left no catalog row and no shadow table"
+    );
+
+    // The same name is free afterwards, over a table the build can read.
+    connection
+        .execute_batch("CREATE INDEX w_v ON t USING inillucent_hnsw (v)")
+        .expect("the retry succeeds");
+    assert_eq!(
+        integers(&connection, "SELECT count(*) FROM w_v"),
+        vec![2],
+        "the retry backfilled both rows"
+    );
+}
+
+/// `DROP INDEX` on a vector index removes its rows and its shadow tables.
+///
+/// **It used to report success and remove nothing (task-1979, R6, R18, R19).**
+/// A vector index is recorded as a virtual table, so the `DROP INDEX` arm found
+/// no index row to forget and released the zero root a module owned index
+/// carries: the planner went on choosing the index, and its five shadow tables
+/// stayed in the schema for the life of the database. `inillucent indexes` did
+/// not list it either, for the same reason, which is why this asserts the
+/// catalog's own index chain names it.
+#[test]
+fn dropping_a_vector_index_removes_its_rows_and_its_shadow_tables() {
+    let held = database("drop_index");
+    let connection = held.session();
+    connection
+        .execute_batch(&format!(
+            "CREATE TABLE t (id INTEGER PRIMARY KEY, v VECTOR(32));
+             INSERT INTO t(id, v) VALUES (1, {east});
+             INSERT INTO t(id, v) VALUES (2, {north});
+             CREATE INDEX t_v ON t USING inillucent_hnsw (v)",
+            east = literal(&tilt(0.0)),
+            north = literal(&tilt(1.0))
+        ))
+        .expect("the table and the index are built");
+
+    // `PRAGMA index_list` is what `inillucent indexes` reads for the module
+    // owned ones, and `v` is the origin it reports for them.
+    let listed = texts(&connection, "SELECT name FROM pragma_index_list('t')");
+    assert!(
+        listed.iter().any(|name| name == "t_v"),
+        "the vector index is listed: {listed:?}"
+    );
+
+    let before = texts(
+        &connection,
+        "SELECT name FROM sqlite_master WHERE name LIKE 't\\_v%' ESCAPE '\\' ORDER BY name",
+    );
+    assert!(
+        before.len() > 1,
+        "the index brought shadow tables with it: {before:?}"
+    );
+
+    connection
+        .execute_batch("DROP INDEX t_v")
+        .expect("the index is dropped");
+    assert_eq!(
+        texts(
+            &connection,
+            "SELECT name FROM sqlite_master WHERE name LIKE 't\\_v%' ESCAPE '\\' ORDER BY name"
+        ),
+        Vec::<String>::new(),
+        "the index row and every shadow table went with it"
+    );
+    assert_eq!(
+        texts(&connection, "SELECT name FROM pragma_index_list('t')"),
+        Vec::<String>::new(),
+        "and nothing lists it any more"
+    );
+    let plan = format!(
+        "{:?}",
+        connection
+            .query(&format!(
+                "EXPLAIN QUERY PLAN SELECT id FROM t ORDER BY vector_distance_cos(v, {}) LIMIT 1",
+                literal(&tilt(0.0))
+            ))
+            .expect("the plan is explained")
+    );
+    assert!(
+        !plan.contains("VECTOR INDEX"),
+        "the planner stopped choosing it: {plan}"
+    );
+    // And the column is queryable, which is what the leak broke.
+    assert_eq!(
+        integers(
+            &connection,
+            &format!(
+                "SELECT id FROM t ORDER BY vector_distance_cos(v, {}) LIMIT 1",
+                literal(&tilt(0.0))
+            )
+        ),
+        vec![1]
+    );
+}
+
+/// `VACUUM` writes one `sqlite_master` row per name, virtual tables included.
+///
+/// **It used to write a second row for every shadow table (task-1979, R2).**
+/// The rebuild replayed every `CREATE TABLE` it found, the shadow ones
+/// included, and then the `CREATE VIRTUAL TABLE` made a second set under the
+/// same names: six rows became eleven, the file roughly doubled, and the SQL
+/// `dump` held every shadow row twice, so it could not be replayed.
+#[test]
+fn vacuum_writes_one_schema_row_per_name() {
+    let held = database("vacuum_shadows");
+    let connection = held.session();
+    connection
+        .execute_batch(&format!(
+            "CREATE VIRTUAL TABLE d USING fts5(body);
+             INSERT INTO d(rowid, body) VALUES (1, 'hello world');
+             INSERT INTO d(rowid, body) VALUES (2, 'goodbye world');
+             CREATE TABLE t (id INTEGER PRIMARY KEY, v VECTOR(32));
+             INSERT INTO t(id, v) VALUES (1, {east});
+             INSERT INTO t(id, v) VALUES (2, {north});
+             CREATE INDEX t_v ON t USING inillucent_hnsw (v);
+             CREATE VIRTUAL TABLE h USING inillucent_search(body, dims=32)",
+            east = literal(&tilt(0.0)),
+            north = literal(&tilt(1.0))
+        ))
+        .expect("a full text table, a vector index and a hybrid table");
+
+    let counted = "SELECT count(*), count(DISTINCT name) FROM sqlite_master";
+    let before = connection.query(counted).expect("the count runs");
+    connection.execute_batch("VACUUM").expect("VACUUM runs");
+    let after = connection.query(counted).expect("the count runs");
+    assert_eq!(
+        before, after,
+        "VACUUM added no row and removed none: {before:?} then {after:?}"
+    );
+    let rows = connection.query(counted).expect("the count runs");
+    let row = rows.first().expect("one row");
+    assert_eq!(
+        row.first(),
+        row.get(1),
+        "every name appears exactly once: {row:?}"
+    );
+
+    // And the two tables still answer, which a schema that lost a shadow would
+    // not.
+    assert_eq!(
+        integers(&connection, "SELECT rowid FROM d WHERE d MATCH 'hello'"),
+        vec![1]
+    );
+    assert_eq!(
+        integers(
+            &connection,
+            &format!(
+                "SELECT id FROM t ORDER BY vector_distance_cos(v, {}) LIMIT 1",
+                literal(&tilt(0.0))
+            )
+        ),
+        vec![1]
+    );
+}
+
+/// An unknown function in a `CHECK` or a generated column is refused at
+/// `CREATE TABLE`.
+///
+/// **Both used to be accepted (task-1979, R11).** The expressions were stored
+/// as text and resolved when a row was first written or read, so the statement
+/// reported success and the table was unusable from its first insert. SQLite
+/// refuses both at `CREATE TABLE`, naming the function.
+#[test]
+fn an_unknown_function_in_a_declaration_is_refused_at_create_table() {
+    let held = database("declarations");
+    let connection = held.session();
+    for wrong in [
+        "CREATE TABLE c (x INTEGER, CHECK (unknownfn(x)))",
+        "CREATE TABLE g (x INTEGER, y AS (unknownfn(x)))",
+        "CREATE TABLE s (x INTEGER, y AS (unknownfn(x)) STORED)",
+    ] {
+        let failed = connection
+            .execute_batch(wrong)
+            .expect_err(&format!("{wrong} should have been refused"));
+        assert!(
+            format!("{failed:?}").contains("unknownfn"),
+            "{wrong} names the function: {failed:?}"
+        );
+    }
+    assert_eq!(
+        texts(
+            &connection,
+            "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
+        ),
+        Vec::<String>::new(),
+        "no refused table was left in the schema"
+    );
+    // The declarations that do resolve are still accepted.
+    connection
+        .execute_batch(
+            "CREATE TABLE ok (x INTEGER, y AS (abs(x)) STORED, CHECK (length(CAST(x AS TEXT)) > 0))",
+        )
+        .expect("a declaration naming functions the engine has");
+}

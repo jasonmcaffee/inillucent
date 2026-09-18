@@ -245,6 +245,14 @@ fn built(
     let mut engine =
         ImportedDatabase::create_on(Arc::clone(&vfs) as Arc<dyn Vfs>, path(), PAGE_SIZE, FRAMES)
             .expect("the database is created");
+    // **`exclusive` is asked for, and that is what makes the window exist
+    // (task-1980).** The default is `locking_mode = normal`, under which a
+    // connection checkpoints and releases the file after every statement that
+    // wrote - so the log holds one statement at a time and there is no window
+    // for a page to be both carried whole and read by a later record, which is
+    // the ordering this file is about. The fixture keeps the file the way it
+    // did before the default changed.
+    run(&mut engine, "PRAGMA locking_mode = exclusive");
     run(
         &mut engine,
         "CREATE TABLE doc (id INTEGER PRIMARY KEY, body TEXT NOT NULL)",

@@ -68,8 +68,9 @@ pub mod writer;
 
 pub use record::{Body, PageList, Record, Structural, MAX_RECORD_BYTES};
 pub use recover::{recover, truncate_after, DryRun, Recovered, RecoveryStart, Redo};
+pub use segment::{first_lsn_of, sequence_of_segment_name};
 pub use segment::{SegmentHeader, SEGMENT_BYTES};
-pub use writer::{Synchronous, Wal, WalOptions, WalStats, FIRST_LSN};
+pub use writer::{tail_on_disk, LogTail, Synchronous, Wal, WalOptions, WalStats, FIRST_LSN};
 
 /// The implementation phase that filled this crate in, as named by the TDD.
 pub const IMPLEMENTATION_PHASE: &str = "phase 3: writes, durability, and MVCC";

@@ -239,6 +239,10 @@ pub fn serve<R: BufRead + Send + 'static>(
         settings.root.clone(),
     )
     .map_err(|failure| failure.message)?;
+    // **Safe mode, unconditionally.** See `Context::refuse_the_world`: this
+    // server's clients are agents, its standard output is the protocol, and
+    // there is no case for handing one a shell on the host.
+    context.refuse_the_world();
     context.limit = settings.limit.min(settings.max_rows);
     context.set_max_rows(Some(settings.max_rows));
     // **The engine's own budget, armed for the life of the server rather than

@@ -1,0 +1,16 @@
+# Differential cases, category `cte`, from task-1979's review of commit 3073058.
+# One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
+# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+cte-001	WITH x(a) AS (SELECT 1 UNION ALL SELECT 2) SELECT * FROM x
+cte-002	WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<5) SELECT * FROM n
+cte-003	WITH RECURSIVE n(i) AS (SELECT 1 UNION SELECT (i+1)%3 FROM n) SELECT * FROM n ORDER BY i
+cte-004	WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n) SELECT * FROM n LIMIT 4
+cte-005	WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<10) SELECT * FROM n LIMIT 3 OFFSET 2
+cte-006	WITH x AS (SELECT 1 AS a), y AS (SELECT a+1 AS b FROM x) SELECT * FROM x, y
+cte-007	WITH RECURSIVE t(a,b) AS (VALUES(1,1) UNION ALL SELECT b,a+b FROM t WHERE a<20) SELECT * FROM t
+cte-008	WITH x(a) AS (VALUES(1),(2),(3)) SELECT sum(a) FROM x
+cte-009	WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<3) SELECT count(*) FROM n, n AS m
+cte-010	WITH x AS MATERIALIZED (SELECT 1 AS a) SELECT * FROM x
+cte-011	WITH x AS NOT MATERIALIZED (SELECT 1 AS a) SELECT * FROM x
+cte-012	CREATE TABLE t(a); INSERT INTO t VALUES(1),(2); WITH t AS (SELECT 9 AS a) SELECT * FROM t
+cte-013	WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n ORDER BY i LIMIT 3) SELECT * FROM n

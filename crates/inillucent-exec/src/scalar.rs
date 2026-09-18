@@ -169,9 +169,126 @@ impl Eval for ScalarCall {
             // back as code 1.
             return Err(inillucent_base::error::statement_refusal(said));
         }
+        // **Before the allocation, where the size is knowable from the
+        // arguments (task-1979, section 5.4).** `zeroblob(1073741824)` and
+        // `printf('%2000000000d', 1)` say how many bytes they will take before
+        // they take them, and a check afterwards is a check the process has
+        // already paid 5.7 GB of working set for.
+        if let Some(wanted) = size_asked_for(self.func, &values) {
+            if !context.permits_length(wanted) {
+                return Err(too_big());
+            }
+            // And the served budget hears about it, so a value that is inside
+            // the value bound and outside the request's own ceiling stops here
+            // rather than when the row completes.
+            if wanted >= MATERIALISED_AT {
+                inillucent_base::budget::materialise(wanted)?;
+            }
+        }
         let answer = builtin::call_with(self.func, &values, self.collation, ENCODING, context);
-        Ok(Computed::Owned(OwnedDatum::from(answer)))
+        let built = OwnedDatum::from(answer);
+        // And afterwards for every function whose answer's size only the answer
+        // knows - `replace`, `hex`, `char`, `group_concat`'s separator work and
+        // the rest.
+        let produced = value_bytes(&built);
+        if !context.permits_length(produced) {
+            return Err(too_big());
+        }
+        if produced >= MATERIALISED_AT {
+            inillucent_base::budget::materialise(produced)?;
+        }
+        Ok(Computed::Owned(built))
     }
+}
+
+/// How large a single value has to be before the request's own budget is
+/// charged for it.
+///
+/// **A threshold rather than every value**, because charging the budget for a
+/// four-byte integer would be a thread-local borrow per cell and would count
+/// the same bytes the row sink counts. One mebibyte is where a single value
+/// stops being a cell and starts being an allocation somebody should be told
+/// about (task-1979, section 5.4).
+const MATERIALISED_AT: u64 = 1 << 20;
+
+/// Returns the refusal SQLite gives for a value past its length limit.
+fn too_big() -> inillucent_base::error::DbError {
+    inillucent_base::error::DbError::primary(inillucent_base::error::PrimaryCode::TooBig)
+        .with_message("string or blob too big")
+        .with_detail("string or blob too big")
+}
+
+/// Returns how many bytes a value occupies.
+///
+/// @param value - the value produced
+fn value_bytes(value: &OwnedDatum) -> u64 {
+    match value {
+        OwnedDatum::Text(bytes) | OwnedDatum::Blob(bytes) => bytes.len() as u64,
+        _ => 0,
+    }
+}
+
+/// Returns how many bytes a call will produce, when its arguments say.
+///
+/// `None` for every function whose answer's size is not a function of its
+/// arguments alone; those are checked once the answer exists.
+///
+/// @param func - the function being called
+/// @param values - its arguments
+fn size_asked_for(func: ScalarFunc, values: &[inillucent_value::Value<'static>]) -> Option<u64> {
+    match func {
+        ScalarFunc::ZeroBlob | ScalarFunc::RandomBlob => {
+            let asked = inillucent_value::cast::integer_value(values.first()?);
+            (asked > 0).then_some(asked as u64)
+        }
+        // A format string's width fields are what make `printf` allocate, and
+        // they are in the string before anything is written.
+        ScalarFunc::Printf => {
+            let format = values.first()?;
+            let text = match format {
+                inillucent_value::Value::Text(text) => text.raw(),
+                _ => return None,
+            };
+            widest_field(text)
+        }
+        _ => None,
+    }
+}
+
+/// Returns the largest width a `printf` format string asks for.
+///
+/// **The width, not the whole answer.** `%2000000000d` writes two billion
+/// spaces and one digit, and the number is in the format string - so the
+/// refusal can be made before a byte is written rather than after the process
+/// has grown by 5.7 GB.
+///
+/// @param format - the format string's bytes
+fn widest_field(format: &[u8]) -> Option<u64> {
+    let mut widest = 0u64;
+    let mut bytes = format.iter().copied().peekable();
+    while let Some(byte) = bytes.next() {
+        if byte != b'%' {
+            continue;
+        }
+        // Flags, then the width, then everything else the conversion carries.
+        let mut width = 0u64;
+        while let Some(next) = bytes.peek().copied() {
+            if matches!(next, b'-' | b'+' | b' ' | b'#' | b'0' | b'!' | b',') && width == 0 {
+                let _ = bytes.next();
+                continue;
+            }
+            if next.is_ascii_digit() {
+                width = width
+                    .saturating_mul(10)
+                    .saturating_add(u64::from(next - b'0'));
+                let _ = bytes.next();
+                continue;
+            }
+            break;
+        }
+        widest = widest.max(width);
+    }
+    (widest > 0).then_some(widest)
 }
 
 impl ScalarCall {
@@ -546,19 +663,53 @@ pub struct GeneralArith {
     pub left: Box<dyn Eval>,
     /// The right operand.
     pub right: Box<dyn Eval>,
+    /// The largest value this connection admits, in bytes.
+    ///
+    /// **`||` is the one operator that builds a value out of two others**, so
+    /// it is the one that can produce something past `Limit::Length` without
+    /// any function being called. `WITH RECURSIVE c(s) AS (SELECT 'aa' UNION
+    /// ALL SELECT s||s FROM c)` reached 49 GB before the harness gave up
+    /// (task-1979, section 5.4). Zero means unbounded, which is what the unit
+    /// tests below construct.
+    pub length_limit: i64,
 }
 
 impl Eval for GeneralArith {
     fn value<'p>(&self, batch: &Batch<'p>, nth: usize) -> DbResult<Computed<'p>> {
         let left = self.left.value(batch, nth)?;
         let right = self.right.value(batch, nth)?;
-        let answer = eval::arithmetic(
-            self.op,
-            &Value::from(&left.get()).into_owned()?,
-            &Value::from(&right.get()).into_owned()?,
-            ENCODING,
-        );
+        let left = Value::from(&left.get()).into_owned()?;
+        let right = Value::from(&right.get()).into_owned()?;
+        // **Before the concatenation, because the size is the sum of two
+        // values already in hand.** Checking afterwards is checking a value the
+        // process has already allocated, and the recursive doubling above
+        // doubles it every round.
+        if self.op == BinaryOp::Concat {
+            let wanted = text_length_of(&left).saturating_add(text_length_of(&right));
+            if self.length_limit > 0 && wanted > self.length_limit as u64 {
+                return Err(too_big());
+            }
+            if wanted >= MATERIALISED_AT {
+                inillucent_base::budget::materialise(wanted)?;
+            }
+        }
+        let answer = eval::arithmetic(self.op, &left, &right, ENCODING);
         Ok(Computed::Owned(OwnedDatum::from(answer)))
+    }
+}
+
+/// Returns how many bytes a value's text form takes.
+///
+/// A number's text form is bounded by its own digits, so only text and blobs
+/// can make a concatenation large; everything else is counted as the short
+/// thing it is.
+///
+/// @param value - the operand
+fn text_length_of(value: &Value<'static>) -> u64 {
+    match value {
+        Value::Text(text) => text.raw().len() as u64,
+        Value::Blob(blob) => blob.raw().len() as u64,
+        _ => 32,
     }
 }
 
@@ -922,6 +1073,8 @@ mod tests {
     #[test]
     fn the_general_operators_answer() {
         let concat = GeneralArith {
+            // Unbounded, which is what a unit test of the operator asks for.
+            length_limit: 0,
             op: BinaryOp::Concat,
             left: column(0, 2),
             right: column(1, 2),
@@ -931,6 +1084,7 @@ mod tests {
             OwnedDatum::Text(b"ab7".to_vec())
         );
         let and = GeneralArith {
+            length_limit: 0,
             op: BinaryOp::BitAnd,
             left: column(0, 2),
             right: column(1, 2),

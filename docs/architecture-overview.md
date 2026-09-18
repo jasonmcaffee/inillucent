@@ -95,8 +95,13 @@ LSN stamped on it. [Relational architecture section 5](relational-architecture.m
 has recovery in full, including what `journal_mode = off` gives up.
 
 Access from **several processes** works, over the same SHARED, RESERVED, PENDING and EXCLUSIVE lock
-protocol SQLite uses. **Threads inside one process** do not: a `Database` is neither `Send` nor
-`Sync` today, and [the roadmap](roadmap.md) has the step that makes it `Send`.
+protocol SQLite uses, with one writer at a time: a second writer waits up to `PRAGMA busy_timeout`
+and is then refused with `busy`. Every connection re-derives the meta record, its pages and the
+log's tail from the files at the moment it takes the lock, which is what makes a commit another
+process made visible to this one.
+`crates/inillucent-compat/tests/process_concurrency.rs` asserts that rows present equal commits
+acknowledged, with two real writer processes. **Threads inside one process** do not: a `Database` is
+neither `Send` nor `Sync` today, and [the roadmap](roadmap.md) has the step that makes it `Send`.
 
 ## Where the bytes live
 

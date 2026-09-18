@@ -85,5 +85,20 @@ one: its name, the columns its answer has, and whether it takes an argument.
 | `wal_checkpoint` | yes | `busy`, `log`, `checkpointed` |
 | `writable_schema` | yes | one unnamed column |
 
+## The two defaults that decide what a second process sees
+
+`busy_timeout` starts at **5000** milliseconds. It is how long a statement waits
+for a file another process holds before it is refused with `busy`, and setting it
+to 0 makes a contended statement fail at once. It governs the wait between
+processes as well as the one inside a process; before task-1980 the cross-process
+wait was a constant this pragma could not reach.
+
+`locking_mode` starts at **normal**, which is SQLite's default too: the file lock
+is released between statements, so a second process can open the database.
+`exclusive` keeps the lock for the connection's whole life, which is faster for a
+program that never opens a second connection and means a second process waits out
+that connection or is refused. A value that is neither is an error rather than a
+silently kept setting.
+
 `compat/api/pragmas.toml` is the same register in the form a program reads,
 and `docs/README.md` lists this page in its reading order.

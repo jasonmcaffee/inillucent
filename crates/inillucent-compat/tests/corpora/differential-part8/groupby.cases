@@ -1,0 +1,28 @@
+# Differential cases, category `groupby`, from task-1979's review of commit 3073058.
+# One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
+# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+gb-001	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',4); SELECT g FROM t GROUP BY g ORDER BY g
+gb-002	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',4); SELECT g, v FROM t GROUP BY g ORDER BY g
+gb-003	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',4); SELECT g FROM t GROUP BY g HAVING count(*)>0 ORDER BY g
+gb-004	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',4); SELECT g, count(*) FROM t GROUP BY g ORDER BY g
+gb-005	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',4); SELECT upper(g) FROM t GROUP BY g ORDER BY 1
+gb-006	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',4); SELECT g||'!' FROM t GROUP BY g ORDER BY 1
+gb-007	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',4); SELECT g, g FROM t GROUP BY g ORDER BY 1
+gb-008	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',4); SELECT g FROM t GROUP BY 1 ORDER BY 1
+gb-009	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',4); SELECT g, v FROM t GROUP BY g, v ORDER BY g, v
+gb-010	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',4); SELECT v FROM t GROUP BY v ORDER BY v
+gb-011	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',4); SELECT 1 FROM t GROUP BY g
+gb-012	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',4); SELECT g FROM t GROUP BY g HAVING g>'a'
+gb-013	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',4); SELECT g FROM t WHERE v>1 GROUP BY g ORDER BY g
+gb-014	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',4); SELECT count(*) FROM (SELECT g FROM t GROUP BY g)
+gb-015	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',4); SELECT g FROM t GROUP BY g ORDER BY v
+gb-016	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',4); SELECT g FROM t GROUP BY g||'' ORDER BY 1
+gb-017	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',4); SELECT DISTINCT g FROM t ORDER BY g
+gb-018	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',4); CREATE INDEX i ON t(g); SELECT g FROM t GROUP BY g ORDER BY g
+gb-019	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',4); SELECT g FROM t GROUP BY g LIMIT 1
+gb-020	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',4); SELECT t.g FROM t GROUP BY t.g ORDER BY t.g
+gb-021	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',4); SELECT g AS k FROM t GROUP BY k ORDER BY k
+gb-022	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',4); SELECT g FROM t GROUP BY g UNION ALL SELECT 'z'
+gb-023	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',4); SELECT g, (SELECT count(*) FROM t u WHERE u.g=t.g) FROM t GROUP BY g ORDER BY g
+gb-024	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',4); SELECT rowid FROM t GROUP BY rowid ORDER BY rowid
+gb-025	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',4); SELECT g FROM t GROUP BY g, v ORDER BY g, v

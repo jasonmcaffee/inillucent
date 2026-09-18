@@ -1192,6 +1192,86 @@ fn an_unbuilt_statement_exits_three_and_says_unsupported() {
 
 // --- the guard ----------------------------------------------------------------
 
+/// A log segment beside the database that its chain does not reach is named
+/// rather than left in silence (task-1979, C9).
+///
+/// **It is neither replayed nor removed, and that part is right**: the chain is
+/// followed by sequence number from the meta record and stops at the first gap,
+/// so a file copied or restored at a higher sequence is not part of this log.
+/// What was wrong is that nothing said it was there, so it sat beside the
+/// database through every open and close and an operator reading the directory
+/// could not tell it from the live log.
+#[test]
+fn query_names_a_log_segment_the_chain_does_not_reach() {
+    let Some(binary) = program("inillucent") else {
+        return;
+    };
+    let database = populated(&binary, "stray-segment");
+    let path = database.to_string_lossy().to_string();
+
+    // Nothing planted yet: the answer must not mention one, or the assertion
+    // below would pass against a build that always printed it.
+    let clean = run(
+        &binary,
+        &[
+            "--db",
+            path.as_str(),
+            "query",
+            "SELECT 1",
+            "--output",
+            "json",
+        ],
+    );
+    assert_eq!(clean.code, 0, "reading the clean file:\n{}", clean.said());
+    assert!(
+        !clean.stdout.contains("stray_log_segments"),
+        "a database with no stray segment reported one:\n{}",
+        clean.stdout
+    );
+
+    // The live segment, copied to a sequence the chain does not reach.
+    let live = std::fs::read_dir(database.parent().unwrap_or(Path::new(".")))
+        .ok()
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|found| {
+            found
+                .file_name()
+                .map(|name| name.to_string_lossy().contains("-wal."))
+                .unwrap_or(false)
+        });
+    let Some(live) = live else {
+        panic!("the database has no log segment beside it, so this case tested nothing");
+    };
+    let planted = live.with_extension("0000009999");
+    std::fs::copy(&live, &planted).expect("the segment is copied");
+
+    let named = run(
+        &binary,
+        &[
+            "--db",
+            path.as_str(),
+            "query",
+            "SELECT 1",
+            "--output",
+            "json",
+        ],
+    );
+    assert_eq!(
+        named.code,
+        0,
+        "reading the file with a stray:\n{}",
+        named.said()
+    );
+    assert!(
+        named.stdout.contains("stray_log_segments"),
+        "a log segment the chain does not reach was not named:\n{}",
+        named.stdout
+    );
+}
+
 /// Every verb in the registry has a subprocess test in this file.
 ///
 /// **The guard that keeps this file from going stale (task-1969, 5.2).** A verb

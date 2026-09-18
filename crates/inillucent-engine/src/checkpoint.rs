@@ -102,6 +102,47 @@ impl ImportedDatabase {
     /// the log has already described durably. The other order is the durability
     /// mutant the Phase 3 gate exists to kill.
     pub fn checkpoint(&mut self) -> DbResult<()> {
+        // **A read only connection has nothing to fold down.** Its pool holds
+        // no change the file does not, its log is a scratch one in memory, and
+        // its file handle would refuse the write. Answering `Ok` rather than a
+        // refusal is what lets `leave` and `settle_journal` run the same code
+        // on both kinds of connection.
+        if self.storage.read_only {
+            return Ok(());
+        }
+        // **What a caller reads about its own last statement is put back
+        // afterwards (task-1980).** `refresh_statistics` below rewrites the
+        // catalog rows whose shape has moved, and that is a write: it opens a
+        // transaction, commits it, and on the way through sets
+        // `last_insert_rowid`, `changes`, `total_changes` and the participant
+        // count of the last commit. Under `locking_mode = exclusive` a
+        // connection checkpointed at close and nothing read those afterwards.
+        // Under `normal`, which is the default now, every statement that wrote
+        // checkpoints on its way out - so a two-file `COMMIT` answered
+        // `decided_over` 1 instead of 2, because the checkpoint's own one-file
+        // commit was the last one to set it.
+        //
+        // A checkpoint is the engine's bookkeeping and not a statement the
+        // caller ran, so none of those four is its to move. SQLite makes the
+        // same distinction: `PRAGMA wal_checkpoint` does not change
+        // `sqlite3_changes`.
+        let held = (
+            self.writing.decided_over(),
+            self.counters.last_rowid.get(),
+            self.counters.last_changes.get(),
+            self.counters.changed_ever.get(),
+        );
+        let outcome = self.checkpoint_within();
+        self.writing.set_decided_over(held.0);
+        self.counters.last_rowid.set(held.1);
+        self.counters.last_changes.set(held.2);
+        self.counters.changed_ever.set(held.3);
+        outcome
+    }
+
+    /// Everything [`ImportedDatabase::checkpoint`] does, without putting the
+    /// caller's own counters back.
+    fn checkpoint_within(&mut self) -> DbResult<()> {
         // **The catalog's statistics are made honest first, and inside the
         // transaction the checkpoint is about to make durable.** A tree's shape
         // changes on every split and every insert, and rewriting a catalog row
@@ -153,9 +194,40 @@ impl ImportedDatabase {
         // page's change belongs to an *earlier*, already-committed statement
         // that simply had not been checkpointed yet - see this module's own
         // doc comment for the reproduction.
+        // **Never below the first position the stream has.** A page that has
+        // never been described by a record carries stamp zero, and
+        // `note_dirty_from` floors a fresh database's `rec_lsn` at its
+        // `checkpoint_lsn`, which is also zero - so a checkpoint taken while a
+        // statement holds such a page computed a recovery point of 0, and
+        // `sequence_containing(0)` refused with "no present segment holds lsn
+        // 0: segment 1 starts at 8". Zero is not a position in the stream; it
+        // is the absence of one, and the recovery point that covers everything
+        // is the stream's own start.
+        //
+        // Nothing reached it before task-1980 because the default was
+        // `locking_mode = exclusive`, under which `leave` never checkpoints:
+        // the first checkpoint of a fresh database happened at close, with no
+        // statement holding a page. With `normal` as the default every
+        // statement checkpoints, and a `CREATE VIRTUAL TABLE` that fails on a
+        // database nothing has checkpointed yet reaches it on its way out.
         let recovery_from = durable
             .min(self.storage.database.pool().uncommitted_lsn())
-            .min(oldest_dirty);
+            .min(oldest_dirty)
+            .max(inillucent_wal::FIRST_LSN);
+        // **And never past a vote nobody has counted.** See `Storage::in_doubt`:
+        // while a super-journal beside this file names a transaction as
+        // undecided, the records of that transaction have to stay where
+        // recovery can find them, whichever way the decision goes.
+        let recovery_from = match self.storage.in_doubt {
+            true => recovery_from.min(
+                self.storage
+                    .database
+                    .meta()
+                    .checkpoint_lsn
+                    .max(inillucent_wal::FIRST_LSN),
+            ),
+            false => recovery_from,
+        };
         // **The segment `recovery_from` actually lives in, not the one
         // `roll_segment` just opened.** The freshly rolled segment is only
         // where `recovery_from` lives when nothing bounded it below
@@ -253,9 +325,26 @@ impl ImportedDatabase {
             held.wal.sync()?;
             let durable = held.wal.write_ahead_point();
             held.database.pool().set_durable_lsn(durable);
+            // See `checkpoint`'s own comment: zero is the absence of a stream
+            // position rather than one, and the point that covers everything is
+            // the stream's start.
             let recovery_from = durable
                 .min(held.database.pool().uncommitted_lsn())
-                .min(oldest_dirty);
+                .min(oldest_dirty)
+                .max(inillucent_wal::FIRST_LSN);
+            // And the same doubt floor `main` has, read off this file's own
+            // markers rather than off `main`'s: a transaction may be undecided
+            // over the attachment and settled over the database the connection
+            // was opened on, or the other way round.
+            let recovery_from = match held.in_doubt {
+                true => recovery_from.min(
+                    held.database
+                        .meta()
+                        .checkpoint_lsn
+                        .max(inillucent_wal::FIRST_LSN),
+                ),
+                false => recovery_from,
+            };
             // See `checkpoint`'s own comment: paired with the segment that
             // actually holds `recovery_from`, not whichever one `roll_segment`
             // just opened, and refused rather than guessed if none does.

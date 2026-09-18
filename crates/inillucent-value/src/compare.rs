@@ -196,22 +196,24 @@ pub fn compare_with_affinity<'a>(
 /// numeric wins over none, text wins over none, and anything else compares
 /// with no conversion at all.
 pub fn comparison_affinity(left: Affinity, right: Affinity) -> Option<Affinity> {
-    let left_numeric = left.is_numeric();
-    let right_numeric = right.is_numeric();
-    if left_numeric && right_numeric {
+    // **`sqlite3CompareAffinity`, both arms of it (task-1979, F2).** When both
+    // operands have an affinity of their own the rule is two lines: if either
+    // is numeric or stronger the comparison is numeric, and otherwise it
+    // applies none at all. The table this replaces had five cases and got both
+    // of those wrong in the same direction - it read a *declared* affinity as a
+    // preference rather than as the rule.
+    //
+    // What that cost, measured against 3.53.4: `WHERE i = s` over
+    // `i INTEGER, s TEXT` holding (5,'5') and (7,'7') matched **no rows**,
+    // because neither side was converted and an integer never equals a string;
+    // and an untyped column compared to a TEXT column was converted to text,
+    // which matched rows SQLite does not match. Fifteen of the ninety-two
+    // disagreements were this one rule.
+    //
+    // `None` is `SQLITE_AFF_BLOB`: an affinity that converts nothing, which is
+    // what the caller does with it.
+    if left.is_numeric() || right.is_numeric() {
         return Some(Affinity::Numeric);
-    }
-    if left_numeric && right == Affinity::Blob {
-        return Some(Affinity::Numeric);
-    }
-    if right_numeric && left == Affinity::Blob {
-        return Some(Affinity::Numeric);
-    }
-    if left == Affinity::Text && right == Affinity::Blob {
-        return Some(Affinity::Text);
-    }
-    if right == Affinity::Text && left == Affinity::Blob {
-        return Some(Affinity::Text);
     }
     None
 }
@@ -401,8 +403,16 @@ mod tests {
         assert!(!Truth::Unknown.is_true());
     }
 
-    /// A comparison between a numeric-affinity column and text converts the
-    /// text; without an affinity the two stay in different classes.
+    /// A comparison where either side is numeric converts both sides.
+    ///
+    /// **The expectations changed with the rule (task-1979, F2).** This test
+    /// used to assert that an integer with no affinity beside a TEXT operand
+    /// was rendered as text and compared equal to `'10'`. It is not: SQLite
+    /// applies numeric affinity only when one of the two is numeric, and
+    /// otherwise applies none - so the integer and the text stay in different
+    /// storage classes and the number sorts first. The corpus in
+    /// `crates/inillucent-compat/tests/corpora/differential-part8` is what
+    /// settled it, on fifteen cases.
     #[test]
     fn comparison_affinity_converts_the_operand_that_has_none() {
         let converted = compare_with_affinity(
@@ -414,6 +424,16 @@ mod tests {
             TextEncoding::Utf8,
         );
         assert_eq!(converted, SqlOrdering::Equal);
+        // The same, with the numeric side on the right.
+        let mirrored = compare_with_affinity(
+            Value::text_utf8(b"10"),
+            Affinity::Blob,
+            Value::Integer(10),
+            Affinity::Real,
+            Collation::Binary,
+            TextEncoding::Utf8,
+        );
+        assert_eq!(mirrored, SqlOrdering::Equal);
         let unconverted = compare_with_affinity(
             Value::Integer(10),
             Affinity::Blob,
@@ -424,6 +444,8 @@ mod tests {
         );
         // A number is always less than text when nothing converts them.
         assert_eq!(unconverted, SqlOrdering::Less);
+        // A TEXT affinity on one side alone converts nothing, because neither
+        // side is numeric - so the number still sorts before the text.
         let as_text = compare_with_affinity(
             Value::Integer(10),
             Affinity::Blob,
@@ -432,13 +454,20 @@ mod tests {
             Collation::Binary,
             TextEncoding::Utf8,
         );
-        assert_eq!(as_text, SqlOrdering::Equal);
+        assert_eq!(as_text, SqlOrdering::Less);
     }
 
-    /// The affinity rule table itself, spelled out.
+    /// The affinity rule, which is two lines rather than a table.
+    ///
+    /// `sqlite3CompareAffinity`: numeric if either side is numeric, and none
+    /// otherwise. The five case table this replaces is in the function's own
+    /// comment, with what it cost.
     #[test]
     fn the_comparison_affinity_table_matches_the_documentation() {
-        assert_eq!(comparison_affinity(Affinity::Integer, Affinity::Text), None);
+        assert_eq!(
+            comparison_affinity(Affinity::Integer, Affinity::Text),
+            Some(Affinity::Numeric)
+        );
         assert_eq!(
             comparison_affinity(Affinity::Integer, Affinity::Blob),
             Some(Affinity::Numeric)
@@ -447,14 +476,15 @@ mod tests {
             comparison_affinity(Affinity::Blob, Affinity::Real),
             Some(Affinity::Numeric)
         );
-        assert_eq!(
-            comparison_affinity(Affinity::Text, Affinity::Blob),
-            Some(Affinity::Text)
-        );
+        assert_eq!(comparison_affinity(Affinity::Text, Affinity::Blob), None);
         assert_eq!(comparison_affinity(Affinity::Blob, Affinity::Blob), None);
         assert_eq!(comparison_affinity(Affinity::Text, Affinity::Text), None);
         assert_eq!(
             comparison_affinity(Affinity::Integer, Affinity::Real),
+            Some(Affinity::Numeric)
+        );
+        assert_eq!(
+            comparison_affinity(Affinity::Numeric, Affinity::Text),
             Some(Affinity::Numeric)
         );
     }

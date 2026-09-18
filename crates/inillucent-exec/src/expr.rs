@@ -333,38 +333,92 @@ fn numeric_datum<'p>(value: &Datum<'_>) -> Datum<'p> {
 
 /// Returns the numeric prefix as an integer, when it is one.
 ///
-/// `None` when the prefix carries a point or an exponent, or when the digits do
-/// not fit an `i64` - both of which are the cases SQLite reads as a real.
+/// `None` when the prefix is a real - a point with a digit on one side of it,
+/// or a complete exponent - and `Some(0)` when there is no number at the front
+/// at all, which is what SQLite reads `'abc' + 0` as.
+///
+/// **The shape is read before it is judged (task-1979, F3).** The scan this
+/// replaces refused a point or an exponent only *after* it had seen a digit,
+/// so a leading point was not a point at all: `'.5'` fell out of the loop with
+/// nothing read and came back as the integer zero, and every leading-dot
+/// numeral in arithmetic did the same - `'.5'+0` was 0 where SQLite says 0.5.
+/// It also read `'1e'` as a real, because it stopped at the `e` and handed the
+/// rest to the real parser; SQLite reads the exponent as incomplete, so the
+/// prefix ends at the `1` and the answer is the integer 1.
+///
+/// Checked against the pinned 3.53.4 for each shape: `'1.'+0` is 1.0 real,
+/// `'.'+0` is 0 integer, `'1e'+0` and `'1e+'+0` are 1 integer, `'.5e'+0` is 0.5
+/// real, `'1abc'+0` is 1 integer, `'1e2'+0` is 100.0 real.
 ///
 /// @param bytes - the string to read
 fn prefix_integer(bytes: &[u8]) -> Option<i64> {
-    let text = std::str::from_utf8(bytes).ok()?.trim_start();
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return Some(0);
+    };
     let raw = text.as_bytes();
-    let mut end = 0usize;
-    let mut seen_digit = false;
-    for (index, byte) in raw.iter().enumerate() {
-        let accept = match byte {
-            b'0'..=b'9' => {
-                seen_digit = true;
-                true
-            }
-            b'+' | b'-' => index == 0,
-            // A point or an exponent means the value is a real, so there is no
-            // integer prefix to read - not a shorter one.
-            b'.' | b'e' | b'E' if seen_digit => return None,
-            _ => false,
-        };
-        if !accept {
-            break;
-        }
-        end = index.saturating_add(1);
+    let mut at = 0usize;
+    while raw
+        .get(at)
+        .copied()
+        .is_some_and(|byte| byte == b' ' || byte.is_ascii_whitespace())
+    {
+        at = at.saturating_add(1);
     }
-    if !seen_digit {
+    let began = at;
+    if matches!(raw.get(at), Some(b'+') | Some(b'-')) {
+        at = at.saturating_add(1);
+    }
+    let before = digits_from(raw, &mut at);
+    // A point is part of the number only when a digit sits on one side of it.
+    // `'.'` on its own is not a number, which is why the count is taken before
+    // the decision.
+    let mut fractional = false;
+    if raw.get(at) == Some(&b'.') {
+        let mut after_point = at.saturating_add(1);
+        let after = digits_from(raw, &mut after_point);
+        if before.saturating_add(after) > 0 {
+            fractional = true;
+            at = after_point;
+        }
+    }
+    if before == 0 && !fractional {
         // No number at all, which SQLite reads as the integer zero.
         return Some(0);
     }
-    text.get(..end)
+    // An exponent counts only when it has at least one digit of its own;
+    // without one the number ends before the `e`.
+    if matches!(raw.get(at), Some(b'e') | Some(b'E')) {
+        let mut after_e = at.saturating_add(1);
+        if matches!(raw.get(after_e), Some(b'+') | Some(b'-')) {
+            after_e = after_e.saturating_add(1);
+        }
+        let mut counting = after_e;
+        if digits_from(raw, &mut counting) > 0 {
+            return None;
+        }
+    }
+    if fractional {
+        return None;
+    }
+    text.get(began..at)
         .and_then(|prefix| prefix.parse::<i64>().ok())
+}
+
+/// Advances past a run of ASCII digits and returns how many there were.
+///
+/// @param raw - the bytes being read
+/// @param at - the position, moved past the digits
+fn digits_from(raw: &[u8], at: &mut usize) -> usize {
+    let mut counted = 0usize;
+    while raw
+        .get(*at)
+        .copied()
+        .is_some_and(|byte| byte.is_ascii_digit())
+    {
+        *at = at.saturating_add(1);
+        counted = counted.saturating_add(1);
+    }
+    counted
 }
 
 /// Arithmetic over anything.
@@ -635,39 +689,39 @@ fn prefix_number(bytes: &[u8]) -> f64 {
         Ok(text) => text.trim_start(),
         Err(_) => return 0.0,
     };
-    let mut end = 0usize;
     let raw = text.as_bytes();
-    let mut seen_digit = false;
-    let mut seen_dot = false;
-    let mut seen_exponent = false;
-    for (index, byte) in raw.iter().enumerate() {
-        let accept = match byte {
-            b'0'..=b'9' => {
-                seen_digit = true;
-                true
-            }
-            b'+' | b'-' => {
-                index == 0 || matches!(raw.get(index.saturating_sub(1)), Some(b'e') | Some(b'E'))
-            }
-            b'.' => !seen_dot && !seen_exponent,
-            b'e' | b'E' => seen_digit && !seen_exponent,
-            _ => false,
-        };
-        if !accept {
-            break;
-        }
-        if *byte == b'.' {
-            seen_dot = true;
-        }
-        if matches!(byte, b'e' | b'E') {
-            seen_exponent = true;
-        }
-        end = index.saturating_add(1);
+    let mut at = 0usize;
+    if matches!(raw.get(at), Some(b'+') | Some(b'-')) {
+        at = at.saturating_add(1);
     }
-    if !seen_digit {
+    let before = digits_from(raw, &mut at);
+    let mut after = 0usize;
+    if raw.get(at) == Some(&b'.') {
+        let mut after_point = at.saturating_add(1);
+        after = digits_from(raw, &mut after_point);
+        if before.saturating_add(after) > 0 {
+            at = after_point;
+        }
+    }
+    if before.saturating_add(after) == 0 {
         return 0.0;
     }
-    text.get(..end)
+    // **An exponent counts only when it has a digit of its own (task-1979,
+    // F3).** The scan this replaces accepted a trailing `e`, so `'.5e'` came
+    // back as the four bytes `.5e`, which `parse::<f64>` refuses - and the
+    // fallback answered 0.0 for a string whose numeric prefix is 0.5. SQLite
+    // ends the number before an exponent it cannot complete.
+    if matches!(raw.get(at), Some(b'e') | Some(b'E')) {
+        let mut after_e = at.saturating_add(1);
+        if matches!(raw.get(after_e), Some(b'+') | Some(b'-')) {
+            after_e = after_e.saturating_add(1);
+        }
+        let mut counting = after_e;
+        if digits_from(raw, &mut counting) > 0 {
+            at = counting;
+        }
+    }
+    text.get(..at)
         .and_then(|prefix| prefix.parse::<f64>().ok())
         .unwrap_or(0.0)
 }

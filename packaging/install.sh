@@ -192,12 +192,26 @@ echo
 echo "inillucent $version is installed in $prefix"
 "$prefix/bin/inillucent" --version
 
+# The file to write the line into is the one this shell reads, which is not
+# always ~/.zshrc: Ubuntu's login shell is bash and Debian's is dash. Naming
+# ~/.zshrc on a machine running bash printed an instruction that adds the line
+# to a file nothing reads (task-1979, E5).
 case ":$PATH:" in
   *":$bin_dir:"*) ;;
   *)
+    case "$(basename "${SHELL:-sh}")" in
+      zsh) profile='~/.zshrc'; reload='exec zsh' ;;
+      bash) profile='~/.bashrc'; reload='exec bash' ;;
+      fish) profile='~/.config/fish/config.fish'; reload='exec fish' ;;
+      *) profile='~/.profile'; reload='. ~/.profile' ;;
+    esac
     echo
     echo "$bin_dir is not on your PATH. Add it:"
-    echo "  echo 'export PATH=\"\$HOME/.local/bin:\$PATH\"' >> ~/.zshrc && exec zsh"
+    if [ "$profile" = '~/.config/fish/config.fish' ]; then
+      echo "  echo 'fish_add_path $bin_dir' >> $profile && $reload"
+    else
+      echo "  echo 'export PATH=\"$bin_dir:\$PATH\"' >> $profile && $reload"
+    fi
     ;;
 esac
 

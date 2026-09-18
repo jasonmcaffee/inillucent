@@ -165,6 +165,29 @@ impl Database {
     /// @param path - the database file
     /// @param frames - how many frames the buffer pool holds
     pub fn open_with(path: impl AsRef<Path>, frames: usize) -> DbResult<Database> {
+        Database::open_as(path, frames, false)
+    }
+
+    /// Opens a database this connection will never write.
+    ///
+    /// See [`ImportedDatabase::open_read_only`]. A `:memory:` database has
+    /// nothing to protect and no file to leave alone, so it is opened the way
+    /// it always was and the statement filter above is what read only means
+    /// for it.
+    ///
+    /// @param path - the database file
+    /// @param frames - how many frames the buffer pool holds
+    pub fn open_read_only(path: impl AsRef<Path>, frames: usize) -> DbResult<Database> {
+        Database::open_as(path, frames, true)
+    }
+
+    /// [`Database::open_with`], with the caller saying whether this connection
+    /// may write.
+    ///
+    /// @param path - the database file
+    /// @param frames - how many frames the buffer pool holds
+    /// @param read_only - whether this connection may write the file
+    fn open_as(path: impl AsRef<Path>, frames: usize, read_only: bool) -> DbResult<Database> {
         let path = path.as_ref().to_path_buf();
         // **`:memory:` is a database, not a filename.** The operating system
         // refuses it as a path - on Windows with `the filename, directory name,
@@ -190,10 +213,20 @@ impl Database {
                 next_session: std::cell::Cell::new(1),
             });
         }
-        let engine = if path.is_file() {
-            ImportedDatabase::open(path.clone(), PAGE_SIZE, frames)?
-        } else {
-            ImportedDatabase::create(path.clone(), PAGE_SIZE, frames)?
+        let engine = match (path.is_file(), read_only) {
+            (true, false) => ImportedDatabase::open(path.clone(), PAGE_SIZE, frames)?,
+            (true, true) => ImportedDatabase::open_read_only(path.clone(), PAGE_SIZE, frames)?,
+            // **A read only connection does not create the file it was given.**
+            // Creating one would answer a caller who asked to read an existing
+            // database with an empty one, and would write - see task-1979's E2,
+            // which is the same mistake on the read verbs.
+            (false, true) => {
+                return Err(inillucent_base::error::refusal(
+                    "there is no database at that path, and a read only connection does not \
+                     create one",
+                ))
+            }
+            (false, false) => ImportedDatabase::create(path.clone(), PAGE_SIZE, frames)?,
         };
         Ok(Database {
             writer: std::rc::Rc::clone(&engine.writing),
@@ -346,6 +379,22 @@ impl Database {
     /// Returns the file this database is in.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Returns which segment of its log this connection is writing.
+    ///
+    /// See [`ImportedDatabase::log_sequence`].
+    pub fn log_sequence(&self) -> u64 {
+        self.engine.borrow().log_sequence()
+    }
+
+    /// Returns what opening this database did to it.
+    ///
+    /// See [`ImportedDatabase::recovery_report`]. Cloned rather than borrowed
+    /// because the engine is behind a cell and a caller holding a borrow across
+    /// a statement would take the cell the statement needs.
+    pub fn recovery_report(&self) -> crate::recovery::RecoveryReport {
+        self.engine.borrow().recovery_report().clone()
     }
 
     /// Makes everything written so far durable in the file.

@@ -476,3 +476,162 @@ fn hex_of(bits: u64) -> String {
     }
     out
 }
+
+/// A statement at the depth limit answers, one past it is refused by name, and
+/// the connection is still there afterwards (task-1979, section 5.3).
+///
+/// **A real process, because the failure this replaces was a stack overflow.**
+/// `SELECT abs(abs(...(1)...))` 300 deep ended the process with
+/// `thread 'main' has overflowed its stack` and exit code 0xC00000FD - well
+/// under the declared `ExprDepth` of 1000, so the limit could never be the
+/// thing that fired. An in-process case cannot see that: it would run on the
+/// test harness's own thread, whose stack is not the one the shipped binaries
+/// carry.
+///
+/// The three shapes are the ones the parser fuzz reached: nested calls, which
+/// charge the expression tree, and nested parentheses and nested subqueries,
+/// which charge the parser's own recursion.
+#[test]
+fn a_statement_at_the_depth_limit_answers_and_one_past_it_names_the_limit() {
+    let Some(shell) = inillucent_compat::cliproc::program("inillucent-shell") else {
+        return;
+    };
+    // Under `ExprDepth`'s 1000 and `ParserDepth`'s 2500, and over each.
+    for (under, over, build) in [
+        (900usize, 1_100usize, 0usize),
+        (2_400, 2_600, 1),
+        (900, 2_600, 2),
+    ] {
+        let statement = |depth: usize| match build {
+            0 => format!("SELECT {}1{};", "abs(".repeat(depth), ")".repeat(depth)),
+            1 => format!("SELECT count({}1{});", "(".repeat(depth), ")".repeat(depth)),
+            _ => format!("SELECT {}1{};", "(SELECT ".repeat(depth), ")".repeat(depth)),
+        };
+        let script = format!(
+            "{}\n{}\nSELECT 'alive';\n",
+            statement(under),
+            statement(over)
+        );
+        let ran = inillucent_compat::cliproc::run_with_input(&shell, &[":memory:"], &script);
+        assert!(
+            ran.code == 0 || ran.code == 1,
+            "shape {build}: the shell ended with {} rather than answering - \
+             a stack overflow reports 127 here and 0xC00000FD to the operating system:\n{}",
+            ran.code,
+            ran.said()
+        );
+        let said = ran.said();
+        assert!(
+            said.contains("depth exceeded") || said.contains("nested SELECT"),
+            "shape {build}: nothing named a limit for a statement {over} deep:\n{said}"
+        );
+        assert!(
+            said.contains("alive"),
+            "shape {build}: the connection did not answer the statement after the refusal:\n{said}"
+        );
+    }
+}
+
+/// One value cannot be built past `Limit::Length`, and the process does not
+/// grow to find that out (task-1979, section 5.4).
+///
+/// **Three shapes, each measured on a served MCP server before this.**
+/// `SELECT length(zeroblob(1073741824))` answered 1,073,741,824 with a 256 MiB
+/// budget armed, after taking the working set to 2,873 MB;
+/// `SELECT length(printf('%2000000000d', 1))` answered 2,000,000,000 at 5,734
+/// MB. `Limit::Length` was enforced on the write path, so a value that is only
+/// read never met it.
+///
+/// A real process, because what is being asserted is that the working set does
+/// not follow the value.
+#[test]
+fn one_value_cannot_be_built_past_the_length_limit() {
+    let Some(binary) = inillucent_compat::cliproc::program("inillucent") else {
+        return;
+    };
+    for sql in [
+        "SELECT length(zeroblob(1073741824))",
+        "SELECT length(randomblob(1073741824))",
+        "SELECT length(printf('%2000000000d', 1))",
+    ] {
+        let (code, said, highest) = run_and_watch(&binary, sql);
+        assert_eq!(code, Some(1), "`{sql}` did not answer a refusal: {said}");
+        assert!(
+            said.contains("too big"),
+            "`{sql}` was refused by something other than the value bound: {said}"
+        );
+        // The measured failures were 2,873 MB and 5,734 MB; a build that
+        // refuses before the allocation stays in the tens of megabytes, and a
+        // build that allocates first cannot come near this.
+        assert!(
+            highest < 512 * 1024 * 1024,
+            "`{sql}` took the process to {:.0} MiB, so the refusal came after the allocation",
+            inillucent_compat::procstat::mebibytes(highest)
+        );
+    }
+}
+
+/// A chain of concatenations cannot double its way past the value bound.
+///
+/// **Its own case, because what it costs and what a single value costs are
+/// different questions.** `WITH RECURSIVE c(s) AS (SELECT 'aa' UNION ALL
+/// SELECT s||s FROM c)` reached 49 GB before the harness gave up. The value
+/// bound is what stops the doubling; the rows the recursive term has already
+/// produced are a *result set*, which is the request budget's business and
+/// which the command line leaves unbounded on purpose - see
+/// `inillucent_driver::StatementLimits`, and `docs/sql.md` on what a served
+/// server sets instead. So this asserts the refusal and not a ceiling the
+/// command line does not have.
+#[test]
+fn a_chain_of_concatenations_cannot_double_past_the_value_bound() {
+    let Some(binary) = inillucent_compat::cliproc::program("inillucent") else {
+        return;
+    };
+    let sql = "WITH RECURSIVE c(s) AS (SELECT 'aa' UNION ALL SELECT s||s FROM c) \
+               SELECT length(s) FROM c";
+    let (code, said, _) = run_and_watch(&binary, sql);
+    assert_eq!(
+        code,
+        Some(1),
+        "the doubling did not answer a refusal: {said}"
+    );
+    assert!(
+        said.contains("too big"),
+        "the doubling was refused by something other than the value bound: {said}"
+    );
+}
+
+/// Runs one statement as a process and reports its exit code, what it said, and
+/// the largest resident set it reached.
+///
+/// Sampled while it runs rather than after it exits, because a process that has
+/// ended reports nothing about how large it got.
+///
+/// @param binary - the built `inillucent`
+/// @param sql - the statement to run
+fn run_and_watch(binary: &std::path::Path, sql: &str) -> (Option<i32>, String, u64) {
+    let mut child = std::process::Command::new(binary)
+        .args(["--db", ":memory:", "query", sql])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|error| panic!("the binary did not start: {error}"));
+    let mut highest = 0u64;
+    let finished = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                highest =
+                    highest.max(inillucent_compat::procstat::child_cost(&child).peak_working_set);
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(error) => panic!("waiting on the binary: {error}"),
+        }
+    };
+    let mut said = String::new();
+    if let Some(mut stream) = child.stderr.take() {
+        use std::io::Read;
+        let _ = stream.read_to_string(&mut said);
+    }
+    (finished.code(), said, highest)
+}

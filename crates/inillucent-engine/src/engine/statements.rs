@@ -243,6 +243,7 @@ impl crate::ImportedDatabase {
             Cached::Program(_) => Ok(vec!["a program listing".to_string()]),
             Cached::Insert(..) => Ok(vec!["an insert".to_string()]),
             Cached::VirtualInsert(_) => Ok(vec!["an insert into a module".to_string()]),
+            Cached::SchemaInsert(_) => Ok(vec!["an insert into sqlite_schema".to_string()]),
             Cached::VirtualUpdate(..) => Ok(vec!["an update of a module".to_string()]),
             Cached::VirtualDelete(..) => Ok(vec!["a delete from a module".to_string()]),
             Cached::Update(..) => Ok(vec!["an update".to_string()]),
@@ -295,9 +296,64 @@ impl ImportedDatabase {
                 self.pragmas.foreign_keys(),
                 self.pragmas.defer_foreign_keys(),
             );
-        let bound = binder.bind_statement(&parsed.statement).map_err(refused)?;
+        let mut bound = binder.bind_statement(&parsed.statement).map_err(refused)?;
+        // **A correlated `IN` becomes `EXISTS` before anything plans it.** The
+        // physical pass computes a correlated block once per outer row and
+        // hands the operator one column, which is not a list, so it refused one
+        // by name; `EXISTS` over the same block is a path the engine already
+        // runs. See `inillucent_sql::correlated_in` for the NULL rules the
+        // lowering has to keep.
+        inillucent_sql::correlated_in::lower(&mut bound);
         self.refuse_shadow_write(&bound)?;
+        self.refuse_schema_write(&bound)?;
         Ok(bound)
+    }
+
+    /// Refuses a write of `sqlite_schema` the connection has not asked for.
+    ///
+    /// **The binder used to refuse every `sqlite_` name outright, and that made
+    /// a dump of a virtual table unreplayable (task-1979, R2).** `.dump` writes
+    /// `PRAGMA writable_schema=ON` and then
+    /// `INSERT INTO sqlite_schema(type,name,tbl_name,rootpage,sql)VALUES(...)`
+    /// for a virtual table, because running its `CREATE VIRTUAL TABLE` would
+    /// build empty shadow tables over the ones the dump restores a few lines
+    /// earlier. SQLite accepts that statement under the pragma and this engine
+    /// answered `unsupported`, so its own `dump` output stopped at the first
+    /// virtual table.
+    ///
+    /// The pragma is read here rather than in the binder for the reason
+    /// `refuse_shadow_write` gives: the check belongs to the connection, and
+    /// the binder is bound against a catalog rather than against a connection's
+    /// settings.
+    ///
+    /// **Only an insert.** `UPDATE sqlite_schema SET sql = ...` is how SQLite
+    /// repairs a corrupt schema by hand and nothing in this tree produces one,
+    /// so it stays refused with the code that says "not built" rather than
+    /// being half implemented.
+    ///
+    /// @param bound - the statement that was just bound
+    fn refuse_schema_write(&self, bound: &BoundStatement) -> DbResult<()> {
+        let (written, inserting) = match bound {
+            BoundStatement::Insert(statement) => (&statement.table.folded, true),
+            BoundStatement::Update(statement) => (&statement.table.folded, false),
+            BoundStatement::Delete(statement) => (&statement.table.folded, false),
+            _ => return Ok(()),
+        };
+        if !is_the_schema_table(written) {
+            return Ok(());
+        }
+        if !self.pragmas.writable_schema() {
+            return Err(refusal(
+                "writing to sqlite_schema needs PRAGMA writable_schema = ON",
+            ));
+        }
+        if !inserting {
+            return Err(
+                refusal("only an INSERT into sqlite_schema is built, not an UPDATE or a DELETE")
+                    .with_unsupported("changing a row of sqlite_schema"),
+            );
+        }
+        Ok(())
     }
 
     /// Refuses a write of a module's private storage on a defensive connection.
@@ -478,6 +534,7 @@ impl ImportedDatabase {
             | Cached::VirtualUpdate(..)
             | Cached::VirtualDelete(..)
             | Cached::VirtualInsert(_)
+            | Cached::SchemaInsert(_)
             | Cached::Select(..)
             | Cached::Insert(_, None, _) => Vec::new(),
             // This harness measures a fresh build on purpose - see the doc
@@ -510,6 +567,9 @@ impl ImportedDatabase {
             Cached::VirtualDelete(..) | Cached::VirtualUpdate(..) => {}
             Cached::VirtualInsert(statement) => {
                 self.insert_into_module(statement, params)?;
+            }
+            Cached::SchemaInsert(statement) => {
+                self.insert_into_schema(statement, params)?;
             }
             Cached::Select(plan, prepared, _) => {
                 physical::run_any_prepared(plan, self, prepared, params)?;
@@ -694,4 +754,11 @@ pub(crate) fn describe_statement(statement: &BoundStatement) -> &'static str {
         BoundStatement::Directive(_) => "a directive",
         BoundStatement::Empty => "nothing",
     }
+}
+
+/// Returns whether a folded name is one of the schema table's two spellings.
+///
+/// @param name - the table's name, folded
+pub(crate) fn is_the_schema_table(name: &[u8]) -> bool {
+    name == b"sqlite_schema" || name == b"sqlite_master"
 }

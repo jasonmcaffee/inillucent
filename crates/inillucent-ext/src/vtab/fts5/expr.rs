@@ -15,9 +15,17 @@
 //! andlist := notpart ( AND? notpart )*        -- juxtaposition is AND
 //! notpart := primary ( NOT primary )*
 //! primary := '(' expr ')' | colspec ':' primary | phrase | NEAR '(' phrase+ , n ')'
-//! phrase  := '"' term+ '"' | term
+//! colspec := '-'? ( word | '{' word+ '}' )    -- a '-' excludes those columns
+//! phrase  := '^'? ( '"' term+ '"' | term ) '*'?
 //! term    := word '*'?                        -- a trailing star is a prefix
 //! ```
+//!
+//! **Four of those forms were refused and one was parsed and dropped
+//! (task-1979, R4 and R7).** `{title body}:cat`, `{title}:cat` and `-title:cat`
+//! were syntax errors here and are answered by SQLite; `"a b"*`, a phrase whose
+//! last term is a prefix, was refused the same way. `^cat` parsed, and the
+//! anchor was then thrown away: `^alpha` returned every row holding `alpha`
+//! anywhere - 206 rows where SQLite answered 82.
 
 use std::collections::BTreeMap;
 
@@ -38,13 +46,41 @@ pub struct Term {
     pub prefix: bool,
 }
 
+/// Which columns a phrase may be found in.
+///
+/// An empty list admits every column, which is what a phrase with no filter in
+/// front of it means. `negated` is the `-` form: `-title:cat` searches every
+/// column *except* `title`, so the same list answers both questions and there
+/// is one place that decides.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ColumnFilter {
+    /// The columns the filter names.
+    pub named: Vec<usize>,
+    /// Whether the named columns are the ones to skip.
+    pub negated: bool,
+}
+
+impl ColumnFilter {
+    /// Returns whether a phrase under this filter may match in a column.
+    ///
+    /// @param column - the column a hit was found in
+    pub fn admits(&self, column: usize) -> bool {
+        if self.named.is_empty() {
+            return true;
+        }
+        self.named.contains(&column) != self.negated
+    }
+}
+
 /// A run of terms that must appear at consecutive positions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Phrase {
     /// The terms, in order.
     pub terms: Vec<Term>,
-    /// The column the phrase is restricted to, when one was named.
-    pub column: Option<usize>,
+    /// The columns the phrase is restricted to.
+    pub columns: ColumnFilter,
+    /// Whether a leading `^` anchored it to the start of a column.
+    pub anchored: bool,
 }
 
 /// One node of a parsed query.
@@ -79,16 +115,16 @@ pub struct Query {
 impl Query {
     /// Parses one query string.
     pub fn parse(text: &[u8], tokenizer: &Tokenizer, columns: &[Vec<u8>]) -> DbResult<Query> {
-        let tokens = lex(text);
+        let tokens = lex(text)?;
         let mut parser = Parser {
             tokens,
             at: 0,
             tokenizer,
             columns,
         };
-        let root = parser.parse_or(None)?;
+        let root = parser.parse_or(&ColumnFilter::default())?;
         if parser.at < parser.tokens.len() {
-            return Err(failure("fts5: syntax error near the end of the query"));
+            return Err(syntax("fts5: syntax error near the end of the query"));
         }
         let mut phrases = Vec::new();
         collect_phrases(&root, &mut phrases);
@@ -106,6 +142,21 @@ fn collect_phrases(node: &Match, into: &mut Vec<Phrase>) {
             collect_phrases(right, into);
         }
     }
+}
+
+/// Returns a syntax error whose own words reach the caller.
+///
+/// **`failure` attaches `detail`, and nothing above this reads it (task-1979,
+/// R14).** Every refusal this parser built - "no such column: nope", "a group
+/// is not closed", "NEAR is not closed" - reached an application as
+/// `SQL logic error`, the generic text for the primary code, so a query with a
+/// mistake in it said nothing about where the mistake was. The message is what
+/// a caller is shown, so the same sentence goes in both.
+///
+/// @param said - what is wrong with the query
+fn syntax(said: impl Into<String>) -> inillucent_base::DbError {
+    let said = said.into();
+    failure(said.clone()).with_message(said)
 }
 
 /// One lexical token of a query.
@@ -129,10 +180,25 @@ enum Lexeme {
     Plus,
     /// `^`, which anchors a phrase to the start of a column.
     Caret,
+    /// `{`, which opens a list of column names.
+    OpenBrace,
+    /// `}`, which closes one.
+    CloseBrace,
+    /// `-`, which negates the column filter after it.
+    Minus,
 }
 
 /// Splits a query into its lexemes.
-fn lex(text: &[u8]) -> Vec<Lexeme> {
+///
+/// **A string that is never closed is a syntax error, and a `-` is its own
+/// lexeme (task-1979, R17).** Both were swallowed: an unterminated `"cat`
+/// produced the phrase `cat`, and `it\'s` produced `it` AND `s`, where SQLite
+/// refuses each of them; `co-operate` lexed as one word and looked for a token
+/// no tokenizer would ever produce. Three strings SQLite calls errors were
+/// answered with rows.
+///
+/// @param text - the query the `MATCH` operand was given
+fn lex(text: &[u8]) -> DbResult<Vec<Lexeme>> {
     let text = String::from_utf8_lossy(text);
     let mut out = Vec::new();
     let mut characters = text.chars().peekable();
@@ -146,6 +212,9 @@ fn lex(text: &[u8]) -> Vec<Lexeme> {
             '*' => Some(Lexeme::Star),
             '+' => Some(Lexeme::Plus),
             '^' => Some(Lexeme::Caret),
+            '{' => Some(Lexeme::OpenBrace),
+            '}' => Some(Lexeme::CloseBrace),
+            '-' => Some(Lexeme::Minus),
             _ => None,
         };
         if let Some(punctuation) = punctuation {
@@ -160,11 +229,28 @@ fn lex(text: &[u8]) -> Vec<Lexeme> {
                 out.push(Lexeme::Word(core::mem::take(&mut word).into_bytes()));
             }
             let mut quoted = String::new();
-            for inner in characters.by_ref() {
+            let mut closed = false;
+            while let Some(inner) = characters.next() {
+                // **A doubled quote inside a string stands for one quote**,
+                // which is how a query writes a phrase that holds a quote
+                // character. Without this the first two characters read as an
+                // empty string and the rest read as two more strings, so a
+                // query SQLite answers with rows was a syntax error here.
                 if inner == character {
+                    if characters.peek() == Some(&character) {
+                        characters.next();
+                        quoted.push(inner);
+                        continue;
+                    }
+                    closed = true;
                     break;
                 }
                 quoted.push(inner);
+            }
+            if !closed {
+                return Err(syntax(format!(
+                    "fts5: syntax error - the string opened by {character} is not closed"
+                )));
             }
             out.push(Lexeme::Quoted(quoted.into_bytes()));
             continue;
@@ -180,7 +266,7 @@ fn lex(text: &[u8]) -> Vec<Lexeme> {
     if !word.is_empty() {
         out.push(Lexeme::Word(word.into_bytes()));
     }
-    out
+    Ok(out)
 }
 
 /// The query parser's position.
@@ -203,7 +289,7 @@ impl Parser<'_> {
     }
 
     /// Parses an `OR` chain.
-    fn parse_or(&mut self, column: Option<usize>) -> DbResult<Match> {
+    fn parse_or(&mut self, column: &ColumnFilter) -> DbResult<Match> {
         let mut left = self.parse_and(column)?;
         while self.at_keyword("OR") {
             self.at = self.at.saturating_add(1);
@@ -214,7 +300,7 @@ impl Parser<'_> {
     }
 
     /// Parses an `AND` chain, where two things side by side are an `AND`.
-    fn parse_and(&mut self, column: Option<usize>) -> DbResult<Match> {
+    fn parse_and(&mut self, column: &ColumnFilter) -> DbResult<Match> {
         let mut left = self.parse_not(column)?;
         loop {
             if self.at_keyword("AND") {
@@ -234,7 +320,7 @@ impl Parser<'_> {
     }
 
     /// Parses a `NOT` chain.
-    fn parse_not(&mut self, column: Option<usize>) -> DbResult<Match> {
+    fn parse_not(&mut self, column: &ColumnFilter) -> DbResult<Match> {
         let mut left = self.parse_primary(column)?;
         while self.at_keyword("NOT") {
             self.at = self.at.saturating_add(1);
@@ -245,12 +331,12 @@ impl Parser<'_> {
     }
 
     /// Parses one primary: a group, a column filter, a `NEAR`, or a phrase.
-    fn parse_primary(&mut self, column: Option<usize>) -> DbResult<Match> {
+    fn parse_primary(&mut self, column: &ColumnFilter) -> DbResult<Match> {
         if matches!(self.peek(), Some(Lexeme::Open)) {
             self.at = self.at.saturating_add(1);
             let inner = self.parse_or(column)?;
             if !matches!(self.peek(), Some(Lexeme::Close)) {
-                return Err(failure("fts5: a group is not closed"));
+                return Err(syntax("fts5: a group is not closed"));
             }
             self.at = self.at.saturating_add(1);
             return Ok(inner);
@@ -258,25 +344,78 @@ impl Parser<'_> {
         if self.at_keyword("NEAR") && matches!(self.tokens.get(self.at + 1), Some(Lexeme::Open)) {
             return self.parse_near(column);
         }
-        // `column : rest` restricts everything after it to one column.
-        if let Some(Lexeme::Word(name)) = self.peek().cloned() {
-            if matches!(self.tokens.get(self.at + 1), Some(Lexeme::Colon)) {
-                let Some(index) = self.column_named(&name) else {
-                    return Err(failure(format!(
-                        "fts5: no such column: {}",
-                        String::from_utf8_lossy(&name)
-                    )));
-                };
-                self.at = self.at.saturating_add(2);
-                return self.parse_primary(Some(index));
-            }
+        if let Some(filter) = self.parse_column_filter()? {
+            return self.parse_primary(&filter);
         }
         let phrase = self.parse_phrase(column)?;
         Ok(Match::Phrase(phrase))
     }
 
+    /// Parses a column filter, when the cursor is on one.
+    ///
+    /// The four forms SQLite takes: `c:`, `{c d}:`, `-c:` and `-{c d}:`. A `-`
+    /// makes the list the columns to skip. `Ok(None)` means the cursor was not
+    /// on a filter at all, which is the ordinary case and is why this is
+    /// separated from [`Parser::parse_primary`] rather than written into it.
+    fn parse_column_filter(&mut self) -> DbResult<Option<ColumnFilter>> {
+        let started = self.at;
+        let negated = matches!(self.peek(), Some(Lexeme::Minus));
+        if negated {
+            self.at = self.at.saturating_add(1);
+        }
+        let named = match self.peek().cloned() {
+            Some(Lexeme::OpenBrace) => {
+                self.at = self.at.saturating_add(1);
+                let mut named = Vec::new();
+                while let Some(Lexeme::Word(name)) = self.peek().cloned() {
+                    self.at = self.at.saturating_add(1);
+                    named.push(self.column_index(&name)?);
+                }
+                if !matches!(self.peek(), Some(Lexeme::CloseBrace)) {
+                    return Err(syntax("fts5: a column list is not closed"));
+                }
+                self.at = self.at.saturating_add(1);
+                named
+            }
+            // After a `-` the name is a column whether or not a colon
+            // follows, which is how SQLite answers `co-operate` with
+            // "no such column: operate" rather than with rows.
+            Some(Lexeme::Word(name))
+                if negated || matches!(self.tokens.get(self.at + 1), Some(Lexeme::Colon)) =>
+            {
+                self.at = self.at.saturating_add(1);
+                vec![self.column_index(&name)?]
+            }
+            // A `-` that is not in front of a column filter is a stray, and
+            // `parse_phrase` refuses it where every other stray is refused.
+            _ => {
+                self.at = started;
+                return Ok(None);
+            }
+        };
+        if !matches!(self.peek(), Some(Lexeme::Colon)) {
+            return Err(syntax(
+                "fts5: a column filter has to be followed by a colon and a phrase",
+            ));
+        }
+        self.at = self.at.saturating_add(1);
+        Ok(Some(ColumnFilter { named, negated }))
+    }
+
+    /// Returns which column a name is, refusing one the table does not have.
+    ///
+    /// @param name - the column name as written
+    fn column_index(&self, name: &[u8]) -> DbResult<usize> {
+        self.column_named(name).ok_or_else(|| {
+            syntax(format!(
+                "fts5: no such column: {}",
+                String::from_utf8_lossy(name)
+            ))
+        })
+    }
+
     /// Parses `NEAR(phrase phrase, distance)`.
-    fn parse_near(&mut self, column: Option<usize>) -> DbResult<Match> {
+    fn parse_near(&mut self, column: &ColumnFilter) -> DbResult<Match> {
         self.at = self.at.saturating_add(2);
         let mut phrases = Vec::new();
         while !matches!(
@@ -294,20 +433,19 @@ impl Parser<'_> {
             }
         }
         if !matches!(self.peek(), Some(Lexeme::Close)) {
-            return Err(failure("fts5: NEAR is not closed"));
+            return Err(syntax("fts5: NEAR is not closed"));
         }
         self.at = self.at.saturating_add(1);
         if phrases.is_empty() {
-            return Err(failure("fts5: NEAR needs at least one phrase"));
+            return Err(syntax("fts5: NEAR needs at least one phrase"));
         }
         Ok(Match::Near { phrases, distance })
     }
 
     /// Parses one phrase: a quoted string, or a word with an optional `*`.
-    fn parse_phrase(&mut self, column: Option<usize>) -> DbResult<Phrase> {
-        // A leading `^` anchors the phrase to the start of the column. It is
-        // accepted and recorded by making the phrase start at position zero,
-        // which is what the anchor means.
+    fn parse_phrase(&mut self, column: &ColumnFilter) -> DbResult<Phrase> {
+        // A leading `^` anchors the phrase to the start of the column, which
+        // is kept on the phrase and applied in `phrase_hits`.
         let anchored = matches!(self.peek(), Some(Lexeme::Caret));
         if anchored {
             self.at = self.at.saturating_add(1);
@@ -317,10 +455,20 @@ impl Parser<'_> {
             match self.peek().cloned() {
                 Some(Lexeme::Quoted(text)) => {
                     self.at = self.at.saturating_add(1);
-                    for token in self.tokenizer.tokens(&text) {
+                    // **A quoted phrase may end in a prefix (task-1979, R7).**
+                    // `"a b"*` is SQLite's phrase prefix and was refused here,
+                    // because only the bare word branch below looked for a
+                    // trailing star.
+                    let starred = matches!(self.peek(), Some(Lexeme::Star));
+                    if starred {
+                        self.at = self.at.saturating_add(1);
+                    }
+                    let tokens = self.tokenizer.tokens(&text);
+                    let last = tokens.len().saturating_sub(1);
+                    for (position, token) in tokens.into_iter().enumerate() {
                         terms.push(Term {
                             token,
-                            prefix: false,
+                            prefix: starred && position == last,
                         });
                     }
                 }
@@ -352,9 +500,13 @@ impl Parser<'_> {
             break;
         }
         if terms.is_empty() {
-            return Err(failure("fts5: syntax error - a phrase has no terms"));
+            return Err(syntax("fts5: syntax error - a phrase has no terms"));
         }
-        Ok(Phrase { terms, column })
+        Ok(Phrase {
+            terms,
+            columns: column.clone(),
+            anchored,
+        })
     }
 
     /// Returns which column a name is.
@@ -415,7 +567,13 @@ pub fn evaluate_rows(
     buffer: &super::Buffer,
     columns: usize,
 ) -> DbResult<Option<Vec<i64>>> {
-    if query.phrases.iter().any(|phrase| phrase.terms.len() != 1) {
+    // An anchored phrase is decided by *where* its term sits, so it belongs on
+    // the path that decodes positions however few terms it has (task-1979, R4).
+    if query
+        .phrases
+        .iter()
+        .any(|phrase| phrase.terms.len() != 1 || phrase.anchored)
+    {
         return Ok(None);
     }
     let mut per_phrase = Vec::with_capacity(query.phrases.len());
@@ -449,7 +607,7 @@ fn phrase_rows(
     };
     let mut rows = Vec::new();
     for bytes in term_doclists(term, context, shadows, buffer)? {
-        super::doclist_rows(&bytes, phrase.column, columns, &mut rows);
+        super::doclist_rows(&bytes, &phrase.columns, columns, &mut rows);
     }
     rows.sort_unstable();
     rows.dedup();
@@ -696,7 +854,7 @@ pub fn phrase_hits(
         let mut current: Hits = BTreeMap::new();
         for entry in entries {
             for (column, positions) in &entry.columns {
-                if phrase.column.is_some_and(|wanted| wanted != *column) {
+                if !phrase.columns.admits(*column) {
                     continue;
                 }
                 if *column >= columns {
@@ -727,7 +885,33 @@ pub fn phrase_hits(
             return Ok(BTreeMap::new());
         }
     }
-    Ok(found.unwrap_or_default())
+    let mut found = found.unwrap_or_default();
+    if phrase.anchored {
+        anchor(&mut found);
+    }
+    Ok(found)
+}
+
+/// Keeps only the hits that start at the first token of their column.
+///
+/// **What `^` means, and what it did not do (task-1979, R4).** The parser
+/// recognised the caret, stepped past it and recorded nothing, so `^alpha`
+/// matched `alpha` anywhere in the column - 206 rows where SQLite answered 82.
+/// The positions in `found` have already been shifted back by each term's place
+/// in the phrase, so the phrase's own start is position zero and the anchor is
+/// simply that position surviving.
+///
+/// @param found - the phrase's hits, narrowed in place
+fn anchor(found: &mut Hits) {
+    found.retain(|_, columns| {
+        columns.retain(|(_, positions)| positions.first() == Some(&0));
+        !columns.is_empty()
+    });
+    for columns in found.values_mut() {
+        for (_, positions) in columns.iter_mut() {
+            positions.retain(|position| *position == 0);
+        }
+    }
 }
 
 /// Returns the positions two terms share, per row and column.
@@ -899,10 +1083,65 @@ mod tests {
     #[test]
     fn a_column_filter_restricts_what_follows() {
         let query = parse("title : cat");
-        assert_eq!(query.phrases[0].column, Some(0));
+        assert_eq!(query.phrases[0].columns.named, vec![0]);
         let both = parse("body:dog cat");
-        assert_eq!(both.phrases[0].column, Some(1));
-        assert_eq!(both.phrases[1].column, None);
+        assert_eq!(both.phrases[0].columns.named, vec![1]);
+        assert!(both.phrases[1].columns.named.is_empty());
+    }
+
+    /// A brace list names several columns, and a `-` excludes them.
+    #[test]
+    fn a_brace_list_names_several_columns() {
+        let several = parse("{title body}:cat");
+        assert_eq!(several.phrases[0].columns.named, vec![0, 1]);
+        assert!(!several.phrases[0].columns.negated);
+        let one = parse("{body}:cat");
+        assert_eq!(one.phrases[0].columns.named, vec![1]);
+        let without = parse("-title:cat");
+        assert_eq!(without.phrases[0].columns.named, vec![0]);
+        assert!(without.phrases[0].columns.negated);
+        assert!(!without.phrases[0].columns.admits(0));
+        assert!(without.phrases[0].columns.admits(1));
+    }
+
+    /// A caret is kept on the phrase rather than stepped over.
+    #[test]
+    fn a_caret_anchors_the_phrase() {
+        assert!(parse("^cat").phrases[0].anchored);
+        assert!(!parse("cat").phrases[0].anchored);
+        assert!(parse("title:^cat").phrases[0].anchored);
+    }
+
+    /// A quoted phrase can end in a prefix.
+    #[test]
+    fn a_quoted_phrase_can_end_in_a_prefix() {
+        let query = parse("\"quick brown\"*");
+        assert_eq!(query.phrases[0].terms.len(), 2);
+        assert!(!query.phrases[0].terms[0].prefix);
+        assert!(query.phrases[0].terms[1].prefix);
+    }
+
+    /// The three strings SQLite calls syntax errors are refused here too.
+    #[test]
+    fn the_strings_sqlite_refuses_are_refused() {
+        let tokenizer = Tokenizer::named(&[]).expect("a known tokenizer");
+        let columns = [b"title".to_vec(), b"body".to_vec()];
+        for text in [b"co-operate".as_slice(), b"it's".as_slice(), b"\"cat"] {
+            assert!(
+                Query::parse(text, &tokenizer, &columns).is_err(),
+                "{} should be a syntax error",
+                String::from_utf8_lossy(text)
+            );
+        }
+    }
+
+    /// A syntax error says what is wrong, rather than "SQL logic error".
+    #[test]
+    fn a_syntax_error_carries_its_own_message() {
+        let tokenizer = Tokenizer::named(&[]).expect("a known tokenizer");
+        let failed = Query::parse(b"nope:cat", &tokenizer, &[b"title".to_vec()])
+            .expect_err("an unknown column");
+        assert!(failed.message().contains("no such column"), "{failed:?}");
     }
 
     /// A column nobody declared is a query error.

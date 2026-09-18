@@ -43,6 +43,10 @@ struct Captured {
     name: Vec<u8>,
     /// The `CREATE` text, empty for an object that has none.
     sql: Vec<u8>,
+    /// Whether a virtual table owns it as one of its shadow tables.
+    shadow: bool,
+    /// Whether it is a virtual table that owns shadow tables of its own.
+    owns_shadows: bool,
 }
 
 /// Rebuilds a database into a fresh file, and reports what it wrote.
@@ -83,16 +87,20 @@ pub(crate) fn rebuild_into(
                 error
             ))
         })?;
-    replay_schema(&mut fresh, &captured, |kind| kind == ObjectKind::Table)?;
+    replay_schema(&mut fresh, &captured, |entry| {
+        entry.kind == ObjectKind::Table && !entry.shadow
+    })?;
     for entry in &captured {
-        if entry.kind != ObjectKind::Table {
+        if entry.kind != ObjectKind::Table || entry.owns_shadows {
             continue;
         }
-        copy_rows(source, &mut fresh, &entry.name)?;
+        copy_rows(source, &mut fresh, &entry.name, entry.shadow)?;
     }
-    replay_schema(&mut fresh, &captured, |kind| kind == ObjectKind::Index)?;
-    replay_schema(&mut fresh, &captured, |kind| {
-        matches!(kind, ObjectKind::View | ObjectKind::Trigger)
+    replay_schema(&mut fresh, &captured, |entry| {
+        entry.kind == ObjectKind::Index
+    })?;
+    replay_schema(&mut fresh, &captured, |entry| {
+        matches!(entry.kind, ObjectKind::View | ObjectKind::Trigger)
     })?;
     carry_header(source, &mut fresh).map_err(|error| {
         inillucent_base::error::misuse(format!("VACUUM could not carry the header: {error}"))
@@ -118,6 +126,8 @@ fn capture_schema(source: &ImportedDatabase) -> Vec<Captured> {
             kind: entry.kind,
             name: entry.name.clone(),
             sql: entry.sql.clone(),
+            shadow: source.is_shadow_table(&entry.name),
+            owns_shadows: source.owns_shadow_tables(&entry.name),
         })
         .collect()
 }
@@ -130,10 +140,10 @@ fn capture_schema(source: &ImportedDatabase) -> Vec<Captured> {
 fn replay_schema(
     fresh: &mut ImportedDatabase,
     captured: &[Captured],
-    wanted: impl Fn(ObjectKind) -> bool,
+    wanted: impl Fn(&Captured) -> bool,
 ) -> DbResult<()> {
     for entry in captured {
-        if !wanted(entry.kind) {
+        if !wanted(entry) {
             continue;
         }
         let sql = String::from_utf8_lossy(&entry.sql).into_owned();
@@ -167,6 +177,7 @@ fn copy_rows(
     source: &ImportedDatabase,
     fresh: &mut ImportedDatabase,
     table: &[u8],
+    shadow: bool,
 ) -> DbResult<()> {
     let name = quoted(table);
     let (rows, columns) = source.run(&format!("SELECT * FROM {name}"))?;
@@ -182,7 +193,16 @@ fn copy_rows(
         .map(|column| quoted(column.as_bytes()))
         .collect::<Vec<_>>()
         .join(", ");
-    let insert = format!("INSERT INTO {name} ({names}) VALUES ({placeholders})");
+    // **A shadow table is not empty when its rows arrive.** The module wrote
+    // its own opening rows when `CREATE VIRTUAL TABLE` connected it - a version
+    // row in `_config`, a structure row in `_data` - and those keys are in the
+    // source too, so a plain `INSERT` reports a `UNIQUE` violation on the first
+    // of them. The source's row is the one that is right.
+    let verb = match shadow {
+        true => "INSERT OR REPLACE INTO",
+        false => "INSERT INTO",
+    };
+    let insert = format!("{verb} {name} ({names}) VALUES ({placeholders})");
     for row in rows {
         let mut params = inillucent_exec::physical::Params::new();
         for (at, value) in row.iter().enumerate() {

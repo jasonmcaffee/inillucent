@@ -239,15 +239,7 @@ pub(crate) fn carry_tables(
         } else {
             import_table(database, &mut source.file, info)
         };
-        let (shape, layout) = match imported {
-            Ok(imported) => imported,
-            Err(_) => {
-                carried
-                    .skipped
-                    .push(String::from_utf8_lossy(&info.name).into_owned());
-                continue;
-            }
-        };
+        let (shape, layout) = imported.map_err(|error| unreadable(error, &info.name))?;
         carried.entries.push(SchemaEntry {
             kind: ObjectKind::Table,
             name: info.name.clone(),
@@ -465,4 +457,26 @@ pub(crate) fn reopen_and_verify(
         ));
     }
     Ok(database)
+}
+
+/// Returns the refusal a table whose rows could not be read produces.
+///
+/// **A refusal, not a skip (task-1979, M1).** A table the reader could not walk
+/// used to be dropped and named in a `skipped` list nothing on the migration
+/// path reads - so one flipped bit in a leaf page of a 500 row table produced a
+/// published, integrity-clean database with the table gone entirely and exit
+/// code 0, while real SQLite still read all 500 rows from the same file.
+/// Reading fewer tables than the source has is the one outcome a migration must
+/// never report as success.
+///
+/// @param error - what the read failed with
+/// @param name - the table it was reading
+fn unreadable(error: inillucent_base::DbError, name: &[u8]) -> inillucent_base::DbError {
+    let said = error.detail().unwrap_or_default().to_string();
+    let named = String::from_utf8_lossy(name).into_owned();
+    error
+        .with_message(format!(
+            "the rows of {named} could not be read from the source database"
+        ))
+        .with_detail(format!("the rows of {named} could not be read: {said}"))
 }

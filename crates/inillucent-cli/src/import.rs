@@ -147,9 +147,15 @@ pub fn import(shell: &mut Shell, arguments: &[&str]) {
     let Some(reading) = reading(shell, arguments) else {
         return;
     };
-    let (path, table) = (reading.path, reading.table);
-    let Ok(text) = std::fs::read_to_string(path) else {
-        shell.complain(&format!("Error: cannot open \"{path}\""));
+    let (named, table) = (reading.path, reading.table);
+    // **Through the same confinement function every other path-taking dot
+    // command calls (task-1979, H1).** This reads its file with `std::fs`, so
+    // the confined VFS never sees the path and `--root` did not apply to it.
+    let Some(path) = crate::dot::confine_path(shell, named) else {
+        return;
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        shell.complain(&format!("Error: cannot open \"{named}\""));
         return;
     };
     let mut rows = parse(
@@ -181,7 +187,7 @@ pub fn import(shell: &mut Shell, arguments: &[&str]) {
             return;
         }
     }
-    insert(shell, table, &rows, path);
+    insert(shell, table, &rows, &path);
 }
 
 /// Inserts every parsed row, reporting the first line that will not go in.

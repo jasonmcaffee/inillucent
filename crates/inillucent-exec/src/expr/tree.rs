@@ -311,6 +311,12 @@ pub enum Expr {
         left: Box<Expr>,
         /// The right operand.
         right: Box<Expr>,
+        /// The largest value this connection admits, in bytes.
+        ///
+        /// See `crate::scalar::GeneralArith`: `||` is the one operator that
+        /// builds a value out of two others, so it is the one that can produce
+        /// something past `Limit::Length` with no function being called.
+        length_limit: i64,
     },
     /// A call to one of the JSON built-ins, or `->` / `->>`.
     ///
@@ -623,16 +629,13 @@ pub fn compile(expr: &Expr, types: &[StaticType]) -> DbResult<Box<dyn Eval>> {
             func,
             arguments,
             now,
-        } => Box::new(crate::scalar::TimeCall {
-            func: *func,
-            arguments: compile_all(arguments, types)?,
-            now: *now,
-        }),
-        Expr::General { op, left, right } => Box::new(crate::scalar::GeneralArith {
-            op: *op,
-            left: compile(left, types)?,
-            right: compile(right, types)?,
-        }),
+        } => time_call(*func, arguments, *now, types)?,
+        Expr::General {
+            op,
+            left,
+            right,
+            length_limit,
+        } => general_arith(*op, left, right, *length_limit, types)?,
         Expr::Unary { op, operand } => Box::new(crate::scalar::Unary {
             op: *op,
             operand: compile(operand, types)?,
@@ -733,6 +736,56 @@ pub fn compile(expr: &Expr, types: &[StaticType]) -> DbResult<Box<dyn Eval>> {
 ///
 /// @param exprs - the expressions to compile
 /// @param types - the static type of each input column
+/// Compiles a call to one of the date and time built-ins.
+///
+/// Its own function for the reason `general_arith` below is: `compile` has a
+/// recorded length in `crates/inillucent-compat/tests/policy.rs`, and an arm
+/// that is three fields wide is one of the cheapest to lift out of it.
+///
+/// @param func - which function
+/// @param arguments - the compiled arguments
+/// @param now - the julian day the statement calls "now"
+/// @param types - the static types of the columns in scope
+fn time_call(
+    func: TimeFunc,
+    arguments: &[Expr],
+    now: f64,
+    types: &[StaticType],
+) -> DbResult<Box<dyn Eval>> {
+    Ok(Box::new(crate::scalar::TimeCall {
+        func,
+        arguments: compile_all(arguments, types)?,
+        now,
+    }))
+}
+
+/// Compiles an arithmetic, bitwise or concatenation operator.
+///
+/// Its own function only because `compile` has a recorded length in
+/// `crates/inillucent-compat/tests/policy.rs` and this arm is the one that
+/// grew a field (task-1980). What the field is for is in
+/// `crate::scalar::GeneralArith`.
+///
+/// @param op - which operator
+/// @param left - the left operand
+/// @param right - the right operand
+/// @param length_limit - the largest value this connection admits, in bytes
+/// @param types - the static types of the columns in scope
+fn general_arith(
+    op: BinaryOp,
+    left: &Expr,
+    right: &Expr,
+    length_limit: i64,
+    types: &[StaticType],
+) -> DbResult<Box<dyn Eval>> {
+    Ok(Box::new(crate::scalar::GeneralArith {
+        length_limit,
+        op,
+        left: compile(left, types)?,
+        right: compile(right, types)?,
+    }))
+}
+
 fn compile_all(exprs: &[Expr], types: &[StaticType]) -> DbResult<Vec<Box<dyn Eval>>> {
     exprs.iter().map(|expr| compile(expr, types)).collect()
 }

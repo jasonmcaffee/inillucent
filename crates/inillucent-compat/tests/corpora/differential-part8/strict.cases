@@ -1,0 +1,13 @@
+# Differential cases, category `strict`, from task-1979's review of commit 3073058.
+# One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
+# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+str-001-3	CREATE TABLE t(a INTEGER) STRICT; INSERT INTO t VALUES(1); SELECT a, typeof(a) FROM t
+str-002-3	CREATE TABLE t(a INTEGER) STRICT; INSERT INTO t VALUES('x')
+str-003-3	CREATE TABLE t(a TEXT) STRICT; INSERT INTO t VALUES(1); SELECT a, typeof(a) FROM t
+str-004-3	CREATE TABLE t(a INTEGER) STRICT; INSERT INTO t VALUES('12'); SELECT a, typeof(a) FROM t
+str-005-3	CREATE TABLE t(a VARCHAR) STRICT
+str-006-3	CREATE TABLE t(a ANY) STRICT; INSERT INTO t VALUES(1),('x'),(1.5); SELECT a, typeof(a) FROM t
+str-007-3	CREATE TABLE t(a INT NOT NULL) STRICT; INSERT INTO t VALUES(NULL)
+str-008-3	CREATE TABLE t(a REAL) STRICT; INSERT INTO t VALUES(1); SELECT a, typeof(a) FROM t
+str-009-3	CREATE TABLE t(a INTEGER PRIMARY KEY) STRICT, WITHOUT ROWID; INSERT INTO t VALUES(1); SELECT * FROM t
+str-010-3	CREATE TABLE t(a BLOB) STRICT; INSERT INTO t VALUES('x')

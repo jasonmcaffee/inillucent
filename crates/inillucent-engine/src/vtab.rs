@@ -262,6 +262,60 @@ impl ImportedDatabase {
     /// @param term - which FROM term of the plan
     /// @param path - the access path the planner chose for it
     /// @param params - the values bound to `?1`, `?2`, ...
+    /// Removes a virtual table's own catalog row and the shadow tables it owns.
+    ///
+    /// **A virtual table used to leave its shadow tables behind for ever
+    /// (task-1979, R18).** `DROP TABLE e_v` removed one row and left
+    /// `e_v_config`, `e_v_content`, `e_v_delta`, `e_v_gen` and `e_v_state` in
+    /// the schema, holding every vector the index had been given, with no
+    /// statement that could reach them: their names are the module's, nothing
+    /// re-derives them once the virtual table's row is gone, and `VACUUM` copied
+    /// them forward. A database that had created and dropped one index carried
+    /// its rows for the rest of its life.
+    ///
+    /// **A shadow another table owns is left alone.** An external content FTS5
+    /// index is handed the *source* table's rows as its shadow, and that table
+    /// belongs to the application - so only a shadow whose catalog row is named
+    /// after this table is removed, which is exactly the set
+    /// `create_virtual_table` made.
+    ///
+    /// @param name - the virtual table's name as written
+    pub(super) fn drop_module_table(&mut self, name: &[u8]) -> DbResult<()> {
+        let folded = name.to_ascii_lowercase();
+        let owned: Vec<Vec<u8>> = match self.session_state.virtual_tables.get(&folded) {
+            Some(connected) => connected
+                .arguments
+                .shadows
+                .iter()
+                .map(|shadow| shadow_table_name(name, &shadow.suffix).to_ascii_lowercase())
+                .filter(|held| *held != folded)
+                .collect(),
+            None => Vec::new(),
+        };
+        let at = self.schema.ddl_schema;
+        let doomed: Vec<(i64, u32)> = self
+            .entries_of(at)
+            .iter()
+            .filter(|held| {
+                let held_name = held.entry.name.to_ascii_lowercase();
+                held_name == folded || owned.contains(&held_name)
+            })
+            .map(|held| (held.rowid, held.root))
+            .collect();
+        for (rowid, root) in doomed {
+            self.forget(rowid)?;
+            if root != 0 {
+                self.release_tree(root)?;
+            }
+        }
+        // The module is disconnected here rather than left for
+        // `reconnect_modules`: the connection holds its state in memory, and a
+        // module still connected to trees that have been given back to the free
+        // map would answer out of pages another table is about to use.
+        self.session_state.virtual_tables.remove(&folded);
+        Ok(())
+    }
+
     /// Returns the root of a shadow table another object already owns.
     ///
     /// The catalog rows are the authority, as they are at open time, and a name
@@ -313,6 +367,29 @@ impl ImportedDatabase {
             .virtual_tables
             .values()
             .any(|connected| shadow_names(&connected.arguments).any(|held| held == folded))
+    }
+
+    /// Returns whether a name is a virtual table that owns shadow tables.
+    ///
+    /// **What `VACUUM` asks before it copies a table's rows (task-1979, R2).**
+    /// A virtual table's rows are already in its shadow tables, so copying both
+    /// wrote every document twice: the rebuild replayed every `CREATE TABLE`
+    /// it found, including the shadow ones, and then the `CREATE VIRTUAL TABLE`
+    /// made a second set under the same names - six `sqlite_master` rows became
+    /// eleven, the file roughly doubled, and the SQL `dump` produced could not
+    /// be replayed because every shadow row was in it twice.
+    ///
+    /// A virtual table that owns none - an eponymous one, or one whose only
+    /// shadow is another table's - answers `false`, and its rows are copied
+    /// through the module as before.
+    ///
+    /// @param name - the table's name, as written
+    pub(crate) fn owns_shadow_tables(&self, name: &[u8]) -> bool {
+        let folded = name.to_ascii_lowercase();
+        let Some(connected) = self.session_state.virtual_tables.get(&folded) else {
+            return false;
+        };
+        shadow_names(&connected.arguments).any(|held| held != folded)
     }
 
     /// Returns what a module says about its own storage.

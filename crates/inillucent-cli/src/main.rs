@@ -344,6 +344,12 @@ fn openable(invocation: &Invocation) -> Result<(), String> {
 
 /// Opens the database, applies the settings, and runs whatever was asked for.
 fn main() {
+    // See `inillucent_cli::STATEMENT_STACK`.
+    inillucent_cli::on_a_sized_stack(run)
+}
+
+/// Everything `main` does, on the sized thread.
+fn run() {
     let invocation = parse(std::env::args().skip(1));
     if invocation.help {
         usage();

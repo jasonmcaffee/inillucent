@@ -282,6 +282,11 @@ impl Arguments {
 pub struct Context {
     /// The shell every command drives.
     shell: Shell,
+    /// The log segments beside the file that its chain cannot reach.
+    ///
+    /// Read once at the open. See [`Context::strays_beside`] for why the moment
+    /// matters.
+    strays: Vec<u64>,
     /// The file it is open on.
     path: String,
     /// Whether a statement that changes anything is refused.
@@ -382,14 +387,46 @@ impl Context {
                 .into_owned(),
             None => path.to_string(),
         };
-        let shell = Shell::open(&opened).map_err(|message| {
+        // **A path that is not there is not made here (task-1979, E2).**
+        // `inillucent --db typo.rdb tables` used to create `typo.rdb`, write a
+        // log segment beside it, print an empty table and exit 0 - so a
+        // mistyped path answered "this database has no tables" and left a file
+        // behind that the next command would then open happily. `create` is the
+        // command that makes a file, and it says so in its own help; `migrate`
+        // writes its destination itself and opens no session database. Both of
+        // them reach this function with `:memory:`.
+        if !opened.is_empty() && opened != ":memory:" && !std::path::Path::new(&opened).exists() {
+            return Err(Failed::said(
+                Status::NotFound,
+                format!("there is no database at \"{opened}\". `inillucent create {opened}` makes one."),
+            ));
+        }
+        // **The engine's own status, not `io` for everything.** A file another
+        // process holds is `busy`, which a caller can act on by retrying; a
+        // file that is not a database of this engine is `corrupt`. Reporting
+        // both as `io` told a script nothing (task-1979, C6).
+        let mut shell = Shell::open_reporting(&opened, readonly).map_err(|error| {
+            let said = Failed::from_engine(&error);
             Failed::said(
-                Status::Io,
-                format!("could not open \"{opened}\": {message}"),
+                said.status,
+                format!("could not open \"{opened}\": {}", said.message),
             )
         })?;
+        // **`--root` turns safe mode on, because otherwise it does not confine
+        // anything (task-1979, H1).** A caller that names a directory has said
+        // the program may touch that directory and nothing else; a `.shell` or
+        // `.system` that spawns `cmd /C` walks straight past that, and the
+        // reviewer's run wrote a file outside the root through the `run` verb
+        // and exited 0. The MCP server turns it on whether or not a root was
+        // given - see `Context::refuse_the_world`.
+        shell.safe = root.is_some();
+        // Read once, here, while the chain this open recovered is still the one
+        // on the disk - see `Context::strays_beside`.
+        let reported = shell.recovery();
+        let strays = Context::strays_beside(&opened, reported.last_sequence, reported.last_lsn);
         Ok(Context {
             shell,
+            strays,
             path: opened,
             readonly,
             root,
@@ -421,6 +458,110 @@ impl Context {
         })?;
         self.path = named;
         Ok(())
+    }
+
+    /// Refuses every shell command that reaches outside the database.
+    ///
+    /// **Always on over MCP, and there is no flag to turn it off (task-1979,
+    /// H1).** The set is the reference's `-safe`: running a program
+    /// (`.shell`, `.system`), loading a shared library (`.load`), changing the
+    /// working directory (`.cd`), handing a file to whatever the system opens
+    /// it with (`.excel`, `.www`), and writing output through a pipe. An MCP
+    /// server that left it off handed an agent a shell on the host, whatever
+    /// `--root` said - and a child spawned that way inherits the server's
+    /// standard output, which is the JSON-RPC channel, so its output landed in
+    /// the middle of a reply and the client could not match one to its id.
+    ///
+    /// A flag was the alternative and was rejected: an operator who forgets it
+    /// hands an agent a shell, and there is no case for an MCP server with safe
+    /// mode off.
+    pub fn refuse_the_world(&mut self) {
+        self.shell.safe = true;
+    }
+
+    /// Returns what opening this context's database did to it.
+    ///
+    /// See [`Outcome::with_recovery`] for what the command surface does with
+    /// it.
+    pub fn recovery(&self) -> inillucent_driver::Recovery {
+        self.shell.recovery()
+    }
+
+    /// Returns the log segments beside this database that its chain cannot
+    /// reach.
+    ///
+    /// **A file nothing will replay and nothing will remove (task-1979, C9).**
+    /// A segment copied or restored at a sequence past the live one is ignored
+    /// by recovery, which is right - the chain is followed by sequence from the
+    /// meta record and stops at the first gap - and was also never mentioned,
+    /// so it sat beside the database through every open and close.
+    ///
+    /// **Read once, at the open, and the moment matters.** `truncate_after` has
+    /// just deleted every segment above where the chain stopped that it could
+    /// walk to, so what is left above a gap is what nothing will ever reach.
+    /// Asking again later would answer differently for a reason that is not
+    /// damage: this connection rolls a segment on every checkpoint, another
+    /// process rolls its own, and retiring the ones below a new recovery point
+    /// leaves the directory with gaps that are simply the log moving on.
+    ///
+    /// The directory is read here rather than in the engine because
+    /// `inillucent_vfs::Vfs` has no listing and the command surface is where
+    /// reading a directory already happens. What a name means is
+    /// `inillucent_wal::segment::sequence_of_segment_name`, reached through the
+    /// engine's own re-export, so the naming convention stays in the crate that
+    /// writes it.
+    ///
+    /// @param path - the database file
+    /// @param reaches - the sequence this open's recovery stopped in
+    /// @param ended_at - the stream position it stopped at
+    fn strays_beside(path: &str, reaches: u64, ended_at: u64) -> Vec<u64> {
+        let path = std::path::Path::new(path);
+        let (Some(directory), Some(stem)) = (path.parent(), path.file_name()) else {
+            return Vec::new();
+        };
+        let stem = stem.to_string_lossy().into_owned();
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            return Vec::new();
+        };
+        let mut present: Vec<u64> = entries
+            .flatten()
+            .filter_map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                inillucent_driver::log::sequence_of_segment_name(&stem, &name)
+            })
+            .collect();
+        present.sort_unstable();
+        // **Above the chain's end AND holding positions it has already passed.**
+        // The sequence on its own is not enough: another process writing this
+        // same database rolls to the next one and retires the one below it, so
+        // a live log leaves exactly the shape a leftover does - a number above
+        // this connection's own with a gap under it. What tells them apart is
+        // where the records start. A segment a writer rolled to begins at or
+        // above where this chain ended; a copy of an older segment begins
+        // below it, which means nothing above it will ever read it.
+        present.retain(|sequence| {
+            *sequence > reaches
+                && Context::first_record_of(directory, &stem, *sequence)
+                    .is_some_and(|first| first < ended_at)
+        });
+        present
+    }
+
+    /// Returns where one segment file's records start.
+    ///
+    /// @param directory - the directory the database is in
+    /// @param stem - the database file's name
+    /// @param sequence - which segment
+    fn first_record_of(directory: &std::path::Path, stem: &str, sequence: u64) -> Option<u64> {
+        let name = format!("{stem}-wal.{sequence:010}");
+        let head = std::fs::read(directory.join(name)).ok()?;
+        inillucent_driver::log::first_lsn_of(&head)
+    }
+
+    /// Returns the strays this context's open found. See
+    /// [`Context::strays_beside`].
+    pub fn stray_log_segments(&self) -> &[u64] {
+        &self.strays
     }
 
     /// Returns a handle to this session's cancellation flag.
@@ -533,6 +674,7 @@ impl Context {
     pub fn for_test(shell: Shell, root: Option<PathBuf>) -> Context {
         Context {
             shell,
+            strays: Vec::new(),
             path: ":memory:".to_string(),
             readonly: false,
             // A test builds its own root rather than installing a process-wide
@@ -575,32 +717,30 @@ impl Context {
 
     /// Refuses a statement that changes something, when read-only.
     ///
-    /// **The binder decides, not a scan of the text.** `EXPLAIN QUERY PLAN`
-    /// over the statement fails with "not a read-only statement" for anything
-    /// that writes, which is the engine's own classification and cannot be
-    /// talked past with whitespace, a comment or an unusual capitalisation.
-    /// It is the same mechanism `inillucent-driver` uses, for the same reason.
+    /// **By the statement's class, in one place shared with the driver
+    /// (task-1979, section 5.2).** The check this replaces asked the engine to
+    /// `EXPLAIN` the statement and refused only when the message contained
+    /// "not a read-only statement" - text `compile_explain` never produces for
+    /// an `INSERT`, a write pragma, an `ATTACH` or a `VACUUM INTO`, all of
+    /// which therefore ran and persisted through `--readonly`. The class comes
+    /// from the parser's own `classify_statement`; the pragma lists are in
+    /// `inillucent_driver::readonly` so this and the driver cannot disagree.
+    ///
+    /// This is the layer that gives the caller a good message. The layer that
+    /// makes the property true is the commit path, which refuses a write on a
+    /// connection opened read only whatever reached it.
     ///
     /// @param sql - the statement
     pub fn refuse_if_it_writes(&self, sql: &str) -> Result<(), Failed> {
         if !self.readonly {
             return Ok(());
         }
-        match self.shell.connection().explain(sql) {
-            Ok(_) => Ok(()),
-            Err(error) => {
-                let classified = Failed::from_engine(&error);
-                match classified.message.contains("not a read-only statement") {
-                    true => Err(Failed::said(
-                        Status::ReadOnly,
-                        "this connection is read only, and that statement changes something.",
-                    )),
-                    // A statement that failed to plan for any other reason is
-                    // that failure, and reporting it as a read-only refusal
-                    // would tell a caller to reopen the file over a typo.
-                    false => Err(classified),
-                }
-            }
+        match inillucent_driver::readonly::admits(sql) {
+            true => Ok(()),
+            false => Err(Failed::said(
+                Status::ReadOnly,
+                "this connection is read only, and that statement changes something.",
+            )),
         }
     }
 
@@ -802,6 +942,8 @@ mod tests {
         let root = std::env::temp_dir().join("inillucent-cli-confine");
         std::fs::create_dir_all(&root).unwrap();
         let context = Context {
+            // A unit test builds its own context and has no directory to read.
+            strays: Vec::new(),
             shell: Shell::open(":memory:").unwrap(),
             path: ":memory:".to_string(),
             readonly: false,
@@ -863,6 +1005,8 @@ mod tests {
             }
         }
         let context = Context {
+            // A unit test builds its own context and has no directory to read.
+            strays: Vec::new(),
             shell: Shell::open(":memory:").unwrap(),
             path: ":memory:".to_string(),
             readonly: false,

@@ -173,10 +173,15 @@ pub fn decode_doclist(bytes: &[u8]) -> Vec<DocEntry> {
 /// building the vectors that would prove it.
 ///
 /// @param bytes - the doclist as `%_idx` holds it
-/// @param wanted - the column a `column:term` filter named, if any
+/// @param wanted - the columns a `column:term` filter named
 /// @param columns - how many columns the table declares
 /// @param out - where the rowids are appended, in doclist order
-pub fn doclist_rows(bytes: &[u8], wanted: Option<usize>, columns: usize, out: &mut Vec<i64>) {
+pub fn doclist_rows(
+    bytes: &[u8],
+    wanted: &super::expr::ColumnFilter,
+    columns: usize,
+    out: &mut Vec<i64>,
+) {
     let mut at = 0usize;
     let mut rowid = 0i64;
     while at < bytes.len() {
@@ -198,7 +203,7 @@ pub fn doclist_rows(bytes: &[u8], wanted: Option<usize>, columns: usize, out: &m
             if positions == 0 || column >= columns {
                 continue;
             }
-            if wanted.is_some_and(|asked| asked != column) {
+            if !wanted.admits(column) {
                 continue;
             }
             matched = true;

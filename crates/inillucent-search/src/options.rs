@@ -196,8 +196,16 @@ pub struct Options {
     /// How wide a query search is by default, when the index said.
     ///
     /// pgvector's `hnsw.ef_search`, which is a session setting there and an
-    /// index setting here as well - `PRAGMA hnsw_ef_search` is the session
-    /// form and overrides this one for the statement it precedes.
+    /// index setting here: it is named in `WITH (ef_search = ...)` on the
+    /// index, and there is no session form.
+    ///
+    /// **There used to be a claim that `PRAGMA hnsw_ef_search` was the session
+    /// form (task-1979, R13).** No such pragma exists, and an unrecognised
+    /// pragma is a silent no-op, so an application that set it got no signal
+    /// that the setting had not taken. The claim is gone rather than the
+    /// pragma built: the width reaches the search through the index's own
+    /// options, and a per statement override would need a channel from the
+    /// connection's settings into a module that does not exist yet.
     pub ef_search: Option<usize>,
     /// Whether results are exact or approximate.
     pub mode: Mode,

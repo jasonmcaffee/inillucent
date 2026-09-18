@@ -25,6 +25,54 @@ use inillucent_pool::PageId;
 use inillucent_tree::datum::Datum;
 use inillucent_txn::redo::{RowRedo, TreeRows};
 
+/// Returns which segment of a database a file name beside it is.
+///
+/// **Re-exported rather than reimplemented.** The command surface reads the
+/// directory beside a database to find a segment the chain does not reach
+/// (task-1979, C9) and cannot ask `inillucent-wal` directly - the dependency
+/// contract does not give it that edge, and there is no reason to add one for a
+/// string function. What a segment is called is
+/// `inillucent_wal::segment::segment_name`, and this is its inverse, so the two
+/// stay in one crate rather than in two that agree today.
+pub use inillucent_wal::{first_lsn_of, sequence_of_segment_name};
+
+/// What opening one file did to it, for a caller that has to say so.
+///
+/// **An operator could not tell a clean open from a recovered one (task-1979,
+/// C10).** After a `TerminateProcess` on a writer mid transaction the reopen
+/// replayed the log, returned the right rows and said nothing, in text and in
+/// `--output json`. The numbers here are what the log's own scan already
+/// counted; nothing is computed for them.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct RecoveryReport {
+    /// Whether the log held anything above the file's own checkpoint.
+    pub recovered: bool,
+    /// How many records the scan read.
+    pub scanned: u64,
+    /// How many records the second pass applied.
+    pub applied: u64,
+    /// How many transactions committed in the replayed window.
+    pub committed: u64,
+    /// How many transactions were open at the end of the log and were
+    /// discarded.
+    pub losers: u64,
+    /// The highest segment the live chain reaches.
+    ///
+    /// A file beside the database at a sequence above this is one nothing will
+    /// replay and nothing will remove (task-1979, C9). Finding one means
+    /// reading the directory, which no layer below the command surface does, so
+    /// this is the number those layers can supply and the caller does the
+    /// looking.
+    pub last_sequence: u64,
+    /// The stream position the chain ended at.
+    ///
+    /// Beside `last_sequence` because the sequence on its own cannot tell a
+    /// leftover copy from the next segment a live writer rolled to. A copy
+    /// holds positions the chain has already passed; a genuine later segment
+    /// starts at or above this number.
+    pub last_lsn: u64,
+}
+
 /// One database file, opened, recovered, and ready to be read.
 pub(crate) struct OpenedFile {
     /// The pool, the meta page and the free map.
@@ -33,6 +81,8 @@ pub(crate) struct OpenedFile {
     pub(crate) wal: std::rc::Rc<Wal>,
     /// The catalog tree, attached from the meta page's root.
     pub(crate) catalog_tree: PagedTree,
+    /// What the open did to the file, for the caller to report.
+    pub(crate) recovery: RecoveryReport,
     /// The highest transaction number any record recovery scanned carried.
     ///
     /// **A reopened database must not reuse a number the log still holds**, and
@@ -102,6 +152,127 @@ fn resume_above_every_stamp(
     database.set_log_position(resumed, outcome.latest_cts, rolled);
     database.checkpoint()?;
     Ok((resumed, rolled))
+}
+
+/// Puts the free map's own changes back, in log order.
+///
+/// **In log order.** Claiming every allocation and then releasing every free
+/// gave the frees the last word, so a page freed and allocated again inside the
+/// replayed range came back free while it was live, and the next allocation
+/// handed it to a second owner. See `Applier::free_map_changes`.
+///
+/// It is applied after the scan rather than inside it because the map and every
+/// page write are both behind `&mut Database`, and one record cannot hold two
+/// mutable borrows of the same object.
+///
+/// @param database - the file being opened
+/// @param changes - what the replay did to the free map
+fn apply_free_map_changes(
+    database: &mut Database,
+    changes: &[inillucent_txn::redo::FreeMapChange],
+) -> DbResult<()> {
+    for change in changes {
+        match change.allocated {
+            true => database.claim(change.page)?,
+            false => database.release(change.page, 1)?,
+        }
+    }
+    Ok(())
+}
+
+/// Returns where this file's recovery starts.
+///
+/// From the file's own checkpoint, not from the start of the log:
+/// `RecoveryStart::fresh` scans from `FIRST_LSN` and would replay everything
+/// the last checkpoint already applied.
+///
+/// `doubtful` is how a cross-file commit reaches this. A transaction that wrote
+/// two databases votes in each file's log and is *decided* by a super-journal
+/// outside both, so a `Commit` record for one of those transactions is a vote
+/// rather than the decision - see `super_journal_doubt`.
+///
+/// @param database - the file being opened
+/// @param doubtful - transactions whose `Commit` record is not the decision
+fn where_recovery_starts(
+    database: &Database,
+    doubtful: &std::collections::BTreeSet<u64>,
+) -> inillucent_wal::RecoveryStart {
+    let meta = database.meta();
+    if meta.checkpoint_lsn == 0 {
+        return inillucent_wal::RecoveryStart {
+            doubtful: doubtful.clone(),
+            ..inillucent_wal::RecoveryStart::fresh(database.uuid())
+        };
+    }
+    inillucent_wal::RecoveryStart {
+        uuid: database.uuid(),
+        checkpoint_lsn: meta.checkpoint_lsn,
+        sequence: meta.wal_sequence,
+        cts_watermark: meta.cts_watermark,
+        doubtful: doubtful.clone(),
+    }
+}
+
+/// Returns the catalog redo is seeded with, repairing the file first when the
+/// page it lives on is the one a crash tore.
+///
+/// Answers the catalog and whether the repair pass ran; `replay_with_repair`
+/// needs the second, because a catalog read *after* a repair is the catalog at
+/// the end of the window rather than at its start.
+///
+/// The shapes come from the catalog as it stood at the last checkpoint, plus
+/// the catalog tree itself, whose own rows are what a `CREATE TABLE` writes.
+/// A record naming a tree that is in none of them - a table created *after*
+/// the checkpoint, whose rows were then written - makes `TreeRows` refuse,
+/// which fails this open with a named error rather than replaying into a
+/// tree that is not the one meant.
+///
+/// **The catalog root can itself be the page a crash tore, and reading it
+/// here is what makes that unrepairable.** This read is an ordinary
+/// checksummed page fetch, done before redo has run a single record, so a
+/// checkpoint interrupted while rewriting the catalog's own page fails
+/// exactly the way redo exists to fix - except redo cannot run first
+/// either, because its row decoder needs the catalog's shapes to replay a
+/// row record. Neither side can go first, which is what makes it a circle
+/// rather than an ordering bug.
+///
+/// It breaks like this: when this first read fails, a **repair pass** runs
+/// ahead of the real one, tolerant of a record naming a tree it has not
+/// been told the shape of - every other record it applies exactly as
+/// normal, including the schema tree's own rows, whose shape
+/// (`schema_layout()`) is fixed and needs no catalog at all. That is enough
+/// whenever the log holds a record for the torn page, which it does for
+/// the one case measured: `ddl.rs`'s `refresh_statistics` rewrites a
+/// table's catalog row on every checkpoint whose shape changed, and that
+/// rewrite is an ordinary schema-tree row record - the very thing this pass
+/// can already replay without the catalog. The catalog is read again after
+/// it; if it is still unreadable, the file is refused the way it always
+/// was, unchanged - a corruption no record in the log describes is not
+/// this pass's to fix, and `crates/inillucent-compat/tests/corruption.rs`
+/// is what proves that stays true. Reached only on the error path, so an
+/// ordinary open pays nothing extra: one read, one pass, exactly as before.
+///
+/// @param database - the file being opened
+/// @param vfs - the file system the log lives on
+/// @param db_path - the database file
+/// @param start - where in the log to replay from
+fn catalog_before_redo(
+    database: &mut Database,
+    vfs: &std::sync::Arc<dyn inillucent_vfs::Vfs>,
+    db_path: &DbPath,
+    start: &inillucent_wal::RecoveryStart,
+) -> DbResult<(Vec<SchemaEntry>, bool)> {
+    match read_checkpointed_catalog(database) {
+        Ok(checkpointed) => Ok((checkpointed, false)),
+        Err(_) => {
+            {
+                let mut repair =
+                    inillucent_txn::redo::Applier::new(database, LearningRows::new_tolerant(&[]));
+                inillucent_wal::recover(vfs.as_ref(), db_path, start.clone(), &mut repair)?;
+            }
+            Ok((read_checkpointed_catalog(database)?, true))
+        }
+    }
 }
 
 /// Reads the catalog as the file's own pages currently show it, before redo.
@@ -265,6 +436,128 @@ fn replay_with_repair(
     }
 }
 
+/// Rebuilds a connection's view of a file another process has written, without
+/// letting the file go.
+///
+/// **The whole of task-1979 section 4 in one function.** A connection read the
+/// meta record and discovered the log's tail at `open`, under no lock or under
+/// a shared one two processes can hold at once, and then trusted both for the
+/// rest of its life. Two processes therefore computed the same append position
+/// and each wrote over the other's records: 120 acknowledged inserts, 60 rows
+/// present, `integrity-check ok`, every process exit 0. Nothing read at `open`
+/// before the first lock may be trusted afterwards, so this re-derives all of
+/// it - the meta record, the pages, the free map and the log's real tail - from
+/// the files, at a moment the caller holds the lock.
+///
+/// It is deliberately the same sequence `open_file` runs, in the same order and
+/// through the same functions, because the question both answer is the same
+/// one: what does this file plus the log beside it say right now. The
+/// difference is only that the `Database` already exists and keeps its open
+/// file - and so keeps the lock, which is the point.
+///
+/// The caller has already called [`Database::adopt_from_file`], so the cache is
+/// empty and the free map is deliberately not loaded: redo may carry the free
+/// map's own pages.
+///
+/// @param database - the connection's file, with its cache already discarded
+/// @param vfs - the file system the file and its log live on
+/// @param db_path - the database file
+/// @param doubtful - transactions whose `Commit` record is not the decision
+pub(crate) fn resync_file(
+    database: &mut Database,
+    vfs: &std::sync::Arc<dyn inillucent_vfs::Vfs>,
+    db_path: &DbPath,
+    doubtful: &std::collections::BTreeSet<u64>,
+) -> DbResult<std::rc::Rc<Wal>> {
+    let meta = database.meta();
+    let start = if meta.checkpoint_lsn == 0 {
+        inillucent_wal::RecoveryStart {
+            doubtful: doubtful.clone(),
+            ..inillucent_wal::RecoveryStart::fresh(database.uuid())
+        }
+    } else {
+        inillucent_wal::RecoveryStart {
+            uuid: database.uuid(),
+            checkpoint_lsn: meta.checkpoint_lsn,
+            sequence: meta.wal_sequence,
+            cts_watermark: meta.cts_watermark,
+            doubtful: doubtful.clone(),
+        }
+    };
+    let mut repaired = false;
+    let checkpointed = match read_checkpointed_catalog(database) {
+        Ok(checkpointed) => checkpointed,
+        Err(_) => {
+            repaired = true;
+            let mut repair =
+                inillucent_txn::redo::Applier::new(database, LearningRows::new_tolerant(&[]));
+            inillucent_wal::recover(vfs.as_ref(), db_path, start.clone(), &mut repair)?;
+            read_checkpointed_catalog(database)?
+        }
+    };
+    let (outcome, free_map) =
+        replay_with_repair(database, vfs, db_path, start, &checkpointed, repaired)?;
+    for change in &free_map {
+        match change.allocated {
+            true => database.claim(change.page)?,
+            false => database.release(change.page, 1)?,
+        }
+    }
+    inillucent_wal::truncate_after(vfs.as_ref(), db_path, &outcome)?;
+    let (next_lsn, sequence) = resume_above_every_stamp(database, &outcome)?;
+    let wal = std::rc::Rc::new(Wal::open(
+        std::sync::Arc::clone(vfs),
+        db_path,
+        database.uuid(),
+        next_lsn,
+        sequence,
+        WalOptions::default(),
+    )?);
+    database.pool().set_durable_lsn(wal.write_ahead_point());
+    database
+        .pool()
+        .set_retained_lsn(database.meta().checkpoint_lsn);
+    let_the_pool_ask_the_log(database.pool(), &wal);
+    Ok(wal)
+}
+
+/// Returns a log for a connection that will never write one.
+///
+/// **On a file system of its own, in memory.** A read only connection still
+/// holds a `Wal` because every path through the engine reads one - the durable
+/// point the pool is told, the sync policy a pragma reports - and it must not
+/// create or extend a segment beside the database. A scratch log on a
+/// `MemoryVfs` satisfies the first and cannot do the second: nothing it holds
+/// has a name on the disk. A write that reached it is refused earlier, by the
+/// pool, and by the file handle under that.
+///
+/// @param db_path - the database file, so the scratch log is named after it
+/// @param uuid - the database's identity
+/// @param first_lsn - where the real log ended
+/// @param sequence - the segment the real log ended in
+fn scratch_log(
+    db_path: &DbPath,
+    uuid: u128,
+    first_lsn: u64,
+    sequence: u64,
+) -> DbResult<std::rc::Rc<Wal>> {
+    let held: std::sync::Arc<dyn inillucent_vfs::Vfs> =
+        std::sync::Arc::new(inillucent_vfs::MemoryVfs::new());
+    let name = db_path
+        .as_path()
+        .file_name()
+        .map(|part| part.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "readonly".to_string());
+    Ok(std::rc::Rc::new(Wal::open(
+        held,
+        &DbPath::new(&name),
+        uuid,
+        first_lsn,
+        sequence,
+        WalOptions::default(),
+    )?))
+}
+
 /// Opens one database file, replays its log into it, and opens that log.
 ///
 /// **The one recovery path, for the file a connection is opened on and for
@@ -283,11 +576,41 @@ pub(crate) fn open_file(
     frames: usize,
     doubtful: &std::collections::BTreeSet<u64>,
 ) -> DbResult<OpenedFile> {
-    let database =
-        Database::open_before_recovery(vfs.as_ref(), db_path, frames.max(64)).map_err(|error| {
-            let said = error.detail().unwrap_or_default().to_string();
-            error.with_detail(format!("opening the file before redo: {said}"))
-        })?;
+    open_file_as(vfs, db_path, frames, doubtful, false)
+}
+
+/// [`open_file`], with the caller saying whether this connection may write.
+///
+/// **A read only open writes nothing at all (task-1979, C5 and section 5.2).**
+/// It replays the log into its own buffer pool, because that is what makes the
+/// rows it reads the committed ones, and it skips every step of an ordinary
+/// open that would touch the media: the log is not trimmed to its last valid
+/// record, the resume position is not written back, the tail past the header's
+/// page count is not given back, and the log it opens is a scratch one in
+/// memory rather than a segment beside the database. The file handle itself is
+/// read only, so anything that got past all of that is refused by the operating
+/// system.
+///
+/// @param vfs - the file system the file and its log live on
+/// @param db_path - the database file
+/// @param frames - how many frames the buffer pool holds
+/// @param doubtful - transactions whose `Commit` record is not the decision
+/// @param read_only - whether this connection may write the file
+pub(crate) fn open_file_as(
+    vfs: &std::sync::Arc<dyn inillucent_vfs::Vfs>,
+    db_path: &DbPath,
+    frames: usize,
+    doubtful: &std::collections::BTreeSet<u64>,
+    read_only: bool,
+) -> DbResult<OpenedFile> {
+    let database = match read_only {
+        true => Database::open_read_only(vfs.as_ref(), db_path, frames.max(64)),
+        false => Database::open_before_recovery(vfs.as_ref(), db_path, frames.max(64)),
+    }
+    .map_err(|error| {
+        let said = error.detail().unwrap_or_default().to_string();
+        error.with_detail(format!("opening the file before redo: {said}"))
+    })?;
 
     // **Recovery.** The log is replayed into the file before anything is read
     // out of it, which is what makes this an open rather than a reader of
@@ -308,64 +631,9 @@ pub(crate) fn open_file(
     // super-journal outside both, so a `Commit` record for one of those
     // transactions is a vote rather than the decision - see
     // `super_journal_doubt`.
-    let meta = database.meta();
-    let start = if meta.checkpoint_lsn == 0 {
-        inillucent_wal::RecoveryStart {
-            doubtful: doubtful.clone(),
-            ..inillucent_wal::RecoveryStart::fresh(database.uuid())
-        }
-    } else {
-        inillucent_wal::RecoveryStart {
-            uuid: database.uuid(),
-            checkpoint_lsn: meta.checkpoint_lsn,
-            sequence: meta.wal_sequence,
-            cts_watermark: meta.cts_watermark,
-            doubtful: doubtful.clone(),
-        }
-    };
+    let start = where_recovery_starts(&database, doubtful);
     let mut database = database;
-    // The shapes come from the catalog as it stood at the last checkpoint, plus
-    // the catalog tree itself, whose own rows are what a `CREATE TABLE` writes.
-    // A record naming a tree that is in none of them - a table created *after*
-    // the checkpoint, whose rows were then written - makes `TreeRows` refuse,
-    // which fails this open with a named error rather than replaying into a
-    // tree that is not the one meant.
-    //
-    // **The catalog root can itself be the page a crash tore, and reading it
-    // here is what makes that unrepairable.** This read is an ordinary
-    // checksummed page fetch, done before redo has run a single record, so a
-    // checkpoint interrupted while rewriting the catalog's own page fails
-    // exactly the way redo exists to fix - except redo cannot run first
-    // either, because its row decoder needs the catalog's shapes to replay a
-    // row record. Neither side can go first, which is what makes it a circle
-    // rather than an ordering bug.
-    //
-    // It breaks like this: when this first read fails, a **repair pass** runs
-    // ahead of the real one, tolerant of a record naming a tree it has not
-    // been told the shape of - every other record it applies exactly as
-    // normal, including the schema tree's own rows, whose shape
-    // (`schema_layout()`) is fixed and needs no catalog at all. That is enough
-    // whenever the log holds a record for the torn page, which it does for
-    // the one case measured: `ddl.rs`'s `refresh_statistics` rewrites a
-    // table's catalog row on every checkpoint whose shape changed, and that
-    // rewrite is an ordinary schema-tree row record - the very thing this pass
-    // can already replay without the catalog. The catalog is read again after
-    // it; if it is still unreadable, the file is refused the way it always
-    // was, unchanged - a corruption no record in the log describes is not
-    // this pass's to fix, and `crates/inillucent-compat/tests/corruption.rs`
-    // is what proves that stays true. Reached only on the error path, so an
-    // ordinary open pays nothing extra: one read, one pass, exactly as before.
-    let mut repaired = false;
-    let checkpointed = match read_checkpointed_catalog(&database) {
-        Ok(checkpointed) => checkpointed,
-        Err(_) => {
-            repaired = true;
-            let mut repair =
-                inillucent_txn::redo::Applier::new(&mut database, LearningRows::new_tolerant(&[]));
-            inillucent_wal::recover(vfs.as_ref(), db_path, start.clone(), &mut repair)?;
-            read_checkpointed_catalog(&database)?
-        }
-    };
+    let (checkpointed, repaired) = catalog_before_redo(&mut database, vfs, db_path, &start)?;
     let (outcome, free_map) =
         replay_with_repair(&mut database, vfs, db_path, start, &checkpointed, repaired)?;
     // The free map is rebuilt after the scan rather than inside it: the map and
@@ -377,13 +645,30 @@ pub(crate) fn open_file(
     // allocated again inside the replayed range came back free while it was
     // live, and the next allocation handed it to a second owner. See
     // `Applier::free_map_changes`.
-    for change in &free_map {
-        match change.allocated {
-            true => database.claim(change.page)?,
-            false => database.release(change.page, 1)?,
-        }
+    apply_free_map_changes(&mut database, &free_map)?;
+    if !read_only {
+        inillucent_wal::truncate_after(vfs.as_ref(), db_path, &outcome)?;
     }
-    inillucent_wal::truncate_after(vfs.as_ref(), db_path, &outcome)?;
+    // **And the file's own header is made to describe the file.** A
+    // transaction that grew the file and then did not become durable leaves a
+    // file longer than the meta record claims: the pool grows the file when it
+    // writes a page past the end, the meta record is written last on purpose,
+    // and the rollback journal restores a page's contents and says nothing
+    // about the file's length. Recovery has just settled what the file holds,
+    // so this is the moment the two can be made to agree - and they have to,
+    // because a header that under-counts is a file whose tail nothing will ever
+    // reclaim and nothing can account for.
+    //
+    // The checkpoint runs only when the count has moved, so an ordinary open of
+    // a clean file writes nothing. `durability.rs`'s
+    // `a_recovered_database_is_no_longer_than_its_header_says` is what measures
+    // it, at every call of a growing transaction (task-1980).
+    if !read_only && database.pool().page_count() != database.meta().page_count {
+        database.checkpoint()?;
+    }
+    if !read_only {
+        database.give_back_the_unclaimed_tail()?;
+    }
 
     // **The log resumes where recovery ended, not at the beginning.** Opening it
     // at `FIRST_LSN` with sequence 1 starts a second stream over the same
@@ -394,15 +679,24 @@ pub(crate) fn open_file(
     //
     // **And above every stamp the file carries.** See
     // `resume_above_every_stamp`.
-    let (next_lsn, sequence) = resume_above_every_stamp(&mut database, &outcome)?;
-    let wal = std::rc::Rc::new(Wal::open(
-        std::sync::Arc::clone(vfs),
-        db_path,
-        database.uuid(),
-        next_lsn,
-        sequence,
-        WalOptions::default(),
-    )?);
+    let (next_lsn, sequence) = match read_only {
+        // `resume_above_every_stamp` checkpoints when the file's pages are
+        // stamped above where the log ended, which a read only connection
+        // cannot do and does not need: nothing it does will write a record.
+        true => (outcome.next_lsn.max(FIRST_LSN), outcome.sequence.max(1)),
+        false => resume_above_every_stamp(&mut database, &outcome)?,
+    };
+    let wal = match read_only {
+        true => scratch_log(db_path, database.uuid(), next_lsn, sequence)?,
+        false => std::rc::Rc::new(Wal::open(
+            std::sync::Arc::clone(vfs),
+            db_path,
+            database.uuid(),
+            next_lsn,
+            sequence,
+            WalOptions::default(),
+        )?),
+    };
     database.pool().set_durable_lsn(wal.write_ahead_point());
     // **Seeds `Pool::note_dirty_from`'s floor from this file's own last
     // checkpoint**, so a page whose stamp predates it cannot repeat, across a
@@ -423,10 +717,29 @@ pub(crate) fn open_file(
             let said = error.detail().unwrap_or_default().to_string();
             error.with_detail(format!("attaching the catalog after redo: {said}"))
         })?;
+    // **What this open did, kept rather than dropped (task-1979, C10).** The
+    // numbers are the scan's own counters and the stray search is a fixed
+    // handful of `access` calls, so an open that recovered nothing pays for a
+    // report that says so.
+    let recovery = RecoveryReport {
+        // **A transaction put back or thrown away, not a record read.** Every
+        // open scans at least the checkpoint record that told it where to
+        // start, so `applied` is above zero on a file nothing has ever crashed
+        // on; what an operator is asking is whether this open had work to
+        // restore.
+        recovered: outcome.committed > 0 || outcome.losers > 0,
+        scanned: outcome.scanned,
+        applied: outcome.applied,
+        committed: outcome.committed,
+        losers: outcome.losers,
+        last_sequence: sequence.max(outcome.sequence),
+        last_lsn: next_lsn,
+    };
     Ok(OpenedFile {
         database,
         wal,
         catalog_tree,
+        recovery,
         highest_txn: outcome.highest_txn,
     })
 }

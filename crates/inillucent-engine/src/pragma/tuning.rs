@@ -131,8 +131,13 @@ impl crate::ImportedDatabase {
                 self.pragmas.busy_timeout_ms() as i64,
             )),
             Some(argument) => {
-                self.pragmas
-                    .set_busy_timeout_ms(argument_integer(argument).max(0) as u64);
+                let millis = argument_integer(argument).max(0) as u64;
+                self.pragmas.set_busy_timeout_ms(millis);
+                // **And the file hears about it.** Recording the number
+                // without giving it to the thing that waits is what C7 found:
+                // the pragma answered with whatever it had been set to while
+                // the wait a contended writer actually spent was a constant.
+                self.storage.database.set_busy_millis(millis);
                 Ok(named_integer(
                     "timeout",
                     self.pragmas.busy_timeout_ms() as i64,
@@ -389,10 +394,19 @@ impl crate::ImportedDatabase {
         let Some(argument) = argument else {
             return Ok(word_row("locking_mode", self.locking_word()));
         };
+        // **An unrecognised value is an error rather than a silent no-op
+        // (task-1979, C8).** The arm here was `_ => {}`, so a typo left the
+        // connection in whatever mode it was already in and reported success -
+        // and since the reported mode is the one in force, the answer looked
+        // like a refusal nobody could tell from an honoured switch.
         match argument_text(argument).trim().to_ascii_lowercase().as_str() {
             "normal" => self.set_locking_exclusive(false)?,
             "exclusive" => self.set_locking_exclusive(true)?,
-            _ => {}
+            other => {
+                return Err(refusal(format!(
+                    "no such locking mode: {other}; it is normal or exclusive"
+                )))
+            }
         }
         Ok(word_row("locking_mode", self.locking_word()))
     }

@@ -1,0 +1,50 @@
+single term	SELECT rowid FROM d WHERE d MATCH 'zeta' ORDER BY rowid
+implicit AND	SELECT rowid FROM d WHERE d MATCH 'alpha beta' ORDER BY rowid
+explicit AND	SELECT rowid FROM d WHERE d MATCH 'alpha AND beta' ORDER BY rowid
+OR	SELECT rowid FROM d WHERE d MATCH 'zeta OR eta' ORDER BY rowid
+NOT	SELECT rowid FROM d WHERE d MATCH 'alpha NOT beta' ORDER BY rowid
+phrase	SELECT rowid FROM d WHERE d MATCH '"alpha beta"' ORDER BY rowid
+NEAR default	SELECT rowid FROM d WHERE d MATCH 'NEAR(alpha beta)' ORDER BY rowid
+NEAR 3	SELECT rowid FROM d WHERE d MATCH 'NEAR(alpha beta, 3)' ORDER BY rowid
+NEAR 0	SELECT rowid FROM d WHERE d MATCH 'NEAR(alpha beta, 0)' ORDER BY rowid
+prefix	SELECT rowid FROM d WHERE d MATCH 'run*' ORDER BY rowid
+column filter	SELECT rowid FROM d WHERE d MATCH 'title:alpha' ORDER BY rowid
+column set filter	SELECT rowid FROM d WHERE d MATCH '{title body}:alpha' ORDER BY rowid
+column set one col	SELECT rowid FROM d WHERE d MATCH '{title}:alpha' ORDER BY rowid
+negated column filter	SELECT rowid FROM d WHERE d MATCH '-title:alpha' ORDER BY rowid
+initial token ^	SELECT rowid FROM d WHERE d MATCH '^alpha' ORDER BY rowid
+initial token col	SELECT rowid FROM d WHERE d MATCH 'title:^alpha' ORDER BY rowid
+nested parens	SELECT rowid FROM d WHERE d MATCH '(zeta OR eta) AND alpha' ORDER BY rowid
+phrase w prefix	SELECT rowid FROM d WHERE d MATCH '"alpha bet"*' ORDER BY rowid
+hyphen token	SELECT rowid FROM d WHERE d MATCH 'co-operate' ORDER BY rowid
+identifier token	SELECT rowid FROM d WHERE d MATCH 'parse_headers' ORDER BY rowid
+ticket id	SELECT rowid FROM d WHERE d MATCH '"PROJ-1932"' ORDER BY rowid
+apostrophe word	SELECT rowid FROM d WHERE d MATCH 'it''s' ORDER BY rowid
+diacritic query	SELECT rowid FROM d WHERE d MATCH 'cafe' ORDER BY rowid
+diacritic query2	SELECT rowid FROM d WHERE d MATCH 'café' ORDER BY rowid
+diacritic naive	SELECT rowid FROM d WHERE d MATCH 'naive' ORDER BY rowid
+doubled quote in phrase	SELECT rowid FROM d WHERE d MATCH '"""quoted"""' ORDER BY rowid
+star in text	SELECT rowid FROM d WHERE d MATCH '"x*y"' ORDER BY rowid
+paren in text	SELECT rowid FROM d WHERE d MATCH '"a(b)"' ORDER BY rowid
+empty query	SELECT rowid FROM d WHERE d MATCH '' ORDER BY rowid
+bare star	SELECT rowid FROM d WHERE d MATCH '*' ORDER BY rowid
+order by rank 10	SELECT rowid FROM d WHERE d MATCH 'alpha beta' ORDER BY rank LIMIT 10
+bm25 values	SELECT rowid, round(bm25(d),6) FROM d WHERE d MATCH 'alpha beta' ORDER BY rank LIMIT 10
+bm25 weighted	SELECT rowid, round(bm25(d, 10.0, 1.0),6) FROM d WHERE d MATCH 'alpha beta' ORDER BY rank LIMIT 10
+rank column	SELECT rowid, round(rank,6) FROM d WHERE d MATCH 'zeta' ORDER BY rank LIMIT 5
+highlight	SELECT rowid, highlight(d, 1, '[', ']') FROM d WHERE d MATCH 'zeta' ORDER BY rowid LIMIT 3
+snippet	SELECT rowid, snippet(d, 1, '[', ']', '...', 8) FROM d WHERE d MATCH 'zeta' ORDER BY rowid LIMIT 3
+count matches	SELECT count(*) FROM d WHERE d MATCH 'alpha'
+match in title only	SELECT count(*) FROM d WHERE d MATCH 'body:alpha'
+vocab row	SELECT term, doc, cnt FROM v_row WHERE term='zeta'
+vocab col	SELECT term, col, doc, cnt FROM v_col WHERE term='zeta' ORDER BY col
+vocab instance	SELECT term, doc, col, offset FROM v_inst WHERE term='zeta' ORDER BY doc, offset LIMIT 5
+cross column 1	SELECT rowid, round(bm25(d),8) FROM d WHERE d MATCH 'crosscolumn' ORDER BY rowid
+cross column 2	SELECT rowid, round(bm25(d,5.0,1.0),8) FROM d WHERE d MATCH 'crosscolumn' ORDER BY rowid
+cross column 3	SELECT rowid, round(bm25(d,1.0,7.0),8) FROM d WHERE d MATCH 'crosscolumn' ORDER BY rowid
+cross column 4	SELECT rowid, round(bm25(d,0.25,3.5),8) FROM d WHERE d MATCH 'crosscolumn marker' ORDER BY rowid
+cross column 5	SELECT rowid FROM d WHERE d MATCH 'crosscolumn' ORDER BY rank
+cross column 6	SELECT rowid FROM d WHERE d MATCH '{title}:crosscolumn' ORDER BY rowid
+cross column 7	SELECT rowid FROM d WHERE d MATCH '-body:marker' ORDER BY rowid
+cross column 8	SELECT rowid FROM d WHERE d MATCH '^crosscolumn' ORDER BY rowid
+cross column 9	SELECT rowid FROM d WHERE d MATCH '"crosscolumn app"*' ORDER BY rowid

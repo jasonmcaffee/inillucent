@@ -20,7 +20,43 @@ use crate::PageId;
 pub const MAGIC: [u8; 8] = *b"RDB2\0\0\0\0";
 
 /// The format version this build writes and is the only one it reads.
+///
+/// **The compatibility rule, which `docs/relational-architecture.md` states in
+/// full.** A point release reads every file an earlier point release of the
+/// same minor version wrote, so this number does not move for a bug fix. A
+/// change to the layout of a page, a record or this header raises it, and that
+/// is a minor version with a documented migration; a build that meets a file
+/// with a higher number says so rather than reading it as damage.
 pub const FORMAT_VERSION: u32 = 1;
+
+/// Returns the refusal a file of another format version reports.
+///
+/// **A newer file is not a damaged one (task-1979, E3).** Both answered
+/// `corrupt`, which sends a reader looking for a torn page in a file that is
+/// perfectly well formed and only newer than the build reading it. The newer
+/// case carries `unsupported`, so the command line exits 3 and a driver reports
+/// the status `unsupported` - the same answer every other "this build has not
+/// got that" gives - and the message says what to do about it.
+///
+/// A *lower* number would mean a format this build has dropped, and there is
+/// none: version 1 is the first. It is still named rather than folded into the
+/// newer case, because a zero here is a file whose header was zeroed rather
+/// than a file from the future.
+///
+/// @param found - the version the file's header carries
+fn wrong_format(found: u32) -> inillucent_base::DbError {
+    if found > FORMAT_VERSION {
+        return inillucent_base::error::refusal(format!(
+            "this database is format version {found} and this build reads version \
+             {FORMAT_VERSION}; upgrade inillucent to open it"
+        ))
+        .with_unsupported(format!("a database of format version {found}"));
+    }
+    corrupt(format!(
+        "format version {found} is not {FORMAT_VERSION}, and there is no earlier format: the \
+         header has been overwritten"
+    ))
+}
 
 /// The page the meta record lives on.
 pub const META_PAGE: PageId = PageId(0);
@@ -239,9 +275,7 @@ impl Meta {
         }
         let format = u32(page, at::FORMAT)?;
         if format != FORMAT_VERSION {
-            return Err(corrupt(format!(
-                "format version {format} is not {FORMAT_VERSION}"
-            )));
+            return Err(wrong_format(format));
         }
         let stored = u32(page, at::CHECKSUM)?;
         let computed = checksum(page)?;

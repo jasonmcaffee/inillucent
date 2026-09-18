@@ -1,0 +1,20 @@
+# Differential cases, category `like`, from task-1979's review of commit 3073058.
+# One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
+# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+like-001	SELECT 'abc' LIKE 'a_c', 'abc' LIKE 'a__c', 'a%c' LIKE 'a\\%c' ESCAPE '\\', 'abc' LIKE 'a\\%c' ESCAPE '\\'
+like-002	SELECT 'a_c' LIKE 'a\\_c' ESCAPE '\\', 'abc' LIKE 'a\\_c' ESCAPE '\\', 'a\\c' LIKE 'a\\\\c' ESCAPE '\\'
+like-003	SELECT 'É' LIKE 'é', 'I' LIKE 'i', '中' LIKE '中'
+like-004	SELECT NULL LIKE 'a', 'a' LIKE NULL, 'a' LIKE 'a' ESCAPE NULL
+like-005	SELECT 1 LIKE '1', 1.5 LIKE '1.5', x'4142' LIKE 'AB'
+like-006	SELECT 'abc' GLOB 'a?c', 'abc' GLOB '[a-c]bc', 'abc' GLOB '[^a]bc', 'a*c' GLOB 'a[*]c'
+like-007	SELECT 'abc' GLOB '*', '' GLOB '*', '' LIKE '%', 'abc' GLOB 'a**c'
+like-008	SELECT 'abc' NOT LIKE 'a%', 'abc' NOT GLOB 'a*', NULL NOT LIKE 'a'
+like-009	SELECT like('a%','abc'), like('a\\%c','a%c','\\'), glob('a*','abc')
+like-010	CREATE TABLE t(a TEXT COLLATE NOCASE); INSERT INTO t VALUES('ABC'); SELECT a LIKE 'abc', a = 'abc' FROM t
+like-011	SELECT 'abc' LIKE 'A%', 'ABC' LIKE 'a%', 'é' LIKE 'É'
+like-012	SELECT 'a[b' GLOB 'a[[]b', 'a]b' GLOB 'a]b'
+like-013	SELECT '100%' LIKE '%!%' ESCAPE '!', '100x' LIKE '%!%' ESCAPE '!'
+like-014	SELECT 'abc' LIKE '%%%', 'abc' LIKE '%b%', 'abc' LIKE '_%_'
+like-015	CREATE TABLE t(a); INSERT INTO t VALUES('abc'),('ABC'),('aBc'); SELECT a FROM t WHERE a LIKE 'abc' ORDER BY a
+like-016	SELECT 'abc' MATCH 'a'
+like-017	SELECT 'abc' REGEXP 'a'

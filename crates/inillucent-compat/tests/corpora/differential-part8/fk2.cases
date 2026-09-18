@@ -1,0 +1,8 @@
+# Differential cases, category `fk2`, from task-1979's review of commit 3073058.
+# One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
+# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+dfk-001	PRAGMA foreign_keys=ON; CREATE TABLE p(id INTEGER PRIMARY KEY); CREATE TABLE ch(pid INTEGER REFERENCES p(id)); INSERT INTO p VALUES(1); INSERT INTO ch VALUES(1); DROP TABLE p
+dfk-002	PRAGMA foreign_keys=ON; CREATE TABLE p(id INTEGER PRIMARY KEY); CREATE TABLE ch(pid INTEGER REFERENCES p(id)); DROP TABLE p; SELECT count(*) FROM ch
+dfk-003	PRAGMA foreign_keys=ON; CREATE TABLE p(id INTEGER PRIMARY KEY); CREATE TABLE ch(pid INTEGER REFERENCES p(id) ON DELETE CASCADE); INSERT INTO p VALUES(1); INSERT INTO ch VALUES(1); DROP TABLE p; SELECT count(*) FROM ch
+dfk-004	PRAGMA foreign_keys=ON; CREATE TABLE p(id INTEGER PRIMARY KEY); CREATE TABLE ch(pid INTEGER REFERENCES p(id)); INSERT INTO p VALUES(1); INSERT INTO ch VALUES(1); UPDATE p SET id=2
+dfk-005	PRAGMA foreign_keys=ON; CREATE TABLE p(id INTEGER PRIMARY KEY); CREATE TABLE ch(pid INTEGER REFERENCES p(id)); INSERT INTO p VALUES(1); INSERT INTO ch VALUES(1); ALTER TABLE p RENAME TO p2; SELECT count(*) FROM ch

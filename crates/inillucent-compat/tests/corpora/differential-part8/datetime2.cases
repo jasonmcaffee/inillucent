@@ -1,0 +1,10 @@
+# Differential cases, category `datetime2`, from task-1979's review of commit 3073058.
+# One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
+# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+dtr-001	SELECT date('9999-12-31','+1 day'), date('0000-01-01','-1 day'), datetime('9999-12-31 23:59:59','+1 second')
+dtr-002	SELECT date('5000-01-01'), date('2020-01-01','+10000 years'), date('2020-01-01','-10000 years')
+dtr-003	SELECT julianday('9999-12-31'), julianday('9999-12-31','+1 day')
+dtr-004	SELECT strftime('%Y-%m-%d','2020-01-01 24:00:00'), strftime('%H','2020-01-01 24:00:00'), datetime('2020-01-01 24:00:00')
+dtr-005	SELECT time('23:59:59','+1 second'), datetime('2020-01-01 23:59:59','+1 second')
+dtr-006	SELECT date('2020-01-01','floor'), date('2020-01-01','ceiling'), date('2020-01-01','+1 month','ceiling')
+dtr-007	SELECT date('2020-02-30'), date('2020-04-31'), date('2020-01-32')

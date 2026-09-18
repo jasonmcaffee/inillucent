@@ -1,0 +1,11 @@
+# Differential cases, category `uniondup`, from task-1979's review of commit 3073058.
+# One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
+# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+und-001	SELECT 1 AS a UNION SELECT 1.0
+und-002	SELECT 1.0 AS a UNION SELECT 1
+und-003	SELECT 1 AS a UNION SELECT 1.0 UNION SELECT 1
+und-004	SELECT 2 AS a UNION SELECT 2.0 ORDER BY a
+und-005	SELECT 1 AS a INTERSECT SELECT 1.0
+und-006	SELECT 1.0 AS a EXCEPT SELECT 1
+und-007	CREATE TABLE t(a); INSERT INTO t VALUES(1),(1.0); SELECT DISTINCT a, typeof(a) FROM t
+und-008	CREATE TABLE t(a); INSERT INTO t VALUES(1),(1.0); SELECT count(DISTINCT a) FROM t

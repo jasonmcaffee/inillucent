@@ -343,6 +343,21 @@ impl ImportedDatabase {
     /// makes the index answerable without a second map: the store's own rowid
     /// is the source rowid too, so a delete needs no lookup at all.
     ///
+    /// **The whole of it is one transaction, because a failure used to leave
+    /// half of it behind (task-1979, R1).** The synthesised
+    /// `CREATE VIRTUAL TABLE` runs through `execute_any`, which outside a
+    /// transaction is its own autocommit statement: it sealed, committed, and
+    /// cleared the undo buffer, so when the backfill afterwards refused a row -
+    /// a NaN component was enough - the enclosing statement's rollback in
+    /// `execute_ddl` had nothing left to put back. What was measured on the
+    /// shipped binary: the catalog kept the index row and its five shadow
+    /// tables, the planner went on choosing `SEARCH ... USING VECTOR INDEX`,
+    /// every vector query on the column answered `bad parameter or other API
+    /// misuse` for ever, and `CREATE INDEX` again was refused with "already
+    /// exists". Opening a transaction around the whole build makes the inner
+    /// statement join it instead of committing, so one failure removes
+    /// everything the statement made.
+    ///
     /// @param name - the index's name, which is the store's name
     /// @param table - the table being indexed
     /// @param columns - the key columns, of which there must be exactly one
@@ -367,6 +382,61 @@ impl ImportedDatabase {
                 String::from_utf8_lossy(name)
             )));
         }
+        // Inside a transaction there is already something to roll back to, and
+        // the caller's `ROLLBACK` is what decides; alone, the statement opens
+        // its own.
+        let alone = self.writing.batch().is_none();
+        if alone {
+            self.begin_batch();
+            self.writing.set_implicit_transaction(true);
+        }
+        let built = self.build_vector_index(module, name, table, columns, settings);
+        if !alone {
+            return built;
+        }
+        match built {
+            Ok(outcome) => {
+                self.commit_batch()?;
+                Ok(outcome)
+            }
+            Err(error) => {
+                let undone = self.rollback();
+                // The store was connected by the `CREATE VIRTUAL TABLE` that
+                // has just been undone, so the association has to be read again
+                // from a catalog that no longer names it.
+                self.refresh_vector_indexes();
+                // **The undo's own failure is the one worth reporting**, for
+                // the reason `execute_ddl` gives: an error describing a database
+                // in a state nobody intended is worse than saying so.
+                Err(undone.err().unwrap_or(error))
+            }
+        }
+    }
+
+    /// Creates the index's backing store and fills it from the table.
+    ///
+    /// The body of [`ImportedDatabase::create_vector_index`], separated so that
+    /// every path out of it - including the ones that return early - is inside
+    /// the transaction that wrapper opened.
+    ///
+    /// The store's declared column is `body`, and it holds the source row's
+    /// **rowid as text** so a hit can name the row it came from. That is what
+    /// makes the index answerable without a second map: the store's own rowid
+    /// is the source rowid too, so a delete needs no lookup at all.
+    ///
+    /// @param module - `inillucent_hnsw` or `ivfflat`
+    /// @param name - the index's name, which is the store's name
+    /// @param table - the table being indexed
+    /// @param columns - the key columns, of which there must be exactly one
+    /// @param settings - the `WITH (...)` storage parameters
+    fn build_vector_index(
+        &mut self,
+        module: &[u8],
+        name: &[u8],
+        table: &[u8],
+        columns: &[inillucent_sql::directive::IndexKeyColumn],
+        settings: &[(Vec<u8>, Vec<u8>)],
+    ) -> DbResult<Outcome> {
         let [key] = columns else {
             return Err(
                 refusal("an index USING inillucent_hnsw takes exactly one column")

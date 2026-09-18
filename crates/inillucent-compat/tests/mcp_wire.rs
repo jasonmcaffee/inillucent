@@ -49,8 +49,18 @@ impl Session {
     /// @param server - the built `inillucent-mcp`
     /// @param database - the file to open
     fn start(server: &Path, database: &Path) -> Session {
+        Session::start_with(server, database, &[])
+    }
+
+    /// Starts the server with extra arguments and completes the handshake.
+    ///
+    /// @param server - the built `inillucent-mcp`
+    /// @param database - the file to open
+    /// @param extra - the flags to start it with
+    fn start_with(server: &Path, database: &Path, extra: &[&str]) -> Session {
         let mut child = Command::new(server)
             .args(["--db", &database.to_string_lossy()])
+            .args(extra)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -155,7 +165,19 @@ impl Drop for Session {
 ///
 /// @param binary - the built `inillucent`
 fn populated(binary: &Path) -> PathBuf {
-    let directory = workspace_root().join("_agent_output/mcp-wire");
+    populated_at(binary, "session")
+}
+
+/// Returns the same fixture in a directory of the case's own.
+///
+/// Per case rather than shared, because three cases in this file build it and
+/// a shared directory makes the order they happen to run in part of what is
+/// under test - the second `create` reports that the file already exists.
+///
+/// @param binary - the built `inillucent`
+/// @param case - what to name the directory after
+fn populated_at(binary: &Path, case: &str) -> PathBuf {
+    let directory = workspace_root().join("_agent_output/mcp-wire").join(case);
     let _ = std::fs::remove_dir_all(&directory);
     std::fs::create_dir_all(&directory).expect("a scratch directory");
     let database = directory.join("app.rdb");
@@ -403,5 +425,145 @@ fn every_tool_answers_over_one_session() {
     assert!(
         refused.contains("\"isError\":true"),
         "a statement the engine has not built came back as a success:\n{refused}"
+    );
+}
+
+/// A read only server refuses every statement that changes the file, and the
+/// file is unchanged afterwards (task-1979, H2).
+///
+/// **Every one of these ran and persisted through `--readonly` before
+/// task-1980.** The filter asked the engine to `EXPLAIN` the statement and
+/// refused only on the text "not a read-only statement", which
+/// `compile_explain` produces for a `SELECT`, an `UPDATE` and a `DELETE` and
+/// never for an `INSERT`, a write pragma, an `ATTACH` or a `VACUUM INTO`.
+#[test]
+fn a_read_only_server_refuses_every_write_and_leaves_the_file_alone() {
+    let Some(binary) = program("inillucent") else {
+        return;
+    };
+    let Some(server) = program("inillucent-mcp") else {
+        return;
+    };
+    let database = populated_at(&binary, "readonly");
+    let before = std::fs::read(&database).expect("the database reads");
+
+    let mut session = Session::start_with(&server, &database, &["--readonly"]);
+    for sql in [
+        "INSERT INTO note (body) VALUES ('written')",
+        "UPDATE note SET body = 'changed'",
+        "DELETE FROM note",
+        "PRAGMA user_version = 7",
+        "DROP TABLE note",
+        "CREATE TABLE another (a)",
+    ] {
+        let answer = session.tool("inillucent_query", &format!("{{\"sql\":\"{sql}\"}}"));
+        assert!(
+            answer.contains("read only"),
+            "a read only server did not refuse `{sql}`:\n{answer}"
+        );
+    }
+    // A read still answers, so the refusals above are about writing rather than
+    // about a server that stopped working.
+    let read = session.tool(
+        "inillucent_query",
+        "{\"sql\":\"SELECT count(*) FROM note\"}",
+    );
+    assert!(
+        read.contains("\"isError\":false") && read.contains("count(*)"),
+        "a read only server could not read:\n{read}"
+    );
+    drop(session);
+
+    let after = std::fs::read(&database).expect("the database reads");
+    assert_eq!(
+        before,
+        after,
+        "the file changed under a read only server, by {} bytes",
+        after.len() as i64 - before.len() as i64
+    );
+}
+
+/// A server refuses every dot command that reaches the operating system or a
+/// path outside its root (task-1979, H1).
+///
+/// **`.shell` and `.system` spawned `cmd /C` on a server started `--root`, and
+/// `.output`, `.once` and `.read` opened any path with plain `std::fs`.** The
+/// reviewer wrote files outside the root through all five and the server
+/// answered `isError=false`. A child spawned that way also inherits the
+/// server's standard output, which is the JSON-RPC channel.
+#[test]
+fn a_server_refuses_the_dot_commands_that_reach_outside_it() {
+    let Some(binary) = program("inillucent") else {
+        return;
+    };
+    let Some(server) = program("inillucent-mcp") else {
+        return;
+    };
+    let database = populated_at(&binary, "confined");
+    let root = database
+        .parent()
+        .expect("the fixture has a directory")
+        .to_path_buf();
+    let outside = root.join("..").join("mcp-wire-outside");
+    let _ = std::fs::create_dir_all(&outside);
+    let escaped = outside
+        .join("escaped.txt")
+        .to_string_lossy()
+        .replace('\\', "/");
+
+    let mut session = Session::start_with(&server, &database, &["--root", &root.to_string_lossy()]);
+    for input in [
+        ".shell cmd /c echo escaped".to_string(),
+        ".system cmd /c echo escaped".to_string(),
+        format!(".output {escaped}"),
+        format!(".once {escaped}"),
+        format!(".read {escaped}"),
+        format!(".import {escaped} note"),
+    ] {
+        let flattened = input.replace('"', "'");
+        let answer = session.tool("inillucent_run", &format!("{{\"input\":\"{flattened}\"}}"));
+        let said = answer.to_ascii_lowercase();
+        assert!(
+            said.contains("prohibited in safe mode")
+                || said.contains("outside")
+                || said.contains("cannot open"),
+            "`{input}` was not refused by a server confined to its root:\n{answer}"
+        );
+    }
+    drop(session);
+
+    assert!(
+        !outside.join("escaped.txt").is_file(),
+        "a dot command wrote outside the root the server was confined to"
+    );
+}
+
+/// A statement deep enough to have ended the server is refused, and the server
+/// answers the next request (task-1979, section 5.3).
+///
+/// **It used to end the server for every client.** `SELECT abs(abs(...(1)...))`
+/// 300 deep overflowed the 1 MiB stack the binaries carry, which is exit code
+/// 0xC00000FD and a client whose next request is never answered.
+#[test]
+fn a_statement_past_the_depth_limit_does_not_end_the_server() {
+    let Some(binary) = program("inillucent") else {
+        return;
+    };
+    let Some(server) = program("inillucent-mcp") else {
+        return;
+    };
+    let database = populated_at(&binary, "deep");
+    let mut session = Session::start(&server, &database);
+    let deep = format!("SELECT {}1{}", "abs(".repeat(2_000), ")".repeat(2_000));
+    let refused = session.tool("inillucent_query", &format!("{{\"sql\":\"{deep}\"}}"));
+    assert!(
+        refused.contains("depth exceeded"),
+        "a statement 2,000 deep was not refused by a limit:\n{}",
+        &refused[..refused.len().min(400)]
+    );
+    let after = session.tool("inillucent_query", "{\"sql\":\"SELECT 1\"}");
+    assert!(
+        after.contains("\"isError\":false"),
+        "the server did not answer the request after a deep statement:\n{after}"
     );
 }

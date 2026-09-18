@@ -35,9 +35,20 @@ pub(crate) struct MatchedRow {
 pub(crate) struct Fts5Cursor {
     /// Which surface this table presents.
     pub(crate) dialect: Dialect,
+    /// The option this build cannot honour, when the table declares one.
+    ///
+    /// Every query of the table reports it; see [`super::Options::unsupported`]
+    /// for why the refusal is here rather than at open.
+    pub(crate) unsupported: Option<String>,
     pub(crate) columns: usize,
     /// The shadow suffix the rows are reached under.
     pub(crate) content: Vec<u8>,
+    /// Whether the table stores no document text at all.
+    ///
+    /// A `content=''` table has no `%_content` shadow, so every declared column
+    /// reads back NULL - which is what SQLite answers and what task-1979, R5
+    /// found this returning the stored document for instead.
+    pub(crate) contentless: bool,
     /// Where each declared column sits in a stored row.
     pub(crate) offsets: Vec<usize>,
     /// The table the rows belong to, when they are not this table's.
@@ -258,6 +269,9 @@ impl Fts5Cursor {
         let Some(row) = self.rows.get(self.at).cloned() else {
             return Ok(None);
         };
+        if self.contentless {
+            return Ok(None);
+        }
         if self.held.as_ref().map(|(rowid, _)| *rowid) != Some(row.rowid) {
             self.resolve_offsets(context);
             self.held = self
@@ -453,6 +467,9 @@ impl Fts5Cursor {
 impl VirtualCursor for Fts5Cursor {
     /// Runs the query and collects every row it matched.
     fn filter(&mut self, context: &mut Context<'_>, plan: &FilterPlan) -> DbResult<()> {
+        if let Some(what) = self.unsupported.clone() {
+            return Err(super::unsupported_option(&what));
+        }
         self.rows.clear();
         self.matched.clear();
         self.phrases.clear();
@@ -462,11 +479,14 @@ impl VirtualCursor for Fts5Cursor {
             let Some(rowid) = plan.arguments.first().and_then(Value::as_integer) else {
                 return Ok(());
             };
-            if self
-                .shadows
-                .read_row(context, &self.content.clone(), rowid)?
-                .is_some()
-            {
+            // `%_docsize` holds one row per indexed document and a contentless
+            // table has no `%_content` to ask, so it is the record of which
+            // rowids exist for both.
+            let suffix: &[u8] = match self.contentless {
+                true => b"docsize",
+                false => &self.content.clone(),
+            };
+            if self.shadows.read_row(context, suffix, rowid)?.is_some() {
                 self.rows.push(MatchedRow { rowid, score: None });
             }
             return Ok(());
@@ -476,7 +496,7 @@ impl VirtualCursor for Fts5Cursor {
             // table's owner may hold rows this index has never seen, and a
             // scan that returned them would answer with documents no query
             // could match. `%_docsize` has one row per indexed document.
-            let suffix: &[u8] = if self.external.is_some() {
+            let suffix: &[u8] = if self.external.is_some() || self.contentless {
                 b"docsize"
             } else {
                 b"content"
@@ -607,6 +627,9 @@ impl VirtualCursor for Fts5Cursor {
         if index as i32 == self.match_column {
             // The hidden column that carries the query is NULL when it is read
             // as a value; it exists to be *constrained*, not to be selected.
+            return Ok(Value::Null);
+        }
+        if self.contentless {
             return Ok(Value::Null);
         }
         if self.held.as_ref().map(|(rowid, _)| *rowid) != Some(row.rowid) {

@@ -1,0 +1,15 @@
+# Differential cases, category `math`, from task-1979's review of commit 3073058.
+# One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
+# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+mth-001	SELECT abs(-3), abs(-3.5), abs('x'), abs(NULL), typeof(abs(-3))
+mth-002	SELECT sign(-3), sign(0), sign(4.5), sign('x')
+mth-003	SELECT ceil(1.2), ceiling(-1.2), floor(1.8), floor(-1.8), typeof(ceil(1.2))
+mth-004	SELECT trunc(1.9), trunc(-1.9), typeof(trunc(1.9))
+mth-005	SELECT sqrt(4), sqrt(-1), pow(2,10), power(2,0.5), exp(0), ln(1)
+mth-006	SELECT log(100), log10(100), log2(8), log(2,8), ln(0), ln(-1)
+mth-007	SELECT pi(), sin(0), cos(0), tan(0), asin(1), acos(1), atan(1), atan2(1,1)
+mth-008	SELECT sinh(0), cosh(0), tanh(0), asinh(0), acosh(1), atanh(0)
+mth-009	SELECT degrees(pi()), radians(180), mod(7,2), mod(-7,2), mod(7.5,2)
+mth-010	SELECT round(2.675,2), round(-2.675,2), round(1.005,2)
+mth-011	SELECT cast(sqrt(2) AS TEXT), 2.0/3.0
+mth-012	SELECT max(1,2,3), min(1,2,3), max('a','B'), min('a','B')

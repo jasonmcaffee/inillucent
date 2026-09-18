@@ -47,13 +47,16 @@ pub(crate) struct Pragmas {
     /// two different queries.
     levers: std::cell::Cell<Levers>,
 
-    /// How long a writer waits for the writer slot, in milliseconds.
+    /// How long a writer waits for the file, in milliseconds.
     ///
-    /// `PRAGMA busy_timeout` reads and writes it. The value is carried here
-    /// rather than in `inillucent-txn` because this harness holds the log
-    /// directly and never takes the writer slot - so what it can honestly do
-    /// with the setting is remember it and report it, which is what the pragma
-    /// is asked for far more often than it is relied on.
+    /// **It governs the cross-process wait rather than only being remembered
+    /// (task-1979, C7).** It used to be a value this connection recorded and
+    /// reported while the wait that actually happened was a constant in
+    /// `inillucent-pool` no pragma, flag or environment variable could reach.
+    /// Setting it now pushes the number into `Database::set_busy_millis`, which
+    /// is the budget `begin_write_within` spends, and it starts at that
+    /// crate's `DEFAULT_BUSY_MILLIS` rather than at zero so the behaviour a
+    /// caller gets without asking is the one they always got.
     busy_timeout_ms: std::cell::Cell<u64>,
 
     /// Whether `PRAGMA foreign_keys` is on.
@@ -452,10 +455,10 @@ impl Pragmas {
         Pragmas {
             limits: std::cell::RefCell::new(Limits::default()),
             levers: std::cell::Cell::new(Levers::default()),
-            busy_timeout_ms: std::cell::Cell::new(0),
+            busy_timeout_ms: std::cell::Cell::new(inillucent_pool::file::DEFAULT_BUSY_MILLIS),
             foreign_keys: std::cell::Cell::new(false),
             defer_foreign_keys: std::cell::Cell::new(false),
-            locking_exclusive: std::cell::Cell::new(true),
+            locking_exclusive: std::cell::Cell::new(false),
             journal_mode: std::cell::Cell::new(inillucent_pool::journal::JournalMode::Delete),
             ignore_check_constraints: std::cell::Cell::new(false),
             secure_delete: std::cell::Cell::new(0),
@@ -686,6 +689,34 @@ pub(crate) struct Storage {
     pub(crate) path: PathBuf,
     pub(crate) page_size: usize,
     pub(crate) frames: usize,
+    /// What opening this file did to it, for a caller that has to report it.
+    ///
+    /// Set once by the open and never changed: it describes the open, not the
+    /// connection's later life. See `crate::recovery::RecoveryReport`.
+    pub(crate) recovery: crate::recovery::RecoveryReport,
+    /// Whether this file was opened with a transaction still in doubt.
+    ///
+    /// **A checkpoint must not fold the log down past a vote nobody has
+    /// counted.** A transaction that wrote two files is decided by the deletion
+    /// of a super-journal outside both, and until that deletion each
+    /// participant's log holds a `Commit` record recovery is told to read as
+    /// absent. A checkpoint that advanced this file's recovery point past those
+    /// records would make the transaction unrecoverable whichever way the
+    /// decision then went - so while the doubt is there, the recovery point
+    /// does not move.
+    ///
+    /// Nothing reached it before task-1980 because under `locking_mode =
+    /// exclusive` a connection checkpointed at close; with `normal` as the
+    /// default, the `ATTACH` that a reader runs to look at both files
+    /// checkpoints on its way out and did exactly this.
+    pub(crate) in_doubt: bool,
+    /// Whether this connection may write the file at all.
+    ///
+    /// See `inillucent_pool::Database::open_read_only`. Held here as well as on
+    /// the pool so the engine can answer without a write having to fail first -
+    /// a checkpoint on its way out of a statement, for instance, has nothing to
+    /// do and should not report a refusal nobody asked for.
+    pub(crate) read_only: bool,
     /// The file system this database and everything beside it lives on.
     ///
     /// **One instance, held, rather than one made per call.** `OsVfs` is

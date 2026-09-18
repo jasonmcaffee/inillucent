@@ -31,10 +31,19 @@ use crate::parser::parse_expression;
 
 /// The internal tables an application may write, as SQLite allows.
 ///
-/// **Two, and neither of them is the schema.** Every table whose
-/// name begins with `sqlite_` used to be refused, which is right for
-/// `sqlite_schema` - that is what `PRAGMA writable_schema` is for - and wrong
-/// for these two, because writing them is the documented way to use them:
+/// **Four, and two of them are the schema.** Every table whose
+/// name begins with `sqlite_` used to be refused, which is wrong for all four,
+/// because writing them is the documented way to use them:
+///
+/// - `sqlite_schema`, and `sqlite_master` which is its other name, are what
+///   `PRAGMA writable_schema` is for, and `.dump` emits
+///   `INSERT INTO sqlite_schema(type,name,tbl_name,rootpage,sql)VALUES(...)`
+///   for a virtual table - which is the only way a dump can restore one
+///   without building empty shadow tables over the ones it is about to fill
+///   (task-1979, R2). Whether the pragma is on is the *engine's* question and
+///   not the binder's: `ImportedDatabase::refuse_schema_write` refuses the
+///   statement when it is off, the way `refuse_shadow_write` refuses a write a
+///   defensive connection may not make.
 ///
 /// - `sqlite_sequence` holds one row per `AUTOINCREMENT` table, and
 ///   `UPDATE sqlite_sequence SET seq = 0 WHERE name = 't'` is how the counter is
@@ -47,7 +56,12 @@ use crate::parser::parse_expression;
 /// They are ordinary tables in every other respect: the rows are what they are,
 /// and a value written into one is used exactly as `ANALYZE` or the rowid
 /// allocator would have used the one it replaced.
-const WRITABLE_INTERNAL: [&[u8]; 2] = [b"sqlite_sequence", b"sqlite_stat1"];
+const WRITABLE_INTERNAL: [&[u8]; 4] = [
+    b"sqlite_sequence",
+    b"sqlite_stat1",
+    b"sqlite_schema",
+    b"sqlite_master",
+];
 
 /// Where one column's value comes from in an INSERT.
 #[derive(Clone, Debug, PartialEq)]

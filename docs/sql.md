@@ -81,7 +81,11 @@ node tools/feature-probe/registers.js    # both registers, compared name by name
 or a scan. `GROUP BY`, `HAVING`, `DISTINCT`, `ORDER BY`, `LIMIT` and `OFFSET`. Compound selects
 (`UNION`, `UNION ALL`, `EXCEPT`, `INTERSECT`). Common table expressions, including recursive ones.
 Derived tables in `FROM`. Subqueries in `WHERE`, in `IN`, in `EXISTS` and as values, including
-correlated ones.
+correlated ones. A correlated `IN` is answered by rewriting it as `EXISTS`, which keeps SQLite's NULL
+rules: an empty list is false even for a NULL on the left, a NULL on the left over a list with rows
+is NULL, and a list holding a NULL turns a non-match into NULL. The one shape that is refused is a
+correlated `IN` whose block groups, limits or is itself a compound query, because the rewrite puts
+the equality in the block's `WHERE` and a `WHERE` runs before either.
 
 **Writes.** `INSERT`, `UPDATE` and `DELETE`, with `RETURNING`, with `ON CONFLICT DO UPDATE` and
 `DO NOTHING`, and with `UPDATE ... FROM`. `WITH` on all three. Row values in every comparison and in
@@ -164,13 +168,17 @@ settings, and that difference is what is quoted here.
 3.44x with `schema` at **6% slower than SQLite**, under the floor the performance contract requires.
 The pragma reports what the file is, which is its job.
 
-**`PRAGMA locking_mode` reports `exclusive`.** `normal` works and gives real access from several
-processes: 37 stress rounds, two processes each writing 12,000 rows into one file, zero lost writes
-and zero failed integrity checks. `exclusive` is the *default* because running the gate with `normal`
-as the default read 3.03x with a lower bound of 2.95x, under the 3.00x bar. It takes `write` from
-1.94x to 1.19x, `transaction` from 11% slower to 170% slower, and `schema` from 1.34x to 52% slower.
-Releasing the file between statements means reading the meta record again before each one, in every
-program, including every program that never opens a second connection.
+**`PRAGMA locking_mode` reports `normal`**, where SQLite also reports `normal`, so this is no
+longer a difference. It is the default because `exclusive` never releases the file between
+statements, so a second process either waits out the whole life of the first or reads state from
+before it. `exclusive` is still a real switch, and a program that never opens a second connection
+can take it for the throughput: releasing the file between statements means reading the meta record
+and the log's tail again before each one.
+
+What multi-process access means here is one writer at a time. A second writer waits up to
+`PRAGMA busy_timeout` and is then refused with `busy`, naming what the holder has the file for.
+Rows in the file equal commits acknowledged, which
+`crates/inillucent-compat/tests/process_concurrency.rs` asserts against two real writer processes.
 
 **`.recover`** differs on one line of nineteen, and it is the line that names the page size.
 
@@ -198,7 +206,7 @@ wrong".
 | `fts5(...)`, `fts5_locale()`, `fts5_get_locale()`, `fts5_insttoken()` | four function names that hand out C pointers or belong to FTS5's locale machinery. A stub would be a wrong answer rather than a missing one |
 | `fts3_tokenizer()` | the same, and absent from the pinned SQLite library too, so it is a difference against the shell rather than against the library an application links |
 | modules `fts4aux` and `fts3tokenize` | also absent from the pinned library, so also a difference against the shell. The FTS5 equivalent `fts5vocab` is here |
-| a second writer | one writer at a time. Readers never block, under snapshot isolation |
+| a second writer | one writer at a time. A reader is refused with `busy` while a writer holds the file, after `PRAGMA busy_timeout`; there is no shared-memory log index, so there is no snapshot for a reader to read from while a writer is working. `docs/roadmap.md` has the protocol that would change that |
 | threads inside one process | the engine is single threaded by construction. Several *processes* on one file are supported under `PRAGMA locking_mode = normal` |
 | SQLite's file format | this engine writes its own format. A SQLite file is imported with [`inillucent migrate`](migrating.md), not opened in place |
 
@@ -210,7 +218,7 @@ wrong".
 | page size | 32 KiB by default, 8 to 64 KiB allowed | 4 KiB by default |
 | page cache | a pool of frames, 4,096 frames at 128 MiB by default, set when the file is opened. A frame's page is allocated the first time that frame is claimed, so the budget is a ceiling rather than an amount taken at open | `cache_size`, 2 MiB by default, also grown into |
 | journal modes | all six, and `delete` is the default as it is in SQLite. `PRAGMA journal_mode = wal` selects the redo log, and a database left in WAL reopens in WAL. What the mode selects here is how a **checkpoint** is protected: an application's `ROLLBACK` is undone from the log under every mode, including `off`, so `memory` and `off` are one choice rather than two | six |
-| writers | one at a time; readers never block, under snapshot isolation | one at a time; readers block in rollback mode, not in WAL |
+| writers | one at a time; a reader waits for a writer, and is refused with `busy` after `PRAGMA busy_timeout` | one at a time; readers block in rollback mode, not in WAL |
 | processes on one file | many, under `PRAGMA locking_mode = normal` | many, over byte range locks |
 | threads | one | serialised or multi thread |
 | rollback | an undo buffer of before images, for rows and for schema | rollback journal or WAL |

@@ -1005,7 +1005,8 @@ impl Index {
         // empty vector deliberately; refusing that would turn the fallback into
         // a failure, which is the opposite of what it is for.
         let vector_hits = if branches.runs_vector() {
-            self.vector_search(query_vector, filter, candidates, ef_search)?
+            let found = self.vector_search(query_vector, filter, candidates, ef_search)?;
+            self.without_the_unembedded(found)
         } else {
             Vec::new()
         };
@@ -1046,6 +1047,34 @@ impl Index {
             lexical_candidates: lexical_hits.len(),
         };
         Ok((hits, explanation))
+    }
+
+    /// Drops the candidates that have no embedding yet.
+    ///
+    /// **A row with no vector used to come back from the vector branch
+    /// (task-1979, R16).** `embedding_of` gives such a row the zero vector,
+    /// whose own doc comment says it "is orthogonal to nothing and therefore
+    /// never a near neighbour of anything" - but a scan that has fewer than
+    /// `k` real neighbours returns it anyway, at the bottom of the list. Two
+    /// things followed from that: a pure vector query answered a document
+    /// nobody had embedded, at score zero, and a hybrid query labelled it
+    /// `origin = both`, which says it was found by a branch that cannot have
+    /// found it.
+    ///
+    /// It is a filter on the answer rather than on the scan because the scan is
+    /// the accuracy reference the whole project is graded against, and a
+    /// shortcut in the reference is a shortcut in every recall number measured
+    /// against it. At most `candidates` vectors are read.
+    ///
+    /// @param found - what the vector branch answered
+    fn without_the_unembedded(&self, found: Vec<Neighbour>) -> Vec<Neighbour> {
+        found
+            .into_iter()
+            .filter(|hit| {
+                self.vectors
+                    .with(hit.chunk, |vector| vector.iter().any(|held| *held != 0.0))
+            })
+            .collect()
     }
 
     /// The fusion this query should use: the configured one, or the same method

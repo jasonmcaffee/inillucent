@@ -65,10 +65,71 @@ fn literal_of(value: &Json) -> Result<String, Failed> {
         // blob leaves in `value_to_json` and so how it must be allowed back in.
         Json::Text(text) if is_blob_literal(text) => Ok(text.clone()),
         Json::Text(text) => Ok(format!("'{}'", text.replace('\'', "''"))),
-        Json::Array(_) | Json::Object(_) => Err(Failed::misuse(
-            "a parameter has to be a string, a number, a boolean or null.",
-        )),
+        // **An array of numbers is a vector (task-1979, section 8.2, gap 2).**
+        // It was refused, and the only working spelling of a vector parameter
+        // was a hex blob the caller had to assemble itself - so `--params` was
+        // unusable for the first write into a `VECTOR(N)` column, which is the
+        // first thing an application does with one.
+        Json::Array(values) => vector_literal(values),
+        // **A blob is `{"blob": "<hex>"}`.** JSON has no byte string, and the
+        // `x'..'` text form above only covers a value this command printed; a
+        // caller with bytes of its own had no spelling at all.
+        Json::Object(fields) => blob_literal(fields),
     }
+}
+
+/// Returns the blob literal a JSON array of numbers names.
+///
+/// The bytes are little-endian 32-bit floats, which is what a `VECTOR(N)`
+/// column holds and what `vector_distance_cos` reads.
+///
+/// @param values - the array's elements
+fn vector_literal(values: &[Json]) -> Result<String, Failed> {
+    if values.is_empty() {
+        return Err(Failed::misuse(
+            "a parameter that is an array is a vector, so it needs at least one number.",
+        ));
+    }
+    let mut hex = String::from("x'");
+    for value in values {
+        let number = match value {
+            Json::Int(whole) => *whole as f64,
+            Json::Real(real) if real.is_finite() => *real,
+            _ => {
+                return Err(Failed::misuse(
+                    "a parameter that is an array is a vector, so every element has to be a \
+                     finite number.",
+                ))
+            }
+        };
+        for byte in (number as f32).to_le_bytes() {
+            hex.push_str(&format!("{byte:02x}"));
+        }
+    }
+    hex.push('\'');
+    Ok(hex)
+}
+
+/// Returns the blob literal a `{"blob": "<hex>"}` parameter names.
+///
+/// @param fields - the object's members
+fn blob_literal(fields: &[(String, Json)]) -> Result<String, Failed> {
+    let held = fields
+        .iter()
+        .find(|(name, _)| name == "blob")
+        .map(|(_, value)| value);
+    let Some(Json::Text(hex)) = held else {
+        return Err(Failed::misuse(
+            "a parameter has to be a string, a number, a boolean, null, an array of numbers \
+             for a vector, or {\"blob\": \"<hex>\"} for bytes.",
+        ));
+    };
+    if hex.is_empty() || hex.len() % 2 != 0 || !hex.chars().all(|digit| digit.is_ascii_hexdigit()) {
+        return Err(Failed::misuse(
+            "the value of \"blob\" has to be an even number of hexadecimal digits.",
+        ));
+    }
+    Ok(format!("x'{hex}'"))
 }
 
 /// Returns whether a string is the `x'..'` spelling of a blob.
@@ -430,14 +491,130 @@ pub fn tables(context: &mut Context, arguments: &Arguments) -> Result<Outcome, F
 }
 
 /// `indexes`: the indexes in the database, and what each is on.
+///
+/// **Two sources, because a vector index is not written to `sqlite_master` as
+/// an index (task-1979, R19).** `CREATE INDEX v ON t USING inillucent_hnsw (c)`
+/// records its backing store as a virtual table, so this command listed nothing
+/// at all for a database whose only index was a vector one - and the answer
+/// "there are no indexes" was wrong on a file that had just been given one.
+/// `PRAGMA index_list` walks the table's own index chain, which holds both
+/// kinds, and reports `v` for the module owned ones.
 pub fn indexes(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
+    let pattern = arguments.text("pattern").map(str::to_string);
     let mut sql =
         String::from("SELECT name, tbl_name AS \"table\" FROM sqlite_master WHERE type = 'index'");
-    if let Some(pattern) = arguments.text("pattern") {
+    if let Some(pattern) = &pattern {
         sql.push_str(&format!(" AND name LIKE {}", quoted_text(pattern)));
     }
-    sql.push_str(" ORDER BY tbl_name, name");
-    listing(context, "indexes", &sql)
+    context.refuse_if_it_writes(&sql)?;
+    let started = std::time::Instant::now();
+    let (names, mut rows) = context
+        .shell()
+        .collect(&sql)
+        .map_err(|failure| Failed::from_shell(&failure))?;
+    rows.extend(module_indexes(context, pattern.as_deref())?);
+    rows.sort_by(|left, right| {
+        let key = |row: &Vec<Value<'static>>| {
+            (
+                row.get(1).map(text_of_value).unwrap_or_default(),
+                row.first().map(text_of_value).unwrap_or_default(),
+            )
+        };
+        key(left).cmp(&key(right))
+    });
+    let elapsed = started.elapsed().as_secs_f64() * 1000.0;
+    Ok(rows_to_outcome(context, "indexes", names, rows, 0, elapsed))
+}
+
+/// Returns one row per vector index, in the shape the `indexes` listing uses.
+///
+/// Every table is asked for its own index chain, because that chain is the one
+/// place both kinds of index are recorded; see [`indexes`] for why
+/// `sqlite_master` is not enough.
+///
+/// @param context - the open database
+/// @param pattern - the `LIKE` pattern the caller gave, if any
+fn module_indexes(
+    context: &mut Context,
+    pattern: Option<&str>,
+) -> Result<Vec<Vec<Value<'static>>>, Failed> {
+    let tables = context
+        .shell()
+        .column("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'");
+    let mut found = Vec::new();
+    for table in tables {
+        let listed = context
+            .shell()
+            .collect(&format!("PRAGMA index_list({})", quoted_text(&table)))
+            .map_err(|failure| Failed::from_shell(&failure))?
+            .1;
+        for row in listed {
+            if row.get(3).map(text_of_value).as_deref() != Some("v") {
+                continue;
+            }
+            let Some(name) = row.get(1).map(text_of_value) else {
+                continue;
+            };
+            if let Some(pattern) = pattern {
+                if !like(&name, pattern) {
+                    continue;
+                }
+            }
+            let (Ok(named), Ok(owner)) = (
+                Value::owned_text(name.as_bytes()),
+                Value::owned_text(table.as_bytes()),
+            ) else {
+                continue;
+            };
+            found.push(vec![named, owner]);
+        }
+    }
+    Ok(found)
+}
+
+/// Returns a value's text, or the empty string for anything else.
+///
+/// @param value - the cell
+fn text_of_value(value: &Value<'static>) -> String {
+    match value {
+        Value::Text(text) => String::from_utf8_lossy(text.raw()).into_owned(),
+        _ => String::new(),
+    }
+}
+
+/// Answers SQLite's `LIKE` for the two patterns this command accepts.
+///
+/// Only `%` is honoured, which is every pattern the command's own help
+/// describes; `_` is left alone because a name holding one is commoner here
+/// than a caller meaning it as a wildcard.
+///
+/// @param name - the index's name
+/// @param pattern - what the caller asked for
+fn like(name: &str, pattern: &str) -> bool {
+    let folded = name.to_lowercase();
+    let wanted = pattern.to_lowercase();
+    let parts: Vec<&str> = wanted.split('%').collect();
+    let mut at = 0usize;
+    for (which, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            continue;
+        }
+        let Some(found) = folded.get(at..).and_then(|rest| rest.find(part)) else {
+            return false;
+        };
+        if which == 0 && !wanted.starts_with('%') && found != 0 {
+            return false;
+        }
+        at = at.saturating_add(found).saturating_add(part.len());
+    }
+    if !wanted.ends_with('%') {
+        if let Some(last) = parts.last() {
+            if !last.is_empty() && at != folded.len() {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// `databases`: what is attached, and the file behind each.
@@ -770,6 +947,25 @@ pub fn stats(context: &mut Context, _arguments: &Arguments) -> Result<Outcome, F
         .with("cache_misses", Json::Int(cache.misses as i64)))
 }
 
+/// Returns how many neighbours a search was asked for.
+///
+/// **`--k 0` and `--k -1` used to answer one row (task-1979, R10).** The count
+/// was clamped with `.max(1)`, so a caller asking for none - which a loop over
+/// a configured page size does - was given one, and a caller who had computed a
+/// negative count from a mistake elsewhere was given one too. Neither is what
+/// was asked for, and a row nobody asked for is worse than an error.
+///
+/// @param arguments - the command line as it was parsed
+fn neighbours_asked_for(arguments: &Arguments) -> Result<i64, Failed> {
+    let k = arguments.integer("k").unwrap_or(10);
+    if k < 1 {
+        return Err(Failed::misuse(
+            "'k' has to be one or more: it is how many rows to return.",
+        ));
+    }
+    Ok(k)
+}
+
 /// `search`: full-text and hybrid retrieval, without writing the idiom.
 ///
 /// One statement over an `inillucent_search` or FTS5 table, in the form both
@@ -779,7 +975,7 @@ pub fn stats(context: &mut Context, _arguments: &Arguments) -> Result<Outcome, F
 pub fn search(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
     let query_text = arguments.required_text("query")?.to_string();
     let name = arguments.required_text("table")?.to_string();
-    let k = arguments.integer("k").unwrap_or(10).max(1);
+    let k = neighbours_asked_for(arguments)?;
     let sql = format!(
         "SELECT rowid, * FROM {0} WHERE {0} MATCH {1} ORDER BY rank LIMIT {k}",
         quoted(&name),
@@ -815,7 +1011,7 @@ pub fn vector_search(context: &mut Context, arguments: &Arguments) -> Result<Out
         }
     }
     blob.push('\'');
-    let k = arguments.integer("k").unwrap_or(10).max(1);
+    let k = neighbours_asked_for(arguments)?;
     let measure = arguments.text("measure").unwrap_or("cos");
     let function = match measure {
         "cos" => "vector_distance_cos",
@@ -1236,8 +1432,23 @@ fn migrate_sqlite_file(from: &std::path::Path, to: &std::path::Path) -> Result<O
     let mut staged = to.as_os_str().to_os_string();
     staged.push(format!(".staging-{}", std::process::id()));
     let staged = std::path::PathBuf::from(staged);
-    let imported = inillucent_driver::Database::import_sqlite_into(from, &staged)
-        .map_err(Failed::from_driver)?;
+    // **A source the reader could not read whole is refused here (task-1979,
+    // M1).** The import used to drop a table whose rows it could not read and
+    // carry on, so one flipped bit in a leaf page produced a published,
+    // integrity-clean database with the table gone and exit code 0. The engine
+    // refuses instead, and the staging file is left where it fell rather than
+    // renamed over the destination.
+    let imported = match inillucent_driver::Database::import_sqlite_into(from, &staged) {
+        Ok(imported) => imported,
+        Err(error) => {
+            // **The staging file goes with the refusal.** A migration that
+            // published nothing used to leave a half-built database and its log
+            // segments beside the destination, named after this process, for
+            // somebody to find later and wonder about.
+            remove_staged(&staged);
+            return Err(Failed::from_driver(error));
+        }
+    };
     drop(imported);
     std::fs::rename(&staged, to).map_err(|error| {
         Failed::said(
@@ -1253,6 +1464,29 @@ fn migrate_sqlite_file(from: &std::path::Path, to: &std::path::Path) -> Result<O
         format!("imported {} into {}", from.display(), to.display()),
     )
     .with("destination", json::text(to.to_string_lossy())))
+}
+
+/// Removes a staging database and every log segment beside it.
+///
+/// A `.rdb` is a file plus its own log segments, named after it, so removing
+/// the first and leaving the rest is leaving most of the bytes.
+///
+/// @param staged - the staging database
+fn remove_staged(staged: &std::path::Path) {
+    let _ = std::fs::remove_file(staged);
+    let (Some(directory), Some(stem)) = (staged.parent(), staged.file_name()) else {
+        return;
+    };
+    let stem = stem.to_string_lossy().into_owned();
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with(&format!("{stem}-wal.")) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// `version`: what this build is.

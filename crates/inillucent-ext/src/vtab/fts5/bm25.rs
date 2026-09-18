@@ -10,15 +10,26 @@
 //!
 //! ```text
 //! idf(q)   = log( (N - n(q) + 0.5) / (n(q) + 0.5) )        -- clamped at 1e-6
+//! f(q)     = SUM over columns c of w(c) * f(q,c)
 //! score    = - SUM over phrases q of
-//!              idf(q) * SUM over columns c of
-//!                w(c) * f(q,c) * (k1 + 1) / (f(q,c) + k1 * (1 - b + b * D/avgdl))
+//!              idf(q) * f(q) * (k1 + 1) / (f(q) + k1 * (1 - b + b * D/avgdl))
 //! ```
 //!
 //! with `k1 = 1.2` and `b = 0.75`, `N` the number of rows, `n(q)` the number of
 //! rows the phrase appears in, `f(q,c)` how often it appears in column `c` of
 //! this row, `D` the row's length and `avgdl` the average length. `w(c)` is the
 //! per-column weight an application may pass, and is one by default.
+//!
+//! **The columns are summed before the saturation, not after (task-1979, R3).**
+//! This used to saturate each column separately and add the results, which is a
+//! different function wherever a phrase is in more than one column of a row:
+//! `fts5Bm25Function` accumulates `aFreq[phrase] += weight` once per *instance*
+//! across every column and divides once. With every weight at one the two agree
+//! only when each row holds the phrase in a single column, which is what the
+//! four row corpus the old differential test used happened to be - so the test
+//! claimed agreement "to the last digit" and could not have seen the
+//! difference. Passing weights makes them disagree on every row, because a
+//! weight inside a saturating quotient does not scale the result.
 
 use std::collections::BTreeMap;
 
@@ -105,18 +116,24 @@ pub fn score_row(
         let Some(columns) = found.get(&rowid) else {
             continue;
         };
-        let mut term = 0.0f64;
+        // One weighted frequency for the whole row, summed over the columns
+        // the phrase is in - see this module's own header for why the sum is
+        // inside the quotient and not outside it.
+        let mut frequency = 0.0f64;
         for (column, positions) in columns {
             let weight = weights.get(*column).copied().unwrap_or(1.0);
-            let frequency = positions.len() as f64;
-            let normalised = if average > 0.0 {
-                1.0 - B + B * (length as f64 / average)
-            } else {
-                1.0
-            };
-            term += weight * frequency * (K1 + 1.0) / (frequency + K1 * normalised);
+            frequency += weight * positions.len() as f64;
         }
-        score += idf * term;
+        // **`avgdl` of zero is this engine's guard, not SQLite's.** An index
+        // with no rows has no average length and SQLite would divide by zero;
+        // there is also no row to score in that case, so the branch decides
+        // nothing a caller can observe.
+        let normalised = if average > 0.0 {
+            1.0 - B + B * (length as f64 / average)
+        } else {
+            1.0
+        };
+        score += idf * (frequency * (K1 + 1.0) / (frequency + K1 * normalised));
     }
     -score
 }
@@ -144,7 +161,8 @@ mod tests {
         };
         let phrase = Phrase {
             terms: Vec::new(),
-            column: None,
+            columns: Default::default(),
+            anchored: false,
         };
         let score = score_row(1, &[hits(1, 0, 1)], &[phrase], &totals, &[10], &[1.0]);
         assert!(score < 0.0, "{score}");
@@ -159,7 +177,8 @@ mod tests {
         };
         let phrase = Phrase {
             terms: Vec::new(),
-            column: None,
+            columns: Default::default(),
+            anchored: false,
         };
         let once = score_row(
             1,
@@ -182,7 +201,8 @@ mod tests {
         };
         let phrase = Phrase {
             terms: Vec::new(),
-            column: None,
+            columns: Default::default(),
+            anchored: false,
         };
         let short = score_row(
             1,
@@ -205,7 +225,8 @@ mod tests {
         };
         let phrase = Phrase {
             terms: Vec::new(),
-            column: None,
+            columns: Default::default(),
+            anchored: false,
         };
         let score = score_row(2, &[hits(1, 0, 3)], &[phrase], &totals, &[10], &[1.0]);
         assert_eq!(score, 0.0);

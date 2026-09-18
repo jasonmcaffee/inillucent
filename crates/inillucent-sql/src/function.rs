@@ -1058,7 +1058,11 @@ pub fn scalar_arity_ok(func: ScalarFunc, count: usize) -> bool {
         ScalarFunc::Round => count == 1 || count == 2,
         ScalarFunc::Substr => count == 2 || count == 3,
         ScalarFunc::Coalesce | ScalarFunc::Max | ScalarFunc::Min => count >= 2,
-        ScalarFunc::Char | ScalarFunc::Concat => count >= 1,
+        // `char()` with no arguments is the empty string in SQLite, not a
+        // parse error (task-1979, F16). `concat()` keeps its floor of one,
+        // which is the reference's own rule for that name.
+        ScalarFunc::Char => true,
+        ScalarFunc::Concat => count >= 1,
         ScalarFunc::ConcatWs => count >= 2,
         ScalarFunc::Version => count == 0,
         ScalarFunc::Printf => count >= 1,

@@ -1,0 +1,27 @@
+# Differential cases, category `aggregate`, from task-1979's review of commit 3073058.
+# One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
+# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+agg-001	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',3),('c',NULL); SELECT g, group_concat(v) FROM t GROUP BY g ORDER BY g
+agg-002	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',3),('c',NULL); SELECT g, group_concat(v,'-') FROM t GROUP BY g ORDER BY g
+agg-003	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',3),('c',NULL); SELECT group_concat(DISTINCT v) FROM t
+agg-004	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',3),('c',NULL); SELECT group_concat(v ORDER BY v DESC) FROM t
+agg-005	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',3),('c',NULL); SELECT count(DISTINCT v), count(v), count(*), count(DISTINCT g) FROM t
+agg-006	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',3),('c',NULL); SELECT sum(v), total(v), avg(v), min(v), max(v), typeof(sum(v)), typeof(total(v)) FROM t
+agg-007	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',3),('c',NULL); SELECT sum(DISTINCT v), avg(DISTINCT v) FROM t
+agg-008	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',3),('c',NULL); SELECT g, count(*) FROM t GROUP BY g HAVING count(*)>1 ORDER BY g
+agg-009	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',3),('c',NULL); SELECT max(v) FROM t WHERE g='c'
+agg-010	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',3),('c',NULL); SELECT g, v FROM t GROUP BY g ORDER BY g
+agg-011	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',3),('c',NULL); SELECT g, max(v), v FROM t GROUP BY g ORDER BY g
+agg-012	CREATE TABLE t(a); INSERT INTO t VALUES(1),('x'),(2.5),(NULL),(x'00'); SELECT min(a), max(a), typeof(min(a)), typeof(max(a)) FROM t
+agg-013	CREATE TABLE t(a); INSERT INTO t VALUES(1),('x'),(2.5); SELECT sum(a), total(a), avg(a) FROM t
+agg-014	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',3),('c',NULL); SELECT count(*) FILTER (WHERE v>1), sum(v) FILTER (WHERE g='a') FROM t
+agg-015	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',3),('c',NULL); SELECT g FROM t GROUP BY g HAVING sum(v) IS NULL ORDER BY g
+agg-016	SELECT count(*), sum(a), avg(a), group_concat(a) FROM (SELECT 1 AS a WHERE 0)
+agg-017	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',3),('c',NULL); SELECT g, count(*) FROM t GROUP BY 1 ORDER BY 1
+agg-018	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',3),('c',NULL); SELECT upper(g) AS u, count(*) FROM t GROUP BY u ORDER BY u
+agg-019	SELECT group_concat(a,'') FROM (SELECT 'x' AS a UNION ALL SELECT 'y')
+agg-020	CREATE TABLE t(a); INSERT INTO t VALUES(1),(2); SELECT sum(a) OVER () FROM t
+agg-021	SELECT avg(a), typeof(avg(a)) FROM (SELECT 2 AS a UNION ALL SELECT 4)
+agg-022	SELECT string_agg(a,',') FROM (SELECT 'x' AS a UNION ALL SELECT 'y')
+agg-023	CREATE TABLE t(g,v); INSERT INTO t VALUES('a',1),('a',2),('b',3),('b',3),('c',NULL); SELECT count(DISTINCT g||v) FROM t
+agg-024	CREATE TABLE t(a); INSERT INTO t VALUES(9223372036854775807),(1); SELECT sum(a) FROM t

@@ -85,8 +85,11 @@ index fits in memory everything PostgreSQL does to survive a power cut is overhe
 
 ## What you give up
 
-- **One writer at a time.** Readers never block it, and several processes can share one file under
-  `PRAGMA locking_mode = normal`. Threads inside one process are not supported.
+- **One writer at a time.** Several processes can share one file under `PRAGMA locking_mode =
+  normal`, which is the default, and a second writer is refused with `busy` after
+  `PRAGMA busy_timeout` rather than being let in. A reader waits for a writer too: there is no
+  shared-memory log index for a reader to find a snapshot through. Threads inside one process are
+  not supported.
 - **This engine's own file format.** SQLite files are imported once with
   [`inillucent migrate`](migrating.md), not opened in place.
 - **No replication, no backups beyond a verified file copy, no wire protocol.** It is a library.

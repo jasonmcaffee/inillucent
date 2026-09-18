@@ -122,6 +122,21 @@ pub struct Capability {
 ///
 /// Measured against the engine at `ec0d84f`, and kept true by
 /// `tests/capability.rs` rather than by anybody remembering to look.
+///
+/// **The `no` rows were added in task-1980 (task-1979, section 8.2, gap 6).**
+/// The table had twenty four rows and not one of them said `no`, so an
+/// application following `AGENTS.md`'s advice to ask before composing was told
+/// only what worked and never what did not - which is the half that makes the
+/// answer worth asking for. Each `no` row runs a statement the engine refuses
+/// today, and `tests/capability.rs` fails when one of them starts working, so
+/// closing a gap is a change to this table rather than a silent drift.
+///
+/// What is here is the gaps a *statement* reaches. The refusal census behind
+/// this counted sixty two distinct messages, and most of them name a bound form
+/// no SQL text can produce - "missing expression", "unknown column", "expected
+/// a select core" - which are invariants of the binder rather than features an
+/// application can ask for. A row for one of those would have no probe, and a
+/// row with no probe is the unchecked claim this table exists to avoid.
 pub static CAPABILITIES: &[Capability] = &[
     // —— what it does ——————————————————————————————————————————————
     Capability {
@@ -394,6 +409,169 @@ pub static CAPABILITIES: &[Capability] = &[
                binder's classification rather than a scan of the text, but the file is \
                still open for writing and another handle could write it.",
         probe: Probe::Nothing,
+    },
+    // —— what it does not do ——————————————————————————————————————
+    Capability {
+        name: "row_value_in_subquery",
+        support: Support::No,
+        note: "A row value on the left of IN takes a value list and not a query: `(a, b) IN (SELECT x, y FROM s)` is refused.",
+        probe: Probe::Runs {
+            setup: &["CREATE TABLE t (a INTEGER, b INTEGER)", "CREATE TABLE s (x INTEGER, y INTEGER)"],
+            sql: "SELECT 1 FROM t WHERE (a, b) IN (SELECT x, y FROM s)",
+        },
+    },
+    Capability {
+        name: "computed_limit",
+        support: Support::No,
+        note: "LIMIT and OFFSET take a constant or a parameter: an expression such as `LIMIT 1 + 1`, and a value that is not an integer, are refused.",
+        probe: Probe::Runs {
+            setup: &["CREATE TABLE t (a INTEGER)"],
+            sql: "SELECT a FROM t LIMIT 1 + 1",
+        },
+    },
+    Capability {
+        name: "window_in_derived_table",
+        support: Support::No,
+        note: "A window function inside a derived table in FROM is refused; the same query written with a common table expression runs.",
+        probe: Probe::Runs {
+            setup: &["CREATE TABLE t (a INTEGER)"],
+            sql: "SELECT * FROM (SELECT row_number() OVER () AS n FROM t)",
+        },
+    },
+    Capability {
+        name: "window_in_compound_arm",
+        support: Support::No,
+        note: "A window function inside an arm of a UNION, EXCEPT or INTERSECT is refused.",
+        probe: Probe::Runs {
+            setup: &["CREATE TABLE t (a INTEGER)"],
+            sql: "SELECT a FROM t UNION ALL SELECT row_number() OVER () FROM t",
+        },
+    },
+    Capability {
+        name: "compound_ordered_by_expression",
+        support: Support::No,
+        note: "A compound query is ordered by a result column or its position, not by an expression over one.",
+        probe: Probe::Runs {
+            setup: &["CREATE TABLE t (a INTEGER)"],
+            sql: "SELECT a FROM t UNION SELECT a FROM t ORDER BY a + 1",
+        },
+    },
+    Capability {
+        name: "multi_column_vector_index",
+        support: Support::No,
+        note: "A vector index is over one column: `CREATE INDEX ... USING inillucent_hnsw (a, b)` is refused.",
+        probe: Probe::Runs {
+            setup: &["CREATE TABLE t (a VECTOR(4), b VECTOR(4))"],
+            sql: "CREATE INDEX t_v ON t USING inillucent_hnsw (a, b)",
+        },
+    },
+    Capability {
+        name: "writing_to_a_view",
+        support: Support::No,
+        note: "A view is read only: an INSERT, UPDATE or DELETE against one is refused, and an INSTEAD OF trigger is the way to write through it.",
+        probe: Probe::Runs {
+            setup: &["CREATE TABLE t (a INTEGER)", "CREATE VIEW v AS SELECT a FROM t"],
+            sql: "INSERT INTO v(a) VALUES (1)",
+        },
+    },
+    Capability {
+        name: "nested_explain",
+        support: Support::No,
+        note: "EXPLAIN takes a statement, not another EXPLAIN.",
+        probe: Probe::Runs {
+            setup: &["CREATE TABLE t (a INTEGER)"],
+            sql: "EXPLAIN EXPLAIN SELECT a FROM t",
+        },
+    },
+    Capability {
+        name: "insert_select_into_virtual_table",
+        support: Support::No,
+        note: "A virtual table takes values: `INSERT INTO d(body) SELECT body FROM t` is refused, and inserting the rows one statement at a time is the way to fill one.",
+        probe: Probe::Runs {
+            setup: &["CREATE VIRTUAL TABLE d USING fts5(body)", "CREATE TABLE t (body TEXT)"],
+            sql: "INSERT INTO d(body) SELECT body FROM t",
+        },
+    },
+    Capability {
+        name: "on_conflict_partial_index",
+        support: Support::No,
+        note: "An ON CONFLICT target names a column list of an ordinary unique index; a partial index's WHERE clause in the target is refused.",
+        probe: Probe::Runs {
+            setup: &["CREATE TABLE t (a INTEGER, b INTEGER)", "CREATE UNIQUE INDEX t_a ON t(a) WHERE b > 0"],
+            sql: "INSERT INTO t(a,b) VALUES (1,1) ON CONFLICT(a) WHERE b > 0 DO NOTHING",
+        },
+    },
+    Capability {
+        name: "on_conflict_expression_index",
+        support: Support::No,
+        note: "An ON CONFLICT target names columns; an expression such as `ON CONFLICT(lower(a))` is refused.",
+        probe: Probe::Runs {
+            setup: &["CREATE TABLE t (a TEXT)", "CREATE UNIQUE INDEX t_l ON t(lower(a))"],
+            sql: "INSERT INTO t(a) VALUES ('x') ON CONFLICT(lower(a)) DO NOTHING",
+        },
+    },
+    Capability {
+        name: "correlated_in_over_a_grouped_block",
+        support: Support::No,
+        note: "A correlated IN subquery runs, and one whose block groups, limits, or is itself a compound query is refused: the lowering pushes the equality into the block's WHERE, which is applied before either.",
+        probe: Probe::Runs {
+            setup: &["CREATE TABLE t (a INTEGER, b INTEGER)", "CREATE TABLE s (x INTEGER, y INTEGER)"],
+            sql: "SELECT a FROM t WHERE a IN (SELECT x FROM s WHERE s.y = t.b GROUP BY x)",
+        },
+    },
+    Capability {
+        name: "returning_inside_a_trigger",
+        support: Support::No,
+        note: "RETURNING runs on a statement and is refused inside a trigger body.",
+        probe: Probe::Runs {
+            setup: &["CREATE TABLE t (a INTEGER)", "CREATE TABLE u (a INTEGER)"],
+            sql: "CREATE TRIGGER g AFTER INSERT ON t BEGIN INSERT INTO u(a) VALUES (1) RETURNING a; END",
+        },
+    },
+    Capability {
+        name: "fts5_unavailable_tokenizer",
+        support: Support::No,
+        note: "The FTS5 tokenizers are ascii, unicode61 and porter; a name this build has not got, such as trigram or icu, is refused rather than silently replaced.",
+        probe: Probe::Runs {
+            setup: &[],
+            sql: "CREATE VIRTUAL TABLE d USING fts5(body, tokenize='trigram')",
+        },
+    },
+    Capability {
+        name: "fts5_detail_option",
+        support: Support::No,
+        note: "The FTS5 index stores full positions: `detail='none'` and `detail='column'` are refused rather than accepted and ignored.",
+        probe: Probe::Runs {
+            setup: &[],
+            sql: "CREATE VIRTUAL TABLE d USING fts5(body, detail='none')",
+        },
+    },
+    Capability {
+        name: "fts5_columnsize_option",
+        support: Support::No,
+        note: "The FTS5 index stores one size per column: `columnsize=0` is refused rather than accepted and ignored.",
+        probe: Probe::Runs {
+            setup: &[],
+            sql: "CREATE VIRTUAL TABLE d USING fts5(body, columnsize=0)",
+        },
+    },
+    Capability {
+        name: "fts5_content_rowid_option",
+        support: Support::No,
+        note: "An external content FTS5 table reads its owner's rowid: `content_rowid=` naming another column is refused rather than accepted and ignored.",
+        probe: Probe::Runs {
+            setup: &[],
+            sql: "CREATE VIRTUAL TABLE d USING fts5(body, content='c', content_rowid='id')",
+        },
+    },
+    Capability {
+        name: "changing_a_schema_row",
+        support: Support::No,
+        note: "An INSERT into sqlite_schema under PRAGMA writable_schema records a virtual table, which is what a dump replays; an UPDATE or a DELETE of a schema row is refused.",
+        probe: Probe::Runs {
+            setup: &["CREATE TABLE t (a INTEGER)"],
+            sql: "UPDATE sqlite_schema SET sql = 'x' WHERE name = 't'",
+        },
     },
 ];
 

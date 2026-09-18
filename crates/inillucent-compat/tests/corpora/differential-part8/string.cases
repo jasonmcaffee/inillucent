@@ -1,0 +1,37 @@
+# Differential cases, category `string`, from task-1979's review of commit 3073058.
+# One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
+# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+str-001	SELECT length('abc'), length(''), length(NULL), length(x'010203'), length(123), length(1.5)
+str-002	SELECT length('café'), length('é'), length('😀'), length('中文')
+str-003	SELECT substr('abcdef',2), substr('abcdef',2,3), substr('abcdef',-2), substr('abcdef',-2,1), substr('abcdef',0,2)
+str-004	SELECT substr('abcdef',2,-1), substr('abcdef',4,-2), substr('abc',10), substr('abc',1,100)
+str-005	SELECT substr('中文abc',1,2), substr('😀x',1,1), substr('😀x',2,1)
+str-006	SELECT upper('abcé'), lower('ABCÉ'), upper('ß'), lower('İ')
+str-007	SELECT instr('abcabc','bc'), instr('abc','z'), instr('abc',''), instr('','a'), instr(NULL,'a')
+str-008	SELECT instr(x'010203', x'02'), instr('中文abc','abc')
+str-009	SELECT replace('aaa','a','bb'), replace('abc','','x'), replace('abc','b',''), replace(NULL,'a','b')
+str-010	SELECT trim('  ab  '), ltrim('  ab  '), rtrim('  ab  '), trim('xxabxx','x'), trim('abc','cba')
+str-011	SELECT trim('abc',''), ltrim('aaa','a'), rtrim('',''), trim(1.0)
+str-012	SELECT hex('abc'), hex(x'00ff'), hex(1), hex(1.5), hex(NULL), hex('é')
+str-013	SELECT unicode('a'), unicode('é'), unicode('😀'), unicode(''), unicode(NULL)
+str-014	SELECT char(97,98), char(233), char(128512), char(), char(0)='' 
+str-015	SELECT quote('a''b'), quote(1), quote(1.5), quote(NULL), quote(x'00ff'), quote('')
+str-016	SELECT 'a' || 'b', 'a' || 1, 1 || 2, NULL || 'a', x'41' || 'b'
+str-017	SELECT rtrim('ab  ') || '|', printf('[%10s]','ab'), printf('[%-10s]','ab')
+str-018	SELECT replace('中文','中','X'), upper('中文')
+str-019	SELECT ltrim(' ab'), length(trim('  ab \n'))
+str-020	SELECT substr(x'0102030405',2,2), hex(substr(x'0102030405',2,2)), typeof(substr(x'0102',1,1))
+str-021	SELECT format('%s-%s','a','b'), format('%d',3)
+str-022	SELECT printf('%c', 65), printf('%i', 42), printf('%o', 8), printf('%X', 255), printf('%u', 5)
+str-023	SELECT printf('%.3s','abcdef'), printf('%+d',5), printf('% d',5)
+str-024	SELECT printf('%q','a''b'), printf('%Q','a''b'), printf('%Q',NULL), printf('%w','a"b')
+str-025	SELECT printf('%z',1), printf('%*d', 5, 42)
+str-026	SELECT concat('a','b',NULL,'c'), concat_ws('-','a',NULL,'b')
+str-027	SELECT char(0x41) || char(0x42), unicode(char(0x10FFFF))
+str-028	SELECT lower(x'4142'), upper(x'4142'), typeof(lower(x'4142'))
+str-029	SELECT soundex('Robert'), soundex('Rupert')
+str-030	SELECT unhex('414243'), unhex('4z'), typeof(unhex('41')), hex(unhex('00'))
+str-031	SELECT octet_length('abc'), octet_length('é'), octet_length(x'0102')
+str-032	SELECT rtrim('abcxx','x'), rtrim('abc','')
+str-033	SELECT substring('abcdef',2,3)
+str-034	SELECT 'abc' LIKE 'ABC', 'abc' GLOB 'ABC', 'abc' LIKE 'a%', 'abc' GLOB 'a*'

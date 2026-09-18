@@ -609,6 +609,28 @@ pub fn statement_refusal(said: impl Into<String>) -> DbError {
         .with_detail(said)
 }
 
+/// Builds a `SQLITE_BUSY` refusal about another process holding the file.
+///
+/// **The sentence is the message as well as the detail, because the caller can
+/// act on it.** What a contended open used to answer was the VFS's own
+/// "a writer holds PENDING", which names an internal lock level, is wrong
+/// whenever the holder is a reader, and says nothing about how long the wait
+/// was or what would change the outcome (task-1979, C6). A sentence built here
+/// names who holds the file, what they hold it for, and the pragma that governs
+/// the wait.
+///
+/// It must stay free of paths and bound values, exactly as
+/// [`DbError::with_message`] requires; the path is added by the caller that
+/// knows it, in the detail.
+///
+/// @param said - the sentence, safe for a caller to read
+pub fn busy(said: impl Into<String>) -> DbError {
+    let said = said.into();
+    DbError::primary(PrimaryCode::Busy)
+        .with_message(said.clone())
+        .with_detail(said)
+}
+
 /// Builds a refusal about a component this installation has not got, which the
 /// caller can install.
 ///

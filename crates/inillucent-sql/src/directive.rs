@@ -717,17 +717,24 @@ impl<'a> Binder<'a> {
         body: &ast::CreateTableBody,
     ) -> Result<Directive, ParseError> {
         let temp = self.temporary_database(temporary, database)?;
-        let ast::CreateTableBody::Columns {
-            columns,
-            constraints,
-            without_rowid,
-            strict,
-        } = body
-        else {
-            let ast::CreateTableBody::AsSelect(select) = body else {
-                return Err(unsupported("CREATE TABLE ... AS SELECT", Span::default()));
-            };
-            return self.bind_create_table_as_select(temp, if_not_exists, database, name, *select);
+        // **Two bodies, and the second one is built.** This used to be written
+        // as two `let ... else` bindings, the inner one answering
+        // `unsupported("CREATE TABLE ... AS SELECT")` - an arm no statement
+        // could reach, because `CreateTableBody` has exactly these two
+        // variants, so a feature that works was described by a refusal
+        // (task-1979, section 8.3). A match over both says the same thing with
+        // nothing left over.
+        let (columns, constraints, without_rowid, strict) = match body {
+            ast::CreateTableBody::AsSelect(select) => {
+                return self
+                    .bind_create_table_as_select(temp, if_not_exists, database, name, *select)
+            }
+            ast::CreateTableBody::Columns {
+                columns,
+                constraints,
+                without_rowid,
+                strict,
+            } => (columns, constraints, without_rowid, strict),
         };
         if *without_rowid && !self.declares_primary_key(columns, constraints) {
             return Err(schema_refused(

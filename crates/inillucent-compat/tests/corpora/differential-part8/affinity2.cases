@@ -1,0 +1,23 @@
+# Differential cases, category `affinity2`, from task-1979's review of commit 3073058.
+# One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
+# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+cma-001	CREATE TABLE t(n, i INTEGER, r REAL, s TEXT, b BLOB, m NUMERIC); INSERT INTO t VALUES(1,1,1,'1',1,1); SELECT n=i, n=r, n=s, n=b, n=m FROM t
+cma-002	CREATE TABLE t(n, i INTEGER, r REAL, s TEXT, b BLOB, m NUMERIC); INSERT INTO t VALUES(1,1,1,'1',1,1); SELECT i=s, r=s, m=s, b=s, s=b FROM t
+cma-003	CREATE TABLE t(n, i INTEGER, r REAL, s TEXT, b BLOB, m NUMERIC); INSERT INTO t VALUES(1,1,1,'1',1,1); SELECT i=n, s=n, s=i, s=r, s=m FROM t
+cma-004	CREATE TABLE t(a,b TEXT); INSERT INTO t VALUES(1,'1'); SELECT a=b, a<b, a>b, a<=b, a>=b, a<>b FROM t
+cma-005	CREATE TABLE t(a INTEGER, b TEXT); INSERT INTO t VALUES(1,'1'); SELECT a=b, a<b, a>b, a<>b FROM t
+cma-006	CREATE TABLE t(a INTEGER, b TEXT); INSERT INTO t VALUES(1,'x'); SELECT a=b, a<b, a>b FROM t
+cma-007	CREATE TABLE t(a TEXT); INSERT INTO t VALUES('1'); SELECT a=1, a<2, a>0 FROM t
+cma-008	CREATE TABLE t(a INTEGER); INSERT INTO t VALUES(1); SELECT a='1', a<'2', a>'0' FROM t
+cma-009	CREATE TABLE t(a); INSERT INTO t VALUES(1); SELECT a='1', a=1 FROM t
+cma-010	CREATE TABLE t(a,b TEXT); INSERT INTO t VALUES(1,'1'); SELECT count(*) FROM t WHERE a=b
+cma-011	CREATE TABLE t(a INTEGER, b TEXT); CREATE INDEX i ON t(a); INSERT INTO t VALUES(1,'1'); SELECT count(*) FROM t WHERE a=b
+cma-012	CREATE TABLE l(a INTEGER); CREATE TABLE r(b TEXT); INSERT INTO l VALUES(1); INSERT INTO r VALUES('1'); SELECT count(*) FROM l JOIN r ON l.a=r.b
+cma-013	CREATE TABLE l(a); CREATE TABLE r(b TEXT); INSERT INTO l VALUES(1); INSERT INTO r VALUES('1'); SELECT count(*) FROM l JOIN r ON l.a=r.b
+cma-014	CREATE TABLE t(a INTEGER); INSERT INTO t VALUES(1),(2); SELECT count(*) FROM t WHERE a IN ('1','2')
+cma-015	CREATE TABLE t(a TEXT); INSERT INTO t VALUES('1'); SELECT count(*) FROM t WHERE a IN (1)
+cma-016	CREATE TABLE t(a,b TEXT); INSERT INTO t VALUES(1,'1'); SELECT count(*) FROM t WHERE a BETWEEN b AND b
+cma-017	CREATE TABLE t(a INTEGER, b TEXT); INSERT INTO t VALUES(1,'1'); SELECT count(*) FROM t WHERE a BETWEEN b AND b
+cma-018	CREATE TABLE t(a,b TEXT); INSERT INTO t VALUES(1,'1'); SELECT a IS b, a IS NOT b FROM t
+cma-019	CREATE TABLE t(a INTEGER, b TEXT); INSERT INTO t VALUES(1,'1'); SELECT a IS b FROM t
+cma-020	CREATE TABLE t(a BLOB, b TEXT); INSERT INTO t VALUES('1','1'); SELECT a=b, typeof(a), typeof(b) FROM t

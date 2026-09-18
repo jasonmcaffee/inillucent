@@ -45,19 +45,57 @@ impl ImportedDatabase {
         // Once inside one, the retry loop's release would open a window another
         // process could write through - see `Database::begin_write_within`.
         let inside = self.writing.batch().is_some() || self.writing.running() > 1;
+        // **A read only connection takes SHARED for every statement.**
+        // `writes_of` answers true for every directive, a `PRAGMA` included, so
+        // reading `PRAGMA user_version` asked for the write lock - which a read
+        // only connection cannot take and does not need. Anything that would
+        // actually write is refused before it gets here, by
+        // `inillucent_engine::readonly` on the command surface and by the pool
+        // underneath (task-1979, section 5.2).
+        let writing = writing && !self.storage.read_only;
+        // **Whether the lock is being taken now, asked before it is taken.**
+        // Everything this connection read at `open` - the meta record, the
+        // catalog, the log's tail - was read without this lock or under a
+        // shared one two processes hold at once, so none of it may be trusted
+        // once the lock is in hand. A connection that already holds the file
+        // has nothing to re-derive, which is what keeps the check off the path
+        // `locking_mode = exclusive` takes (task-1979, section 4.4 item 1).
+        let taking = !self.storage.database.trusted();
         let reloaded = if writing {
             self.storage.database.begin_write_within(!inside)?
         } else {
             self.storage.database.begin_read()?
         };
-        // **The pages are not the whole cache.** `begin_read` throws away the
-        // pool when another process has committed; the *schema* this connection
-        // read at open is just as stale, and a connection that kept it would
-        // write its own catalog tree over the one the other process just built -
-        // which is a lost table rather than a stale read. `reload_catalog` is
-        // the same reread `ATTACH` does.
-        if reloaded && !inside {
+        // **The log is asked the same question the meta record is.** A commit
+        // that is durable in the log and not yet checkpointed does not move the
+        // generation, so the meta record alone reports "nothing has changed"
+        // about a file another process has just written - which is how 120
+        // acknowledged inserts became 60 rows (task-1979, section 4.2). The
+        // segment beside the file is where that commit is, and its length is
+        // the answer.
+        let moved = reloaded || (taking && !inside && self.the_log_moved()?);
+        if moved && !inside {
+            self.resync_from_file()?;
+        }
+        if taking && !inside {
+            self.storage.database.mark_trusted();
+        }
+        // **Every attached file takes its own lock, for the same reason `main`
+        // does (task-1979, C2).** An attachment was the one file this engine
+        // wrote with no lock at all, so two processes with different `main`
+        // databases attaching one shared `.rdb` lost one side entirely, with
+        // nothing excluding them. A file is a file; which name a statement
+        // qualifies it with does not change what another process can do to it.
+        let moved = self.enter_attached(writing, inside)? || moved;
+        // **The pages are not the whole cache.** The resynchronisation above
+        // throws away the pool when another process has committed; the *schema*
+        // this connection read at open is just as stale, and a connection that
+        // kept it would write its own catalog tree over the one the other
+        // process just built - which is a lost table rather than a stale read.
+        // `reload_catalog` is the same reread `ATTACH` does.
+        if moved && !inside {
             self.reload_catalog()?;
+            self.reattach_every_tree()?;
             // **And the modules hear that somebody else committed
             // (task-1932, M2).** A module's own state is derived from its
             // shadow tables, which are ordinary trees another connection can
@@ -65,6 +103,151 @@ impl ImportedDatabase {
             // happened.
             self.committed_elsewhere_modules();
         }
+        Ok(())
+    }
+
+    /// Takes the lock every attached file needs and re-derives the ones that
+    /// moved.
+    ///
+    /// Returns whether any of them had.
+    ///
+    /// A `temp` database and a `:memory:` one have no path, so no other process
+    /// can reach them and there is nothing to take.
+    ///
+    /// @param writing - whether the statement changes the database
+    /// @param inside - whether a transaction is already holding these files
+    fn enter_attached(&mut self, writing: bool, inside: bool) -> DbResult<bool> {
+        let mut any = false;
+        for index in 0..self.session_state.attached.len() {
+            let Some(held) = self.session_state.attached.get(index) else {
+                continue;
+            };
+            let Some(path) = held.path.clone() else {
+                continue;
+            };
+            let taking = !held.database.trusted();
+            let reloaded = {
+                let Some(held) = self.session_state.attached.get_mut(index) else {
+                    continue;
+                };
+                if writing {
+                    held.database.begin_write_within(!inside)?
+                } else {
+                    held.database.begin_read()?
+                }
+            };
+            let moved = reloaded || (taking && !inside && self.attached_log_moved(index)?);
+            if moved && !inside {
+                self.resync_attached(index, &path)?;
+                any = true;
+            }
+            if taking && !inside {
+                if let Some(held) = self.session_state.attached.get_mut(index) {
+                    held.database.mark_trusted();
+                }
+            }
+        }
+        Ok(any)
+    }
+
+    /// Reports whether one attached file's log ends somewhere other than where
+    /// this connection left it.
+    ///
+    /// @param index - which attachment
+    fn attached_log_moved(&self, index: usize) -> DbResult<bool> {
+        let Some(held) = self.session_state.attached.get(index) else {
+            return Ok(false);
+        };
+        let Some(path) = held.path.as_ref() else {
+            return Ok(false);
+        };
+        let db_path = DbPath::new(path.to_string_lossy().as_ref());
+        let tail = inillucent_wal::tail_on_disk(
+            held.vfs.as_ref(),
+            &db_path,
+            held.database.uuid(),
+            held.wal.sequence(),
+        )?;
+        Ok(match tail {
+            Some(tail) => {
+                tail.sequence != held.wal.sequence() || tail.next_lsn != held.wal.written_end()
+            }
+            None => false,
+        })
+    }
+
+    /// Rebuilds one attached file's pages, free map and log position from the
+    /// files, with its lock held.
+    ///
+    /// @param index - which attachment
+    /// @param path - that attachment's file
+    fn resync_attached(&mut self, index: usize, path: &std::path::Path) -> DbResult<()> {
+        let db_path = DbPath::new(path.to_string_lossy().as_ref());
+        let doubtful = crate::multi::doubtful_transactions(path)?;
+        let Some(held) = self.session_state.attached.get_mut(index) else {
+            return Ok(());
+        };
+        let vfs = std::sync::Arc::clone(&held.vfs);
+        if let Some(found) = held.database.meta_on_disk()? {
+            held.database.adopt_from_file(found)?;
+        }
+        held.wal = crate::recovery::resync_file(&mut held.database, &vfs, &db_path, &doubtful)?;
+        Ok(())
+    }
+
+    /// Reports whether the log beside the file ends somewhere other than where
+    /// this connection last left it.
+    ///
+    /// **Read from the segment rather than from a counter this engine writes.**
+    /// The alternative the design offered was moving the meta record's
+    /// generation on every commit, which would put one more page in every
+    /// commit's write set; the segment's own length answers the same question
+    /// for one `file_size` per lock acquisition and costs the write path
+    /// nothing (task-1979, section 4.4 item 2, the second option).
+    ///
+    /// A database with no file - `:memory:` and a temporary one - has no
+    /// segment and no second process, so it answers no.
+    fn the_log_moved(&self) -> DbResult<bool> {
+        if self.storage.path.as_os_str().is_empty() {
+            return Ok(false);
+        }
+        let db_path = DbPath::new(self.storage.path.to_string_lossy().as_ref());
+        let tail = inillucent_wal::tail_on_disk(
+            self.storage.vfs.as_ref(),
+            &db_path,
+            self.storage.database.uuid(),
+            self.storage.wal.sequence(),
+        )?;
+        Ok(match tail {
+            Some(tail) => {
+                tail.sequence != self.storage.wal.sequence()
+                    || tail.next_lsn != self.storage.wal.written_end()
+            }
+            // No segment where this connection believes its own log is. The
+            // only way that happens is a checkpoint by another process that
+            // retired it, which moved the generation, so the meta record has
+            // already reported it.
+            None => false,
+        })
+    }
+
+    /// Rebuilds this connection's pages, free map and log position from the
+    /// files, with the lock held.
+    ///
+    /// See `crate::recovery::resync_file` for why every part of it is
+    /// re-derived rather than patched.
+    fn resync_from_file(&mut self) -> DbResult<()> {
+        if self.storage.path.as_os_str().is_empty() {
+            return Ok(());
+        }
+        let db_path = DbPath::new(self.storage.path.to_string_lossy().as_ref());
+        let doubtful = crate::multi::doubtful_transactions(&self.storage.path)?;
+        if let Some(found) = self.storage.database.meta_on_disk()? {
+            self.storage.database.adopt_from_file(found)?;
+        }
+        let vfs = std::sync::Arc::clone(&self.storage.vfs);
+        self.storage.wal =
+            crate::recovery::resync_file(&mut self.storage.database, &vfs, &db_path, &doubtful)?;
         Ok(())
     }
 
@@ -90,11 +273,58 @@ impl ImportedDatabase {
         // stale read; it is a lost write, and it is what the first version of
         // this did eight times in ten under two concurrent writers.
         //
-        // Under `exclusive`, which is the default, the lock is never let go and
-        // none of this runs: the checkpoint happens when the connection closes,
-        // as it always did.
-        if self.storage.database.pool().lock_level() != inillucent_vfs::FileLock::None {
+        // **What it costs, measured (task-1979, section 18, decision 1).** 300
+        // autocommit inserts through `inillucent-shell` take 1.91 s with this
+        // checkpoint removed and 10.70 s with it, against 0.46 s under
+        // `locking_mode = exclusive`, where this function returns above and
+        // never reaches here. The 32 ms per statement is a checkpoint's own
+        // work: it rewrites the catalog's statistics, syncs the log twice,
+        // rolls a new log segment, rewrites the free map's pages, writes the
+        // meta record and deletes every segment below the new recovery point.
+        //
+        // **Removing it was tried and put back.** The next process does replay
+        // the log, so the *committed* statement is not lost either way - but
+        // leaving every statement's records unfolded meant every later open
+        // replayed them, which changed what eighteen suites saw: a recovery
+        // report on the front of ordinary command output, and the crash
+        // campaigns grading a file with a log nothing had folded. The cost is
+        // the price of a default that two processes can share; an application
+        // that never opens a second connection sets
+        // `PRAGMA locking_mode = exclusive` and pays none of it.
+        //
+        // **Only when this statement wrote something.** A checkpoint is a
+        // write: it rolls a log segment, rewrites the free map's pages, moves
+        // the meta record's generation and deletes the segments below the new
+        // recovery point. Running one after a `SELECT` makes reading a database
+        // change it, which `lifecycle.rs`'s `a_long_session_changes_no_byte`
+        // compares byte for byte, and made four reads delete log segments a
+        // handle still had open. A read takes SHARED and a write raises past
+        // it, so the lock level is the question already answered; the dirty
+        // count is the second half, for a statement that wrote and released
+        // before reaching here.
+        //
+        // **Every file the connection holds, not only `main`.** A statement
+        // that wrote an attached database and nothing else leaves `main` clean,
+        // so asking `main` alone answered "nothing was written" and released
+        // every file with the attachment's pages still dirty - which lost 116
+        // of 599 acknowledged inserts through `ATTACH` under load.
+        let wrote = self.storage.database.lock_level() > inillucent_vfs::FileLock::Shared
+            || self.storage.database.pool().dirty_pages() > 0
+            || self.session_state.attached.iter().any(|held| {
+                held.path.is_some()
+                    && (held.database.lock_level() > inillucent_vfs::FileLock::Shared
+                        || held.database.pool().dirty_pages() > 0)
+            });
+        if wrote && self.storage.database.pool().lock_level() != inillucent_vfs::FileLock::None {
             self.checkpoint()?;
+        }
+        // Every attached file is let go on the same terms `main` is: the
+        // checkpoint above wrote all of them - `checkpoint_attached` is part of
+        // it - so each one's file is current before its lock is released.
+        for held in self.session_state.attached.iter_mut() {
+            if held.path.is_some() {
+                held.database.end_access()?;
+            }
         }
         self.storage.database.end_access()
     }

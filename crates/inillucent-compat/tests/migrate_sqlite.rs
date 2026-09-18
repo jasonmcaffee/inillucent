@@ -681,3 +681,79 @@ INSERT INTO f(body) VALUES('the quick brown fox'),('jumps over');\n";
 fn quote_rows(rows: &[Vec<OwnedDatum>]) -> Vec<String> {
     rows.iter().map(|row| quote_row(row)).collect()
 }
+
+/// A source the reader cannot read whole is refused, and nothing is published
+/// (task-1979, M1).
+///
+/// **The one damage the verification could not see.** The tool inventories the
+/// source with `inillucent-sqlite-reader`, copies with the same reader, and
+/// verifies the copy against that inventory - so a page the reader cannot walk
+/// made a table disappear from *both* sides and the counts agreed on nothing.
+/// Measured: a two table SQLite file with one flipped bit in a leaf page
+/// migrated with exit 0, `integrity-check ok`, and the 500 row table gone,
+/// while real SQLite still read all 500 rows from the same file.
+///
+/// **The pinned shell is what makes the case a case.** The flip has to be one
+/// SQLite tolerates; a file SQLite also refuses would be a file this tool is
+/// right to refuse for a different reason, and the test would pass against a
+/// build that had learned nothing. The fixture is built here from a valid one
+/// rather than checked in, so the two halves - "SQLite still reads it" and
+/// "this refuses it" - are asserted about the same bytes.
+#[test]
+fn a_source_the_reader_cannot_read_whole_is_not_published() {
+    let Some(shell) = reference() else {
+        inillucent_base::testing::skipping("the pinned SQLite shell is not downloaded");
+        return;
+    };
+    let directory = scratch("unreadable-source");
+    let source = fixtures().join("basic-p4096-utf8.db");
+    let damaged = directory.join("damaged.db");
+    std::fs::copy(&source, &damaged).expect("the fixture copies");
+
+    // The first byte of page two, which is a table's leaf page in this fixture.
+    // Flipped rather than zeroed, so the file stays a SQLite database and the
+    // damage is one bit.
+    const FLIP_AT: u64 = 4_096;
+    {
+        use std::io::{Read, Seek, SeekFrom, Write};
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&damaged)
+            .expect("the copy opens");
+        file.seek(SeekFrom::Start(FLIP_AT)).expect("it seeks");
+        let mut byte = [0u8; 1];
+        file.read_exact(&mut byte).expect("it reads");
+        file.seek(SeekFrom::Start(FLIP_AT)).expect("it seeks back");
+        file.write_all(&[byte[0] ^ 0x40]).expect("it writes");
+    }
+
+    // SQLite still reads every row, so the damage is one this tool must not
+    // answer by dropping a table.
+    for table in ["people", "widths"] {
+        let asked = Command::new(&shell)
+            .arg(&damaged)
+            .arg(format!("SELECT count(*) FROM \"{table}\";"))
+            .output()
+            .expect("the pinned shell runs");
+        let counted = String::from_utf8_lossy(&asked.stdout).trim().to_string();
+        assert!(
+            asked.status.success() && counted.parse::<u64>().is_ok_and(|rows| rows > 0),
+            "the pinned shell could not read {table} from the damaged fixture, so this case \
+             is about a file SQLite refuses too rather than about the reader: {counted}"
+        );
+    }
+
+    let destination = directory.join("migrated.rdb");
+    let outcome = sqlite::migrate(&damaged, &destination);
+    assert!(
+        outcome.is_err(),
+        "a source whose rows the reader could not read was migrated: {:?}",
+        outcome.map(|report| report.passed())
+    );
+    assert!(
+        !destination.is_file(),
+        "the migration refused and published {} anyway",
+        destination.display()
+    );
+}

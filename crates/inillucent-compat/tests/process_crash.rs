@@ -33,7 +33,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use inillucent_compat::cliproc::{program, rows, run};
+use inillucent_compat::cliproc::{document, field, program, rows, run, text_of};
 use inillucent_compat::workspace_root;
 
 /// How many transactions the writer is fed.
@@ -77,7 +77,17 @@ fn area(cut: usize) -> PathBuf {
 ///
 /// @param directory - where to write it
 fn script(directory: &Path) -> PathBuf {
-    let mut text = String::new();
+    // **`exclusive`, and that is what leaves recovery anything to do
+    // (task-1980).** The default is `locking_mode = normal`, under which a
+    // connection checkpoints and releases the file after every statement that
+    // wrote - so a killed writer's rows are already in the data file and a
+    // reopen replays nothing. That is a better outcome and a worse test: what
+    // this file is about is whether an acknowledged transaction that lives only
+    // in the log survives a real `TerminateProcess`, and under `normal` there
+    // is no such transaction to survive. `a_cut_with_the_log_moved_aside_loses_the_rows`
+    // is the case that says so out loud: with the log gone the rows must be
+    // gone, and under `normal` they are still in the file.
+    let mut text = String::from("PRAGMA locking_mode = exclusive;\n");
     for batch in 1..=BATCHES {
         text.push_str("BEGIN;\n");
         for sequence in 1..=PER_BATCH {
@@ -223,6 +233,41 @@ fn a_killed_writer_leaves_every_acknowledged_transaction_whole() {
             "cut {cut}: the writer acknowledged nothing, so this cut tested nothing"
         );
 
+        // **The first reopen after the kill, and it has to be first.** It is
+        // the one that replays the log; once it has, it checkpoints on its way
+        // out and every later open finds nothing left to recover. Before
+        // task-1980 nothing reported a recovery at all, in text or in
+        // `--output json`, so an operator investigating a crash could not ask
+        // the tool whether the file had been recovered (task-1979, C10).
+        let reported = run(
+            &binary,
+            &[
+                "--db",
+                &database.to_string_lossy(),
+                "query",
+                "SELECT 1",
+                "--output",
+                "json",
+            ],
+        );
+        assert_eq!(
+            reported.code,
+            0,
+            "cut {cut}: reading the file back failed:\n{}",
+            reported.said()
+        );
+        let object = document(&reported.stdout);
+        assert!(
+            field(&object, "recovered").is_some(),
+            "cut {cut}: the reopen after a kill did not report that it recovered:\n{}",
+            reported.stdout
+        );
+        let said = field(&object, "text").and_then(text_of).unwrap_or_default();
+        assert!(
+            said.contains("recovered the log"),
+            "cut {cut}: the text form does not mention the recovery:\n{said}"
+        );
+
         // The file opens, and the engine says it holds together.
         let checked = run(
             &binary,
@@ -276,6 +321,51 @@ fn a_killed_writer_leaves_every_acknowledged_transaction_whole() {
 
         let _ = std::fs::remove_dir_all(&directory);
     }
+}
+
+/// A reopen that had nothing to recover says nothing about recovery.
+///
+/// **What keeps the case above from being a test of a constant.** A build that
+/// printed the recovery line unconditionally would pass every assertion in this
+/// file and tell an operator nothing, which is the state task-1979's C10 found.
+#[test]
+fn a_clean_reopen_does_not_claim_to_have_recovered() {
+    let Some(binary) = program("inillucent") else {
+        return;
+    };
+    let directory = area(CUTS.saturating_add(1));
+    let database = prepared(&binary, &directory);
+    for sequence in 1..=5 {
+        let ran = run(
+            &binary,
+            &[
+                "--db",
+                &database.to_string_lossy(),
+                "exec",
+                &format!("INSERT INTO note (batch, seq) VALUES (1, {sequence})"),
+            ],
+        );
+        assert_eq!(ran.code, 0, "seeding the file:\n{}", ran.said());
+    }
+    let reported = run(
+        &binary,
+        &[
+            "--db",
+            &database.to_string_lossy(),
+            "query",
+            "SELECT count(*) FROM note",
+            "--output",
+            "json",
+        ],
+    );
+    assert_eq!(reported.code, 0, "reading it back:\n{}", reported.said());
+    let object = document(&reported.stdout);
+    assert!(
+        field(&object, "recovered").is_none(),
+        "a clean reopen claimed to have recovered:\n{}",
+        reported.stdout
+    );
+    let _ = std::fs::remove_dir_all(&directory);
 }
 
 /// The same cut, with the log moved aside, loses the rows.

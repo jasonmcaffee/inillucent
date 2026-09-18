@@ -83,7 +83,8 @@ fn write_across(main: &Path, aux: &Path) {
     let connection = database.session().expect("the connection opens");
     connection
         .execute_batch(&format!(
-            "ATTACH DATABASE '{}' AS aux;
+            "PRAGMA locking_mode = EXCLUSIVE;
+             ATTACH DATABASE '{}' AS aux;
              BEGIN;
              INSERT INTO t VALUES (1);
              INSERT INTO aux.t VALUES (2);

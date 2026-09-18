@@ -104,9 +104,18 @@ differential` grades 416 cases against a pinned SQLite 3.53.4, in both direction
 
 ## 4. Transactions and isolation
 
-One writer at a time, many readers, snapshot isolation. A reader takes a snapshot and sees the
-database as it was at that instant for the length of its transaction; a writer takes the writer slot
-and publishes before-images into a version log so readers can still see what they started with.
+`inillucent-txn`, the transaction manager, implements one writer at a time, many readers and
+snapshot isolation: a reader takes a snapshot and sees the database as it was at that instant for the
+length of its transaction, and a writer takes the writer slot and publishes before-images into a
+version log so readers can still see what they started with.
+
+**What a connection of the shipped engine gets is the first half of that and not the second.**
+`ImportedDatabase` holds the log directly rather than going through the transaction manager, and it
+takes the file's EXCLUSIVE lock for the length of a write. So one writer at a time holds across
+processes, and a reader of another process waits for that writer rather than reading a snapshot past
+it - there is no shared-memory index through which a reader could find the log. A reader that will
+not wait is refused with `busy` after `PRAGMA busy_timeout`. `docs/roadmap.md` has the protocol that
+would make the second half true across processes as well.
 
 The version log is collected on a threshold rather than after every commit, because collecting walks
 the whole log and doing it per commit would be quadratic in the images a batch publishes.
@@ -242,6 +251,32 @@ tier's fault campaigns, which crash at a chosen sync and then read back what the
 Those campaigns drove the retired engine until task-1911 deleted it; re-pointing them at this one is
 what found the journal defect above, and `new_engine_recovery_shapes.rs` did not, because it crashes
 at one fixed point rather than at every cut of a commit.
+
+---
+
+## 5a. What a file's format version promises
+
+The first eight bytes of a database are `RDB2    ` and the four after them are the **format
+version**, which this build writes as `1` and is the only one it reads.
+
+The rule it stands for:
+
+- **A point release reads every file an earlier point release of the same minor version wrote.**
+  `0.1.4` opens a `0.1.0` file. The version does not move for a bug fix, and a release that changed
+  the layout of a page, a record or the header without moving it would be a release that could not
+  say which files it can read.
+- **A change to that layout raises the number, and that is a minor version with a documented
+  migration.** The migration is `inillucent-migrate`, which reads the older file and writes a new
+  one; it is not an upgrade in place, because an upgrade in place is a rewrite that a crash can
+  catch halfway.
+- **A build that meets a higher number says so rather than reading the file as damage.** The refusal
+  is `this database is format version N and this build reads version 1; upgrade inillucent to open
+  it`, it carries the status `unsupported`, and the command line exits 3 - the same answer every
+  other "this build has not got that" gives. A *lower* number is reported as corruption, because
+  there is no earlier format: a zero there is a header that has been overwritten.
+
+The number lives at byte 8 of the meta page, which is covered by the meta record's checksum, so a
+file whose version has been edited by hand fails the checksum rather than opening.
 
 ---
 

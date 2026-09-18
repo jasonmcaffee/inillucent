@@ -190,6 +190,28 @@ struct Options {
     /// is what an application uses when the documents already exist and a
     /// second copy of them would double the file.
     content: Option<Vec<u8>>,
+    /// The option this build cannot honour, when the table declares one.
+    ///
+    /// **Recorded rather than ignored (task-1979, R15).** `detail=`,
+    /// `columnsize=` and `content_rowid=` each change what the index stores and
+    /// what a query may ask of it, and all three fell through to the catch-all
+    /// that records an option and changes nothing - so `detail='none'`, under
+    /// which SQLite refuses a phrase query because it holds no positions,
+    /// answered the phrase query here from positions it had stored anyway.
+    ///
+    /// It is a refusal at `CREATE VIRTUAL TABLE` and a refusal on every query
+    /// of a table an older build or SQLite wrote, rather than a refusal to
+    /// open: a database has to open before the table in it can be dropped.
+    unsupported: Option<String>,
+    /// Whether `content=''` made the table contentless.
+    ///
+    /// **Accepted and ignored until task-1979, R5.** `content=''` fell through
+    /// to the catch-all that records an option and changes nothing, so
+    /// `%_content` was created anyway and every column read back the document
+    /// text where SQLite answers NULL. That is the difference an application
+    /// chooses the option for: the source text is not supposed to be in the
+    /// database at all, and it was, silently.
+    contentless: bool,
 }
 
 /// Reads the arguments of a `CREATE VIRTUAL TABLE ... USING fts5(...)`.
@@ -201,6 +223,8 @@ fn parse_options(arguments: &[Vec<u8>]) -> DbResult<Options> {
     let mut columns = Vec::new();
     let mut tokenizer = vec![b"unicode61".to_vec()];
     let mut content: Option<Vec<u8>> = None;
+    let mut contentless = false;
+    let mut unsupported: Option<String> = None;
     for argument in arguments {
         let text = String::from_utf8_lossy(argument).trim().to_string();
         if let Some((name, value)) = split_option(&text) {
@@ -216,6 +240,22 @@ fn parse_options(arguments: &[Vec<u8>]) -> DbResult<Options> {
                 // thing: it stores no rows on purpose.
                 "content" if !unquote_option(&value).is_empty() => {
                     content = Some(unquote_option(&value).as_bytes().to_vec())
+                }
+                "content" => contentless = true,
+                // **Three options that change what the index holds.** Each is
+                // accepted at the value this build does store - which is
+                // SQLite's own default - and refused at every other, because
+                // answering a query against a `detail='none'` index from
+                // positions the option says are not there is the one outcome
+                // that is worse than saying no.
+                "detail" if !unquote_option(&value).eq_ignore_ascii_case("full") => {
+                    unsupported = Some(format!("fts5 detail={}", unquote_option(&value)))
+                }
+                "columnsize" if unquote_option(&value).trim() != "1" => {
+                    unsupported = Some(format!("fts5 columnsize={}", unquote_option(&value)))
+                }
+                "content_rowid" => {
+                    unsupported = Some(format!("fts5 content_rowid={}", unquote_option(&value)))
                 }
                 // The options this build understands and the ones it does not
                 // are both accepted, because refusing one would make a schema
@@ -248,6 +288,8 @@ fn parse_options(arguments: &[Vec<u8>]) -> DbResult<Options> {
         columns,
         tokenizer,
         content,
+        contentless,
+        unsupported,
     })
 }
 
@@ -311,10 +353,13 @@ impl Module for Fts5Module {
                         .to_string(),
                 owner: None,
             },
+            // **Named rather than made** for an external content table: the
+            // rows already exist in somebody else's table, and creating a
+            // second, empty `%_content` beside them would be an index over
+            // nothing. A contentless table has no content shadow at all, which
+            // is the whole of what `content=''` asks for, so its entry is
+            // dropped below rather than written here.
             match &options.content {
-                // **Named rather than made.** The rows already exist in
-                // somebody else's table, and creating a second, empty
-                // `%_content` beside them would be an index over nothing.
                 Some(owner) => ShadowTable {
                     suffix: Vec::new(),
                     create_sql: String::new(),
@@ -337,7 +382,10 @@ impl Module for Fts5Module {
                 create_sql: "CREATE TABLE \"%_config\"(k PRIMARY KEY, v) WITHOUT ROWID".to_string(),
                 owner: None,
             },
-        ])
+        ]
+        .into_iter()
+        .filter(|shadow| !(options.contentless && shadow.suffix == b"content"))
+        .collect())
     }
 
     /// Connects to a table, writing its configuration when it is being created.
@@ -381,13 +429,32 @@ fn connect_with(
             Dialect::Three => "docid",
         }));
         let suffix = content_suffix(&options);
-        let shadows =
-            ShadowTables::of(arguments, &[b"data", b"idx", suffix, b"docsize", b"config"])?;
+        // A contentless table has no content shadow to ask for, and asking for
+        // one it does not have is a refusal: `ShadowTables::of` treats a
+        // missing shadow as a corrupt schema, which is right everywhere else.
+        let mut wanted: Vec<&[u8]> = vec![b"data", b"idx"];
+        if !options.contentless {
+            wanted.push(suffix);
+        }
+        wanted.push(b"docsize");
+        wanted.push(b"config");
+        // **Refused here only when the table is being created.** A table an
+        // older build or SQLite wrote carries the same option, and refusing it
+        // on reconnect would stop the database opening at all - so the refusal
+        // moves to the queries, where a caller can still drop the table.
+        if creating {
+            if let Some(what) = &options.unsupported {
+                return Err(unsupported_option(what));
+            }
+        }
+        let shadows = ShadowTables::of(arguments, &wanted)?;
         Ok(Box::new(Fts5Table {
             dialect,
             tokenizer: Tokenizer::named(&options.tokenizer)?,
+            name: arguments.table.clone(),
             content: suffix.to_vec(),
             external: options.content.clone(),
+            contentless: options.contentless,
             options,
             shadows,
             declaration: Declaration {
@@ -421,6 +488,8 @@ struct Fts5Table {
     creating: bool,
     /// The doclists this transaction has changed, shared with its cursors.
     pending: Buffer,
+    /// The table's own name, which its refusals name.
+    name: Vec<u8>,
     /// The shadow suffix the rows are reached under.
     ///
     /// `content` for a table that owns its rows and the empty name for one
@@ -429,11 +498,32 @@ struct Fts5Table {
     content: Vec<u8>,
     /// The table the rows belong to, when they are not this table's.
     external: Option<Vec<u8>>,
+    /// Whether `content=''` made the table contentless.
+    ///
+    /// There is no `%_content` to read, so every declared column answers NULL
+    /// and nothing is written - see [`Options::contentless`] for what was
+    /// happening instead.
+    contentless: bool,
     /// Where each declared column sits in a stored row.
     ///
     /// Filled the first time a row is read, because it is read out of the
     /// *catalog* and a module is only shown one while a statement is running.
     offsets: Vec<usize>,
+}
+
+/// Returns the refusal an option this build cannot honour reports.
+///
+/// Carried as `unsupported` so the command line exits 3 and the driver reports
+/// the status `unsupported`, which is how a caller tells "this engine has not
+/// built that" apart from "your statement is wrong".
+///
+/// @param what - the option and the value it was given
+fn unsupported_option(what: &str) -> inillucent_base::DbError {
+    failure(format!(
+        "{what} is not built; this index stores full positions and one size per column"
+    ))
+    .with_message(format!("{what} is not built"))
+    .with_unsupported(what.to_string())
 }
 
 /// Returns the shadow suffix a table's rows are reached under.
@@ -516,9 +606,13 @@ impl Fts5Table {
         self.offsets.clone()
     }
 
-    /// Returns whether the rows belong to another table.
-    fn borrows_rows(&self) -> bool {
-        self.external.is_some()
+    /// Returns whether the table stores no rows of its own at all.
+    ///
+    /// True for a contentless table and for an external content one: both are
+    /// the cases where this module writes no document text, and both are the
+    /// cases `delete-all` is for.
+    fn stores_no_rows(&self) -> bool {
+        self.contentless || self.external.is_some()
     }
 
     /// Returns whether the index already holds a row.
@@ -610,7 +704,9 @@ impl VirtualTable for Fts5Table {
     fn open(&self) -> DbResult<Box<dyn VirtualCursor>> {
         Ok(Box::new(Fts5Cursor {
             dialect: self.dialect,
+            unsupported: self.options.unsupported.clone(),
             content: self.content.clone(),
+            contentless: self.contentless,
             offsets: content_offsets(self.external.as_deref(), &self.options.columns, None),
             external: self.external.clone(),
             matched: Vec::new(),
@@ -700,7 +796,12 @@ impl VirtualTable for Fts5Table {
                     // the number and the answer to whether it is taken. See
                     // `Pending::content_highest`.
                     None => {
-                        let suffix = self.content.clone();
+                        // `%_docsize` stands in for a contentless table, which
+                        // has no `%_content` to read the highest rowid out of.
+                        let suffix = match self.contentless {
+                            true => b"docsize".to_vec(),
+                            false => self.content.clone(),
+                        };
                         next_content_rowid(context, &self.shadows, &self.pending, &suffix)?
                     }
                 };
@@ -784,7 +885,10 @@ impl VirtualTable for Fts5Table {
         flush_doclists(context, &self.shadows, &self.pending)?;
         let mut problems = Vec::new();
         let mut rows = Vec::new();
-        let suffix = self.content.clone();
+        let suffix = match self.stores_no_rows() {
+            true => b"docsize".to_vec(),
+            false => self.content.clone(),
+        };
         self.shadows.scan(context, &suffix, |rowid, _| {
             rows.push(rowid);
             Ok(true)

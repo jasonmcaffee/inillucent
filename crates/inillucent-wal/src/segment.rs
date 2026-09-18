@@ -176,6 +176,49 @@ pub fn segment_name(base: &str, sequence: u64) -> String {
     format!("{base}-wal.{sequence:010}")
 }
 
+/// Returns the stream position a segment's first record sits at.
+///
+/// **For a caller that has the bytes and no file system.** The command surface
+/// reads the directory beside a database to find a segment the chain cannot
+/// reach (task-1979, C9), and what tells a leftover copy from the next segment
+/// a live writer rolled to is where its records start: a copy holds positions
+/// the chain has already passed, and a genuine later segment starts at or above
+/// where the chain ended.
+///
+/// `None` when the bytes are not a segment header of this format.
+///
+/// @param head - the segment file's first bytes
+pub fn first_lsn_of(head: &[u8]) -> Option<u64> {
+    SegmentHeader::decode(head)
+        .ok()
+        .map(|header| header.first_lsn)
+}
+
+/// Returns which segment of `base` a file name is, or nothing when it is not
+/// one.
+///
+/// The inverse of [`segment_name`], so the two cannot drift: a caller looking at
+/// a directory beside a database asks this what it is holding rather than
+/// reimplementing the suffix.
+///
+/// It exists because a segment at a sequence the chain does not reach is
+/// neither replayed nor removed nor mentioned, and sat beside a database
+/// through every open and close (task-1979, C9). Finding one means reading the
+/// directory, which this crate cannot do - there is no listing on
+/// `inillucent_vfs::Vfs` - so the caller that can reads the names and this
+/// decides what they mean.
+///
+/// @param base - the database file's name, without a directory
+/// @param name - a file name found beside it, without a directory
+pub fn sequence_of_segment_name(base: &str, name: &str) -> Option<u64> {
+    let prefix = format!("{base}-wal.");
+    let digits = name.strip_prefix(&prefix)?;
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
 /// Writes `value` into `buffer` at `at`.
 ///
 /// @param buffer - the bytes

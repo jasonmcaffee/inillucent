@@ -124,8 +124,8 @@ table.
 
 | prerequisite | rows | what provides it |
 |---|---:|---|
-| `oracle` | 27 | the pinned SQLite 3.53.4 comparison process: `pwsh tools/sqlite-reference.ps1`, `bash tools/sqlite-reference.sh` |
-| `programs` | 11 | the command surface built into this profile's target directory: `cargo build -p inillucent-cli` |
+| `oracle` | 28 | the pinned SQLite 3.53.4 comparison process: `pwsh tools/sqlite-reference.ps1`, `bash tools/sqlite-reference.sh` |
+| `programs` | 14 | the command surface built into this profile's target directory: `cargo build -p inillucent-cli` |
 | `shell` | 7 | the pinned `sqlite3` 3.53.4 shell, from the same two scripts as the oracle |
 | `fixtures` | 2 | the gate fixtures, which are 1.2 MB and 120 MB and are not tracked: `bash tools/build-gate-fixtures.sh _agent_output/fixtures` |
 | `onnx` | 3 | ONNX Runtime and the embedding weights: `inillucent setup-embeddings all` |
@@ -218,7 +218,10 @@ and five `onnx` cases are built only when that feature is on.
 
 Measured on 2026-09-15 at commit `f9d1433`, which is `v0.1.3`, with
 `tools/validate.ps1 -Coverage` (`tools/validate.sh --coverage` on Unix), which
-runs every suite under `cargo llvm-cov` and prints this table. Region and line
+runs every suite under `cargo llvm-cov` and prints this table. **The repository
+is at `v0.1.4` and this table has not been measured again since `v0.1.3`**, so
+read it as the last measurement rather than as the current one; the command
+above is what refreshes it, and it takes about an hour. Region and line
 coverage, not branch: branch coverage needs `-Z coverage-options=branch`, a
 nightly option, and `rust-toolchain.toml` pins the compiler to stable for the
 reason written beside the pin.

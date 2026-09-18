@@ -115,10 +115,20 @@ fn scratch(name: &str) -> PathBuf {
 /// @param path - the database file
 /// @param sql - the statements to run
 fn write_and_abandon(path: &Path, sql: &str) {
+    // **`exclusive` first, `normal` last, and both are the simulation
+    // (task-1980).** What this has to leave behind is a log nothing has folded
+    // into the file. The default is `locking_mode = normal`, under which a
+    // connection checkpoints and releases the file after every statement that
+    // wrote - so the statements below would fold themselves down one at a time
+    // and there would be no unfolded log to reopen. `exclusive` keeps the file
+    // and writes no checkpoint; the `normal` at the end releases it without
+    // one, which is what the operating system does for a process that has died.
     let database = Database::open(path).expect("the database opens");
     let connection = database.session().expect("the connection opens");
     connection
-        .execute_batch(&format!("{sql}\nPRAGMA locking_mode = NORMAL;"))
+        .execute_batch(&format!(
+            "PRAGMA locking_mode = EXCLUSIVE;\n{sql}\nPRAGMA locking_mode = NORMAL;"
+        ))
         .expect("the statements run");
     std::mem::forget(connection);
     std::mem::forget(database);
@@ -502,9 +512,17 @@ fn a_log_below_the_files_high_water_resumes_above_it() {
         "the meta still points below the stamp: checkpoint_lsn {} against a stamp of {stamp}",
         after.checkpoint_lsn
     );
-    assert_eq!(
-        after.high_water_lsn, stamp,
-        "the high water was not carried forward through the resume's own checkpoint"
+    // **At or above the stamp, rather than exactly it.** What matters is that
+    // the number never goes backwards: a file whose recorded high water is
+    // below a stamp its pages carry is the state this whole case is about. It
+    // used to be exactly `stamp` because the resume's checkpoint was the only
+    // one a run took; with `locking_mode = normal` as the default (task-1980) a
+    // statement that wrote checkpoints on its way out, and those pages carry
+    // stamps of their own above the resumed position.
+    assert!(
+        after.high_water_lsn >= stamp,
+        "the high water went backwards through the resume's own checkpoint: {} against a stamp of {stamp}",
+        after.high_water_lsn
     );
 
     // **Once, and then again.** The resume opens a new segment and leaves a gap

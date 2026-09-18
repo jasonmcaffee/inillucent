@@ -86,6 +86,33 @@ pub struct Database {
     /// fills a new page, which costs the tail of one page per open and cannot be
     /// wrong: every value already written is found through its own reference.
     shared_extent: Option<PageId>,
+    /// How long this connection waits for a contended file before reporting it
+    /// busy, in milliseconds.
+    ///
+    /// `PRAGMA busy_timeout`'s value, pushed down by the engine. See
+    /// [`DEFAULT_BUSY_MILLIS`].
+    busy_millis: u64,
+    /// Whether this connection may write the file at all.
+    ///
+    /// **A flag on the storage, not a filter above it (task-1979, C5 and
+    /// section 5.2).** `--readonly` used to be a statement filter on the
+    /// command surface and the file was opened for writing either way - so the
+    /// open took the same locks a writer takes, waited out the whole busy
+    /// budget against a live writer and then reported the writer's lock. A read
+    /// only connection now opens the file read only, never raises past SHARED,
+    /// and refuses a write here rather than relying on somebody above to have
+    /// asked.
+    read_only: bool,
+    /// Whether what this connection holds was derived while it held the file.
+    ///
+    /// **False from `open` until the owner says otherwise.** The open path
+    /// reads the meta record under a shared lock, which two processes hold at
+    /// once, and the caller above reads the log's tail with no lock at all - so
+    /// everything a connection starts with was read at a moment another process
+    /// could have been writing. It goes false again every time the file is let
+    /// go, because the same is then true of everything cached since
+    /// (task-1979, section 4.4 item 1).
+    trusted: bool,
 }
 
 impl Database {
@@ -127,6 +154,9 @@ impl Database {
             meta,
             free: FreeMap::new(options.page_size),
             shared_extent: None,
+            busy_millis: DEFAULT_BUSY_MILLIS,
+            read_only: false,
+            trusted: false,
         };
         let mut next = FIRST_DATA_PAGE.0;
         let created = database.free.ensure(FIRST_DATA_PAGE.0, &mut next)?;
@@ -158,7 +188,43 @@ impl Database {
             meta,
             free,
             shared_extent: None,
+            busy_millis: DEFAULT_BUSY_MILLIS,
+            read_only: false,
+            trusted: false,
         })
+    }
+
+    /// Opens an existing database for reading and never for writing.
+    ///
+    /// The file handle itself is read only, so a write that reached the media
+    /// through any path at all is refused by the operating system rather than
+    /// by this crate's own bookkeeping - which is what makes "the file is
+    /// unchanged" a property of the open rather than of the filter above it.
+    ///
+    /// The free map is not walked, for the same reason
+    /// [`Database::open_before_recovery`] does not: the caller replays the log
+    /// into its own pool first and calls [`Database::load_free_map`] after.
+    ///
+    /// @param vfs - the file system to read from
+    /// @param path - the database file
+    /// @param frames - how many frames the pool holds
+    pub fn open_read_only(vfs: &dyn Vfs, path: &DbPath, frames: usize) -> DbResult<Database> {
+        let (pool, meta) = Self::open_bootstrap_with(vfs, path, frames, true)?;
+        let free = FreeMap::new(pool.page_size());
+        Ok(Database {
+            pool,
+            meta,
+            free,
+            shared_extent: None,
+            busy_millis: DEFAULT_BUSY_MILLIS,
+            read_only: true,
+            trusted: false,
+        })
+    }
+
+    /// Reports whether this connection may write the file.
+    pub fn read_only(&self) -> bool {
+        self.read_only
     }
 
     /// Opens an existing database without walking its free map.
@@ -191,6 +257,9 @@ impl Database {
             meta,
             free,
             shared_extent: None,
+            busy_millis: DEFAULT_BUSY_MILLIS,
+            read_only: false,
+            trusted: false,
         })
     }
 
@@ -213,8 +282,28 @@ impl Database {
     /// @param path - the database file
     /// @param frames - how many frames the pool holds
     fn open_bootstrap(vfs: &dyn Vfs, path: &DbPath, frames: usize) -> DbResult<(Pool, Meta)> {
+        Self::open_bootstrap_with(vfs, path, frames, false)
+    }
+
+    /// [`Database::open_bootstrap`], with the caller saying whether the handle
+    /// may write.
+    ///
+    /// @param vfs - the file system to read from
+    /// @param path - the database file
+    /// @param frames - how many frames the pool holds
+    /// @param read_only - whether the file handle refuses writes
+    fn open_bootstrap_with(
+        vfs: &dyn Vfs,
+        path: &DbPath,
+        frames: usize,
+        read_only: bool,
+    ) -> DbResult<(Pool, Meta)> {
+        let options = match read_only {
+            true => OpenOptions::main_db().read_only(),
+            false => OpenOptions::main_db(),
+        };
         let file = vfs
-            .open(path, OpenOptions::main_db())
+            .open(path, options)
             .map_err(|error| error.into_db_error())?;
         // The page size lives in the meta page, and the meta page cannot be
         // read without it. The first sixteen bytes are readable at any size -
@@ -243,7 +332,7 @@ impl Database {
             if let Some(size) = discover_page_size(file.as_ref()) {
                 break size;
             }
-            if waited >= BUSY_BUDGET_MILLIS {
+            if waited >= DEFAULT_BUSY_MILLIS {
                 return Err(corrupt("neither meta page is readable"));
             }
             // Released while waiting, because the process finishing the
@@ -271,6 +360,46 @@ impl Database {
         // a stamp that is still in the file.
         pool.note_high_water_lsn(meta.high_water_lsn);
         Ok((pool, meta))
+    }
+
+    /// Gives back the tail of the file that the meta record does not describe.
+    ///
+    /// **A crash between a page write and the meta record that would have
+    /// claimed it leaves a file longer than its own header.** The pool grows
+    /// the file when it writes a page past the end, and the meta record is
+    /// written last, on purpose - so a transaction that grew the file and then
+    /// did not become durable leaves pages nothing refers to and nothing will
+    /// ever reclaim. The rollback journal puts the *contents* back and says
+    /// nothing about the length, which is the half SQLite's journal header
+    /// carries and this format does not.
+    ///
+    /// Called by the open path once recovery has finished, so `page_count` is
+    /// everything the log had to say. A file that is already the right length
+    /// or shorter is left alone; a failure to truncate is reported, because a
+    /// file this cannot shrink is one the next allocation would grow again from
+    /// the wrong place.
+    ///
+    /// Reached by `durability.rs`'s
+    /// `a_recovered_database_is_no_longer_than_its_header_says`, which crashes
+    /// at every call of a growing transaction and measures the file against its
+    /// own header (task-1980).
+    pub fn give_back_the_unclaimed_tail(&mut self) -> DbResult<()> {
+        let wanted = self
+            .pool
+            .page_count()
+            .saturating_mul(self.pool.page_size() as u64);
+        let there = self
+            .pool
+            .file()
+            .file_size()
+            .map_err(inillucent_vfs::VfsError::into_db_error)?;
+        if there <= wanted {
+            return Ok(());
+        }
+        self.pool
+            .file()
+            .truncate(wanted)
+            .map_err(inillucent_vfs::VfsError::into_db_error)
     }
 
     /// Returns the buffer pool, so a caller that owns the file can grow it.
@@ -537,6 +666,17 @@ impl Database {
     ///
     /// @param may_release - whether the shared lock may be dropped to retry
     pub fn begin_write_within(&mut self, may_release: bool) -> DbResult<bool> {
+        // **A read only connection never raises past SHARED.** It has nothing
+        // to protect from a reader and nothing to write, and raising is what
+        // made `--readonly` wait out the busy budget against a live writer and
+        // then report the writer's lock (task-1979, C5).
+        if self.read_only {
+            return Err(inillucent_base::error::DbError::primary(
+                inillucent_base::error::PrimaryCode::ReadOnly,
+            )
+            .with_message("this connection is read only and cannot write the database")
+            .with_detail("this connection is read only and cannot write the database"));
+        }
         // The same short circuit `begin_read` makes, for the same reason: a
         // writer that already holds the file exclusively has nothing to raise.
         if self.pool.lock_level() == FileLock::Exclusive {
@@ -576,9 +716,15 @@ impl Database {
             let attempt = self.attempt_write();
             match attempt {
                 Ok(reloaded) => return Ok(reloaded),
-                Err(error) if waited >= BUSY_BUDGET_MILLIS => {
+                Err(_) if waited >= self.busy_millis => {
+                    let refusal = file_is_busy(
+                        self.pool.file(),
+                        FileLock::Exclusive,
+                        waited,
+                        self.busy_millis,
+                    );
                     let _ = self.pool.unlock(FileLock::None);
-                    return Err(error);
+                    return Err(refusal);
                 }
                 Err(_) => {}
             }
@@ -597,6 +743,7 @@ impl Database {
     /// cache is refreshed on the round the lock is actually won on rather than
     /// on some earlier round the writer then lost.
     fn attempt_write(&mut self) -> DbResult<bool> {
+        self.trusted = false;
         self.pool.unlock(FileLock::None)?;
         self.pool.lock_within(FileLock::Shared, 0)?;
         let reloaded = self.reload_if_moved()?;
@@ -606,8 +753,26 @@ impl Database {
     }
 
     /// Releases the file lock, which is what `locking_mode = normal` does.
+    ///
+    /// Everything cached is untrusted from here: another process may write the
+    /// file before this connection takes it again.
     pub fn end_access(&mut self) -> DbResult<()> {
+        self.trusted = false;
         self.pool.unlock(FileLock::None)
+    }
+
+    /// Reports whether what this connection holds was derived under the lock it
+    /// now has.
+    ///
+    /// See the field. The owner asks this on the way into a statement and
+    /// re-derives when the answer is no.
+    pub fn trusted(&self) -> bool {
+        self.trusted
+    }
+
+    /// Records that the owner has re-derived everything under the lock.
+    pub fn mark_trusted(&mut self) {
+        self.trusted = true;
     }
 
     /// Returns the lock level currently held.
@@ -615,27 +780,120 @@ impl Database {
         self.pool.lock_level()
     }
 
+    /// Sets how long this connection waits for a contended file.
+    ///
+    /// `PRAGMA busy_timeout`'s value, pushed down by the engine (task-1979,
+    /// C7). Zero means one attempt and no waiting, which is what SQLite's own
+    /// zero means.
+    ///
+    /// @param millis - the budget in milliseconds
+    pub fn set_busy_millis(&mut self, millis: u64) {
+        self.busy_millis = millis;
+    }
+
+    /// Returns how long this connection waits for a contended file.
+    pub fn busy_millis(&self) -> u64 {
+        self.busy_millis
+    }
+
+    /// Returns the meta record the file holds right now, read past the cache.
+    ///
+    /// **Only a caller holding the file lock may act on the answer.** Without
+    /// the lock another process can commit between the read and the use.
+    ///
+    /// `None` when neither slot decodes, which is not this function's to
+    /// report: the read that follows says so, with the message the open path
+    /// uses.
+    pub fn meta_on_disk(&self) -> DbResult<Option<Meta>> {
+        let page_size = self.pool.page_size();
+        let (primary, shadow) = self.pool.read_meta_slots(page_size)?;
+        Ok(Meta::choose(&primary, &shadow).ok())
+    }
+
+    /// Returns the generation this connection's cache describes.
+    pub fn generation(&self) -> u64 {
+        self.meta.generation
+    }
+
+    /// Throws the cache away and adopts a meta record read from the file.
+    ///
+    /// **The free map is deliberately left empty**, exactly as
+    /// [`Database::open_before_recovery`] leaves it: the caller is about to
+    /// replay a log whose records may include the free map's own pages, and
+    /// walking the chain before that replay turns a state the log can rebuild
+    /// into a refusal. The caller runs redo and then calls
+    /// [`Database::load_free_map`].
+    ///
+    /// @param found - the meta record the file holds
+    pub fn adopt_from_file(&mut self, found: Meta) -> DbResult<()> {
+        // **Abandoned rather than discarded, and that is the fix rather than a
+        // detail.** A discard writes every dirty frame back on its way out, so
+        // a connection re-deriving its view of a file another process has
+        // written would first write its own stale pages over that process's
+        // work. Nothing is lost by dropping them: the caller replays the log
+        // from this record's own checkpoint next, and the write-ahead rule
+        // means every change they hold is in a record there
+        // (task-1979, section 4.4 item 3).
+        self.pool.abandon_all()?;
+        self.pool.set_page_count(found.page_count);
+        // **The high water the adopted file carries, folded in before a page is
+        // written.** `open_bootstrap` does this for the same reason and it is
+        // the same failure here: a connection that resumed its log below a stamp
+        // the file's pages already carry writes records recovery then skips -
+        // "a page stamped by a stream that no longer exists silently swallows
+        // every later write to it", in `resume_above_every_stamp`'s own words -
+        // and the row is gone with nothing reporting it. Without this line two
+        // long-lived writer processes lost 261 of 599 acknowledged inserts.
+        self.pool.note_high_water_lsn(found.high_water_lsn);
+        self.meta = found;
+        self.free = FreeMap::new(self.pool.page_size());
+        self.shared_extent = None;
+        Ok(())
+    }
+
+    /// Refuses when the cache holds a change the file does not.
+    ///
+    /// **Discarding writes the dirty frames back on the way out**, so throwing
+    /// the cache away for another process's sake writes this connection's stale
+    /// pages over that process's work. Under one writer at a time this cannot
+    /// happen: a connection checkpoints before it releases the file, so it
+    /// holds nothing uncheckpointed while another process can write. Reaching
+    /// here anyway is a defect, and `busy` is the outcome that loses nothing -
+    /// the caller retries and the state it needs is still in its own log
+    /// (task-1979, section 4.4 item 3).
+    fn refuse_if_the_cache_is_dirty(&self) -> DbResult<()> {
+        let dirty = self.pool.dirty_pages();
+        if dirty == 0 {
+            return Ok(());
+        }
+        Err(inillucent_base::error::busy(format!(
+            "another process has written this file and this connection still holds {dirty} uncheckpointed pages"
+        )))
+    }
+
     /// Throws the cache away when the file's meta record has moved on.
     ///
     /// The generation is bumped by every checkpoint, so a generation greater
-    /// than the one in memory means another process has committed since this
+    /// than the one in memory means another process has checkpointed since this
     /// one last looked. Every cached page may then describe a database that no
     /// longer exists - including the free map, which is why it is rebuilt from
     /// the new record rather than kept.
     ///
+    /// **A commit that has not been checkpointed does not move the generation**,
+    /// so this is not on its own enough to tell a connection its cache is
+    /// stale. The engine asks the log the same question at the same moment -
+    /// see `inillucent_wal::tail_on_disk` - and runs the fuller resynchronisation
+    /// when either answer has moved (task-1979, section 4.4).
+    ///
     /// Returns whether anything was thrown away.
     fn reload_if_moved(&mut self) -> DbResult<bool> {
-        let page_size = self.pool.page_size();
-        let (primary, shadow) = self.pool.read_meta_slots(page_size)?;
-        let Ok(found) = Meta::choose(&primary, &shadow) else {
-            // An unreadable meta record is not this function's problem to
-            // report: the read that follows will say so, with the message the
-            // open path uses.
+        let Some(found) = self.meta_on_disk()? else {
             return Ok(false);
         };
         if found.generation <= self.meta.generation {
             return Ok(false);
         }
+        self.refuse_if_the_cache_is_dirty()?;
         self.pool.discard_all()?;
         self.pool.set_page_count(found.page_count);
         self.meta = found;
@@ -710,6 +968,15 @@ impl Database {
     /// unchanged between the two paths: the meta record's bookkeeping, the
     /// pool's flush, and the sync that makes it durable.
     pub fn checkpoint_after_free_map(&mut self) -> DbResult<()> {
+        // See [`Database::open_read_only`]: a checkpoint is a write, and the
+        // file handle would refuse it anyway. Refusing here names why.
+        if self.read_only {
+            return Err(inillucent_base::error::DbError::primary(
+                inillucent_base::error::PrimaryCode::ReadOnly,
+            )
+            .with_message("this connection is read only and cannot checkpoint")
+            .with_detail("this connection is read only and cannot checkpoint"));
+        }
         self.meta.page_count = self.pool.page_count();
         self.meta.free_map = self.free.first();
         self.meta.generation = self.meta.generation.saturating_add(1);
@@ -726,12 +993,16 @@ impl Database {
     }
 }
 
-/// How long a writer keeps trying before it reports the file as busy.
+/// How long a writer keeps trying before it reports the file as busy, when
+/// nobody has said otherwise.
 ///
-/// The same budget the pool's own waiting uses; it is stated twice because the
-/// open path runs before a pool exists and this one runs inside a retry loop
-/// that has to own its own clock.
-const BUSY_BUDGET_MILLIS: u64 = 5_000;
+/// **`PRAGMA busy_timeout` is what says otherwise** (task-1979, C7). This was a
+/// constant no pragma, flag or environment variable could reach, so a caller
+/// that wanted to wait longer for a contended file had nothing to set; the
+/// engine now pushes the pragma's value into [`Database::set_busy_millis`] and
+/// this is only the value a connection starts with. The open path still uses it
+/// directly, because an open runs before there is a connection to have set it.
+pub const DEFAULT_BUSY_MILLIS: u64 = 5_000;
 
 /// Walks a free map's page chain and assembles it.
 ///
@@ -767,6 +1038,19 @@ fn read_free_map(pool: &Pool, head: PageId) -> DbResult<FreeMap> {
 /// @param file - the database file
 /// @param level - the level to reach
 fn wait_for_lock(file: &dyn inillucent_vfs::VfsFile, level: FileLock) -> DbResult<()> {
+    wait_for_lock_within(file, level, DEFAULT_BUSY_MILLIS)
+}
+
+/// Takes a lock on a file, waiting up to a budget the caller states.
+///
+/// @param file - the database file
+/// @param level - the level to reach
+/// @param budget_millis - how long to keep trying
+fn wait_for_lock_within(
+    file: &dyn inillucent_vfs::VfsFile,
+    level: FileLock,
+    budget_millis: u64,
+) -> DbResult<()> {
     if file.lock_level() >= level {
         return Ok(());
     }
@@ -775,13 +1059,52 @@ fn wait_for_lock(file: &dyn inillucent_vfs::VfsFile, level: FileLock) -> DbResul
     loop {
         match file.lock(level) {
             Ok(()) => return Ok(()),
-            Err(error) if waited >= BUSY_BUDGET_MILLIS => return Err(error.into_db_error()),
+            Err(_) if waited >= budget_millis => {
+                return Err(file_is_busy(file, level, waited, budget_millis))
+            }
             Err(_) => {}
         }
         std::thread::sleep(std::time::Duration::from_millis(pause));
         waited = waited.saturating_add(pause);
         pause = pause.saturating_mul(2).min(50);
     }
+}
+
+/// Returns the refusal a caller that could not take the file is given.
+///
+/// **It names the holder's operation and this caller's, and no lock level**
+/// (task-1979, C6). The level a holder is at is not something a caller can
+/// observe or act on, and the message that named one was wrong every time the
+/// holder was a reader: every contended case, reader or writer, answered "a
+/// writer holds PENDING". What a caller can act on is whether somebody else is
+/// writing, how long this connection waited, and which pragma changes that.
+///
+/// @param file - the file that could not be locked
+/// @param wanted - the level this caller was trying to reach
+/// @param waited - how long it tried, in milliseconds
+/// @param budget - the budget it was given, in milliseconds
+fn file_is_busy(
+    file: &dyn inillucent_vfs::VfsFile,
+    wanted: FileLock,
+    waited: u64,
+    budget: u64,
+) -> inillucent_base::error::DbError {
+    // RESERVED or stronger is somebody who intends to write. Anything else
+    // holding the file is a reader, which is the case the old message got
+    // wrong.
+    let holder = match file.check_reserved_lock() {
+        Ok(true) | Err(_) => "writing",
+        Ok(false) => "reading",
+    };
+    let mine = if wanted > FileLock::Shared {
+        "writing"
+    } else {
+        "reading"
+    };
+    inillucent_base::error::busy(format!(
+        "another process holds the file for {holder}; this connection wanted it for {mine}, \
+         and waited {waited} ms of the {budget} ms PRAGMA busy_timeout"
+    ))
 }
 
 /// Returns the page size the file's first sixteen bytes declare.

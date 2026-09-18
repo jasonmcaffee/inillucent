@@ -74,6 +74,13 @@ struct Invocation {
 
 /// Runs whatever the command line named.
 fn main() -> ExitCode {
+    // Every statement this program runs is on a stack this crate sized - see
+    // `inillucent_cli::STATEMENT_STACK`.
+    inillucent_cli::on_a_sized_stack(run)
+}
+
+/// Everything `main` does, on the sized thread.
+fn run() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if let Some(topic) = help_topic(&arguments) {
         return dispatch_help(topic);
@@ -390,7 +397,11 @@ fn dispatch(command: &'static Command, invocation: &Invocation) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let database = if command.name == "create" {
+    // **`create` and `migrate` open no session database.** Each writes the file
+    // it was asked for and neither reads the one `--db` names, so pointing them
+    // at `:memory:` is what lets `Context::open` refuse a `--db` path that is
+    // not there for every other command (task-1979, E2).
+    let database = if command.name == "create" || command.name == "migrate" {
         ":memory:"
     } else {
         &invocation.database
@@ -409,8 +420,11 @@ fn dispatch(command: &'static Command, invocation: &Invocation) -> ExitCode {
     // `migrate` can be given up on without losing what it has already reported
     // (task-1932, H11).
     inillucent_cli::interrupt::stop_on_ctrl_c(context.cancel_flag());
+    let recovery = context.recovery();
+    let strays = context.stray_log_segments().to_vec();
     match command::run(command, &mut context, &arguments) {
         Ok(produced) => {
+            let produced = produced.with_recovery(&recovery, &strays);
             let shown = match invocation.json {
                 true => produced.to_json().pretty(0),
                 false => produced.text.clone(),

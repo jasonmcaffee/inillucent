@@ -1,0 +1,15 @@
+# Differential cases, category `transaction`, from task-1979's review of commit 3073058.
+# One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
+# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+txn-001	CREATE TABLE t(a); BEGIN; INSERT INTO t VALUES(1); ROLLBACK; SELECT count(*) FROM t
+txn-002	CREATE TABLE t(a); BEGIN; INSERT INTO t VALUES(1); COMMIT; SELECT count(*) FROM t
+txn-003	CREATE TABLE t(a); BEGIN; INSERT INTO t VALUES(1); SAVEPOINT s; INSERT INTO t VALUES(2); ROLLBACK TO s; COMMIT; SELECT count(*) FROM t
+txn-004	CREATE TABLE t(a); SAVEPOINT s; INSERT INTO t VALUES(1); RELEASE s; SELECT count(*) FROM t
+txn-005	CREATE TABLE t(a); SAVEPOINT s; INSERT INTO t VALUES(1); ROLLBACK TO s; RELEASE s; SELECT count(*) FROM t
+txn-006	CREATE TABLE t(a); BEGIN; INSERT INTO t VALUES(1); SELECT count(*) FROM t; ROLLBACK
+txn-007	BEGIN; BEGIN
+txn-008	COMMIT
+txn-009	CREATE TABLE t(a UNIQUE); BEGIN; INSERT INTO t VALUES(1); INSERT INTO t VALUES(1); COMMIT
+txn-010	CREATE TABLE t(a); BEGIN; CREATE TABLE u(b); ROLLBACK; SELECT count(*) FROM sqlite_schema WHERE name='u'
+txn-011	CREATE TABLE t(a); SAVEPOINT s1; INSERT INTO t VALUES(1); SAVEPOINT s2; INSERT INTO t VALUES(2); ROLLBACK TO s1; RELEASE s1; SELECT count(*) FROM t
+txn-012	CREATE TABLE t(a); INSERT INTO t VALUES(1); BEGIN; UPDATE t SET a=2; ROLLBACK; SELECT a FROM t

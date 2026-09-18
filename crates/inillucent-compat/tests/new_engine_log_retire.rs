@@ -90,6 +90,15 @@ fn segments(path: &Path) -> (usize, u64) {
 /// @param doublings - how many times the seed row set is doubled
 fn fill(database: &mut ImportedDatabase, doublings: usize) {
     for sql in [
+        // **`exclusive` is asked for, and that is what makes the log window
+        // exist (task-1980).** The default is `locking_mode = normal`, under
+        // which a connection checkpoints and releases the file after every
+        // statement that wrote - so the log never holds more than one
+        // statement's worth, and a case about what a checkpoint reclaims has
+        // nothing to reclaim. What is under test is the log between
+        // checkpoints, so the connection keeps the file the way it did before
+        // the default changed.
+        "PRAGMA locking_mode = exclusive",
         "CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT, c REAL)",
         "INSERT INTO t(a,b,c) VALUES (1,'seed',1.5)",
     ] {

@@ -81,6 +81,13 @@ impl crate::ImportedDatabase {
             // So the `like(a, b)` function spelling follows the same pragma the
             // `LIKE` operator does.
             like_case_sensitive: self.pragmas.case_sensitive_like(),
+            // The connection's own `Limit::Length`, so a value a function
+            // builds is held to the same bound as one a row stores.
+            length_limit: self
+                .pragmas
+                .limits()
+                .borrow()
+                .get(inillucent_base::limits::Limit::Length),
         }
     }
 

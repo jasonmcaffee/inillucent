@@ -215,7 +215,7 @@ Each scan setting was chosen from a measured sweep against an exhaustive compari
 | `hnsw.ef_search` | 400 | 100 | a scan cannot return more rows than it collected, so this has to be at least the number of rows requested, and higher raises recall inside a filter |
 | `hnsw.max_scan_tuples` | 40,000 | not applicable | measured against 200,000, mean recall was 0.788 either way, so the larger value only costs latency |
 | `hnsw.scan_mem_multiplier` | 4 | not applicable | at the default of 1 the iterative scan exhausts its memory budget and stops early, returning as few as 30 rows of 50 and holding mean recall to 0.788. At 4 the short results stop and mean recall reaches 0.856. At 8 nothing changes |
-| ordering | `relaxed_order` | not applicable | 0.856 against 0.727 mean recall at the same cost, and nothing downstream depends on the within scan ordering because reciprocal rank fusion recomputes it |
+| ordering | `relaxed_order` | not applicable | 0.856 against 0.727 mean recall at the same cost, and nothing downstream depends on the within scan ordering because the fusion recomputes it |
 
 `hnsw.scan_mem_multiplier` is the one most easily missed, and missing it produces a baseline that
 looks tuned and is not.

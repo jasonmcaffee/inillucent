@@ -1,0 +1,33 @@
+# Differential cases, category `window`, from task-1979's review of commit 3073058.
+# One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
+# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+win-001	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT g,v,row_number() OVER (ORDER BY g,v) FROM t
+win-002	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT g,v,rank() OVER (ORDER BY v), dense_rank() OVER (ORDER BY v) FROM t ORDER BY g,v
+win-003	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT g,v,percent_rank() OVER (ORDER BY v), cume_dist() OVER (ORDER BY v) FROM t ORDER BY g,v
+win-004	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT g,v,ntile(3) OVER (ORDER BY g,v) FROM t
+win-005	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT g,v,lag(v) OVER (ORDER BY g,v), lead(v) OVER (ORDER BY g,v) FROM t
+win-006	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT g,v,lag(v,2,-1) OVER (ORDER BY g,v), lead(v,2,-1) OVER (ORDER BY g,v) FROM t
+win-007	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT g,v,first_value(v) OVER (PARTITION BY g ORDER BY v), last_value(v) OVER (PARTITION BY g ORDER BY v) FROM t ORDER BY g,v
+win-008	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT g,v,nth_value(v,2) OVER (PARTITION BY g ORDER BY v) FROM t ORDER BY g,v
+win-009	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT g,v,sum(v) OVER (PARTITION BY g ORDER BY v) FROM t ORDER BY g,v
+win-010	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT g,v,sum(v) OVER (PARTITION BY g ORDER BY v ROWS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM t ORDER BY g,v
+win-011	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT g,v,sum(v) OVER (ORDER BY v RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM t ORDER BY g,v
+win-012	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT g,v,sum(v) OVER (ORDER BY v RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) FROM t ORDER BY g,v
+win-013	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT g,v,count(*) OVER (ORDER BY v GROUPS BETWEEN 1 PRECEDING AND 1 FOLLOWING) FROM t ORDER BY g,v
+win-014	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT g,v,sum(v) OVER (PARTITION BY g ORDER BY v ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING) FROM t ORDER BY g,v
+win-015	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT g,v,avg(v) OVER (PARTITION BY g), count(v) OVER (PARTITION BY g) FROM t ORDER BY g,v
+win-016	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT g,v,sum(v) OVER w FROM t WINDOW w AS (PARTITION BY g ORDER BY v) ORDER BY g,v
+win-017	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT g,v,sum(v) OVER (PARTITION BY g ORDER BY v EXCLUDE CURRENT ROW) FROM t ORDER BY g,v
+win-018	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT g,v,sum(v) OVER (PARTITION BY g ORDER BY v EXCLUDE TIES) FROM t ORDER BY g,v
+win-019	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT g,v,sum(v) OVER (PARTITION BY g ORDER BY v EXCLUDE GROUP) FROM t ORDER BY g,v
+win-020	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT g,v,group_concat(v,'|') OVER (PARTITION BY g ORDER BY v) FROM t ORDER BY g,v
+win-021	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT g,v,max(v) OVER (ORDER BY v ROWS BETWEEN CURRENT ROW AND UNBOUNDED FOLLOWING) FROM t ORDER BY g,v
+win-022	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT g, sum(v) AS s, row_number() OVER (ORDER BY sum(v)) FROM t GROUP BY g ORDER BY g
+win-023	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT g,v,row_number() OVER (PARTITION BY g ORDER BY v DESC NULLS LAST) FROM t ORDER BY g,v
+win-024	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT g,v,sum(v) OVER (ORDER BY g ROWS 2 PRECEDING) FROM t ORDER BY g,v
+win-025	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT * FROM (SELECT g,v,row_number() OVER (PARTITION BY g ORDER BY v) rn FROM t) WHERE rn = 1 ORDER BY g
+win-026	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT g,v,ntile(0) OVER (ORDER BY v) FROM t
+win-027	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT g,v,lag(v,0) OVER (ORDER BY v) FROM t ORDER BY g,v
+win-028	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT g,v,lag(v,-1) OVER (ORDER BY g,v) FROM t
+win-029	SELECT v, sum(v) OVER (ORDER BY v RANGE BETWEEN 1.5 PRECEDING AND 0.5 FOLLOWING) FROM (SELECT 1 AS v UNION ALL SELECT 2 UNION ALL SELECT 3)
+win-030	CREATE TABLE t(g TEXT, v INTEGER); INSERT INTO t VALUES('a',1),('a',2),('a',2),('b',5),('b',NULL),('c',7); SELECT g,v,count(*) FILTER (WHERE v>1) OVER (PARTITION BY g) FROM t ORDER BY g,v

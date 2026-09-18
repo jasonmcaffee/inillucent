@@ -98,6 +98,7 @@ impl crate::ImportedDatabase {
             Cached::QueryPlan(lines) => Ok(query_plan_rows(lines)),
             Cached::Program(rows) => Ok(program_rows(rows)),
             Cached::VirtualInsert(statement) => self.insert_into_module(statement, params),
+            Cached::SchemaInsert(statement) => self.insert_into_schema(statement, params),
             Cached::Select(plan, prepared, slot) => {
                 self.execute_select_cached(plan, prepared, slot, params)
             }
@@ -178,12 +179,22 @@ impl crate::ImportedDatabase {
                 let mut changed = 0usize;
                 for key in &keys {
                     let Some(rowid) = key.first() else { continue };
-                    self.change_module(
+                    // **The count is recorded on the way out of a refusal too**,
+                    // for the reason `insert_into_module` gives: `changes()`
+                    // reads the connection's counters, and a statement that
+                    // errored before touching them left the *previous*
+                    // statement's number there. A module that refuses a delete -
+                    // a contentless fts5 table refuses every one - reported the
+                    // last insert's 1 where SQLite reports 0.
+                    if let Err(error) = self.change_module(
                         &statement.table.name,
                         &inillucent_sql::vtab::Change::Delete(
                             inillucent_value::Value::from(&rowid.borrow()).into_owned()?,
                         ),
-                    )?;
+                    ) {
+                        self.record_changes(changed as i64, changed as i64);
+                        return Err(error);
+                    }
                     changed = changed.saturating_add(1);
                 }
                 if self.writing.batch().is_none() {
@@ -355,6 +366,13 @@ impl crate::ImportedDatabase {
                     Box::new(prepared),
                     std::cell::RefCell::new(physical::Slot::default()),
                 ))
+            }
+            BoundStatement::Insert(statement)
+                if crate::engine::statements::is_the_schema_table(&statement.table.folded) =>
+            {
+                // The catalog tree is wider than `sqlite_schema` declares, so
+                // the row goes through `record` - see `insert_into_schema`.
+                Ok(Cached::SchemaInsert(statement))
             }
             BoundStatement::Insert(statement)
                 if statement.table.kind == inillucent_sql::catalog_view::TableKind::Virtual =>

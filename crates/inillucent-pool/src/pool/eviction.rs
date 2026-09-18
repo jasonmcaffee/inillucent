@@ -328,6 +328,50 @@ impl Pool {
         }
     }
 
+    /// Returns how many resident frames hold a change the file does not.
+    ///
+    /// **Asked before a cache is thrown away for another process's sake.** A
+    /// dirty frame is a change this connection acknowledged and has not
+    /// checkpointed, and [`Pool::discard_all`] writes one back on its way out -
+    /// so discarding over a file another process has since rewritten writes
+    /// this connection's stale page over that process's work. The answer is
+    /// what turns that into a refusal (task-1979, section 4.4 item 3).
+    pub fn dirty_pages(&self) -> usize {
+        let state = self.state.borrow();
+        state
+            .frames
+            .iter()
+            .filter(|meta| meta.dirty && meta.state != FrameState::Free)
+            .count()
+    }
+
+    /// Drops every cached page without writing any of it back.
+    ///
+    /// **What a connection does when the file it cached has been rewritten by
+    /// another process.** [`Pool::discard_all`] writes a dirty frame back on
+    /// its way out, which is right when the cache is ahead of the file and
+    /// exactly wrong when the file is ahead of the cache: the page written back
+    /// describes a database that no longer exists, and it lands on top of the
+    /// other process's work. That is one half of how 120 acknowledged inserts
+    /// became 60 rows (task-1979, section 4.2, fact 2).
+    ///
+    /// Nothing is lost by dropping them. Every change a dirty frame holds is
+    /// described by a record in the log - that is the write-ahead rule, stated
+    /// in `inillucent-wal` - and the caller replays the log from the file's own
+    /// checkpoint immediately afterwards, which is what puts every one of them
+    /// back. A caller that does not replay must not use this.
+    ///
+    /// Returns how many frames went.
+    pub fn abandon_all(&self) -> DbResult<usize> {
+        {
+            let mut state = self.state.borrow_mut();
+            for meta in state.frames.iter_mut() {
+                meta.dirty = false;
+            }
+        }
+        self.discard_all()
+    }
+
     /// Drops every cached page, so the next read comes from the file.
     ///
     /// **What a connection does when another process has committed.** Every

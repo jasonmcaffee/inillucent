@@ -16,6 +16,35 @@ use crate::render::{literal, Layout};
 use crate::shell::{drive, mode_named, Shell};
 use inillucent_value::Value;
 
+/// Refuses a path outside `--root`, and returns it when there is no root.
+///
+/// **The dot commands were the one way out of `--root` (task-1979, H1).** A
+/// path a statement names goes through the confined VFS, which resolves it
+/// through the file system and refuses what lands outside; `.output`, `.once`,
+/// `.read` and `.import` open their path with plain `std::fs`, so none of that
+/// applied to them. On an MCP server started `--root DIR` an agent could read
+/// and write any file on the host.
+///
+/// The decision is `inillucent_vfs::confine`'s, which is the same one the VFS
+/// makes, so a junction inside the root pointing out is refused here exactly as
+/// it is there. This exists so that every dot command that opens a path by name
+/// asks, and so that the next one somebody adds has an obvious thing to call.
+///
+/// @param shell - the shell, which is told when the path is refused
+/// @param path - the path the caller typed
+pub(crate) fn confine_path(shell: &mut Shell, path: &str) -> Option<String> {
+    let Some(root) = inillucent_driver::vfs::confine::process_root() else {
+        return Some(path.to_string());
+    };
+    match root.admit(path) {
+        Ok(resolved) => Some(resolved.to_string_lossy().into_owned()),
+        Err(refused) => {
+            shell.complain(&format!("Error: {}", refused.message()));
+            None
+        }
+    }
+}
+
 /// Runs one dot command.
 pub fn run(shell: &mut Shell, line: &str) {
     let words = split(without_terminator(line));
@@ -60,6 +89,8 @@ pub fn run(shell: &mut Shell, line: &str) {
         "eqp" => shell.explain_plan = truthy(arguments.first().copied()),
         "read" => read(shell, &arguments),
         "dump" => dump(shell, &arguments),
+        // `.import` reads its file with `std::fs`, so its path is confined
+        // here rather than inside the reader - see `confine`.
         "import" => crate::import::import(shell, &arguments),
         // `.save` and `.clone` both write the database somewhere else, which is
         // what `.backup` does. SQLite's `.clone` rebuilds the target object by
@@ -391,7 +422,11 @@ fn help(shell: &mut Shell, arguments: &[&str]) {
 
 /// `.open`: closes the current database and opens another.
 fn open(shell: &mut Shell, arguments: &[&str]) {
-    let path = arguments.first().copied().unwrap_or(":memory:");
+    let named = arguments.first().copied().unwrap_or(":memory:");
+    let Some(path) = confine_path(shell, named) else {
+        return;
+    };
+    let path = path.as_str();
     if let Err(message) = shell.reopen(path) {
         shell.complain(&format!(
             "Error: unable to open database \"{path}\": {message}"
@@ -747,22 +782,32 @@ fn width(shell: &mut Shell, arguments: &[&str]) {
 
 /// `.output` and `.once`: where results go.
 fn output(shell: &mut Shell, arguments: &[&str], once: bool) {
-    let path = arguments.first().copied().filter(|path| *path != "stdout");
-    if let Err(message) = shell.redirect(path, once) {
+    let named = arguments.first().copied().filter(|path| *path != "stdout");
+    let confined = match named {
+        None => None,
+        Some(named) => match confine_path(shell, named) {
+            Some(path) => Some(path),
+            None => return,
+        },
+    };
+    if let Err(message) = shell.redirect(confined.as_deref(), once) {
         shell.complain(&format!(
             "Error: cannot open \"{}\": {message}",
-            path.unwrap_or("")
+            confined.unwrap_or_default()
         ));
     }
 }
 
 /// `.read`: runs a script as though it had been typed.
 fn read(shell: &mut Shell, arguments: &[&str]) {
-    let Some(path) = arguments.first() else {
+    let Some(named) = arguments.first() else {
         shell.complain("Error: .read requires a file name");
         return;
     };
-    let Ok(text) = std::fs::read_to_string(path) else {
+    let Some(path) = confine_path(shell, named) else {
+        return;
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
         shell.complain(&format!("Error: cannot open \"{path}\""));
         return;
     };
@@ -772,16 +817,27 @@ fn read(shell: &mut Shell, arguments: &[&str]) {
 
 /// `.dump`: the SQL that would rebuild the database.
 fn dump(shell: &mut Shell, arguments: &[&str]) {
-    crate::dump::dump(shell, arguments.first().copied());
+    let confined = match arguments.first().copied() {
+        None => None,
+        Some(named) => match confine_path(shell, named) {
+            Some(path) => Some(path),
+            None => return,
+        },
+    };
+    crate::dump::dump(shell, confined.as_deref());
 }
 
 /// `.backup`: copies a database into a file.
 fn backup(shell: &mut Shell, arguments: &[&str]) {
-    let (_, path) = database_and_file(arguments);
-    let Some(path) = path else {
+    let (_, named) = database_and_file(arguments);
+    let Some(named) = named else {
         shell.complain("Error: .backup requires a file name");
         return;
     };
+    let Some(path) = confine_path(shell, named) else {
+        return;
+    };
+    let path = path.as_str();
     // A checkpoint and a file copy, which is what a backup of this format is:
     // one file is one database, and there is no second writer to race.
     if let Err(message) = shell.backup_to(path) {
@@ -791,11 +847,15 @@ fn backup(shell: &mut Shell, arguments: &[&str]) {
 
 /// `.restore`: replaces a database with the contents of a file.
 fn restore(shell: &mut Shell, arguments: &[&str]) {
-    let (_, path) = database_and_file(arguments);
-    let Some(path) = path else {
+    let (_, named) = database_and_file(arguments);
+    let Some(named) = named else {
         shell.complain("Error: .restore requires a file name");
         return;
     };
+    let Some(path) = confine_path(shell, named) else {
+        return;
+    };
+    let path = path.as_str();
     // **Restoring is opening the other file, not copying it over this one.**
     // The old engine's restore wrote the source's pages into the open database
     // in place. This engine's databases are whole files, so the honest restore

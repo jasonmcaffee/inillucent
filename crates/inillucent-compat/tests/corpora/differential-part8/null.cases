@@ -1,0 +1,33 @@
+# Differential cases, category `null`, from task-1979's review of commit 3073058.
+# One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
+# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+null-001	SELECT NULL = NULL, NULL <> NULL, NULL IS NULL, NULL IS NOT NULL
+null-002	SELECT 1 = NULL, 1 < NULL, 1 > NULL, NULL + 1, NULL || 'a'
+null-003	SELECT NULL AND 0, NULL AND 1, NULL OR 0, NULL OR 1, NOT NULL
+null-004	SELECT 1 IS 1, 1 IS NULL, NULL IS NULL, 'a' IS 'a', 1 IS NOT 2
+null-005	SELECT 1 IN (1,2,NULL), 3 IN (1,2,NULL), 3 NOT IN (1,2,NULL), 1 NOT IN (1,2,NULL)
+null-006	SELECT NULL IN (1,2), NULL NOT IN (1,2), NULL IN (), NULL NOT IN ()
+null-007	SELECT 1 IN (), 1 NOT IN ()
+null-008	CREATE TABLE t(a); INSERT INTO t VALUES(1),(2),(NULL); SELECT 3 IN (SELECT a FROM t), 3 NOT IN (SELECT a FROM t), 1 IN (SELECT a FROM t)
+null-009	CREATE TABLE t(a); INSERT INTO t VALUES(NULL),(1),(2),(NULL); SELECT count(*), count(a), sum(a), avg(a), total(a), min(a), max(a) FROM t
+null-010	CREATE TABLE t(a); INSERT INTO t VALUES(NULL),(NULL); SELECT count(*), count(a), sum(a), total(a), avg(a), min(a), max(a), typeof(sum(a)), typeof(total(a)) FROM t
+null-011	CREATE TABLE t(a); INSERT INTO t VALUES(NULL),(1),(NULL),(1); SELECT DISTINCT a FROM t ORDER BY a
+null-012	CREATE TABLE t(a); INSERT INTO t VALUES(NULL),(1),(2),(NULL); SELECT a, count(*) FROM t GROUP BY a ORDER BY a
+null-013	CREATE TABLE t(a); INSERT INTO t VALUES(2),(NULL),(1); SELECT a FROM t ORDER BY a
+null-014	CREATE TABLE t(a); INSERT INTO t VALUES(2),(NULL),(1); SELECT a FROM t ORDER BY a DESC
+null-015	CREATE TABLE t(a); INSERT INTO t VALUES(2),(NULL),(1); SELECT a FROM t ORDER BY a NULLS LAST
+null-016	CREATE TABLE t(a); INSERT INTO t VALUES(2),(NULL),(1); SELECT a FROM t ORDER BY a DESC NULLS FIRST
+null-017	SELECT coalesce(NULL,NULL,3,4), ifnull(NULL,'x'), ifnull('y','x'), nullif(1,1), nullif(1,2), nullif(NULL,1)
+null-018	SELECT coalesce(NULL,NULL), typeof(coalesce(NULL,NULL))
+null-019	SELECT nullif('a','A'), nullif('a','a'), typeof(nullif(1,2))
+null-020	CREATE TABLE t(a,b); INSERT INTO t VALUES(1,NULL),(NULL,1); SELECT a,b FROM t WHERE a IS NOT b
+null-021	SELECT CASE WHEN NULL THEN 1 ELSE 2 END, CASE NULL WHEN NULL THEN 1 ELSE 2 END, CASE 1 WHEN 1 THEN NULL END
+null-022	SELECT NULL BETWEEN 1 AND 2, 1 BETWEEN NULL AND 2, 1 BETWEEN 0 AND NULL, 3 BETWEEN 0 AND NULL
+null-023	CREATE TABLE t(a UNIQUE); INSERT INTO t VALUES(NULL),(NULL); SELECT count(*) FROM t
+null-024	CREATE TABLE t(a,b); INSERT INTO t VALUES(NULL,1),(NULL,2); SELECT count(DISTINCT a), count(DISTINCT b) FROM t
+null-025	SELECT group_concat(x) FROM (SELECT NULL AS x UNION ALL SELECT 'a' UNION ALL SELECT NULL UNION ALL SELECT 'b')
+null-026	SELECT max(NULL, 1), min(NULL, 1), max(1,2,NULL), min(1,2,NULL)
+null-027	CREATE TABLE t(a); INSERT INTO t VALUES(1); SELECT a FROM t HAVING count(*) > 0
+null-028	SELECT sum(a) FROM (SELECT 1 AS a WHERE 0)
+null-029	SELECT (SELECT 1 WHERE 0), typeof((SELECT 1 WHERE 0))
+null-030	CREATE TABLE t(a NOT NULL DEFAULT 5); INSERT INTO t DEFAULT VALUES; SELECT a FROM t

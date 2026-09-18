@@ -260,9 +260,11 @@ Reading down that table: compression to 1 byte costs nothing, and shortening the
 
 Semantic search and lexical search each produce a ranked list of 50 chunks. They have to become one list of 10.
 
-The scores cannot be added, because they are not the same kind of number: a cosine similarity of 0.83 and a BM25 score of 14.2 have no common scale. inillucent's default therefore ignores the scores and uses only the positions, giving each chunk `1 divided by (60 plus its position)` from each list and adding those. A chunk both methods rank highly beats a chunk only one of them found. This is called Reciprocal Rank Fusion, and the baseline is given the same method and the same constant, so the comparison measures retrieval rather than a change of ranking policy.
+The scores cannot be added, because they are not the same kind of number: a cosine similarity of 0.83 and a BM25 score of 14.2 have no common scale. inillucent's default rescales each list onto its own range and takes a weighted sum: the vector side is given a weight of 0.35 and the lexical side the rest. A chunk both methods rank highly beats a chunk only one of them found. The weight is then adapted per query from four signals the search has already computed, within a floor of 0.05 and a ceiling of 0.95, so a question full of identifiers leans on the lexical side and a paraphrased question leans on the vector side.
 
-inillucent also implements a second method that rescales each list's scores onto a common range and takes a weighted sum, keeping the score magnitudes that the first method discards. Both are graded, and on this corpus they finish close together.
+inillucent also implements Reciprocal Rank Fusion, which ignores the scores and gives each chunk `1 divided by (60 plus its position)` from each list. It is available and it is graded. It is not the default: on the 18,685 chunk corpus the weighted normalised score beat it on every hybrid metric, nDCG 0.751 against 0.434 on natural language queries and 0.981 against 0.933 on document identity.
+
+The baseline is given whichever of the two the run is configured with, and the graded run configures both engines with the same one, so the comparison measures retrieval rather than a change of ranking policy.
 
 Finally, at most two chunks from any one document are kept, so a single long page cannot fill the results.
 
@@ -317,7 +319,7 @@ Correct answers come from three sources, none of which requires a person to judg
 
 ### The baseline
 
-Beating a badly configured PostgreSQL would prove nothing, so the baseline is a correctly configured one. It runs the same SQL shape against the same schema, builds its HNSW index with the same parameters, `m = 16` and `ef_construction = 64`, fuses its two result lists with the same Reciprocal Rank Fusion constant, and is loaded with byte identical vectors.
+Beating a badly configured PostgreSQL would prove nothing, so the baseline is a correctly configured one. It runs the same SQL shape against the same schema, builds its HNSW index with the same parameters, `m = 16` and `ef_construction = 64`, fuses its two result lists with the same method and the same weight as inillucent - the harness hands both engines one fusion setting, and the published run used the normalised score fusion at a vector weight of 0.35 - and is loaded with byte identical vectors.
 
 Its scan settings are these, each chosen from a measured sweep against an exhaustive comparison rather than by feel:
 
@@ -327,7 +329,7 @@ Its scan settings are these, each chosen from a measured sweep against an exhaus
 | `hnsw.ef_search` | 400 | 100 | A scan cannot return more rows than it collected, so this has to be at least the number of rows requested. Raising it further raises recall inside a filter. |
 | `hnsw.max_scan_tuples` | 40,000 | not applicable | Measured against 200,000, mean recall was 0.788 either way, so the larger value only costs latency. |
 | `hnsw.scan_mem_multiplier` | 4 | not applicable | At the pgvector default of 1 the iterative scan exhausts its memory budget and stops early, returning as few as 30 rows of 50 and holding mean recall to 0.788. At 4 the short results stop and mean recall reaches 0.856. At 8 nothing changes. |
-| ordering | `relaxed_order` rather than `strict_order` | not applicable | 0.856 against 0.727 mean recall at the same cost. Nothing downstream depends on the within scan ordering, because Reciprocal Rank Fusion recomputes the ranking. Those figures come from the private corpus this engine was first graded on, measured against a different database. They are the reason the setting has the value it has, not a result this repository reproduces. |
+| ordering | `relaxed_order` rather than `strict_order` | not applicable | 0.856 against 0.727 mean recall at the same cost. Nothing downstream depends on the within scan ordering, because the fusion recomputes the ranking. Those figures come from the private corpus this engine was first graded on, measured against a different database. They are the reason the setting has the value it has, not a result this repository reproduces. |
 
 `hnsw.scan_mem_multiplier` is the one most easily missed. Missing it produces a baseline that looks tuned and is not, which is why the settings are written down here.
 

@@ -174,12 +174,18 @@ impl ImportedDatabase {
         // is stale and a later `main` open of it would replay old pages back
         // over the newer ones this session wrote.
         inillucent_pool::journal::replay_hot_journal(vfs.as_ref(), &path)?;
+        let doubtful = self.doubt_for(&path)?;
+        let in_doubt = !doubtful.is_empty();
         let OpenedFile {
             database,
             wal,
             catalog_tree,
+            // An attachment's own recovery is reported by the statement that
+            // attached it rather than kept, because `PRAGMA` and the result
+            // envelope both describe the connection's main file.
+            recovery: _,
             highest_txn,
-        } = open_file(&vfs, &path, self.storage.frames, &self.doubt_for(&path)?)?;
+        } = open_file(&vfs, &path, self.storage.frames, &doubtful)?;
         // **This attachment gets its own rollback journal, matching `main`.**
         // `Pool::checkpoint` writes an attached file's pages in place exactly
         // as it does `main`'s, so without this a checkpoint interrupted on an
@@ -260,6 +266,7 @@ impl ImportedDatabase {
             vfs,
             database,
             wal,
+            in_doubt,
             entries,
             next_root: highest_identifier.saturating_add(1).max(FIRST_CREATED_ROOT),
             handles,

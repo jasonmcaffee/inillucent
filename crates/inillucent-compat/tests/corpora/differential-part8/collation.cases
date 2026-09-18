@@ -1,0 +1,17 @@
+# Differential cases, category `collation`, from task-1979's review of commit 3073058.
+# One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
+# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+coll-001	SELECT 'a' = 'A' COLLATE NOCASE, 'a' = 'A', 'a ' = 'a' COLLATE RTRIM, 'a ' = 'a'
+coll-002	CREATE TABLE t(a TEXT COLLATE NOCASE); INSERT INTO t VALUES('b'),('A'),('a'),('B'); SELECT a FROM t ORDER BY a
+coll-003	CREATE TABLE t(a TEXT); INSERT INTO t VALUES('b'),('A'),('a'),('B'); SELECT a FROM t ORDER BY a COLLATE NOCASE, a
+coll-004	CREATE TABLE t(a TEXT COLLATE NOCASE UNIQUE); INSERT INTO t VALUES('a'); INSERT INTO t VALUES('A'); SELECT count(*) FROM t
+coll-005	CREATE TABLE t(a TEXT COLLATE RTRIM); INSERT INTO t VALUES('a '),('a'),('b'); SELECT a, count(*) FROM t GROUP BY a ORDER BY a
+coll-006	CREATE TABLE t(a TEXT COLLATE NOCASE); CREATE INDEX i ON t(a); INSERT INTO t VALUES('B'),('a'); SELECT a FROM t WHERE a = 'A'
+coll-007	SELECT 'a' COLLATE NOCASE = 'A', ('a' = 'A') COLLATE NOCASE
+coll-008	CREATE TABLE t(a TEXT COLLATE NOCASE); INSERT INTO t VALUES('A'),('a'); SELECT DISTINCT a FROM t
+coll-009	CREATE TABLE t(a TEXT COLLATE NOCASE, b TEXT); INSERT INTO t VALUES('A','a'); SELECT a=b, b=a FROM t
+coll-010	SELECT 'é' = 'É' COLLATE NOCASE, 'STRASSE' = 'strasse' COLLATE NOCASE
+coll-011	CREATE TABLE t(a COLLATE NOCASE); INSERT INTO t VALUES('a'),('B'); SELECT group_concat(a) FROM (SELECT a FROM t ORDER BY a)
+coll-012	SELECT 1 COLLATE NOCASE = 1
+coll-013	CREATE TABLE t(a TEXT); INSERT INTO t VALUES('a '),('a'); SELECT count(DISTINCT a COLLATE RTRIM), count(DISTINCT a) FROM t
+coll-014	CREATE TABLE t(a TEXT COLLATE NOCASE); INSERT INTO t VALUES('a'),('B'),('b'),('A'); SELECT a FROM t WHERE a BETWEEN 'A' AND 'B' ORDER BY a, rowid

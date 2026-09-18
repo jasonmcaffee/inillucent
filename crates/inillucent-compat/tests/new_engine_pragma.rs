@@ -253,12 +253,14 @@ fn a_pragma_with_one_setting_reports_it_and_refuses_any_other() {
     // `delete` is the default because the reference's is, and because the
     // medium gate says it is free: 3.78x weighted with `wal` and 3.70x with
     // `delete`, lower bounds 3.45x and 3.44x over 30 paired rounds.
-    // `locking_mode` is the other way round - `normal` is a real switch, and
-    // defaulting to it reads 3.03x with a 2.95x lower bound, under the bar.
+    // `locking_mode` is `normal`, the reference's default too: `exclusive`
+    // never releases the file between statements, so a second process either
+    // waits out the whole life of the first or reads state from before it
+    // (task-1979, section 4).
     for (sql, expected) in [
         ("PRAGMA journal_mode", "delete"),
         ("PRAGMA encoding", "UTF-8"),
-        ("PRAGMA locking_mode", "exclusive"),
+        ("PRAGMA locking_mode", "normal"),
     ] {
         assert_eq!(
             ask(&mut engine, sql)

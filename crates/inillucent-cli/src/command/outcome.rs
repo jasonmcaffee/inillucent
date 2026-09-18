@@ -233,6 +233,69 @@ impl Outcome {
         self
     }
 
+    /// Adds what opening the database did, when it did anything.
+    ///
+    /// **Only when something happened (task-1979, C10).** A `recovered` member
+    /// on every result of every command would change the envelope every caller
+    /// parses and every page documents, to carry `false` almost always. An
+    /// operator investigating a crash asks one question - was this file
+    /// recovered - and the answer is the presence of the member.
+    ///
+    /// A stray segment is reported the same way and for the same reason: it is
+    /// a file beside the database that nothing will replay and nothing will
+    /// remove, so naming it is the only way anybody finds out it is there.
+    ///
+    /// @param recovery - what the open reported
+    /// @param strays - segments beside the file the chain does not reach
+    pub fn with_recovery(
+        mut self,
+        recovery: &inillucent_driver::Recovery,
+        strays: &[u64],
+    ) -> Outcome {
+        if recovery.recovered {
+            self.extra.push((
+                "recovered".to_string(),
+                json::object(vec![
+                    ("records_scanned", Json::Int(recovery.scanned as i64)),
+                    ("records_applied", Json::Int(recovery.applied as i64)),
+                    (
+                        "transactions_committed",
+                        Json::Int(recovery.committed as i64),
+                    ),
+                    ("transactions_discarded", Json::Int(recovery.losers as i64)),
+                ]),
+            ));
+            self.text = format!(
+                "{}{}recovered the log: {} records scanned, {} applied, {} transactions committed, {} discarded.",
+                self.text,
+                if self.text.is_empty() { "" } else { "\n" },
+                recovery.scanned,
+                recovery.applied,
+                recovery.committed,
+                recovery.losers
+            );
+        }
+        if !strays.is_empty() {
+            let named: Vec<Json> = strays
+                .iter()
+                .map(|sequence| Json::Int(*sequence as i64))
+                .collect();
+            self.extra
+                .push(("stray_log_segments".to_string(), Json::Array(named)));
+            let listed = strays
+                .iter()
+                .map(|sequence| format!("{sequence:010}"))
+                .collect::<Vec<String>>()
+                .join(", ");
+            self.text = format!(
+                "{}{}log segments beside this database that its chain does not reach: {listed}. Nothing replays them.",
+                self.text,
+                if self.text.is_empty() { "" } else { "\n" }
+            );
+        }
+        self
+    }
+
     /// Renders this outcome as the object every front end reports.
     pub fn to_json(&self) -> Json {
         let columns = self

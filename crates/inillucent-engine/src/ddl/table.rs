@@ -43,6 +43,7 @@ impl crate::ImportedDatabase {
         let sql = canonical_sql("CREATE TABLE", source, name_offset, source.len() as u32);
         self.define_table(name, sql)?;
         self.refresh_catalog();
+        self.declarations_resolve(name)?;
         // **`sqlite_sequence` comes into being with the first `AUTOINCREMENT`
         // table**, not with the first row - SQLite writes the schema row at
         // `CREATE TABLE` time and the table's own row at its first insert. The
@@ -55,6 +56,30 @@ impl crate::ImportedDatabase {
         self.seal()?;
         Ok(Outcome::empty())
     }
+    /// Refuses a table whose `CHECK` or generated column names nothing.
+    ///
+    /// **`CREATE TABLE` used to accept a function no build has (task-1979,
+    /// R11).** `CHECK (unknownfn(x))` and `y AS (unknownfn(x))` were stored as
+    /// text and resolved only when a row was written or read, so the statement
+    /// that could have said "no such function: unknownfn" reported success and
+    /// the table was unusable from its first insert. SQLite refuses both at
+    /// `CREATE TABLE`, naming the function.
+    ///
+    /// The declarations are resolved by binding two probes rather than by
+    /// walking them here: binding is what resolves a function, and a second
+    /// resolver would agree with the binder until the day it did not. A failure
+    /// leaves nothing behind, because `execute_ddl` undoes the statement.
+    ///
+    /// @param name - the table's name as written
+    fn declarations_resolve(&mut self, name: &[u8]) -> DbResult<()> {
+        let written = String::from_utf8_lossy(name).replace('"', "\"\"");
+        // The read resolves every generated column's expression, and the write
+        // resolves every `CHECK`. Neither runs.
+        names_something(self.bind(&format!("SELECT * FROM \"{written}\"")))?;
+        names_something(self.bind(&format!("INSERT INTO \"{written}\" DEFAULT VALUES")))?;
+        Ok(())
+    }
+
     /// Reports whether a table just defined never reuses a key.
     ///
     /// @param name - the table's name as written
@@ -272,5 +297,26 @@ impl crate::ImportedDatabase {
         }
         self.rebuild_tables()?;
         Ok(root)
+    }
+}
+
+/// Returns the refusal only when it is about a name nothing has.
+///
+/// **The probes bind an ordinary statement, and a schema is not one.** A
+/// `CHECK` is bound as schema text, where `PRAGMA trusted_schema` decides
+/// whether a function that is not innocuous may be named at all, and a probe
+/// bound as an ordinary `INSERT` does not carry that site - so a table whose
+/// `CHECK` calls a function the schema policy allows was refused by the probe
+/// and not by the engine. What `declarations_resolve` is for is the one
+/// failure SQLite reports at `CREATE TABLE` (task-1979, R11): a function no
+/// build has. Everything else the probe happens to notice is left to the
+/// statement that actually runs.
+///
+/// @param bound - what binding the probe answered
+fn names_something<T>(bound: DbResult<T>) -> DbResult<()> {
+    match bound {
+        Ok(_) => Ok(()),
+        Err(error) if error.message().starts_with("no such function") => Err(error),
+        Err(_) => Ok(()),
     }
 }

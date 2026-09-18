@@ -408,3 +408,113 @@ fn a_tokenizer_this_build_has_not_got_is_refused_rather_than_substituted() {
             .unwrap_or_else(|error| panic!("{suffix}: {error:?}"));
     }
 }
+
+/// `VACUUM` leaves one `sqlite_master` row per name.
+///
+/// **It used to write a second row for every shadow table (task-1979, R2).**
+/// The rebuild replayed every `CREATE TABLE` it found, the shadow ones
+/// included, and then the `CREATE VIRTUAL TABLE` made a second set under the
+/// same names: six rows became eleven for six names and the file roughly
+/// doubled. `integrity-check` said `ok` and the table still answered, so
+/// nothing but the catalog itself showed it.
+#[test]
+fn vacuum_leaves_one_schema_row_per_name() {
+    check(
+        "vacuum",
+        &[
+            Step::Exec("VACUUM"),
+            Step::Query("SELECT name, type FROM sqlite_master ORDER BY name"),
+            Step::Query("SELECT count(*), count(DISTINCT name) FROM sqlite_master"),
+            Step::Query("SELECT rowid FROM docs WHERE docs MATCH 'quick' ORDER BY rowid"),
+            Step::Query("SELECT * FROM docs_content ORDER BY id"),
+        ],
+    );
+}
+
+/// `content=''` makes a contentless table, and it is one.
+///
+/// **It used to be accepted and ignored (task-1979, R5).** The option fell
+/// through to the catch-all that records an option and changes nothing, so
+/// `%_content` was created anyway, every column read back the document text
+/// where SQLite answers NULL, and `delete-all` - the only way to empty a
+/// contentless table - was refused unconditionally with a message naming the
+/// two kinds of table it is for. An application chooses the option precisely so
+/// that the source text is not written into the database, and it was.
+#[test]
+fn a_contentless_table_stores_no_text() {
+    check(
+        "contentless",
+        &[
+            Step::Exec("CREATE VIRTUAL TABLE cl USING fts5(body, content='')"),
+            Step::Exec("INSERT INTO cl(rowid, body) VALUES (1, 'hello world')"),
+            Step::Exec("INSERT INTO cl(rowid, body) VALUES (2, 'goodbye world')"),
+            Step::Query("SELECT name FROM sqlite_master WHERE name LIKE 'cl%' ORDER BY name"),
+            Step::Query("SELECT rowid, body FROM cl WHERE cl MATCH 'world' ORDER BY rowid"),
+            Step::Query("SELECT rowid FROM cl ORDER BY rowid"),
+            Step::Query("SELECT rowid FROM cl WHERE rowid = 2"),
+            Step::Query("SELECT count(*) FROM cl"),
+            // Both engines refuse this, which the comparison grades by code.
+            Step::Query("DELETE FROM cl WHERE rowid = 1"),
+            Step::Exec("INSERT INTO cl(cl) VALUES('delete-all')"),
+            Step::Query("SELECT count(*) FROM cl"),
+            Step::Query("SELECT rowid FROM cl WHERE cl MATCH 'world' ORDER BY rowid"),
+        ],
+    );
+}
+
+/// The options this build cannot honour are refused rather than ignored.
+///
+/// **All three used to be accepted and changed nothing (task-1979, R15).**
+/// `detail='none'` says the index holds no positions, and SQLite refuses a
+/// phrase query against one - this engine stored the positions anyway and
+/// answered the phrase query, which is an answer the schema says is not
+/// available. The refusal carries `unsupported`, so the command line exits 3
+/// and a caller can tell "not built" from "your statement is wrong".
+///
+/// It is not a differential case: SQLite implements all three, so the two
+/// engines disagree here on purpose and the claim is about the refusal.
+#[test]
+fn the_fts5_options_this_build_cannot_honour_are_refused() {
+    let path = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fts5-options.rdb");
+    for suffix in ["", "-wal", "-journal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+    let database = Database::open(&path).expect("the database opens");
+    let connection = database.session().expect("the connection opens");
+    for (name, option) in [
+        ("detail_none", "detail='none'"),
+        ("detail_column", "detail='column'"),
+        ("columnsize", "columnsize=0"),
+        ("content_rowid", "content_rowid='id'"),
+    ] {
+        let refused = connection
+            .execute(&format!(
+                "CREATE VIRTUAL TABLE r_{name} USING fts5(body, {option})"
+            ))
+            .expect_err("an option this build cannot honour must be refused");
+        assert!(
+            refused.unsupported().is_some(),
+            "{option} must be refused as unsupported: {refused:?}"
+        );
+        assert!(
+            connection
+                .query(&format!("SELECT rowid FROM r_{name}"))
+                .is_err(),
+            "the refused CREATE must leave no table behind"
+        );
+    }
+    // The values this build does store are accepted, so the refusal is about
+    // the value rather than about the option.
+    for (suffix, option) in [
+        ("full", "detail='full'"),
+        ("sized", "columnsize=1"),
+        ("prefixed", "prefix='2 3'"),
+    ] {
+        connection
+            .execute(&format!(
+                "CREATE VIRTUAL TABLE ok_{suffix} USING fts5(body, {option})"
+            ))
+            .unwrap_or_else(|error| panic!("{option}: {error:?}"));
+    }
+}
+

@@ -647,6 +647,145 @@ fn place_row(
     tree.put(database, log, &borrowed)?;
     Ok(())
 }
+
+/// Converts a JSON array of numbers into the blob a `VECTOR(N)` column holds.
+///
+/// **The only form that worked was a hex blob literal (task-1979, section 8.2,
+/// gap 2).** A vector is 32-bit floats in little-endian order, and nothing in
+/// SQL writes those: the working `INSERT` appeared in one test file and
+/// nowhere else, so an application's first write into a vector column was a
+/// hex string it had to build itself. `'[1, 0, 0, 0]'` is what pgvector takes
+/// and what an application already has, and it converts to exactly the same
+/// bytes.
+///
+/// `None` means the value is not a JSON array of the declared width, and the
+/// caller then checks it as it stands - so a TEXT value that is not one is
+/// still refused by `vector_column_is_met` rather than being quietly accepted.
+///
+/// @param value - what the statement is about to store
+/// @param width - how many dimensions the declaration promises
+fn vector_from_json(value: Option<&OwnedDatum>, width: usize) -> Option<OwnedDatum> {
+    let text = match value {
+        Some(OwnedDatum::Text(bytes)) => bytes,
+        _ => return None,
+    };
+    let numbers = json_numbers(text)?;
+    if numbers.len() != width {
+        return None;
+    }
+    let mut bytes = Vec::with_capacity(width.saturating_mul(4));
+    for number in numbers {
+        bytes.extend_from_slice(&(number as f32).to_le_bytes());
+    }
+    Some(OwnedDatum::Blob(bytes))
+}
+
+/// Returns the numbers of a JSON array, or `None` for anything else.
+///
+/// A hand parser rather than the JSON reader, because the whole grammar here is
+/// `[` a comma separated list of numbers `]`: anything with a string, an
+/// object, a nested array or a name in it is not a vector, and answering `None`
+/// for it is what leaves the ordinary refusal in place.
+///
+/// @param text - the value's bytes
+fn json_numbers(text: &[u8]) -> Option<Vec<f64>> {
+    let held = std::str::from_utf8(text).ok()?.trim();
+    let inner = held.strip_prefix('[')?.strip_suffix(']')?.trim();
+    if inner.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut numbers = Vec::new();
+    for part in inner.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            return None;
+        }
+        numbers.push(part.parse::<f64>().ok()?);
+    }
+    Some(numbers)
+}
+
+/// Refuses a value a `VECTOR(N)` column does not admit.
+///
+/// **The width is checked because the storage does not check it.** A vector of
+/// the wrong width is not a slow query, it is a distance that silently answers
+/// NULL for ever.
+///
+/// **NaN and Infinity are refused for a reason measured on the shipped binary
+/// (task-1979, R8).** Byte length used to be the only check, so
+/// `x'0000c07f...'` - a NaN in the first component - was stored. Every distance
+/// against that row is NaN, NaN compares below every real number in the
+/// engine's ordering, and the row therefore sorted ahead of every real
+/// neighbour in an exhaustive `ORDER BY vector_distance_cos`. Worse, the HNSW
+/// builder refuses a non finite component, so a `CREATE INDEX ... USING
+/// inillucent_hnsw` over a table holding one of these rows failed - which is the
+/// path that reached R1 without a crash. Refusing the value where it is written
+/// is the only place the application can still act on it.
+///
+/// The code is `SQLITE_CONSTRAINT_DATATYPE`, so the primary code a caller
+/// matches on is `SQLITE_CONSTRAINT`, the same class a `CHECK` violation
+/// reports.
+///
+/// @param table - the table being written, for the message
+/// @param column - the column being written, for the message
+/// @param width - how many dimensions the declaration promises
+/// @param value - what the statement is about to store, absent when the row
+///   image has no cell for the column
+fn vector_column_is_met(
+    table: &[u8],
+    column: &[u8],
+    width: usize,
+    value: Option<&OwnedDatum>,
+) -> DbResult<()> {
+    let bytes = match value {
+        Some(OwnedDatum::Blob(bytes)) => bytes,
+        Some(OwnedDatum::Null) | None => return Ok(()),
+        _ => return Err(not_a_vector(table, column, width, "it is not a vector")),
+    };
+    if bytes.len() != width.saturating_mul(4) {
+        return Err(not_a_vector(
+            table,
+            column,
+            width,
+            "it is not a vector of the declared width",
+        ));
+    }
+    for component in bytes.chunks_exact(4) {
+        let held = match component.try_into() {
+            Ok(four) => f32::from_le_bytes(four),
+            Err(_) => continue,
+        };
+        if !held.is_finite() {
+            return Err(not_a_vector(
+                table,
+                column,
+                width,
+                "one of its components is not a finite number",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Builds the refusal a `VECTOR(N)` column reports.
+///
+/// Its own function so every reason carries the same code and the same
+/// sentence shape; see `vector_column_is_met` for why each one is refused.
+///
+/// @param table - the table being written
+/// @param column - the column being written
+/// @param width - how many dimensions the declaration promises
+/// @param because - the clause naming what is wrong with the value
+fn not_a_vector(table: &[u8], column: &[u8], width: usize, because: &str) -> DbError {
+    DbError::new(ExtendedCode(codes::DATATYPE)).with_message(format!(
+        "cannot store this value in {}.{}: {}, and the column is declared VECTOR({})",
+        String::from_utf8_lossy(table),
+        String::from_utf8_lossy(column),
+        because,
+        width
+    ))
+}
+
 /// Refuses a row a column's declaration does not allow.
 ///
 /// **The engine used to accept one - an attempt to write a vector into a
@@ -695,26 +834,19 @@ pub(crate) fn declarations_are_met(
             continue;
         };
         let value = row.get(slot).cloned();
-        // **A `VECTOR(N)` column holds N floats or nothing.** The width is the
-        // only thing the declaration promises that the storage does not already
-        // enforce, and a vector of the wrong width is not a slow query, it is a
-        // distance that silently answers NULL for ever.
+        // A `VECTOR(N)` column holds N finite floats or nothing - see
+        // `vector_column_is_met`. A JSON array of N numbers is accepted as a
+        // spelling of one and converted here, which is where a column's
+        // affinity is applied to a value on its way in.
         if let Some(width) = column.vector_dimensions() {
-            let wrong = match &value {
-                Some(OwnedDatum::Blob(bytes)) => bytes.len() != width.saturating_mul(4),
-                Some(OwnedDatum::Null) | None => false,
-                _ => true,
-            };
-            if wrong {
-                return Err(
-                    DbError::new(ExtendedCode(codes::DATATYPE)).with_message(format!(
-                        "cannot store this value in {}.{}: it is not a vector of {} dimensions",
-                        String::from_utf8_lossy(&table.name),
-                        String::from_utf8_lossy(&column.name),
-                        width
-                    )),
-                );
+            if let Some(converted) = vector_from_json(value.as_ref(), width) {
+                if let Some(cell) = row.get_mut(slot) {
+                    *cell = converted.clone();
+                }
+                vector_column_is_met(&table.name, &column.name, width, Some(&converted))?;
+                continue;
             }
+            vector_column_is_met(&table.name, &column.name, width, value.as_ref())?;
         }
         if !column.not_null || Some(position as u16) == table.rowid_alias {
             continue;

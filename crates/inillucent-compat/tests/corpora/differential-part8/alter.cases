@@ -1,0 +1,14 @@
+# Differential cases, category `alter`, from task-1979's review of commit 3073058.
+# One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
+# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+alt-001	CREATE TABLE t(a); INSERT INTO t VALUES(1); ALTER TABLE t ADD COLUMN b DEFAULT 7; SELECT a,b FROM t
+alt-002	CREATE TABLE t(a); INSERT INTO t VALUES(1); ALTER TABLE t ADD COLUMN b; SELECT a,b,typeof(b) FROM t
+alt-003	CREATE TABLE t(a); INSERT INTO t VALUES(1); ALTER TABLE t RENAME TO u; SELECT a FROM u
+alt-004	CREATE TABLE t(a,b); INSERT INTO t VALUES(1,2); ALTER TABLE t RENAME COLUMN b TO c; SELECT c FROM t
+alt-005	CREATE TABLE t(a,b); INSERT INTO t VALUES(1,2); ALTER TABLE t DROP COLUMN b; SELECT * FROM t
+alt-006	CREATE TABLE t(a PRIMARY KEY, b); ALTER TABLE t DROP COLUMN a
+alt-007	CREATE TABLE t(a); ALTER TABLE t ADD COLUMN b NOT NULL
+alt-008	CREATE TABLE t(a); ALTER TABLE t ADD COLUMN b UNIQUE
+alt-009	CREATE TABLE t(a); CREATE VIEW v AS SELECT a FROM t; ALTER TABLE t RENAME TO u; SELECT sql FROM sqlite_schema WHERE name='v'
+alt-010	CREATE TABLE t(a,b); CREATE INDEX i ON t(b); ALTER TABLE t RENAME COLUMN b TO c; SELECT sql FROM sqlite_schema WHERE name='i'
+alt-011	CREATE TABLE t(a); INSERT INTO t VALUES(1); ALTER TABLE t ADD COLUMN b INTEGER DEFAULT '5'; SELECT b, typeof(b) FROM t

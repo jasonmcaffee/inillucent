@@ -1,0 +1,18 @@
+# Differential cases, category `limit`, from task-1979's review of commit 3073058.
+# One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
+# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+lim-001	CREATE TABLE t(a); INSERT INTO t VALUES(1),(2),(3); SELECT a FROM t ORDER BY a LIMIT -1
+lim-002	CREATE TABLE t(a); INSERT INTO t VALUES(1),(2),(3); SELECT a FROM t ORDER BY a LIMIT 0
+lim-003	CREATE TABLE t(a); INSERT INTO t VALUES(1),(2),(3); SELECT a FROM t ORDER BY a LIMIT 2 OFFSET -1
+lim-004	CREATE TABLE t(a); INSERT INTO t VALUES(1),(2),(3); SELECT a FROM t ORDER BY a LIMIT 1+1
+lim-005	CREATE TABLE t(a); INSERT INTO t VALUES(1),(2),(3); SELECT a FROM t ORDER BY a LIMIT '2'
+lim-006	CREATE TABLE t(a); INSERT INTO t VALUES(1),(2),(3); SELECT a FROM t ORDER BY a LIMIT 2.7
+lim-007	CREATE TABLE t(a); INSERT INTO t VALUES(1),(2),(3); SELECT a FROM t ORDER BY a LIMIT NULL
+lim-008	CREATE TABLE t(a); INSERT INTO t VALUES(1),(2),(3); SELECT a FROM t ORDER BY a LIMIT 1,2
+lim-009	CREATE TABLE t(a); INSERT INTO t VALUES(3),(1),(2); SELECT a AS x FROM t ORDER BY x
+lim-010	CREATE TABLE t(a); INSERT INTO t VALUES(3),(1),(2); SELECT a*-1 AS x FROM t ORDER BY 1
+lim-011	CREATE TABLE t(a); INSERT INTO t VALUES(3),(1),(2); SELECT a FROM t ORDER BY 2
+lim-012	CREATE TABLE t(a,b); INSERT INTO t VALUES(1,'z'),(1,'a'),(2,'m'); SELECT a,b FROM t ORDER BY a, b DESC
+lim-013	CREATE TABLE t(a); INSERT INTO t VALUES(1),(2); SELECT a AS a FROM t ORDER BY -a
+lim-014	CREATE TABLE t(a); INSERT INTO t VALUES(1),(2),(3); SELECT a FROM t ORDER BY a LIMIT 9223372036854775807
+lim-015	SELECT 1 LIMIT 1 OFFSET 9223372036854775807

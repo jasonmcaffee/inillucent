@@ -128,9 +128,12 @@ mod plans;
 use plans::Cached;
 pub use plans::DEFAULT_STATEMENT_CACHE;
 pub mod pragma;
+pub mod readonly;
+mod reattach;
 mod rebuild;
-mod recovery;
-use recovery::{open_file, OpenedFile};
+mod schema_write;
+pub mod recovery;
+use recovery::OpenedFile;
 /// Session-scoped `total_changes()` accounting.
 mod session_changes;
 /// The engine's half of a vector index a module owns.
@@ -182,7 +185,7 @@ use inillucent_tree::PagedTree;
 use inillucent_value::collation::Collation;
 pub use inillucent_vfs as vfs;
 use inillucent_vfs::{DbPath, OsVfs};
-use inillucent_wal::{Body, Synchronous, Wal, WalOptions, FIRST_LSN};
+use inillucent_wal::{Body, Synchronous, Wal};
 
 /// The error every call in this crate reports, and its result alias.
 ///
@@ -311,6 +314,11 @@ struct Attached {
     database: Database,
     /// The log every change to this file is described in.
     wal: std::rc::Rc<Wal>,
+    /// Whether this file was attached with a transaction still in doubt.
+    ///
+    /// See `Storage::in_doubt`, which says the same thing about the database
+    /// the connection was opened on and for the same reason.
+    in_doubt: bool,
     /// This file's catalog rows, with the handle each object's tree is under.
     entries: Vec<Recorded>,
     /// The identifier the next tree created *in this file* takes.
@@ -388,6 +396,31 @@ impl ImportedDatabase {
     /// roadmap item 6).
     pub fn checkpoint_lsn(&self) -> u64 {
         self.storage.database.meta().checkpoint_lsn
+    }
+
+    /// Returns what opening this connection's file did to it.
+    ///
+    /// **So a caller can tell a clean open from a recovered one (task-1979,
+    /// C10).** Nothing reported it before: after a killed writer, the reopen
+    /// replayed the log, answered every query correctly and said nothing, in
+    /// text and in `--output json`, so an operator investigating a crash had no
+    /// way to ask the tool whether the file had been recovered.
+    ///
+    /// It describes the open, not the connection's later life, so it does not
+    /// change when a statement runs.
+    pub fn recovery_report(&self) -> &crate::recovery::RecoveryReport {
+        &self.storage.recovery
+    }
+
+    /// Returns which segment of its log this connection is writing.
+    ///
+    /// **The live number, not the one the open reported.** A checkpoint rolls
+    /// the log to the next sequence, and a connection checkpoints on its way
+    /// out of every statement that wrote, so the sequence the open found is
+    /// behind by the time anybody asks. A caller comparing a directory listing
+    /// against the open's number named the live segment as a stray.
+    pub fn log_sequence(&self) -> u64 {
+        self.storage.wal.sequence()
     }
 
     /// Returns what `PRAGMA application_id` would answer.
@@ -1124,126 +1157,6 @@ impl ImportedDatabase {
     pub(crate) fn vacuum_in_place(&mut self) -> DbResult<()> {
         crate::rebuild::vacuum_in_place(self)
     }
-
-    /// Closes the file and opens it again, from the catalog alone.
-    ///
-    /// **The test that makes the persisted statistics load-bearing.** Every tree
-    /// handle is rebuilt from the catalog row's leftmost leaf, leaf count and
-    /// row count rather than from anything this process remembers, so a file
-    /// whose statistics were wrong answers differently after a reopen - which is
-    /// the failure the numbers exist to prevent, made visible.
-    ///
-    /// It is on the harness rather than in the engine because the engine's own
-    /// open path is Phase 5's consumer story. What this proves is that the
-    /// *format* carries what an open needs, which is the part Phase 4 owes.
-    pub fn reopen(&mut self) -> DbResult<()> {
-        self.checkpoint()?;
-        let path = self.storage.path.clone();
-        let frames = self.storage.frames;
-        let vfs = std::sync::Arc::clone(&self.storage.vfs);
-        let db_path = DbPath::new(path.to_string_lossy().as_ref());
-        // **The old handle lets the file go before the new one asks for it.**
-        // Since the engine takes real file locks, a handle that is still holding
-        // one is a writer as far as the open path is concerned, and the open
-        // would wait out its whole busy budget and then report the file busy -
-        // against a lock this same call is about to drop. The checkpoint above
-        // has already made the file current, so there is nothing left for the
-        // lock to protect.
-        self.storage.database.end_access()?;
-        // The old handle's file is closed before the new one opens it, because
-        // two `Database`s over one path is two page caches over one file.
-        let database = {
-            let replacement = Database::open(vfs.as_ref(), &db_path, frames.max(64))?;
-            std::mem::replace(&mut self.storage.database, replacement)
-        };
-        drop(database);
-
-        let stored = read_catalog(
-            self.storage.database.pool(),
-            &attach_catalog(
-                self.storage.database.pool(),
-                self.storage.database.catalog_root(),
-            )?,
-        )?;
-        let mut trees = HashMap::new();
-        let mut entries: Vec<Recorded> = Vec::new();
-        for (position, entry) in stored.into_iter().enumerate() {
-            let rowid = position.saturating_add(1) as i64;
-            // The identifier this tree is registered under, carried across so the
-            // plans and layouts this handle already holds keep pointing at the
-            // same trees.
-            //
-            // **This comment used to say the identifier was "this process's own
-            // bookkeeping and is not in the file", and that is no longer true.**
-            // It was never quite true: every logical row record
-            // in the log carries it, so a reader that numbered trees differently
-            // would send recovery's records to the wrong tree. It is in the
-            // catalog now, `open` reads it from there, and the lookup below
-            // agrees with what `open` would derive rather than merely with what
-            // this handle happens to remember.
-            let root = self
-                .schema
-                .entries
-                .iter()
-                .find(|held| held.entry.kind == entry.kind && held.entry.name == entry.name)
-                .map(|held| held.root)
-                .unwrap_or(0);
-            if entry.root.is_none() || root == 0 {
-                entries.push(Recorded { rowid, root, entry });
-                continue;
-            }
-            let Some(columns) = self
-                .schema
-                .trees
-                .get(&root)
-                .map(|tree| tree.columns().to_vec())
-            else {
-                entries.push(Recorded { rowid, root, entry });
-                continue;
-            };
-            let key_columns = self
-                .schema
-                .trees
-                .get(&root)
-                .map(PagedTree::key_columns)
-                .unwrap_or(1);
-            let tree = PagedTree::attach(
-                self.storage.database.pool(),
-                u64::from(root),
-                entry.root,
-                columns,
-                key_columns,
-                entry.stats.leaf_count,
-                entry.stats.row_count,
-            )?;
-            trees.insert(root, tree);
-            entries.push(Recorded { rowid, root, entry });
-        }
-        // The catalog itself, which the meta page points at rather than a row.
-        let catalog_tree = attach_catalog(
-            self.storage.database.pool(),
-            self.storage.database.catalog_root(),
-        )?;
-        trees.insert(SCHEMA_VIEW_ROOT, catalog_tree);
-        self.schema.trees = trees;
-        self.schema.entries = entries;
-        self.storage.wal = std::rc::Rc::new(Wal::open(
-            std::sync::Arc::clone(&self.storage.vfs),
-            &db_path,
-            self.storage.database.uuid(),
-            FIRST_LSN,
-            1,
-            WalOptions::default(),
-        )?);
-        self.storage
-            .database
-            .pool()
-            .set_durable_lsn(self.storage.wal.write_ahead_point());
-        let_the_pool_ask_the_log(self.storage.database.pool(), &self.storage.wal);
-        self.rebuild_tables()?;
-        self.refresh_catalog();
-        Ok(())
-    }
 }
 
 /// Returns the modules a database of this engine has.
@@ -1273,9 +1186,11 @@ fn modules() -> inillucent_ext::registry::Registry {
 /// @param cached - the compiled statement
 fn writes_something(cached: &Cached) -> bool {
     match cached {
-        Cached::Insert(..) | Cached::VirtualInsert(_) | Cached::Update(..) | Cached::Delete(..) => {
-            true
-        }
+        Cached::Insert(..)
+        | Cached::VirtualInsert(_)
+        | Cached::SchemaInsert(_)
+        | Cached::Update(..)
+        | Cached::Delete(..) => true,
         Cached::Ddl(sql) => {
             let head = sql
                 .split_whitespace()

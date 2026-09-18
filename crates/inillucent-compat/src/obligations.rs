@@ -154,6 +154,32 @@ pub fn pragma_page() -> String {
             columns
         ));
     }
+    out.push_str("\n## The two defaults that decide what a second process sees\n\n");
+    out.push_str(
+        "`busy_timeout` starts at **5000** milliseconds. It is how long a statement waits\n",
+    );
+    out.push_str(
+        "for a file another process holds before it is refused with `busy`, and setting it\n",
+    );
+    out.push_str("to 0 makes a contended statement fail at once. It governs the wait between\n");
+    out.push_str(
+        "processes as well as the one inside a process; before task-1980 the cross-process\n",
+    );
+    out.push_str("wait was a constant this pragma could not reach.\n\n");
+    out.push_str(
+        "`locking_mode` starts at **normal**, which is SQLite's default too: the file lock\n",
+    );
+    out.push_str("is released between statements, so a second process can open the database.\n");
+    out.push_str(
+        "`exclusive` keeps the lock for the connection's whole life, which is faster for a\n",
+    );
+    out.push_str(
+        "program that never opens a second connection and means a second process waits out\n",
+    );
+    out.push_str(
+        "that connection or is refused. A value that is neither is an error rather than a\n",
+    );
+    out.push_str("silently kept setting.\n");
     out.push_str("\n`compat/api/pragmas.toml` is the same register in the form a program reads,\n");
     out.push_str("and `docs/README.md` lists this page in its reading order.\n");
     out

@@ -45,6 +45,14 @@ static ALLOCATOR: inillucent_alloc::Pooled = inillucent_alloc::Pooled;
 
 /// Reads the command line and serves until standard input ends.
 fn main() -> ExitCode {
+    // **Every request this server answers is on a stack this crate sized.** A
+    // statement deep enough to overflow ends the server for every client, not
+    // only the request that sent it - see `inillucent_cli::STATEMENT_STACK`.
+    inillucent_cli::on_a_sized_stack(run)
+}
+
+/// Everything `main` does, on the sized thread.
+fn run() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     if arguments
         .iter()

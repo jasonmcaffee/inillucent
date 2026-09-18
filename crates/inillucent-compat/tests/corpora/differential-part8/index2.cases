@@ -1,0 +1,7 @@
+# Differential cases, category `index2`, from task-1979's review of commit 3073058.
+# One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
+# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+ixb-001	CREATE TABLE t(a,b); CREATE INDEX i ON t(a); SELECT * FROM t INDEXED BY nosuch WHERE a=1
+ixb-002	CREATE TABLE t(a,b); CREATE INDEX i ON t(a); INSERT INTO t VALUES(1,2); SELECT * FROM t INDEXED BY i WHERE b=2
+ixb-003	CREATE TABLE t(a,b); INSERT INTO t VALUES(1,2); DELETE FROM t INDEXED BY nosuch WHERE a=1
+ixb-004	CREATE TABLE t(a,b); CREATE INDEX i ON t(a); INSERT INTO t VALUES(1,2); UPDATE t INDEXED BY nosuch SET b=3 WHERE a=1

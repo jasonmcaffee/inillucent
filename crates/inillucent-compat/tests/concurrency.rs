@@ -111,10 +111,13 @@ fn as_integer(value: Option<&OwnedDatum>) -> i64 {
 /// "connections" here are two *sessions* on that one pool, so the second one
 /// reads the first one's committed rows immediately.
 ///
-/// Where the real promise lives now is **across processes**:
-/// `docs/roadmap.md` item 9 records SHARED/RESERVED/PENDING/EXCLUSIVE working
-/// over 37 stress rounds with two writing processes, and that is the suite that
-/// grades it. What this test pins is the in-process answer, so that a future
+/// Where the real promise lives now is **across processes**, and this file is
+/// not where it is graded: `process_concurrency.rs` spawns two real writer
+/// processes and asserts that rows present equal commits acknowledged. That
+/// distinction is not a technicality - until task-1980 this file's own comment
+/// claimed the cross-process case was measured, and two real processes were
+/// losing 43% of their acknowledged commits at the time (task-1979, section 4).
+/// What this test pins is the in-process answer, so that a future
 /// engine which does give a session its own read mark turns this red and the
 /// original expectations - 1 while the writer commits, 3 after the commit - go
 /// back in.
@@ -478,8 +481,9 @@ fn a_connection_sees_another_connections_commit() {
 // blocked while the first is still running, and `docs/roadmap.md`'s own item 9
 // says where this behaviour does live now: "Access from several **processes**
 // works... Threads inside one process do not." The cross-process locking
-// protocol - SHARED, RESERVED, PENDING, EXCLUSIVE, over 37 stress rounds with
-// two writing processes - is tested by the two-process suite rather than here.
+// protocol - SHARED, RESERVED, PENDING, EXCLUSIVE - is tested by
+// `crates/inillucent-compat/tests/process_concurrency.rs`, which spawns real
+// writer processes, rather than here.
 //
 // So the timeout's *waiting* half is not covered by this file any more. Its
 // refusing half still is: `a_second_writer_in_this_process_is_refused` above

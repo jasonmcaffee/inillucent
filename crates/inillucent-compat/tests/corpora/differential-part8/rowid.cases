@@ -1,0 +1,17 @@
+# Differential cases, category `rowid`, from task-1979's review of commit 3073058.
+# One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
+# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+rid-001	CREATE TABLE t(a); INSERT INTO t VALUES('x'); SELECT rowid, oid, _rowid_ FROM t
+rid-002	CREATE TABLE t(a INTEGER PRIMARY KEY, b); INSERT INTO t VALUES(NULL,'x'); SELECT a, rowid FROM t
+rid-003	CREATE TABLE t(a INTEGER PRIMARY KEY, b); INSERT INTO t VALUES(-5,'x'); INSERT INTO t(b) VALUES('y'); SELECT a FROM t ORDER BY a
+rid-004	CREATE TABLE t(a INTEGER PRIMARY KEY, b); INSERT INTO t VALUES(9223372036854775807,'x'); INSERT INTO t(b) VALUES('y')
+rid-005	CREATE TABLE t(a INTEGER PRIMARY KEY AUTOINCREMENT, b); INSERT INTO t(b) VALUES('x'); DELETE FROM t; INSERT INTO t(b) VALUES('y'); SELECT a FROM t
+rid-006	CREATE TABLE t(a INTEGER PRIMARY KEY, b); INSERT INTO t(b) VALUES('x'); DELETE FROM t; INSERT INTO t(b) VALUES('y'); SELECT a FROM t
+rid-007	CREATE TABLE t(a); INSERT INTO t VALUES(1); SELECT last_insert_rowid()
+rid-008	CREATE TABLE t(a INTEGER PRIMARY KEY); INSERT INTO t VALUES(42); SELECT last_insert_rowid()
+rid-009	CREATE TABLE t(a INTEGER PRIMARY KEY AUTOINCREMENT); INSERT INTO t VALUES(10); SELECT seq FROM sqlite_sequence WHERE name='t'
+rid-010	CREATE TABLE t(a); INSERT INTO t VALUES(1); UPDATE t SET rowid=100; SELECT rowid, a FROM t
+rid-011	CREATE TABLE t(a INTEGER PRIMARY KEY, b); INSERT INTO t VALUES(1,'x'); UPDATE t SET a=2; SELECT rowid, a FROM t
+rid-012	CREATE TABLE t(a INT PRIMARY KEY, b); INSERT INTO t VALUES(5,'x'); SELECT rowid, a FROM t
+rid-013	CREATE TABLE t(a INTEGER PRIMARY KEY DESC, b); INSERT INTO t VALUES(5,'x'); SELECT rowid, a FROM t
+rid-014	CREATE TABLE t(a); INSERT INTO t VALUES(1),(2); DELETE FROM t WHERE rowid=1; SELECT rowid,a FROM t

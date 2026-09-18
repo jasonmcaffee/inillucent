@@ -45,6 +45,7 @@
 pub mod ast;
 pub mod bind;
 pub mod catalog_view;
+pub mod correlated_in;
 pub mod cost;
 pub mod declare;
 pub mod diagnostic;
