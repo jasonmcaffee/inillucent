@@ -37,6 +37,7 @@ pub mod memory;
 pub mod os;
 pub mod path;
 pub mod shm_locks;
+pub mod zone;
 
 pub use confine::{authorize, confine_process, process_root, Refused, Root};
 pub use contract::{

@@ -189,12 +189,29 @@ may_depend_on = [
 #
 # It sits above `inillucent-sql` because a built-in is identified by
 # `inillucent_sql::function::ScalarFunc` and the binder is what resolves a name to
-# one. That is the only edge; nothing here parses, binds, plans or reads a page.
+# one. Nothing here parses, binds, plans or reads a page.
+#
+# **The edge to `inillucent-vfs` is the `utc` and `localtime` date modifiers
+# (task-1979, F13).** Both convert between the machine's zone and UTC, and the
+# offset between the two is not a constant a table could hold: it moves at a
+# daylight saving boundary and it has moved by legislation, so it is asked for
+# one instant at a time. `inillucent-vfs` is the crate whose own invariant says
+# it is the only part of the workspace that touches the operating system's
+# files, clocks and randomness, and a zone lookup is a clock question. The
+# alternative was to thread a function pointer from `inillucent-engine` down
+# through the binder, the bound expression and the compiled expression tree so
+# that this crate could stay a leaf of the three it had; that is four files of
+# plumbing to avoid one edge that points downward and closes no cycle.
 [[crate]]
 name = "inillucent-scalar"
 kind = "production"
 layer = 5
-may_depend_on = ["inillucent-base", "inillucent-value", "inillucent-sql"]
+may_depend_on = [
+  "inillucent-base",
+  "inillucent-value",
+  "inillucent-sql",
+  "inillucent-vfs",
+]
 
 # `inillucent-sqlite-reader` is the read half of `inillucent-storage` behind a narrow
 # interface, kept when the rest of that crate goes. It is a tool rather than a

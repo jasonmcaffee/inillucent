@@ -535,6 +535,16 @@ impl Parser<'_> {
         } else {
             (None, None)
         };
+        // **`EXCLUDE` needs a frame clause to exclude anything from
+        // (task-1979, F18).** SQLite's grammar hangs the exclusion off the
+        // frame rule, so `OVER (ORDER BY v EXCLUDE TIES)` is
+        // `near "EXCLUDE": syntax error` there. This parser read it as a
+        // separate clause and accepted it against the default frame, which
+        // meant four spellings of a frame nobody had written answered rows
+        // where the reference answers nothing at all.
+        if unit.is_none() && self.at_keyword(Keyword::EXCLUDE)? {
+            return Err(self.unexpected(&[")"])?);
+        }
         let exclude = if self.eat_keyword(Keyword::EXCLUDE)? {
             if self.eat_keyword(Keyword::NO)? {
                 self.expect_keyword(Keyword::OTHERS)?;

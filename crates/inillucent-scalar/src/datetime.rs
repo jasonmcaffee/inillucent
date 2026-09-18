@@ -9,10 +9,30 @@
 //! Gregorian calendar before 1582, and the half-day offset that makes a Julian
 //! day start at noon.
 //!
-//! The one thing deliberately not implemented is `localtime`. It would make the
-//! answer depend on the machine's zone, and the parity tests would then grade
-//! two engines against two different clocks; the modifier is refused rather
-//! than answered wrongly.
+//! `localtime` and `utc` ask the machine's zone, through
+//! [`inillucent_vfs::zone`]. They used to answer NULL and nothing, on the
+//! argument that an answer which depends on the machine's zone is one two
+//! engines cannot be graded against. task-1979's differential corpus is that
+//! grading, and it runs both engines on one machine, where the argument does
+//! not hold: `datetime('2020-01-01 12:00:00','utc')` is a fixed conversion
+//! both engines can be asked for and compared on. The same objection would
+//! apply to `'now'`, which this module has always implemented.
+//!
+//! Three things here are kept the way SQLite keeps them rather than the way a
+//! Julian day alone would give:
+//!
+//! - **The range.** A date outside Julian day 0 to 5373484.5 - roughly the
+//!   year -4713 to the end of 9999 - is NULL rather than a date nobody can
+//!   store. [`Moment::inside_the_range`].
+//! - **The fields as they were spelled.** `'2020-01-01 24:00:00'` is an hour
+//!   24 SQLite accepts and does not carry into the next day, so `date()` of it
+//!   is `2020-01-01` and `strftime('%H', ...)` is `24`, while `julianday()` of
+//!   it is the next day's midnight. [`Moment::spelled`] holds the fields until
+//!   a modifier makes them stale.
+//! - **What a `floor` modifier takes off.** Adding a month to 31 January lands
+//!   on 31 February, which carries into March; `floor` asks for the last day
+//!   of February instead. [`Moment::overflow`] is how many days the carry
+//!   moved, recorded when it happens and subtracted when `floor` asks.
 
 use inillucent_sql::function::TimeFunc;
 use inillucent_value::{numeric, TextEncoding, Value};
@@ -35,6 +55,28 @@ pub fn julian_now() -> f64 {
     UNIX_EPOCH_JD + since_epoch / SECONDS_PER_DAY
 }
 
+/// The first Julian day a date function will answer with.
+const FIRST_JULIAN_DAY: f64 = 0.0;
+
+/// The first Julian day past the last one a date function will answer with.
+///
+/// SQLite's bound, in its own units, is `iJD <= 464269060799999` milliseconds,
+/// which is the last millisecond of 9999-12-31.
+const PAST_LAST_JULIAN_DAY: f64 = 5_373_484.5;
+
+/// How a year is written out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum YearStyle {
+    /// `date()`, `time()` and `datetime()`: a minus sign if the year is
+    /// negative, then four digits. SQLite writes the year of
+    /// `date('0000-01-01','-1 day')` as `-0001`.
+    Signed,
+    /// `strftime()`: C's `%04d`, which counts the sign against the width, so
+    /// the same year is `-001`. SQLite's two formatters really do differ here
+    /// and both were checked against 3.53.4.
+    Printf,
+}
+
 /// A broken-down date and time, as the formatter reads it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Civil {
@@ -50,6 +92,76 @@ pub struct Civil {
     pub minute: i64,
     /// The second, with its fraction.
     pub second: f64,
+}
+
+/// A time value part-way through being resolved.
+///
+/// SQLite's `DateTime` keeps a Julian day and the broken-down fields side by
+/// side and marks which of them is current; this is the same idea with the
+/// three things that behaviour turns on.
+#[derive(Clone, Copy, Debug)]
+struct Moment {
+    /// The Julian day, which is always current.
+    day: f64,
+    /// The fields exactly as the input spelled them, while no modifier has
+    /// made them stale.
+    ///
+    /// **This is what keeps hour 24 (task-1979, F12).** SQLite accepts
+    /// `'2020-01-01 24:00:00'` and leaves the fields alone, so `date()` of it
+    /// answers `2020-01-01` and `strftime('%H', ...)` answers `24`, while
+    /// `julianday()` of it answers the next day's midnight. Rendering from the
+    /// Julian day instead answered `2020-01-02` and hour `00`. One modifier -
+    /// any modifier - recomputes the fields and the carry happens, which is
+    /// also SQLite's rule: `datetime('2020-01-01 24:00:00','+0 day')` is
+    /// `2020-01-02 00:00:00` in both engines.
+    spelled: Option<Civil>,
+    /// How many days a `floor` modifier would take off.
+    ///
+    /// **Set by the month and year modifiers, read by `floor` (task-1979,
+    /// F14).** `date('2020-01-31','+1 month')` lands on 31 February, which is
+    /// two days past the end of that February, so the date carries to 2 March
+    /// and this holds 2; `floor` subtracts it and the answer is 29 February.
+    /// `ceiling` is the default and only clears it.
+    overflow: i64,
+}
+
+impl Moment {
+    /// Returns a moment with no spelled fields and no carry, which is what a
+    /// number or the clock gives.
+    ///
+    /// @param day - the Julian day
+    fn at(day: f64) -> Moment {
+        Moment {
+            day,
+            spelled: None,
+            overflow: 0,
+        }
+    }
+
+    /// Returns the same instant with the spelled fields discarded.
+    ///
+    /// @param day - the Julian day the modifier produced
+    fn moved_to(self, day: f64) -> Moment {
+        Moment {
+            day,
+            spelled: None,
+            overflow: self.overflow,
+        }
+    }
+
+    /// Returns the broken-down fields a formatter should read.
+    fn civil(self) -> Civil {
+        self.spelled.unwrap_or_else(|| civil_of(self.day))
+    }
+
+    /// Reports whether the date is one SQLite will answer with.
+    ///
+    /// Outside it every date function answers NULL rather than a year nobody
+    /// can store: `date('9999-12-31','+1 day')` is NULL, not `10000-01-01`
+    /// (task-1979, F11).
+    fn inside_the_range(self) -> bool {
+        (FIRST_JULIAN_DAY..PAST_LAST_JULIAN_DAY).contains(&self.day)
+    }
 }
 
 /// Calls a date or time function.
@@ -79,9 +191,11 @@ pub fn call(
         _ => (None, arguments.get(..)),
     };
     let rest = rest.unwrap_or(&[]);
-    let Some(day) = resolve(rest, now, encoding) else {
+    let Some(moment) = resolve(rest, now, encoding) else {
         return Value::Null;
     };
+    let day = moment.day;
+    let civil = moment.civil();
     // **`subsec` is a modifier the *renderer* has to know about.** It asks for
     // the fractional second, so `datetime(x, 'subsec')` formats seconds as
     // `%f` rather than `%S`. It reached `unixepoch` and nothing else, so
@@ -92,17 +206,29 @@ pub fn call(
     match func {
         TimeFunc::JulianDay => Value::Real(day),
         TimeFunc::UnixEpoch => unix_epoch(rest, day, encoding),
-        TimeFunc::Date => render(day, b"%Y-%m-%d"),
-        TimeFunc::Time => render(day, if subsec { b"%H:%M:%f" } else { b"%H:%M:%S" }),
+        TimeFunc::Date => render(day, civil, b"%Y-%m-%d", YearStyle::Signed),
+        TimeFunc::Time => render(
+            day,
+            civil,
+            if subsec { b"%H:%M:%f" } else { b"%H:%M:%S" },
+            YearStyle::Signed,
+        ),
         TimeFunc::DateTime => render(
             day,
+            civil,
             if subsec {
                 b"%Y-%m-%d %H:%M:%f"
             } else {
                 b"%Y-%m-%d %H:%M:%S"
             },
+            YearStyle::Signed,
         ),
-        TimeFunc::StrfTime => render(day, &format.unwrap_or_default()),
+        TimeFunc::StrfTime => render(
+            day,
+            civil,
+            &format.unwrap_or_default(),
+            YearStyle::Printf,
+        ),
         TimeFunc::TimeDiff => Value::Null,
     }
 }
@@ -120,23 +246,42 @@ fn asks_for_subsec(arguments: &[Value<'static>]) -> bool {
     })
 }
 
-/// Returns the Julian day one argument list resolves to.
+/// Returns the moment one argument list resolves to.
 ///
 /// The first argument is the time value and every later one is a modifier,
 /// applied in order. With no arguments at all the value is `'now'`, which is
 /// why `date()` and `date('now')` are the same call.
-fn resolve(arguments: &[Value<'static>], now: f64, encoding: TextEncoding) -> Option<f64> {
-    let mut day = match arguments.first() {
+///
+/// `None` when any step has no answer, and also when the date the steps landed
+/// on is outside the range SQLite answers with - see
+/// [`Moment::inside_the_range`].
+///
+/// @param arguments - the time value and its modifiers
+/// @param now - the wall clock the caller supplies
+/// @param encoding - the text encoding a numeric string is read in
+fn resolve(arguments: &[Value<'static>], now: f64, encoding: TextEncoding) -> Option<Moment> {
+    let mut moment = match arguments.first() {
         Some(value) => parse_time_value(value, now, encoding)?,
-        None => now,
+        None => Moment::at(now),
     };
     for modifier in arguments.get(1..).unwrap_or(&[]) {
         let Value::Text(text) = modifier else {
             return None;
         };
-        day = apply_modifier(day, &text.utf8_bytes())?;
+        moment = apply_modifier(moment, &text.utf8_bytes())?;
     }
-    Some(day)
+    // **A day of the month past 28 is normalised; an hour 24 is not.** SQLite's
+    // `isDate` throws the spelled fields away when the call carried no modifier
+    // and the day of the month is greater than 28, so `date('2020-02-30')` is
+    // `2020-03-01` and `date('2020-04-31')` is `2020-05-01`. The hour is never
+    // part of that check, which is why `date('2020-01-01 24:00:00')` still
+    // answers `2020-01-01` - see [`Moment::spelled`]. Keeping the fields for
+    // both put `2020-02-30` back out unchanged, which is a date that does not
+    // exist.
+    if arguments.len() <= 1 && moment.spelled.is_some_and(|civil| civil.day > 28) {
+        moment.spelled = None;
+    }
+    moment.inside_the_range().then_some(moment)
 }
 
 /// Returns `unixepoch()`, honouring the `subsec` modifier.
@@ -178,6 +323,9 @@ fn timediff(arguments: &[Value<'static>], now: f64, encoding: TextEncoding) -> V
     ) else {
         return Value::Null;
     };
+    // `timediff` is a difference between two instants, so it reads the Julian
+    // day of each rather than the fields they were spelled with.
+    let (left, right) = (left.day, right.day);
     let (sign, low, high) = if left >= right {
         ('+', right, left)
     } else {
@@ -240,31 +388,43 @@ fn timediff(arguments: &[Value<'static>], now: f64, encoding: TextEncoding) -> V
     Value::owned_text(text.as_bytes()).unwrap_or(Value::Null)
 }
 
-/// Returns the Julian day a time value names.
+/// Returns the moment a time value names.
 ///
 /// The forms are SQLite's: a number is a Julian day unless a `unixepoch`
 /// modifier says otherwise, and text is one of the ISO-8601 shapes or the
 /// literal `now`.
-fn parse_time_value(value: &Value<'static>, now: f64, encoding: TextEncoding) -> Option<f64> {
+///
+/// Only the ISO-8601 shapes carry [`Moment::spelled`] fields, and only when the
+/// text named no zone offset. A number has no fields to keep, and an offset
+/// means the fields as written are not the instant that was stored.
+///
+/// @param value - the first argument of the call
+/// @param now - the wall clock the caller supplies
+/// @param encoding - the text encoding a numeric string is read in
+fn parse_time_value(value: &Value<'static>, now: f64, encoding: TextEncoding) -> Option<Moment> {
     match value {
         Value::Null => None,
-        Value::Integer(integer) => Some(*integer as f64),
-        Value::Real(real) => Some(*real),
+        Value::Integer(integer) => Some(Moment::at(*integer as f64)),
+        Value::Real(real) => Some(Moment::at(*real)),
         Value::Blob(_) => None,
         Value::Text(text) => {
             let raw = text.utf8_bytes().to_vec();
             let trimmed = trim(&raw);
             if trimmed.eq_ignore_ascii_case(b"now") {
-                return Some(now);
+                return Some(Moment::at(now));
             }
-            if let Some(day) = parse_iso(trimmed) {
-                return Some(day);
+            if let Some((day, spelled)) = parse_iso(trimmed) {
+                return Some(Moment {
+                    day,
+                    spelled,
+                    overflow: 0,
+                });
             }
             // A numeric string is a Julian day, which is what makes
             // `date('2451545.0')` work.
             if numeric::looks_numeric(trimmed, encoding) {
                 let parsed = numeric::atof(trimmed, encoding);
-                return Some(parsed.value);
+                return Some(Moment::at(parsed.value));
             }
             None
         }
@@ -298,7 +458,12 @@ fn trim(bytes: &[u8]) -> &[u8] {
 /// The accepted set is exactly SQLite's: a date, a time, or a date and a time
 /// separated by a space or a `T`, with an optional fractional second and an
 /// optional `Z` or `±HH:MM` offset.
-fn parse_iso(bytes: &[u8]) -> Option<f64> {
+///
+/// The fields come back beside the Julian day when the text named no offset,
+/// so that an hour 24 survives to the formatter - see [`Moment::spelled`].
+///
+/// @param bytes - the text, already trimmed
+fn parse_iso(bytes: &[u8]) -> Option<(f64, Option<Civil>)> {
     let (date_part, time_part) = split_datetime(bytes)?;
     let mut civil = Civil {
         year: 2000,
@@ -326,7 +491,10 @@ fn parse_iso(bytes: &[u8]) -> Option<f64> {
         return None;
     }
     let day = julian_of(civil);
-    Some(day - (offset_minutes as f64) / 1440.0)
+    if offset_minutes != 0 {
+        return Some((day - (offset_minutes as f64) / 1440.0, None));
+    }
+    Some((day, Some(civil)))
 }
 
 /// Splits a timestamp into its date and time halves.
@@ -517,30 +685,61 @@ pub fn civil_of(day: f64) -> Civil {
     }
 }
 
-/// Applies one modifier to a Julian day.
-fn apply_modifier(day: f64, modifier: &[u8]) -> Option<f64> {
+/// Applies one modifier to a moment.
+///
+/// Every modifier but `subsec` makes the spelled fields stale, which is what
+/// carries an hour 24 into the next day the moment anything else is asked for -
+/// SQLite's rule as well as this one.
+///
+/// @param moment - the moment so far
+/// @param modifier - the modifier, as written
+fn apply_modifier(moment: Moment, modifier: &[u8]) -> Option<Moment> {
+    let day = moment.day;
     let folded = trim(modifier).to_ascii_lowercase();
-    if folded == b"utc" || folded == b"subsec" || folded == b"subsecond" {
-        // `utc` is a no-op here because nothing in this module works in a local
-        // zone, and `subsec` is read by `unixepoch` rather than applied.
-        return Some(day);
+    if folded == b"subsec" || folded == b"subsecond" {
+        // Read by `unixepoch` and by the renderer rather than applied, so the
+        // fields it was given are still the fields it has.
+        return Some(moment);
     }
     if folded == b"julianday" {
-        return Some(day);
+        return Some(moment.moved_to(day));
     }
     if folded == b"unixepoch" {
-        return Some(UNIX_EPOCH_JD + day / SECONDS_PER_DAY);
+        return Some(moment.moved_to(UNIX_EPOCH_JD + day / SECONDS_PER_DAY));
     }
     if folded == b"auto" {
         // A value large enough to be a unix timestamp is one; anything else is
         // already a Julian day. SQLite's own threshold.
-        if day > 5_373_484.5 {
-            return Some(UNIX_EPOCH_JD + day / SECONDS_PER_DAY);
+        if day > PAST_LAST_JULIAN_DAY {
+            return Some(moment.moved_to(UNIX_EPOCH_JD + day / SECONDS_PER_DAY));
         }
-        return Some(day);
+        return Some(moment.moved_to(day));
     }
-    if folded == b"localtime" || folded == b"utc" {
-        return None;
+    if folded == b"localtime" {
+        return Some(moment.moved_to(day + zone_offset_days(day)?));
+    }
+    if folded == b"utc" {
+        // Two steps, as SQLite does it: the offset is asked for again at the
+        // instant the first step landed on, so a conversion that crosses a
+        // daylight saving boundary uses the offset in force on the far side.
+        let first = zone_offset_days(day)?;
+        let second = zone_offset_days(day - first)?;
+        return Some(moment.moved_to(day - second));
+    }
+    if folded == b"ceiling" {
+        // The default, so it only forgets what a `floor` would have taken off.
+        return Some(Moment {
+            day,
+            spelled: None,
+            overflow: 0,
+        });
+    }
+    if folded == b"floor" {
+        return Some(Moment {
+            day: day - moment.overflow as f64,
+            spelled: None,
+            overflow: 0,
+        });
     }
     if let Some(rest) = folded.strip_prefix(b"start of ") {
         let mut civil = civil_of(day);
@@ -556,7 +755,7 @@ fn apply_modifier(day: f64, modifier: &[u8]) -> Option<f64> {
             }
             _ => return None,
         }
-        return Some(julian_of(civil));
+        return Some(moment.moved_to(julian_of(civil)));
     }
     if let Some(rest) = folded.strip_prefix(b"weekday ") {
         let wanted = digits(trim(rest))?;
@@ -571,13 +770,62 @@ fn apply_modifier(day: f64, modifier: &[u8]) -> Option<f64> {
         civil.hour = 0;
         civil.minute = 0;
         civil.second = 0.0;
-        return Some(julian_of(civil));
+        return Some(moment.moved_to(julian_of(civil)));
     }
-    apply_offset(day, &folded)
+    apply_offset(moment, &folded)
+}
+
+/// Returns the local zone's offset from UTC at one Julian day, in days.
+///
+/// `None` when the operating system will not convert that instant, which is
+/// what makes `localtime` and `utc` answer NULL for a date outside the range
+/// the platform's own conversion accepts rather than guessing an offset.
+///
+/// @param day - the instant, as a Julian day
+fn zone_offset_days(day: f64) -> Option<f64> {
+    let seconds = whole_seconds((day - UNIX_EPOCH_JD) * SECONDS_PER_DAY);
+    let offset = inillucent_vfs::zone::local_offset_seconds(seconds)?;
+    Some(offset as f64 / SECONDS_PER_DAY)
+}
+
+/// Returns how many days past the end of its month a date reaches.
+///
+/// **What a `floor` modifier takes off (task-1979, F14).** A month or year
+/// modifier lands on a day of the month the new month may not have: one month
+/// after 31 January is 31 February, which carries into March. `ceiling`, the
+/// default, keeps the carry; `floor` asks for the last day of the month
+/// instead, and this is the difference between the two. 31 February is two days
+/// past a leap February and three past a short one, so
+/// `date('2020-01-31','+1 month','floor')` is 29 February 2020 and
+/// `date('2021-01-31','+1 month','floor')` is 28 February 2021.
+///
+/// @param civil - the date the modifier built, before the carry is applied
+fn days_past_the_month(civil: Civil) -> i64 {
+    if civil.day <= 28 {
+        return 0;
+    }
+    // The months with 31 days. A day of the month never exceeds 31, so nothing
+    // reaches past one of them.
+    if matches!(civil.month, 1 | 3 | 5 | 7 | 8 | 10 | 12) {
+        return 0;
+    }
+    if civil.month != 2 {
+        return i64::from(civil.day == 31);
+    }
+    let leap = civil.year.rem_euclid(4) == 0
+        && (civil.year.rem_euclid(100) != 0 || civil.year.rem_euclid(400) == 0);
+    match leap {
+        true => civil.day - 29,
+        false => civil.day - 28,
+    }
 }
 
 /// Applies a `±NNN unit` modifier.
-fn apply_offset(day: f64, folded: &[u8]) -> Option<f64> {
+///
+/// @param moment - the moment so far
+/// @param folded - the modifier, trimmed and lowercased
+fn apply_offset(moment: Moment, folded: &[u8]) -> Option<Moment> {
+    let day = moment.day;
     let at = folded.iter().position(|byte| *byte == b' ')?;
     let amount = folded.get(..at)?;
     let unit = trim(folded.get(at.saturating_add(1)..)?);
@@ -594,33 +842,56 @@ fn apply_offset(day: f64, folded: &[u8]) -> Option<f64> {
     let signed = if negative { -parsed } else { parsed };
     let unit = unit.strip_suffix(b"s").unwrap_or(unit);
     match unit {
-        b"day" => Some(day + signed),
-        b"hour" => Some(day + signed / 24.0),
-        b"minute" => Some(day + signed / 1440.0),
-        b"second" => Some(day + signed / SECONDS_PER_DAY),
+        b"day" => Some(moment.moved_to(day + signed)),
+        b"hour" => Some(moment.moved_to(day + signed / 24.0)),
+        b"minute" => Some(moment.moved_to(day + signed / 1440.0)),
+        b"second" => Some(moment.moved_to(day + signed / SECONDS_PER_DAY)),
         // Months and years move the calendar rather than a fixed number of
         // days, and the day of the month is clamped the way SQLite clamps it:
         // one month after 31 January is 3 March in a non-leap year, because the
-        // overflow carries rather than saturating.
+        // overflow carries rather than saturating. How far it carried is kept,
+        // because a `floor` modifier after it asks for the last day of the
+        // month instead - see `days_past_the_month`.
         b"month" => {
             let mut civil = civil_of(day);
             let total = civil.year * 12 + (civil.month - 1) + signed as i64;
             civil.year = total.div_euclid(12);
             civil.month = total.rem_euclid(12) + 1;
-            Some(julian_of(civil))
+            Some(moved_by_calendar(civil))
         }
         b"year" => {
             let mut civil = civil_of(day);
             civil.year += signed as i64;
-            Some(julian_of(civil))
+            Some(moved_by_calendar(civil))
         }
         _ => None,
     }
 }
 
-/// Renders a Julian day through a `strftime` format.
-fn render(day: f64, format: &[u8]) -> Value<'static> {
-    let civil = civil_of(day);
+/// Returns the moment a calendar date names, with its carry recorded.
+///
+/// @param civil - the date a month or year modifier built, which may name a day
+///   the month does not have
+fn moved_by_calendar(civil: Civil) -> Moment {
+    Moment {
+        day: julian_of(civil),
+        spelled: None,
+        overflow: days_past_the_month(civil),
+    }
+}
+
+/// Renders a moment through a `strftime` format.
+///
+/// `day` and `civil` are given separately on purpose. `%s` and `%J` ask for the
+/// instant and every other specifier asks for the fields, and the two disagree
+/// for an hour 24: `strftime('%H %s','2020-01-01 24:00:00')` is hour `24` at
+/// the next day's midnight - see [`Moment::spelled`].
+///
+/// @param day - the Julian day, for `%s` and `%J`
+/// @param civil - the broken-down fields every other specifier reads
+/// @param format - the format string
+/// @param style - how `%Y`, `%G` and `%F` write a year
+fn render(day: f64, civil: Civil, format: &[u8], style: YearStyle) -> Value<'static> {
     let mut out: Vec<u8> = Vec::new();
     let mut index = 0usize;
     while index < format.len() {
@@ -647,7 +918,8 @@ fn render(day: f64, format: &[u8]) -> Value<'static> {
                 out.extend_from_slice(text.as_bytes());
             }
             b'F' => {
-                let text = format!("{:04}-{:02}-{:02}", civil.year, civil.month, civil.day);
+                push_year(&mut out, civil.year, style);
+                let text = format!("-{:02}-{:02}", civil.month, civil.day);
                 out.extend_from_slice(text.as_bytes());
             }
             b'H' => push_padded(&mut out, civil.hour, 2),
@@ -713,14 +985,8 @@ fn render(day: f64, format: &[u8]) -> Value<'static> {
             b'U' => push_padded(&mut out, week_from(civil, days_after_sunday(day)), 2),
             b'V' => push_padded(&mut out, iso_week(day).1, 2),
             b'W' => push_padded(&mut out, week_from(civil, days_after_monday(day)), 2),
-            b'G' => {
-                let text = format!("{:04}", iso_week(day).0);
-                out.extend_from_slice(text.as_bytes());
-            }
-            b'Y' => {
-                let text = format!("{:04}", civil.year);
-                out.extend_from_slice(text.as_bytes());
-            }
+            b'G' => push_year(&mut out, iso_week(day).0, style),
+            b'Y' => push_year(&mut out, civil.year, style),
             // **A specifier SQLite does not have makes the whole call NULL**,
             // rather than putting the two characters back. `strftime('%y', d)`
             // is NULL in SQLite and was the literal text `%y` here, which is a
@@ -754,6 +1020,28 @@ fn sixteen_significant(value: f64) -> String {
     }
     let trimmed = text.trim_end_matches('0');
     trimmed.trim_end_matches('.').to_string()
+}
+
+/// Appends a year in the spelling its formatter uses.
+///
+/// **The two formatters really do differ on a negative year.** `date()` writes
+/// the sign and then four digits, so the year of `date('0000-01-01','-1 day')`
+/// is `-0001`; `strftime('%Y', ...)` goes through C's `%04d`, which counts the
+/// sign against the width, so the same year is `-001`. Both spellings were read
+/// off SQLite 3.53.4.
+///
+/// @param out - the bytes being built
+/// @param year - the proleptic Gregorian year
+/// @param style - which of the two spellings to write
+fn push_year(out: &mut Vec<u8>, year: i64, style: YearStyle) {
+    let text = match style {
+        YearStyle::Signed => {
+            let sign = if year < 0 { "-" } else { "" };
+            format!("{sign}{:04}", year.abs())
+        }
+        YearStyle::Printf => format!("{year:04}"),
+    };
+    out.extend_from_slice(text.as_bytes());
 }
 
 /// Appends a zero-padded number.

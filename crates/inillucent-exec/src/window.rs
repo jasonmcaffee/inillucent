@@ -336,7 +336,7 @@ fn evaluate(
         WindowSlot::Plain(WindowFunc::CumeDist) => {
             OwnedDatum::Real(frames::cume_dist(partition, row))
         }
-        WindowSlot::Plain(WindowFunc::Ntile) => ntile(rows, call, partition, row),
+        WindowSlot::Plain(WindowFunc::Ntile) => ntile(rows, call, partition, row)?,
         WindowSlot::Plain(WindowFunc::Lag) => offset_row(rows, call, partition, row, true),
         WindowSlot::Plain(WindowFunc::Lead) => offset_row(rows, call, partition, row, false),
         WindowSlot::Plain(WindowFunc::FirstValue)
@@ -350,19 +350,34 @@ fn evaluate(
 }
 
 /// Computes `ntile(n)`.
+///
+/// **A bucket count of zero or less is an error, not a NULL (task-1979,
+/// F17).** `frames::ntile` answers `None` for a count it cannot divide a
+/// partition into, and this read that `None` as "no answer for this row" and
+/// returned NULL for every row of the query. SQLite refuses the statement with
+/// `argument of ntile must be a positive integer`, so a caller that passed a
+/// count it computed hears about it rather than reading a column of NULLs as
+/// data.
+///
+/// @param rows - the buffered input
+/// @param call - the call, whose first argument is the bucket count
+/// @param partition - the row's partition, with its peer groups
+/// @param row - the row
 fn ntile(
     rows: &[Vec<OwnedDatum>],
     call: &WindowCall,
     partition: &frames::Partition,
     row: usize,
-) -> OwnedDatum {
+) -> DbResult<OwnedDatum> {
     let Some(column) = call.arguments.first() else {
-        return OwnedDatum::Null;
+        return Ok(OwnedDatum::Null);
     };
     let buckets = integer_of(&value_at(rows, row, *column));
     match frames::ntile(partition, row, buckets) {
-        Some(bucket) => OwnedDatum::Int(bucket),
-        None => OwnedDatum::Null,
+        Some(bucket) => Ok(OwnedDatum::Int(bucket)),
+        None => Err(inillucent_base::error::statement_refusal(
+            "argument of ntile must be a positive integer",
+        )),
     }
 }
 

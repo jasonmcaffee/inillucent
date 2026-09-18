@@ -1826,7 +1826,8 @@ impl<'a> Binder<'a> {
         let mut bound = Vec::with_capacity(terms.len());
         for term in terms {
             let span = self.ast.expr_span(term.expr);
-            let index = match self.as_ordinal(term.expr) {
+            let (target, named) = self.order_term_collation(term.expr, span)?;
+            let index = match self.as_ordinal(target) {
                 Some(ordinal) => match ordinal.checked_sub(1) {
                     Some(index) if index < columns.len() => index,
                     _ => return Err(order_out_of_range(ordinal, span)),
@@ -1836,7 +1837,7 @@ impl<'a> Binder<'a> {
                         database: None,
                         table: None,
                         column,
-                    }) = self.ast.expr(term.expr)
+                    }) = self.ast.expr(target)
                     else {
                         return Err(compound_order_unmatched(span));
                     };
@@ -1853,7 +1854,9 @@ impl<'a> Binder<'a> {
             let Some(column) = columns.get(index) else {
                 return Err(order_out_of_range(index.saturating_add(1), span));
             };
-            let collation = column.expr.collation().unwrap_or(Collation::Binary);
+            let collation = named
+                .or_else(|| column.expr.collation())
+                .unwrap_or(Collation::Binary);
             let nulls = term.nulls.unwrap_or(match term.order {
                 SortOrder::Ascending => NullOrder::First,
                 SortOrder::Descending => NullOrder::Last,
@@ -1870,6 +1873,33 @@ impl<'a> Binder<'a> {
         Ok(bound)
     }
 
+    /// Splits a compound `ORDER BY` term into the term itself and the
+    /// collation an explicit `COLLATE` named on it.
+    ///
+    /// **`UNION ... ORDER BY a COLLATE NOCASE` was a parse error (task-1979,
+    /// F15).** A compound's `ORDER BY` may only name a result column, and the
+    /// match was made against the term exactly as written, so `a COLLATE
+    /// NOCASE` was an `Expr::Collate` rather than an `Expr::Column` and the
+    /// term matched nothing. SQLite reads through the `COLLATE`, matches the
+    /// name underneath it, and sorts that column with the collation the term
+    /// named rather than the one the column carries.
+    ///
+    /// @param expr - the term as written
+    /// @param span - where to point a `no such collation` diagnostic
+    fn order_term_collation(
+        &self,
+        expr: ExprId,
+        span: Span,
+    ) -> Result<(ExprId, Option<Collation>), ParseError> {
+        let Some(Expr::Collate { operand, collation }) = self.ast.expr(expr) else {
+            return Ok((expr, None));
+        };
+        let name = self.ast.text(*collation);
+        let Some(named) = self.collation_named(name) else {
+            return Err(no_such_collation(name, span));
+        };
+        Ok((*operand, Some(named)))
+    }
     /// Opens a query block: a fresh scope, and fresh per-block state.
     fn enter_block(&mut self) -> BlockFrame {
         self.scopes.push(Vec::new());
@@ -3155,7 +3185,8 @@ impl<'a> Binder<'a> {
     ///
     /// A bare column reference is named after its declared name rather than
     /// the query's text - `rowid`/`oid`/`_rowid_` resolve to the column they
-    /// alias and take its name too. Everything else keeps the source text.
+    /// alias and take its name too, and are called `rowid` when they alias no
+    /// column. Everything else keeps the source text.
     fn default_column_name(&self, id: ExprId, bound: &BoundExpr) -> Vec<u8> {
         let name = match bound {
             BoundExpr::Column { source, column, .. } => self
@@ -3170,6 +3201,17 @@ impl<'a> Binder<'a> {
         };
         if let Some(name) = name {
             return name.name.clone();
+        }
+        // **A rowid with no alias column is called `rowid`, whichever of the
+        // three spellings was written (task-1979, F22).** `SELECT rowid, oid,
+        // _rowid_ FROM t` answers three columns all named `rowid` in SQLite,
+        // and the case written is not kept either: `SELECT OID FROM t` is
+        // `rowid`. Falling through to the source text below named them `oid`
+        // and `_rowid_`, so a caller reading results by column name got a name
+        // SQLite never reports. A table whose INTEGER PRIMARY KEY *is* the
+        // rowid is the branch above and keeps that column's own name.
+        if matches!(bound, BoundExpr::Rowid { .. }) {
+            return b"rowid".to_vec();
         }
         if let Some(Expr::Column { column, .. }) = self.ast.expr(id) {
             return self.ast.text(*column).to_vec();
@@ -4664,32 +4706,32 @@ pub fn comparison_rules(left: &BoundExpr, right: &BoundExpr) -> (Option<Affinity
     (affinity, collation)
 }
 
-/// Rewrites an expression so its comparisons use an explicit collation.
+/// Wraps an expression in the collation an explicit `COLLATE` names.
 ///
-/// A column takes the collation directly, because that is the cheapest place
-/// for it and the planner reads it there when it decides whether an index is
-/// usable. A comparison takes it because `a = b COLLATE X` is about the
-/// comparison rather than about `b`. Everything else is wrapped, so that a
-/// collation on a literal survives to the comparison that will use it.
+/// **A `COLLATE` above a comparison does not reach the comparison (task-1979,
+/// F5).** `a = b COLLATE NOCASE` parses as `a = (b COLLATE NOCASE)`, because
+/// `COLLATE` binds tighter than `=`, and the comparison then reads NOCASE off
+/// its own right operand through [`comparison_rules`]. `(a = b) COLLATE
+/// NOCASE` is the other tree: the comparison is finished and NOCASE applies to
+/// the integer it produced, where a text collation does nothing. This function
+/// used to stamp the collation onto a `BoundExpr::Compare` it was handed, which
+/// made the two trees answer the same and made the outer name win over the
+/// inner one: measured against 3.53.4, `SELECT ('B'<'a') COLLATE NOCASE`
+/// answered 0 where SQLite answers 1, and
+/// `SELECT ('a' = 'A' COLLATE NOCASE) COLLATE BINARY` answered 0 where SQLite
+/// answers 1 because the inner NOCASE is the comparison's and the outer BINARY
+/// is the result's.
+///
+/// The wrapper is what carries the collation onward: [`comparison_rules`] asks
+/// an operand for its [`BoundExpr::explicit_collation`], so a `COLLATE` on a
+/// literal still reaches the comparison that uses it.
+///
+/// @param expr - the operand the `COLLATE` was written on
+/// @param collation - the collation it names
 fn apply_collation(expr: BoundExpr, collation: Collation) -> BoundExpr {
-    match expr {
-        BoundExpr::Compare {
-            op,
-            left,
-            right,
-            affinity,
-            ..
-        } => BoundExpr::Compare {
-            op,
-            left,
-            right,
-            affinity,
-            collation,
-        },
-        other => BoundExpr::Collate {
-            operand: Box::new(other),
-            collation,
-        },
+    BoundExpr::Collate {
+        operand: Box::new(expr),
+        collation,
     }
 }
 

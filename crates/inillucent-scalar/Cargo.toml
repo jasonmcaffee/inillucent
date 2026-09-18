@@ -11,6 +11,10 @@ description = "The dialect's scalar functions, three-valued logic and value coer
 inillucent-base = { workspace = true }
 inillucent-value = { workspace = true }
 inillucent-sql = { workspace = true }
+# The one thing in this crate the operating system has to answer: the local
+# zone's offset from UTC, for the `utc` and `localtime` date modifiers.
+# `inillucent-vfs` is where the workspace asks the operating system anything.
+inillucent-vfs = { workspace = true }
 
 # The workspace's lint table; see the note beside it in the root manifest.
 [lints]
