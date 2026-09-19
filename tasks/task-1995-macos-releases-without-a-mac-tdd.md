@@ -360,12 +360,57 @@ Run in this order, because each step's failure mode is cheapest to read on its o
 Steps 1 to 6 need nothing from Apple and are what this task is verified by. Step 7 needs the
 membership and the certificates, and is the one part that waits on §7.
 
-## 10. unluminous
+## 10. unluminous, which is the same toolchain and one extra requirement
 
-The same toolchain applies to `C:\jason\dev\unluminous` and the ticket asks for both. Its shape is
-different in one way that matters: it is a desktop application rather than four command line programs,
-so the artifact is an `.app` bundle rather than loose binaries, and `rcodesign sign` signs a bundle
-directly — it recurses into nested Mach-O files and writes the `_CodeSignature/CodeResources` that a
-bundle needs. That is a capability `rcodesign` has and this repository does not exercise. The pieces
-it shares with inillucent — the cross compile, the universal binary, the notary key, the credential
-storage — are the same ones, which is why inillucent is done first.
+The ticket asks for both, and unluminous was done second because it is the harder case in one
+specific way. Everything after the compile is the same and works the same:
+`rcodesign macho-universal-create` joins the slices, `rcodesign sign` signs the bundle recursively
+and writes its `_CodeSignature/CodeResources`, and the notary API is the same API.
+
+**The compile is different, and it needs Apple's macOS SDK.** inillucent is four command line
+programs and a shared library, and the only C in it is `onig` and `esaxx-rs`, so zig's `libSystem`
+stub is everything the link needs. unluminous is a windowed application: its link line asks for
+`-lobjc` and for AppKit, Metal, QuartzCore, WebKit, Carbon, ApplicationServices, CoreGraphics,
+CoreVideo, Foundation, CoreFoundation and Security. zig ships a stub for `libSystem` and nothing
+else — `zig cc -framework AppKit` answers `unable to find framework 'AppKit'. searched paths: none`
+— so the link stops at the first of them:
+
+```
+error: unable to find dynamic system library 'objc' using strategy 'paths_first'
+```
+
+measured here on 2026-09-19. Those stubs are in Xcode and in the Command Line Tools, at
+`/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk`, and cargo-zigbuild already reads `SDKROOT`, so
+one copied directory is the whole of what is missing.
+
+**Apple's licence for that SDK says Apple-branded hardware.** That is the same clause the ticket's
+two links run into, and it is a decision for the person who accepted the licence rather than one a
+build script should make quietly. `installer/macos/build-on-windows.ps1` therefore never downloads
+an SDK: it looks in `-Sdk`, `$env:SDKROOT` and `tools/cross/sdk/MacOSX.sdk`, and when there is none it
+says what is missing, where it comes from and what the licence says.
+
+`unluminous-cli` links no framework and **cross compiles here with no SDK at all**, which `-CliOnly`
+does and which is proven.
+
+**Three things about the bundle that are not in the inillucent half.**
+
+- **A zip, not a disk image.** A `.dmg` holds an HFS+ filesystem, `hdiutil` is what writes one, and
+  `rcodesign` signs a disk image but does not create one. Apple's notary accepts a zipped bundle, and
+  the ticket is stapled to the *application* inside the zip rather than to the zip, so what a person
+  ends up running carries its own ticket and opens with no network — which is the property the Mac
+  script's two-submission order gives the image. `installer/macos/build.sh` still writes the `.dmg`.
+- **The zip has to carry Unix modes.** A zip written on Windows records the host system as MS-DOS and
+  leaves the external attributes zero, and `unzip` on macOS reads a mode only when the host byte says
+  Unix. `Contents/MacOS/unluminous` would arrive without its executable bit and the application would
+  not start. `Set-ZipUnixModes` patches the central directory, which was measured both ways.
+- **The identity is a `.p12`.** `CODESIGN_IDENTITY` names an entry in a keychain and Windows has
+  none. Keychain Access exports the same identity as a `.p12`; `CODESIGN_P12` names it in the
+  `installer/macos/notarize.env` the other credentials already live in, and its password is sealed
+  with DPAPI.
+
+**What was proven without the SDK**: `unluminous-cli` built for both Apple architectures; the bundle
+assembled with its `Info.plist`, `PkgInfo` and icon; both binaries joined into universal Mach-O;
+`unluminous-cli` signed and then the bundle signed round it, with the hardened runtime on all four
+signatures and `_CodeSignature/CodeResources` written; each Mach-O verified; and the zip holding only
+the bundle with 0755 on `Contents/MacOS` and 0644 elsewhere. The windowed program's own place in the
+bundle was taken by a small Mach-O built the same way, because the SDK is what it is waiting for.
