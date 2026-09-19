@@ -115,6 +115,14 @@ if (Test-Path -LiteralPath $sealedKey) {
 # nothing installed beyond the release toolchain. The self-signed certificate it
 # writes alongside the key is discarded: only the key half is used, and the
 # certificate that matters is the one Apple issues from the request below.
+#
+# **Discarded means removed before sealing, and that took a bad signature to
+# notice.** The first version sealed the whole unified PEM. `rcodesign sign
+# --pem-file` then read both halves, and its documented rule is that "all
+# remaining certificates are assumed to constitute the CA issuing chain and will
+# be added to the signature data" - so every signature carried the throwaway
+# certificate next to Apple's, reading back as a second `Developer ID
+# Application` with `chains_to_apple_root_ca: false`.
 $scratch = Get-AppleScratchDir
 $stamp = [guid]::NewGuid().ToString('N')
 $keyFile = Join-Path $scratch "new-$Kind-$stamp.pem"
@@ -126,7 +134,10 @@ try {
     & $rcodesign generate-certificate-signing-request --pem-file $keyFile --csr-pem-file $csr
     if ($LASTEXITCODE -ne 0) { throw "rcodesign could not write the signing request ($LASTEXITCODE)" }
 
-    Protect-AppleSecret -Value (Get-Content -Path $keyFile -Raw) -Path $sealedKey
+    $unified = Get-Content -Path $keyFile -Raw
+    $key = [regex]::Match($unified, '(?s)-----BEGIN (RSA )?PRIVATE KEY-----.*?-----END (RSA )?PRIVATE KEY-----').Value
+    if (-not $key) { throw 'rcodesign wrote a PEM with no private key block in it' }
+    Protect-AppleSecret -Value ($key + "`n") -Path $sealedKey
 } finally {
     if (Test-Path -LiteralPath $keyFile) { Remove-Item -LiteralPath $keyFile -Force -Confirm:$false }
 }
