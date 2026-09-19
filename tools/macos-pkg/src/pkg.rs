@@ -171,15 +171,29 @@ fn build_package_info(spec: &PackageSpec, files: &[PayloadFile], directories: &[
     let bytes: usize = files.iter().map(|file| file.data.len()).sum();
     let kilobytes = bytes.div_ceil(1024);
     let count = files.len() + directories.len() + 1;
+
+    // `install-location` is omitted when the payload installs at the root, which is what
+    // `node-v26.9.0.pkg` does and what `pkgbuild` writes. The empty elements below are Apple's too:
+    // none is needed for a payload with no bundles in it, and all of them appear in every
+    // PackageInfo Apple's tooling produces.
+    let location = if spec.install_location == "/" {
+        String::new()
+    } else {
+        format!(" install-location=\"{}\"", spec.install_location)
+    };
     format!(
-        "<?xml version=\"1.0\" encoding=\"utf-8\" standalone=\"no\"?>\n\
-         <pkg-info format-version=\"2\" identifier=\"{}\" version=\"{}\" \
-         install-location=\"{}\" auth=\"root\" overwrite-permissions=\"true\" \
-         relocatable=\"false\" postinstall-action=\"none\">\n\
-         \x20   <payload installKBytes=\"{}\" numberOfFiles=\"{}\"/>\n\
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n\
+         <pkg-info overwrite-permissions=\"true\" relocatable=\"false\" identifier=\"{}\" \
+         postinstall-action=\"none\" version=\"{}\" format-version=\"2\"{} auth=\"root\">\n\
+         \x20   <payload numberOfFiles=\"{}\" installKBytes=\"{}\"/>\n\
          \x20   <bundle-version/>\n\
+         \x20   <upgrade-bundle/>\n\
+         \x20   <update-bundle/>\n\
+         \x20   <atomic-update-bundle/>\n\
+         \x20   <strict-identifier/>\n\
+         \x20   <relocate/>\n\
          </pkg-info>\n",
-        spec.identifier, spec.version, spec.install_location, kilobytes, count
+        spec.identifier, spec.version, location, count, kilobytes
     )
 }
 
@@ -212,6 +226,7 @@ pub fn assemble(
         is_directory: false,
         mode: 0o644,
         data: distribution.as_bytes().to_vec(),
+        compress: true,
     }];
 
     if !resources.is_empty() {
@@ -220,6 +235,7 @@ pub fn assemble(
             is_directory: true,
             mode: 0o755,
             data: Vec::new(),
+            compress: false,
         });
         for resource in resources {
             let name = resource
@@ -233,6 +249,7 @@ pub fn assemble(
                 mode: 0o644,
                 data: std::fs::read(resource)
                     .with_context(|| format!("reading {}", resource.display()))?,
+                compress: true,
             });
         }
     }
@@ -242,17 +259,22 @@ pub fn assemble(
         is_directory: true,
         mode: 0o755,
         data: Vec::new(),
+        compress: false,
     });
-    for (name, data) in [
-        ("PackageInfo", package_info.into_bytes()),
-        ("Bom", bom),
-        ("Payload", payload),
+    // The payload is already a gzip stream, so it goes into the heap as it is. Apple stores it the
+    // same way - `application/octet-stream`, with the archived and extracted lengths equal - and
+    // deflating it a second time saves nothing.
+    for (name, data, compress) in [
+        ("PackageInfo", package_info.into_bytes(), true),
+        ("Bom", bom, true),
+        ("Payload", payload, false),
     ] {
         entries.push(XarEntry {
             path: format!("{component_name}/{name}"),
             is_directory: false,
             mode: 0o644,
             data,
+            compress,
         });
     }
 

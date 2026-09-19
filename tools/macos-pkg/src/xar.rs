@@ -18,7 +18,7 @@
 
 use {
     anyhow::Result,
-    sha2::{Digest, Sha256},
+    sha1::{Digest, Sha1},
     std::io::Write,
 };
 
@@ -28,10 +28,19 @@ const XAR_MAGIC: u32 = 0x7861_7221;
 const HEADER_SIZE: u16 = 28;
 /// The only format version Apple's tools write or read.
 const XAR_VERSION: u16 = 1;
-/// The checksum algorithm id for SHA-256 in the header.
-const CHECKSUM_SHA256: u32 = 3;
-/// The size of a SHA-256 digest, which is how much heap the checksum occupies.
-const DIGEST_SIZE: u64 = 32;
+/// The checksum algorithm id for SHA-1 in the header.
+///
+/// **SHA-1 because that is what Apple writes, and the reader is Apple's.** The format allows
+/// SHA-256, and this wrote SHA-256 first because a newer digest is the better choice everywhere
+/// else. Apple's notary service answered `The contents of the package could not be extracted` and
+/// `has no signed executables or bundles. No tickets can be generated`, and the real product
+/// archive `node-v26.9.0.pkg` reads back `checksum_alg=1` with `<checksum style="sha1">` and
+/// `sha1` on every file. Nothing here is relying on the digest for security: the signature over the archive is
+/// CMS, and every Mach-O inside carries its own. This digest only says the table of contents was not
+/// truncated.
+const CHECKSUM_SHA1: u32 = 1;
+/// The size of a SHA-1 digest, which is how much heap the checksum occupies.
+const DIGEST_SIZE: u64 = 20;
 
 /// One file or directory to place in the archive.
 pub struct XarEntry {
@@ -43,6 +52,13 @@ pub struct XarEntry {
     pub mode: u32,
     /// The file's bytes. Empty for a directory.
     pub data: Vec<u8>,
+    /// Whether to deflate the bytes into the heap.
+    ///
+    /// False for a payload that is already compressed. Apple stores `Payload` as
+    /// `application/octet-stream` with its archived and extracted lengths equal, and compressing a
+    /// gzip stream a second time buys nothing while making the archive differ from every one Apple's
+    /// own tools produce.
+    pub compress: bool,
 }
 
 /// What the layout pass worked out about one entry.
@@ -72,11 +88,11 @@ fn compress(data: &[u8]) -> Result<Vec<u8>> {
     Ok(encoder.finish()?)
 }
 
-/// Hex encodes a SHA-256 digest of some bytes.
+/// Hex encodes a SHA-1 digest of some bytes.
 ///
 /// @param data - the bytes to digest
 fn digest_hex(data: &[u8]) -> String {
-    let mut hasher = Sha256::new();
+    let mut hasher = Sha1::new();
     hasher.update(data);
     hasher
         .finalize()
@@ -106,8 +122,10 @@ fn place(entries: &[XarEntry]) -> Result<Vec<Placed>> {
     for (index, entry) in entries.iter().enumerate() {
         let archived = if entry.is_directory {
             Vec::new()
-        } else {
+        } else if entry.compress {
             compress(&entry.data)?
+        } else {
+            entry.data.clone()
         };
         let length = archived.len() as u64;
         placed.push(Placed {
@@ -152,12 +170,17 @@ fn children_of(entries: &[XarEntry], index: usize) -> Vec<usize> {
 fn write_data_element(xml: &mut String, entry: &XarEntry, spot: &Placed) {
     xml.push_str(&format!(
         "<data><length>{}</length><offset>{}</offset><size>{}</size>\
-         <encoding style=\"application/x-gzip\"/>\
-         <extracted-checksum style=\"sha256\">{}</extracted-checksum>\
-         <archived-checksum style=\"sha256\">{}</archived-checksum></data>",
+         <encoding style=\"{}\"/>\
+         <extracted-checksum style=\"sha1\">{}</extracted-checksum>\
+         <archived-checksum style=\"sha1\">{}</archived-checksum></data>",
         spot.archived.len(),
         spot.offset,
         entry.data.len(),
+        if entry.compress {
+            "application/x-gzip"
+        } else {
+            "application/octet-stream"
+        },
         spot.extracted_digest,
         spot.archived_digest
     ));
@@ -220,7 +243,7 @@ fn table_of_contents(entries: &[XarEntry], placed: &[Placed], timestamp: &str) -
     xml.push_str("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<xar><toc>");
     xml.push_str(&format!("<creation-time>{timestamp}</creation-time>"));
     xml.push_str(&format!(
-        "<checksum style=\"sha256\"><offset>0</offset><size>{DIGEST_SIZE}</size></checksum>"
+        "<checksum style=\"sha1\"><offset>0</offset><size>{DIGEST_SIZE}</size></checksum>"
     ));
     for index in children_of(entries, usize::MAX) {
         write_file_element(&mut xml, entries, placed, index, timestamp);
@@ -244,12 +267,12 @@ pub fn build(entries: &[XarEntry], timestamp: &str) -> Result<Vec<u8>> {
     out.extend_from_slice(&XAR_VERSION.to_be_bytes());
     out.extend_from_slice(&(toc_compressed.len() as u64).to_be_bytes());
     out.extend_from_slice(&(toc.len() as u64).to_be_bytes());
-    out.extend_from_slice(&CHECKSUM_SHA256.to_be_bytes());
+    out.extend_from_slice(&CHECKSUM_SHA1.to_be_bytes());
     out.extend_from_slice(&toc_compressed);
 
     // The heap: the digest of the compressed table of contents, then every
     // file's compressed bytes in the order the layout pass placed them.
-    let mut hasher = Sha256::new();
+    let mut hasher = Sha1::new();
     hasher.update(&toc_compressed);
     out.extend_from_slice(&hasher.finalize());
     for spot in &placed {

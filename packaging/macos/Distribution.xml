@@ -38,7 +38,14 @@
         <pkg-ref id="com.blackrainbowlabs.inillucent" />
     </choice>
 
-    <pkg-ref id="com.blackrainbowlabs.inillucent" version="@VERSION@" onConclusion="none">
-        inillucent-component-@VERSION@.pkg
-    </pkg-ref>
+    <!--
+      The `#` is not decoration and the whitespace is not harmless. A pkg-ref's text is a URL, and
+      `#name.pkg` means "the entry called name.pkg inside this archive"; without the `#` it is a
+      relative path to something outside, which is not there. Apple's notary service answered
+      `The contents of the package could not be extracted` and `has no signed executables or
+      bundles. No tickets can be generated` for an archive that was otherwise byte-for-byte the
+      shape of a real one. `node-v26.9.0.pkg` writes `>#node-v26.9.0.pkg<`, on one line, and so does
+      this. productbuild normalised it on the way past, which is why it was never wrong on a Mac.
+    -->
+    <pkg-ref id="com.blackrainbowlabs.inillucent" version="@VERSION@" onConclusion="none">#inillucent-component-@VERSION@.pkg</pkg-ref>
 </installer-gui-script>

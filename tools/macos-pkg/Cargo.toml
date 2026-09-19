@@ -26,7 +26,7 @@ clap = { version = "4", features = ["derive"] }
 crc32fast = "1"
 flate2 = "1"
 scroll = { version = "0.12", features = ["derive"] }
-sha2 = "0.10"
+sha1 = "0.10"
 walkdir = "2"
 
 # There is no development dependency on `apple-xar`, and that is deliberate.

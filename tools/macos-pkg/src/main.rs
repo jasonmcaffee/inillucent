@@ -91,6 +91,20 @@ fn distribution_for(path: &PathBuf, version: &str) -> Result<String> {
 /// Builds the package described by the command line.
 fn main() -> Result<()> {
     let args = Args::parse();
+
+    // **A shell can rewrite this argument, and the result installs somewhere nobody meant.**
+    // `--install-location /` typed in Git Bash arrives as `C:/Program Files/Git/`, because MSYS
+    // rewrites a lone slash into its own root. The package still builds, still signs and is still
+    // notarised - Apple accepted one - and it would lay the payload down under a path that does not
+    // exist on a Mac. An install location that is not absolute in the POSIX sense is always this.
+    if !args.install_location.starts_with('/') {
+        anyhow::bail!(
+            "--install-location is {:?}, which is not an absolute macOS path. A shell has rewritten \
+             it: Git Bash turns a lone `/` into its own installation directory. Pass it from \
+             PowerShell, or as `//` which MSYS leaves alone.",
+            args.install_location
+        );
+    }
     let component_name = args
         .component_name
         .clone()
