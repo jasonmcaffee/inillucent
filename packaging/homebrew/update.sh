@@ -59,6 +59,15 @@ fill() {
     return
   fi
   formula="${formula//$placeholder/$digest}"
+  # **And the URL, which is the half that was missed.** The version substitution above rewrites the
+  # template's own version string, and the template's URLs named an older release - 0.1.2 under
+  # `version "0.1.4"`. So a bump produced a formula declaring the new version, carrying the new
+  # release's sha256, and pointing at the previous release's archive: Homebrew downloads the old
+  # file, hashes it, and tells the person their download is corrupted. That is exactly the failure
+  # the comment at the top of this script says must never reach somebody else's machine, and the
+  # checksums being read out of SHA256SUMS did not prevent it, because the mismatch was in the URL.
+  formula="$(printf '%s
+' "$formula" | sed "s|inillucent-[0-9][0-9.]*-$target\.tar\.gz|$archive|g")"
   echo "  $target  $digest"
 }
 
