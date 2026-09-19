@@ -11,8 +11,21 @@
 The wheel is **platform-specific**, because it carries the four executables and
 the C ABI library. That is deliberate and it is what makes ``pip install
 inillucent`` work with no compiler, no Rust toolchain and no network access past
-the index. It also means one wheel per platform, built on that platform, and
-this script builds the one for the machine it is run on.
+the index.
+
+It used to mean one wheel per platform *built on that platform*, and the effect
+was that only the Windows wheel ever reached PyPI - so ``pip install inillucent``
+on a Mac or on Linux answered "no matching distribution". Nothing about a wheel
+needs the machine it targets: it is an archive of files plus a platform tag, and
+the release already builds every platform's binaries here. ``--target`` stages
+from any archive in ``dist/`` and tags the wheel accordingly::
+
+    python packages/python/build.py --target aarch64-unknown-linux-gnu
+
+The ``manylinux_2_28`` tags are accurate rather than asserted: the Linux targets
+are built through ``cargo-zigbuild`` with a pinned glibc floor of 2.28, which is
+exactly what that tag claims. ``tools/release-verify-linux.sh`` reads the highest
+``GLIBC_`` symbol version out of the archive and fails if it is higher.
 
 ``driver.py`` is copied here from ``drivers/bindings/python/inillucent.py``
 rather than being written twice. That file is the reference binding
@@ -33,6 +46,26 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent.parent
 PROGRAMS = ("inillucent", "inillucent-shell", "inillucent-mcp", "inillucent-migrate")
+
+#: The wheel platform tag for each release target.
+#:
+#: macOS is one wheel rather than two: the release builds a universal binary, so ``universal2``
+#: describes it exactly and pip installs it on either architecture. ``13_0`` is the minimum the
+#: binaries declare - tagging it lower would install on a Mac they refuse to start on.
+WHEEL_TAGS = {
+    "x86_64-pc-windows-msvc": "win_amd64",
+    "aarch64-apple-darwin": "macosx_13_0_universal2",
+    "x86_64-apple-darwin": "macosx_13_0_universal2",
+    "x86_64-unknown-linux-gnu": "manylinux_2_28_x86_64",
+    "aarch64-unknown-linux-gnu": "manylinux_2_28_aarch64",
+}
+
+#: The archive a target's binaries come from, when it is not the target's own.
+#: Both macOS wheels are cut from the one universal archive the release builds.
+SOURCE_ARCHIVES = {
+    "aarch64-apple-darwin": "universal-apple-darwin",
+    "x86_64-apple-darwin": "universal-apple-darwin",
+}
 LIBRARIES = (
     "inillucent_driver_capi.dll",
     "libinillucent_driver_capi.dylib",
@@ -88,7 +121,7 @@ def stage(version: str, target: str) -> None:
     :param version: the release version
     :param target: the Rust target triple whose archive to stage from
     """
-    source = ROOT / "dist" / f"inillucent-{version}-{target}"
+    source = ROOT / "dist" / f"inillucent-{version}-{SOURCE_ARCHIVES.get(target, target)}"
     if not source.is_dir():
         raise SystemExit(
             f"{source} does not exist.\n"
@@ -99,7 +132,10 @@ def stage(version: str, target: str) -> None:
         shutil.rmtree(package / directory, ignore_errors=True)
         (package / directory).mkdir(parents=True, exist_ok=True)
 
-    suffix = ".exe" if sys.platform == "win32" else ""
+    # **The target's suffix, not the host's.** This read `sys.platform`, which is right only when
+    # the wheel is for the machine building it - and cross building a Linux wheel on Windows then
+    # looked for `inillucent.exe` inside a Linux archive and stopped.
+    suffix = ".exe" if "windows" in target else ""
     for program in PROGRAMS:
         wanted = source / "bin" / f"{program}{suffix}"
         shutil.copy2(wanted, package / "_bin" / wanted.name)
@@ -178,7 +214,10 @@ def main() -> None:
     target = parsed.target or host_target()
     print(f"inillucent {version} for {target}")
     stage(version, target)
-    build(platform_tag(), parsed.sdist)
+    # The target's tag when the target is named, the host's otherwise. `platform_tag()` asks
+    # sysconfig about *this* machine, which is the wrong answer for a cross built wheel.
+    tag = WHEEL_TAGS.get(target) if parsed.target else None
+    build(tag or platform_tag(), parsed.sdist)
     if parsed.publish:
         publish(parsed.test)
 

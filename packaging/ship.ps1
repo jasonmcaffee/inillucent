@@ -316,6 +316,33 @@ function Import-SigningSecrets {
         $script:SigningScratch += $keyFile
     }
 
+    # npm reads its credential out of an npmrc rather than an environment variable, so the token is
+    # unsealed into one on the RAM disk and npm is pointed at it.
+    #
+    # **The sealed token wins over an inherited `npm_config_userconfig`.** Every other secret here
+    # follows "anything already in the environment wins", and for npm that rule is backwards: this
+    # machine exports `npm_config_userconfig=C:\Users\jason\.npmrc`, and that file holds a token
+    # which answers 401. Deferring to it meant the preflight reported npm as unusable while a
+    # working token sat sealed beside it. Only an explicit NPM_TOKEN defers now, because that is
+    # somebody deliberately choosing a different credential rather than a machine-wide default.
+    $sealedNpm = Join-Path $store 'npm.token.sealed'
+    if (-not $env:NPM_TOKEN -and (Test-Path -LiteralPath $sealedNpm)) {
+        $script:PreviousNpmConfig = $env:npm_config_userconfig
+        $npmrc = Join-Path (Get-AppleScratchDir) ('npmrc-' + [guid]::NewGuid().ToString('N'))
+        Set-Content -Path $npmrc -Encoding ascii -NoNewline `
+            -Value "//registry.npmjs.org/:_authToken=$(Unprotect-AppleSecret -Path $sealedNpm)"
+        $env:npm_config_userconfig = $npmrc
+        $script:SigningScratch += $npmrc
+    }
+
+    # twine takes `__token__` as the username and the API token as the password.
+    $sealedPypi = Join-Path $store 'pypi.token.sealed'
+    if (-not $env:TWINE_PASSWORD -and (Test-Path -LiteralPath $sealedPypi)) {
+        $env:TWINE_USERNAME = '__token__'
+        $env:TWINE_PASSWORD = Unprotect-AppleSecret -Path $sealedPypi
+        $env:TWINE_NON_INTERACTIVE = '1'
+    }
+
     $keyIdFile = Join-Path $store 'gpg.keyid'
     $sealedPassphrase = Join-Path $store 'gpg.passphrase.sealed'
     if (-not $env:INILLUCENT_GPG_KEY -and (Test-Path -LiteralPath $keyIdFile)) {
@@ -335,6 +362,10 @@ function Remove-SigningSecrets {
         if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force -Confirm:$false }
     }
     $env:INILLUCENT_GPG_PASSPHRASE = $null
+    $env:TWINE_PASSWORD = $null
+    # Put back whatever the machine had, rather than clearing it: npm outside this script should
+    # keep reading the config it was pointed at.
+    $env:npm_config_userconfig = $script:PreviousNpmConfig
 }
 
 function Test-Tool {
@@ -456,8 +487,9 @@ function Get-Routes {
                 # one request and it also names the account, so publishing under the wrong one is
                 # visible in the plan rather than discovered afterwards.
                 $who = (& npm whoami 2>&1 | Out-String).Trim()
-                if ($LASTEXITCODE -ne 0 -or -not $who -or $who -match 'E401|Unauthorized') {
-                    return 'npm is not signed in. Create the Black Rainbow Labs account, then: npm login, or set NPM_TOKEN.'
+                if (-not $who -or $who -match 'E401|Unauthorized|ENEEDAUTH') {
+                    # npm's own words, because "not signed in" hid the real answer once already.
+                    return "npm rejected the credential: $($who -replace '\s+', ' ')"
                 }
                 $script:NpmAccount = $who
                 $null
@@ -470,8 +502,11 @@ function Get-Routes {
             What   = 'the Python wheel'
             Needs  = {
                 if (-not $env:TWINE_PASSWORD -and -not (Test-Path -LiteralPath (Join-Path $HOME '.pypirc'))) {
-                    return 'no PyPI credential: TWINE_PASSWORD is unset and there is no ~/.pypirc.'
+                    return 'no PyPI credential: nothing sealed at %LOCALAPPDATA%\inillucent\signing\pypi.token.sealed, TWINE_PASSWORD is unset and there is no ~/.pypirc.'
                 }
+                if (-not (Test-Tool 'python')) { return 'python is not installed.' }
+                $probe = & python -m twine --version 2>&1
+                if ($LASTEXITCODE -ne 0) { return 'twine is not installed: python -m pip install twine' }
                 $null
             }
             Run    = { & python (Join-Path $script:Root 'packages/python/build.py') --publish }
