@@ -90,6 +90,20 @@ function Repair-StagedLink {
         @{ File = 'README.md';                   From = '[**`examples/rag-agent/`**](examples/rag-agent/README.md)'; To = '**`examples/rag-agent/`**, in the repository,' }
     )
 
+    # Directories the archive deliberately does not carry, and what to do about a link into one.
+    #
+    # **This is the third time the same defect has stopped a release.** task-1962 linked
+    # docs/glossary.md to drivers/README.md; task-1998 linked docs/roadmap.md to its own TDD under
+    # tasks/. Each was a reasonable thing to write, each was invisible until somebody cut a release,
+    # and each needed a row of its own in the table above. A row per link does not scale: a
+    # documentation change in any ticket can break the packaging in a ticket nobody is working on.
+    #
+    # So a link into one of these directories becomes its own text - the sentence still reads, and
+    # the reader is not sent to a file the archive was never going to contain. Every other dead link
+    # still fails the staging, because those are mistakes rather than policy.
+    $neverStaged = @('tasks', 'crates', 'drivers', 'compat', 'tools', 'fuzz', 'examples', 'packaging', 'scripts', 'runs', 'design')
+    $intoUnstaged = '\[([^\]]+)\]\((?:\.\./)*(?:' + ($neverStaged -join '|') + ')/[^)]*\)'
+
     foreach ($rewrite in $rewrites) {
         $path = Join-Path $Stage $rewrite.File
         if (-not (Test-Path -LiteralPath $path)) { continue }
@@ -97,6 +111,12 @@ function Repair-StagedLink {
         if (-not $text.Contains($rewrite.From)) { continue }
         $text = $text.Replace($rewrite.From, $rewrite.To)
         [System.IO.File]::WriteAllText($path, $text)
+    }
+
+    foreach ($document in (Get-ChildItem -LiteralPath $Stage -Recurse -Filter '*.md')) {
+        $text = [System.IO.File]::ReadAllText($document.FullName)
+        $flattened = [regex]::Replace($text, $intoUnstaged, '$1')
+        if ($flattened -ne $text) { [System.IO.File]::WriteAllText($document.FullName, $flattened) }
     }
 
     # A dead link in the archive is the defect this function exists to prevent,
