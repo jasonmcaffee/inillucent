@@ -71,6 +71,11 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'stage-layout.ps1')
+# The DPAPI sealing helpers live in apple-credentials.ps1 because that is where sealing was first
+# needed. Nothing about `Protect-AppleSecret` is Apple-specific: it is `ConvertFrom-SecureString`,
+# which encrypts under one Windows account, and the project's minisign and OpenPGP keys want exactly
+# the same treatment as the Developer ID one.
+. (Join-Path $PSScriptRoot 'macos/apple-credentials.ps1')
 
 $script:Outcomes = [ordered]@{}
 $script:Dist = Join-Path $root 'dist'
@@ -281,6 +286,57 @@ function Find-VersionStraggler {
 # Phase 1: what can run.
 # ---------------------------------------------------------------------------
 
+function Import-SigningSecrets {
+    <#
+    .SYNOPSIS
+        Puts the project's signing keys into the environment for this run, from the sealed store.
+
+    .DESCRIPTION
+        `sign-sums.ps1` and `linux/package-linux.ps1` read theirs out of the environment, which is
+        right for them - they are usable on their own and on another machine. On this machine the
+        keys are sealed with DPAPI under Jason's account, so nothing has to be exported by hand
+        before a release and nothing sits in the clear:
+
+            %LOCALAPPDATA%\inillucent\signing\minisign.key.sealed
+            %LOCALAPPDATA%\inillucent\signing\gpg.passphrase.sealed
+            %LOCALAPPDATA%\inillucent\signing\gpg.keyid
+
+        Anything already in the environment wins, so a one-off run with a different key still works.
+        The unsealed minisign key is written to the RAM disk and deleted by
+        Remove-SigningSecrets in a `finally`.
+    #>
+    $store = Join-Path $env:LOCALAPPDATA 'inillucent\signing'
+    $script:SigningScratch = @()
+
+    $sealedMinisign = Join-Path $store 'minisign.key.sealed'
+    if (-not $env:INILLUCENT_MINISIGN_KEY -and (Test-Path -LiteralPath $sealedMinisign)) {
+        $keyFile = Join-Path (Get-AppleScratchDir) ('minisign-' + [guid]::NewGuid().ToString('N') + '.key')
+        Set-Content -Path $keyFile -Value (Unprotect-AppleSecret -Path $sealedMinisign) -NoNewline
+        $env:INILLUCENT_MINISIGN_KEY = $keyFile
+        $script:SigningScratch += $keyFile
+    }
+
+    $keyIdFile = Join-Path $store 'gpg.keyid'
+    $sealedPassphrase = Join-Path $store 'gpg.passphrase.sealed'
+    if (-not $env:INILLUCENT_GPG_KEY -and (Test-Path -LiteralPath $keyIdFile)) {
+        $env:INILLUCENT_GPG_KEY = (Get-Content -Path $keyIdFile -Raw).Trim()
+    }
+    if (-not $env:INILLUCENT_GPG_PASSPHRASE -and (Test-Path -LiteralPath $sealedPassphrase)) {
+        $env:INILLUCENT_GPG_PASSPHRASE = Unprotect-AppleSecret -Path $sealedPassphrase
+    }
+}
+
+function Remove-SigningSecrets {
+    <#
+    .SYNOPSIS
+        Deletes what Import-SigningSecrets unsealed, and clears the passphrase.
+    #>
+    foreach ($path in $script:SigningScratch) {
+        if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force -Confirm:$false }
+    }
+    $env:INILLUCENT_GPG_PASSPHRASE = $null
+}
+
 function Test-Tool {
     <#
     .SYNOPSIS
@@ -393,9 +449,17 @@ function Get-Routes {
             What   = 'the npm wrapper and its four platform packages'
             Needs  = {
                 if (-not (Test-Tool 'npm')) { return 'npm is not installed.' }
-                if (-not $env:NPM_TOKEN -and -not (Test-Path -LiteralPath (Join-Path $HOME '.npmrc'))) {
-                    return 'no npm credential: NPM_TOKEN is unset and there is no ~/.npmrc.'
+                # **Asked, not assumed.** A `~/.npmrc` with a token in it is not a working
+                # credential: this machine had one that answered 401, and a preflight that checks
+                # only whether the file exists reports a route as ready and then fails in the
+                # publish phase - which is the failure preflight exists to prevent. `npm whoami` is
+                # one request and it also names the account, so publishing under the wrong one is
+                # visible in the plan rather than discovered afterwards.
+                $who = (& npm whoami 2>&1 | Out-String).Trim()
+                if ($LASTEXITCODE -ne 0 -or -not $who -or $who -match 'E401|Unauthorized') {
+                    return 'npm is not signed in. Create the Black Rainbow Labs account, then: npm login, or set NPM_TOKEN.'
                 }
+                $script:NpmAccount = $who
                 $null
             }
             Run    = { & node (Join-Path $script:Root 'packages/npm/build.mjs') --publish }
@@ -588,6 +652,7 @@ if ($dirty -and -not $AllowDirty -and -not $WhatIf) {
 }
 
 Write-Phase 'preflight'
+Import-SigningSecrets
 $routes = Get-Routes -Version $Version
 $plan = @()
 foreach ($route in $routes) {
@@ -597,12 +662,16 @@ foreach ($route in $routes) {
     $plan += @{ Route = $route; Blocked = $state }
     $mark = if ($state) { 'skip' } else { 'run ' }
     $detail = if ($state) { " - $state" } else { '' }
+    if (-not $state -and $route.Name -eq 'npm' -and $script:NpmAccount) {
+        $detail = " - as $script:NpmAccount"
+    }
     Write-Host ("   [{0}] {1,-16} {2}{3}" -f $mark, $route.Name, $route.What, $detail)
 }
 
 if ($WhatIf) {
     Write-Phase 'version'
     Set-ReleaseVersion -Version $Version -Previous $current
+    Remove-SigningSecrets
     Write-Host ''
     Write-Host 'nothing was written.' -ForegroundColor Yellow
     return
@@ -632,6 +701,8 @@ foreach ($entry in $plan) {
         Write-Warning "$($route.Name): $($_.Exception.Message)"
     }
 }
+
+Remove-SigningSecrets
 
 Write-Phase "report - inillucent $Version"
 foreach ($name in $script:Outcomes.Keys) {

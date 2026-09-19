@@ -86,11 +86,31 @@ function Export-SigningKey {
     if (-not (Test-Path -LiteralPath $gpg)) {
         throw "gpg is not at $gpg. Install Git for Windows, which ships it, or pass -Unsigned."
     }
-    $keyFile = Join-Path ([System.IO.Path]::GetTempPath()) ("inillucent-signing-" + [guid]::NewGuid().ToString('N') + '.asc')
-    $Passphrase | & $gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 `
-        --armor --output $keyFile --export-secret-keys $Key
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $keyFile)) {
-        throw "gpg could not export $Key"
+    # **A passphrase file, not `--passphrase-fd 0`.** Piping the passphrase into gpg from PowerShell
+    # is what this did, and gpg answers `error receiving key from agent: Bad passphrase` - the
+    # string does not arrive as gpg reads it. Measured on 2026-09-19 with a key that had just been
+    # generated: the same passphrase passed another way exports the key immediately. It had never
+    # been noticed because the keyring on this machine was empty, so this function had never run.
+    #
+    # `--passphrase` on the command line would work too and is what proved the diagnosis, but it
+    # puts the passphrase in the process argument list, which anything on the machine can read. A
+    # file on the RAM disk is the same choice `apple-credentials.ps1` makes for the .p12 password.
+    $scratch = if (Test-Path -LiteralPath 'R:\') { 'R:\inillucent-release' } else { [System.IO.Path]::GetTempPath() }
+    New-Item -ItemType Directory -Force -Path $scratch | Out-Null
+    $stamp = [guid]::NewGuid().ToString('N')
+    $keyFile = Join-Path $scratch "inillucent-signing-$stamp.asc"
+    $passphraseFile = Join-Path $scratch "inillucent-passphrase-$stamp.txt"
+    try {
+        Set-Content -Path $passphraseFile -Value $Passphrase -NoNewline -Encoding ascii
+        & $gpg --batch --yes --pinentry-mode loopback --passphrase-file $passphraseFile `
+            --armor --output $keyFile --export-secret-keys $Key
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $keyFile)) {
+            throw "gpg could not export $Key"
+        }
+    } finally {
+        if (Test-Path -LiteralPath $passphraseFile) {
+            Remove-Item -LiteralPath $passphraseFile -Force -Confirm:$false
+        }
     }
     return $keyFile
 }
