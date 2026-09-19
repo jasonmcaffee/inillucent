@@ -241,18 +241,21 @@ being about this repository. Until the count is zero, this item is what says so.
 ## 7. PostgreSQL parity: a server, a replica, readers beside a writer, roles and the dialect
 
 There is no listener, no replica, no reader that proceeds while a writer holds the file, no role
-and no password. An application written against PostgreSQL through an ordinary driver has nothing
-to connect to. What closing each of those looks like, in the order they are worked, is designed in
+and no password. A PostgreSQL client has nothing to connect to. What closing each of those looks
+like, in the order they are worked, is designed in
 [task-1998, the path from an embedded engine to PostgreSQL parity](../tasks/task-1998-postgres-parity-tdd.md):
 a server that runs as a service and speaks the PostgreSQL wire protocol first, a primary with a
 replica fed from the redo log second, snapshot readers alongside the one writer third, roles and
 row policies fourth, the PostgreSQL dialect fifth, and the operational verbs last.
 
-The measurement behind the dialect rung: of the 340 statements the ai-service backend runs at
-startup, 91 run here as written and 208 after its PostgreSQL types are rewritten to this engine's;
-96 of the rest fail on `ADD COLUMN IF NOT EXISTS` alone. Done, for the ladder as a whole, means
-that backend boots against the server with no change but its connection string, and a second
-server holds a copy of its data that stays current.
+Two measurements sit behind it, both in the design. Under the same load and with both engines
+syncing every commit, one writer here commits 38 single rows a second against PostgreSQL's 2,837,
+because the default journal mode syncs three times a commit, and four readers complete four reads
+while a 50,000 row transaction is open, because a reader waits for the writer to release the file.
+And a probe of one statement per PostgreSQL feature, 174 of them, is accepted for 59 and says
+which tokens, types, functions and catalogue tables the dialect rung has to add. Done, for the ladder as a whole, means `psql`, the `postgres` library for
+Node and `pg_dump` work against the server unchanged, and a second server holds a copy of the data
+that stays current.
 
 ## Where to go next
 
