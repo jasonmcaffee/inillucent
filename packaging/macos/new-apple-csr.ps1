@@ -82,17 +82,26 @@ if ($Certificate) {
     }
     Copy-Item -LiteralPath $Certificate -Destination $installed -Force
 
-    # Reading the certificate back is what catches the two mistakes that are
+    # Reading the certificate back is what catches the three mistakes that are
     # otherwise found by a failed notarisation hours later: the wrong flavour,
-    # and a certificate that is not a Developer ID one at all.
+    # a certificate Apple did not issue, and one that pairs with a different key.
+    #
+    # **The profile name is matched as `analyze-certificate` spells it**, which is
+    # CamelCase: `Guessed Certificate Profile: DeveloperIdApplication`. The first
+    # version of this checked for `developer-id-application`, which is how
+    # `print-signature-info` spells the same thing, so it refused the first real
+    # certificate Apple issued and said it was not a Developer ID one.
     $report = & $rcodesign analyze-certificate --certificate-der-file $installed 2>&1
-    $expected = if ($Kind -eq 'application') { 'developer-id-application' } else { 'developer-id-installer' }
-    if ($report -notmatch $expected) {
+    $expected = if ($Kind -eq 'application') { 'DeveloperIdApplication' } else { 'DeveloperIdInstaller' }
+    $profile = ($report | Select-String -Pattern 'Guessed Certificate Profile:\s*(\S+)').Matches.Groups[1].Value
+    $fromApple = [bool]($report | Select-String -Pattern 'Signed by Apple\?:\s*true')
+    if ($profile -ne $expected -or -not $fromApple) {
         Remove-Item -LiteralPath $installed -Force -Confirm:$false
-        throw "that certificate is not a $expected one. rcodesign read it as:`n$report"
+        throw "that certificate reads as '$profile' (signed by Apple: $fromApple); this is the -Kind $Kind slot, which needs $expected."
     }
     Write-Host "installed $installed"
-    $report | Select-String -Pattern 'Subject|Issuer|profile|Team' | ForEach-Object { "  $_" }
+    $report | Select-String -Pattern 'Subject CN|Team ID|Guessed Certificate Profile|Signed by Apple|Not Valid After' |
+        ForEach-Object { "  $($_.ToString().Trim())" }
     Write-Host ''
     Write-Host 'The release now finds it by itself: pwsh packaging/macos/release-macos.ps1'
     return
