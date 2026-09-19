@@ -449,6 +449,14 @@ function New-SelfSignedIdentity {
 # ---------------------------------------------------------------------------
 
 if (-not $Version) { $Version = Get-WorkspaceVersion -Root $root }
+
+# **A version that is not a version stops here**, rather than naming every archive after it. A
+# caller that splats an array instead of a hashtable passes the string `-Version` as the version
+# itself, and the first sign of it was an archive called
+# `inillucent--Version-universal-apple-darwin.tar.gz` that had already been built and signed.
+if ($Version -notmatch '^\d+\.\d+\.\d+') {
+    throw "'$Version' is not a version. A caller has passed a parameter name as the value - array splatting binds positionally, so @('-Version', `$v) sends the string '-Version'. Use a hashtable."
+}
 if ($SelfSigned -and -not $SkipNotarize) {
     throw 'a self-signed certificate cannot be notarised; add -SkipNotarize'
 }

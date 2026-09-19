@@ -1,5 +1,23 @@
 # AGENTS.md — working with inillucent, for an AI agent
 
+> ## Releasing: one command
+>
+> ```powershell
+> pwsh packaging/ship.ps1            # the version in Cargo.toml
+> pwsh packaging/ship.ps1 -Part patch
+> pwsh packaging/ship.ps1 -WhatIf    # the plan, and nothing written
+> ```
+>
+> It builds every target, signs and notarises macOS, writes the version into all five manifests that
+> carry it, tags, pushes, and publishes the GitHub release, the public mirror, inillucent.com and
+> every registry a credential exists for - then prints what reached each one and, for anything it
+> skipped, the sentence that would fix it.
+>
+> **Do not run the scripts in `packaging/` by hand.** They are what it calls, and running them one at
+> a time is how 0.1.3 ended up tagged, half published and left that way for four days, and how the
+> version came to say 0.1.4 in three files while naming 0.1.2 in two others. `-Only site,github`
+> re-runs part of a release without rebuilding.
+
 This is the shortest path to being useful here. Two audiences, and the split is the first thing to
 get right:
 

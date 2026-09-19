@@ -176,7 +176,7 @@ if ($Link) {
     if ($entries.Count -eq 0) { throw 'nothing is staged, so there is nothing to link' }
 
     $json = $entries | ConvertTo-Json -Depth 4 -Compress
-    & node (Join-Path $PSScriptRoot 'site/update-downloads.mjs') $contentFile $json
+    & node (Join-Path $PSScriptRoot 'site/update-downloads.mjs') $contentFile $json $Version
     if ($LASTEXITCODE -ne 0) { throw 'the download section could not be rewritten' }
 
     Write-Host ''

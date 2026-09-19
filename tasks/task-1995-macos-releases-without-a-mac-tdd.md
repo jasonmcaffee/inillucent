@@ -360,6 +360,66 @@ Run in this order, because each step's failure mode is cheapest to read on its o
 Steps 1 to 6 need nothing from Apple and are what this task is verified by. Step 7 needs the
 membership and the certificates, and is the one part that waits on §7.
 
+## 9a. What happened when it met Apple
+
+Everything above was written before a real Developer ID existed. It does now, and the whole design
+has been run against Apple's notary service. This section is what that changed.
+
+**Both products are Accepted and both carry a stapled ticket.**
+
+| Submission | Verdict |
+|---|---|
+| `Unluminous-0.53.0-macos.zip` | `Accepted`, `issues: null`, 23 s, both cdhashes registered |
+| `inillucent-0.1.4-universal-apple-darwin.zip` | `Accepted`, all ten cdhashes registered |
+| `inillucent-0.1.4.pkg` | `Accepted`, ticket stapled into the XAR |
+
+**Two defects the real certificate found that a self-signed one could not.**
+
+*The signature carried a second certificate.* `new-apple-csr.ps1` generates the key with `rcodesign
+generate-self-signed-certificate --pem-unified-file`, which writes a key **and** a throwaway
+certificate, and the whole file was sealed. `rcodesign sign --pem-file` reads every certificate it
+finds and, by its own rule, "all remaining certificates are assumed to constitute the CA issuing
+chain and will be added to the signature data", so every signature carried the throwaway next to
+Apple's with `chains_to_apple_root_ca: false`. The key material is stripped to the `PRIVATE KEY`
+block before sealing now. A self-signed run could never have shown this, because there the
+contaminating certificate *is* the signing certificate.
+
+*The certificate check refused the certificate.* `analyze-certificate` prints `Guessed Certificate
+Profile: DeveloperIdApplication`; `print-signature-info` spells the same thing
+`developer-id-application`. The check was written against the second and run against the first, so
+the first certificate Apple ever issued was rejected as "not a developer-id-application one" while
+the report underneath said it was.
+
+**Three defects in the flat package, found by bisection against a real one.** The first `.pkg`
+submission came back `Invalid`: "The contents of the package could not be extracted" and "has no
+signed executables or bundles. No tickets can be generated." The `.zip` of the same signed binaries
+was Accepted in the same minute, which isolated the fault to the container. `node-v26.9.0.pkg` was
+then downloaded and read field by field against ours.
+
+1. **The `pkg-ref` had no `#`.** A pkg-ref's text is a URL, and `#name.pkg` means "the entry called
+   name.pkg inside this archive". Without it, it is a relative path to something that is not there.
+   Apple writes `>#node-v26.9.0.pkg<`, on one line, with no surrounding whitespace. This was the
+   cause: with the `#`, the same archive is Accepted. `productbuild` normalised it on the way past,
+   which is why the template was never wrong on a Mac.
+2. **SHA-256 digests and a twice-compressed payload.** Apple writes `checksum_alg=1`, `<checksum
+   style="sha1">`, `sha1` per file, and stores the already-gzipped `Payload` as
+   `application/octet-stream` with equal archived and extracted lengths.
+3. **`install-location="/"` in `PackageInfo`.** Apple omits the attribute entirely when the payload
+   installs at the root.
+
+The cpio payload needed nothing: decoded field by field, our header is identical to Apple's.
+
+**And one defect that had nothing to do with Apple.** `--install-location /` typed in Git Bash
+arrives as `C:/Program Files/Git/`, because MSYS rewrites a lone slash into its own root. The package
+still built, still signed, and **Apple notarised one** — and it would have laid the payload down
+under a path no Mac has. An install location that is not POSIX-absolute is now refused by name.
+
+**What this says about §6.** The claim there was that Apple's notary service is a real external
+check and the closest thing to a Gatekeeper run available off a Mac. It is: it caught a container
+three independent readers had accepted — our own writer, our own Python parser, and `rcodesign`,
+which parsed the table of contents and re-signed it. A format writer agreeing with three readers and
+still being wrong is exactly the failure §6 said the notary would catch, and it did.
+
 ## 10. unluminous, which is the same toolchain and one extra requirement
 
 The ticket asks for both, and unluminous was done second because it is the harder case in one
@@ -367,50 +427,48 @@ specific way. Everything after the compile is the same and works the same:
 `rcodesign macho-universal-create` joins the slices, `rcodesign sign` signs the bundle recursively
 and writes its `_CodeSignature/CodeResources`, and the notary API is the same API.
 
-**The compile is different, and it needs Apple's macOS SDK.** inillucent is four command line
-programs and a shared library, and the only C in it is `onig` and `esaxx-rs`, so zig's `libSystem`
-stub is everything the link needs. unluminous is a windowed application: its link line asks for
-`-lobjc` and for AppKit, Metal, QuartzCore, WebKit, Carbon, ApplicationServices, CoreGraphics,
-CoreVideo, Foundation, CoreFoundation and Security. zig ships a stub for `libSystem` and nothing
-else — `zig cc -framework AppKit` answers `unable to find framework 'AppKit'. searched paths: none`
-— so the link stops at the first of them:
+**The compile needs Apple's macOS SDK.** inillucent is four command line programs and a shared
+library, and the only C in it is `onig` and `esaxx-rs`, so zig's `libSystem` stub is everything the
+link needs. unluminous is a windowed application: its link line asks for `-lobjc` and for AppKit,
+Metal, QuartzCore, WebKit, Carbon, ApplicationServices, CoreGraphics, CoreVideo, Foundation,
+CoreFoundation and Security. zig ships a stub for `libSystem` and nothing else, so the link stops at
+`unable to find dynamic system library 'objc'`.
 
-```
-error: unable to find dynamic system library 'objc' using strategy 'paths_first'
-```
+Apple's licence for that SDK says Apple-branded hardware, so
+`installer/macos/build-on-windows.ps1` never downloads one: it looks in `-Sdk`, `$env:SDKROOT` and
+`tools/cross/sdk/MacOSX.sdk`, and when there is none it says what is missing and what the licence
+says. The copy in use came from the MacBook's own Command Line Tools.
 
-measured here on 2026-09-19. Those stubs are in Xcode and in the Command Line Tools, at
-`/Library/Developer/CommandLineTools/SDKs/MacOSX.sdk`, and cargo-zigbuild already reads `SDKROOT`, so
-one copied directory is the whole of what is missing.
+**Copying an SDK to Windows breaks it, silently, and both breakages had to be repaired.**
 
-**Apple's licence for that SDK says Apple-branded hardware.** That is the same clause the ticket's
-two links run into, and it is a decision for the person who accepted the licence rather than one a
-build script should make quietly. `installer/macos/build-on-windows.ps1` therefore never downloads
-an SDK: it looks in `-Sdk`, `$env:SDKROOT` and `tools/cross/sdk/MacOSX.sdk`, and when there is none it
-says what is missing, where it comes from and what the licence says.
+- **3,732 symlinks are refused.** A framework is mostly symlinks — `AppKit.framework/AppKit.tbd` →
+  `Versions/Current/AppKit.tbd` → `Versions/C/AppKit.tbd` — and Windows will not create one without
+  Developer Mode or elevation. `tar -xzf` leaves every framework without the stub the linker looks
+  for, and the link then fails exactly as it did with no SDK at all. They are rebuilt as **hard
+  links** for files and **junctions** for directories, neither of which needs a privilege, resolved
+  through the chain including links that are a *component* of a path rather than its last element.
+- **28 frameworks, WebKit among them, carry no top-level stub at all**, only
+  `Versions/A/WebKit.tbd`. On a Mac the missing name is a symlink the file system makes for free.
+  Here it is the difference between linking and not, so each is hard-linked into place.
 
-`unluminous-cli` links no framework and **cross compiles here with no SDK at all**, which `-CliOnly`
-does and which is proven.
+A further 5,569 entries have names NTFS will not take, such as the Tcl manual page
+`ttk::progressbar.ntcl`. Those are skipped and counted; nothing links against a manual page.
 
 **Three things about the bundle that are not in the inillucent half.**
 
 - **A zip, not a disk image.** A `.dmg` holds an HFS+ filesystem, `hdiutil` is what writes one, and
   `rcodesign` signs a disk image but does not create one. Apple's notary accepts a zipped bundle, and
   the ticket is stapled to the *application* inside the zip rather than to the zip, so what a person
-  ends up running carries its own ticket and opens with no network — which is the property the Mac
-  script's two-submission order gives the image. `installer/macos/build.sh` still writes the `.dmg`.
+  ends up running carries its own ticket and opens with no network.
 - **The zip has to carry Unix modes.** A zip written on Windows records the host system as MS-DOS and
   leaves the external attributes zero, and `unzip` on macOS reads a mode only when the host byte says
   Unix. `Contents/MacOS/unluminous` would arrive without its executable bit and the application would
-  not start. `Set-ZipUnixModes` patches the central directory, which was measured both ways.
-- **The identity is a `.p12`.** `CODESIGN_IDENTITY` names an entry in a keychain and Windows has
-  none. Keychain Access exports the same identity as a `.p12`; `CODESIGN_P12` names it in the
-  `installer/macos/notarize.env` the other credentials already live in, and its password is sealed
-  with DPAPI.
+  not start. `Set-ZipUnixModes` patches the central directory.
+- **The identity is a `.p12` or a sealed key with a certificate.** `CODESIGN_IDENTITY` names an entry
+  in a keychain and Windows has none.
 
-**What was proven without the SDK**: `unluminous-cli` built for both Apple architectures; the bundle
-assembled with its `Info.plist`, `PkgInfo` and icon; both binaries joined into universal Mach-O;
-`unluminous-cli` signed and then the bundle signed round it, with the hardened runtime on all four
-signatures and `_CodeSignature/CodeResources` written; each Mach-O verified; and the zip holding only
-the bundle with 0755 on `Contents/MacOS` and 0644 elsewhere. The windowed program's own place in the
-bundle was taken by a small Mach-O built the same way, because the SDK is what it is waiting for.
+**Measured.** `aarch64-apple-darwin` in 3m 45s and `x86_64-apple-darwin` in 2m 40s, a 72.6 MB
+universal `unluminous` and a 3.8 MB universal `unluminous-cli`, a 32.9 MB archive, and Apple's
+verdict on it: `"status": "Accepted"`, `"issues": null`, `"statusSummary": "Ready for distribution"`,
+with both architectures' cdhashes registered and the ticket written into
+`Unluminous.app/Contents/CodeResources`.

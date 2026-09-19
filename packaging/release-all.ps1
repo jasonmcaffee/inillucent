@@ -172,9 +172,15 @@ if ($wantLinux) {
 if ($wantMacos) {
     # The macOS half builds its own two targets, because it sets a deployment
     # target per architecture that the Linux and Windows builds have no use for.
-    $macosArguments = @('-Version', $Version)
-    if ($SkipBuild) { $macosArguments += '-SkipBuild' }
-    if ($SkipNotarize) { $macosArguments += '-SkipNotarize' }
+    #
+    # **A hashtable, not an array.** `@('-Version', $Version)` splats POSITIONALLY: the string
+    # `-Version` binds to the first parameter and the version binds to the second. The first run of
+    # this produced `inillucent--Version-universal-apple-darwin.tar.gz`, signed it, and only failed
+    # three steps later when macos-pkg refused `--version -Version` as `unexpected argument '-V'`.
+    # Hash splatting binds by name and cannot do that.
+    $macosArguments = @{ Version = $Version }
+    if ($SkipBuild) { $macosArguments['SkipBuild'] = $true }
+    if ($SkipNotarize) { $macosArguments['SkipNotarize'] = $true }
     & (Join-Path $PSScriptRoot 'macos/release-macos.ps1') @macosArguments
     if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) { throw "the macOS release failed with $LASTEXITCODE" }
 }
