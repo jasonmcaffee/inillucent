@@ -407,13 +407,15 @@ function Submit-ForNotarisation {
     .PARAMETER Path
         The artifact.
 
+    .PARAMETER KeyFile
+        The unsealed App Store Connect key, which the caller deletes afterwards.
+
     .PARAMETER Staple
         Whether to write the ticket into it afterwards.
     #>
-    param([string] $Path, [switch] $Staple)
+    param([string] $Path, [string] $KeyFile, [switch] $Staple)
 
-    $key = Get-AppleNotaryKeyPath
-    $arguments = @('notary-submit', '--api-key-file', $key, '--wait')
+    $arguments = @('notary-submit', '--api-key-file', $KeyFile, '--wait')
     if ($Staple) { $arguments += '--staple' }
     $arguments += $Path
     Write-Host "   submitting $(Split-Path -Leaf $Path); Apple usually answers in two to fifteen minutes"
@@ -523,8 +525,14 @@ try {
 
 if (-not $SkipNotarize) {
     Write-Host '== notarising'
-    Submit-ForNotarisation -Path $product -Staple
-    Submit-ForNotarisation -Path $zip
+    $notary = $null
+    try {
+        $notary = New-AppleNotarySession
+        Submit-ForNotarisation -Path $product -KeyFile $notary.Path -Staple
+        Submit-ForNotarisation -Path $zip -KeyFile $notary.Path
+    } finally {
+        Remove-AppleNotarySession -Session $notary
+    }
 }
 
 # The universal binaries are an intermediate: the archive and the package both

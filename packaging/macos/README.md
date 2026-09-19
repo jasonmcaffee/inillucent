@@ -128,16 +128,39 @@ pwsh -c ". packaging/macos/apple-credentials.ps1; Set-AppleP12Password -Kind app
 
 At <https://appstoreconnect.apple.com> → Users and Access → Integrations, create
 a key with the **Developer** role. That gives an issuer ID, a key ID, and a `.p8`
-file downloadable once. Fold them into the one file the release reads:
+file downloadable once. Fold them into one file, seal it, and delete both plain
+copies — the `.p8` is an ECDSA private key and there is no reason for it to sit
+on a disk in the clear:
 
 ```powershell
-tools\cross\bin\rcodesign.exe encode-app-store-connect-api-key `
-  -o $env:LOCALAPPDATA\inillucent\apple\notary-key.json `
-  <issuer-id> <key-id> AuthKey_<key-id>.p8
+. packaging\macos\apple-credentials.ps1
+$scratch = Get-AppleScratchDir           # the RAM disk
+$json = Join-Path $scratch 'notary-key.json'
+tools\cross\bin\rcodesign.exe encode-app-store-connect-api-key -o $json `
+  <issuer-id> <key-id> <path to AuthKey_<key-id>.p8>
+Protect-AppleSecret -Value (Get-Content $json -Raw) `
+  -Path (Join-Path (Get-AppleCredentialDir) 'notary-key.json.sealed')
+Remove-Item $json, <the .p8> -Force
 ```
 
-This is used rather than an Apple ID and an app-specific password because it is
-revocable on its own and does not carry the password to the Apple ID itself.
+`New-AppleNotarySession` unseals it onto the RAM disk for the length of a
+submission and the release deletes it in a `finally`. A plain `notary-key.json`
+is still accepted, with a warning saying to seal it.
+
+An App Store Connect key is used rather than an Apple ID and an app-specific
+password because it is revocable on its own and does not carry the password to
+the Apple ID itself.
+
+**To check the credentials without submitting anything**, ask Apple to list what
+this key has sent before. It is a read-only call and it is the cheapest proof
+that the issuer id, the key id and the `.p8` are a working set:
+
+```powershell
+. packaging\macos\apple-credentials.ps1
+$session = New-AppleNotarySession
+tools\cross\bin\rcodesign.exe notary-list --api-key-file $session.Path
+Remove-AppleNotarySession -Session $session
+```
 
 ### Where the secrets live, and why that is enough
 

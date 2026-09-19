@@ -16,7 +16,7 @@
             developer-id-application.cer          Apple's certificate, not a secret
             developer-id-installer.key.sealed     the same pair for the .pkg
             developer-id-installer.cer
-            notary-key.json                       the App Store Connect API key
+            notary-key.json.sealed                the App Store Connect API key, sealed
 
     $env:INILLUCENT_APPLE_DIR overrides the directory, which is how a second
     machine or a test uses a different set.
@@ -171,7 +171,8 @@ function Test-AppleCredentials {
         Directory   = $dir
         Application = $kinds['application']
         Installer   = $kinds['installer']
-        NotaryKey   = (Test-Path -LiteralPath (Join-Path $dir 'notary-key.json'))
+        NotaryKey   = (Test-Path -LiteralPath (Join-Path $dir 'notary-key.json.sealed')) `
+            -or (Test-Path -LiteralPath (Join-Path $dir 'notary-key.json'))
     }
 }
 
@@ -241,25 +242,61 @@ function Remove-AppleSigningSession {
     }
 }
 
-function Get-AppleNotaryKeyPath {
+function New-AppleNotarySession {
     <#
     .SYNOPSIS
-        The App Store Connect API key rcodesign notarises with.
+        Unseals the App Store Connect key rcodesign notarises with, and returns
+        its path plus what has to be deleted afterwards.
 
     .DESCRIPTION
-        Written once with:
+        The file holds an ECDSA private key, so it is kept sealed with DPAPI and
+        exists in the clear only on the RAM disk for the length of a submission,
+        the same way the signing key does. Close it with
+        Remove-AppleNotarySession.
+
+        The three values it is made from come from appstoreconnect.apple.com,
+        Users and Access, Integrations, and are folded into one file with:
 
             rcodesign encode-app-store-connect-api-key -o notary-key.json `
               <issuer-id> <key-id> AuthKey_<key-id>.p8
 
-        The three values come from appstoreconnect.apple.com, Users and Access,
-        Integrations. An App Store Connect key is used rather than an Apple ID
-        and an app-specific password because it is revocable on its own and does
-        not carry the password to the Apple ID itself.
+        which is then sealed with Protect-AppleSecret. An App Store Connect key
+        is used rather than an Apple ID and an app-specific password because it
+        is revocable on its own and does not carry the password to the Apple ID
+        itself.
     #>
-    $path = Join-Path (Get-AppleCredentialDir) 'notary-key.json'
-    if (-not (Test-Path -LiteralPath $path)) {
-        throw "no notary key at $path. packaging/macos/README.md has the three values it is made from."
+    $dir = Get-AppleCredentialDir
+    $sealed = Join-Path $dir 'notary-key.json.sealed'
+    if (Test-Path -LiteralPath $sealed) {
+        $path = Join-Path (Get-AppleScratchDir) ('notary-' + [guid]::NewGuid().ToString('N') + '.json')
+        Set-Content -Path $path -Value (Unprotect-AppleSecret -Path $sealed) -NoNewline
+        return [pscustomobject]@{ Path = $path; Scratch = @($path) }
     }
-    return $path
+
+    # A plain notary-key.json is still accepted, because that is what
+    # `rcodesign encode-app-store-connect-api-key` writes and a machine may have
+    # one already. It is not deleted afterwards, because it was not created here.
+    $plain = Join-Path $dir 'notary-key.json'
+    if (Test-Path -LiteralPath $plain) {
+        Write-Warning "$plain holds an unsealed private key. Seal it with Protect-AppleSecret and delete it."
+        return [pscustomobject]@{ Path = $plain; Scratch = @() }
+    }
+
+    throw "no notary key in $dir. packaging/macos/README.md has the three values it is made from."
+}
+
+function Remove-AppleNotarySession {
+    <#
+    .SYNOPSIS
+        Deletes whatever New-AppleNotarySession unsealed.
+
+    .PARAMETER Session
+        The object it returned; a null session is accepted, so this can be
+        called from a `finally` that may run before the session was opened.
+    #>
+    param([object] $Session)
+    if ($null -eq $Session) { return }
+    foreach ($path in $Session.Scratch) {
+        if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force -Confirm:$false }
+    }
 }
