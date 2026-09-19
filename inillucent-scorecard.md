@@ -1,6 +1,6 @@
 # inillucent Score Card
 
-Generated at unix time 1788238061. Corpus: 185078 chunks across 38847 documents, 768 dimensional embeddings from `nomic-embed-text-v1.5` run in process at full precision.
+Generated at unix time 1789828518. Corpus: 185078 chunks across 38977 documents, 768 dimensional embeddings from `nomic-embed-text-v1.5` run in process at full precision.
 
 The corpus is assembled from public data by this repository and embedded once. The identical vectors are written to the cache inillucent reads and to the PostgreSQL column pgvector reads, and every query is embedded once and handed to both engines, so the embedding model cancels out of the comparison entirely. A score difference is therefore attributable to indexing and ranking.
 
@@ -32,17 +32,17 @@ No primary measurement was worse than the best the configured PostgreSQL baselin
 | Filtered vector search, per source | source = jira (9429 chunks, inillucent path: exhaustive) | recall@10 within the filter | 1.000 | 0.3280 | 0.6720 | 0.5360 to 0.7960 | 0.0005 | 25 | 22 | 0.0100 | better |
 | Filtered vector search, per source | source = figma (9144 chunks, inillucent path: exhaustive) | recall@10 within the filter | 1.000 | 1.000 | 0.0000 | 0.0000 to 0.0000 | 1.0000 | 25 | 0 | 0.0100 | equivalent, at the ceiling |
 | Filtered vector search, per source | source = miro (7396 chunks, inillucent path: exhaustive) | recall@10 within the filter | 1.000 | 0.8840 | 0.1160 | 0.0520 to 0.1920 | 0.0020 | 25 | 11 | 0.0100 | better |
-| Lexical retrieval | natural language, from headings | mean reciprocal rank | 0.7221 | 0.5896 | 0.1325 | 0.0855 to 0.1816 | 0.0005 | 300 | 154 | 0.0100 | better |
-| Lexical retrieval | identifiers, rare literal tokens | mean reciprocal rank | 0.5442 | 0.1363 | 0.4079 | 0.3574 to 0.4592 | 0.0005 | 300 | 182 | 0.0100 | better |
+| Lexical retrieval | natural language, from headings | mean reciprocal rank | 0.7222 | 0.5896 | 0.1326 | 0.0855 to 0.1816 | 0.0005 | 300 | 154 | 0.0100 | better |
+| Lexical retrieval | identifiers, rare literal tokens | mean reciprocal rank | 0.5455 | 0.1358 | 0.4097 | 0.3592 to 0.4604 | 0.0005 | 300 | 182 | 0.0100 | better |
 | Hybrid retrieval, whole pipeline | document identity, title as query | nDCG@10 | 0.9756 | 0.8148 | 0.1609 | 0.1305 to 0.1901 | 0.0005 | 600 | 195 | 0.0100 | better |
-| Hybrid retrieval, whole pipeline | natural language, heading as query | nDCG@10 | 0.7477 | 0.6271 | 0.1206 | 0.0817 to 0.1615 | 0.0005 | 300 | 127 | 0.0100 | better |
+| Hybrid retrieval, whole pipeline | natural language, heading as query | nDCG@10 | 0.7478 | 0.6271 | 0.1207 | 0.0818 to 0.1615 | 0.0005 | 300 | 127 | 0.0100 | better |
 | Passage evidence, perturbation and multi-source | passage evidence | graded nDCG@10 | 0.7045 | 0.6027 | 0.1018 | 0.0773 to 0.1278 | 0.0005 | 414 | 114 | 0.0100 | better |
 | Passage evidence, perturbation and multi-source | passage evidence, one transposed character | graded nDCG@10 | 0.6794 | 0.3969 | 0.2825 | 0.2463 to 0.3185 | 0.0005 | 385 | 185 | 0.0100 | better |
 | Passage evidence, perturbation and multi-source | passage evidence, three keywords | graded nDCG@10 | 0.6266 | 0.4651 | 0.1615 | 0.1310 to 0.1922 | 0.0005 | 414 | 192 | 0.0100 | better |
 | Passage evidence, perturbation and multi-source | multi-source, evidence in two sources | evidence recall@10 | 0.6237 | 0.1923 | 0.4314 | 0.3850 to 0.4818 | 0.0005 | 200 | 140 | 0.0100 | better |
 | Abstention on questions nothing answers | questions with no answer in the corpus | confident answer rate at the calibrated threshold | 0.0050 | 1.000 | 0.9950 | 0.9850 to 1.000 | 0.0005 | 200 | 199 | 0.0100 | better |
-| Latency | no predicate | vector search p50 ms | 0.7040 | 1.519 | -0.8150 | not paired | n/a | n/a | n/a | 0.0760 | better |
-| Latency | source = slack | vector search p50 ms | 0.8642 | 1.393 | -0.5287 | not paired | n/a | n/a | n/a | 0.0696 | better |
+| Latency | no predicate | vector search p50 ms | 0.9340 | 1.299 | -0.3650 | not paired | n/a | n/a | n/a | 0.0649 | better |
+| Latency | source = slack | vector search p50 ms | 0.6262 | 1.139 | -0.5123 | not paired | n/a | n/a | n/a | 0.0569 | better |
 
 ### Queries behind each family
 
@@ -74,8 +74,8 @@ Exhaustive cosine over the whole corpus defines the exact answer, so this is the
 
 | measurement | metric | inillucent |
 |---|---|---|
-| all sources, no predicate (600 queries) | recall@10 | 0.9252 |
-| all sources, no predicate (600 queries) | recall@50 | 0.9140 |
+| all sources, no predicate (600 queries) | recall@10 | 0.9255 |
+| all sources, no predicate (600 queries) | recall@50 | 0.9141 |
 
 ## The ef_search tradeoff
 
@@ -84,7 +84,7 @@ Exhaustive cosine over the whole corpus defines the exact answer, so this is the
 | measurement | metric | ef_search = 64 | ef_search = 128 | ef_search = 256 | ef_search = 512 |
 |---|---|---|---|---|---|
 | no predicate | recall@10 | 0.8975 | 0.9300 | 0.9725 | **0.9800** |
-| no predicate | vector search p50 ms | **0.4915** | 0.9073 | 1.410 | 2.066 |
+| no predicate | vector search p50 ms | **0.6471** | 1.112 | 1.459 | 2.473 |
 
 ## Filtered vector search, per source
 
@@ -111,12 +111,12 @@ PostgreSQL full text search joins query terms with `&` through `to_tsquery`, so 
 
 | measurement | metric | inillucent | pgvector (extension defaults) |
 |---|---|---|---|
-| natural language, from headings | mean reciprocal rank | **0.7221** | 0.5896 |
+| natural language, from headings | mean reciprocal rank | **0.7222** | 0.5896 |
 | natural language, from headings | success@10 | **0.9200** | 0.7500 |
 | natural language, from headings | rows returned of 50 | **49.690** | 17.033 |
-| identifiers, rare literal tokens | mean reciprocal rank | **0.5442** | 0.1363 |
+| identifiers, rare literal tokens | mean reciprocal rank | **0.5455** | 0.1358 |
 | identifiers, rare literal tokens | success@10 | **0.6633** | 0.1633 |
-| identifiers, rare literal tokens | rows returned of 50 | **39.900** | 3.280 |
+| identifiers, rare literal tokens | rows returned of 50 | **39.887** | 3.280 |
 
 ## Hybrid retrieval, whole pipeline
 
@@ -129,13 +129,13 @@ Both sides, fused, capped at two chunks per document, truncated to ten. nDCG@10 
 | document identity, title as query | success@10 | **0.9967** | 0.8450 | 0.8600 |
 | document identity, title as query | mean reciprocal rank | **0.9762** | 0.8010 | 0.8186 |
 | document identity, title as query | precision@10 | **0.1637** | 0.1430 | 0.1454 |
-| document identity, title as query | hybrid search ms | **6.044** | 11.753 | 12.172 |
-| natural language, heading as query | nDCG@10 | **0.7477** | 0.6270 | 0.6271 |
+| document identity, title as query | hybrid search ms | **5.125** | 11.835 | 10.257 |
+| natural language, heading as query | nDCG@10 | **0.7478** | 0.6270 | 0.6271 |
 | natural language, heading as query | success@1 | **0.5900** | 0.5000 | 0.5000 |
 | natural language, heading as query | success@10 | **0.8967** | 0.7767 | 0.7733 |
-| natural language, heading as query | mean reciprocal rank | **0.7104** | 0.5933 | 0.5950 |
+| natural language, heading as query | mean reciprocal rank | **0.7105** | 0.5933 | 0.5950 |
 | natural language, heading as query | precision@10 | **0.0973** | 0.0864 | 0.0849 |
-| natural language, heading as query | hybrid search ms | **4.182** | 17.312 | 18.322 |
+| natural language, heading as query | hybrid search ms | **3.476** | 15.486 | 14.483 |
 
 ## Passage evidence, perturbation and multi-source
 
@@ -179,8 +179,8 @@ Reciprocal Rank Fusion keeps only position and discards score magnitude, which m
 
 | measurement | metric | Reciprocal Rank Fusion, k = 60 | min-max, vector weight 0.35 (default) | min-max, vector weight 0.5 | min-max, vector weight 0.7 | convex, vector weight 0.35 |
 |---|---|---|---|---|---|---|
-| document identity | nDCG@10 | 0.9114 | **0.9808** | 0.9522 | 0.8577 | 0.9671 |
-| document identity | success@1 | 0.8383 | **0.9667** | 0.8900 | 0.8133 | 0.9367 |
+| document identity | nDCG@10 | 0.9114 | **0.9808** | 0.9522 | 0.8581 | 0.9671 |
+| document identity | success@1 | 0.8383 | **0.9667** | 0.8900 | 0.8150 | 0.9367 |
 
 ## Quantization and the Matryoshka ladder
 
@@ -197,18 +197,18 @@ Wall clock per query, measured inside the calling process after a warmup pass. T
 
 | measurement | metric | inillucent | pgvector (extension defaults) | pgvector (correctly configured) |
 |---|---|---|---|---|
-| no predicate | vector search p50 ms | **0.7040** | 1.519 | 2.439 |
-| no predicate | vector search mean ms | **0.7577** | 1.598 | 2.513 |
-| no predicate | vector search p95 ms | **1.228** | 2.316 | 3.709 |
-| source = slack | vector search p50 ms | **0.8642** | 1.393 | 39.767 |
-| source = slack | vector search mean ms | **0.8805** | 1.455 | 44.171 |
-| source = slack | vector search p95 ms | **1.087** | 2.243 | 99.317 |
+| no predicate | vector search p50 ms | **0.9340** | 1.299 | 1.990 |
+| no predicate | vector search mean ms | **0.9919** | 1.404 | 2.124 |
+| no predicate | vector search p95 ms | **1.585** | 2.410 | 3.371 |
+| source = slack | vector search p50 ms | **0.6262** | 1.139 | 35.583 |
+| source = slack | vector search mean ms | **0.6499** | 1.230 | 38.842 |
+| source = slack | vector search p95 ms | **0.7352** | 2.054 | 87.733 |
 
 ## Build cost and footprint
 
 | engine | chunks | documents | build seconds | graph layers | graph edges | lexical terms | lexical postings | vectors MB | int8 codes MB |
 |---|---|---|---|---|---|---|---|---|---|
-| inillucent | 185078 | 38847 | 165.2 | 4 | 6119440 | 494179 | 11643704 | 568.6 | 142.9 |
+| inillucent | 185078 | 38977 | 129.7 | 4 | 6119440 | 494293 | 11645056 | 568.6 | 142.9 |
 
 ## Provenance
 
@@ -218,16 +218,18 @@ What this run was, so a number on this card can be reproduced rather than only r
 |---|---|
 | baseline database | postgres://postgres:***@127.0.0.1:5433/inillucent_synth |
 | command | inillucent-bench.exe grade --database-url postgres://postgres:***@127.0.0.1:5433/inillucent_synth --cache corpus.cache --model-dir nomic-embed-text-v1.5 --device cuda:0 --per-source 100 --runs-dir runs --out inillucent-scorecard.md |
-| commit | db29cb97d8851298c4f5d525a569f2666e40903b (working tree dirty) |
+| commit | e2a81e10c1edd24f69dc2d96a2294247c09ed6a9 (working tree dirty) |
 | corpus cache | corpus.cache |
+| corpus cache header | a version 3 cache with no provenance (185078 chunks, 768 dims) |
 | device | Cuda(0) |
 | embedding model | nomic-embed-text-v1.5/model.onnx |
 | host | windows x86_64, 24 logical processors |
-| per-query records | 8139 lines in 1788237655-db29cb97/per-query.jsonl |
+| model manifest | nomic-embed-text-v1.5 at 768 dims, 1900 tokens, manifest db59adb9504a |
+| per-query records | 8139 lines in 1789828186-e2a81e10/per-query.jsonl |
 | query seeds | calibration=1012, heading=12, identifier=13, identity=11, multi_source=16, passage=14, unanswerable=15 |
 | ranking settings | adaptive=AdaptiveWeights { base: 0.35, out_of_vocabulary_gain: 0.1, identifier_gain: 0.1, separation_gain: 0.1, coverage_gain: 0.1, floor: 0.05, ceiling: 0.95 }, adaptive_fusion=true, filtered_ef_search=400, fusion=NormalizedScore { vector_weight: 0.35 }, lexical_coverage=3, lexical_phrase=0.75, lexical_prefix=false, lexical_proximity=1, lexical_rescore_depth=6, lexical_tier=false, mmr_lambda=1, per_source=100 |
-| run id | 1788237655-db29cb97 |
-| run manifest | 1788237655-db29cb97/manifest.json |
+| run id | 1789828186-e2a81e10 |
+| run manifest | 1789828186-e2a81e10/manifest.json |
 | statistics seed | 20260901 |
 
 ## What these numbers do not say

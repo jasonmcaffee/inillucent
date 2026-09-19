@@ -18,7 +18,7 @@ them.
 | | | measured |
 |---|---|---|
 | **Faster than SQLite** | **339% faster** | 4.39x weighted over the contract's ten families, median of four consecutive 30-round runs at the v0.1.3 tag. The 95% lower bound the gate actually grades on is **4.09x**, i.e. **309% faster**, against a 3.00x bound it clears on all four |
-| **Faster than pgvector** | **175% faster unfiltered, 6,262% faster filtered** | retrieval p50 0.8954 ms against 2.459, and 0.6631 ms against 42.182 with a `source =` predicate, against the *better* of the two pgvector configurations. In production, on Nikaya's 598,560-chunk mailbox, semantic p50 went 33.7 ms warm to **4.41 ms** - **664% faster**, and recall@100 0.899 to **1.000** |
+| **Faster than pgvector** | **113% faster unfiltered, 5,582% faster filtered** | retrieval p50 0.9340 ms against 1.990, and 0.6262 ms against 35.583 with a `source =` predicate, against the *better* of the two pgvector configurations. In production, on Nikaya's 598,560-chunk mailbox, semantic p50 went 33.7 ms warm to **4.41 ms** - **664% faster**, and recall@100 0.899 to **1.000** |
 | **Less CPU** | **68% less CPU** | 391 ms of processor against SQLite's 1,207, same plan, one child process each. Ratio 0.325x against a 0.40x bar, which it meets on all four runs |
 | **Less RAM** | **it is not less. It is 15% MORE** | 42.6 MiB peak resident against SQLite's 37.2, on the same 128 MiB budget. It was **102% more** before review 6 and **43% more** before review 7, and the bar asks for **5% less** - so this is the one headline that is still a loss |
 | **Same features as SQLite** | **96.9% byte for byte, 98.3% of what SQLite answers, none refused** | 403 of 416 probed cases produce SQLite's exact bytes. 6 of the other 13 are vector features SQLite does not have, and 7 answer differently. [Why it is not 100%](#why-it-is-not-100) says what each is and which can ever be closed |
@@ -170,8 +170,8 @@ and this engine wins two of those three.
 | **The database on disk**, the same fixture imported | 16.05 MiB | 16.62 MiB | **1.036x** (was 1.41x) |
 | The family that was **under the floor** | - | `transaction`, now **150% faster** (2.50x, lower bound 2.01x) | the release condition is that no required family is below the 1.00x floor, and two runs of the four met it outright; `schema` went under on the other two, at a 0.91x and 0.96x lower bound against a 1.36x ratio. `transaction` reads 150% rather than the 241% recorded at review 7 because task-1911 made the rollback journal perform the sync it exists for, which `txn.autocommit` pays once per statement - see [Performance](performance.md#by-family) |
 | Retrieval ranking, 17 graded comparisons against pgvector | the baseline | 15 better, 2 not worse | **none worse** |
-| Retrieval latency, unfiltered, p50 | 2.459 ms | 0.8954 ms | **175% faster** |
-| Retrieval latency, filtered to a minority source, p50 | 42.182 ms | 0.6631 ms | **6,262% faster** |
+| Retrieval latency, unfiltered, p50 | 1.990 ms | 0.9340 ms | **113% faster** |
+| Retrieval latency, filtered to a minority source, p50 | 35.583 ms | 0.6262 ms | **5,582% faster** |
 
 **Read the performance rows together.** inillucent finishes the same work in **a quarter of the
 time** while spending **about a third of the processor**, so the speed is not bought by burning
@@ -1241,11 +1241,18 @@ triggers, FTS5 indexes and `sqlite_sequence` - verified by count and by digest.
 
 ## Vector search, against PostgreSQL + pgvector
 
-**Re-graded for this review, in full.** The whole suite was re-run on 2026-09-08 - the corpus pulled
-back out of PostgreSQL, the index rebuilt from it in 132.6 s, 1,109 queries embedded with
-`nomic-embed-text-v1.5` in process, and every scenario measured against both pgvector configurations.
-Review 4 quoted the recorded card without re-running it; this one re-ran it, and the verdict is the
-same.
+**Re-graded 2026-09-19, in full.** The whole suite was re-run at commit e2a81e1 - the index rebuilt
+from the cache in 129.7 s, 2,713 queries embedded with `nomic-embed-text-v1.5` in process on the GPU,
+and every scenario measured against both pgvector configurations. The card at the repository root is
+this run's own output file, so the two agree row for row.
+
+**The ranking figures reproduce.** Every ranking row below is within a thousandth of what the same
+suite measured at commit 0c14f71d three weeks earlier, and eight of them are identical to four
+decimal places. A set of figures published from a 2026-09-08 run did not reproduce here, and that run
+embedded 1,109 queries where this one and the 0c14f71d one embed 2,713; a family measured on fewer
+queries is a different measurement, which is the likeliest reason its margins sat where they did.
+Its own output file did not survive, so that cannot be checked, and nothing published now depends on
+it.
 
 **17 primary comparisons: 15 better, 1 equivalent, 1 inconclusive, 0 worse. Correctness gates: all
 pass.** Both engines read byte-identical vectors and are handed the same embedded query, so the model
@@ -1261,21 +1268,21 @@ question the corpus cannot answer - there, lower is better.
 
 | family | measurement | inillucent | best pgvector | the difference |
 |---|---|---|---|---|
-| Lexical | rare identifiers, MRR | **0.5467** | 0.1568 | **249% higher** |
+| Lexical | rare identifiers, MRR | **0.5455** | 0.1358 | **302% higher** |
+| Multi-source | evidence in two sources, evidence recall@10 | **0.6237** | 0.1923 | **224% higher** |
 | Filtered | `source = jira`, recall@10 in filter | **1.000** | 0.3280 | **205% higher** |
 | Filtered | `source = github`, recall@10 in filter | **1.000** | 0.3320 | **201% higher** |
-| Multi-source | evidence in two sources, evidence recall@10 | **0.6254** | 0.2104 | **197% higher** |
-| Passage | one transposed character, graded nDCG@10 | **0.7616** | 0.4460 | **71% higher** |
+| Passage | one transposed character, graded nDCG@10 | **0.6794** | 0.3969 | **71% higher** |
 | Filtered | `source = slack`, recall@10 in filter | **1.000** | 0.6120 | **63% higher** |
-| Passage | three keywords, graded nDCG@10 | **0.6868** | 0.5499 | **25% higher** |
-| Hybrid | document identity, nDCG@10 | **0.9773** | 0.8101 | **21% higher** |
-| Hybrid | natural language headings, nDCG@10 | **0.7540** | 0.6498 | **16% higher** |
-| Lexical | natural language headings, MRR | **0.7246** | 0.6346 | **14% higher** |
-| Filtered | `source = miro`, recall@10 in filter | **1.000** | 0.8800 | **14% higher** |
-| Passage | passage evidence, graded nDCG@10 | **0.7745** | 0.6898 | **12% higher** |
-| Filtered | `source = confluence`, recall@10 in filter | 0.9960 | 0.9720 | 2% - **inconclusive** |
+| Passage | three keywords, graded nDCG@10 | **0.6266** | 0.4651 | **35% higher** |
+| Lexical | natural language headings, MRR | **0.7222** | 0.5896 | **22% higher** |
+| Hybrid | document identity, nDCG@10 | **0.9756** | 0.8148 | **20% higher** |
+| Hybrid | natural language headings, nDCG@10 | **0.7478** | 0.6271 | **19% higher** |
+| Passage | passage evidence, graded nDCG@10 | **0.7045** | 0.6027 | **17% higher** |
+| Filtered | `source = miro`, recall@10 in filter | **1.000** | 0.8840 | **13% higher** |
+| Filtered | `source = confluence`, recall@10 in filter | 0.9960 | 0.9760 | 2% - **inconclusive** |
 | Filtered | `source = figma`, recall@10 in filter | 1.000 | 1.000 | **equivalent, at the ceiling** |
-| Abstention | questions with no answer, confident answer rate | **0.0125** | 1.000 | **99% fewer confident wrong answers** |
+| Abstention | questions with no answer, confident answer rate | **0.0050** | 1.000 | **99.5% fewer confident wrong answers** |
 
 **The correctness gate is the row that matters most and it is not a percentage.** inillucent returned
 every row its predicate admits, on every source. pgvector did not: at the extension's defaults it
@@ -1291,10 +1298,10 @@ the configured one returns the rows and pays for them.
 
 | query | inillucent | pgvector, configured | vs configured | pgvector, defaults | vs defaults |
 |---|---|---|---|---|---|
-| no predicate, p50 | **0.8954 ms** | 2.459 ms | **175% faster** | 1.729 ms | **93% faster** |
-| no predicate, p95 | **1.630 ms** | 3.575 ms | **119% faster** | 2.482 ms | **52% faster** |
-| `source = slack`, p50 | **0.6631 ms** | 42.182 ms | **6,262% faster** | 1.398 ms | **111% faster** |
-| `source = slack`, p95 | **1.292 ms** | 101.038 ms | **7,720% faster** | 1.969 ms | **52% faster** |
+| no predicate, p50 | **0.9340 ms** | 1.990 ms | **113% faster** | 1.299 ms | **39% faster** |
+| no predicate, p95 | **1.585 ms** | 3.371 ms | **113% faster** | 2.410 ms | **52% faster** |
+| `source = slack`, p50 | **0.6262 ms** | 35.583 ms | **5,582% faster** | 1.139 ms | **82% faster** |
+| `source = slack`, p95 | **0.7352 ms** | 87.733 ms | **11,833% faster** | 2.054 ms | **179% faster** |
 
 The filtered row stands for the whole comparison: pgvector's cost of *being correct under a
 filter* is to repeat the scan, and it is two orders of magnitude. inillucent's probe widens itself

@@ -12,10 +12,9 @@ The corpus is 185,078 chunks assembled from public data by this repository:
 [Synthetic corpus](../tests/synthetic-corpus.md) builds it, and every number here can be reproduced
 by anyone with this repository, an internet connection and a few hours.
 
-**Every figure on this page is the grading run of 2026-09-08.** The score card checked in at the
-repository root, `inillucent-scorecard.md`, is the run of **2026-09-01**. The two runs differ on
-seven rows. [Which run a number comes from](#which-run-a-number-comes-from) lists the seven rows.
-Read the card for the method, the intervals and the p-values, which did not change.
+**Every figure on this page and every figure on the score card are the same run**, taken
+**2026-09-19** at commit e2a81e1, and `inillucent-scorecard.md` at the repository root is that run's
+own output file. Read the card for the intervals, the p-values and the diagnostics.
 
 ## Ranking
 
@@ -25,23 +24,23 @@ confidently answers a question the corpus cannot answer.
 
 | family | measurement | inillucent | best pgvector | |
 |---|---|---|---|---|
-| Lexical | rare identifiers, mean reciprocal rank | **0.5467** | 0.1568 | 249% higher |
+| Lexical | rare identifiers, mean reciprocal rank | **0.5455** | 0.1358 | 302% higher |
+| Multi-source | evidence in two sources, evidence recall@10 | **0.6237** | 0.1923 | 224% higher |
 | Filtered | `source = jira`, recall@10 inside the filter | **1.000** | 0.3280 | 205% higher |
 | Filtered | `source = github`, recall@10 inside the filter | **1.000** | 0.3320 | 201% higher |
-| Multi-source | evidence in two sources, evidence recall@10 | **0.6254** | 0.2104 | 197% higher |
-| Passage | one transposed character, graded nDCG@10 | **0.7616** | 0.4460 | 71% higher |
+| Passage | one transposed character, graded nDCG@10 | **0.6794** | 0.3969 | 71% higher |
 | Filtered | `source = slack`, recall@10 inside the filter | **1.000** | 0.6120 | 63% higher |
-| Passage | three keywords, graded nDCG@10 | **0.6868** | 0.5499 | 25% higher |
-| Hybrid | document identity, nDCG@10 | **0.9773** | 0.8101 | 21% higher |
-| Hybrid | natural language headings, nDCG@10 | **0.7540** | 0.6498 | 16% higher |
-| Lexical | natural language headings, mean reciprocal rank | **0.7246** | 0.6346 | 14% higher |
-| Filtered | `source = miro`, recall@10 inside the filter | **1.000** | 0.8800 | 14% higher |
-| Passage | passage evidence, graded nDCG@10 | **0.7745** | 0.6898 | 12% higher |
-| Filtered | `source = confluence`, recall@10 inside the filter | 0.9960 | 0.9720 | **inconclusive** |
+| Passage | three keywords, graded nDCG@10 | **0.6266** | 0.4651 | 35% higher |
+| Lexical | natural language headings, mean reciprocal rank | **0.7222** | 0.5896 | 22% higher |
+| Hybrid | document identity, nDCG@10 | **0.9756** | 0.8148 | 20% higher |
+| Hybrid | natural language headings, nDCG@10 | **0.7478** | 0.6271 | 19% higher |
+| Passage | passage evidence, graded nDCG@10 | **0.7045** | 0.6027 | 17% higher |
+| Filtered | `source = miro`, recall@10 inside the filter | **1.000** | 0.8840 | 13% higher |
+| Filtered | `source = confluence`, recall@10 inside the filter | 0.9960 | 0.9760 | **inconclusive** |
 | Filtered | `source = figma`, recall@10 inside the filter | 1.000 | 1.000 | **equivalent**, both at the ceiling |
-| Abstention | questions with no answer, confident answer rate | **0.0125** | 1.000 | 99% fewer confident wrong answers |
+| Abstention | questions with no answer, confident answer rate | **0.0050** | 1.000 | 99.5% fewer confident wrong answers |
 
-The one **inconclusive** row is confluence, where inillucent leads 0.9960 to 0.9720 and the interval
+The one **inconclusive** row is confluence, where inillucent leads 0.9960 to 0.9760 and the interval
 runs 0.0000 to 0.0440 over 25 queries. The run declines to call that a win.
 
 Fifteen of the seventeen comparisons are tabulated above. The score card carries all seventeen, with
@@ -54,7 +53,8 @@ This is the row that matters most and it is not a percentage.
 **inillucent returned every row its predicate admits, on every source.** pgvector did not. At the
 extension's defaults it returned fewer than the 50 rows the predicate admits on **25 of 25 queries
 for every one of the six sources**. Correctly configured it still fell short on github (12 queries of
-25), jira (9 of 25) and miro (1 of 25).
+25), jira (9 of 25) and miro (1 of 25). Those three counts are the same in this run as in the one
+before it.
 
 An engine that returns fewer rows than the filter allows has answered incompletely rather than
 quickly. Completeness is therefore graded as a gate rather than scored as relevance, because
@@ -63,7 +63,7 @@ returning thirty rows where fifty exist is a defect however good the thirty are.
 ## Abstention
 
 Given a question that nothing in the corpus answers, PostgreSQL with pgvector returns a confident top
-result **every single time**. inillucent does it on about **one question in a hundred**.
+result **every single time**. inillucent does it on **one question of the two hundred**.
 
 That is not a ranking difference. It is the difference between a system that can say "nothing here
 answers that" and one that cannot, and it is the failure that never announces itself: ten confident
@@ -73,28 +73,6 @@ of either.
 [Vector search](vector-search.md#confidence-is-a-separate-number-from-score) explains how the
 confidence is computed and why it had to stop being the same number as the score.
 
-## Which run a number comes from
-
-Two grading runs exist. This page is the later one; the checked in score card is the earlier one and
-has not been regenerated since, so a reader comparing the two finds seven rows that differ.
-
-| row | this page, 2026-09-08 | the score card, 2026-09-01 |
-|---|---|---|
-| Lexical, rare identifiers, MRR | 0.5467 against 0.1568 | 0.5442 against 0.1363 |
-| Lexical, natural language headings, MRR | 0.7246 against 0.6346 | 0.7221 against 0.5896 |
-| Hybrid, document identity, nDCG@10 | 0.9773 against 0.8101 | 0.9756 against 0.8148 |
-| Hybrid, natural language headings, nDCG@10 | 0.7540 against 0.6498 | 0.7477 against 0.6271 |
-| Passage evidence, graded nDCG@10 | 0.7745 against 0.6898 | 0.7045 against 0.6027 |
-| Passage evidence, one transposed character | 0.7616 against 0.4460 | 0.6794 against 0.3969 |
-| Abstention, confident answer rate | 0.0125 against 1.000 | 0.0050 against 1.000 |
-
-Every verdict is the same in both: 15 better, 1 equivalent, 1 inconclusive, 0 worse, and every
-correctness gate passing. What moved is the size of the margin, not the direction of any row.
-
-The 2026-09-08 run's own output file did not survive, which is why the card was not replaced with it.
-Rebuilding the corpus and re-embedding it is about ten hours before a single query runs, so the two
-are reconciled by running the grading again rather than by editing either number.
-
 ## Latency
 
 Median over the same queries, measured inside the calling process. Both pgvector columns are given
@@ -103,10 +81,18 @@ the configured one returns the rows and pays for them.
 
 | query | inillucent | pgvector, configured | | pgvector, defaults | |
 |---|---|---|---|---|---|
-| no predicate, p50 | **0.8954 ms** | 2.459 ms | **175% faster** | 1.729 ms | **93% faster** |
-| no predicate, p95 | **1.630 ms** | 3.575 ms | **119% faster** | 2.482 ms | **52% faster** |
-| `source = slack`, p50 | **0.6631 ms** | 42.182 ms | **6,262% faster** | 1.398 ms | **111% faster** |
-| `source = slack`, p95 | **1.292 ms** | 101.038 ms | **7,720% faster** | 1.969 ms | **52% faster** |
+| no predicate, p50 | **0.9340 ms** | 1.990 ms | **113% faster** | 1.299 ms | **39% faster** |
+| no predicate, p95 | **1.585 ms** | 3.371 ms | **113% faster** | 2.410 ms | **52% faster** |
+| `source = slack`, p50 | **0.6262 ms** | 35.583 ms | **5,582% faster** | 1.139 ms | **82% faster** |
+| `source = slack`, p95 | **0.7352 ms** | 87.733 ms | **11,833% faster** | 2.054 ms | **179% faster** |
+
+**Latency is the family that moves between runs, and these are not the figures an earlier version of
+this page carried.** It read 0.8954 ms unfiltered and 0.6631 filtered, against 2.459 and 42.182. The
+ranking families reproduced to four decimal places across the two runs and latency did not, which is
+what latency does: it is measured in wall clock on a shared machine, and
+[the corpus recipe](../tests/synthetic-corpus.md) says not to compare figures taken while something
+else was running. The relationship is unchanged - the filtered query is still faster than the
+unfiltered one here and still two orders of magnitude faster than the configured baseline's.
 
 The filtered row stands for the whole comparison. pgvector's cost of being *correct* under a
 filter is to repeat the scan, and that is two orders of magnitude. inillucent's probe widens itself

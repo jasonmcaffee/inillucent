@@ -51,10 +51,9 @@ directory.
 
 `inillucent-scorecard.md` in the repository root is the score card a grading run writes, with every
 interval, every p-value and every diagnostic. It stays at the root because
-`inillucent-bench grade` writes it there and a checked in digest records its contents. It holds the
-run of **2026-09-01**. [Retrieval quality](retrieval-quality.md) publishes the later run of
-**2026-09-08**, and [names the seven rows that differ](retrieval-quality.md#which-run-a-number-comes-from);
-every verdict is the same in both.
+`inillucent-bench grade` writes it there, and `inillucent-scorecard.json` beside it holds the same
+measurements so the card can be rendered or judged again without repaying the run. It and
+[Retrieval quality](retrieval-quality.md) are the **same** run, taken 2026-09-19.
 
 ## Working on it
 

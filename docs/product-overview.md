@@ -60,7 +60,7 @@ after the index scan has already chosen its candidates. A plain HNSW scan produc
 `hnsw.ef_search` of them, so a search restricted to a minority source can be left with almost none.
 pgvector's answer is `hnsw.iterative_scan`, which keeps restarting the scan until enough rows pass,
 and it costs latency: a filtered search that took a few milliseconds takes tens of them. Measured
-here, 42.182 ms against 0.6631.
+here, 35.583 ms against 0.6262.
 
 inillucent applies the filter inside the traversal. A node that fails the filter is still expanded,
 so the walk can pass through it to reach what is behind it, but it is never admitted to the results.
