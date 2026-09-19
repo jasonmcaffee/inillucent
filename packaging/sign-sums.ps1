@@ -73,7 +73,14 @@ if (-not (Test-Path -LiteralPath $PublicKey) -and -not $AllowUnverifiedKey) {
 if (-not $SecretKey) {
     throw 'no secret key. Set INILLUCENT_MINISIGN_KEY to the minisign key file, or pass -SecretKey.'
 }
-if (-not (Test-Path -LiteralPath $SecretKey)) { throw "$SecretKey does not exist" }
+if (-not (Test-Path -LiteralPath $SecretKey)) {
+    # **The value is described, never printed (task-1995).** This said "$SecretKey does not exist",
+    # and INILLUCENT_MINISIGN_KEY is a path that sits one mistake away from being the key itself -
+    # set it to the key material and the error writes the project's signing key to the terminal, to
+    # the transcript and to any log the release was piped into. It happened. The key was rotated.
+    $shape = if ($SecretKey -match 'minisign') { 'the key material itself' } else { "$($SecretKey.Length) characters" }
+    throw "INILLUCENT_MINISIGN_KEY does not name a file that exists; it holds $shape. It must be the path to a minisign key file."
+}
 
 $sums = Join-Path $root 'dist/SHA256SUMS'
 if (-not (Test-Path -LiteralPath $sums)) {

@@ -244,13 +244,28 @@ created an empty database.
   scripts. Every other stage of `tools/validate.ps1` passes. The amendment
   belongs to whoever changed those files.
 
-## 0.1.3 — 2026-09-15
+## 0.1.3 — 2026-09-15, published 2026-09-19
 
-**Tagged and not published.** The GitHub release is a draft waiting on the Linux
-archives; the tag `v0.1.3` is the tree it was cut from. This entry is written
-after the fact, because the release that cut it did not write one and a hole
-between 0.1.2 and 0.1.4 is the kind of thing a reader assumes is a mistake in
-their checkout.
+**Published.** https://github.com/Black-Rainbow-Labs/Inillucent/releases/tag/v0.1.3
+carries eleven assets and inillucent.com serves nine downloads, all naming 0.1.3.
+This is the first inillucent release with macOS binaries: `inillucent-0.1.3.pkg`
+is signed with a Developer ID and notarised by Apple, and
+`inillucent-0.1.3-universal-apple-darwin.tar.gz` holds the same universal
+binaries. It is also the first with signed `.deb` and `.rpm` packages, for x86-64
+and aarch64, and the first whose `SHA256SUMS` carries a signature anyone can
+check: `SHA256SUMS.minisig`, against `packaging/inillucent.pub`.
+
+It was tagged on 2026-09-15 and left unpublished for four days. The GitHub
+release stayed a **draft**, which is worse than nothing having happened: `gh
+release view` finds a draft, so the release step uploaded every asset into it and
+reported success while the release stayed invisible and untagged.
+`Publish-GitHubRelease` publishes a draft it uploaded into now, and
+`packaging/ship.ps1`'s preflight asks GitHub who it is rather than checking that
+`gh` is installed — `gh` had never been logged in on the release machine.
+
+This entry is written after the fact, because the release that cut the tag did
+not write one and a hole between 0.1.2 and 0.1.4 is the kind of thing a reader
+assumes is a mistake in their checkout.
 
 What is in it is task-1962: the public Rust surface reduced to one - the facade
 is a re-export of the driver rather than a second API over the same engine -

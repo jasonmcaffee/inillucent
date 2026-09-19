@@ -176,6 +176,6 @@ rpm:
     if ($env:NFPM_PASSPHRASE) { Remove-Item Env:\NFPM_PASSPHRASE }
 }
 
-$sums = Update-Sha256Sums -Dist $dist
+$sums = Update-Sha256Sums -Dist $dist -Version $Version
 Write-Host ''
 Write-Host "sums $sums"

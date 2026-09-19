@@ -185,7 +185,7 @@ if ($wantMacos) {
     if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) { throw "the macOS release failed with $LASTEXITCODE" }
 }
 
-$sums = Update-Sha256Sums -Dist $dist
+$sums = Update-Sha256Sums -Dist $dist -Version $Version
 Write-Host ''
 Write-Host "sums $sums"
 Get-Content -Path $sums

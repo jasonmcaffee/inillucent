@@ -314,6 +314,9 @@ function Update-Sha256Sums {
     .PARAMETER Dist
         The dist directory.
 
+    .PARAMETER Version
+        Limit the file to this release's artifacts. Omitted, every archive in Dist is named.
+
     .NOTES
         **Written with LF, not CRLF (task-1932, H12).** `Set-Content` ends every
         line the way Windows does, and every program that reads this file runs
@@ -337,13 +340,34 @@ function Update-Sha256Sums {
         -Targets macos` rewrote a file that matched the published one into one
         that did not.
     #>
-    param([string] $Dist)
+    param([string] $Dist, [string] $Version)
     $sums = Join-Path $Dist 'SHA256SUMS'
     $lines = @()
-    foreach ($pattern in @('*.zip', '*.tar.gz', '*.deb', '*.rpm')) {
+    # **.pkg is in the list because the site publishes one (task-1995).** The signed, notarised
+    # macOS installer is the first thing the download page offers a Mac, and it was the one
+    # published artifact with no line in this file - so `packaging/install.sh`, which verifies what
+    # it downloaded against exactly this file, had nothing to check it against. Measured on the
+    # live site for 0.1.3: five artifacts served, four hashes published.
+    foreach ($pattern in @('*.zip', '*.tar.gz', '*.deb', '*.rpm', '*.pkg')) {
         Get-ChildItem -Path $Dist -Filter $pattern -File -ErrorAction SilentlyContinue |
             Sort-Object Name | ForEach-Object {
-                $lines += "$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+                # **Two ways this file came to name something nobody can download**, both measured
+                # on the live 0.1.3 (task-1995), and both serious because `publish-site.ps1` copies
+                # this file to the site verbatim and `packaging/install.sh` verifies against exactly
+                # it. A name in here with no file behind it is indistinguishable, to anyone checking,
+                # from a download that was tampered with.
+                #
+                # One: dist/ is not emptied between releases - this machine's held 0.1.1, 0.1.2 and
+                # 0.1.3 archives at once - so without $Version the list spans every release while
+                # the site holds one.
+                #
+                # Two: the macOS zip is the notary's container rather than a download. rcodesign
+                # uploads a zip because Apple's notary takes an archive and not a directory, and the
+                # site then publishes the .pkg and the .tar.gz.
+                $mine = -not $Version -or $_.Name -like "*$Version*"
+                if ($mine -and $_.Name -notlike '*-apple-darwin.zip') {
+                    $lines += "$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+                }
             }
     }
     # Last, and by name rather than by pattern, because the release scripts
@@ -351,7 +375,26 @@ function Update-Sha256Sums {
     # not see the lines in a different order.
     $provenance = Join-Path $Dist 'provenance.json'
     if (Test-Path -LiteralPath $provenance) {
-        $lines += "$((Get-FileHash -LiteralPath $provenance -Algorithm SHA256).Hash.ToLower())  provenance.json"
+        # **Named only when it describes what is being published (task-1995).** provenance.json
+        # states the version, commit, toolchain and the archive's own hash, and dist/ keeps the last
+        # one written. The 0.1.3 release shipped a Windows zip of da39cba... while the provenance
+        # beside it claimed f6d3fb..., because the archives were rebuilt from the tag and the
+        # provenance was not - and the site was still serving the 0.1.2 provenance next to 0.1.3
+        # downloads. Publishing either would put a signed, checksummed claim about the build behind
+        # a different build, which is worse than publishing none.
+        $claim = Get-Content -LiteralPath $provenance -Raw | ConvertFrom-Json
+        $named = Join-Path $Dist $claim.archive.name
+        $stale = @()
+        if ($Version -and $claim.version -ne $Version) { $stale += "it describes $($claim.version)" }
+        if (Test-Path -LiteralPath $named) {
+            $actual = (Get-FileHash -LiteralPath $named -Algorithm SHA256).Hash.ToLower()
+            if ($actual -ne $claim.archive.sha256) { $stale += "$($claim.archive.name) hashes to $($actual.Substring(0, 12))... and it claims $($claim.archive.sha256.Substring(0, 12))..." }
+        }
+        if ($stale.Count -gt 0) {
+            Write-Host "  provenance.json is left out of SHA256SUMS: $($stale -join '; '). Re-run packaging/release.ps1 to write one for this build."
+        } else {
+            $lines += "$((Get-FileHash -LiteralPath $provenance -Algorithm SHA256).Hash.ToLower())  provenance.json"
+        }
     }
     # The text is assembled and written whole, because there is no switch on
     # Set-Content that changes the line ending it uses.

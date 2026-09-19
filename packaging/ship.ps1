@@ -64,6 +64,11 @@ param(
     [string] $Part,
     [string[]] $Only,
     [string[]] $Skip,
+    # The six digits from the authenticator app, for an npm account with two-factor on writes.
+    # Without it the npm route is skipped rather than attempted, because npm refuses the publish and
+    # a route that is going to be refused should say so in the plan instead of in the report.
+    [ValidatePattern('^[0-9]{6}$')]
+    [string] $Otp,
     [switch] $AllowDirty,
     [switch] $WhatIf
 )
@@ -286,6 +291,35 @@ function Find-VersionStraggler {
 # Phase 1: what can run.
 # ---------------------------------------------------------------------------
 
+function Resolve-GitHubToken {
+    <#
+    .SYNOPSIS
+        A token gh can use, from GH_TOKEN, from a gh login, or from the credential git already has.
+
+    .DESCRIPTION
+        **`gh` has never been logged in on this machine, and the release needed it anyway.** The
+        github route checked only that the program was installed, so preflight said `[run ]` and the
+        publish would have answered `To get started with GitHub CLI, please run: gh auth login` -
+        the same false positive the npm route had twice. It is not a small one: inillucent 0.1.3
+        reached the site and PyPI on 2026-09-19 with no GitHub release at all, and nothing said so.
+
+        Asking for `gh auth login` would be asking for a second credential for a host this machine
+        is already authenticated to. `git push` works here because Git Credential Manager holds an
+        OAuth token for github.com, and `git credential fill` is the supported way to read it - the
+        same interface git itself uses. So the order is: an explicit GH_TOKEN, then a real gh login,
+        then git's stored credential.
+
+        The token is returned rather than printed, and `Remove-SigningSecrets` clears it.
+    #>
+    if ($env:GH_TOKEN) { return $env:GH_TOKEN }
+    & gh auth status *> $null
+    if ($LASTEXITCODE -eq 0) { return $null }   # gh has its own login; leave it alone.
+    $answer = ("protocol=https`nhost=github.com`n`n" | & git credential fill 2>$null)
+    $line = $answer | Where-Object { $_ -like 'password=*' } | Select-Object -First 1
+    if (-not $line) { return $null }
+    return $line.Substring('password='.Length)
+}
+
 function Import-SigningSecrets {
     <#
     .SYNOPSIS
@@ -313,6 +347,13 @@ function Import-SigningSecrets {
         $keyFile = Join-Path (Get-AppleScratchDir) ('minisign-' + [guid]::NewGuid().ToString('N') + '.key')
         Set-Content -Path $keyFile -Value (Unprotect-AppleSecret -Path $sealedMinisign) -NoNewline
         $env:INILLUCENT_MINISIGN_KEY = $keyFile
+        # **Empty, and set rather than absent.** The sealed key is created with `minisign -G -W`,
+        # which writes an unencrypted secret key - DPAPI under this Windows account protects it, not
+        # a passphrase, because an unattended release has nobody to type one. `sign-sums.ps1`
+        # refuses when this variable is unset and accepts an empty string, so leaving it out stopped
+        # the signature route with `INILLUCENT_MINISIGN_PASSPHRASE is not set` while the key beside
+        # it was perfectly usable.
+        if ($null -eq $env:INILLUCENT_MINISIGN_PASSPHRASE) { $env:INILLUCENT_MINISIGN_PASSPHRASE = '' }
         $script:SigningScratch += $keyFile
     }
 
@@ -343,6 +384,11 @@ function Import-SigningSecrets {
         $env:TWINE_NON_INTERACTIVE = '1'
     }
 
+    # gh reads GH_TOKEN before anything else, so this is all it takes to make the github route work
+    # on a box where `gh auth login` was never run.
+    $resolved = Resolve-GitHubToken
+    if ($resolved) { $env:GH_TOKEN = $resolved }
+
     $keyIdFile = Join-Path $store 'gpg.keyid'
     $sealedPassphrase = Join-Path $store 'gpg.passphrase.sealed'
     if (-not $env:INILLUCENT_GPG_KEY -and (Test-Path -LiteralPath $keyIdFile)) {
@@ -362,6 +408,8 @@ function Remove-SigningSecrets {
         if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force -Confirm:$false }
     }
     $env:INILLUCENT_GPG_PASSPHRASE = $null
+    $env:INILLUCENT_MINISIGN_PASSPHRASE = $null
+    $env:GH_TOKEN = $null
     $env:TWINE_PASSWORD = $null
     # Put back whatever the machine had, rather than clearing it: npm outside this script should
     # keep reading the config it was pointed at.
@@ -441,6 +489,14 @@ function Get-Routes {
             What   = 'the GitHub release, with every asset'
             Needs  = {
                 if (-not (Test-Tool 'gh')) { return 'gh is not installed. https://cli.github.com' }
+                # Installed is not signed in, and this route has been the difference between a
+                # release that exists on GitHub and one that does not. One request, and it names the
+                # account, so publishing as the wrong one is visible in the plan.
+                $who = (& gh api user --jq '.login' 2>&1 | Out-String).Trim()
+                if ($LASTEXITCODE -ne 0 -or -not $who -or $who -match '\s') {
+                    return "gh is not authenticated: $($who -replace '\s+', ' ')"
+                }
+                $script:GitHubAccount = $who
                 $null
             }
             Run    = { Publish-GitHubRelease -Version $Version }
@@ -492,9 +548,28 @@ function Get-Routes {
                     return "npm rejected the credential: $($who -replace '\s+', ' ')"
                 }
                 $script:NpmAccount = $who
+
+                # **Being signed in is not being able to publish, and that distinction cost a
+                # release.** The token below authenticates fine and `npm whoami` names the account,
+                # and then the publish answers `403 ... Two-factor authentication or granular access
+                # token with bypass 2fa enabled is required to publish packages` - so the plan said
+                # ready and the run failed, which is the second time this route has been a false
+                # positive. npm will say which kind of token it is holding if it is asked, and only
+                # an automation token, or one of the granular ones minted to skip the second factor,
+                # can publish on its own. Anything else needs -Otp.
+                if (-not $Otp) {
+                    $tokens = (& npm token list 2>&1 | Out-String)
+                    if ($tokens -match 'Publish token' -and $tokens -notmatch 'Automation token') {
+                        return 'the npm token can read but not publish: it is a publish token, and this account requires a second factor on a write. Re-run with -Otp <six digits> from the authenticator app.'
+                    }
+                }
                 $null
             }
-            Run    = { & node (Join-Path $script:Root 'packages/npm/build.mjs') --publish }
+            Run    = {
+                $publishArguments = @('--publish')
+                if ($Otp) { $publishArguments += @('--otp', $Otp) }
+                & node (Join-Path $script:Root 'packages/npm/build.mjs') @publishArguments
+            }
             Verify = { Test-Registry -Url "https://registry.npmjs.org/inillucent" -Version $Version }
         },
         @{
@@ -563,6 +638,26 @@ function Publish-Tag {
     if ($LASTEXITCODE -ne 0) { throw "pushing v$Version failed" }
 }
 
+function Get-MirrorRepo {
+    <#
+    .SYNOPSIS
+        The owner/name of the public repository, read off the `brl` remote.
+
+    .DESCRIPTION
+        **The release belongs where the published URLs point.** This checkout has two remotes:
+        `origin` is jasonmcaffee/inillucent, where the work happens, and `brl` is
+        Black-Rainbow-Labs/Inillucent, which is what inillucent.com links, what the Go module path
+        `github.com/Black-Rainbow-Labs/Inillucent/packages/go` resolves through, and the account the
+        product is published under. `gh` with no `--repo` uses the current directory's `origin`, so
+        every release would have landed on the development repository while the public one showed
+        nothing newer than 0.1.2.
+    #>
+    $url = (& git -C $script:Root remote get-url brl 2>$null)
+    if (-not $url) { throw 'this checkout has no `brl` remote, so the public repository is unknown.' }
+    if ($url -notmatch 'github\.com[:/](?<owner>[^/]+)/(?<name>[^/.]+)') { throw "the brl remote is $url, which is not a GitHub URL." }
+    return "$($Matches.owner)/$($Matches.name)"
+}
+
 function Publish-GitHubRelease {
     <#
     .SYNOPSIS
@@ -572,18 +667,35 @@ function Publish-GitHubRelease {
         The version being released.
     #>
     param([string] $Version)
+    # **The notary's container is not a download.** `rcodesign` zips the macOS binaries to upload
+    # them to Apple, and `publish-site.ps1` ships the .pkg and the .tar.gz instead. Attaching the
+    # zip would offer a third macOS file that no page links and no checksum covers.
     $assets = @(Get-ChildItem -LiteralPath $script:Dist -File |
         Where-Object { $_.Name -like "*$Version*" -or $_.Name -like 'SHA256SUMS*' } |
+        Where-Object { $_.Name -notlike '*-apple-darwin.zip' } |
         ForEach-Object { $_.FullName })
     if ($assets.Count -eq 0) { throw "dist/ holds no artifact naming $Version" }
 
-    $exists = & gh release view "v$Version" --json tagName 2>$null
+    $repo = @('--repo', (Get-MirrorRepo))
+    $exists = & gh release view "v$Version" @repo --json tagName 2>$null
     if ($exists) {
-        & gh release upload "v$Version" @assets --clobber
+        & gh release upload "v$Version" @assets @repo --clobber
     } else {
-        & gh release create "v$Version" @assets --title "inillucent $Version" --notes "inillucent $Version"
+        & gh release create "v$Version" @assets @repo --title "inillucent $Version" --notes "inillucent $Version"
     }
     if ($LASTEXITCODE -ne 0) { throw "the GitHub release for v$Version failed" }
+
+    # **A draft is not a release, and uploading into one says nothing (task-1995).** `gh release
+    # view` finds a draft, so the branch above quietly puts every asset into it and reports success
+    # while the release stays invisible and untagged. inillucent 0.1.3 had a draft open from
+    # 2026-09-15 and the CHANGELOG recorded the release as "tagged and not published" for four days.
+    # Asked and fixed, rather than assumed: a draft is published, and a release that is already
+    # public is left alone.
+    $draft = & gh release view "v$Version" @repo --json isDraft --jq '.isDraft' 2>$null
+    if ($draft -eq 'true') {
+        & gh release edit "v$Version" @repo --draft=false
+        if ($LASTEXITCODE -ne 0) { throw "v$Version was uploaded but could not be published" }
+    }
 }
 
 function Publish-GoModule {
@@ -600,12 +712,23 @@ function Publish-GoModule {
     #>
     param([string] $Version)
     $tag = "packages/go/v$Version"
-    if (-not (& git -C $root tag --list $tag)) {
-        & git -C $root tag -a $tag -m "inillucent Go module $Version"
-        if ($LASTEXITCODE -ne 0) { throw "tagging $tag failed" }
+    # **On the mirror, at the mirror's own release commit (task-1995).** The module path is
+    # `github.com/Black-Rainbow-Labs/Inillucent/packages/go`, so proxy.golang.org reads this tag off
+    # the mirror and nowhere else - pushing it to `origin` published nothing, and inillucent 0.1.3
+    # sat on the site and on PyPI while `go get` still resolved 0.1.2.
+    #
+    # It points at the mirror's v<version> commit rather than at a local one. The mirror is one
+    # commit per release, built from the release tag's tree and checked to equal it, so that commit
+    # carries the same packages/go as the tag does. Pushing a local tag instead pushes the local
+    # commit with it, which is how the 0.1.0, 0.1.1 and 0.1.2 Go tags came to point at development
+    # history inside a repository whose whole design is one commit per release.
+    $mirrorCommit = (& git -C $root ls-remote brl "refs/tags/v$Version^{}" | ForEach-Object { ($_ -split '\s+')[0] } | Select-Object -First 1)
+    if (-not $mirrorCommit) {
+        $mirrorCommit = (& git -C $root ls-remote brl "refs/tags/v$Version" | ForEach-Object { ($_ -split '\s+')[0] } | Select-Object -First 1)
     }
-    & git -C $root push origin $tag
-    if ($LASTEXITCODE -ne 0) { throw "pushing $tag failed" }
+    if (-not $mirrorCommit) { throw "the mirror has no v$Version tag yet, so the Go module cannot be tagged. Run the mirror route first." }
+    & git -C $root push brl "${mirrorCommit}:refs/tags/$tag"
+    if ($LASTEXITCODE -ne 0) { throw "pushing $tag to the mirror failed" }
 }
 
 # ---------------------------------------------------------------------------
@@ -621,8 +744,9 @@ function Test-GitHubRelease {
         The version being released.
     #>
     param([string] $Version)
-    $names = & gh release view "v$Version" --json assets --jq '.assets[].name' 2>$null
-    if (-not $names) { return "gh release view v$Version lists no assets" }
+    $repo = Get-MirrorRepo
+    $names = & gh release view "v$Version" --repo $repo --json assets --jq '.assets[].name' 2>$null
+    if (-not $names) { return "$repo has no assets on the v$Version release" }
     return $null
 }
 
@@ -641,6 +765,35 @@ function Test-SiteVersion {
         return "inillucent.com/downloads/VERSION could not be read: $($_.Exception.Message)"
     }
     if ($served -ne $Version) { return "inillucent.com serves $served, not $Version" }
+
+    # **Every name in the published SHA256SUMS is fetched (task-1995).** Reading VERSION says the
+    # page was written; it says nothing about the files. The live 0.1.3 had a SHA256SUMS naming a
+    # macOS zip that answered 404, no line at all for the .pkg the page offers first, and later an
+    # arm64 .deb and an aarch64 .rpm that were built and hashed but never copied. Each one is
+    # indistinguishable, to a person running `sha256sum -c`, from a download that was interfered
+    # with. Checking hashes here rather than only names would mean pulling about 240 MB on every
+    # release, so this asks for the first byte and trusts Content-Length; the hashes are checked
+    # against the files on disk when SHA256SUMS is written.
+    try {
+        $sums = (Invoke-WebRequest -Uri 'https://inillucent.com/downloads/SHA256SUMS' -UseBasicParsing -TimeoutSec 30).Content
+    } catch {
+        return "inillucent.com/downloads/SHA256SUMS could not be read: $($_.Exception.Message)"
+    }
+    $absent = @()
+    foreach ($line in ($sums -split "`n")) {
+        $name = ($line -split '\s+', 2)[1]
+        if (-not $name) { continue }
+        $name = $name.Trim()
+        try {
+            $head = Invoke-WebRequest -Uri "https://inillucent.com/downloads/$name" -Method Head -UseBasicParsing -TimeoutSec 30
+            if ([int] $head.StatusCode -ne 200) { $absent += $name }
+        } catch {
+            $absent += $name
+        }
+    }
+    if ($absent.Count -gt 0) {
+        return "SHA256SUMS names $($absent.Count) file(s) inillucent.com does not serve: $($absent -join ', ')"
+    }
     return $null
 }
 
@@ -681,6 +834,20 @@ Write-Host "inillucent $Version" -ForegroundColor Green
 if ($Version -ne $current) { Write-Host "  (from $current)" }
 if ($WhatIf) { Write-Host '  -WhatIf: nothing will be written' -ForegroundColor Yellow }
 
+# **Backwards is refused (task-1995).** The version phase runs whatever `-Only` says, because every
+# later route reads the version it writes. So `ship.ps1 -Only github -Version 0.1.3`, the obvious way
+# to attach an asset to a release that already exists, rewrites Cargo.toml, the npm wrapper, the
+# Python package and four more files to 0.1.3 on a tree that is on 0.1.4 - and the first thing the
+# publish phase does with that is commit it. Re-publishing an old release is a real thing to want;
+# doing it from this script is not, because this script's second phase is "write the new version
+# everywhere".
+$comparable = { param($v) [version]($v -replace '[^0-9.].*$', '') }
+if ($Version -and -not $WhatIf) {
+    if ((& $comparable $Version) -lt (& $comparable $current)) {
+        throw "this checkout is on $current and -Version says $Version. The version phase would rewrite every version file backwards, and the publish phase would commit that. To add to an already published release, run the step itself: packaging/publish-site.ps1, or gh release upload."
+    }
+}
+
 $dirty = & git -C $root status --porcelain
 if ($dirty -and -not $AllowDirty -and -not $WhatIf) {
     throw "the working tree has uncommitted changes. A release built from one cannot be rebuilt. Commit them, or pass -AllowDirty."
@@ -699,6 +866,8 @@ foreach ($route in $routes) {
     $detail = if ($state) { " - $state" } else { '' }
     if (-not $state -and $route.Name -eq 'npm' -and $script:NpmAccount) {
         $detail = " - as $script:NpmAccount"
+    } elseif (-not $state -and $route.Name -eq 'github' -and $script:GitHubAccount) {
+        $detail = " - as $script:GitHubAccount"
     }
     Write-Host ("   [{0}] {1,-16} {2}{3}" -f $mark, $route.Name, $route.What, $detail)
 }

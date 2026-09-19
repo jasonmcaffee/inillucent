@@ -89,7 +89,13 @@ $artifacts = @(
     @{ Platform = 'Linux'; File = "inillucent-$Version-x86_64-unknown-linux-gnu.tar.gz"; Detail = 'x86-64, glibc 2.28 or newer' },
     @{ Platform = 'Linux ARM'; File = "inillucent-$Version-aarch64-unknown-linux-gnu.tar.gz"; Detail = 'aarch64, glibc 2.28 or newer' },
     @{ Platform = 'Debian and Ubuntu'; File = "inillucent_${Version}_amd64.deb"; Detail = 'x86-64' },
-    @{ Platform = 'Fedora and RHEL'; File = "inillucent-$Version.x86_64.rpm"; Detail = 'x86-64' }
+    @{ Platform = 'Fedora and RHEL'; File = "inillucent-$Version.x86_64.rpm"; Detail = 'x86-64' },
+    # **aarch64 too (task-1995).** `linux/package-linux.ps1` builds four packages and this list
+    # named two, so SHA256SUMS - which covers everything built - published hashes for an arm64 .deb
+    # and an aarch64 .rpm that the site answered 404 for. The page already offers an ARM Linux
+    # tar.gz, so the machines these are for were already being served, just not with a package.
+    @{ Platform = 'Debian and Ubuntu ARM'; File = "inillucent_${Version}_arm64.deb"; Detail = 'aarch64' },
+    @{ Platform = 'Fedora and RHEL ARM'; File = "inillucent-$Version.aarch64.rpm"; Detail = 'aarch64' }
 )
 
 function Get-Sha256 {
@@ -123,8 +129,25 @@ if ($Stage) {
     # in the sums so that verifying the sums verifies the provenance too, and
     # publishing the sums without the file they name leaves a line that cannot
     # be checked.
+    #
+    # **And only when SHA256SUMS names it (task-1995).** This copied it whenever dist/ had one, so
+    # the reasoning above ran backwards: the sums file is what decides. `Update-Sha256Sums` leaves
+    # out a provenance describing a different build, and copying it anyway is how the site came to
+    # serve the 0.1.2 provenance beside the 0.1.3 downloads. A provenance left behind is also not
+    # merely absent - it is a specific, wrong claim about how the thing next to it was built.
+    $sumsText = ''
+    $sumsFile = Join-Path $dist 'SHA256SUMS'
+    if (Test-Path -LiteralPath $sumsFile) { $sumsText = Get-Content -LiteralPath $sumsFile -Raw }
     foreach ($extra in @('SHA256SUMS', 'SHA256SUMS.minisig', 'provenance.json')) {
         $from = Join-Path $dist $extra
+        if ($extra -eq 'provenance.json' -and $sumsText -notmatch 'provenance\.json') {
+            $stale = Join-Path $downloads 'provenance.json'
+            if (Test-Path -LiteralPath $stale) {
+                Write-Warning "$downloads\provenance.json describes an older release and SHA256SUMS does not name a new one. Delete it by hand, or run packaging/release.ps1 to write a provenance for this build."
+            }
+            Write-Host '  provenance.json skipped: SHA256SUMS does not name it'
+            continue
+        }
         if (Test-Path -LiteralPath $from) {
             Copy-Item -LiteralPath $from -Destination $downloads -Force
             Write-Host "  $extra"

@@ -548,7 +548,7 @@ if (-not $SkipNotarize) {
 # loose signed Mach-O files where a publish step could pick them up.
 if (Test-Path -LiteralPath $universal) { Remove-Item -LiteralPath $universal -Recurse -Force -Confirm:$false }
 
-$sums = Update-Sha256Sums -Dist $dist
+$sums = Update-Sha256Sums -Dist $dist -Version $Version
 Write-Host ''
 Write-Host "sums $sums"
 

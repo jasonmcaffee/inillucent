@@ -5,6 +5,21 @@
 //   node packages/npm/build.mjs --pack              # and `npm pack` each one
 //   node packages/npm/build.mjs --publish           # and publish, platform packages first
 //   node packages/npm/build.mjs --publish --dry-run # say what it would publish
+//   node packages/npm/build.mjs --publish --otp 123456   # 2FA on writes
+//
+// **--otp is how a publish reaches an account that has two-factor on.** npm
+// answers a publish without one with `403 ... Two-factor authentication or
+// granular access token with bypass 2fa enabled is required to publish
+// packages`, and that is a property of the credential rather than of anything
+// here: a token proves who you are, and two-factor is a second thing the
+// account asks for on a write. The six digits from the authenticator app
+// satisfy it. npm accepts one code for the whole of its 30-second window, so
+// every package is published in a single pass with no pause between them.
+//
+// It is the durable route as well as the immediate one. npm restricted
+// two-factor-bypass tokens for account changes on 2026-07-31 and turns off
+// direct publishing with them in January 2027, so a token minted to skip the
+// second factor is a credential with an expiry date on it.
 //
 // The order matters and is not a detail: `inillucent` lists the platform
 // packages as optionalDependencies at an exact version, so publishing it first
@@ -51,7 +66,14 @@ const PLATFORMS = [
 
 const PROGRAMS = ['inillucent', 'inillucent-shell', 'inillucent-mcp', 'inillucent-migrate'];
 
-const options = new Set(process.argv.slice(2));
+const argv = process.argv.slice(2);
+const options = new Set(argv);
+
+/** Reads `--name value` off the command line, or null when it is absent. */
+function optionValue(name) {
+  const at = argv.indexOf(name);
+  return at >= 0 && argv[at + 1] ? argv[at + 1] : null;
+}
 const version = JSON.parse(readFileSync(join(here, 'inillucent', 'package.json'), 'utf8')).version;
 
 /**
@@ -161,9 +183,13 @@ function stage(platform) {
  * @param directory - where to run
  * @param args - the npm arguments
  */
-function npm(directory, args) {
+function npm(directory, args, secret = []) {
+  // The printed line leaves `secret` out, so a one-time code does not reach the
+  // log a release leaves behind. It is still an argument to npm, and so still
+  // readable in a process listing for the second it runs - npm's CLI takes it no
+  // other way, and the code expires in 30 seconds regardless.
   console.log(`  npm ${args.join(' ')}  (in ${directory})`);
-  execFileSync('npm', args, { cwd: directory, stdio: 'inherit', shell: process.platform === 'win32' });
+  execFileSync('npm', [...args, ...secret], { cwd: directory, stdio: 'inherit', shell: process.platform === 'win32' });
 }
 
 console.log(`staging inillucent ${version} npm packages`);
@@ -203,15 +229,20 @@ if (options.has('--pack')) {
 
 if (options.has('--publish')) {
   const dry = options.has('--dry-run') ? ['--dry-run'] : [];
-  console.log(`\npublishing${dry.length ? ' (dry run)' : ''}:`);
+  const otp = optionValue('--otp');
+  if (otp && !/^[0-9]{6}$/.test(otp)) {
+    throw new Error(`--otp is ${JSON.stringify(otp)}, which is not the six digits npm expects.`);
+  }
+  const second = otp ? [`--otp=${otp}`] : [];
+  console.log(`\npublishing${dry.length ? ' (dry run)' : ''}${otp ? ' with a one-time code' : ''}:`);
   // Platform packages first. The wrapper pins them at an exact version, so a
   // wrapper published first is a package nobody can install until the rest
   // land - and npm's registry is eventually consistent, so "a few seconds" is
   // not a number anybody can rely on.
   for (const directory of built) {
-    npm(directory, ['publish', '--access', 'public', ...dry]);
+    npm(directory, ['publish', '--access', 'public', ...dry], second);
   }
-  npm(wrapper, ['publish', '--access', 'public', ...dry]);
+  npm(wrapper, ['publish', '--access', 'public', ...dry], second);
 }
 
 console.log(`\nstaged in ${staged}`);
