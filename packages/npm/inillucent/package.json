@@ -43,10 +43,10 @@
     "README.md"
   ],
   "optionalDependencies": {
-    "@inillucent/cli-win32-x64": "0.1.2",
-    "@inillucent/cli-darwin-arm64": "0.1.2",
-    "@inillucent/cli-darwin-x64": "0.1.2",
-    "@inillucent/cli-linux-x64": "0.1.2",
-    "@inillucent/cli-linux-arm64": "0.1.2"
+    "@inillucent/cli-win32-x64": "0.1.4",
+    "@inillucent/cli-darwin-arm64": "0.1.4",
+    "@inillucent/cli-darwin-x64": "0.1.4",
+    "@inillucent/cli-linux-x64": "0.1.4",
+    "@inillucent/cli-linux-arm64": "0.1.4"
   }
 }
