@@ -731,7 +731,7 @@ and the ordering agree.
 | sum of text and of a mixed column | yes | **yes** |
 | Integer sum overflowing | yes | **yes** |
 
-### Date and time - 9 of 10
+### Date and time - 10 of 10
 
 | feature | SQLite 3.53.4 | inillucent |
 |---|---|---|
@@ -744,19 +744,20 @@ and the ordering agree.
 | Modifiers: ceiling, floor, subsec, auto | yes | **yes** |
 | timediff | yes | **yes** |
 | Julian day round trip | yes | **yes** |
-| Modifiers: localtime, utc | yes | **no, on purpose** |
+| Modifiers: localtime, utc | yes | **yes** |
 
-The two time zone modifiers are the one deliberate difference in this table.
-`datetime(x, 'localtime')` answers NULL here and `datetime(x, 'utc')` returns
-its argument unchanged, where SQLite converts between the machine's zone and
-UTC: on a machine set to UTC-6, `datetime('2026-09-03 14:30:00', 'utc')` is
-`2026-09-03 20:30:00` in SQLite and `2026-09-03 14:30:00` here.
+The two time zone modifiers were the one deliberate difference in this table
+until task-1981 implemented them. `datetime(x, 'localtime')` answered NULL and
+`datetime(x, 'utc')` returned its argument unchanged; both now convert between
+the machine's zone and UTC, as SQLite's do.
 
-Both of SQLite's answers depend on the operating system's time zone database
-and on the zone the process is running in, so the same query answers differently
-on two machines and differently again after a daylight saving change. Store the
-offset with the value and convert it in the application, which is what a query
-that has to give the same answer twice already does.
+Both answers depend on the operating system's time zone database and on the zone
+the process is running in, so the same query answers differently on two machines
+and differently again after a daylight saving change. That is true of SQLite too,
+and it is why `date_and_time_functions_match_the_oracle` compares the two engines
+on one machine rather than asserting a value. If a query has to give the same
+answer on two machines, store the offset with the value and convert it in the
+application.
 
 ### Maths - 4 of 4
 

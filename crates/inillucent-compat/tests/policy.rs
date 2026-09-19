@@ -107,7 +107,7 @@ const UNSAFE_CRATES: [&str; 1] = ["inillucent-driver-capi"];
 // are FFI. Each call installs a handler and reads nothing back; each handler
 // stores `true` into an already-allocated `AtomicBool` and returns, which is
 // the whole of what a handler is allowed to do.
-const UNSAFE_ALLOWED: [&str; 14] = [
+const UNSAFE_ALLOWED: [&str; 15] = [
     "crates/inillucent-cli/src/interrupt.rs",
     // The allocator's own concurrency suite, added in task-1932 (H9). It
     // allocates on one thread and frees on another through `GlobalAlloc`, which
@@ -133,6 +133,15 @@ const UNSAFE_ALLOWED: [&str; 14] = [
     "crates/inillucent-remote/src/tls/windows.rs",
     "crates/inillucent-vfs/src/os/windows.rs",
     "crates/inillucent-vfs/src/os/unix.rs",
+    // The local time zone, added in task-1981 and admitted here by task-1987,
+    // which found it refused. It is the same operating-system boundary the two
+    // files above stand on and it is reached the same way: `localtime_r` on
+    // Unix and `SystemTimeToTzSpecificLocalTime` on Windows, with a zeroed
+    // output structure per call. The offset between local time and UTC is not
+    // something this workspace can compute - it changes at a daylight saving
+    // boundary and it has changed by legislation - so there is no safe route
+    // to the answer to prefer. Every call site carries its own SAFETY note.
+    "crates/inillucent-vfs/src/zone.rs",
     "crates/inillucent-compat/src/bin/sqlperf.rs",
     "crates/inillucent-compat/src/bin/planperf.rs",
     // The same counting global allocator as the two profiling binaries above:

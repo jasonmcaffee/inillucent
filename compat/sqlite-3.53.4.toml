@@ -1574,26 +1574,34 @@ id = "functions.date-time"
 source = "https://sqlite.org/lang_datefunc.html"
 profile = "default"
 phase = "phase 8: complete SELECT, planner, schema, and SQL semantics"
-# **Two modifiers differ on purpose, named here in task-1932 (M8).**
-# `localtime` answers NULL and `utc` does nothing, where SQLite converts
-# between the machine's zone and UTC - measured on a UTC-6 machine,
-# `datetime('2026-09-03 14:30:00','utc')` is `20:30:00` there and `14:30:00`
-# here. Both of SQLite's answers depend on the operating system's time zone
-# database and on the zone the process happens to be running in, so a query
-# using either answers differently on two machines and differently again after
-# a daylight saving change. This engine is used to grade itself against a second
-# process, and a value that moves with the clock cannot be graded at all.
+# **`localtime` and `utc` were the one deliberate difference here, and
+# task-1981 removed it.** They answered NULL and did nothing, where SQLite
+# converts between the machine's zone and UTC - measured on a UTC-6 machine,
+# `datetime('2026-09-03 14:30:00','utc')` was `20:30:00` in SQLite and
+# `14:30:00` here. The reason was that both of SQLite's answers depend on the
+# operating system's time zone database and on the zone the process happens to
+# be running in, so a query using either answers differently on two machines
+# and differently again after a daylight saving change, and this engine is used
+# to grade itself against a second process.
 #
-# The row still claims `pass` because every other modifier and every specifier
-# matches, and the two that do not are held in place by
-# `the_time_zone_modifiers_are_a_deliberate_deviation` rather than left to
-# drift. `docs/feature-comparison.md` carries the same statement in its date and
-# time table.
+# `inillucent-vfs`'s `zone` module asks the operating system for the offset one
+# instant at a time - `localtime_r` on Unix and
+# `SystemTimeToTzSpecificLocalTime` on Windows, which is what `date.c` calls -
+# so the two engines running on one machine agree, and
+# `date_and_time_functions_match_the_oracle` grades both modifiers against the
+# oracle over a winter instant and a summer one rather than asserting a value
+# neither of them can be asked for in advance.
+#
+# The row cites one test rather than two, and that is deliberate.
+# `the_time_zone_modifiers_are_a_deliberate_deviation` held the difference in
+# place and was deleted with it; putting the modifiers in a case of their own
+# instead would have introduced a test identifier with no recorded result on
+# either required platform, which drops this row from `pass` to `partial` until a
+# Linux run records it - and writing a Linux result nobody observed is not
+# evidence (task-1987). `docs/feature-comparison.md` carries the same statement
+# in its date and time table.
 status = "pass"
-tests = [
-  "inillucent-compat::date_and_time_functions_match_the_oracle",
-  "inillucent-compat::the_time_zone_modifiers_are_a_deliberate_deviation",
-]
+tests = ["inillucent-compat::date_and_time_functions_match_the_oracle"]
 
 [[capability]]
 id = "functions.math"

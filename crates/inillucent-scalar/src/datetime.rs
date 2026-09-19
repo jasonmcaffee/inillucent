@@ -223,12 +223,7 @@ pub fn call(
             },
             YearStyle::Signed,
         ),
-        TimeFunc::StrfTime => render(
-            day,
-            civil,
-            &format.unwrap_or_default(),
-            YearStyle::Printf,
-        ),
+        TimeFunc::StrfTime => render(day, civil, &format.unwrap_or_default(), YearStyle::Printf),
         TimeFunc::TimeDiff => Value::Null,
     }
 }

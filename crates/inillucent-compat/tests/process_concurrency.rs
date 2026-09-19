@@ -31,6 +31,9 @@ use std::process::{Command, Stdio};
 
 use inillucent_compat::cliproc::{program, rows, run, Ran};
 use inillucent_compat::workspace_root;
+use inillucent_pool::journal::{replay_hot_journal, Journal, JournalMode};
+use inillucent_pool::page::PageId;
+use inillucent_vfs::{AccessMode, DbPath, OpenOptions, OsVfs, Vfs, VfsFile, VfsResult};
 
 /// How many inserts each writer sends in the one-statement-per-process shape.
 ///
@@ -548,5 +551,208 @@ fn a_refusal_names_the_holder_and_the_operation() {
         !said.contains("pending"),
         "the refusal still names an internal lock level:\n{}",
         refused.said()
+    );
+}
+
+/// A VFS that disposes of one journal the moment its database is opened.
+///
+/// **What it stands in for is a checkpoint finishing, and it stands in for it
+/// without a race.** The defect below is an ordering, and the ordering is
+/// between one process reading a journal and another process disposing of it;
+/// reproducing that with two threads and a sleep gets a case that passes on a
+/// broken build whenever the machine is busy, which is the shape
+/// `tests/inillucent-testing-tdd.md` calls worse than no test. So the disposal
+/// is hung off the one call both builds make at the same point in their own
+/// control flow - opening the database to take its lock - and fires exactly
+/// once. Neither build is told anything the other is not; they differ only in
+/// whether they had already read the journal by the time it fired.
+#[derive(Debug)]
+struct DisposingVfs {
+    /// The real VFS every call is delegated to.
+    inner: OsVfs,
+    /// The database whose opening is the moment the journal goes.
+    database: PathBuf,
+    /// The journal to dispose of.
+    journal: DbPath,
+    /// Whether it has been disposed of, so this happens once.
+    disposed: std::sync::atomic::AtomicBool,
+}
+
+impl Vfs for DisposingVfs {
+    /// Names the VFS underneath.
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    /// Opens a file, disposing of the journal first when this is the database.
+    ///
+    /// @param path - the file to open
+    /// @param options - how to open it
+    fn open(&self, path: &DbPath, options: OpenOptions) -> VfsResult<Box<dyn VfsFile>> {
+        if path.as_path() == self.database
+            && !self
+                .disposed
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            let _ = self.inner.delete(&self.journal, false);
+        }
+        self.inner.open(path, options)
+    }
+
+    /// @param path - the file to remove
+    /// @param sync_dir - whether to flush the directory entry
+    fn delete(&self, path: &DbPath, sync_dir: bool) -> VfsResult<()> {
+        self.inner.delete(path, sync_dir)
+    }
+
+    /// @param from - the existing name
+    /// @param to - the new name
+    fn rename(&self, from: &DbPath, to: &DbPath) -> VfsResult<()> {
+        self.inner.rename(from, to)
+    }
+
+    /// @param path - the file to ask about
+    /// @param mode - what is being asked
+    fn access(&self, path: &DbPath, mode: AccessMode) -> VfsResult<bool> {
+        self.inner.access(path, mode)
+    }
+
+    /// @param path - the path to resolve
+    fn full_pathname(&self, path: &DbPath) -> VfsResult<DbPath> {
+        self.inner.full_pathname(path)
+    }
+
+    /// @param output - the buffer to fill
+    fn randomness(&self, output: &mut [u8]) -> VfsResult<()> {
+        self.inner.randomness(output)
+    }
+
+    /// Returns the wall clock the VFS underneath reports.
+    fn current_time(&self) -> VfsResult<std::time::SystemTime> {
+        self.inner.current_time()
+    }
+
+    /// @param prefix - what to name the temporary file after
+    fn temp_path(&self, prefix: &str) -> VfsResult<DbPath> {
+        self.inner.temp_path(prefix)
+    }
+
+    /// @param micros - how long to wait
+    fn sleep(&self, micros: u64) -> VfsResult<()> {
+        self.inner.sleep(micros)
+    }
+}
+
+/// Returns the one byte a page is filled with, straight out of the file.
+///
+/// The case below writes each version of the page as a single repeated byte,
+/// so which version the file holds is one number rather than five hundred and
+/// twelve of them - and a failure prints that number instead of two pages of
+/// them.
+///
+/// @param path - the file
+/// @param page - which page
+/// @param page_size - how big a page is
+fn page_marker(path: &Path, page: usize, page_size: usize) -> u8 {
+    let whole =
+        std::fs::read(path).unwrap_or_else(|error| panic!("the file did not read: {error}"));
+    let at = page.saturating_mul(page_size);
+    let image = whole
+        .get(at..at.saturating_add(page_size))
+        .unwrap_or_else(|| panic!("the file is shorter than page {page}"));
+    let first = image
+        .first()
+        .copied()
+        .unwrap_or_else(|| panic!("page {page} is empty"));
+    assert!(
+        image.iter().all(|byte| *byte == first),
+        "page {page} is not one repeated byte, so this case cannot name which version it holds"
+    );
+    first
+}
+
+/// A journal is not put back over the checkpoint that owned it (task-1987).
+///
+/// **The defect, stated as the value of one page.** `replay_hot_journal` opened
+/// the journal beside a database and read its header *before* it took any lock
+/// on that database, and then waited for the lock. The lock chain was there and
+/// the argument written beside it was right - a concurrent holder means the
+/// journal is not this process's - but it ran after the read, and nothing asked
+/// again once the lock was in hand. So a journal belonging to a checkpoint that
+/// finished while this process waited was still written back, over a commit
+/// that had already been acknowledged. Deleting a journal does not take it away
+/// from a process that already has it open, on Windows or on POSIX.
+///
+/// Measured through the command line on the build this case was written
+/// against, with a microsecond clock on the lock, meta and journal decisions:
+/// two writer processes running single statement inserts, one of them writing
+/// generation 28 and reading it back through its own handle, and the file
+/// reporting generation 27 again eleven milliseconds later because a third
+/// process had put that checkpoint's own journal back. `integrity-check` said
+/// `ok`, and between two and six of every two hundred and forty acknowledged
+/// inserts were not in the file.
+///
+/// The file here holds the image the checkpoint wrote, and the journal holds
+/// the image from before it. Putting the journal back is the whole failure, so
+/// the assertion is on the page's bytes.
+#[test]
+fn a_finished_checkpoints_journal_is_not_put_back_over_it() {
+    const PAGE_SIZE: usize = 512;
+    const BEFORE: u8 = 0xA5;
+    const AFTER: u8 = 0x5C;
+    let directory = area("hot-journal-after-checkpoint");
+    let database = directory.join("shared.rdb");
+    let before_the_checkpoint = vec![BEFORE; PAGE_SIZE];
+    let after_the_checkpoint = vec![AFTER; PAGE_SIZE];
+    std::fs::write(&database, &before_the_checkpoint)
+        .unwrap_or_else(|error| panic!("the database did not write: {error}"));
+
+    let path = DbPath::new(database.to_string_lossy().as_ref());
+    let journal_path = path.journal();
+
+    // The pre-image a checkpoint saves before it overwrites the page, written
+    // by the same code a checkpoint writes it with.
+    let real: std::sync::Arc<dyn Vfs> = std::sync::Arc::new(OsVfs::new());
+    let mut journal = Journal::new(
+        std::sync::Arc::clone(&real),
+        &path,
+        JournalMode::Delete,
+        PAGE_SIZE,
+    );
+    journal
+        .save(PageId(0), &before_the_checkpoint)
+        .unwrap_or_else(|error| panic!("the pre-image did not save: {error}"));
+    journal
+        .seal()
+        .unwrap_or_else(|error| panic!("the journal did not seal: {error}"));
+    assert!(
+        real.access(&journal_path, AccessMode::Exists)
+            .unwrap_or(false),
+        "the journal this case is about was never written, so it tests nothing"
+    );
+
+    // The rest of that checkpoint: the new image reaches the file. Its own
+    // disposal of the journal is what `DisposingVfs` performs, at the moment
+    // the replayer reaches for the lock.
+    std::fs::write(&database, &after_the_checkpoint)
+        .unwrap_or_else(|error| panic!("the new image did not write: {error}"));
+
+    let disposing = DisposingVfs {
+        inner: OsVfs::new(),
+        database: database.clone(),
+        journal: journal_path.clone(),
+        disposed: std::sync::atomic::AtomicBool::new(false),
+    };
+    let restored = replay_hot_journal(&disposing, &path)
+        .unwrap_or_else(|error| panic!("the replay reported an error: {error}"));
+
+    assert_eq!(
+        page_marker(&database, 0, PAGE_SIZE),
+        AFTER,
+        "page 0 holds {BEFORE:#x}, from before the checkpoint, not the {AFTER:#x} the checkpoint wrote: a finished checkpoint's journal was put back over it, undoing an acknowledged commit"
+    );
+    assert!(
+        !restored,
+        "nothing was there to put back, yet the replay reported that it had"
     );
 }

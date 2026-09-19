@@ -16,6 +16,16 @@ libc = { workspace = true }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true }
 
+[dev-dependencies]
+# The one skip helper, `inillucent_base::testing::skipping`.
+#
+# A dev-dependency, so the feature is on for this crate's test targets and off
+# in a shipped build - the same arrangement `inillucent-cli` makes and for the
+# same reason. `zone.rs`'s two cases return early when the operating system
+# will not answer an offset, and a return that says nothing reports success
+# having tested nothing.
+inillucent-base = { workspace = true, features = ["testing"] }
+
 [[bin]]
 name = "inillucent-lock-probe"
 path = "src/bin/lock_probe.rs"

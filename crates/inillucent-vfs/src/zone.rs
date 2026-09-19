@@ -23,6 +23,9 @@
 #[cfg(unix)]
 pub fn local_offset_seconds(utc_seconds: i64) -> Option<i64> {
     let instant = utc_seconds as libc::time_t;
+    // SAFETY: `tm` is plain data with no invalid bit patterns, so an all-zero
+    // value is a valid one; every field read below is written by the call that
+    // follows, and the return value is checked before any of them is read.
     let mut broken: libc::tm = unsafe { core::mem::zeroed() };
     // SAFETY: `localtime_r` writes into a `tm` this call owns and reads one
     // `time_t` by pointer. It is the reentrant form on purpose: the shared
@@ -70,8 +73,14 @@ pub fn local_offset_seconds(utc_seconds: i64) -> Option<i64> {
         dwLowDateTime: held as u32,
         dwHighDateTime: (held >> 32) as u32,
     };
+    // SAFETY: `SYSTEMTIME` and `FILETIME` are plain data with no invalid bit
+    // patterns, so an all-zero value is a valid one. Each is an output the
+    // chain below fills in, and nothing reads one until that chain has reported
+    // success.
     let mut broken: SYSTEMTIME = unsafe { core::mem::zeroed() };
+    // SAFETY: as above.
     let mut local: SYSTEMTIME = unsafe { core::mem::zeroed() };
+    // SAFETY: as above.
     let mut converted: FILETIME = unsafe { core::mem::zeroed() };
     // SAFETY: every pointer is to a local of the right type, and the null
     // zone argument is what asks for the process's own zone rather than a
@@ -111,6 +120,9 @@ mod tests {
     #[test]
     fn the_offset_is_a_whole_minute_inside_the_range_zones_use() {
         let Some(offset) = local_offset_seconds(1_577_880_000) else {
+            inillucent_base::testing::skipping(
+                "this machine's operating system would not answer a local offset",
+            );
             return;
         };
         assert_eq!(offset % 60, 0, "the offset is {offset} seconds");
@@ -132,6 +144,9 @@ mod tests {
             local_offset_seconds(1_577_880_000),
             local_offset_seconds(1_593_604_800),
         ) else {
+            inillucent_base::testing::skipping(
+                "this machine's operating system would not answer a local offset",
+            );
             return;
         };
         assert!(

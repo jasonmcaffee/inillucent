@@ -136,6 +136,7 @@ table.
 | `capi` | 1 | the C ABI shared library, built by `cargo build -p inillucent-driver-capi` into this run's own target directory |
 | `cc` | 1 | a C compiler on `PATH`, for the program that links the C ABI |
 | `directory-link` | 1 | permission to create a directory link, which Windows gives an elevated shell or a machine in developer mode |
+| `local-timezone` | 1 | a configured local time zone the operating system will convert an instant through: `localtime_r` on Unix, `SystemTimeToTzSpecificLocalTime` on Windows |
 | `mysql` | 1 | a live MySQL server, named by `INILLUCENT_TEST_MYSQL_URL` |
 | `narrow-slots` | 1 | the narrow integer slots compiled in, which is a constant in `crates/inillucent-tree/src/leaf.rs` |
 | `network` | 1 | outbound network access, turned on by setting `INILLUCENT_NETWORK_TESTS` |

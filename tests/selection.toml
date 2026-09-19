@@ -348,6 +348,13 @@ tier = "unit"
 package = "inillucent-vfs"
 kind = "lib"
 tier = "unit"
+# `zone.rs`'s two cases ask the operating system for the local offset at a fixed
+# instant, and it can answer nothing - an instant outside the range its
+# conversion accepts, or a machine with no zone configured. Neither case can
+# assert the offset's value, which is the machine's, so with no answer there is
+# nothing left to test and they announce a skip rather than pass having tested
+# nothing (task-1987).
+requires = ["local-timezone"]
 
 [[target]]
 package = "inillucent-wal"

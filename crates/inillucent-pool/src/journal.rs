@@ -567,6 +567,49 @@ fn write_header(file: &dyn VfsFile, page_size: usize, count: usize, nonce: u64) 
         .map_err(|error| error.into_db_error())
 }
 
+/// Takes the whole lock chain on a database, reporting whether it got it.
+///
+/// **The one thing that makes a journal beside a file interpretable.** A journal
+/// is written, and disposed of, by a process holding EXCLUSIVE on the database
+/// it belongs to, so a journal that is still there while this process holds
+/// EXCLUSIVE belongs to nobody: the process that wrote it is gone. Without the
+/// lock, a journal on the disk means only that *somebody* has one open, and
+/// putting its pre-images back then undoes a checkpoint that is still running or
+/// has already finished (task-1987).
+///
+/// SHARED and RESERVED are asked for with no wait, because a concurrent holder
+/// refuses them at once and there is nothing here worth waiting for - whoever
+/// holds the file will dispose of its own journal. EXCLUSIVE is the one step
+/// allowed to wait: RESERVED already stops new readers arriving, so all it waits
+/// for is the readers already inside to leave, and it waits the same bounded,
+/// backing-off way [`crate::pool::Pool::lock_within`] does rather than a second,
+/// differently-tuned retry.
+///
+/// Every failing path leaves the handle holding nothing.
+///
+/// @param target - the database file
+fn hold_the_database(target: &dyn VfsFile) -> bool {
+    if target.lock(FileLock::Shared).is_err() {
+        let _ = target.unlock(FileLock::None);
+        return false;
+    }
+    if target.lock(FileLock::Reserved).is_err() {
+        let _ = target.unlock(FileLock::None);
+        return false;
+    }
+    if crate::pool::lock_with_wait(
+        target,
+        FileLock::Exclusive,
+        crate::pool::DEFAULT_BUSY_MILLIS,
+    )
+    .is_err()
+    {
+        let _ = target.unlock(FileLock::None);
+        return false;
+    }
+    true
+}
+
 /// Puts a hot journal's pages back, then removes it.
 ///
 /// **Called before a database is opened, never after.** A journal that survived
@@ -602,11 +645,28 @@ fn write_header(file: &dyn VfsFile, page_size: usize, count: usize, nonce: u64) 
 /// previous one and redo re-applies the batch from the log. The journal is
 /// only strictly needed to undo the meta record itself.
 ///
-/// **A file this journal is hot beside may already be open, and locked, by
-/// another process's own live checkpoint.** Every mode now carries a journal,
-/// so this can no longer assume it runs before anyone else touches the file:
-/// see the lock escalation right after `target` is opened, below, for why a
-/// concurrent holder makes this a no-op rather than a write.
+/// **The database is locked before this journal is opened, let alone read**
+/// (task-1987). Every mode now carries a journal, so this can no longer assume
+/// it runs before anyone else touches the file - another process can be inside
+/// its own checkpoint, with this very journal open and about to be disposed of.
+/// Taking the lock first is what makes the journal's own presence mean
+/// something: with EXCLUSIVE held nobody else can create one, write one or
+/// delete one, so a journal that is still on the disk at that moment really is
+/// a crashed process's and really is this one's to put back.
+///
+/// Reading it first is what task-1980 left behind, and it lost acknowledged
+/// commits. The lock escalation was already here and already had the right
+/// argument written beside it - a concurrent holder makes this a no-op - but it
+/// ran *after* the header and the records had been read, and nothing asked
+/// again once the lock was in hand. Measured on two writer processes each
+/// running single statement inserts through the command line: one process
+/// opened the database, found the journal a live checkpoint was in the middle
+/// of, was refused SHARED, read the journal anyway, waited for the lock, and
+/// then wrote that journal's pre-images over the checkpoint that had already
+/// finished and deleted it - so the meta record went from generation 28 back to
+/// 27 and the row the caller had been told about was gone. The Windows and
+/// POSIX file handles both survive an unlink, so deleting the journal does not
+/// take it away from a reader that already has it open.
 ///
 /// Returns whether anything was restored, which the caller reports.
 ///
@@ -614,14 +674,35 @@ fn write_header(file: &dyn VfsFile, page_size: usize, count: usize, nonce: u64) 
 /// @param database - the database file's path
 pub fn replay_hot_journal(vfs: &dyn Vfs, database: &DbPath) -> DbResult<bool> {
     let path = database.journal();
+    // **A cheap look before any lock is taken**, because this runs on every
+    // open and the overwhelmingly common answer is "there is no journal". It
+    // decides nothing: the answer is asked again below with the lock held, and
+    // that is the one that counts.
     if !vfs.access(&path, AccessMode::Exists).unwrap_or(false) {
         return Ok(false);
     }
+    let Ok(target) = vfs.open(database, OpenOptions::main_db()) else {
+        return Ok(false);
+    };
+    if !hold_the_database(target.as_ref()) {
+        return Ok(false);
+    }
+    // **Asked again, now that the lock is held.** Between the first look and
+    // this one, the process that owned that journal can have finished its
+    // checkpoint and disposed of it, so the file having been there a moment ago
+    // says nothing about whether there is anything to put back.
+    if !vfs.access(&path, AccessMode::Exists).unwrap_or(false) {
+        let _ = target.unlock(FileLock::None);
+        return Ok(false);
+    }
     let Ok(journal) = vfs.open(&path, OpenOptions::of_kind(FileKind::MainJournal)) else {
+        let _ = target.unlock(FileLock::None);
         return Ok(false);
     };
     let mut header = [0u8; HEADER];
     if journal.read_exact_at(0, &mut header).is_err() {
+        let _ = target.unlock(FileLock::None);
+        drop(journal);
         let _ = vfs.delete(&path, false);
         return Ok(false);
     }
@@ -629,6 +710,8 @@ pub fn replay_hot_journal(vfs: &dyn Vfs, database: &DbPath) -> DbResult<bool> {
         // Not a journal, one an older build wrote, or one that was finished.
         // In every case there is nothing here that can be put back safely, and
         // deleting it is what `delete` mode would have done.
+        let _ = target.unlock(FileLock::None);
+        drop(journal);
         let _ = vfs.delete(&path, false);
         return Ok(false);
     }
@@ -652,6 +735,8 @@ pub fn replay_hot_journal(vfs: &dyn Vfs, database: &DbPath) -> DbResult<bool> {
         // checkpoint was taking it. The journal is only strictly needed to
         // undo the *meta* record, and a torn header means the meta record was
         // never reached.
+        let _ = target.unlock(FileLock::None);
+        drop(journal);
         let _ = vfs.delete(&path, false);
         return Ok(false);
     }
@@ -659,42 +744,9 @@ pub fn replay_hot_journal(vfs: &dyn Vfs, database: &DbPath) -> DbResult<bool> {
     let count = read_u64(&header, 16) as usize;
     let nonce = read_u64(&header, 24);
     if page_size == 0 || page_size > 1 << 20 {
+        let _ = target.unlock(FileLock::None);
+        drop(journal);
         let _ = vfs.delete(&path, false);
-        return Ok(false);
-    }
-    let Ok(target) = vfs.open(database, OpenOptions::main_db()) else {
-        return Ok(false);
-    };
-    // **A hot journal is only this process's to replay while nothing else has
-    // the file open.** Before today, a `wal` connection carried no journal, so
-    // this function only ever ran ahead of any lock a second connection could
-    // take. Now every mode gets one, so `replay_hot_journal` can run in the
-    // middle of another live connection's own checkpoint - one that has
-    // already written pages and is still holding the file - and writing this
-    // journal's pre-images over those pages, then deleting it, would erase a
-    // commit the other connection is in the middle of making durable, leaving
-    // its buffer pool believing pages are clean that the file no longer
-    // agrees with. SHARED and RESERVED are refused at once by any concurrent
-    // holder, with no wait, so failing either means the file is in use right
-    // now and this journal is not ours: leave it exactly where it is; whoever
-    // holds the file will finish its own checkpoint and clear it.
-    if target.lock(FileLock::Shared).is_err() {
-        return Ok(false);
-    }
-    if target.lock(FileLock::Reserved).is_err() {
-        return Ok(false);
-    }
-    // EXCLUSIVE only has to wait for readers already in the file to leave -
-    // RESERVED already stops new ones arriving - so this is the one step
-    // allowed to wait, and it waits the same bounded, backing-off way
-    // `Pool::lock_within` does rather than a second, differently-tuned retry.
-    if crate::pool::lock_with_wait(
-        target.as_ref(),
-        FileLock::Exclusive,
-        crate::pool::DEFAULT_BUSY_MILLIS,
-    )
-    .is_err()
-    {
         return Ok(false);
     }
     let mut record = vec![0u8; page_size.saturating_add(RECORD_PREFIX)];

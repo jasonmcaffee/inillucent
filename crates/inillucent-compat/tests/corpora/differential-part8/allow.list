@@ -22,7 +22,6 @@ ixb-004	F7: `INDEXED BY <missing index>` is silently ignored
 lim-004	section 6.2's exit 3 gaps: `LIMIT 1+1`
 lim-005	section 6.2's exit 3 gaps: `LIMIT '2'`
 ms-006	section 8.4: a construct that is documented and not built
-rid-001	F22: `oid` and `_rowid_` are not normalised to `rowid` in a column name
 rid-004	F9: `UPDATE t SET rowid = 100` is `no such column: rowid`
 rid-010	F8: an insert past the maximum rowid fails `UNIQUE constraint failed`
 rwe-001	F9: `UPDATE t SET rowid = 100` is `no such column: rowid`

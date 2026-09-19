@@ -217,7 +217,7 @@ Generated from `compat/sqlite-3.53.4.toml`. Do not edit.
 | `txn.isolation` | pass | pass | linux-x86_64, windows-x86_64 | 3 |
 | `functions.core` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `functions.aggregate` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
-| `functions.date-time` | pass | pass | linux-x86_64, windows-x86_64 | 2 |
+| `functions.date-time` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `functions.math` | pass | pass | linux-x86_64, windows-x86_64 | 1 |
 | `functions.json` | pass | pass | linux-x86_64, windows-x86_64 | 8 |
 | `functions.window` | pass | pass | linux-x86_64, windows-x86_64 | 1 |

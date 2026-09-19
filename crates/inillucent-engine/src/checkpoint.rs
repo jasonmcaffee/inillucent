@@ -316,6 +316,37 @@ impl ImportedDatabase {
                 // A database with no file has nothing to fold a log into.
                 continue;
             }
+            // **A file this connection is not holding is not one it may write
+            // (task-1987).** A checkpoint is a write - it rewrites the free
+            // map's pages, moves the meta record's generation and retires log
+            // segments - so doing it without the lock is doing it while another
+            // process is doing the same thing to the same bytes.
+            //
+            // It was reachable, and it lost acknowledged commits. `enter`'s own
+            // failure path calls `release_if_idle`, and `release_if_idle` asks
+            // whether *`main`* still holds a lock before it checkpoints, then
+            // checkpoints every attachment. So a statement refused by a busy
+            // timeout on this attachment - `begin_write_retrying` gives up by
+            // unlocking to `None` - left the attachment holding nothing while
+            // `main` held everything, and this loop then wrote the attachment's
+            // meta record from a cache that was by then seconds out of date.
+            //
+            // Measured, two processes each attaching one shared file and
+            // running three hundred autocommit inserts into it: one wrote
+            // generation 49 and read it back, the other wrote **generation 10**
+            // over it 17 ms later with `lock=None` after an 8.4 second gap in
+            // which it had entered nothing, and the first then resynchronised
+            // *backwards* onto that record and lost the 38 rows it had
+            // committed in between. Between 36 and 129 acknowledged inserts of
+            // about 595 went that way, in three trials of every twelve.
+            //
+            // Skipping is the whole fix and it loses nothing: a page can only
+            // be dirtied under EXCLUSIVE, so an attachment that is not held has
+            // nothing outstanding to fold, and the next statement that does
+            // enter it resynchronises it from the file first.
+            if held.database.lock_level() <= inillucent_vfs::FileLock::Shared {
+                continue;
+            }
             held.wal.sync()?;
             held.wal.roll_segment()?;
             // See `checkpoint`'s own comment: read before this file's free-map

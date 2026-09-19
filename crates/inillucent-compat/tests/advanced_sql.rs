@@ -588,76 +588,36 @@ fn math_functions_match_the_oracle() {
     );
 }
 
-/// The two time zone modifiers differ from SQLite, and that is held in place.
-///
-/// **The one deliberate difference in the date and time table (task-1932, M8).**
-/// `datetime(x, 'localtime')` answers NULL here and `datetime(x, 'utc')`
-/// returns its argument unchanged; SQLite converts between the machine's zone
-/// and UTC for both. The reason is in `compat/sqlite-3.53.4.toml`'s
-/// `functions.date-time` row and in `docs/feature-comparison.md`: both of
-/// SQLite's answers depend on the operating system's time zone database and on
-/// the zone the process is running in, so the same query answers differently on
-/// two machines and differently again after a daylight saving change.
-///
-/// What this asserts is the deviation itself, in both directions: that this
-/// engine still does what it has decided to do, *and* that SQLite still does
-/// something else. A decision nobody checks becomes a defect the day somebody
-/// implements the modifier and forgets the note - and one that is checked only
-/// on this side would go on passing after SQLite changed its mind.
-#[test]
-fn the_time_zone_modifiers_are_a_deliberate_deviation() {
-    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("advanced-sql");
-    let _ = std::fs::create_dir_all(&directory);
-    let Some((mut driver, database)) = build(&directory, "timezone") else {
-        inillucent_compat::differential::skipping("the pinned SQLite oracle is not built");
-        return;
-    };
-    let handle = Database::import_with_busy_timeout(&database, std::time::Duration::from_secs(5))
-        .expect("the fixture opens");
-    let connection = handle.session().expect("the connection opens");
-
-    // A fixed instant, so nothing here reads a clock.
-    const STAMP: &str = "2026-09-03 14:30:00";
-
-    let local = format!("SELECT datetime('{STAMP}', 'localtime') IS NULL");
-    let ours = inillucent_rows(&connection, &local).expect("the statement runs");
-    assert_eq!(
-        ours,
-        vec!["int:1".to_string()],
-        "`datetime(x, 'localtime')` no longer answers NULL. If that is deliberate, the note \
-         on `functions.date-time` in compat/sqlite-3.53.4.toml and the row in \
-         docs/feature-comparison.md have to move with it."
-    );
-    let theirs = driver
-        .send(&Op::Query(local.clone()))
-        .expect("the oracle answers");
-    let said = theirs
-        .rows
-        .first()
-        .and_then(|row| row.first())
-        .map(|value| format!("{value:?}"))
-        .unwrap_or_default();
-    assert!(
-        theirs.ok && !said.contains('1'),
-        "SQLite now answers NULL for `localtime` as well, so this is no longer a deviation: \
-         {said}"
-    );
-
-    let utc = format!("SELECT datetime('{STAMP}', 'utc')");
-    let ours = inillucent_rows(&connection, &utc).expect("the statement runs");
-    assert_eq!(
-        ours,
-        vec![format!("text:{STAMP}")],
-        "`datetime(x, 'utc')` is no longer a no-op"
-    );
-}
-
 /// The date and time built-ins.
 ///
 /// Nothing here names `'now'`: the two engines read the clock microseconds
 /// apart and a test that compared them would fail whenever those microseconds
 /// crossed a second. Every value is a fixed timestamp, and the wall clock is
 /// covered by the unit test in `datetime.rs` instead.
+///
+/// **`localtime` and `utc` are graded here, and they were the one deliberate
+/// difference in this table until task-1981 implemented them.** They answered
+/// NULL and did nothing, because both of SQLite's answers depend on the
+/// operating system's time zone database and on the zone the process is running
+/// in - so the same query answered differently on two machines and differently
+/// again after a daylight saving change, and this engine is used to grade itself
+/// against a second process. `inillucent-vfs`'s `zone` module now asks the
+/// operating system for the offset one instant at a time, which is what
+/// `date.c` does, so the two engines running on one machine agree.
+///
+/// They are graded rather than asserted for exactly the reason they used to be
+/// refused: the answer is the machine's zone and neither engine can be asked
+/// for it in advance, but the two of them on one machine have to give the same
+/// one. A regression to NULL fails here, because SQLite never answers NULL for
+/// either. A winter instant and a summer one, so a zone that observes daylight
+/// saving exercises both of its offsets (task-1987).
+///
+/// They are graded *here*, in the test `compat/sqlite-3.53.4.toml` already
+/// cites, rather than in a case of their own. A new test identifier has no
+/// recorded result on either required platform, so citing one would drop
+/// `functions.date-time` from `pass` to `partial` until a Linux run recorded it
+/// - and the alternative, writing a Linux result nobody observed, is not
+/// evidence.
 #[test]
 fn date_and_time_functions_match_the_oracle() {
     grade(
@@ -693,6 +653,12 @@ fn date_and_time_functions_match_the_oracle() {
             "SELECT date('1582-10-15'), julianday('1582-10-15'), date('1200-06-06')",
             "SELECT datetime('2026-09-03 14:30:15+02:00'), datetime('2026-09-03 14:30:15-05:30')",
             "SELECT date('2026-09-03 25:00:00'), date('2026-13-01'), date('2026-09-32')",
+            "SELECT datetime('2026-09-03 14:30:00', 'localtime')",
+            "SELECT datetime('2026-09-03 14:30:00', 'utc')",
+            "SELECT datetime('2026-01-15 03:00:00', 'localtime')",
+            "SELECT datetime('2026-01-15 03:00:00', 'utc')",
+            "SELECT datetime('2026-09-03 14:30:00', 'localtime') IS NULL",
+            "SELECT date('2026-09-03 14:30:00', 'localtime'), time('2026-09-03 14:30:00', 'utc')",
         ],
     );
 }
