@@ -1984,10 +1984,11 @@ target/release/inillucent-childcost target/release/inillucent-allocarm <dir>/m.d
 # script with a leading `PRAGMA cache_size = -N;`, through inillucent-childcost
 target/release/inillucent-shellrss
 
-# the retrieval engine, re-graded in full against pgvector
-target/release/inillucent-bench --database-url postgres://postgres@127.0.0.1:5433/inillucent_synth load --cache corpus.cache
-target/release/inillucent-bench --database-url postgres://postgres@127.0.0.1:5433/inillucent_synth grade --cache corpus.cache --model-dir <models>/nomic-embed-text-v1.5 --out scorecard.md
-target/release/inillucent-bench save --cache corpus.cache --dir index.inillucent --quantized
+# the retrieval engine, re-graded in full against pgvector. Every flag goes AFTER the verb.
+# Run it from the repository root: the card records the commit by reading the working directory.
+target/release/inillucent-bench embed-check --cache <cache> --model-dir <models>/nomic-embed-text-v1.5 --device cuda:0
+target/release/inillucent-bench grade --database-url postgres://postgres:<password>@127.0.0.1:5433/inillucent_synth     --cache <cache> --model-dir <models>/nomic-embed-text-v1.5 --device cuda:0     --per-source 100 --runs-dir <runs> --out inillucent-scorecard.md
+target/release/inillucent-bench save --cache <cache> --dir index.inillucent --quantized
 target/release/inillucent-childcost target/release/inillucent-bench open --dir index.inillucent
 ```
 
