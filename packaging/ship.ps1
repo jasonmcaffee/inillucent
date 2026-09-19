@@ -166,9 +166,9 @@ function Get-VersionCarriers {
         },
         @{
             Path    = Join-Path $root 'packages/npm/inillucent/package.json'
-            Pattern = '(?m)^(    "@inillucent/cli-[a-z0-9-]+": ")[^"]+(")'
+            Pattern = '(?m)^(    "@blackrainbowlabs/cli-[a-z0-9-]+": ")[^"]+(")'
             Replace = "`${1}$Version`${2}"
-            Check   = "@inillucent/cli-win32-x64"": ""$escaped"""
+            Check   = "@blackrainbowlabs/cli-win32-x64"": ""$escaped"""
             What    = 'the five platform packages the wrapper pins'
         },
         @{

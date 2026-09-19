@@ -29,15 +29,24 @@ const staged = join(here, 'staged');
 
 /** Each npm platform package, and the release target it carries. */
 const PLATFORMS = [
-  { npm: '@inillucent/cli-win32-x64', target: 'x86_64-pc-windows-msvc', os: 'win32', cpu: 'x64', exe: '.exe', library: 'inillucent_driver_capi.dll' },
-  { npm: '@inillucent/cli-darwin-arm64', target: 'aarch64-apple-darwin', os: 'darwin', cpu: 'arm64', exe: '', library: 'libinillucent_driver_capi.dylib' },
-  { npm: '@inillucent/cli-darwin-x64', target: 'x86_64-apple-darwin', os: 'darwin', cpu: 'x64', exe: '', library: 'libinillucent_driver_capi.dylib' },
-  { npm: '@inillucent/cli-linux-x64', target: 'x86_64-unknown-linux-gnu', os: 'linux', cpu: 'x64', exe: '', library: 'libinillucent_driver_capi.so' },
+  { npm: '@blackrainbowlabs/cli-win32-x64', target: 'x86_64-pc-windows-msvc', os: 'win32', cpu: 'x64', exe: '.exe', library: 'inillucent_driver_capi.dll' },
+  // **Both macOS packages come from the one universal archive**, which is what the release builds
+  // now (`task-1995`): `lipo`'s job is done by `rcodesign macho-universal-create`, and the result
+  // carries an arm64 and an x86-64 slice in every program. There is no
+  // `inillucent-<version>-aarch64-apple-darwin` archive to find, so before this both macOS packages
+  // were reported absent and skipped - and the wrapper then listed two optional dependencies that
+  // do not exist, which npm skips without a word, leaving a Mac with the shim and no binary.
+  //
+  // `os` and `cpu` still differ, so npm installs exactly one of the two on any given Mac. They hold
+  // the same bytes; what each declares is which machine it is for.
+  { npm: '@blackrainbowlabs/cli-darwin-arm64', target: 'aarch64-apple-darwin', source: 'universal-apple-darwin', os: 'darwin', cpu: 'arm64', exe: '', library: 'libinillucent_driver_capi.dylib' },
+  { npm: '@blackrainbowlabs/cli-darwin-x64', target: 'x86_64-apple-darwin', source: 'universal-apple-darwin', os: 'darwin', cpu: 'x64', exe: '', library: 'libinillucent_driver_capi.dylib' },
+  { npm: '@blackrainbowlabs/cli-linux-x64', target: 'x86_64-unknown-linux-gnu', os: 'linux', cpu: 'x64', exe: '', library: 'libinillucent_driver_capi.so' },
   // The release has built this target since packaging began and npm was
   // the one wrapper that did not offer it, so `npm i inillucent` on a
   // Graviton or an Ampere machine installed the shim and no binary
   // (task-1932, H12).
-  { npm: '@inillucent/cli-linux-arm64', target: 'aarch64-unknown-linux-gnu', os: 'linux', cpu: 'arm64', exe: '', library: 'libinillucent_driver_capi.so' },
+  { npm: '@blackrainbowlabs/cli-linux-arm64', target: 'aarch64-unknown-linux-gnu', os: 'linux', cpu: 'arm64', exe: '', library: 'libinillucent_driver_capi.so' },
 ];
 
 const PROGRAMS = ['inillucent', 'inillucent-shell', 'inillucent-mcp', 'inillucent-migrate'];
@@ -86,11 +95,14 @@ function writeManifest(platform, into) {
  * @param platform - the platform entry
  */
 function unpacked(platform) {
-  const directory = join(dist, `inillucent-${version}-${platform.target}`);
+  // `source` is the archive this package's binaries come from, which is the target itself unless a
+  // platform says otherwise - the two macOS packages share one universal archive.
+  const from = platform.source ?? platform.target;
+  const directory = join(dist, `inillucent-${version}-${from}`);
   if (existsSync(directory)) return directory;
 
   for (const extension of ['.tar.gz', '.zip']) {
-    const name = `inillucent-${version}-${platform.target}${extension}`;
+    const name = `inillucent-${version}-${from}${extension}`;
     if (!existsSync(join(dist, name))) continue;
     // tar reads both, on Windows 10 1803 and later as well as on macOS and
     // Linux, so there is one command rather than one per platform.
