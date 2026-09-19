@@ -233,27 +233,22 @@ impl ImportedDatabase {
     /// Reports whether one attached file's log ends somewhere other than where
     /// this connection left it.
     ///
+    /// The attached half of [`ImportedDatabase::the_log_moved`], and asked off
+    /// this file's own open segment for the same reason: the check runs once
+    /// per statement per attached file, and going through
+    /// `inillucent_wal::tail_on_disk` made it a path lookup and a file open
+    /// each time (task-1999).
+    ///
     /// @param index - which attachment
     fn attached_log_moved(&self, index: usize) -> DbResult<bool> {
         let Some(held) = self.session_state.attached.get(index) else {
             return Ok(false);
         };
-        let Some(path) = held.path.as_ref() else {
+        if held.path.is_none() {
             return Ok(false);
-        };
-        let db_path = DbPath::new(path.to_string_lossy().as_ref());
-        let tail = inillucent_wal::tail_on_disk(
-            held.vfs.as_ref(),
-            &db_path,
-            held.database.uuid(),
-            held.wal.sequence(),
-        )?;
-        Ok(match tail {
-            Some(tail) => {
-                tail.sequence != held.wal.sequence() || tail.next_lsn != held.wal.written_end()
-            }
-            None => false,
-        })
+        }
+        let tail = held.wal.tail_of_open_segment()?;
+        Ok(tail.sequence != held.wal.sequence() || tail.next_lsn != held.wal.written_end())
     }
 
     /// Rebuilds one attached file's pages, free map and log position from the
@@ -315,30 +310,28 @@ impl ImportedDatabase {
     /// for one `file_size` per lock acquisition and costs the write path
     /// nothing (task-1979, section 4.4 item 2, the second option).
     ///
+    /// **It used to cost a path lookup and a file open instead, and that was
+    /// 37% of an autocommit statement (task-1999).** This called
+    /// `inillucent_wal::tail_on_disk`, which takes a *path* and walks forward
+    /// from a sequence, asking `access` at each one and opening the file to
+    /// read its header - so the sentence above about one `file_size` described
+    /// an intention rather than the code. Under `locking_mode = normal` the
+    /// check runs once a statement, and it was measured at 3.2 ms of an 8.8 ms
+    /// autocommit statement, as much as the whole checkpoint beside it, while
+    /// `the_meta_moved` next to it cost 0.03 ms. `Wal::tail_of_open_segment`
+    /// answers the same question off the handle the log already holds open,
+    /// and its own doc comment carries why the open segment is the only one
+    /// that has to be asked.
+    ///
     /// A database with no file - `:memory:` and a temporary one - has no
     /// segment and no second process, so it answers no.
     fn the_log_moved(&self) -> DbResult<bool> {
         if self.storage.path.as_os_str().is_empty() {
             return Ok(false);
         }
-        let db_path = DbPath::new(self.storage.path.to_string_lossy().as_ref());
-        let tail = inillucent_wal::tail_on_disk(
-            self.storage.vfs.as_ref(),
-            &db_path,
-            self.storage.database.uuid(),
-            self.storage.wal.sequence(),
-        )?;
-        Ok(match tail {
-            Some(tail) => {
-                tail.sequence != self.storage.wal.sequence()
-                    || tail.next_lsn != self.storage.wal.written_end()
-            }
-            // No segment where this connection believes its own log is. The
-            // only way that happens is a checkpoint by another process that
-            // retired it, which moved the generation, so the meta record has
-            // already reported it.
-            None => false,
-        })
+        let tail = self.storage.wal.tail_of_open_segment()?;
+        Ok(tail.sequence != self.storage.wal.sequence()
+            || tail.next_lsn != self.storage.wal.written_end())
     }
 
     /// Rebuilds this connection's pages, free map and log position from the
@@ -408,6 +401,17 @@ impl ImportedDatabase {
         // rolls a new log segment, rewrites the free map's pages, writes the
         // meta record and deletes every segment below the new recovery point.
         //
+        // **Most of that 32 ms was not what a lock release owes, and it is no
+        // longer done here (task-1999).** The checkpoint this takes is
+        // `CheckpointKind::Releasing`: it writes the dirty pages and the meta
+        // record, so the file holds the statement that just succeeded, and it
+        // does the catalog's statistics and the log's reclamation only once the
+        // log has grown past `checkpoint::RECLAIM_BYTES`. What was
+        // measured of the 19 ms a release checkpoint took on the medium gate:
+        // 5.9 ms writing the pages, and 12 ms rolling a segment, locating a
+        // segment by LSN, writing a checkpoint record, deleting segments and
+        // rewriting the catalog's statistics. See `CheckpointKind`.
+        //
         // **Removing it was tried and put back.** The next process does replay
         // the log, so the *committed* statement is not lost either way - but
         // leaving every statement's records unfolded meant every later open
@@ -442,7 +446,7 @@ impl ImportedDatabase {
                         || held.database.pool().dirty_pages() > 0)
             });
         if wrote && self.storage.database.pool().lock_level() != inillucent_vfs::FileLock::None {
-            self.checkpoint()?;
+            self.checkpoint_of(crate::checkpoint::CheckpointKind::Releasing)?;
         }
         // Every attached file is let go on the same terms `main` is: the
         // checkpoint above wrote all of them - `checkpoint_attached` is part of

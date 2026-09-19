@@ -241,6 +241,30 @@ struct Shared {
     /// The policy, atomic so a pragma can change it without taking the lock a
     /// commit is waiting on.
     synchronous: AtomicU64,
+    /// The lowest sequence number [`Wal::retire_segments_below`] still has to
+    /// look at.
+    ///
+    /// **Without it that function is quadratic, and it was measured (task-1999).**
+    /// It walks `1..current` and opens a file per sequence to read its header,
+    /// so every call re-asks about every segment every earlier call already
+    /// deleted. Under `locking_mode = normal` a segment is rolled per statement
+    /// and a checkpoint is taken per statement, which makes `current` roughly
+    /// the statement count and the walk O(statements) *per statement*. Two
+    /// thousand autocommit inserts opened **1.5 million segment headers, 1.49
+    /// million of them for a file that is not there**, and the call grew from
+    /// 4.9 ms at statement 100 to 14.5 ms at statement 2,000 with no bound; a
+    /// database reopened with 2,030 segments behind it paid 19.5 ms a
+    /// statement, 52% of the whole checkpoint, to delete nothing, because the
+    /// sequence number is read back from the meta record and the cost therefore
+    /// survives a close.
+    ///
+    /// It is only ever raised past a sequence this process has watched become
+    /// absent - deleted here, or already gone when this handle first looked -
+    /// and only while that run is unbroken from the floor, so a segment that is
+    /// still there, including one whose deletion failed, keeps the floor
+    /// beneath it and is looked at again next time. A fresh handle starts at 1
+    /// and so pays the old walk exactly once.
+    retired_below: AtomicU64,
 }
 
 /// A write-ahead log over a chain of segment files.
@@ -321,6 +345,9 @@ impl Wal {
             uuid,
             segment_bytes: options.segment_bytes.max(segment::HEADER_BYTES as u64 * 2),
             synchronous: AtomicU64::new(policy_code(options.synchronous)),
+            // A new handle knows nothing about which of the segments below it
+            // are still on disk, so it starts at the bottom and learns.
+            retired_below: AtomicU64::new(1),
         };
         // **No padding call here.** Every commit pads its own tail to the next
         // sector boundary (see `commit`'s own call), so by induction a resumed
@@ -456,9 +483,20 @@ impl Wal {
     /// here is bounded on both sides by segments confirmed present and
     /// confirmed contiguous with it.
     ///
+    /// **The segment being appended to is answered without a file open**,
+    /// which is the answer almost every call gets: the walk below reads a
+    /// header off disk even for the segment this handle already has open, and
+    /// under `locking_mode = normal` a checkpoint asks this once a statement.
+    /// It was 3.3 ms of a 19 ms checkpoint (task-1999). The open segment's
+    /// `first_lsn` is held in memory and is exact, so an `lsn` at or above it
+    /// is in that segment and in no other.
+    ///
     /// @param lsn - the stream position to locate
     pub fn sequence_containing(&self, lsn: u64) -> DbResult<u64> {
         let mut candidate = self.sequence();
+        if lsn >= self.segment_first_lsn() {
+            return Ok(candidate);
+        }
         loop {
             match self.first_lsn_of(candidate) {
                 Some(first) if first <= lsn => return Ok(candidate),
@@ -696,11 +734,25 @@ impl Wal {
     /// checkpoint because a file could not be unlinked would turn a tidy-up into
     /// an outage.
     ///
+    /// **It starts at the lowest sequence that might still be there, not at
+    /// 1.** See [`Shared::retired_below`] for what walking from 1 every time
+    /// cost and how the floor is allowed to move. The set of files this deletes
+    /// is unchanged: everything below the floor is a file this handle has
+    /// already watched become absent, and nothing creates a segment below the
+    /// one being appended to.
+    ///
     /// @param lsn - the checkpoint LSN
     pub fn retire_segments_below(&self, lsn: u64) -> DbResult<usize> {
         let current = self.sequence();
         let mut removed = 0usize;
-        for sequence in 1..current {
+        // Raised past each sequence that is absent when this call is done with
+        // it, and only while that run is unbroken from where the walk began: a
+        // segment still on disk - kept deliberately, or one whose deletion the
+        // file system refused - has to be looked at again next time.
+        let floor = self.shared.retired_below.load(Ordering::Relaxed).max(1);
+        let mut next_floor = floor;
+        let mut unbroken = true;
+        for sequence in floor..current {
             let path = self.segment_path(sequence);
             // No `access` check first: the read-only open below fails for a
             // segment that is not there, so asking twice was one extra call and
@@ -713,23 +765,43 @@ impl Wal {
                 .vfs
                 .open(&path, OpenOptions::of_kind(FileKind::Wal).read_only())
             else {
+                // Not there at all, so the floor may pass it: the only thing
+                // that creates a segment is `roll_now`, and it only ever
+                // creates the one above the current.
+                next_floor = match unbroken {
+                    true => sequence.saturating_add(1),
+                    false => next_floor,
+                };
                 continue;
             };
             if file.read_exact_at(0, &mut header).is_err() {
+                unbroken = false;
                 continue;
             }
             drop(file);
             let Ok(decoded) = SegmentHeader::decode(&header) else {
+                unbroken = false;
                 continue;
             };
             let next_first = self.first_lsn_of(sequence.saturating_add(1)).unwrap_or(lsn);
-            if decoded.first_lsn < lsn
+            let gone = decoded.first_lsn < lsn
                 && next_first <= lsn
-                && self.shared.vfs.delete(&path, false).is_ok()
-            {
+                && self.shared.vfs.delete(&path, false).is_ok();
+            if gone {
                 removed = removed.saturating_add(1);
             }
+            // A segment this call left on disk - because it still holds records
+            // recovery needs, or because the deletion was refused - keeps the
+            // floor beneath itself, so the next call asks about it again.
+            unbroken = unbroken && gone;
+            next_floor = match unbroken {
+                true => sequence.saturating_add(1),
+                false => next_floor,
+            };
         }
+        self.shared
+            .retired_below
+            .store(next_floor.max(floor), Ordering::Relaxed);
         Ok(removed)
     }
 
@@ -836,6 +908,44 @@ impl Wal {
             inner.stats.segments = inner.stats.segments.saturating_add(1);
         });
         Ok(())
+    }
+
+    /// Returns where the segment this handle is appending to currently ends.
+    ///
+    /// **The same answer [`tail_on_disk`] gives, off the handle this log
+    /// already holds open.** That function takes a path and walks forward from
+    /// a sequence, calling `access` at each one and opening the file to read
+    /// its header - so asking it costs a path lookup and a file open every
+    /// time. `ImportedDatabase::enter` asks it once per statement under
+    /// `locking_mode = normal` to find out whether another process has appended
+    /// to the log, and it was measured at **3.2 ms a statement, 37% of a 8.8 ms
+    /// autocommit statement and as much as the whole checkpoint beside it**
+    /// (task-1999). Its own doc comment says the check costs "one `file_size`
+    /// per lock acquisition", and this is the function that makes that true.
+    ///
+    /// The size is read from the file rather than from this handle's own
+    /// counters, which is the whole point: the question is what somebody else
+    /// wrote, and a connection asking whether another process has committed
+    /// cannot ask its own cache.
+    ///
+    /// **It answers for the open segment only, which is enough because a new
+    /// segment cannot appear without the meta record moving first.** Only
+    /// `roll_now` creates a segment, only a checkpoint rolls one, and a
+    /// checkpoint bumps the meta record's generation before it releases the
+    /// file lock. A caller therefore sees the generation move first, and
+    /// `ImportedDatabase::the_meta_moved` is asked before this is.
+    pub fn tail_of_open_segment(&self) -> DbResult<LogTail> {
+        let segment = self.io_lock()?;
+        let size = segment
+            .file
+            .file_size()
+            .map_err(inillucent_vfs::VfsError::into_db_error)?;
+        Ok(LogTail {
+            sequence: segment.sequence,
+            next_lsn: segment
+                .first_lsn
+                .saturating_add(size.saturating_sub(segment::HEADER_BYTES as u64)),
+        })
     }
 
     /// Returns the open segment's first LSN.
@@ -1060,6 +1170,16 @@ pub struct LogTail {
 /// **Only a caller holding the file lock may act on the answer.** Without the
 /// lock another process can append between the read and the use, which is the
 /// defect this exists to close rather than one to repeat one layer up.
+///
+/// **This is the form for a caller with no log open**, and since task-1999 it
+/// has no caller inside the workspace. It takes a path, so every call is a
+/// path lookup and a file open, and the two callers it had -
+/// `ImportedDatabase::the_log_moved` and its attached twin - ask the question
+/// once per statement per file under `locking_mode = normal`. They now ask
+/// [`Wal::tail_of_open_segment`] instead, off the handle they already hold, and
+/// that was worth 3.2 ms of an 8.8 ms autocommit statement. It is kept because
+/// it is published API of this crate and it answers for a log this process has
+/// not opened, which the method cannot.
 ///
 /// @param vfs - the file system the segments live on
 /// @param base - the database file the segments are named after

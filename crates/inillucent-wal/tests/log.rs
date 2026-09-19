@@ -248,6 +248,15 @@ struct CountingVfs {
     inner: MemoryVfs,
     syncs: Arc<AtomicU64>,
     writes: Arc<AtomicU64>,
+    /// Calls to `open`, whether or not the file was there.
+    ///
+    /// `retire_segments_below` and `sequence_containing` both find a segment by
+    /// opening it and reading its header, so this is the counter that says how
+    /// many segments a call looked at - which is the whole of what task-1999
+    /// measures.
+    opens: Arc<AtomicU64>,
+    /// Segments whose deletion is refused, by sequence number.
+    refuse_delete: Arc<std::sync::Mutex<Vec<u64>>>,
 }
 
 /// A file that counts its syncs and writes.
@@ -310,6 +319,7 @@ impl Vfs for CountingVfs {
         path: &DbPath,
         options: inillucent_vfs::OpenOptions,
     ) -> inillucent_vfs::VfsResult<Box<dyn inillucent_vfs::VfsFile>> {
+        self.opens.fetch_add(1, Ordering::SeqCst);
         Ok(Box::new(CountingFile {
             inner: self.inner.open(path, options)?,
             syncs: Arc::clone(&self.syncs),
@@ -317,6 +327,23 @@ impl Vfs for CountingVfs {
         }))
     }
     fn delete(&self, path: &DbPath, sync_dir: bool) -> inillucent_vfs::VfsResult<()> {
+        let name = path.as_path().to_string_lossy().into_owned();
+        let refused = self
+            .refuse_delete
+            .lock()
+            .map(|held| {
+                held.iter()
+                    .any(|sequence| name.ends_with(&format!("-wal.{sequence:010}")))
+            })
+            .unwrap_or(false);
+        if refused {
+            return Err(inillucent_vfs::VfsError::new(
+                inillucent_base::error::ExtendedCode::from_primary(
+                    inillucent_base::error::PrimaryCode::Perm,
+                ),
+                "the test pinned this segment",
+            ));
+        }
         self.inner.delete(path, sync_dir)
     }
     fn rename(&self, from: &DbPath, to: &DbPath) -> inillucent_vfs::VfsResult<()> {
@@ -361,6 +388,8 @@ fn concurrent_committers_share_one_write_and_one_sync() {
         inner: MemoryVfs::new(),
         syncs: Arc::clone(&syncs),
         writes: Arc::clone(&writes),
+        opens: Arc::new(AtomicU64::new(0)),
+        refuse_delete: Arc::new(std::sync::Mutex::new(Vec::new())),
     });
     let path = DbPath::new("group.rdb");
     let wal = Wal::open(
@@ -530,4 +559,304 @@ fn the_checkpoint_trigger_fires_on_bytes_and_on_time() {
         .expect("a checkpoint");
     assert_eq!(wal.since_checkpoint(), 0, "the trigger resets");
     assert!(!wal.checkpoint_due(0));
+}
+
+/// What [`counted`] hands a case: the open counter, the pinned-segment list,
+/// the file system and the log.
+struct Counted {
+    opens: Arc<AtomicU64>,
+    refuse_delete: Arc<std::sync::Mutex<Vec<u64>>>,
+    vfs: Arc<dyn Vfs>,
+    wal: Wal,
+}
+
+/// Builds a log over a file system that counts what it is asked to open.
+///
+/// @param segment_bytes - how large a segment grows before the log rolls
+fn counted(segment_bytes: u64) -> Counted {
+    let opens = Arc::new(AtomicU64::new(0));
+    let refuse_delete = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let vfs: Arc<dyn Vfs> = Arc::new(CountingVfs {
+        inner: MemoryVfs::new(),
+        syncs: Arc::new(AtomicU64::new(0)),
+        writes: Arc::new(AtomicU64::new(0)),
+        opens: Arc::clone(&opens),
+        refuse_delete: Arc::clone(&refuse_delete),
+    });
+    let path = DbPath::new("retire-test.rdb");
+    let wal = Wal::open(
+        Arc::clone(&vfs),
+        &path,
+        0xFEED,
+        FIRST_LSN,
+        1,
+        WalOptions {
+            synchronous: Synchronous::Off,
+            segment_bytes,
+        },
+    )
+    .expect("a log");
+    Counted {
+        opens,
+        refuse_delete,
+        vfs,
+        wal,
+    }
+}
+
+/// Writes one record, rolls the segment and retires everything behind it.
+///
+/// The shape a checkpoint has under `locking_mode = normal`: one statement, one
+/// roll, one retirement.
+///
+/// @param wal - the log
+fn one_checkpoint(wal: &Wal) {
+    wal.append(
+        0,
+        Body::WritePage {
+            page: 7,
+            image: &[0u8; 64],
+        },
+    )
+    .expect("an append");
+    wal.roll_segment().expect("a roll");
+    wal.retire_segments_below(wal.write_ahead_point())
+        .expect("a retirement");
+}
+
+/// Reports whether one segment file is on the file system.
+///
+/// @param held - the log and the file system it was built on
+/// @param sequence - which segment
+fn segment_exists(held: &Counted, sequence: u64) -> bool {
+    let path = held.wal.segment_path(sequence);
+    held.vfs
+        .access(&path, inillucent_vfs::AccessMode::Exists)
+        .unwrap_or(false)
+}
+
+/// Retiring twice does not re-open the segments the first retirement deleted.
+///
+/// **The defect this is here for is quadratic and unbounded (task-1999).**
+/// `retire_segments_below` used to walk `1..current` and open a file per
+/// sequence to read its header, so a run that rolls a segment per statement -
+/// which `locking_mode = normal` does - re-asked about every segment every
+/// earlier call had already deleted. Measured on the shipping engine, 2,000
+/// autocommit inserts opened 1,489,000 segment headers for files that are not
+/// there, and the call grew from 4.9 ms to 14.5 ms a statement as the run went
+/// on.
+///
+/// The assertion is on the file system's own counter rather than on the log's,
+/// and on how the count *grows*: the second twenty checkpoints do the same work
+/// as the first twenty, so a walk whose length is the sequence number fails
+/// this however fast the file system is.
+#[test]
+fn retiring_segments_does_not_reopen_the_ones_it_already_deleted() {
+    let held = counted(256);
+    for _ in 0..20 {
+        one_checkpoint(&held.wal);
+    }
+    let first_twenty = held.opens.swap(0, Ordering::SeqCst);
+    for _ in 0..20 {
+        one_checkpoint(&held.wal);
+    }
+    let second_twenty = held.opens.load(Ordering::SeqCst);
+    assert!(
+        second_twenty <= first_twenty.saturating_mul(2),
+        "the second twenty checkpoints opened {second_twenty} segment headers against the first \
+         twenty's {first_twenty}, so the walk is still the length of the sequence number"
+    );
+    assert!(
+        second_twenty < 100,
+        "twenty checkpoints opened {second_twenty} segment headers, which is more than a handful \
+         each"
+    );
+}
+
+/// A segment the file system refuses to delete is offered again next time.
+///
+/// **The floor may only pass a segment that is gone.** It is raised past a
+/// sequence this handle has watched become absent, and only while that run is
+/// unbroken from where the walk began, so a segment still on disk - kept
+/// because it holds records recovery needs, or because the deletion failed -
+/// keeps the floor beneath it. A floor that moved on regardless would leave
+/// that segment on disk for ever, which is the leak this function exists to
+/// close.
+#[test]
+fn a_segment_whose_deletion_is_refused_is_offered_again() {
+    let held = counted(256);
+    if let Ok(mut pinned) = held.refuse_delete.lock() {
+        pinned.push(2);
+    }
+    for _ in 0..8 {
+        one_checkpoint(&held.wal);
+    }
+    assert!(
+        segment_exists(&held, 2),
+        "the case's own refusal did not hold: segment 2 was deleted anyway"
+    );
+    if let Ok(mut pinned) = held.refuse_delete.lock() {
+        pinned.clear();
+    }
+    held.wal
+        .retire_segments_below(held.wal.write_ahead_point())
+        .expect("a retirement");
+    assert!(
+        !segment_exists(&held, 2),
+        "segment 2 was never looked at again once its deletion had been refused, so a segment a \
+         file system would not delete is leaked for ever"
+    );
+}
+
+/// The segment being appended to is located without reading its header.
+///
+/// `sequence_containing` walked down from the current sequence opening each
+/// segment's header, including the one this handle already has open and whose
+/// `first_lsn` it holds in memory. A checkpoint asks it once a statement under
+/// `locking_mode = normal`, where it was 3.3 ms of a 19 ms checkpoint
+/// (task-1999). The answer is the same one; what changes is that it costs
+/// nothing.
+#[test]
+fn the_segment_being_appended_to_is_located_without_reading_its_header() {
+    let held = counted(1 << 20);
+    for _ in 0..4 {
+        held.wal
+            .append(
+                0,
+                Body::WritePage {
+                    page: 3,
+                    image: &[0u8; 64],
+                },
+            )
+            .expect("an append");
+    }
+    let here = held.wal.write_ahead_point();
+    held.opens.store(0, Ordering::SeqCst);
+    assert_eq!(
+        held.wal.sequence_containing(here).expect("a sequence"),
+        held.wal.sequence(),
+        "a position in the open segment is in the open segment"
+    );
+    assert_eq!(
+        held.opens.load(Ordering::SeqCst),
+        0,
+        "locating a position in the segment already open read a header off the file system"
+    );
+}
+
+/// A position below the open segment is still found by walking down.
+///
+/// The fast path above answers for the segment being appended to. Everything
+/// below it is what the walk is for, and a fast path that swallowed those
+/// cases would pair a recovery point with a segment that does not hold it -
+/// which is the defect `sequence_containing` was written against.
+#[test]
+fn a_position_in_an_earlier_segment_is_still_found() {
+    let held = counted(256);
+    let mut marks = Vec::new();
+    for _ in 0..6 {
+        held.wal
+            .append(
+                0,
+                Body::WritePage {
+                    page: 9,
+                    image: &[0u8; 64],
+                },
+            )
+            .expect("an append");
+        marks.push((held.wal.sequence(), held.wal.write_ahead_point()));
+        held.wal.roll_segment().expect("a roll");
+    }
+    for (sequence, lsn) in marks {
+        assert_eq!(
+            held.wal.sequence_containing(lsn).expect("a sequence"),
+            sequence,
+            "the position the segment ended at was not found in that segment"
+        );
+    }
+}
+
+/// The open segment's tail is read without opening a file.
+///
+/// **`ImportedDatabase::enter` asks this once a statement under `locking_mode =
+/// normal`, and it was 37% of an autocommit statement (task-1999).** It went
+/// through `tail_on_disk`, which takes a path and walks forward from a
+/// sequence, calling `access` at each one and opening the file to read its
+/// header - so the check that its own doc comment prices at "one `file_size`"
+/// cost a path lookup and a file open every time. Measured at 3.2 ms of an
+/// 8.8 ms statement, against 0.03 ms for the meta-record half beside it.
+///
+/// The assertion is on the file system's own counter, because "it is cheaper"
+/// is not something a timing in a test can say on a shared box, and because
+/// the open is the thing that was expensive.
+#[test]
+fn the_open_segments_tail_is_read_without_opening_a_file() {
+    let held = counted(1 << 20);
+    for _ in 0..3 {
+        held.wal
+            .append(
+                0,
+                Body::WritePage {
+                    page: 11,
+                    image: &[0u8; 64],
+                },
+            )
+            .expect("an append");
+    }
+    held.wal.sync().expect("a sync");
+    held.opens.store(0, Ordering::SeqCst);
+    let tail = held.wal.tail_of_open_segment().expect("a tail");
+    assert_eq!(
+        held.opens.load(Ordering::SeqCst),
+        0,
+        "reading the open segment's tail opened a file"
+    );
+    assert_eq!(
+        tail.sequence,
+        held.wal.sequence(),
+        "the tail named a segment other than the one being appended to"
+    );
+    assert_eq!(
+        tail.next_lsn,
+        held.wal.written_end(),
+        "the tail read off the file disagrees with what this handle has written"
+    );
+}
+
+/// It reads the file rather than this handle's own counters.
+///
+/// The whole point of the check is to see what *another process* appended, so
+/// an implementation that returned `written_end` directly would be a check that
+/// can never answer yes. The append below is not driven out to the file, so the
+/// handle's own idea of where it is has moved and the file's has not.
+#[test]
+fn the_open_segments_tail_follows_the_file_and_not_the_handle() {
+    let held = counted(1 << 20);
+    held.wal
+        .append(
+            0,
+            Body::WritePage {
+                page: 12,
+                image: &[0u8; 64],
+            },
+        )
+        .expect("an append");
+    held.wal.sync().expect("a sync");
+    let settled = held.wal.tail_of_open_segment().expect("a tail");
+    assert_eq!(settled.next_lsn, held.wal.written_end());
+    held.wal
+        .append(
+            0,
+            Body::WritePage {
+                page: 13,
+                image: &[0u8; 4096],
+            },
+        )
+        .expect("a second append");
+    let buffered = held.wal.tail_of_open_segment().expect("a tail");
+    assert_eq!(
+        buffered.next_lsn, settled.next_lsn,
+        "the tail moved for a record that is still in this handle's buffer, so it is reading the \
+         handle rather than the file"
+    );
 }

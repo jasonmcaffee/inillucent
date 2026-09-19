@@ -10,6 +10,76 @@ fails the build when any copy of it disagrees.
 
 ## 0.1.4 — 2026-09-17
 
+**A statement no longer pays for the log's housekeeping on its way out, which
+is worth a factor of two to four on every autocommit write.** `locking_mode =
+normal` became the default in this version, and under it a connection
+checkpoints and releases the file after every statement that wrote. A
+checkpoint also makes the catalog's statistics honest, rolls a log segment,
+writes a checkpoint record and deletes the segments it has made redundant -
+work that belongs to a checkpoint somebody asked for, and that was running once
+a statement. Nothing released carries the cost: 0.1.3 shipped with
+`locking_mode = exclusive` as the default, under which a connection checkpoints
+at close.
+
+Measured on the medium gate against pinned SQLite 3.53.4, the same fixture and
+the same disk: an autocommit insert 27.4 ms before and 8.2 ms after, an
+autocommit update 22.6 ms and 8.6 ms, `schema.index` 61.5 ms and 54.2 ms. Two
+thousand autocommit inserts through `inillucent-shell` took 73.4 s and now take
+28.6 s, and the per-statement checkpoint is flat where it used to climb from
+20 ms to 38 ms as the run went on.
+
+What is left of an autocommit statement, timed: about 4 ms is the fold - five or
+six pages written, three `fsync`s and a rollback journal created and deleted -
+and about 4 ms is the statement's own execution and commit sync.
+
+**What this costs, so it is not a surprise.** Between reclamations the log
+keeps the segments that would have been deleted, up to four mebibytes - the
+same bar SQLite draws at `SQLITE_DEFAULT_WAL_AUTOCHECKPOINT`, which is 1,000
+pages of its 4 KiB default. **Nothing in this engine checkpoints when a
+connection closes**, so that is also what a process leaves on disk when it
+exits without asking for one; it was previously near zero only because the
+per-statement checkpoint reclaimed every statement. Measured: 4,000 autocommit
+statements against a 320 KB database leave 3.3 MB of log in one segment. A
+process killed without closing leaves that same amount for the next open to
+replay, where it used to leave at most one statement's worth, so the reopen
+after a crash reads more and reports it. `PRAGMA wal_checkpoint`, the
+`checkpoint` verb and `Database::checkpoint` all reclaim on demand.
+
+**`Wal::retire_segments_below` was quadratic and unbounded.** It walked every
+sequence number from 1, opening a file per sequence to read its header, so
+every call re-asked about every segment an earlier call had already deleted.
+Two thousand autocommit inserts opened 1.5 million segment headers, 1.49
+million of them for a file that is not there. The sequence number is read back
+from the meta record, so the cost survived a close: the same database reopened
+with 2,030 segments behind it spent 19.5 ms a statement, more than half the
+checkpoint, deleting nothing. It now starts at the lowest sequence that might
+still be there, and deletes exactly the same files.
+
+**`Wal::sequence_containing` answers for the segment being appended to without
+reading its header off disk**, which is the answer almost every call gets.
+
+**The staleness check a statement makes on its way in no longer opens a file.**
+Before every statement a connection asks whether another process has written,
+and the log half of that question cost a path lookup and a file open: it went
+through `tail_on_disk`, which takes a path and walks forward from a sequence,
+calling `access` at each one and opening the file to read its header. Its own
+doc comment prices the check at "one `file_size` per lock acquisition", and
+`Wal::tail_of_open_segment` is what makes that true - the log already holds
+that segment open. Measured at 3.2 ms of an 8.8 ms autocommit statement, where
+the meta-record half of the same check cost 0.03 ms. Only the open segment has
+to be asked: a checkpoint is the only thing that rolls a segment, and it moves
+the meta record's generation before it releases the file lock, so the
+generation is seen first.
+
+Statistics are written by a checkpoint somebody asked for - a close, `PRAGMA
+wal_checkpoint`, `VACUUM`, a backup, an integrity check, a journal-mode switch -
+rather than by every statement. Between those, a tree's recorded row and leaf
+counts are the shape as of the last one. They were already an estimate rather
+than an invariant: `PagedTree::attach` derives the leftmost leaf from the file
+instead of trusting the recorded copy, and `PagedTree::check` compares the
+sibling chain against the interior levels rather than against the recorded leaf
+count.
+
 **`embed(TEXT)` is `direct_only`, which is a behaviour change to a shipped
 function.** A schema may no longer name it: a `CHECK` constraint, an index
 expression, a generated column, a `DEFAULT`, a view or a trigger that calls

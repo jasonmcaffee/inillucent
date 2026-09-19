@@ -95,6 +95,124 @@ use inillucent_base::DbResult;
 
 use crate::ImportedDatabase;
 
+/// Why a checkpoint is being taken, and so how much of one it is.
+///
+/// **Under `locking_mode = normal` a checkpoint is two different events
+/// wearing one name, and giving them one body cost a factor of twenty
+/// (task-1999).** Every statement that writes checkpoints on its way out of
+/// [`ImportedDatabase::release_if_idle`], so the work that belongs to a
+/// checkpoint *somebody asked for* - making the catalog's statistics honest,
+/// rolling a log segment, writing a checkpoint record and deleting the
+/// segments the checkpoint made redundant - was running once a statement. An
+/// autocommit insert went from 1.26 ms to 27.4 ms and an autocommit update
+/// from 1.18 ms to 22.6 ms, against SQLite's 4.09 ms and 1.21 ms on the same
+/// fixture and the same disk, which put the `write`, `transaction` and
+/// `schema` families under `compat/perf/contract.toml`'s floor on four
+/// consecutive gate runs.
+///
+/// What a lock release owes the next process is that the file hold every
+/// statement this one acknowledged, which is the flush and the meta record and
+/// nothing else. The rest is log housekeeping, and it waits until the log has
+/// grown past [`RECLAIM_BYTES`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CheckpointKind {
+    /// Somebody asked for a checkpoint: `Database::checkpoint`, `PRAGMA
+    /// wal_checkpoint`, a `VACUUM`, a backup, an integrity check, a
+    /// journal-mode switch, `PRAGMA user_version` or `application_id`, and the
+    /// open, import and rebuild paths.
+    ///
+    /// Closing a connection is *not* one of these - see [`RECLAIM_BYTES`].
+    ///
+    /// The whole of it, exactly as before this distinction existed.
+    Asked,
+    /// A statement is letting the file go at the end of an autocommit
+    /// statement.
+    ///
+    /// The pages are written and the recovery point moves, so the file
+    /// describes the statement that just succeeded. The statistics and the
+    /// log's reclamation wait until the log has grown past [`RECLAIM_BYTES`],
+    /// and then this does the whole of a checkpoint too.
+    Releasing,
+}
+
+/// How much log may pile up before a statement letting the file go reclaims it
+/// on its way out.
+///
+/// **It has to be small, and the first cut of task-1999 got that wrong.** The
+/// reclamation was put behind `Wal::checkpoint_due`, whose bar is 256 MiB -
+/// which answers "is a whole checkpoint overdue", a different question from "has
+/// enough piled up that the statement already folding its pages may as well
+/// reclaim while it is here". Nothing in this engine checkpoints when a
+/// connection closes: `ImportedDatabase` has no `Drop`, and the command line,
+/// the shell and the driver all leave it to a caller. Until this change the
+/// per-statement checkpoint hid that, because it reclaimed every statement.
+///
+/// The same run measured at three bars - 4,000 autocommit statements through
+/// `inillucent-shell` against a 320 KB database, and what was on disk after the
+/// process exited:
+///
+/// | bar | log left behind | the run |
+/// |---|---|---|
+/// | 256 MiB, the first cut | 129.7 MB in two segments | 72.8 s |
+/// | 32 MiB, a thousand 32 KiB pages | 30.1 MB in one | 59.3 s |
+/// | **4 MiB, this** | **3.3 MB in one** | **57.8 s** |
+///
+/// **Why four mebibytes, and why bytes rather than pages.** SQLite makes the
+/// same decision at `SQLITE_DEFAULT_WAL_AUTOCHECKPOINT`, 1,000 pages, which at
+/// its 4 KiB default page size is four mebibytes. Counting pages here would not
+/// mean the same thing: this engine's default page is 32 KiB, so a thousand of
+/// them is 32 MiB, which is the middle row above. What has to be bounded is
+/// bytes, so bytes is what the bar counts.
+///
+/// The cost of choosing it this way is small and was measured. A reclamation is
+/// about 4 ms - 2.4 ms to create the new segment, 1.2 ms for the checkpoint
+/// record, about 0.2 ms to delete - against the 6.5 ms the fold beside it
+/// costs. An autocommit statement writes about 34 KiB of log at the 32 KiB
+/// default, so four mebibytes is a reclamation every 120 statements and 0.03 ms
+/// a statement amortised, half a percent of the fold. At a 4 KiB page it is
+/// every 950 statements and nothing at all.
+///
+/// A clock was considered and rejected. A reclamation that fired on elapsed time
+/// would make what a suite sees depend on how long it took to get there.
+const RECLAIM_BYTES: u64 = 4 << 20;
+
+/// Records the checkpoint in the log and deletes the segments it has made
+/// redundant.
+///
+/// `retire_segments_below` was written, documented as "called after a
+/// checkpoint", and covered by six cases in `inillucent-wal`'s recovery tests -
+/// and called from exactly one place, `inillucent-txn`'s engine, which is not
+/// the engine that ships. The consequence was measured: the same 200,000 rows
+/// are 18.4 MB in SQLite and 179.1 MB here, 27.6 MB of data file and 151.5 MB
+/// of log segments that survive a checkpoint, a clean close, a reopen and a
+/// second checkpoint.
+///
+/// It is safe to do here rather than only at close because the function deletes
+/// a segment only when every record in it is below the checkpoint LSN *and* the
+/// next segment starts at or below it, so a segment holding anything recovery
+/// would still need is left alone - and a segment it cannot unlink is left
+/// alone and reported `Ok`, because failing a checkpoint over a file that would
+/// not delete would turn a tidy-up into an outage. `recovery_from` rather than
+/// the log's durable end is what makes that true of a segment a held-back page
+/// still needs, not only of one recovery has already replayed.
+///
+/// **The checkpoint record goes in beside the deletion rather than before it.**
+/// `note_checkpoint` is what resets the counter [`RECLAIM_BYTES`] is compared
+/// against, so writing one per statement would mean the log never registered as
+/// having grown and nothing would ever be reclaimed. Recovery does not need it -
+/// it starts from the meta record's own `checkpoint_lsn` and `wal_sequence`,
+/// which `set_log_position` moves on every checkpoint including one that does
+/// not reach here - and reports the last one it saw for a caller that wants to
+/// know.
+///
+/// @param wal - the log to record the checkpoint in and reclaim
+/// @param recovery_from - the point the checkpoint persisted
+fn reclaim(wal: &inillucent_wal::writer::Wal, recovery_from: u64) -> DbResult<()> {
+    wal.note_checkpoint(recovery_from, 0)?;
+    wal.retire_segments_below(recovery_from)?;
+    Ok(())
+}
+
 impl ImportedDatabase {
     /// Writes every dirty page and advances the log's recovery point.
     ///
@@ -102,6 +220,17 @@ impl ImportedDatabase {
     /// the log has already described durably. The other order is the durability
     /// mutant the Phase 3 gate exists to kill.
     pub fn checkpoint(&mut self) -> DbResult<()> {
+        self.checkpoint_of(CheckpointKind::Asked)
+    }
+
+    /// Writes every dirty page and advances the log's recovery point, doing as
+    /// much of a checkpoint as the reason for it calls for.
+    ///
+    /// See [`CheckpointKind`] for which parts a lock release leaves out and
+    /// why.
+    ///
+    /// @param kind - why this checkpoint is being taken
+    pub(crate) fn checkpoint_of(&mut self, kind: CheckpointKind) -> DbResult<()> {
         // **A read only connection has nothing to fold down.** Its pool holds
         // no change the file does not, its log is a scratch one in memory, and
         // its file handle would refuse the write. Answering `Ok` rather than a
@@ -132,7 +261,7 @@ impl ImportedDatabase {
             self.counters.last_changes.get(),
             self.counters.changed_ever.get(),
         );
-        let outcome = self.checkpoint_within();
+        let outcome = self.checkpoint_within(kind);
         self.writing.set_decided_over(held.0);
         self.counters.last_rowid.set(held.1);
         self.counters.last_changes.set(held.2);
@@ -140,18 +269,107 @@ impl ImportedDatabase {
         outcome
     }
 
+    /// Returns the point this checkpoint may tell recovery to start from.
+    ///
+    /// **Never past an open transaction's own first record, nor past any other
+    /// held-back page's.** Read off this schema's own pool, because a
+    /// connection with an `ATTACH`ed file checkpoints each file's recovery
+    /// point against that file's own transaction, not another file's.
+    /// `uncommitted_lsn` alone missed the case where the held-back page's
+    /// change belongs to an *earlier*, already-committed statement that simply
+    /// had not been checkpointed yet - see this module's own doc comment for
+    /// the reproduction.
+    ///
+    /// **Never below the first position the stream has.** A page that has never
+    /// been described by a record carries stamp zero, and `note_dirty_from`
+    /// floors a fresh database's `rec_lsn` at its `checkpoint_lsn`, which is
+    /// also zero - so a checkpoint taken while a statement holds such a page
+    /// computed a recovery point of 0, and `sequence_containing(0)` refused
+    /// with "no present segment holds lsn 0: segment 1 starts at 8". Zero is
+    /// not a position in the stream; it is the absence of one, and the recovery
+    /// point that covers everything is the stream's own start.
+    ///
+    /// Nothing reached it before task-1980 because the default was
+    /// `locking_mode = exclusive`, under which `leave` never checkpoints: the
+    /// first checkpoint of a fresh database happened at close, with no
+    /// statement holding a page. With `normal` as the default every statement
+    /// checkpoints, and a `CREATE VIRTUAL TABLE` that fails on a database
+    /// nothing has checkpointed yet reaches it on its way out.
+    ///
+    /// **And never past a vote nobody has counted.** See `Storage::in_doubt`:
+    /// while a super-journal beside this file names a transaction as undecided,
+    /// the records of that transaction have to stay where recovery can find
+    /// them, whichever way the decision goes.
+    ///
+    /// @param durable - how far this file's log is durable
+    /// @param oldest_dirty - the lowest stamp any page this flush will hold
+    ///   back still needs
+    fn recovery_point(&self, durable: u64, oldest_dirty: u64) -> u64 {
+        let recovery_from = durable
+            .min(self.storage.database.pool().uncommitted_lsn())
+            .min(oldest_dirty)
+            .max(inillucent_wal::FIRST_LSN);
+        match self.storage.in_doubt {
+            true => recovery_from.min(
+                self.storage
+                    .database
+                    .meta()
+                    .checkpoint_lsn
+                    .max(inillucent_wal::FIRST_LSN),
+            ),
+            false => recovery_from,
+        }
+    }
+
     /// Everything [`ImportedDatabase::checkpoint`] does, without putting the
     /// caller's own counters back.
-    fn checkpoint_within(&mut self) -> DbResult<()> {
+    fn checkpoint_within(&mut self, kind: CheckpointKind) -> DbResult<()> {
+        // **The log is reclaimed once it has grown past [`RECLAIM_BYTES`], not
+        // once a statement.** `roll_segment`, the checkpoint record and
+        // `retire_segments_below` below exist so the log can shrink, and none
+        // of them is what makes the file hold the statement that just
+        // committed.
+        //
+        // Measured on 2,000 autocommit inserts (task-1999): rolling a segment
+        // was 2.4 ms a statement, locating the recovery point's segment 3.3 ms,
+        // the checkpoint record 1.2 ms, and deleting the segments 4.9 ms rising
+        // to 14.5 ms as the run went on - together about two thirds of a 19 ms
+        // checkpoint.
+        let reclaiming = match kind {
+            CheckpointKind::Asked => true,
+            CheckpointKind::Releasing => self.storage.wal.since_checkpoint() >= RECLAIM_BYTES,
+        };
         // **The catalog's statistics are made honest first, and inside the
-        // transaction the checkpoint is about to make durable.** A tree's shape
-        // changes on every split and every insert, and rewriting a catalog row
-        // that often would put a catalog write on the write path. A checkpoint
-        // is the moment it is cheap: the file is being flushed anyway, and what
-        // the next open reads is the shape as of the last checkpoint - which is
-        // exactly what the next open needs, because everything after it is in
-        // the log for recovery to replay.
-        self.refresh_statistics()?;
+        // transaction the checkpoint is about to make durable - but only on a
+        // checkpoint that is doing the rest of the housekeeping too.** A tree's
+        // shape changes on every split and every insert, and rewriting a catalog
+        // row that often would put a catalog write on the write path. That is
+        // exactly what happened: the sentence this comment used to carry - "a
+        // checkpoint is the moment it is cheap, the file is being flushed
+        // anyway" - was written when a connection checkpointed at close under
+        // `locking_mode = exclusive`. It stopped being true when `normal` became
+        // the default and a checkpoint became a per-statement event, and an
+        // insert moves its tree's shape almost every time, so the guard inside
+        // `refresh_statistics` that skips an unchanged tree never fired.
+        // Measured at 1.2 ms a statement, plus a second commit inside a
+        // checkpoint (task-1999).
+        //
+        // Leaving them behind between those checkpoints is safe because they are
+        // an estimate and nothing treats them as an invariant: `PagedTree::attach`
+        // derives `first_leaf` from the file rather than trusting the recorded
+        // copy, and `PagedTree::check` was changed for the same reason - "a
+        // cached count is not an invariant; the agreement between the two ways
+        // of reaching a leaf is". What is left is `leaf_count` and `row_count`,
+        // which seed a planner estimate and a walk's cycle guard.
+        //
+        // **It rides on `reclaiming` rather than on `Asked` alone**, which the
+        // first cut of this change had it do. Nothing checkpoints when a
+        // connection closes (see [`RECLAIM_BYTES`]), so a database built
+        // entirely out of autocommit inserts would have gone to disk with the
+        // row and leaf counts its `CREATE TABLE` wrote and never another.
+        if reclaiming {
+            self.refresh_statistics()?;
+        }
         self.storage.wal.sync()?;
         // **The segment boundary is moved to the checkpoint point first.**
         // A segment is only retirable once every record in it is below the
@@ -160,7 +378,14 @@ impl ImportedDatabase {
         // "everything except the current segment" into "everything", and it is
         // the difference between a log that shrinks and one that keeps one
         // segment's worth of a finished build for ever.
-        self.storage.wal.roll_segment()?;
+        //
+        // Only when this checkpoint is reclaiming: rolling a segment is
+        // creating a file, and a segment rolled per statement is also what made
+        // `retire_segments_below` walk a sequence range the length of the run
+        // (see `Shared::retired_below`).
+        if reclaiming {
+            self.storage.wal.roll_segment()?;
+        }
         // **Read before `log_free_map_pages` touches anything.** Every page
         // `holds_uncommitted` will hold back in the flush below is already
         // dirty right now - it was dirtied by the write that made it
@@ -186,48 +411,7 @@ impl ImportedDatabase {
         self.storage.wal.sync()?;
         let durable = self.storage.wal.write_ahead_point();
         self.storage.database.pool().set_durable_lsn(durable);
-        // **Never past an open transaction's own first record, nor past any
-        // other held-back page's.** Read off this schema's own pool, because
-        // a connection with an `ATTACH`ed file checkpoints each file's
-        // recovery point against that file's own transaction, not another
-        // file's. `uncommitted_lsn` alone missed the case where the held-back
-        // page's change belongs to an *earlier*, already-committed statement
-        // that simply had not been checkpointed yet - see this module's own
-        // doc comment for the reproduction.
-        // **Never below the first position the stream has.** A page that has
-        // never been described by a record carries stamp zero, and
-        // `note_dirty_from` floors a fresh database's `rec_lsn` at its
-        // `checkpoint_lsn`, which is also zero - so a checkpoint taken while a
-        // statement holds such a page computed a recovery point of 0, and
-        // `sequence_containing(0)` refused with "no present segment holds lsn
-        // 0: segment 1 starts at 8". Zero is not a position in the stream; it
-        // is the absence of one, and the recovery point that covers everything
-        // is the stream's own start.
-        //
-        // Nothing reached it before task-1980 because the default was
-        // `locking_mode = exclusive`, under which `leave` never checkpoints:
-        // the first checkpoint of a fresh database happened at close, with no
-        // statement holding a page. With `normal` as the default every
-        // statement checkpoints, and a `CREATE VIRTUAL TABLE` that fails on a
-        // database nothing has checkpointed yet reaches it on its way out.
-        let recovery_from = durable
-            .min(self.storage.database.pool().uncommitted_lsn())
-            .min(oldest_dirty)
-            .max(inillucent_wal::FIRST_LSN);
-        // **And never past a vote nobody has counted.** See `Storage::in_doubt`:
-        // while a super-journal beside this file names a transaction as
-        // undecided, the records of that transaction have to stay where
-        // recovery can find them, whichever way the decision goes.
-        let recovery_from = match self.storage.in_doubt {
-            true => recovery_from.min(
-                self.storage
-                    .database
-                    .meta()
-                    .checkpoint_lsn
-                    .max(inillucent_wal::FIRST_LSN),
-            ),
-            false => recovery_from,
-        };
+        let recovery_from = self.recovery_point(durable, oldest_dirty);
         // **The segment `recovery_from` actually lives in, not the one
         // `roll_segment` just opened.** The freshly rolled segment is only
         // where `recovery_from` lives when nothing bounded it below
@@ -255,27 +439,9 @@ impl ImportedDatabase {
         // before `retire_segments_below` below actually deletes anything.
         self.storage.database.pool().set_retained_lsn(recovery_from);
         self.storage.database.checkpoint_after_free_map()?;
-        self.storage.wal.note_checkpoint(recovery_from, 0)?;
-        // **And then the segments the checkpoint has made redundant go.**
-        //
-        // `retire_segments_below` was written, documented as "called after a
-        // checkpoint", and covered by six cases in `inillucent-wal`'s recovery
-        // tests - and called from exactly one place, `inillucent-txn`'s engine,
-        // which is not the engine that ships. The consequence was measured: the
-        // same 200,000 rows are 18.4 MB in SQLite and 179.1 MB here, 27.6 MB of
-        // data file and 151.5 MB of log segments that survive a checkpoint, a
-        // clean close, a reopen and a second checkpoint.
-        //
-        // It is safe to do here rather than only at close because the function
-        // deletes a segment only when every record in it is below the
-        // checkpoint LSN *and* the next segment starts at or below it, so a
-        // segment holding anything recovery would still need is left alone -
-        // and a segment it cannot unlink is left alone and reported `Ok`,
-        // because failing a checkpoint over a file that would not delete would
-        // turn a tidy-up into an outage. `recovery_from` rather than `durable`
-        // is what makes that true of a segment a held-back page still needs,
-        // not only of one recovery has already replayed.
-        self.storage.wal.retire_segments_below(recovery_from)?;
+        if reclaiming {
+            reclaim(&self.storage.wal, recovery_from)?;
+        }
         self.storage
             .database
             .pool()
@@ -283,7 +449,7 @@ impl ImportedDatabase {
         // Every attached database too, because a log is per file and a
         // connection closed after a checkpoint should leave databases rather
         // than databases and logs nobody will open again.
-        self.checkpoint_attached()?;
+        self.checkpoint_attached(kind)?;
         Ok(())
     }
 
@@ -307,7 +473,9 @@ impl ImportedDatabase {
     /// defect `checkpoint` was fixed against for `main`: every free-map page
     /// rewritten on every checkpoint, with no `WritePage` record and no LSN
     /// stamp behind it, so a crash mid-write could leave it unrecoverable.
-    fn checkpoint_attached(&mut self) -> DbResult<()> {
+    ///
+    /// @param kind - why this checkpoint is being taken
+    fn checkpoint_attached(&mut self, kind: CheckpointKind) -> DbResult<()> {
         for nth in 0..self.session_state.attached.len() {
             let Some(held) = self.session_state.attached.get_mut(nth) else {
                 continue;
@@ -347,8 +515,16 @@ impl ImportedDatabase {
             if held.database.lock_level() <= inillucent_vfs::FileLock::Shared {
                 continue;
             }
+            // Each file's log is reclaimed on its own terms, because each
+            // file has its own log and its own size. See `checkpoint_within`.
+            let reclaiming = match kind {
+                CheckpointKind::Asked => true,
+                CheckpointKind::Releasing => held.wal.since_checkpoint() >= RECLAIM_BYTES,
+            };
             held.wal.sync()?;
-            held.wal.roll_segment()?;
+            if reclaiming {
+                held.wal.roll_segment()?;
+            }
             // See `checkpoint`'s own comment: read before this file's free-map
             // pages are touched below, and without an extra `flush()`.
             let oldest_dirty = held.database.pool().oldest_dirty_lsn();
@@ -387,11 +563,9 @@ impl ImportedDatabase {
             // below it are retired.
             held.database.pool().set_retained_lsn(recovery_from);
             held.database.checkpoint_after_free_map()?;
-            held.wal.note_checkpoint(recovery_from, 0)?;
-            // The segments below the checkpoint describe changes the file now
-            // holds, so keeping them is keeping a second copy of the database
-            // for ever. See `Database::checkpoint` for the measurement.
-            held.wal.retire_segments_below(recovery_from)?;
+            if reclaiming {
+                reclaim(&held.wal, recovery_from)?;
+            }
             held.database
                 .pool()
                 .set_durable_lsn(held.wal.write_ahead_point());

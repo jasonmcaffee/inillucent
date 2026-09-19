@@ -13,9 +13,9 @@ Measured at 100,000 rows on Windows, over the ten workload families the performa
 30 paired rounds per run, four consecutive runs, medians of the two middle runs.
 
 **Measured 2026-09-19 at the v0.1.3 tag, commit f9d1433**, which is the newest released code. Read
-[What main measures today](#what-main-measures-today-and-why-it-is-slower-than-this-page) before
-quoting any of it against a build from `main`: `main` is currently slower than this page, for a
-reason that is named there and has a ticket.
+[What main measures today](#what-main-measures-today) before quoting any of it against a build from
+`main`: the default locking mode changed after this tag, so `main` costs more to write to and the
+numbers there are different ones.
 
 | | SQLite 3.53.4 | inillucent | |
 |---|---|---|---|
@@ -39,45 +39,66 @@ The processor and memory figures are a matched pair: **one child process each**,
 finished file the parent built, both running one round of the same plan. Neither figure is a delta
 taken inside a running program.
 
-## What main measures today, and why it is slower than this page
+## What main measures today
 
-**Every number on this page is the v0.1.3 tag. `main` at db3be74 measures 3.48x, and two families
-are under the contract's floor.** The same four run protocol, the same fixture, the same pinned
-SQLite arm, taken the same morning:
+**Every number on this page is the v0.1.3 tag, and `main` is not the same engine to write to.**
+`locking_mode = normal` became the default after that tag, and under it a connection checkpoints
+and releases the file after every statement that wrote. `main` at db3be74 measured 3.48x with
+`transaction` and `schema` under the contract's floor on all four runs; task-1999 found five
+separate pieces of work that the new default had turned into per-statement work and took them off
+that path. The same four run protocol, the same fixture, the same pinned SQLite arm:
 
-| | v0.1.3 | `main`, db3be74 |
-|---|---|---|
-| weighted headline | **4.39x** | 3.48x |
-| 95% lower bound, bound 3.00x | **4.09x** | 3.27x, still met on all four |
-| processor time, one round | **391 ms** | 1,461 ms |
-| `transaction`, floor 1.00x | **2.50x** | **0.92x, under the floor on all four** |
-| `schema`, floor 1.00x | **1.36x** | **0.57x, under the floor on all four** |
-| `write`, floor 1.00x | **2.17x** | 1.19x, under the floor on two of four |
-| workloads slower than SQLite | **6 of 30** | 9 of 30 |
+| | v0.1.3 | `main`, db3be74 | after task-1999 |
+|---|---|---|---|
+| weighted headline | **4.39x** | 3.48x | 3.44x to 3.53x |
+| 95% lower bound, bound 3.00x | **4.09x** | 3.27x | 3.31x to 3.43x, met on all four |
+| processor time, one round | **391 ms** | 1,461 ms | 813 ms |
+| `write`, floor 1.00x | **2.17x** | 1.19x, under on two of four | **1.22x to 1.29x, clear on all four** |
+| `transaction`, floor 1.00x | **2.50x** | 0.92x, under on all four | 0.75x to 0.76x, under on all four |
+| `schema`, floor 1.00x | **1.36x** | 0.57x, under on all four | 0.33x to 0.53x, under on all four |
 
-Three workloads carry almost all of it. `txn.autocommit` goes from 1.03x to **0.05x**,
-`write.insert.autocommit` from 3.30x to **0.18x**, and `schema.index` from 1.36x to **0.57x**. Per
-statement that is **1.2 ms against 24 ms**, where SQLite does the same statement in 1.2 ms at
-`synchronous = FULL`.
+Per statement, against SQLite on the same fixture and the same disk:
 
-**It is one commit, and the bisect names it.** 689a384, task-1980's shutdown checkpoint phases A to
-D. The commit before it is a documents-only commit, so the boundary is exact, and the two binaries
-were run alternately on the same disk within four minutes of each other to rule out the volume:
-7463f48 reads `txn.autocommit` 1.05x and 390 ms of processor time, 689a384 reads 0.06x and 1,203 ms.
-SQLite's own arm does not move between them.
+| workload | v0.1.3 | `main` | after task-1999 | SQLite |
+|---|---:|---:|---:|---:|
+| `write.insert.autocommit` | 1.26 ms | 27.4 ms | **8.5 ms** | 4.06 ms |
+| `txn.autocommit` | 1.18 ms | 22.6 ms | **8.7 ms** | 1.17 ms |
+| `schema.index` | 26.7 ms | 61.5 ms | **55.7 ms** | 34.7 ms |
 
-**The cause.** `checkpoint_within` in `crates/inillucent-engine/src/checkpoint.rs` calls
-`refresh_statistics()` on every checkpoint, and under `locking_mode = normal`, which is the default
-now, every statement that writes checkpoints on its way out. So every autocommit statement rewrites
-the catalog rows whose tree shape moved and then calls `seal()`, which is a second commit.
-`refresh_statistics` does skip a tree whose shape has not moved, but an insert moves its tree's shape
-almost every time, so that guard never fires on a write workload. The comment on it says a checkpoint
-"is the moment the statistics can be made honest cheaply: the file is being made durable anyway",
-which was true when a connection checkpointed at close under `locking_mode = exclusive`, and stopped
-being true when `normal` became the default.
+**What the five were.** All of them were free under `locking_mode = exclusive`, where a connection
+keeps the file and `release_if_idle` returns before any of this runs, and all of them ran once a
+statement under `normal`. Timed line by line in a release build:
 
-**Nothing released carries it.** v0.1.3 is dated 2026-09-15 and 689a384 is 2026-09-18. It would ship
-with the next release. task-1999 owns the fix, and this page moves to `main`'s numbers when it lands.
+| | cost a statement |
+|---|---|
+| `Wal::retire_segments_below` walked every sequence number ever issued, opening a file at each one | 4.9 ms rising to 14.5 ms, with no bound |
+| `ImportedDatabase::the_log_moved` opened the log segment by path to ask its size | 3.2 ms |
+| `Wal::sequence_containing` read the open segment's header off disk | 3.3 ms |
+| rolling a log segment, writing a checkpoint record and retiring | 3.6 ms |
+| `refresh_statistics` rewrote every catalog row whose tree shape had moved, and committed | 1.2 ms |
+
+The first one is the one with no ceiling. A segment was rolled per statement, so the walk was as
+long as the run: 2,000 autocommit inserts opened **1.5 million segment headers, 1.49 million of them
+for files that are not there**. The sequence number is read back from the meta record, so it
+survived a close - the same database reopened with 2,030 segments behind it spent 19.5 ms a
+statement, more than half its checkpoint, deleting nothing.
+
+A checkpoint now knows why it is being taken. The one a statement takes on its way out writes the
+pages and moves the recovery point, so the file holds every statement that was acknowledged before
+the lock is let go; the statistics and the log's reclamation wait until the log has grown past four
+mebibytes, which is the bar SQLite draws at `SQLITE_DEFAULT_WAL_AUTOCHECKPOINT`.
+
+**What is left is not waste.** An autocommit statement is about 8.5 ms, and timing it apart gives
+about 4 ms for the fold - five or six pages written, three `fsync`s, and a rollback journal created
+and deleted - and about 4 ms for the statement's own execution and commit sync. The fold is what
+`locking_mode = normal` buys: the file describes every acknowledged statement at the moment another
+process may take it. `transaction` and `schema` are still under the floor because of it, and the
+floor was set when the default was `exclusive`. Closing that gap is a question about how a commit
+reaches the file - one append and one sync, which is what the redo log exists for - rather than
+about the checkpoint, and it is the first rung of the PostgreSQL parity work.
+
+**Nothing released carries any of it.** v0.1.3 is dated 2026-09-15 and the default changed on
+2026-09-18.
 
 ## By family
 
@@ -114,18 +135,25 @@ Its four workloads are `scan.aggregate` 11.54x, `scan.group` 7.96x, `scan.sort` 
 join is still the slow half and it is what holds the bound on the floor of the requirement rather
 than clear of it.
 
-A join-only run reads the family much higher - 6.46x, 6.26x, 6.14x and 5.60x when the gate was given
-`--families read.join` on 2026-09-15 - and that is the measurement this page used to carry. **A
-family measured on its own is not the same measurement as the same family inside the whole plan**,
-because the plan's other twenty-eight workloads decide what is in the pool when the join runs. The
-figure in the table above is the whole-plan one, which is what the contract grades.
+A join-only run reads the family much higher - 6.46x, 6.26x, 6.14x and 5.60x, with lower bounds of
+4.11x, 4.00x, 4.02x and 3.67x, when the gate was given `--families read.join` on 2026-09-15 - and
+that is the measurement this page used to carry. **A family measured on its own is not the same
+measurement as the same family inside the whole plan**, because the plan's other twenty-eight
+workloads decide what is in the pool when the join runs. The figure in the table above is the
+whole-plan one, which is what the contract grades. The bounds before task-1911's chain reuse were
+2.97x, 3.00x, 3.00x and 2.99x against the same 3.00x bar, which is what put the family on
+[the roadmap](roadmap.md) and what taking it off was measured against.
 
 **`extension` still misses**, at 1.58x with lower bounds of 1.43x, 1.32x, 1.45x and 1.29x against a
 1.50x bar. `extension.fts.build` is the worst workload in the family at **0.70x**, 8.12 ms for 500
 rows against SQLite's 5.76, and it is what holds the bound down; the rest of the family is clear,
 with `extension.rtree.insert` at 1.86x, `extension.rtree.query` at 5.36x and
-`extension.fts.query` at 1.40x. `extension` is on
-[the roadmap](roadmap.md#1-extension-misses-its-bar-on-the-lower-bound).
+`extension.fts.query` at 1.40x. An extension-only run on 2026-09-15 read the family 1.58x, 1.60x,
+1.59x and 1.67x with lower bounds of 1.40x, 1.39x, 1.39x and 1.45x, with `extension.fts.build` at
+0.56x to 0.58x and `extension.fts.query` at 1.70x to 1.85x - 1.77x on its own, against the 1.43x
+the reverted segment format left it at. That run is the measurement
+[the roadmap](roadmap.md#1-extension-misses-its-bar-on-the-lower-bound) argues from; the family
+misses the same way in both, which is why it is still on that list.
 
 **`transaction` fell from 3.41x, and the reason is `txn.autocommit`.** The other two workloads in
 that family did not move: `txn.batched` reads 3.67x and `txn.large` 4.17x. `txn.autocommit` is now
