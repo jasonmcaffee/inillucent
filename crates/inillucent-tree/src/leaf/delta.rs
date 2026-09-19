@@ -30,7 +30,6 @@ use inillucent_pool::extent::ExtentRef;
 
 use crate::datum::Datum;
 use crate::page;
-use crate::types::PhysicalType;
 
 use super::{unreachable_branch, LeafRef};
 
@@ -202,10 +201,12 @@ impl<'p> LeafRef<'p> {
                         "through the tree first"
                     ))
                 })?;
-            let value = match self.column(column)?.physical {
-                PhysicalType::Blob => Datum::Blob(bytes),
-                _ => Datum::Text(bytes),
-            };
+            // The reference says what the bytes are when it can, and the column
+            // answers when it does not - the same rule the sorted region's
+            // `MiniColumn::value` follows, for the same reason (task-1986).
+            let reference = ExtentRef::decode(rest.get(1..).unwrap_or(&[]))?;
+            let value =
+                crate::leaf::extent_datum(reference.class, self.column(column)?.physical, bytes);
             let span = Datum::tagged_span(rest)?;
             return Ok((value, cursor.saturating_add(span)));
         }

@@ -364,6 +364,19 @@ pub static CAPABILITIES: &[Capability] = &[
         },
     },
     Capability {
+        name: "large_values",
+        support: Support::Yes,
+        note: "A value larger than a page is stored outside it, in a contiguous run,                whatever its column is declared - a text in a column declared BLOB, or in                one declared nothing at all, as much as a text in a column declared TEXT.                The reference says what the bytes read back as when the column would say                something else, which is what makes that possible; until it did, an                undeclared column refused about 32 KB. Probed by `typeof` rather than by                whether the insert runs, because the way this fails is a text coming back                as a blob.",
+        probe: Probe::Answers {
+            setup: &[
+                "CREATE TABLE cap_large (a)",
+                "INSERT INTO cap_large VALUES (replace(hex(zeroblob(40000)), '0', 'p'))",
+            ],
+            sql: "SELECT typeof(a) || ':' || length(a) FROM cap_large",
+            expect: "text:80000",
+        },
+    },
+    Capability {
         name: "user_functions",
         support: Support::Yes,
         note: "A scalar function an application wrote, registered on the connection and \
@@ -411,15 +424,6 @@ pub static CAPABILITIES: &[Capability] = &[
         probe: Probe::Nothing,
     },
     // —— what it does not do ——————————————————————————————————————
-    Capability {
-        name: "large_value_in_an_untyped_column",
-        support: Support::No,
-        note: "A value larger than a page is stored outside it only when the column is declared TEXT and holds text or BLOB and holds bytes: an extent reference carries a page and a length and nothing saying which of the two it is, so the column's declaration is what answers. `CREATE TABLE t (a TEXT)` holds a megabyte; `CREATE TABLE t (a)` refuses about 32 KB and says what to declare.",
-        probe: Probe::Runs {
-            setup: &["CREATE TABLE t (a)"],
-            sql: "INSERT INTO t VALUES (replace(hex(zeroblob(40000)), '0', 'p'))",
-        },
-    },
     Capability {
         name: "distinct_in_a_scalar_function",
         support: Support::No,

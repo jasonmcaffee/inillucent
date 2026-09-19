@@ -278,6 +278,38 @@ The rule it stands for:
 The number lives at byte 8 of the meta page, which is covered by the meta record's checksum, so a
 file whose version has been edited by hand fails the checksum rather than opening.
 
+### What an extent reference's class bits are, and why the number did not move
+
+An **extent reference** is the sixteen bytes a leaf holds for a value stored outside its page: a
+page number and a length. Since task-1986 it also carries, in the two bits above the page number,
+what the value reads back as - `CLASS_STATED`, and beside it `CLASS_TEXT`. Without them the column's
+declaration was the only thing that could say whether the bytes were text or a blob, so a column
+that would say the wrong thing could not have a value outside its page at all: `CREATE TABLE t (a)`
+is BLOB affinity, a text in it stayed inline however long it was, and at the default 32,768 byte
+page a text of about 32 KB could not be stored.
+
+**The format version stays 1, and the rule above is why it can.** A reference states its class only
+when the column's own answer would be wrong. Every other reference - a text in a column declared
+`TEXT`, bytes in one declared `BLOB` - is encoded as the same sixteen bytes it always was. So:
+
+- **A build from before this reads every file an earlier build wrote, unchanged**, because no file
+  an earlier build wrote contains a reference with these bits set: the only values that produce one
+  are values an earlier build refused to store.
+- **A build from before this that is handed a file written by this one** meets a stated reference as
+  a page number above 2^62. It is not a page any file has, the fetch fails, and it reports the
+  failure. It does not answer.
+- **That last point is why the bits are in the page word and not the length word.** The length word
+  has spare bits too - above the 48-bit length and below the packed-into-a-shared-page flag - and a
+  build from before this would read the page and the length out of such a reference correctly and
+  hand the bytes back labelled by the column. For exactly the values these bits exist for, that is
+  the wrong label on the right bytes: a text coming back as a blob, with nothing to say so.
+
+A file this build writes is therefore readable by an earlier one everywhere an earlier one could
+have written it, and refused rather than misread everywhere it could not. `ExtentClass` in
+`crates/inillucent-pool/src/extent.rs` holds the encoding; `extent_class_for` and `extent_datum` in
+`crates/inillucent-tree/src/leaf/layout.rs` are the writer's and the reader's halves of the rule,
+written beside each other because a disagreement between them is a wrong value rather than an error.
+
 ---
 
 ## 6. Backup, restore and copies

@@ -103,6 +103,79 @@ pub fn encode_extent_tagged(out: &mut Vec<u8>, reference: ExtentRef) {
     out.push(crate::datum::tag::EXTENT);
     out.extend_from_slice(&reference.encode());
 }
+/// Writes one value of its column's own type, and returns where the heap now
+/// starts.
+///
+/// **The `Typed` arm of [`LeafBuilder::encode_rows_with`]'s per-value write,
+/// held apart so the loop reads as the four classes it is choosing between.**
+/// It is four different writes rather than one: an integer into a slot as
+/// narrow as the column's range allows, a double's bit pattern, a heap pair for
+/// a text or a blob, and a tagged value for a column with no useful type. The
+/// loop that calls it already decided the class, and what it does with the
+/// other three is short.
+///
+/// @param page - the page being built
+/// @param slot - where this row's slot sits in the value array
+/// @param width - how wide that slot is
+/// @param frame - the column's frame of reference, or zero for none
+/// @param physical - the column's layout
+/// @param value - the value to write
+/// @param heap_end - where the heap currently starts
+fn write_typed_value(
+    page: &mut [u8],
+    slot: usize,
+    width: usize,
+    frame: i64,
+    physical: PhysicalType,
+    value: &Datum<'_>,
+    heap_end: usize,
+) -> DbResult<usize> {
+    match physical {
+        PhysicalType::Int64 => {
+            let target = page
+                .get_mut(slot..slot.saturating_add(width))
+                .ok_or_else(|| misuse("an integer slot runs past the page"))?;
+            write_frame(frame, target, value.as_int().unwrap_or(0));
+            Ok(heap_end)
+        }
+        PhysicalType::Float64 => {
+            page::write_u64(
+                page,
+                slot,
+                match value {
+                    Datum::Real(number) => number.to_bits(),
+                    // REAL affinity converts, which is why this is a typed
+                    // value rather than an exception.
+                    Datum::Int(number) => (*number as f64).to_bits(),
+                    // Unreachable: `classify_at` returns `Typed` for a Float64
+                    // column only for these two classes.
+                    _ => return Err(unreachable_branch("a typed Float64 slot")),
+                },
+            )?;
+            Ok(heap_end)
+        }
+        PhysicalType::Text | PhysicalType::Blob => {
+            let bytes = value.as_bytes().unwrap_or(&[]);
+            let start = heap_end
+                .checked_sub(bytes.len())
+                .ok_or_else(|| misuse("the heap overflowed the page"))?;
+            let target = page
+                .get_mut(start..start.saturating_add(bytes.len()))
+                .ok_or_else(|| misuse("the heap overflowed the page"))?;
+            target.copy_from_slice(bytes);
+            let pair = page
+                .get_mut(slot..slot.saturating_add(width))
+                .ok_or_else(|| misuse("a heap slot runs past the page"))?;
+            write_heap_slot(pair, start, bytes.len());
+            Ok(start)
+        }
+        PhysicalType::Any => {
+            let start = write_tagged(page, heap_end, value)?;
+            page::write_u32(page, slot, start as u32)?;
+            Ok(start)
+        }
+    }
+}
 /// The rows a leaf builder packs, read one value at a time.
 ///
 /// **A value accessor, not a row iterator, and not a slice.** The builder is
@@ -667,45 +740,17 @@ impl LeafBuilder {
                 let slot = values_at.saturating_add(row.saturating_mul(width));
                 match class {
                     ValueClass::Null => {}
-                    ValueClass::Typed => match column.physical {
-                        PhysicalType::Int64 => {
-                            let target = page
-                                .get_mut(slot..slot.saturating_add(width))
-                                .ok_or_else(|| misuse("an integer slot runs past the page"))?;
-                            write_frame(frame, target, value.as_int().unwrap_or(0));
-                        }
-                        PhysicalType::Float64 => page::write_u64(
+                    ValueClass::Typed => {
+                        heap_end = write_typed_value(
                             &mut page,
                             slot,
-                            match value {
-                                Datum::Real(number) => number.to_bits(),
-                                // REAL affinity converts, which is why this is
-                                // a typed value rather than an exception.
-                                Datum::Int(number) => (number as f64).to_bits(),
-                                // Unreachable: `classify` returns `Typed` for a
-                                // Float64 column only for these two classes.
-                                _ => return Err(unreachable_branch("a typed Float64 slot")),
-                            },
-                        )?,
-                        PhysicalType::Text | PhysicalType::Blob => {
-                            let bytes = value.as_bytes().unwrap_or(&[]);
-                            heap_end = heap_end
-                                .checked_sub(bytes.len())
-                                .ok_or_else(|| misuse("the heap overflowed the page"))?;
-                            let target = page
-                                .get_mut(heap_end..heap_end.saturating_add(bytes.len()))
-                                .ok_or_else(|| misuse("the heap overflowed the page"))?;
-                            target.copy_from_slice(bytes);
-                            let pair = page
-                                .get_mut(slot..slot.saturating_add(width))
-                                .ok_or_else(|| misuse("a heap slot runs past the page"))?;
-                            write_heap_slot(pair, heap_end, bytes.len());
-                        }
-                        PhysicalType::Any => {
-                            heap_end = write_tagged(&mut page, heap_end, &value)?;
-                            page::write_u32(&mut page, slot, heap_end as u32)?;
-                        }
-                    },
+                            width,
+                            frame,
+                            column.physical,
+                            &value,
+                            heap_end,
+                        )?;
+                    }
                     ValueClass::Exception => {
                         heap_end = write_tagged(&mut page, heap_end, &value)?;
                         let narrow = narrow_pair_at(column.physical, width);
@@ -721,8 +766,17 @@ impl LeafBuilder {
                         let spiller = spill
                             .as_deref_mut()
                             .ok_or_else(|| unreachable_branch("an extent with no spiller"))?;
-                        let reference =
-                            spiller.spill(row, index, value.as_bytes().unwrap_or(&[]))?;
+                        // The reference says what the bytes are whenever the
+                        // column would say something else - which is what lets
+                        // a column declared `BLOB`, or declared nothing at all,
+                        // hold a text out of line (task-1986). A repack states
+                        // it over a reference it carried unchanged: the bytes do
+                        // not move, and a carried reference for a column that
+                        // answers correctly is stated as `Unstated` and so is
+                        // encoded exactly as it was.
+                        let reference = spiller
+                            .spill(row, index, value.as_bytes().unwrap_or(&[]))?
+                            .stating(super::extent_class_for(column.physical, &value));
                         heap_end = heap_end
                             .checked_sub(EXTENT_REF_BYTES)
                             .ok_or_else(|| misuse("the heap overflowed the page"))?;

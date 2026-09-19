@@ -68,7 +68,10 @@ mod read;
 
 pub use compare::{compare_rows, compare_rows_under, Hit, KeyView};
 pub use encode::{encode_extent_tagged, Extents, LeafBuilder, Packed, RowSlice, Rows, Spill};
-pub use layout::{class_bytes, fits_frame, from_frame, tombstone_bytes, write_frame, Layout};
+pub use layout::{
+    class_bytes, extent_class_for, extent_datum, fits_frame, from_frame, tombstone_bytes,
+    write_frame, Layout,
+};
 pub use read::{LiveRow, LiveSource, MiniColumn};
 
 mod delta;

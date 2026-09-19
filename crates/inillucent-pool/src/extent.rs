@@ -1,8 +1,9 @@
 //! Blob extents: values too large for a leaf, stored in runs of whole pages.
 //!
 //! Invariant: an extent reference in a leaf is exactly sixteen bytes -
-//! `(u64 first page, u64 total length)` - and the pages it names hold that many
-//! payload bytes and no more. A reader never trusts the length in the reference
+//! `(u64 first page, u64 total length)`, each word carrying flags in the bits
+//! neither number can reach - and the pages it names hold that many payload
+//! bytes and no more. A reader never trusts the length in the reference
 //! against the lengths in the pages: it checks them, because the two disagreeing
 //! is a corruption and reading the longer of the two would run off the end of an
 //! extent chain.
@@ -69,6 +70,22 @@
 //! this existed decodes exactly as it always did - every one of its references
 //! has those bits clear and is read as the run it is.
 //!
+//! ## What the value reads back as
+//!
+//! A page and a length say nothing about whether the bytes are text or a blob,
+//! and until task-1986 the column's declaration was the only thing that could
+//! answer. That is why a column declared `BLOB` holding a text, or declared
+//! nothing at all, could not have a value out of line: nothing would know what
+//! to call it on the way back, so it stayed inline and a value larger than a
+//! page could not be stored at all.
+//!
+//! A reference can now say, in the two bits above a page number: [`CLASS_STATED`]
+//! and, beside it, [`CLASS_TEXT`]. **It says so only when the column's own
+//! answer would be wrong**, so a reference in a column that already answers
+//! correctly is the same sixteen bytes it has always been, and a reference that
+//! carries the new bits exists only in a file holding a value an earlier build
+//! refused to write. See [`ExtentClass`].
+//!
 //! **A slot's bytes are never reused while the page lives.** Clearing a slot
 //! decrements the live count and nothing else; the page goes back to the free
 //! map when the count reaches zero. Compacting a page in place would move a
@@ -98,6 +115,28 @@ pub fn payload_capacity(page_size: usize) -> usize {
     page_size.saturating_sub(at::BODY)
 }
 
+/// What a reference says its value reads back as.
+///
+/// A reference carries a page and a length, and those say nothing about whether
+/// the bytes are text or a blob. Until this existed the column's declaration was
+/// the only thing that could answer, so a column that does not answer - one
+/// declared `BLOB` holding a text, or declared nothing at all - could not have a
+/// value out of line at all, and a value larger than a page in such a column
+/// could not be stored (task-1986).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ExtentClass {
+    /// The reference does not say; the column decides, as it always did.
+    ///
+    /// This is what every reference written before task-1986 is, and it is what
+    /// a reference written now still is whenever the column's own answer is the
+    /// right one - see [`ExtentRef::stating`].
+    Unstated,
+    /// The value reads back as text whatever the column is declared.
+    Text,
+    /// The value reads back as a blob whatever the column is declared.
+    Blob,
+}
+
 /// A value's out-of-line reference, as a leaf stores it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ExtentRef {
@@ -111,6 +150,8 @@ pub struct ExtentRef {
     /// before shared blob pages existed is and what a value too large for one
     /// page still is.
     pub slot: Option<u16>,
+    /// What the value reads back as, when the reference says.
+    pub class: ExtentClass,
 }
 
 /// How many bytes an extent reference occupies inside a leaf.
@@ -118,6 +159,27 @@ pub const EXTENT_REF_BYTES: usize = 16;
 
 /// The bit of the length word that says the value is packed into a shared page.
 const PACKED: u64 = 1 << 63;
+
+/// The bit of the *page* word that says the reference states its value's class.
+///
+/// **In the page word rather than beside `PACKED` in the length word, because
+/// of what a build that does not know about it does with one.** The length
+/// word's spare bits are above `MAX_LENGTH` and below `PACKED`, so a build
+/// written before task-1986 would take a run reference carrying one of them,
+/// read the page and the length out of it correctly, and hand the bytes back
+/// labelled by the column - which for the values this exists for is the wrong
+/// label on the right bytes, the one failure this file's `decode` is otherwise
+/// written to avoid. A page number of 2^63 is not a page any file has: the
+/// fetch fails and the older build says so.
+const CLASS_STATED: u64 = 1 << 63;
+
+/// The bit of the page word that says the stated class is text.
+///
+/// Read only when [`CLASS_STATED`] is set; clear beside it means a blob.
+const CLASS_TEXT: u64 = 1 << 62;
+
+/// The bits of the page word that are the page number.
+const PAGE_MASK: u64 = !(CLASS_STATED | CLASS_TEXT);
 
 /// Where the slot number sits in the length word.
 const SLOT_SHIFT: u32 = 48;
@@ -143,6 +205,7 @@ impl ExtentRef {
             first,
             length,
             slot: None,
+            class: ExtentClass::Unstated,
         }
     }
 
@@ -156,7 +219,24 @@ impl ExtentRef {
             first: page,
             length,
             slot: Some(slot),
+            class: ExtentClass::Unstated,
         }
+    }
+
+    /// Returns the same reference, saying what its value reads back as.
+    ///
+    /// **A caller states the class only when the column's own answer would be
+    /// the wrong one**, which is what keeps this additive: a reference whose
+    /// column already answers correctly is encoded byte for byte as it was
+    /// before task-1986, so every file an earlier build could have written is
+    /// still written the same way and still read the same way. The tree decides
+    /// which case a value is in - see `inillucent_tree::leaf::extent_class_for`,
+    /// which is written beside the reader that consumes it.
+    ///
+    /// @param class - what the value reads back as
+    pub fn stating(mut self, class: ExtentClass) -> ExtentRef {
+        self.class = class;
+        self
     }
 
     /// Returns the sixteen bytes a leaf stores.
@@ -167,7 +247,13 @@ impl ExtentRef {
         // branches no input could take, and a branch no input can take is one
         // the coverage gate can only ever be lied to about.
         let (first, length) = raw.split_at_mut(8);
-        first.copy_from_slice(&self.first.0.to_le_bytes());
+        let page = (self.first.0 & PAGE_MASK)
+            | match self.class {
+                ExtentClass::Unstated => 0,
+                ExtentClass::Text => CLASS_STATED | CLASS_TEXT,
+                ExtentClass::Blob => CLASS_STATED,
+            };
+        first.copy_from_slice(&page.to_le_bytes());
         let mut held = self.length & MAX_LENGTH;
         if let Some(slot) = self.slot {
             held |= PACKED | (u64::from(slot & MAX_SLOTS) << SLOT_SHIFT);
@@ -187,10 +273,16 @@ impl ExtentRef {
         let mut length = [0u8; 8];
         first.copy_from_slice(raw.get(0..8).unwrap_or(&[0; 8]));
         length.copy_from_slice(raw.get(8..16).unwrap_or(&[0; 8]));
-        let first = PageId(u64::from_le_bytes(first));
+        let page = u64::from_le_bytes(first);
+        let first = PageId(page & PAGE_MASK);
         if first.is_none() {
             return Err(corrupt("an extent reference names page zero"));
         }
+        let class = match (page & CLASS_STATED != 0, page & CLASS_TEXT != 0) {
+            (false, _) => ExtentClass::Unstated,
+            (true, true) => ExtentClass::Text,
+            (true, false) => ExtentClass::Blob,
+        };
         let held = u64::from_le_bytes(length);
         let slot =
             (held & PACKED != 0).then(|| ((held >> SLOT_SHIFT) & u64::from(MAX_SLOTS)) as u16);
@@ -198,6 +290,7 @@ impl ExtentRef {
             first,
             length: held & MAX_LENGTH,
             slot,
+            class,
         })
     }
 
@@ -563,6 +656,66 @@ mod tests {
         assert!(ExtentRef::decode(&raw[..15]).is_err());
         assert!(ExtentRef::decode(&[0u8; 16]).is_err());
         assert_eq!(EXTENT_REF_BYTES, 16);
+    }
+
+    /// A reference that states its class round-trips, and one that does not is
+    /// byte for byte what it was before a class could be stated.
+    ///
+    /// **The second assertion is the compatibility promise.** A build written
+    /// before task-1986 reads every reference this one writes for a column that
+    /// answers correctly, because those sixteen bytes did not change; what it
+    /// cannot read is a reference for a column that does not, and that is a
+    /// reference for a value it refused to write in the first place.
+    #[test]
+    fn a_stated_class_round_trips_and_an_unstated_one_is_unchanged() {
+        for (class, packed) in [
+            (ExtentClass::Unstated, false),
+            (ExtentClass::Text, false),
+            (ExtentClass::Blob, false),
+            (ExtentClass::Unstated, true),
+            (ExtentClass::Text, true),
+            (ExtentClass::Blob, true),
+        ] {
+            let base = if packed {
+                ExtentRef::packed(PageId(0x1234_5678), 41, 1_048_576)
+            } else {
+                ExtentRef::run(PageId(0x1234_5678), 1_048_576)
+            };
+            let reference = base.stating(class);
+            let raw = reference.encode();
+            let read = ExtentRef::decode(&raw).unwrap();
+            assert_eq!(read, reference);
+            assert_eq!(read.class, class);
+            assert_eq!(read.first, PageId(0x1234_5678));
+            assert_eq!(read.length, 1_048_576);
+            assert_eq!(read.slot, base.slot);
+            if class == ExtentClass::Unstated {
+                assert_eq!(raw, base.encode());
+            } else {
+                assert_ne!(raw, base.encode());
+            }
+        }
+    }
+
+    /// A build that does not know about the class bits meets one as a page
+    /// number it cannot fetch rather than as the wrong label on right bytes.
+    ///
+    /// The page word is checked rather than the length word for exactly this:
+    /// the spare bits in the length word are above `MAX_LENGTH` and below
+    /// `PACKED`, so an older build would have read the page and the length out
+    /// of a stated run reference correctly and answered with the column's own
+    /// idea of what the bytes were.
+    #[test]
+    fn an_older_build_cannot_read_a_stated_reference_as_a_page_it_has() {
+        let raw = ExtentRef::run(PageId(9), 40_000)
+            .stating(ExtentClass::Text)
+            .encode();
+        let mut word = [0u8; 8];
+        word.copy_from_slice(&raw[0..8]);
+        // What the decode written before task-1986 did: the whole word.
+        let as_an_older_build_reads_it = u64::from_le_bytes(word);
+        assert_eq!(as_an_older_build_reads_it, 9 | CLASS_STATED | CLASS_TEXT);
+        assert!(as_an_older_build_reads_it > 1 << 62);
     }
 
     /// A packed reference round-trips, and a run's bytes still read as a run.

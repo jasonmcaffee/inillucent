@@ -5,7 +5,15 @@
 //! computed a width differently from the writer would read the next value's
 //! bytes and answer a number rather than an error, which is why the frame
 //! and the narrowing rules are in one file with nothing else in it.
+//!
+//! The same shape holds for the other thing decided once and read back by the
+//! same rule: **what an out-of-line value reads back as.**
+//! [`extent_class_for`] decides what the reference says and [`extent_datum`]
+//! reads it, and a writer that stated a class the reader resolved differently
+//! would hand back a blob where a text went in - a wrong answer that looks like
+//! a right one. They are written beside each other for that reason.
 use inillucent_base::DbResult;
+use inillucent_pool::extent::ExtentClass;
 
 use crate::datum::Datum;
 use crate::types::{ColumnSpec, PhysicalType, ValueClass};
@@ -285,18 +293,19 @@ pub(crate) fn narrow_floor(physical: PhysicalType, page_size: usize) -> usize {
         other => other.slot_width(),
     }
 }
-/// Returns the class a value takes in a column of the given physical type.
-///
-/// @param physical - the column's layout
-/// @param value - the value to classify
 /// Returns the class of one value in a column, spilling past a threshold.
 ///
-/// A `Text` or `Blob` value longer than `threshold` is stored out of line. Only
-/// those two: a `PhysicalType::Any` column's slot is a tagged value whose class
-/// is in the bytes, and an extent reference carries only a page and a length -
-/// so a reader would have nothing to say whether it had found text or a blob.
-/// An oversized value in an `Any` column therefore stays inline, and if the row
-/// then does not fit its page the builder says `RowTooLarge` as it always has.
+/// **Any text or blob longer than `threshold` goes out of line, whatever the
+/// column is declared.** It did not until task-1986: an extent reference
+/// carried a page and a length and nothing saying which of the two it held, so
+/// the column's declaration was the only thing that could answer on the way
+/// back out, and a value whose class the column would answer wrongly had to
+/// stay inline however long it was. A column declared `BLOB` - which is what a
+/// column declared nothing at all is - therefore could not hold a text larger
+/// than a page at all: the row could not fit, and the split it fell through to
+/// had one row to divide into two halves. The reference now states the class
+/// when the column would answer wrongly, so nothing has to stay inline for
+/// that reason; see [`extent_class_for`] and [`extent_datum`].
 ///
 /// @param physical - the column's layout
 /// @param value - the value being placed
@@ -306,15 +315,11 @@ pub(crate) fn classify_at(
     value: &Datum<'_>,
     threshold: usize,
 ) -> ValueClass {
-    if matches!(physical, PhysicalType::Text | PhysicalType::Blob) {
-        let spillable = match (physical, value) {
-            (PhysicalType::Text, Datum::Text(bytes)) => Some(bytes.len()),
-            (PhysicalType::Blob, Datum::Blob(bytes)) => Some(bytes.len()),
-            _ => None,
-        };
-        if spillable.is_some_and(|length| length > threshold) {
-            return ValueClass::Extent;
-        }
+    if value
+        .as_bytes()
+        .is_some_and(|bytes| bytes.len() > threshold)
+    {
+        return ValueClass::Extent;
     }
     match (physical, value) {
         (_, Datum::Null) => ValueClass::Null,
@@ -332,6 +337,62 @@ pub(crate) fn classify_at(
         (PhysicalType::Text, Datum::Text(_)) => ValueClass::Typed,
         (PhysicalType::Blob, Datum::Blob(_)) => ValueClass::Typed,
         _ => ValueClass::Exception,
+    }
+}
+/// Returns what an out-of-line value in this column reads back as when its
+/// reference does not say.
+///
+/// The rule every reader followed before a reference could say: a `Blob` column
+/// holds bytes and every other column holds text.
+///
+/// @param physical - the column's layout
+fn implied_class(physical: PhysicalType) -> ExtentClass {
+    if physical == PhysicalType::Blob {
+        ExtentClass::Blob
+    } else {
+        ExtentClass::Text
+    }
+}
+/// Returns the class an out-of-line value's reference has to state.
+///
+/// **[`ExtentClass::Unstated`] whenever the column already answers correctly**,
+/// which is what makes the class bits additive rather than a new format. Those
+/// sixteen bytes are then what every build has always written, so a file this
+/// build produces is read by an earlier one everywhere an earlier one could
+/// have produced it - and the references it could not read are the ones for
+/// values it refused to store. `docs/relational-architecture.md` section 5a
+/// carries the whole argument.
+///
+/// Written beside [`extent_datum`], which is the reader that consumes it: the
+/// two are one rule seen from each end, and a writer that stated a class the
+/// reader resolved differently would give back the wrong one.
+///
+/// @param physical - the column's layout
+/// @param value - the value going out of line
+pub fn extent_class_for(physical: PhysicalType, value: &Datum<'_>) -> ExtentClass {
+    let holds = match value {
+        Datum::Blob(_) => ExtentClass::Blob,
+        _ => ExtentClass::Text,
+    };
+    if holds == implied_class(physical) {
+        ExtentClass::Unstated
+    } else {
+        holds
+    }
+}
+/// Returns the value an out-of-line reference's bytes read back as.
+///
+/// @param class - what the reference states, if anything
+/// @param physical - the column's layout, which answers when it does not
+/// @param bytes - the value, already read through the pool
+pub fn extent_datum<'p>(class: ExtentClass, physical: PhysicalType, bytes: &'p [u8]) -> Datum<'p> {
+    let held = match class {
+        ExtentClass::Unstated => implied_class(physical),
+        stated => stated,
+    };
+    match held {
+        ExtentClass::Blob => Datum::Blob(bytes),
+        _ => Datum::Text(bytes),
     }
 }
 /// Returns the heap bytes one value costs, its class already known.
@@ -387,4 +448,106 @@ pub(crate) fn write_tagged(page: &mut [u8], heap_end: usize, value: &Datum<'_>) 
         .ok_or_else(|| misuse("the heap overflowed the page"))?;
     target.copy_from_slice(&encoded);
     Ok(start)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What a value goes out of line as is what it comes back as, for every
+    /// column type a value can be put in.
+    ///
+    /// **The pair is the test, not either half of it.** A writer that stated
+    /// `Text` where the reader resolved `Blob` would give back a blob where a
+    /// text went in, and nothing would error - so the assertion is that the two
+    /// functions compose to the identity over every combination, including the
+    /// ones an earlier build refused to store and the ones it stored as
+    /// `Unstated` and must go on storing that way.
+    #[test]
+    fn the_class_a_writer_states_is_the_class_a_reader_resolves() {
+        let text = Datum::Text(b"a value".as_slice());
+        let blob = Datum::Blob(b"a value".as_slice());
+        for physical in PhysicalType::all() {
+            for value in [text, blob] {
+                let class = extent_class_for(physical, &value);
+                let back = extent_datum(class, physical, b"a value".as_slice());
+                assert_eq!(
+                    std::mem::discriminant(&back),
+                    std::mem::discriminant(&value),
+                    "{physical:?} holding {value:?} was stated {class:?} and read back {back:?}"
+                );
+            }
+        }
+    }
+
+    /// A column whose own answer is already right leaves the reference alone,
+    /// which is what keeps a file this build writes readable by an earlier one
+    /// everywhere an earlier one could have written it.
+    #[test]
+    fn only_a_column_that_would_answer_wrongly_makes_a_reference_state_its_class() {
+        let text = Datum::Text(b"a value".as_slice());
+        let blob = Datum::Blob(b"a value".as_slice());
+        // The two an earlier build could write, and so the two that must not
+        // change: a text in a TEXT column and bytes in a BLOB column.
+        assert_eq!(
+            extent_class_for(PhysicalType::Text, &text),
+            ExtentClass::Unstated
+        );
+        assert_eq!(
+            extent_class_for(PhysicalType::Blob, &blob),
+            ExtentClass::Unstated
+        );
+        // The ones it refused. A column declared nothing at all is `Blob`.
+        assert_eq!(
+            extent_class_for(PhysicalType::Blob, &text),
+            ExtentClass::Text
+        );
+        assert_eq!(
+            extent_class_for(PhysicalType::Text, &blob),
+            ExtentClass::Blob
+        );
+        assert_eq!(
+            extent_class_for(PhysicalType::Any, &blob),
+            ExtentClass::Blob
+        );
+        assert_eq!(
+            extent_class_for(PhysicalType::Any, &text),
+            ExtentClass::Unstated
+        );
+    }
+
+    /// Any text or blob over the threshold goes out of line, in any column.
+    ///
+    /// The whole of task-1986 in one assertion: before it, only the first two
+    /// rows of this table answered `Extent` and the rest answered `Exception`,
+    /// which is what kept a value larger than a page inline until the row would
+    /// not fit its page.
+    #[test]
+    fn a_value_over_the_threshold_goes_out_of_line_whatever_the_column_is() {
+        let long = vec![b'x'; 600];
+        let text = Datum::Text(long.as_slice());
+        let blob = Datum::Blob(long.as_slice());
+        for physical in PhysicalType::all() {
+            for value in [text, blob] {
+                assert_eq!(
+                    classify_at(physical, &value, 512),
+                    ValueClass::Extent,
+                    "{physical:?} holding a 600-byte {value:?} past a 512-byte threshold"
+                );
+                // And under the threshold nothing changed: the class is what
+                // the column and the value make of each other.
+                let short = match value {
+                    Datum::Text(_) => Datum::Text(b"short".as_slice()),
+                    _ => Datum::Blob(b"short".as_slice()),
+                };
+                assert_ne!(classify_at(physical, &short, 512), ValueClass::Extent);
+            }
+        }
+        // A key column's threshold is `usize::MAX`, which is how the builder
+        // says a key is never stored outside its page.
+        assert_eq!(
+            classify_at(PhysicalType::Text, &text, usize::MAX),
+            ValueClass::Typed
+        );
+    }
 }

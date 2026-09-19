@@ -912,9 +912,20 @@ impl<'p> MiniColumn<'p> {
             // not the value, and handing them back as a blob would be a wrong
             // answer that looked like a right one. `PagedTree::read_extents` is
             // what a caller reads them with; it has the pool and this does not.
+            //
+            // **What the bytes are called comes from the reference first and
+            // the column second** (task-1986). The column is the only thing
+            // that can answer for a reference written before a reference could
+            // say, and it is the wrong thing to ask for a text in a column
+            // declared `BLOB` - which is what a column declared nothing at all
+            // is. `extent_datum` is the whole rule, written beside the writer
+            // that states it.
             ValueClass::Extent => match self.extents.and_then(|held| held.get(row, self.index)) {
-                Some(bytes) if self.physical == PhysicalType::Blob => Ok(Datum::Blob(bytes)),
-                Some(bytes) => Ok(Datum::Text(bytes)),
+                Some(bytes) => Ok(crate::leaf::extent_datum(
+                    self.extent(row)?.class,
+                    self.physical,
+                    bytes,
+                )),
                 None => Err(misuse(concat!(
                     "this value is stored out of line; read the leaf's extents ",
                     "through the tree first"

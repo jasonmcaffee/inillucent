@@ -248,26 +248,26 @@ fn a_value_at_every_size_around_a_page_reads_back_whole() {
     pair.answers_agree("SELECT id, length(body) FROM wide WHERE id >= 201 ORDER BY id");
 }
 
-/// A value larger than a page is stored when its column is declared for it and
-/// refused by name when it is not.
+/// A value larger than a page is stored whatever its column is declared, and
+/// reads back as what went in.
 ///
-/// **Both halves matter, and the second one was answering `bad parameter or
-/// other API misuse` (task-1979, section 10, D2).** A value is stored outside
-/// its page only when the column is declared `TEXT` and holds text, or `BLOB`
-/// and holds bytes: an extent reference carries a page and a length and nothing
-/// that says which of the two it is, so the column's declaration is the only
-/// thing that can answer, and `leaf::layout::classify_at` states that rule.
+/// **This is the rewritten `a_value_larger_than_a_page_needs_a_column_declared_for_it`
+/// (task-1980, task-1986).** It used to assert the opposite of half of this,
+/// because the opposite was true: a value went outside its page only when the
+/// column was declared `TEXT` and held text or `BLOB` and held bytes, since an
+/// extent reference carried a page and a length and nothing saying which of the
+/// two it held. A column declared `BLOB` - which is what a column declared
+/// nothing at all is - therefore kept a text inline however long it was, the row
+/// could not fit a page, and at the 4,096 byte page size here a text of about
+/// 4 KB was refused.
 ///
-/// A column with no declaration - `CREATE TABLE t (a)`, which is `BLOB`
-/// affinity - therefore keeps a text inline however long it is, the row then
-/// cannot fit a page, and the split it falls through to has one row to divide
-/// into two halves. That is a real limit and it is recorded as the capability
-/// row `large_value_in_an_untyped_column`; what was wrong was that the caller
-/// was told nothing about it. Measured at the default 32,768 byte page before
-/// this: `CREATE TABLE t (a TEXT)` stored 65,536 bytes and `CREATE TABLE t (a)`
-/// refused 32,680 with the primary code's own text.
+/// The reference now says what its value reads back as whenever the column
+/// would say something else, so the four combinations below all store. What is
+/// graded is not that they store - it is that SQLite and this engine answer
+/// `typeof` and the bytes identically, before and after a reopen, because the
+/// way this fails is a text coming back as a blob rather than an error.
 #[test]
-fn a_value_larger_than_a_page_needs_a_column_declared_for_it() {
+fn a_value_larger_than_a_page_is_stored_whatever_its_column_is_declared() {
     let Some(mut pair) = pair("declared", 0) else {
         return no_oracle();
     };
@@ -290,23 +290,63 @@ fn a_value_larger_than_a_page_needs_a_column_declared_for_it() {
     pair.is_intact("the delete of a value larger than a page");
     pair.answers_agree("SELECT id, length(body) FROM wide ORDER BY id");
 
-    // And the same value in a column with no declaration is refused in words.
-    pair.both("CREATE TABLE loose (id INTEGER PRIMARY KEY, body)");
-    let refused = pair
-        .engine
-        .execute_any(
-            "INSERT INTO loose VALUES (1, replace(hex(zeroblob(20000)), '0', 'p'))",
-            &Params::new(),
-        )
-        .err()
-        .expect("an untyped column cannot hold a value larger than a page");
-    assert!(
-        refused.message().contains("larger than a page")
-            && refused.message().contains("declared TEXT"),
-        "the refusal has to say why and what to declare, and it said: {:?} / {:?}",
-        refused.message(),
-        refused.detail()
-    );
+    // The three columns that could not hold one. `loose` has no declaration at
+    // all, `blobby` is declared BLOB and is given a text, and `texty` is
+    // declared TEXT and is given bytes - so each one is a column whose own
+    // answer about the value is the wrong one.
+    //
+    // 20,000 bytes rather than 40,000 halves: `hex(zeroblob(10000))` is 20,000
+    // characters, which is nearly five pages here and four times what used to
+    // be refused.
+    for (table, declaration) in [
+        ("loose", "body"),
+        ("blobby", "body BLOB"),
+        ("texty", "body TEXT"),
+    ] {
+        pair.both(&format!(
+            "CREATE TABLE {table} (id INTEGER PRIMARY KEY, {declaration})"
+        ));
+    }
+    pair.both("INSERT INTO loose VALUES (1, replace(hex(zeroblob(10000)), '0', 'p'))");
+    pair.both("INSERT INTO blobby VALUES (1, replace(hex(zeroblob(10000)), '0', 'q'))");
+    pair.both("INSERT INTO texty VALUES (1, zeroblob(20000))");
+    for table in ["loose", "blobby", "texty"] {
+        pair.is_intact(&format!("the insert into {table}"));
+    }
+
+    // Twice over, with a reopen between: what the class array and the reference
+    // hold has to outlive the process that wrote them, and the first version of
+    // this change could have passed the first pass on values still in a leaf's
+    // delta area.
+    for pass in ["before the reopen", "after the reopen"] {
+        for table in ["loose", "blobby", "texty"] {
+            for sql in [
+                format!("SELECT typeof(body) FROM {table}"),
+                format!("SELECT length(body) FROM {table}"),
+                format!("SELECT substr(body, 1, 16) FROM {table}"),
+                format!("SELECT substr(body, -16) FROM {table}"),
+                format!("SELECT body FROM {table}"),
+            ] {
+                pair.answers_agree(&sql);
+            }
+        }
+        if pass == "before the reopen" {
+            pair.engine.reopen().expect("the file reopens");
+            pair.is_intact("a reopen holding values in columns that do not declare them");
+        }
+    }
+
+    // And they survive being rewritten, which is the repack: the placeholder a
+    // repack stands in for an out-of-line value with takes its class from the
+    // reference, so a text in a column declared BLOB stays a text.
+    pair.both("UPDATE loose SET body = body || body WHERE id = 1");
+    pair.both("UPDATE blobby SET body = body || body WHERE id = 1");
+    pair.is_intact("the update over a value in a column that does not declare it");
+    pair.engine.reopen().expect("the file reopens");
+    for table in ["loose", "blobby", "texty"] {
+        pair.answers_agree(&format!("SELECT typeof(body), length(body) FROM {table}"));
+        pair.answers_agree(&format!("SELECT body FROM {table}"));
+    }
 }
 
 #[test]

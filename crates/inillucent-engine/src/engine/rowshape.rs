@@ -768,10 +768,13 @@ fn collation_of(folded: &[u8]) -> Collation {
 
 /// Chooses a mini-column layout for a declared affinity.
 ///
-/// The mapping is the obvious one and the honesty is in what it does *not*
-/// claim: `Blob` affinity (SQLite's "no affinity") gets the `Any` layout, since
-/// a column with no affinity has no type to specialise on, and `Numeric` gets
-/// `Any` too because it holds integers and reals interchangeably.
+/// The mapping is the obvious one except in one place, and that place has cost
+/// a ticket: **`Blob` affinity - which is what a column declared nothing at all
+/// has - gets the `Blob` layout, not `Any`.** This comment used to say it got
+/// `Any`, and task-1980 spent a pass fixing `CREATE TABLE t (a)` on that
+/// footing before measuring what the column really was. `Numeric` and `FlexNum`
+/// do get `Any`, because they hold integers and reals interchangeably and a
+/// typed mini-column would make one of the two an exception on every row.
 ///
 /// @param affinity - the declared affinity
 fn physical_for(affinity: inillucent_value::affinity::Affinity) -> (PhysicalType, StaticType) {
