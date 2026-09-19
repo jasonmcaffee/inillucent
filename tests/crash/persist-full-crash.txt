@@ -204,9 +204,9 @@ cut points: 220, acknowledged commits: 0, detected damage: 0
 203	failed	old
 204	failed	old
 205	failed	old
-206	failed	new
-207	failed	new
-208	failed	new
+206	failed	old
+207	failed	old
+208	failed	old
 209	failed	new
 210	failed	new
 211	failed	new
