@@ -273,12 +273,35 @@ pub struct Store {
     ///
     /// It holds only live documents. That is what makes an edit work: tombstone
     /// the old document, append the new chunks, and the append cannot find the
-    /// dead row to attach them to, so it opens a fresh one.
+    /// dead row to attach them to, so it opens a fresh one. The tombstoned
+    /// documents are in `tombstoned_lookup`, so a chunk that arrives already
+    /// deleted can still find the row its earlier chunks opened.
     #[serde(skip)]
     doc_lookup: HashMap<(u32, String), u32>,
-    /// Whether `doc_lookup` reflects the documents. A store read from disk arrives
-    /// with it empty; a corpus with tombstones has fewer entries than documents,
-    /// so the two lengths cannot be compared to answer this.
+    /// The same map over the documents that are tombstoned.
+    ///
+    /// **Without it a tombstoned document got one document row per chunk
+    /// (task-2001).** A chunk that arrives already deleted must not go into
+    /// `doc_lookup`, because a later live append would then attach to a dead
+    /// row. Keeping it out of every map instead meant the second chunk of that
+    /// document could not find the first one either, so it opened another
+    /// document, and the third opened another. On the graded corpus that turned
+    /// 53 tombstoned documents holding 183 chunks into 183 document rows, and
+    /// `n_documents` answered 38,977 for a corpus of 38,847 - a number the
+    /// score card prints. Every existing test used one deleted chunk per
+    /// document, where one row per chunk and one row per document are the same
+    /// number.
+    ///
+    /// Two maps rather than one whose key carries a third component saying
+    /// whether the document is deleted. `find_document` and all of its callers
+    /// want a live document and nothing else, and a component in the key would
+    /// put that question at every one of those call sites.
+    #[serde(skip)]
+    tombstoned_lookup: HashMap<(u32, String), u32>,
+    /// Whether `doc_lookup` and `tombstoned_lookup` reflect the documents. A
+    /// store read from disk arrives with them empty; a corpus with tombstones
+    /// has fewer entries in `doc_lookup` than it has documents, so the two
+    /// lengths cannot be compared to answer this.
     #[serde(skip)]
     doc_lookup_ready: bool,
 }
@@ -482,31 +505,63 @@ impl Store {
         }
         self.live_chunks = self.live_chunks.saturating_sub(count);
         self.deleted_chunks += count;
+        // The document keeps its identity and changes which map answers for it.
+        // A live append still cannot find it, which is what makes an edit open a
+        // fresh row; a deleted chunk of it arriving later belongs on this row
+        // rather than on a new one.
         if self.doc_lookup_ready {
             self.doc_lookup.remove(&key);
+            self.tombstoned_lookup.insert(key, doc);
         }
         count
     }
 
-    /// Builds the source and external id index over the live documents if it is
-    /// not already present.
+    /// Builds the source and external id indexes over the documents if they are
+    /// not already present, live documents in one and tombstoned ones in the
+    /// other.
     ///
     /// Deferred rather than eager because a store read from disk arrives with the
-    /// map empty, and a caller that only ever searches never needs it.
+    /// maps empty, and a caller that only ever searches never needs them.
+    ///
+    /// One key can name several tombstoned documents, from a corpus that
+    /// tombstoned the same document and added it again more than once. The highest
+    /// ordinal wins, because it is the most recent of them, so a deleted chunk
+    /// arriving later joins the generation it belongs to rather than one two
+    /// edits old.
     fn ensure_doc_lookup(&mut self) {
         if self.doc_lookup_ready {
             return;
         }
         self.doc_lookup.clear();
+        self.tombstoned_lookup.clear();
         self.doc_lookup.reserve(self.documents.len());
         for (i, d) in self.documents.iter().enumerate() {
+            let key = (d.source, d.external_id.clone());
             if d.deleted {
-                continue;
+                self.tombstoned_lookup.insert(key, i as u32);
+            } else {
+                self.doc_lookup.insert(key, i as u32);
             }
-            self.doc_lookup
-                .insert((d.source, d.external_id.clone()), i as u32);
         }
         self.doc_lookup_ready = true;
+    }
+
+    /// The document one key names, in the map holding documents in the same
+    /// state as the chunk that is looking.
+    ///
+    /// **Which map answers is decided by the incoming chunk, not by the key.**
+    /// A live chunk has to reach a live document or open one, and a deleted
+    /// chunk has to reach the tombstoned document its earlier chunks opened.
+    /// One map cannot answer both, which is why there are two.
+    ///
+    /// @param key - the interned source id and the source system's document id
+    /// @param deleted - whether the chunk that is looking is itself tombstoned
+    fn open_document(&self, key: &(u32, String), deleted: bool) -> Option<u32> {
+        if deleted {
+            self.tombstoned_lookup.get(key).copied()
+        } else {
+            self.doc_lookup.get(key).copied()
+        }
     }
 
     /// Ingest chunks, grouping them into documents by source and external id.
@@ -523,14 +578,19 @@ impl Store {
             let source = self.sources.intern(&input.source);
             let key = (source, input.external_doc_id.clone());
 
-            let doc = match self.doc_lookup.get(&key) {
-                Some(d) => *d,
+            let doc = match self.open_document(&key, input.deleted) {
+                Some(d) => d,
                 None => {
                     let d = self.push_document(source, &input)?;
-                    // A document that arrives already tombstoned never enters the
-                    // lookup, for the same reason one that is tombstoned later
-                    // leaves it: nothing may attach live chunks to a dead row.
-                    if !input.deleted {
+                    // A document that arrives already tombstoned goes into the
+                    // tombstoned map and not into `doc_lookup`, for the same
+                    // reason one that is tombstoned later moves between them:
+                    // nothing may attach live chunks to a dead row. It has to
+                    // go into one of them, or the rest of its own chunks each
+                    // open another document (task-2001).
+                    if input.deleted {
+                        self.tombstoned_lookup.insert(key, d);
+                    } else {
                         self.doc_lookup.insert(key, d);
                     }
                     d
@@ -970,6 +1030,7 @@ impl Store {
             deleted_chunks,
             chunks_by_source,
             doc_lookup: HashMap::new(),
+            tombstoned_lookup: HashMap::new(),
             doc_lookup_ready: false,
         })
     }
@@ -1139,5 +1200,153 @@ mod tests {
         c.heading_path = vec!["A".into(), "B".into(), "C".into()];
         s.add_chunks(vec![c]).expect("the chunks are added");
         assert_eq!(s.heading_path(0), vec!["A", "B", "C"]);
+    }
+
+    /// One chunk that arrives already tombstoned.
+    ///
+    /// Every test above that used a deleted chunk used exactly one of them per
+    /// document, and that is why task-2001 went unseen for seventeen days: with
+    /// one chunk per document, one document row per chunk and one document row
+    /// per document are the same number. The tests below use several.
+    ///
+    /// @param source - the source system name
+    /// @param doc - the source system's document identifier
+    /// @param idx - the chunk's position within the document
+    /// @param content - the chunk's text
+    fn deleted(source: &str, doc: &str, idx: u32, content: &str) -> ChunkInput {
+        let mut c = input(source, doc, idx, content);
+        c.deleted = true;
+        c
+    }
+
+    /// **A tombstoned document is one document, whatever its chunk count
+    /// (task-2001).** It used to be one document per chunk, because a chunk
+    /// that arrived deleted was kept out of every lookup and so could not be
+    /// found by the next chunk of the same document.
+    #[test]
+    fn every_chunk_of_a_tombstoned_document_shares_one_document_row() {
+        let mut s = Store::default();
+        s.add_chunks(vec![
+            deleted("email", "gone", 0, "one"),
+            deleted("email", "gone", 1, "two"),
+            deleted("email", "gone", 2, "three"),
+        ])
+        .expect("the chunks are added");
+
+        assert_eq!(s.n_chunks(), 3);
+        assert_eq!(s.n_documents(), 1, "three chunks of one document");
+        assert_eq!(s.chunks[0].doc, s.chunks[1].doc);
+        assert_eq!(s.chunks[1].doc, s.chunks[2].doc);
+        assert_eq!(s.documents[0].chunk_count, 3);
+        assert_eq!(s.deleted_chunks, 3);
+        assert_eq!(s.live_chunks, 0);
+    }
+
+    /// The number the score card prints. A corpus holds as many documents as it
+    /// has distinct source and identifier pairs, live or tombstoned, and not as
+    /// many as it has chunks of its dead ones.
+    #[test]
+    fn n_documents_counts_documents_and_not_the_chunks_of_the_dead_ones() {
+        let mut s = Store::default();
+        s.add_chunks(vec![
+            input("confluence", "a", 0, "x"),
+            input("confluence", "a", 1, "y"),
+            deleted("confluence", "b", 0, "one"),
+            deleted("confluence", "b", 1, "two"),
+            deleted("confluence", "b", 2, "three"),
+            input("slack", "c", 0, "z"),
+        ])
+        .expect("the chunks are added");
+
+        assert_eq!(s.n_documents(), 3);
+        assert_eq!(s.n_chunks(), 6);
+    }
+
+    /// The grouping survives the call boundary, which is the shape the graded
+    /// corpus arrives in: one batch per sync rather than one batch per corpus.
+    #[test]
+    fn a_later_batch_of_deleted_chunks_joins_the_tombstoned_document() {
+        let mut s = Store::default();
+        s.add_chunks(vec![deleted("email", "gone", 0, "one")])
+            .expect("the chunks are added");
+        s.add_chunks(vec![deleted("email", "gone", 1, "two")])
+            .expect("the chunks are added");
+
+        assert_eq!(s.n_documents(), 1);
+        assert_eq!(s.n_chunks(), 2);
+    }
+
+    /// The same, through the rebuild. A store read back from disk arrives with
+    /// both lookups empty, so the rebuild has to put the tombstoned documents
+    /// somewhere a later deleted chunk can find them.
+    #[test]
+    fn a_store_read_back_from_disk_still_groups_deleted_chunks() {
+        let mut s = Store::default();
+        s.add_chunks(vec![
+            deleted("email", "gone", 0, "one"),
+            input("email", "here", 0, "two"),
+        ])
+        .expect("the chunks are added");
+
+        let mut bytes = Vec::new();
+        s.write_to(&mut bytes).expect("the store is written");
+        let mut back = Store::read_from(&mut bytes.as_slice()).expect("the store is read");
+        assert_eq!(back.n_documents(), 2);
+
+        back.add_chunks(vec![deleted("email", "gone", 1, "three")])
+            .expect("the chunks are added");
+        assert_eq!(
+            back.n_documents(),
+            2,
+            "the deleted chunk joins the document it belongs to"
+        );
+        assert_eq!(back.n_chunks(), 3);
+    }
+
+    /// **The task-1775 invariant, which task-2001 must not spend.** An edit
+    /// tombstones the old document and appends the new chunks; those chunks are
+    /// live, so they must not reach the dead row, and the fresh document is what
+    /// makes the edit visible.
+    #[test]
+    fn a_live_append_after_a_tombstone_opens_a_fresh_document() {
+        let mut s = Store::default();
+        s.add_chunks(vec![input("email", "d1", 0, "before")])
+            .expect("the chunks are added");
+        let doc = s
+            .find_document("email", "d1")
+            .expect("the document is there");
+        assert_eq!(s.tombstone_document(doc), 1);
+        assert_eq!(
+            s.find_document("email", "d1"),
+            None,
+            "a tombstoned document is not findable"
+        );
+
+        s.add_chunks(vec![input("email", "d1", 0, "after")])
+            .expect("the chunks are added");
+        assert_eq!(s.n_documents(), 2, "the edit opens a fresh row");
+        assert_ne!(s.chunks[1].doc, doc, "no live chunk lands on the dead row");
+        assert!(!s.documents[1].deleted);
+        assert_eq!(s.live_chunks, 1);
+    }
+
+    /// A deleted chunk for a document this store tombstoned joins that row. It
+    /// is the same rule as within one batch, reached by a document that changed
+    /// state here rather than one that arrived dead.
+    #[test]
+    fn a_deleted_chunk_joins_a_document_this_store_tombstoned() {
+        let mut s = Store::default();
+        s.add_chunks(vec![input("email", "d1", 0, "before")])
+            .expect("the chunks are added");
+        let doc = s
+            .find_document("email", "d1")
+            .expect("the document is there");
+        s.tombstone_document(doc);
+
+        s.add_chunks(vec![deleted("email", "d1", 1, "after")])
+            .expect("the chunks are added");
+        assert_eq!(s.n_documents(), 1);
+        assert_eq!(s.chunks[1].doc, doc);
+        assert_eq!(s.deleted_chunks, 2);
     }
 }

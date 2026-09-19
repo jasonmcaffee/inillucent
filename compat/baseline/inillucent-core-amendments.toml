@@ -248,9 +248,9 @@ sha256 = "351e16ab8fd9c30bc60c22f2d1e5446db8578d3502edd9ed30927b57fcf943b8"
 
 [[amendment]]
 path = "crates/inillucent-core/src/store.rs"
-ticket = "task-1953"
-reason = "task-1946 M9: one doc comment line was duplicated onto itself."
-sha256 = "bd12cd15cf88756d7be2fdcc01da678e43970b6bfec7c915380555c8e728be73"
+ticket = "task-2001"
+reason = "task-2001: a tombstoned document is one document row, not one row per chunk. add_chunks kept a chunk that arrived already deleted out of doc_lookup, so the next chunk of the same document could not find it and opened another row; 53 tombstoned documents holding 183 chunks became 183 rows and n_documents answered 38,977 for a corpus of 38,847. A second derived map, tombstoned_lookup, holds the tombstoned documents, and which map answers is the incoming chunk's own state. find_document still reads only the live map, so task-1775's rule that a live append cannot attach to a dead row is unchanged, and both maps are serde(skip) so no format on disk moved. Verified on the graded corpus: the same cache and the same build command print 38847 documents with every other build statistic identical. Six tests, five of which fail on the old code."
+sha256 = "785bf751e93d400dd22a64362b7829c9b8ec31dbd17822f8844120257d0f0dae"
 
 [[amendment]]
 path = "crates/inillucent-core/src/tokenize.rs"
@@ -266,13 +266,13 @@ sha256 = "6784023d2abb05e4d0a5ddf644c92aaf0656a03f937b82fdbb058f52bd30da8f"
 
 [[amendment]]
 path = "inillucent-scorecard.json"
-ticket = "task-1961"
-reason = "task-1961 P1: the commit the card records was rewritten when the history was rewritten, so `0c14f71d` is a sha nothing answers to any more and the same tree is `db29cb97`. Four occurrences in each file, the abbreviated form and the full one. No grading run was repeated and no measurement moved: `git diff` on both files is eight lines, and every one of them is that sha."
-sha256 = "69d2a497981a47f52d836b121ec20f81e2c4bd9a8f64fd7dead8791f5aa8afde"
+ticket = "task-2001"
+reason = "Moved by b47d6d0 (task-1935): a fresh retrieval run, published to both files. Never declared here; task-2001 declares it because the guard was red at HEAD and this file is not its work. Note that the run this pins is the one whose header reads '185078 chunks across 38977 documents', which is the defect task-2001 fixed: the corpus holds 38,847 documents and the same build command prints 38847 now. Neither file was edited by hand and no measurement was touched. The header and the build cost table will read 38847 the next time the card is generated, and this pin has to move again then."
+sha256 = "54b88f1494290002f204424f80d8ac3885191e5bc2ad20fdc545f7ebfabe4bc7"
 
 [[amendment]]
 path = "inillucent-scorecard.md"
-ticket = "task-1961"
-reason = "task-1961 P1: the commit the card records was rewritten when the history was rewritten, so `0c14f71d` is a sha nothing answers to any more and the same tree is `db29cb97`. Four occurrences in each file, the abbreviated form and the full one. No grading run was repeated and no measurement moved: `git diff` on both files is eight lines, and every one of them is that sha."
-sha256 = "3a3bf8134301326084a7873f023c0e72e9744078ffb1a78bab54adab9c1526a5"
+ticket = "task-2001"
+reason = "Moved by b47d6d0 (task-1935): a fresh retrieval run, published to both files. Never declared here; task-2001 declares it because the guard was red at HEAD and this file is not its work. Note that the run this pins is the one whose header reads '185078 chunks across 38977 documents', which is the defect task-2001 fixed: the corpus holds 38,847 documents and the same build command prints 38847 now. Neither file was edited by hand and no measurement was touched. The header and the build cost table will read 38847 the next time the card is generated, and this pin has to move again then."
+sha256 = "4f82f033c640060eb53c3347f4d5ea1b198683b223a119340c8c056ddc0f0783"
 
