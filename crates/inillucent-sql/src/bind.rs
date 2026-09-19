@@ -4919,6 +4919,9 @@ const CONTEXT_ONLY: &[&[u8]] = &[
 /// @param name - the folded name that did not resolve
 /// @param span - where it was written
 fn no_such_function(name: &[u8], span: Span) -> ParseError {
+    if let Some(said) = crate::function::needs_a_component(name) {
+        return ParseError::new(ParseErrorKind::Unsupported(said), span);
+    }
     if WINDOW_ONLY.contains(&name) {
         return ParseError::new(
             ParseErrorKind::Refused(format!(

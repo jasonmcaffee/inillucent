@@ -174,20 +174,6 @@ fn shell_script(shell: &Path, database: &Path, script: &str) -> Ran {
     }
 }
 
-/// Returns how many statements of a shell run were refused.
-///
-/// A refusal is a correct outcome under contention - it is the busy answer -
-/// so the acknowledged count is the statements sent minus the ones that said
-/// so, and the assertion is made against that rather than against the number
-/// sent.
-///
-/// @param said - everything the shell wrote to both streams
-fn refusals(said: &str) -> usize {
-    said.lines()
-        .filter(|line| line.to_ascii_lowercase().contains("error"))
-        .count()
-}
-
 /// Two writers, one process per statement, lose nothing, under both modes.
 #[test]
 fn two_writer_processes_lose_nothing_one_statement_each() {
@@ -245,6 +231,12 @@ fn two_writer_processes_lose_nothing_long_lived() {
                     "INSERT INTO note (who, n) VALUES ('{who}', {n});\n"
                 ));
             }
+            // The sentinel, for the reason `acknowledged_by` gives: the shell
+            // stops at the first statement that fails, so a writer refused part
+            // way never ran the statements after it and cannot be credited with
+            // them. Line one here is the `PRAGMA`, so the arithmetic is the
+            // same one the attached case uses.
+            text.push_str(&format!("SELECT 'finished-{who}';\n"));
             text
         };
         let acknowledged = std::thread::scope(|scope| {
@@ -262,9 +254,7 @@ fn two_writer_processes_lose_nothing_long_lived() {
             };
             let a = left.join().expect("writer a finished");
             let b = right.join().expect("writer b finished");
-            LONG_LIVED_INSERTS
-                .saturating_sub(refusals(&a.said()))
-                .saturating_add(LONG_LIVED_INSERTS.saturating_sub(refusals(&b.said())))
+            acknowledged_by(&a.said(), "a").saturating_add(acknowledged_by(&b.said(), "b"))
         });
         assert!(
             acknowledged > 0,
@@ -311,6 +301,15 @@ fn two_processes_attaching_one_file_lose_nothing() {
                 "INSERT INTO shared.note (who, n) VALUES ('{who}', {n});\n"
             ));
         }
+        // **The sentinel, which is how many inserts ran is decided from.** The
+        // shell stops at the first statement that fails, so a writer refused at
+        // line 116 never ran the 184 statements after it - and counting
+        // "three hundred minus the error lines" then claimed 299 acknowledged
+        // inserts where 114 had happened, and read the difference as a lost
+        // write. A busy timeout under load is an ordinary outcome of two
+        // processes sharing a file; losing an insert that reported success is
+        // not, and that is the one this case is about.
+        text.push_str(&format!("SELECT 'finished-{who}';\n"));
         text
     };
     let left_own = own("a");
@@ -330,19 +329,86 @@ fn two_processes_attaching_one_file_lose_nothing() {
         };
         let a = left.join().expect("writer a finished");
         let b = right.join().expect("writer b finished");
-        LONG_LIVED_INSERTS
-            .saturating_sub(refusals(&a.said()))
-            .saturating_add(LONG_LIVED_INSERTS.saturating_sub(refusals(&b.said())))
+        (
+            acknowledged_by(&a.said(), "a").saturating_add(acknowledged_by(&b.said(), "b")),
+            a.said(),
+            b.said(),
+        )
     });
+    let (acknowledged, said_a, said_b) = acknowledged;
     assert!(
         acknowledged > 0,
         "no attached insert was acknowledged, so this case tested nothing"
     );
+    // **What each writer said, on a failure only.** A count that does not add
+    // up is the beginning of the question rather than the end of it: the two
+    // interesting shapes are a writer that was refused in a way `refusals` does
+    // not recognise, and a writer that reported nothing and wrote nothing.
     assert_eq!(
         present(&binary, &shared),
         acknowledged,
-        "the attached file does not hold every acknowledged insert"
+        "the attached file does not hold every acknowledged insert.\n\
+         writer a said:\n{}\nwriter b said:\n{}",
+        first_lines(&said_a),
+        first_lines(&said_b)
     );
+}
+
+/// Returns how many inserts one writer reported success for.
+///
+/// **The shell stops at the first statement that fails**, so the count is not
+/// "how many were written minus how many errors were printed". Two shapes:
+///
+/// - the sentinel is in the output, so every statement ran, and the count is
+///   the inserts minus the ones that reported an error of their own;
+/// - the sentinel is absent, so the shell stopped, and the count is the number
+///   of insert lines before the one it stopped at. Line one is the `ATTACH`, so
+///   an error at line N means N minus two inserts got through.
+///
+/// An error on line one is the `ATTACH` itself reporting something - a stale
+/// journal it could not remove, for instance - and is not an insert, which is
+/// why the line number is part of the question rather than just the word.
+///
+/// @param said - both of the writer's streams
+/// @param who - the writer's name, which its sentinel carries
+fn acknowledged_by(said: &str, who: &str) -> usize {
+    let finished = said.contains(&format!("finished-{who}"));
+    let failures: Vec<usize> = said
+        .lines()
+        .filter_map(error_line)
+        .filter(|at| *at >= 2)
+        .collect();
+    if finished {
+        return LONG_LIVED_INSERTS.saturating_sub(failures.len());
+    }
+    match failures.first() {
+        Some(at) => at.saturating_sub(2),
+        None => 0,
+    }
+}
+
+/// Returns the line number an error line names, when it names one.
+///
+/// @param line - one line of a writer's output
+fn error_line(line: &str) -> Option<usize> {
+    let folded = line.to_ascii_lowercase();
+    if !folded.contains("error") {
+        return None;
+    }
+    let (_, rest) = folded.split_once("near line ")?;
+    let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+    digits.parse().ok()
+}
+
+/// Returns the first few lines of what a writer said, for a failure message.
+///
+/// @param said - both of the writer's streams
+fn first_lines(said: &str) -> String {
+    let held: Vec<&str> = said.lines().take(12).collect();
+    match held.is_empty() {
+        true => "(nothing at all)".to_string(),
+        false => held.join("\n"),
+    }
 }
 
 /// A read only process reads a file a writer has open, rather than waiting out

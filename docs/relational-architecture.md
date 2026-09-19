@@ -256,8 +256,8 @@ at one fixed point rather than at every cut of a commit.
 
 ## 5a. What a file's format version promises
 
-The first eight bytes of a database are `RDB2    ` and the four after them are the **format
-version**, which this build writes as `1` and is the only one it reads.
+The first eight bytes of a database are `RDB2` and four zero bytes, and the four bytes after them
+are the **format version**, which this build writes as `1` and is the only one it reads.
 
 The rule it stands for:
 

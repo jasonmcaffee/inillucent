@@ -73,12 +73,14 @@ fn lower_one(expr: &mut BoundExpr, next: &mut usize) {
         None => return,
     };
     let replacement = lowered(
-        (**operand).clone(),
-        listed,
+        &Lowering {
+            operand: (**operand).clone(),
+            listed,
+            negated: *negated,
+            affinity: affinity.clone(),
+            collation: collation.clone(),
+        },
         block,
-        *negated,
-        affinity.clone(),
-        collation.clone(),
         next,
     );
     *expr = replacement;
@@ -104,6 +106,26 @@ fn liftable(block: &BoundSelect) -> bool {
         && !block.sources.is_empty()
 }
 
+/// What one `IN` was written as, which is what the lowering needs.
+///
+/// A struct rather than six parameters, because
+/// `crates/inillucent-compat/tests/policy.rs` refuses an
+/// `#[allow(clippy::too_many_arguments)]`: the threshold is set once in
+/// `clippy.toml` with the argument for where it is, and an attribute moves the
+/// bar for one function and says nothing about why.
+struct Lowering {
+    /// The left side of the `IN`.
+    operand: BoundExpr,
+    /// The block's first result column, which is what `IN` compares against.
+    listed: BoundExpr,
+    /// Whether `NOT IN` was written.
+    negated: bool,
+    /// The affinity `IN` applies to both sides.
+    affinity: Option<Affinity>,
+    /// The collation `IN` compares with.
+    collation: Collation,
+}
+
 /// Builds the `CASE` that answers what `IN` answers.
 ///
 /// ```text
@@ -119,31 +141,18 @@ fn liftable(block: &BoundSelect) -> bool {
 /// stays NULL, which is what makes `NOT IN` over a list holding a NULL answer
 /// nothing.
 ///
-/// @param operand - the left side of the `IN`
-/// @param listed - the block's first result column, which is what `IN` compares
+/// @param about - what the `IN` was written as
 /// @param block - the subquery's own select
-/// @param negated - whether `NOT IN` was written
-/// @param affinity - the affinity `IN` applies to both sides
-/// @param collation - the collation `IN` compares with
 /// @param next - the next free subquery number, advanced by three
-#[allow(clippy::too_many_arguments)]
-fn lowered(
-    operand: BoundExpr,
-    listed: BoundExpr,
-    block: &BoundSelect,
-    negated: bool,
-    affinity: Option<Affinity>,
-    collation: Collation,
-    next: &mut usize,
-) -> BoundExpr {
+fn lowered(about: &Lowering, block: &BoundSelect, next: &mut usize) -> BoundExpr {
     let matched = exists(
         block,
         Some(BoundExpr::Compare {
             op: BinaryOp::Equal,
-            left: Box::new(listed.clone()),
-            right: Box::new(operand.clone()),
-            affinity,
-            collation,
+            left: Box::new(about.listed.clone()),
+            right: Box::new(about.operand.clone()),
+            affinity: about.affinity.clone(),
+            collation: about.collation.clone(),
         }),
         next,
     );
@@ -152,11 +161,11 @@ fn lowered(
         block,
         Some(BoundExpr::IsNull {
             negated: false,
-            operand: Box::new(listed),
+            operand: Box::new(about.listed.clone()),
         }),
         next,
     );
-    let (found, missing) = match negated {
+    let (found, missing) = match about.negated {
         true => (BoundExpr::Integer(0), BoundExpr::Integer(1)),
         false => (BoundExpr::Integer(1), BoundExpr::Integer(0)),
     };
@@ -167,7 +176,7 @@ fn lowered(
             (
                 BoundExpr::IsNull {
                     negated: false,
-                    operand: Box::new(operand),
+                    operand: Box::new(about.operand.clone()),
                 },
                 BoundExpr::Case {
                     operand: None,

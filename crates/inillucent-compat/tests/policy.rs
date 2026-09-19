@@ -1094,7 +1094,14 @@ fn no_new_crate_reaches_into_the_retired_engine() {
 // below already fails loudly with "is not there any more; remove its row"
 // for exactly this reason - removing them here is answering that failure
 // before it happens rather than after.
-const CEILINGS: [(&str, usize); 13] = [
+const CEILINGS: [(&str, usize); 14] = [
+    // **The facade's own size, which had no ratchet (task-1979, Q2).** It is
+    // the harness that runs every assertion against `inillucent::{Database,
+    // Connection, Value}` rather than against `inillucent-engine`, so it grows
+    // whenever a suite is pointed at the facade - 39 lines when task-1962
+    // measured it, 528 now. A file that grows a hundred lines a ticket with
+    // nothing watching is the shape every module on this list started as.
+    ("crates/inillucent-compat/src/facade.rs", 700),
     // Added at its post-split size in task-1946 (M12). It was 2,728 lines
     // holding the frame table, eviction, the journal's sync gating and the
     // swip logic together; the last three are child modules now.

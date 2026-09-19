@@ -1,4 +1,4 @@
-cut points: 171, acknowledged commits: 1, detected damage: 0
+cut points: 179, acknowledged commits: 1, detected damage: 0
 1	failed	old
 2	failed	old
 3	failed	old
@@ -112,15 +112,15 @@ cut points: 171, acknowledged commits: 1, detected damage: 0
 111	failed	old
 112	failed	old
 113	failed	old
-114	failed	new
-115	failed	new
-116	failed	new
-117	failed	new
-118	failed	new
-119	failed	new
-120	failed	new
-121	failed	new
-122	failed	new
+114	failed	old
+115	failed	old
+116	failed	old
+117	failed	old
+118	failed	old
+119	failed	old
+120	failed	old
+121	failed	old
+122	failed	old
 123	failed	new
 124	failed	new
 125	failed	new
@@ -170,4 +170,12 @@ cut points: 171, acknowledged commits: 1, detected damage: 0
 169	failed	new
 170	failed	new
 171	failed	new
-172	acknowledged	new
+172	failed	new
+173	failed	new
+174	failed	new
+175	failed	new
+176	failed	new
+177	failed	new
+178	failed	new
+179	failed	new
+180	acknowledged	new

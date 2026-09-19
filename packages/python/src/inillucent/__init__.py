@@ -186,9 +186,44 @@ def query(
     """
     result = run("query", db=db, sql=sql, params=params, limit=limit)
     if not result.get("ok"):
-        raise Error(result.get("message", "the query failed"))
+        raise _refusal(result)
     names = [column["name"] for column in result["columns"]]
     return [dict(zip(names, row)) for row in result["rows"]]
+
+
+def _refusal(result: Mapping[str, Any]) -> DriverError:
+    """Return the exception one failed command answers with.
+
+    **Every failed query used to raise ``TypeError`` (task-1979, D14).**
+    ``Error`` is ``DriverError``, whose first argument is the numeric status, so
+    ``Error(message)`` passed the message where the status belongs and left the
+    message missing - and what an application saw for "no such table" was
+    ``__init__() missing 1 required positional argument: 'message'``.
+
+    The envelope carries the status as a *name*, which is what a caller reads,
+    so it is turned back into the number the exception carries. A name this
+    build does not know maps to ``INTERNAL`` rather than to nothing, because an
+    exception with the wrong status is still better than a ``KeyError`` from
+    inside the error path.
+
+    :param result: the ``--output json`` object of a command that failed
+    """
+    named = str(result.get("status", "internal"))
+    status = _STATUS_BY_NAME.get(named, _driver.INTERNAL)
+    kind = Unsupported if status == _driver.UNSUPPORTED else DriverError
+    return kind(
+        status,
+        str(result.get("message", "the command failed")),
+        result.get("feature"),
+        result.get("detail"),
+        int(result.get("offset", -1)),
+    )
+
+
+#: Every status name the command line prints, back to the number the driver's
+#: own exceptions carry. Built from the driver's table rather than written out,
+#: so a status added there needs no second edit here.
+_STATUS_BY_NAME = {name: status for status, name in _driver._STATUS_NAMES.items()}
 
 
 __all__ = [

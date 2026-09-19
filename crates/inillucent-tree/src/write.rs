@@ -723,6 +723,17 @@ impl PagedTree {
             .get(column)
             .map(|spec| spec.physical)
             .unwrap_or(crate::types::PhysicalType::Any);
+        // **The value's kind has to match the column's, and that is a real
+        // limit rather than an oversight** - see `leaf::layout::classify_at`,
+        // which states it: an extent reference carries a page and a length and
+        // nothing that says whether it holds text or bytes, so the column is
+        // the only thing that can answer, and a column that does not answer
+        // cannot have one. A text in a column declared `BLOB`, or in one with
+        // no declaration at all, therefore stays inline whatever its length,
+        // and a value larger than a page then cannot be stored at all.
+        // `split_carrying` says so in the words the caller needs, and
+        // `capabilities` has the row `large_value_in_an_untyped_column`
+        // (task-1979, section 10, D2).
         match (physical, value) {
             (crate::types::PhysicalType::Text, Datum::Text(bytes))
             | (crate::types::PhysicalType::Blob, Datum::Blob(bytes))
@@ -1308,9 +1319,22 @@ impl PagedTree {
         fill: f64,
     ) -> DbResult<Vec<ExtentRef>> {
         if rows.len() < 2 {
-            return Err(misuse(
-                "a leaf holding fewer than two rows cannot be split; its one row's keys \
-                 and fixed-width columns alone are larger than a page",
+            // **The sentence a caller reads, because the one that was here was
+            // not one (task-1979, section 10, D2).** `misuse` keeps its words
+            // inside the process, so what reached every front end was the
+            // primary code's own text, `bad parameter or other API misuse`, for
+            // a statement that is written correctly. The row is genuinely too
+            // large for a page, and the reason it was not stored outside the
+            // page is almost always its column's declaration: only a column
+            // declared `TEXT` holding a text, or `BLOB` holding bytes, can have
+            // an extent, because the reference carries no class of its own -
+            // see `leaf::layout::classify_at`. Measured at the default 32,768
+            // byte page: `CREATE TABLE t (a TEXT)` stores 65,536 bytes and
+            // `CREATE TABLE t (a)` refuses 32,680.
+            return Err(inillucent_base::error::statement_refusal(
+                "this row is larger than a page, and a value is only stored outside the page \
+                 when its column is declared TEXT and holds text or declared BLOB and holds \
+                 bytes; declare the column to match the value it carries",
             ));
         }
         let builder = LeafBuilder::new(

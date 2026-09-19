@@ -209,6 +209,7 @@ wrong".
 | a second writer | one writer at a time. A reader is refused with `busy` while a writer holds the file, after `PRAGMA busy_timeout`; there is no shared-memory log index, so there is no snapshot for a reader to read from while a writer is working. `docs/roadmap.md` has the protocol that would change that |
 | threads inside one process | the engine is single threaded by construction. Several *processes* on one file are supported under `PRAGMA locking_mode = normal` |
 | SQLite's file format | this engine writes its own format. A SQLite file is imported with [`inillucent migrate`](migrating.md), not opened in place |
+| a value larger than a page in a column with no declared type | a value is stored outside its page only when the column is declared `TEXT` and holds text, or `BLOB` and holds bytes: the reference carries a page and a length and nothing saying which of the two it is, so the column's declaration is what answers on the way back out. `CREATE TABLE t (a TEXT)` holds a megabyte; `CREATE TABLE t (a)` refuses about 32 KB and says what to declare. `capabilities` has the row `large_value_in_an_untyped_column` |
 
 ## Where this differs in behaviour rather than in output
 

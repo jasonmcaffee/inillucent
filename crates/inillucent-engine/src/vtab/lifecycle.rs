@@ -299,7 +299,15 @@ impl crate::ImportedDatabase {
         params: &inillucent_exec::physical::Params,
     ) -> DbResult<Outcome> {
         let inillucent_sql::dml::BoundInsertSource::Values(values) = &statement.source else {
-            return Err(refusal("an INSERT ... SELECT into a virtual table"));
+            // **Exit 3, because the statement is written correctly and this
+            // engine has not built it (task-1979, section 8.1, gap 5).** It
+            // reported the status `syntax` and exit 1, which tells a caller to
+            // go and look for a mistake in an `INSERT INTO ft(body) SELECT body
+            // FROM src` that has none - and that statement is the FTS5 backfill
+            // idiom, so it is the first thing somebody writes after creating
+            // the table.
+            return Err(refusal("an INSERT ... SELECT into a virtual table")
+                .with_unsupported("an INSERT ... SELECT into a virtual table"));
         };
         let width = statement.table.columns.len();
         let mut changed = 0usize;

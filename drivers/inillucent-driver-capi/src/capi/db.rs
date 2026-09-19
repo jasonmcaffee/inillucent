@@ -17,6 +17,8 @@ use crate::*;
 
 /// An open database file.
 pub struct inillucent_db {
+    /// The word this handle carries while it is alive - see [`Live`].
+    live: Live,
     /// The driver's database.
     pub(crate) database: Database,
     /// The file, as a C string, so [`inillucent_path`] can hand one back.
@@ -85,11 +87,28 @@ impl Drop for ConnState {
 }
 /// A connection to a database.
 pub struct inillucent_conn {
+    /// The word this handle carries while it is alive - see [`Live`].
+    live: Live,
     /// What the connection is, shared with its statements and transactions.
     pub(crate) state: Rc<ConnState>,
 }
+impl Handle for inillucent_db {
+    const MAGIC: u32 = 0x5244_4231;
+    fn live(&self) -> &Live {
+        &self.live
+    }
+}
+impl Handle for inillucent_conn {
+    const MAGIC: u32 = 0x5244_4232;
+    fn live(&self) -> &Live {
+        &self.live
+    }
+}
+
 /// An open transaction.
 pub struct inillucent_txn {
+    /// The word this handle carries while it is alive - see [`Live`].
+    live: Live,
     /// The connection it runs on, shared rather than pointed at.
     connection: Rc<ConnState>,
     /// Whether it has been committed or rolled back.
@@ -133,6 +152,7 @@ pub unsafe extern "C" fn inillucent_open(
         match Database::open_with(path, options) {
             Ok(database) => {
                 let held = Box::new(inillucent_db {
+                    live: Live::new(inillucent_db::MAGIC),
                     path: c_string(&database.path().display().to_string()),
                     database,
                     connections: Cell::new(0),
@@ -188,7 +208,7 @@ pub unsafe extern "C" fn inillucent_close(
         // The handle goes whether or not the checkpoint worked: a caller told
         // "close failed" would have no way to try again, and the log is
         // replayed on the next open regardless.
-        drop(Box::from_raw(db));
+        drop(reclaim(db));
         finish(outcome, error, false)
     })
 }
@@ -301,6 +321,7 @@ pub unsafe extern "C" fn inillucent_connect(
             .connections
             .set(database.connections.get().saturating_add(1));
         *out = Box::into_raw(Box::new(inillucent_conn {
+            live: Live::new(inillucent_conn::MAGIC),
             state: Rc::new(ConnState {
                 database: db as *const inillucent_db,
                 // Opened once, here, and continued by every call on this
@@ -331,7 +352,10 @@ pub unsafe extern "C" fn inillucent_conn_free(conn: *mut inillucent_conn) {
             if conn.is_null() {
                 return;
             }
-            drop(Box::from_raw(conn));
+            if held(conn as *const inillucent_conn).is_none() {
+                return;
+            }
+            drop(reclaim(conn));
         },
         (),
     )
@@ -576,6 +600,7 @@ pub unsafe extern "C" fn inillucent_txn_begin(
             return misused("inillucent_txn_begin", error);
         };
         *out = Box::into_raw(Box::new(inillucent_txn {
+            live: Live::new(inillucent_txn::MAGIC),
             connection: Rc::clone(&handle.state),
             spent: false,
         }));
@@ -693,7 +718,10 @@ pub unsafe extern "C" fn inillucent_txn_rollback(txn: *mut inillucent_txn) {
             if txn.is_null() {
                 return;
             }
-            let transaction = Box::from_raw(txn);
+            if held(txn as *const inillucent_txn).is_none() {
+                return;
+            }
+            let transaction = reclaim(txn);
             if transaction.spent {
                 return;
             }
@@ -706,4 +734,11 @@ pub unsafe extern "C" fn inillucent_txn_rollback(txn: *mut inillucent_txn) {
         },
         (),
     )
+}
+
+impl Handle for inillucent_txn {
+    const MAGIC: u32 = 0x5244_4233;
+    fn live(&self) -> &Live {
+        &self.live
+    }
 }

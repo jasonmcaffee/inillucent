@@ -726,8 +726,13 @@ impl<'a> Binder<'a> {
         // nothing left over.
         let (columns, constraints, without_rowid, strict) = match body {
             ast::CreateTableBody::AsSelect(select) => {
-                return self
-                    .bind_create_table_as_select(temp, if_not_exists, database, name, *select)
+                return self.bind_create_table_as_select(
+                    temp,
+                    if_not_exists,
+                    database,
+                    name,
+                    *select,
+                )
             }
             ast::CreateTableBody::Columns {
                 columns,

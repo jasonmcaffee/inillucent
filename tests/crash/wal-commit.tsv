@@ -1,4 +1,4 @@
-# 91 cuts: 27 old, 64 new, 0 damaged and detected
+# 97 cuts: 31 old, 66 new, 0 damaged and detected
 cut	state	committed
 1	old	false
 2	old	false
@@ -27,10 +27,10 @@ cut	state	committed
 25	old	false
 26	old	false
 27	old	false
-28	new	false
-29	new	false
-30	new	false
-31	new	false
+28	old	false
+29	old	false
+30	old	false
+31	old	false
 32	new	false
 33	new	false
 34	new	false
@@ -91,3 +91,9 @@ cut	state	committed
 89	new	false
 90	new	false
 91	new	false
+92	new	false
+93	new	false
+94	new	false
+95	new	false
+96	new	false
+97	new	false

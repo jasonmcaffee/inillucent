@@ -324,6 +324,29 @@ impl Database {
         // the two are told apart by waiting: a creation finishes, and damage
         // does not. The budget is the same one a busy lock waits out, and the
         // message at the end of it is the one this always reported.
+        // **A file of another format version is named before the wait.** Its
+        // header is perfectly well formed and only newer than this build, so
+        // `declared_page_size` answers `None` for it, the loop below waited out
+        // the whole busy budget and then reported `neither meta page is
+        // readable` - corruption, for a file with nothing wrong with it
+        // (task-1979, E3).
+        if let Some(found) = foreign_format_version(file.as_ref()) {
+            return Err(crate::meta::wrong_format(found));
+        }
+        // **A SQLite file says so rather than reading as damage (task-1979,
+        // section 8.1, gap 7).** It is the most common first mistake, and the
+        // answer was `database disk image is malformed` - which sends somebody
+        // looking for corruption in a file that is perfectly good and is simply
+        // another engine's. `docs/sql.md` has always said a SQLite file is
+        // imported rather than opened in place; this is that sentence, at the
+        // moment it is needed.
+        if is_a_sqlite_file(file.as_ref()) {
+            return Err(inillucent_base::error::refusal(
+                "this is a SQLite database, and this engine writes its own format; \
+                 `inillucent-migrate <file> <new.rdb>` reads it and writes one",
+            )
+            .with_unsupported("opening a SQLite database in place"));
+        }
         let mut waited = 0u64;
         let page_size = loop {
             if let Some(size) = declared_page_size(file.as_ref()) {
@@ -683,10 +706,21 @@ impl Database {
             return Ok(false);
         }
         if !may_release {
-            let reloaded = self.begin_read()?;
+            // **Only a connection that held nothing re-derives**, which is the
+            // short circuit `begin_read` makes and for the same reason: a
+            // connection that already holds the file has had it all along, so
+            // nothing can have changed under it, and throwing its pages away in
+            // the middle of a transaction would discard the transaction's own
+            // writes. The reload is after the raise rather than before it for
+            // the reason `attempt_write` gives.
+            let held = self.pool.lock_level() != FileLock::None;
+            self.pool.lock(FileLock::Shared)?;
             self.pool.lock(FileLock::Reserved)?;
             self.pool.lock(FileLock::Exclusive)?;
-            return Ok(reloaded);
+            if held {
+                return Ok(false);
+            }
+            return self.reload_if_moved();
         }
         self.begin_write_retrying()
     }
@@ -746,10 +780,24 @@ impl Database {
         self.trusted = false;
         self.pool.unlock(FileLock::None)?;
         self.pool.lock_within(FileLock::Shared, 0)?;
-        let reloaded = self.reload_if_moved()?;
         self.pool.lock_within(FileLock::Reserved, 0)?;
         self.pool.lock_within(FileLock::Exclusive, 0)?;
-        Ok(reloaded)
+        // **Read after the lock that excludes a writer, not before it**
+        // (task-1979, section 4; measured again in task-1980). This asked the
+        // file what had changed while it held SHARED, which two processes hold
+        // at once, and then raised to EXCLUSIVE - so the answer was about the
+        // file as it was before the *other* writer's statement, and this one
+        // went on to write from pages it had just decided were current. The
+        // window is small and the loss is rare: two writers each running three
+        // hundred single statement inserts through the command line lost about
+        // one acknowledged row in six hundred, with `PRAGMA integrity_check`
+        // clean and the row never visible to any process.
+        //
+        // Reading here instead costs nothing extra - it is the same two page
+        // reads - and it is the only order in which the answer is still true
+        // when the write happens. `begin_read` needs no such move: SHARED is
+        // the lock a read needs, and a writer cannot write while it is held.
+        self.reload_if_moved()
     }
 
     /// Releases the file lock, which is what `locking_mode = normal` does.
@@ -1132,6 +1180,40 @@ fn declared_page_size(file: &dyn inillucent_vfs::VfsFile) -> Option<usize> {
         return None;
     }
     Some(size)
+}
+
+/// Returns whether a file begins with SQLite's own header.
+///
+/// The sixteen bytes `SQLite format 3` and a NUL, which every SQLite database
+/// starts with and which no inillucent file can, because ours starts with
+/// `RDB2`.
+///
+/// @param file - the open data file
+fn is_a_sqlite_file(file: &dyn inillucent_vfs::VfsFile) -> bool {
+    let mut head = [0u8; 16];
+    if file.read_exact_at(0, &mut head).is_err() {
+        return false;
+    }
+    head == *b"SQLite format 3\0"
+}
+
+/// Returns the format version a file carries when it is not this build's.
+///
+/// `None` means the file is either this build's format or not an inillucent
+/// database at all - the second is the caller's "neither meta page is
+/// readable", which is the right answer for a file whose magic is missing.
+///
+/// @param file - the open data file
+fn foreign_format_version(file: &dyn inillucent_vfs::VfsFile) -> Option<u32> {
+    let mut head = [0u8; 12];
+    file.read_exact_at(0, &mut head).ok()?;
+    if head.get(0..8)? != crate::meta::MAGIC {
+        return None;
+    }
+    let mut format = [0u8; 4];
+    format.copy_from_slice(head.get(8..12)?);
+    let found = u32::from_le_bytes(format);
+    (found != crate::meta::FORMAT_VERSION).then_some(found)
 }
 
 /// Returns the page size the shadow meta page declares, by trying sizes.

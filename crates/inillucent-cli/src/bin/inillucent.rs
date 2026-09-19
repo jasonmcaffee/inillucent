@@ -399,17 +399,18 @@ fn dispatch(command: &'static Command, invocation: &Invocation) -> ExitCode {
     };
     // **`create` and `migrate` open no session database.** Each writes the file
     // it was asked for and neither reads the one `--db` names, so pointing them
-    // at `:memory:` is what lets `Context::open` refuse a `--db` path that is
-    // not there for every other command (task-1979, E2).
+    // at `:memory:` keeps them out of the question `Context::open_for` answers
+    // below (task-1979, E2).
     let database = if command.name == "create" || command.name == "migrate" {
         ":memory:"
     } else {
         &invocation.database
     };
-    let mut context = match Context::open(
+    let mut context = match Context::open_for(
         database,
         OpenMode::of(invocation.readonly),
         invocation.root.clone(),
+        command.writes,
     ) {
         Ok(context) => context,
         Err(failure) => return report(&failure, invocation.json, command.name),

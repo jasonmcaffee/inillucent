@@ -1,4 +1,4 @@
-# 176 cuts: 27 old, 149 new, 0 damaged and detected
+# 182 cuts: 31 old, 151 new, 0 damaged and detected
 cut	state	committed
 1	old	false
 2	old	false
@@ -27,10 +27,10 @@ cut	state	committed
 25	old	false
 26	old	false
 27	old	false
-28	new	false
-29	new	false
-30	new	false
-31	new	false
+28	old	false
+29	old	false
+30	old	false
+31	old	false
 32	new	false
 33	new	false
 34	new	false
@@ -176,3 +176,9 @@ cut	state	committed
 174	new	false
 175	new	false
 176	new	false
+177	new	false
+178	new	false
+179	new	false
+180	new	false
+181	new	false
+182	new	false

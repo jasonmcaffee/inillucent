@@ -177,7 +177,17 @@ pub fn write_extent(
     // Anything longer than a page keeps its contiguous run. Packing would not
     // help it - it needs every byte of the pages it takes - and the run is the
     // whole of the `large.values` argument.
-    if pages <= 1 {
+    //
+    // **And it has to fit a shared page, which holds less than a page.** The
+    // count above is pages of *payload*; a shared page spends another fifty six
+    // bytes on its header and the directory entry, so a value between the two
+    // reached `shared::place` on a page made fresh for it and was refused with
+    // `a shared extent page has no room for this value` - which the caller read
+    // as `bad parameter or other API misuse`. Measured on the default page
+    // size: a bound TEXT of 32,000 bytes stored and one of 32,700 did not, and
+    // nothing in the tree had a test for a value between a shared page's
+    // capacity and a whole one (task-1979, section 10, D2).
+    if pages <= 1 && value.len() <= extent::shared::capacity(page_size) {
         return write_packed_extent(database, log, tree_id, value);
     }
     let first = database.allocate(pages)?;

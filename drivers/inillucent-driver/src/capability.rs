@@ -412,6 +412,33 @@ pub static CAPABILITIES: &[Capability] = &[
     },
     // —— what it does not do ——————————————————————————————————————
     Capability {
+        name: "large_value_in_an_untyped_column",
+        support: Support::No,
+        note: "A value larger than a page is stored outside it only when the column is declared TEXT and holds text or BLOB and holds bytes: an extent reference carries a page and a length and nothing saying which of the two it is, so the column's declaration is what answers. `CREATE TABLE t (a TEXT)` holds a megabyte; `CREATE TABLE t (a)` refuses about 32 KB and says what to declare.",
+        probe: Probe::Runs {
+            setup: &["CREATE TABLE t (a)"],
+            sql: "INSERT INTO t VALUES (replace(hex(zeroblob(40000)), '0', 'p'))",
+        },
+    },
+    Capability {
+        name: "distinct_in_a_scalar_function",
+        support: Support::No,
+        note: "DISTINCT belongs to an aggregate: `count(DISTINCT a)` works and `abs(DISTINCT a)` is refused, as SQLite refuses it too.",
+        probe: Probe::Runs {
+            setup: &["CREATE TABLE t (a INTEGER)"],
+            sql: "SELECT abs(DISTINCT a) FROM t",
+        },
+    },
+    Capability {
+        name: "attach_with_key",
+        support: Support::No,
+        note: "ATTACH takes a path and a name: the KEY clause, which SQLite's own build answers only with the encryption extension, is refused.",
+        probe: Probe::Runs {
+            setup: &[],
+            sql: "ATTACH DATABASE 'other.rdb' AS o KEY 'k'",
+        },
+    },
+    Capability {
         name: "row_value_in_subquery",
         support: Support::No,
         note: "A row value on the left of IN takes a value list and not a query: `(a, b) IN (SELECT x, y FROM s)` is refused.",
@@ -553,15 +580,6 @@ pub static CAPABILITIES: &[Capability] = &[
         probe: Probe::Runs {
             setup: &[],
             sql: "CREATE VIRTUAL TABLE d USING fts5(body, columnsize=0)",
-        },
-    },
-    Capability {
-        name: "fts5_content_rowid_option",
-        support: Support::No,
-        note: "An external content FTS5 table reads its owner's rowid: `content_rowid=` naming another column is refused rather than accepted and ignored.",
-        probe: Probe::Runs {
-            setup: &[],
-            sql: "CREATE VIRTUAL TABLE d USING fts5(body, content='c', content_rowid='id')",
         },
     },
     Capability {

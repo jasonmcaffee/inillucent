@@ -1004,12 +1004,72 @@ fn round(arguments: &[Value<'static>]) -> Value<'static> {
         return Value::Real(scaled.round() / factor);
     }
     let places = usize::try_from(digits).unwrap_or(0);
-    match format!("{real:.places$}").parse::<f64>() {
+    match rounded_text(real, places).parse::<f64>() {
         Ok(rounded) => Value::Real(rounded),
         // A magnitude no decimal form can carry is already rounded to this many
         // places, so it is its own answer.
         Err(_) => Value::Real(real),
     }
+}
+
+/// Returns a number's decimal text at `places`, rounding a tie away from zero.
+///
+/// **Rust's formatter rounds a tie to even and SQLite's does not (task-1979,
+/// F10).** `format!("{:.1}", 99.25)` is `99.2`, because 2 is even; SQLite's
+/// `%!.*f` is its own implementation and rounds an exact half away from zero,
+/// so it answers `99.3`. The same split shows on `round(0.125, 2)`: `0.12`
+/// against `0.13`. Every value that is *not* an exact half already agreed,
+/// which is why the formatter was the right idea and the wrong rounding:
+/// `2.675` is 2.674999999999999822 as a double, and both answer `2.67`.
+///
+/// The number is expanded thirty digits past the place that is being kept, and
+/// the decision is made on that text. Thirty is enough: a tie is a `5` followed
+/// by nothing but zeros, so a digit further out than that makes the value
+/// *larger* than the half, which rounds the same way a tie does.
+///
+/// @param real - the value
+/// @param places - how many decimal places to keep
+fn rounded_text(real: f64, places: usize) -> String {
+    let wide = format!("{:.*}", places.saturating_add(30), real);
+    let (sign, rest) = match wide.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", wide.as_str()),
+    };
+    let Some((whole, fraction)) = rest.split_once('.') else {
+        return wide;
+    };
+    let Some(kept) = fraction.get(..places) else {
+        return wide;
+    };
+    let up = fraction
+        .as_bytes()
+        .get(places)
+        .is_some_and(|digit| *digit >= b'5');
+    let mut digits: Vec<u8> = whole.bytes().chain(kept.bytes()).collect();
+    if up {
+        carry_one(&mut digits);
+    }
+    let text = String::from_utf8_lossy(&digits).into_owned();
+    let point = text.len().saturating_sub(places);
+    let (whole, fraction) = text.split_at(point.min(text.len()));
+    match places {
+        0 => format!("{sign}{whole}"),
+        _ => format!("{sign}{whole}.{fraction}"),
+    }
+}
+
+/// Adds one to a string of decimal digits, in place, growing it on a carry.
+///
+/// @param digits - the digits, most significant first
+fn carry_one(digits: &mut Vec<u8>) {
+    for digit in digits.iter_mut().rev() {
+        if *digit < b'9' {
+            *digit = digit.saturating_add(1);
+            return;
+        }
+        *digit = b'0';
+    }
+    digits.insert(0, b'1');
 }
 
 /// `zeroblob(n)`.

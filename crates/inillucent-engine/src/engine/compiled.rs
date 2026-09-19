@@ -66,6 +66,56 @@ impl crate::ImportedDatabase {
         Ok(outcome)
     }
 
+    /// Tells a module to remove each row a query found.
+    ///
+    /// Its own function because `apply_compiled` has a recorded length in
+    /// `crates/inillucent-compat/tests/policy.rs` and this arm is the one that
+    /// grew when the change count moved onto the refusal path.
+    ///
+    /// **The count is recorded on the way out of a refusal too**, for the
+    /// reason `insert_into_module` gives: `changes()` reads the connection's
+    /// counters, and a statement that errored before touching them left the
+    /// *previous* statement's number there. A module that refuses a delete - a
+    /// contentless fts5 table refuses every one - reported the last insert's 1
+    /// where SQLite reports 0.
+    ///
+    /// @param statement - the bound delete
+    /// @param keys - the rowids the query answered, one per row
+    fn delete_from_module(
+        &mut self,
+        statement: &inillucent_sql::dml::BoundDelete,
+        keys: &[Vec<OwnedDatum>],
+    ) -> DbResult<Outcome> {
+        let mut changed = 0usize;
+        for key in keys {
+            let Some(rowid) = key.first() else { continue };
+            if let Err(error) = self.change_module(
+                &statement.table.name,
+                &inillucent_sql::vtab::Change::Delete(
+                    inillucent_value::Value::from(&rowid.borrow()).into_owned()?,
+                ),
+            ) {
+                self.record_changes(changed as i64, changed as i64);
+                return Err(error);
+            }
+            changed = changed.saturating_add(1);
+        }
+        if self.writing.batch().is_none() {
+            self.sync_modules()?;
+            self.seal()?;
+        }
+        // See the matching comment in `vtab::insert_into_module`.
+        self.record_changes(changed as i64, changed as i64);
+        Ok(Outcome {
+            rows: Vec::new(),
+            names: Vec::new(),
+            changes: Changes {
+                rows: changed,
+                ..Default::default()
+            },
+        })
+    }
+
     /// Runs one already-compiled statement, without settling anything after it.
     ///
     /// @param cached - the compiled statement
@@ -176,41 +226,7 @@ impl crate::ImportedDatabase {
             Cached::VirtualDelete(statement, query) => {
                 let keys =
                     self.run_cached_query(&query.plan, &query.prepared, &query.slot, params)?;
-                let mut changed = 0usize;
-                for key in &keys {
-                    let Some(rowid) = key.first() else { continue };
-                    // **The count is recorded on the way out of a refusal too**,
-                    // for the reason `insert_into_module` gives: `changes()`
-                    // reads the connection's counters, and a statement that
-                    // errored before touching them left the *previous*
-                    // statement's number there. A module that refuses a delete -
-                    // a contentless fts5 table refuses every one - reported the
-                    // last insert's 1 where SQLite reports 0.
-                    if let Err(error) = self.change_module(
-                        &statement.table.name,
-                        &inillucent_sql::vtab::Change::Delete(
-                            inillucent_value::Value::from(&rowid.borrow()).into_owned()?,
-                        ),
-                    ) {
-                        self.record_changes(changed as i64, changed as i64);
-                        return Err(error);
-                    }
-                    changed = changed.saturating_add(1);
-                }
-                if self.writing.batch().is_none() {
-                    self.sync_modules()?;
-                    self.seal()?;
-                }
-                // See the matching comment in `vtab::insert_into_module`.
-                self.record_changes(changed as i64, changed as i64);
-                Ok(Outcome {
-                    rows: Vec::new(),
-                    names: Vec::new(),
-                    changes: Changes {
-                        rows: changed,
-                        ..Default::default()
-                    },
-                })
+                self.delete_from_module(statement, &keys)
             }
             Cached::Delete(statement, query) => {
                 let keys = self.keys_of(query, params)?;

@@ -348,10 +348,10 @@ impl ImportedDatabase {
             ));
         }
         if !inserting {
-            return Err(
-                refusal("only an INSERT into sqlite_schema is built, not an UPDATE or a DELETE")
-                    .with_unsupported("changing a row of sqlite_schema"),
-            );
+            return Err(refusal(
+                "only an INSERT into sqlite_schema is built, not an UPDATE or a DELETE",
+            )
+            .with_unsupported("changing a row of sqlite_schema"));
         }
         Ok(())
     }

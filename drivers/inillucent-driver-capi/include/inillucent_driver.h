@@ -116,6 +116,11 @@ typedef struct inillucent_error inillucent_error; /* one failure            */
 #define INILLUCENT_FULL          10
 #define INILLUCENT_TOO_BIG       11
 #define INILLUCENT_INVALID_STATE 12  /* you broke this API's own contract  */
+/* The same code, under the name the handle rules use for it: a freed handle, a
+ * double free, or a bind index past the statement's parameter count. Every one
+ * of those was undefined behaviour before task-1980 - a heap corruption, a
+ * silently wrong value, or an allocation of tens of gigabytes. */
+#define INILLUCENT_MISUSE        INILLUCENT_INVALID_STATE
 #define INILLUCENT_INTERNAL      13  /* a defect - please report it        */
 
 /* Value kinds, as inillucent_value_type reports them. Also frozen. */

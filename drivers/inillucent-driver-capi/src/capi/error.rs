@@ -14,6 +14,8 @@ use crate::*;
 
 /// One failure, with its strings already in C form.
 pub struct inillucent_error {
+    /// The word this handle carries while it is alive - see [`Live`].
+    live: Live,
     /// What kind of failure it was.
     status: i32,
     /// The safe message.
@@ -95,6 +97,7 @@ pub(crate) fn report(out: *mut *mut inillucent_error, failure: &Error, diagnosti
         return;
     }
     let held = Box::new(inillucent_error {
+        live: Live::new(inillucent_error::MAGIC),
         status: failure.status as i32,
         message: c_string(&failure.message),
         feature: failure.feature.as_deref().map(c_string),
@@ -251,9 +254,19 @@ pub unsafe extern "C" fn inillucent_error_free(error: *mut inillucent_error) {
     guarded_value(
         || {
             if !error.is_null() {
-                drop(Box::from_raw(error));
+                if held(error as *const inillucent_error).is_none() {
+                    return;
+                }
+                drop(reclaim(error));
             }
         },
         (),
     )
+}
+
+impl Handle for inillucent_error {
+    const MAGIC: u32 = 0x5244_4236;
+    fn live(&self) -> &Live {
+        &self.live
+    }
 }

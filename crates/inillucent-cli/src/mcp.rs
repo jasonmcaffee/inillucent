@@ -233,10 +233,14 @@ pub fn serve<R: BufRead + Send + 'static>(
     mut input: R,
     output: &mut impl Write,
 ) -> Result<(), String> {
-    let mut context = Context::open(
+    // **A served database is one that exists.** A server makes no file: pointed
+    // at a typo it used to create an empty database and answer every question
+    // from it for the rest of its life (task-1979, E2).
+    let mut context = Context::open_for(
         &settings.database,
         OpenMode::of(settings.readonly),
         settings.root.clone(),
+        false,
     )
     .map_err(|failure| failure.message)?;
     // **Safe mode, unconditionally.** See `Context::refuse_the_world`: this

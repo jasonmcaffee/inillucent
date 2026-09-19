@@ -201,6 +201,114 @@ fn a_value_larger_than_the_threshold_reads_back_whole() {
     }
 }
 
+/// A value at every size around a page reads back whole.
+///
+/// **The band between a shared extent page and a whole one had no test, and
+/// nothing in it could be stored (task-1979, section 10, D2).** A value goes
+/// out of line past `page_size / 8`, and `write_extent` sent everything up to
+/// one page of *payload* to the shared, slotted page - which spends another
+/// fifty six bytes on its header and directory entry and therefore holds less.
+/// A value in between reached `shared::place` on a page made fresh for it, was
+/// refused, and the caller read `bad parameter or other API misuse`.
+///
+/// Measured before the fix at the default 32,768 byte page size: a bound TEXT
+/// of 32,000 bytes stored and one of 32,700 did not, and so did every longer
+/// one, so no `TEXT` or `BLOB` over about 32 KB could be written at all. The
+/// sizes below are the same four positions at this suite's 4,096 byte page: a
+/// value the shared page holds, one at its capacity, one past it and inside a
+/// page, and one that needs a run of pages.
+#[test]
+fn a_value_at_every_size_around_a_page_reads_back_whole() {
+    let Some(mut pair) = pair("around-a-page", 8) else {
+        return no_oracle();
+    };
+    // `shared::capacity` is `page_size - 48 - 8` and `payload_capacity` is
+    // `page_size - 48`, so 4,044 is in the eight byte band between them; the
+    // rest straddle a whole page and a run of three.
+    for (nth, length) in [
+        (201usize, 4_000usize),
+        (202, 4_040),
+        (203, 4_044),
+        (204, 4_096),
+        (205, 9_000),
+    ] {
+        let sql = format!(
+            "INSERT INTO wide VALUES ({nth}, 'wide{nth}', replace(hex(zeroblob({})), '0', 'q'))",
+            length / 2
+        );
+        pair.both(&sql);
+        pair.is_intact(&sql);
+    }
+    pair.answers_agree("SELECT id, length(body) FROM wide WHERE id >= 201 ORDER BY id");
+    pair.answers_agree("SELECT id, body FROM wide WHERE id >= 201 ORDER BY id");
+    pair.answers_agree("SELECT sum(length(body)) FROM wide");
+    // And they survive being written over.
+    pair.both("UPDATE wide SET body = body || body WHERE id = 203");
+    pair.is_intact("the update over a value past a shared page's capacity");
+    pair.answers_agree("SELECT id, length(body) FROM wide WHERE id >= 201 ORDER BY id");
+}
+
+/// A value larger than a page is stored when its column is declared for it and
+/// refused by name when it is not.
+///
+/// **Both halves matter, and the second one was answering `bad parameter or
+/// other API misuse` (task-1979, section 10, D2).** A value is stored outside
+/// its page only when the column is declared `TEXT` and holds text, or `BLOB`
+/// and holds bytes: an extent reference carries a page and a length and nothing
+/// that says which of the two it is, so the column's declaration is the only
+/// thing that can answer, and `leaf::layout::classify_at` states that rule.
+///
+/// A column with no declaration - `CREATE TABLE t (a)`, which is `BLOB`
+/// affinity - therefore keeps a text inline however long it is, the row then
+/// cannot fit a page, and the split it falls through to has one row to divide
+/// into two halves. That is a real limit and it is recorded as the capability
+/// row `large_value_in_an_untyped_column`; what was wrong was that the caller
+/// was told nothing about it. Measured at the default 32,768 byte page before
+/// this: `CREATE TABLE t (a TEXT)` stored 65,536 bytes and `CREATE TABLE t (a)`
+/// refused 32,680 with the primary code's own text.
+#[test]
+fn a_value_larger_than_a_page_needs_a_column_declared_for_it() {
+    let Some(mut pair) = pair("declared", 0) else {
+        return no_oracle();
+    };
+    // `wide`'s `body` is declared TEXT, so a text of any length has a run of
+    // its own: 40,000 bytes is ten pages at this suite's page size.
+    for (nth, halves) in [(1usize, 30usize), (2, 2_020), (3, 2_024), (4, 20_000)] {
+        let sql = format!(
+            "INSERT INTO wide VALUES ({nth}, 'row{nth}', replace(hex(zeroblob({halves})), '0', 'p'))"
+        );
+        pair.both(&sql);
+        pair.is_intact(&sql);
+    }
+    pair.answers_agree("SELECT id, length(body) FROM wide ORDER BY id");
+    pair.answers_agree("SELECT id, body FROM wide ORDER BY id");
+    pair.answers_agree("SELECT id, substr(body, 1, 8), substr(body, -8) FROM wide ORDER BY id");
+    pair.both("UPDATE wide SET body = body || body WHERE id = 4");
+    pair.is_intact("the update over a value larger than a page");
+    pair.answers_agree("SELECT id, length(body) FROM wide ORDER BY id");
+    pair.both("DELETE FROM wide WHERE id = 4");
+    pair.is_intact("the delete of a value larger than a page");
+    pair.answers_agree("SELECT id, length(body) FROM wide ORDER BY id");
+
+    // And the same value in a column with no declaration is refused in words.
+    pair.both("CREATE TABLE loose (id INTEGER PRIMARY KEY, body)");
+    let refused = pair
+        .engine
+        .execute_any(
+            "INSERT INTO loose VALUES (1, replace(hex(zeroblob(20000)), '0', 'p'))",
+            &Params::new(),
+        )
+        .err()
+        .expect("an untyped column cannot hold a value larger than a page");
+    assert!(
+        refused.message().contains("larger than a page")
+            && refused.message().contains("declared TEXT"),
+        "the refusal has to say why and what to declare, and it said: {:?} / {:?}",
+        refused.message(),
+        refused.detail()
+    );
+}
+
 #[test]
 fn writing_over_a_large_value_keeps_every_other_row() {
     let Some(mut pair) = pair("write", 40) else {

@@ -99,6 +99,16 @@ pub const INILLUCENT_OPEN_READONLY: u32 = 0x0002;
 /// Let an error carry the engine's internal diagnostic text.
 pub const INILLUCENT_OPEN_DIAGNOSTICS: u32 = 0x0004;
 
+/// The status a call that broke this API's own contract reports.
+///
+/// **The name the C header uses for `INILLUCENT_INVALID_STATE` when the
+/// contract that was broken is a handle's (task-1979, D1).** A freed handle, a
+/// double free and a bind index past the statement's parameter count all answer
+/// this rather than doing something undefined, which is the role SQLite gives
+/// `SQLITE_MISUSE`. It is the same number as `INILLUCENT_INVALID_STATE` and not
+/// a fourteenth code, because it is the same answer: the call was wrong.
+pub const INILLUCENT_MISUSE: i32 = INILLUCENT_INVALID_STATE;
+
 // —— handles ————————————————————————————————————————————————————————
 
 // —— the plumbing ——————————————————————————————————————————————————
@@ -118,16 +128,87 @@ pub(crate) unsafe fn borrowed(text: *const c_char) -> Option<&'static str> {
     CStr::from_ptr(text).to_str().ok()
 }
 
-/// Borrows a handle, or answers `None` for a null pointer.
+/// A handle's liveness word.
+///
+/// **The word a freed handle no longer carries (task-1979, D1).** Freeing an
+/// `inillucent_db`, `inillucent_conn` or `inillucent_error` twice used to
+/// corrupt the heap and end the process, and using a freed handle was
+/// undefined behaviour with no check at all: sometimes a silently wrong value -
+/// an empty path, a query that returned OK against a freed connection -
+/// sometimes an abort that the panic guard cannot intercept, because an abort
+/// is not an unwind.
+///
+/// Every handle now begins with one of these, set to its own type's magic when
+/// the handle is made and cleared to zero immediately before the box is
+/// dropped. Every entry point reads it and answers `INILLUCENT_MISUSE` for a
+/// handle that does not carry the right word.
+///
+/// **It is a check, not a guarantee, and SQLite's is the same.** Once the
+/// allocation is freed the bytes belong to the allocator, and a later
+/// allocation may happen to put the magic back. What it does catch is the two
+/// cases that actually happen: a double free, where the memory is still
+/// untouched, and a handle used after it was freed in the same breath. The
+/// alternative is undefined behaviour with no diagnosis at all.
+pub(crate) struct Live(std::cell::Cell<u32>);
+
+impl Live {
+    /// Returns a liveness word carrying a type's magic.
+    ///
+    /// @param magic - the type's own word
+    pub(crate) fn new(magic: u32) -> Live {
+        Live(std::cell::Cell::new(magic))
+    }
+
+    /// Returns whether the word is still the one this type was made with.
+    ///
+    /// @param magic - the type's own word
+    pub(crate) fn is(&self, magic: u32) -> bool {
+        self.0.get() == magic
+    }
+
+    /// Clears the word, which is what a free does before it drops the box.
+    pub(crate) fn clear(&self) {
+        self.0.set(0);
+    }
+}
+
+/// A type C holds a pointer to.
+pub(crate) trait Handle {
+    /// The word this type's handles carry while they are alive.
+    const MAGIC: u32;
+    /// Returns the handle's own liveness word.
+    fn live(&self) -> &Live;
+}
+
+/// Borrows a live handle, or answers `None` for a null or freed pointer.
 ///
 /// @param handle - the caller's pointer
 ///
 /// # Safety
 ///
-/// `handle` must be null or a pointer this library returned and the caller has
-/// not freed.
-pub(crate) unsafe fn held<'a, T>(handle: *const T) -> Option<&'a T> {
-    handle.as_ref()
+/// `handle` must be null or a pointer this library returned. A pointer the
+/// caller has freed is answered `None` rather than dereferenced further; see
+/// [`Live`] for what that promise is worth and why it is still worth making.
+pub(crate) unsafe fn held<'a, T: Handle>(handle: *const T) -> Option<&'a T> {
+    let held = handle.as_ref()?;
+    held.live().is(T::MAGIC).then_some(held)
+}
+
+/// Clears a handle's liveness word and hands back the box to drop.
+///
+/// The order matters: the word is cleared while the allocation is still ours,
+/// so a second free of the same pointer reads a zero rather than a magic and is
+/// refused by [`held`] before it reaches `Box::from_raw` a second time.
+///
+/// @param handle - the pointer the caller passed
+///
+/// # Safety
+///
+/// `handle` must be a live pointer this library returned.
+pub(crate) unsafe fn reclaim<T: Handle>(handle: *mut T) -> Box<T> {
+    let held = Box::from_raw(handle);
+    held.live().clear();
+    held
 }
 
 // —— the library ————————————————————————————————————————————————————
@@ -300,12 +381,27 @@ pub(crate) unsafe fn database_in<'a>(state: &ConnState) -> Option<&'a inillucent
 ///
 /// `stmt` must be a live handle.
 pub(crate) unsafe fn bind(stmt: *mut inillucent_stmt, index: u32, value: Value) -> i32 {
+    // **The handle is checked before it is dereferenced (task-1979, D1).**
+    // This took `as_mut()` on whatever the caller passed, so binding to a freed
+    // statement wrote into freed memory and reported `INILLUCENT_OK`.
+    if held(stmt as *const inillucent_stmt).is_none() {
+        return INILLUCENT_MISUSE;
+    }
     let Some(statement) = stmt.as_mut() else {
-        return INILLUCENT_INVALID_STATE;
+        return INILLUCENT_MISUSE;
     };
     let Some(at) = (index as usize).checked_sub(1) else {
-        return INILLUCENT_INVALID_STATE;
+        return INILLUCENT_MISUSE;
     };
+    // **And the index against the statement's own parameter count (task-1979,
+    // D3).** There was no upper bound at all, and the `resize` below grew the
+    // list to whatever number arrived: an index near `u32::MAX` asked the
+    // allocator for about 137 GB and stalled the process for tens of seconds.
+    // A statement that declares three parameters cannot be bound at four,
+    // which is what SQLite answers `SQLITE_RANGE` for.
+    if index > statement.declared {
+        return INILLUCENT_MISUSE;
+    }
     if at >= statement.params.len() {
         statement.params.resize(at.saturating_add(1), Value::Null);
     }
@@ -314,7 +410,7 @@ pub(crate) unsafe fn bind(stmt: *mut inillucent_stmt, index: u32, value: Value) 
             *slot = value;
             INILLUCENT_OK
         }
-        None => INILLUCENT_INVALID_STATE,
+        None => INILLUCENT_MISUSE,
     }
 }
 

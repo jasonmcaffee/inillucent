@@ -44,7 +44,7 @@ pub const FORMAT_VERSION: u32 = 1;
 /// than a file from the future.
 ///
 /// @param found - the version the file's header carries
-fn wrong_format(found: u32) -> inillucent_base::DbError {
+pub(crate) fn wrong_format(found: u32) -> inillucent_base::DbError {
     if found > FORMAT_VERSION {
         return inillucent_base::error::refusal(format!(
             "this database is format version {found} and this build reads version \

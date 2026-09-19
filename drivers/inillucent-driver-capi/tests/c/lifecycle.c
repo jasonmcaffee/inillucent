@@ -244,10 +244,14 @@ static void statements(inillucent_conn *conn)
     check_status("bind_blob",
                  inillucent_bind_blob(stmt, 4, blob, sizeof blob), INILLUCENT_OK);
     check_status("bind_null", inillucent_bind_null(stmt, 5), INILLUCENT_OK);
-    /* Binding out of order grows the list with NULLs, which is the documented
-     * behaviour and is what a binding built from a dictionary needs. */
-    check_status("bind_past_the_end_grows",
-                 inillucent_bind_int(stmt, 9, 7), INILLUCENT_OK);
+    /* Binding out of order grows the list with NULLs, which is what a binding
+     * built from a dictionary needs - but only inside the statement's own
+     * parameter count. An index past it used to grow the list to match
+     * whatever number arrived (task-1979, D3), so `?9` on a five parameter
+     * statement was accepted and a large index asked the allocator for tens of
+     * gigabytes. */
+    check_status("bind_past_the_declared_count",
+                 inillucent_bind_int(stmt, 9, 7), INILLUCENT_MISUSE);
     check_status("bind_index_zero_is_refused",
                  inillucent_bind_int(stmt, 0, 7), INILLUCENT_INVALID_STATE);
     check_status("bind_on_null_statement_is_refused",
@@ -801,6 +805,234 @@ static void database_surface(inillucent_db *db, const char *path, const char *ba
     scrub(backup);
 }
 
+
+/* ---------------------------------------------------------------- */
+/* Misuse: a freed handle, a double free, an index nothing declared  */
+/* ---------------------------------------------------------------- */
+
+/*
+ * Every way a caller can break the handle contract, answered by a status.
+ *
+ * **Before task-1980 each of these was undefined behaviour (task-1979, D1 and
+ * D3).** Freeing a database, a connection or an error twice corrupted the heap
+ * and ended the process; using a freed handle sometimes returned a silently
+ * wrong value - an empty path, a query that answered OK against a freed
+ * connection - and sometimes aborted, which the panic guard cannot intercept
+ * because an abort is not an unwind. A bind index had no upper bound at all, so
+ * one call with a large one asked the allocator for about 137 GB and stalled
+ * the process for tens of seconds.
+ *
+ * Every check below therefore asserts two things at once: the status, and that
+ * the process is still here to print the next line.
+ *
+ * @param path - a database file of this group's own
+ */
+static void misuse_is_a_status(const char *path)
+{
+    inillucent_error *error = NULL;
+    inillucent_db *db = NULL;
+    inillucent_conn *conn = NULL;
+    inillucent_stmt *stmt = NULL;
+    const char *held = NULL;
+
+    scrub(path);
+    check_status("misuse_open",
+                 inillucent_open(path, INILLUCENT_OPEN_CREATE, &db, &error),
+                 INILLUCENT_OK);
+    inillucent_error_free(error);
+    error = NULL;
+    if (db == NULL) {
+        check("misuse_open_handle", 0, "no database handle");
+        return;
+    }
+    check_status("misuse_connect", inillucent_connect(db, &conn, &error), INILLUCENT_OK);
+    inillucent_error_free(error);
+    error = NULL;
+    if (conn == NULL) {
+        check("misuse_connect_handle", 0, "no connection handle");
+        return;
+    }
+    check_status("misuse_schema",
+                 inillucent_execute_batch(conn, "CREATE TABLE m (a INTEGER, b TEXT)", &error),
+                 INILLUCENT_OK);
+    inillucent_error_free(error);
+    error = NULL;
+
+    /* A bind index past the statement's own parameter count. */
+    check_status("misuse_prepare",
+                 inillucent_prepare(conn, "INSERT INTO m (a, b) VALUES (?1, ?2)", &stmt, &error),
+                 INILLUCENT_OK);
+    inillucent_error_free(error);
+    error = NULL;
+    if (stmt == NULL) {
+        check("misuse_prepare_handle", 0, "no statement handle");
+        return;
+    }
+    check_status("bind_index_at_the_ceiling",
+                 inillucent_bind_int(stmt, 0xffffffffu, 1),
+                 INILLUCENT_MISUSE);
+    check_status("bind_index_one_past_the_count",
+                 inillucent_bind_int(stmt, 3, 1),
+                 INILLUCENT_MISUSE);
+    check_status("bind_index_zero", inillucent_bind_int(stmt, 0, 1), INILLUCENT_MISUSE);
+    check_status("bind_index_in_range", inillucent_bind_int(stmt, 1, 1), INILLUCENT_OK);
+    check_status("bind_index_two_in_range", inillucent_bind_int(stmt, 2, 2), INILLUCENT_OK);
+
+    /* A freed statement, used and then freed again. */
+    inillucent_stmt_free(stmt);
+    check_status("bind_after_free", inillucent_bind_int(stmt, 1, 1), INILLUCENT_MISUSE);
+    inillucent_stmt_free(stmt);
+    check("statement_double_free_is_survivable", 1, NULL);
+    stmt = NULL;
+
+    /* A freed connection, used and then freed again. */
+    inillucent_conn_free(conn);
+    check_status("prepare_after_conn_free",
+                 inillucent_prepare(conn, "SELECT 1", &stmt, &error),
+                 INILLUCENT_MISUSE);
+    inillucent_error_free(error);
+    error = NULL;
+    inillucent_conn_free(conn);
+    check("connection_double_free_is_survivable", 1, NULL);
+    conn = NULL;
+
+    /* A freed database, read and then closed again. */
+    check_status("close", inillucent_close(db, &error), INILLUCENT_OK);
+    inillucent_error_free(error);
+    error = NULL;
+    held = inillucent_path(db);
+    check("path_after_close_is_null", held == NULL, "a freed database answered a path");
+    check_status("close_twice", inillucent_close(db, &error), INILLUCENT_MISUSE);
+    inillucent_error_free(error);
+    error = NULL;
+    db = NULL;
+
+    /* A freed error, freed again. */
+    check_status("error_open_missing",
+                 inillucent_open("capi-misuse-not-there.rdb", 0, &db, &error),
+                 INILLUCENT_NOT_FOUND);
+    inillucent_error_free(error);
+    inillucent_error_free(error);
+    check("error_double_free_is_survivable", 1, NULL);
+    error = NULL;
+
+    scrub(path);
+}
+
+/*
+ * A TEXT value far past 32 KiB, bound and read back whole.
+ *
+ * **32,768 bytes used to fail and 32,767 to succeed (task-1979, D2).** A BLOB
+ * of the same size went through, and a 40,000 byte TEXT built by a literal
+ * expression stored and read back at its full length - so the ceiling was in
+ * the bind path rather than in storage.
+ *
+ * @param path - a database file of this group's own
+ */
+static void a_large_text_round_trips(const char *path)
+{
+    const size_t size = 65536;
+    inillucent_error *error = NULL;
+    inillucent_db *db = NULL;
+    inillucent_conn *conn = NULL;
+    inillucent_stmt *stmt = NULL;
+    inillucent_rows *rows = NULL;
+    char *text = NULL;
+    const uint8_t *read_back = NULL;
+    size_t read_len = 0;
+    size_t nth = 0;
+
+    text = (char *)malloc(size + 1);
+    if (text == NULL) {
+        check("large_text_allocated", 0, "the test could not allocate its own string");
+        return;
+    }
+    for (nth = 0; nth < size; nth += 1) {
+        text[nth] = (char)('a' + (nth % 26));
+    }
+    text[size] = '\0';
+
+    scrub(path);
+    check_status("large_text_open",
+                 inillucent_open(path, INILLUCENT_OPEN_CREATE, &db, &error),
+                 INILLUCENT_OK);
+    inillucent_error_free(error);
+    error = NULL;
+    if (db == NULL) {
+        free(text);
+        return;
+    }
+    check_status("large_text_connect", inillucent_connect(db, &conn, &error), INILLUCENT_OK);
+    inillucent_error_free(error);
+    error = NULL;
+    if (conn == NULL) {
+        free(text);
+        return;
+    }
+    check_status("large_text_schema",
+                 inillucent_execute_batch(conn, "CREATE TABLE big (s TEXT)", &error),
+                 INILLUCENT_OK);
+    inillucent_error_free(error);
+    error = NULL;
+
+    check_status("large_text_prepare",
+                 inillucent_prepare(conn, "INSERT INTO big (s) VALUES (?1)", &stmt, &error),
+                 INILLUCENT_OK);
+    inillucent_error_free(error);
+    error = NULL;
+    if (stmt == NULL) {
+        free(text);
+        return;
+    }
+    check_status("large_text_bind",
+                 inillucent_bind_text(stmt, 1, text, size),
+                 INILLUCENT_OK);
+    check_status("large_text_execute",
+                 inillucent_stmt_execute(stmt, 1, &rows, &error),
+                 INILLUCENT_OK);
+    inillucent_error_free(error);
+    error = NULL;
+    inillucent_rows_free(rows);
+    rows = NULL;
+    inillucent_stmt_free(stmt);
+    stmt = NULL;
+
+    check_status("large_text_query_prepare",
+                 inillucent_prepare(conn, "SELECT s FROM big", &stmt, &error),
+                 INILLUCENT_OK);
+    inillucent_error_free(error);
+    error = NULL;
+    if (stmt == NULL) {
+        free(text);
+        return;
+    }
+    check_status("large_text_query",
+                 inillucent_stmt_execute(stmt, 1, &rows, &error),
+                 INILLUCENT_OK);
+    inillucent_error_free(error);
+    error = NULL;
+    inillucent_stmt_free(stmt);
+    stmt = NULL;
+    if (rows == NULL) {
+        free(text);
+        return;
+    }
+    check("large_text_one_row", inillucent_rows_count(rows) == 1, "not exactly one row");
+    read_back = inillucent_value_bytes(rows, 0, 0, &read_len);
+    check("large_text_length", read_len == size, "the value came back a different length");
+    check("large_text_bytes",
+          read_back != NULL && read_len == size && memcmp(read_back, text, size) == 0,
+          "the value came back different");
+    inillucent_rows_free(rows);
+    rows = NULL;
+
+    inillucent_conn_free(conn);
+    check_status("large_text_close", inillucent_close(db, &error), INILLUCENT_OK);
+    inillucent_error_free(error);
+    free(text);
+    scrub(path);
+}
+
 /* ---------------------------------------------------------------- */
 
 /* Runs every group and reports how many checks failed. */
@@ -854,6 +1086,9 @@ int main(void)
     check_status("close", inillucent_close(db, &error), INILLUCENT_OK);
     inillucent_error_free(error);
     scrub(path);
+
+    misuse_is_a_status("capi-lifecycle-misuse.rdb");
+    a_large_text_round_trips("capi-lifecycle-large.rdb");
 
     closing_is_refused_while_connected("capi-lifecycle-order-1.rdb");
     statement_outliving_its_connection("capi-lifecycle-order-2.rdb");

@@ -68,12 +68,27 @@ impl Kind {
             Kind::Text => matches!(value, Json::Text(_)),
             Kind::Integer => value.integer().is_some(),
             Kind::Boolean => matches!(value, Json::Bool(_)),
+            // **An array and an object are values too (task-1979, section 8.2,
+            // gap 2, and D15).** A nested array of numbers is a vector and
+            // `{"blob": "<hex>"}` is bytes; neither had a spelling at all, so a
+            // caller binding into a `VECTOR(N)` column or binding a byte string
+            // had to build a hex literal itself. The command line accepted both
+            // once `literal_of` learned them and this did not, so the two
+            // surfaces disagreed about the same JSON.
             Kind::Values => value.array().is_some_and(|items| {
-                items.iter().all(|item| {
-                    matches!(
-                        item,
-                        Json::Null | Json::Bool(_) | Json::Int(_) | Json::Real(_) | Json::Text(_)
-                    )
+                items.iter().all(|item| match item {
+                    Json::Null | Json::Bool(_) | Json::Int(_) | Json::Real(_) | Json::Text(_) => {
+                        true
+                    }
+                    Json::Array(numbers) => numbers
+                        .iter()
+                        .all(|number| matches!(number, Json::Int(_) | Json::Real(_))),
+                    Json::Object(fields) => {
+                        fields.len() == 1
+                            && fields.iter().all(|(name, value)| {
+                                name == "blob" && matches!(value, Json::Text(_))
+                            })
+                    }
                 })
             }),
         }
@@ -363,6 +378,21 @@ impl Context {
     /// @param readonly - whether writes are refused
     /// @param root - the directory paths are confined to, if any
     pub fn open(path: &str, mode: OpenMode, root: Option<PathBuf>) -> Result<Context, Failed> {
+        Context::open_for(path, mode, root, true)
+    }
+
+    /// Opens a database for one command, which may or may not make the file.
+    ///
+    /// @param path - the database to open
+    /// @param mode - whether writes are refused
+    /// @param root - the directory every file is confined to, when there is one
+    /// @param may_create - whether this caller is allowed to make the file
+    pub fn open_for(
+        path: &str,
+        mode: OpenMode,
+        root: Option<PathBuf>,
+        may_create: bool,
+    ) -> Result<Context, Failed> {
         let readonly = mode == OpenMode::ReadOnly;
         // **The confinement is installed before the first file is opened.**
         // The database this surface starts on is a path like any other, and
@@ -387,18 +417,26 @@ impl Context {
                 .into_owned(),
             None => path.to_string(),
         };
-        // **A path that is not there is not made here (task-1979, E2).**
-        // `inillucent --db typo.rdb tables` used to create `typo.rdb`, write a
-        // log segment beside it, print an empty table and exit 0 - so a
+        // **A read verb does not make the file it was pointed at (task-1979,
+        // E2).** `inillucent --db typo.rdb tables` used to create `typo.rdb`,
+        // write a log segment beside it, print an empty table and exit 0 - so a
         // mistyped path answered "this database has no tables" and left a file
-        // behind that the next command would then open happily. `create` is the
-        // command that makes a file, and it says so in its own help; `migrate`
-        // writes its destination itself and opens no session database. Both of
-        // them reach this function with `:memory:`.
-        if !opened.is_empty() && opened != ":memory:" && !std::path::Path::new(&opened).exists() {
+        // behind that the next command would then open happily.
+        //
+        // **A verb that writes still makes one**, because that is what
+        // `sqlite3 new.db "CREATE TABLE ..."` does and what every script that
+        // sets a database up in one line expects. `Command::writes` is the same
+        // flag `--readonly` refuses on, so the two questions have one answer.
+        if !may_create
+            && !opened.is_empty()
+            && opened != ":memory:"
+            && !std::path::Path::new(&opened).exists()
+        {
             return Err(Failed::said(
                 Status::NotFound,
-                format!("there is no database at \"{opened}\". `inillucent create {opened}` makes one."),
+                format!(
+                    "there is no database at \"{opened}\". `inillucent create {opened}` makes one."
+                ),
             ));
         }
         // **The engine's own status, not `io` for everything.** A file another

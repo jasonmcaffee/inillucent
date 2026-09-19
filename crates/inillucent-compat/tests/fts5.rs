@@ -464,7 +464,7 @@ fn a_contentless_table_stores_no_text() {
 
 /// The options this build cannot honour are refused rather than ignored.
 ///
-/// **All three used to be accepted and changed nothing (task-1979, R15).**
+/// **Both used to be accepted and changed nothing (task-1979, R15).**
 /// `detail='none'` says the index holds no positions, and SQLite refuses a
 /// phrase query against one - this engine stored the positions anyway and
 /// answered the phrase query, which is an answer the schema says is not
@@ -485,7 +485,6 @@ fn the_fts5_options_this_build_cannot_honour_are_refused() {
         ("detail_none", "detail='none'"),
         ("detail_column", "detail='column'"),
         ("columnsize", "columnsize=0"),
-        ("content_rowid", "content_rowid='id'"),
     ] {
         let refused = connection
             .execute(&format!(
@@ -517,4 +516,3 @@ fn the_fts5_options_this_build_cannot_honour_are_refused() {
             .unwrap_or_else(|error| panic!("{option}: {error:?}"));
     }
 }
-

@@ -131,6 +131,74 @@ pub fn run_with_input(program: &Path, arguments: &[&str], input: &str) -> Ran {
     from_output(&output)
 }
 
+/// Runs statements in a child process and kills it before it can tidy up.
+///
+/// **What a crash is, done with a process rather than with a pragma.** A test
+/// that needs a log nothing has folded into the file used to ask for it with
+/// `PRAGMA locking_mode = EXCLUSIVE`, the statements, and `PRAGMA locking_mode
+/// = NORMAL` - the last of which released the file without checkpointing, which
+/// is what the operating system does for a process that has died. That release
+/// is gone (task-1980): a connection that let the file go with pages still
+/// dirty left the file describing a database without the statement that had
+/// just succeeded, which is a lost write rather than a stale read, and two
+/// writer processes lost 43% of their acknowledged commits to it.
+///
+/// So the crash is a real one now. The shell is spawned with its standard input
+/// held open, the statements are written to it, and the process is killed while
+/// it waits for the next line: nothing is checkpointed because `exclusive`
+/// checkpoints nothing, no destructor runs because the process is gone, and the
+/// locks are released by the operating system, which is the thing being
+/// simulated.
+///
+/// The statements are sent under `PRAGMA locking_mode = EXCLUSIVE`, which the
+/// caller does not write itself, and a `SELECT` follows them so the caller can
+/// see they ran before the kill.
+///
+/// @param shell - the `inillucent-shell` binary
+/// @param database - the file to open
+/// @param sql - the statements, each ending in a semicolon
+/// @returns what the shell printed before it was killed
+pub fn write_and_crash(shell: &Path, database: &Path, sql: &str) -> String {
+    use std::io::{Read, Write};
+    let mut child = Command::new(shell)
+        .arg(database.to_string_lossy().replace('\\', "/"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|error| panic!("{} did not start: {error}", shell.display()));
+    let text = format!("PRAGMA locking_mode = EXCLUSIVE;\n{sql}\nSELECT 'written';\n");
+    if let Some(pipe) = child.stdin.as_mut() {
+        let _ = pipe.write_all(text.as_bytes());
+        let _ = pipe.flush();
+    }
+    // **Read until the sentinel rather than sleeping.** The kill has to land
+    // after the statements have run and before the shell is asked to exit, and
+    // a fixed wait is either too short on a loaded machine or wasted on an idle
+    // one. The shell prints a row per statement, so the sentinel arriving is
+    // the statements having finished.
+    //
+    // Bounded, because a shell that buffered its output would never print the
+    // sentinel and this would wait for ever. The bound is generous - the work
+    // is a handful of statements - and the kill happens either way, so a run
+    // that reaches it fails on the caller's assertion about the sentinel rather
+    // than by hanging.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    let mut said = String::new();
+    if let Some(pipe) = child.stdout.as_mut() {
+        let mut byte = [0u8; 1];
+        while !said.contains("written") && std::time::Instant::now() < deadline {
+            match pipe.read(&mut byte) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => said.push(char::from(byte[0])),
+            }
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    said.replace("\r\n", "\n")
+}
+
 /// Turns a finished process into a `Ran`, normalising line endings.
 ///
 /// The endings are normalised because every assertion below compares against a

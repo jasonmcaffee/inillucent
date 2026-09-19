@@ -131,8 +131,8 @@ pub mod pragma;
 pub mod readonly;
 mod reattach;
 mod rebuild;
-mod schema_write;
 pub mod recovery;
+mod schema_write;
 use recovery::OpenedFile;
 /// Session-scoped `total_changes()` accounting.
 mod session_changes;

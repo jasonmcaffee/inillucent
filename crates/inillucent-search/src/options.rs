@@ -124,7 +124,9 @@ impl Mode {
         match text.trim().to_ascii_lowercase().as_str() {
             "exact" => Ok(Mode::Exact),
             "approximate" | "approx" => Ok(Mode::Approximate),
-            other => Err(failure(format!(
+            // The sentence is the message and not only the detail, for the
+            // reason given on `Metric::parse` below.
+            other => Err(inillucent_base::error::statement_refusal(format!(
                 "inillucent_search: mode must be exact or approximate, not {other}"
             ))),
         }
@@ -165,7 +167,15 @@ impl Metric {
         match text.trim().to_ascii_lowercase().as_str() {
             "cosine" => Ok(Metric::Cosine),
             "l2" => Ok(Metric::L2),
-            other => Err(failure(format!(
+            // **The sentence is the message, not only the detail (task-1979,
+            // section 8.1, gap 10).** `failure` sets the detail alone, and a
+            // `DbError` with no message renders as `SQL logic error` - so
+            // `WITH (metric = 'manhattan')` answered three words that name
+            // neither the setting, the value nor the two that would have
+            // worked. Somebody porting from pgvector writes a metric name
+            // pgvector has and this build does not, which is the whole of how
+            // this is reached.
+            other => Err(inillucent_base::error::statement_refusal(format!(
                 "inillucent_search: the only distances this build implements are cosine and l2, not {other}"
             ))),
         }

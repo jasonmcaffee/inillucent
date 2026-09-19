@@ -374,7 +374,11 @@ fn json(layout: &Layout, columns: &[String], rows: &[Vec<Value<'static>>]) -> Ve
             .enumerate()
             .map(|(position, value)| {
                 let name = columns.get(position).cloned().unwrap_or_default();
-                format!("\"{}\":{}", json_escape(&name), json_value(value))
+                format!(
+                    "\"{}\":{}",
+                    inillucent_base::json::escape(&name),
+                    json_value(value)
+                )
             })
             .collect();
         let open = if index == 0 { "[" } else { "" };
@@ -390,7 +394,10 @@ fn json_value(value: &Value<'static>) -> String {
         Value::Null => "null".to_string(),
         Value::Integer(number) => number.to_string(),
         Value::Real(_) => number_text(value),
-        Value::Text(text) => format!("\"{}\"", json_escape(&String::from_utf8_lossy(text.raw()))),
+        Value::Text(text) => format!(
+            "\"{}\"",
+            inillucent_base::json::escape(&String::from_utf8_lossy(text.raw()))
+        ),
         // A blob's bytes, each as its own escape: the reference writes
         // `"\u00ab"` rather than the hex a reader might expect, and a consumer
         // of the JSON is reading whichever one it was given.
@@ -403,25 +410,6 @@ fn json_value(value: &Value<'static>) -> String {
             format!("\"{escaped}\"")
         }
     }
-}
-
-/// Escapes a string for JSON.
-fn json_escape(text: &str) -> String {
-    let mut out = String::with_capacity(text.len());
-    for character in text.chars() {
-        match character {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            control if (control as u32) < 0x20 => {
-                out.push_str(&format!("\\u{:04x}", control as u32));
-            }
-            other => out.push(other),
-        }
-    }
-    out
 }
 
 /// Returns each column's width: the widest of its values and its name.
@@ -786,9 +774,14 @@ mod tests {
 
     /// JSON escapes what JSON has to escape.
     #[test]
-    fn json_escapes_control_characters() {
-        assert_eq!(json_escape("a\"b"), "a\\\"b");
-        assert_eq!(json_escape("a\nb"), "a\\nb");
-        assert_eq!(json_escape("a\u{1}b"), "a\\u0001b");
+    fn the_shell_escapes_through_the_base_crate() {
+        assert_eq!(inillucent_base::json::escape("a\"b"), "a\\\"b");
+        assert_eq!(inillucent_base::json::escape("a\nb"), "a\\nb");
+        assert_eq!(inillucent_base::json::escape("a\u{1}b"), "a\\u0001b");
+        // The two the private copy spelled as `\u0008` and `\u000c`, and the
+        // one it left unescaped.
+        assert_eq!(inillucent_base::json::escape("a\u{8}b"), "a\\bb");
+        assert_eq!(inillucent_base::json::escape("a\u{c}b"), "a\\fb");
+        assert_eq!(inillucent_base::json::escape("a\u{7f}b"), "a\\u007fb");
     }
 }

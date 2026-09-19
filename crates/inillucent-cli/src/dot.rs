@@ -45,6 +45,42 @@ pub(crate) fn confine_path(shell: &mut Shell, path: &str) -> Option<String> {
     }
 }
 
+/// The dot commands safe mode refuses, measured against the pinned reference.
+///
+/// **Six of these were reachable over MCP and are the reason this list is
+/// central rather than a check inside each command (task-1979, section 5.3).**
+/// Safe mode was asked about in four places - `.cd`, `.system` and `.shell`,
+/// `.excel` and `.www`, and `.load` - so a server that had turned it on still
+/// let a caller write a file with `.output`, read one with `.read`, and copy
+/// the database somewhere with `.backup`. Measured: `.output out.txt` through
+/// `inillucent-mcp` created `out.txt` in the server's working directory and
+/// reported no error.
+///
+/// The set is the reference's own, read off `sqlite3 -safe` at 3.53.4, which
+/// answers `cannot run .output in safe mode` for every name here. `.clone` is
+/// on it because this shell's `.clone` is its `.backup` under another name -
+/// see the dispatch arm - and the reference has no `.clone` to ask.
+const REFUSED_IN_SAFE_MODE: &[&str] = &[
+    "ar", "archive", "backup", "cd", "clone", "excel", "import", "load", "once", "output", "read",
+    "restore", "save", "shell", "system", "www",
+];
+
+/// Refuses a dot command that safe mode does not allow.
+///
+/// Returns whether the command was refused, in which case it must not run.
+///
+/// `.nonce` has already cleared safe mode by the time the command it covers
+/// reaches here, which is what `.nonce` is for.
+///
+/// @param shell - the shell
+/// @param name - the command's name, without its leading dot
+fn refused_by_safe_mode(shell: &mut Shell, name: &str) -> bool {
+    if !REFUSED_IN_SAFE_MODE.contains(&name) {
+        return false;
+    }
+    shell.unsafe_refused(&format!(".{name}"))
+}
+
 /// Runs one dot command.
 pub fn run(shell: &mut Shell, line: &str) {
     let words = split(without_terminator(line));
@@ -55,6 +91,9 @@ pub fn run(shell: &mut Shell, line: &str) {
         return;
     };
     let arguments: Vec<&str> = words.iter().skip(1).map(String::as_str).collect();
+    if refused_by_safe_mode(shell, &name) {
+        return;
+    }
     match name.as_str() {
         "quit" | "exit" => shell.done = true,
         "help" => help(shell, &arguments),
@@ -208,9 +247,6 @@ fn log(shell: &mut Shell, arguments: &[&str]) {
 /// @param shell - the shell
 /// @param arguments - the words after the command
 fn load_extension(shell: &mut Shell, arguments: &[&str]) {
-    if shell.unsafe_refused(".load") {
-        return;
-    }
     if arguments.is_empty() {
         shell.complain("Usage: .load FILE ?ENTRYPOINT?");
         return;
@@ -423,6 +459,14 @@ fn help(shell: &mut Shell, arguments: &[&str]) {
 /// `.open`: closes the current database and opens another.
 fn open(shell: &mut Shell, arguments: &[&str]) {
     let named = arguments.first().copied().unwrap_or(":memory:");
+    // **The reference refuses the file, not the command.** `sqlite3 -safe`
+    // answers `cannot open disk-based database files in safe mode` and still
+    // allows `.open :memory:`, so `.open` is not in `REFUSED_IN_SAFE_MODE` and
+    // says this instead.
+    if shell.safe && named != ":memory:" && !named.is_empty() {
+        shell.complain("Error: cannot open disk-based database files in safe mode");
+        return;
+    }
     let Some(path) = confine_path(shell, named) else {
         return;
     };

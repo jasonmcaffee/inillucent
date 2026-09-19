@@ -141,133 +141,8 @@ impl crate::ImportedDatabase {
         }
         let folded = name.to_ascii_lowercase();
         match kind {
-            Ast::Table => {
-                let at = self.schema.ddl_schema;
-                let position = self
-                    .schema
-                    .tables
-                    .iter()
-                    .position(|held| held.database == at && held.folded == folded)
-                    .ok_or_else(|| {
-                        refusal(format!("no such table: {}", String::from_utf8_lossy(name)))
-                    })?;
-                let owner = self
-                    .schema
-                    .tables
-                    .get(position)
-                    .cloned()
-                    .ok_or_else(|| refusal("the table that was just found is gone"))?;
-                // A virtual table's storage is its shadow tables, which are
-                // named after it and are not reachable from any row that names
-                // it - see `drop_module_table`.
-                if owner.module.is_some() {
-                    self.drop_module_table(name)?;
-                    self.rebuild_tables()?;
-                    self.refresh_catalog();
-                    self.refresh_vector_indexes();
-                    self.seal()?;
-                    return Ok(Outcome::empty());
-                }
-                // Every row that names the table: the table, its indexes and its
-                // triggers. Collected before anything is removed, because the
-                // list is what decides what to remove.
-                let doomed: Vec<i64> = self
-                    .entries_of(at)
-                    .iter()
-                    .filter(|held| {
-                        held.entry.name.to_ascii_lowercase() == folded
-                            || held.entry.table.to_ascii_lowercase() == folded
-                    })
-                    .map(|held| held.rowid)
-                    .collect();
-                for rowid in doomed {
-                    self.forget(rowid)?;
-                }
-                for index in &owner.indexes {
-                    self.release_tree(index.root)?;
-                }
-                self.release_tree(owner.root)?;
-                // The high-water mark goes with the table, so a table dropped
-                // and recreated starts from one again - which is SQLite's
-                // behaviour and the reason the mark is a row rather than a
-                // header field.
-                if owner.autoincrement {
-                    self.forget_sequence(&owner.name)?;
-                }
-                let _ = position;
-            }
-            Ast::Index => {
-                let owner = self.schema.ddl_schema;
-                let found = self
-                    .schema
-                    .tables
-                    .iter()
-                    .enumerate()
-                    .find_map(|(at, table)| {
-                        if table.database != owner {
-                            return None;
-                        }
-                        table
-                            .indexes
-                            .iter()
-                            .position(|index| index.folded == folded)
-                            .map(|which| (at, which, table.root))
-                    });
-                let Some((table_at, index_at, table_root)) = found else {
-                    return Err(refusal(format!(
-                        "no such index: {}",
-                        String::from_utf8_lossy(name)
-                    )));
-                };
-                // **A vector index is dropped by dropping the store that holds
-                // it (task-1979, R6).** `CREATE INDEX v ON t USING
-                // inillucent_hnsw (c)` records a virtual table, not an index
-                // row, so the loop below found nothing to forget and the
-                // `release_tree` underneath it was handed the zero root a module
-                // owned index carries: `DROP INDEX v` reported success, removed
-                // nothing, and the planner went on choosing the index for every
-                // query - which then failed, because the module had been told
-                // the statement dropped it.
-                let module = self
-                    .schema
-                    .tables
-                    .get(table_at)
-                    .and_then(|table| table.indexes.get(index_at))
-                    .is_some_and(|index| {
-                        index.origin == inillucent_sql::catalog_view::IndexOrigin::Module
-                    });
-                if module {
-                    self.drop_module_table(name)?;
-                    self.rebuild_tables()?;
-                    self.refresh_catalog();
-                    self.refresh_vector_indexes();
-                    self.sort_covering(table_root);
-                    self.seal()?;
-                    return Ok(Outcome::empty());
-                }
-                let index_root = self
-                    .schema
-                    .tables
-                    .get(table_at)
-                    .and_then(|table| table.indexes.get(index_at))
-                    .map(|index| index.root)
-                    .ok_or_else(|| refusal("the index that was just found is gone"))?;
-                let rowids: Vec<i64> = self
-                    .entries_of(self.schema.ddl_schema)
-                    .iter()
-                    .filter(|held| {
-                        held.entry.kind == ObjectKind::Index
-                            && held.entry.name.to_ascii_lowercase() == folded
-                    })
-                    .map(|held| held.rowid)
-                    .collect();
-                for rowid in rowids {
-                    self.forget(rowid)?;
-                }
-                self.release_tree(index_root)?;
-                let _ = (table_at, index_at);
-                self.sort_covering(table_root);
-            }
+            Ast::Table => self.drop_table(name, &folded)?,
+            Ast::Index => self.drop_index(name, &folded)?,
             Ast::View | Ast::Trigger => {
                 let wanted = if kind == Ast::View {
                     ObjectKind::View
@@ -292,6 +167,145 @@ impl crate::ImportedDatabase {
         self.seal()?;
         Ok(Outcome::empty())
     }
+    /// Removes a table, its indexes, its triggers and every tree they held.
+    ///
+    /// Its own function because `drop_object` has a recorded length in
+    /// `crates/inillucent-compat/tests/policy.rs`, and the three kinds it
+    /// handles have nothing in common but the name they were given.
+    ///
+    /// @param name - the table's name as written
+    /// @param folded - the same name, folded, which the catalog is searched by
+    fn drop_table(&mut self, name: &[u8], folded: &[u8]) -> DbResult<()> {
+        let at = self.schema.ddl_schema;
+        let position = self
+            .schema
+            .tables
+            .iter()
+            .position(|held| held.database == at && held.folded == folded)
+            .ok_or_else(|| refusal(format!("no such table: {}", String::from_utf8_lossy(name))))?;
+        let owner = self
+            .schema
+            .tables
+            .get(position)
+            .cloned()
+            .ok_or_else(|| refusal("the table that was just found is gone"))?;
+        // A virtual table's storage is its shadow tables, which are
+        // named after it and are not reachable from any row that names
+        // it - see `drop_module_table`.
+        if owner.module.is_some() {
+            self.drop_module_table(name)?;
+            self.rebuild_tables()?;
+            self.refresh_catalog();
+            self.refresh_vector_indexes();
+            // `drop_object`'s own tail rebuilds and seals for every kind,
+            // so this returns to it rather than repeating it.
+            return Ok(());
+        }
+        // Every row that names the table: the table, its indexes and its
+        // triggers. Collected before anything is removed, because the
+        // list is what decides what to remove.
+        let doomed: Vec<i64> = self
+            .entries_of(at)
+            .iter()
+            .filter(|held| {
+                held.entry.name.to_ascii_lowercase() == folded
+                    || held.entry.table.to_ascii_lowercase() == folded
+            })
+            .map(|held| held.rowid)
+            .collect();
+        for rowid in doomed {
+            self.forget(rowid)?;
+        }
+        for index in &owner.indexes {
+            self.release_tree(index.root)?;
+        }
+        self.release_tree(owner.root)?;
+        // The high-water mark goes with the table, so a table dropped
+        // and recreated starts from one again - which is SQLite's
+        // behaviour and the reason the mark is a row rather than a
+        // header field.
+        if owner.autoincrement {
+            self.forget_sequence(&owner.name)?;
+        }
+        let _ = position;
+        Ok(())
+    }
+
+    /// Removes an index and the tree it held.
+    ///
+    /// @param name - the index's name as written
+    /// @param folded - the same name, folded, which the catalog is searched by
+    fn drop_index(&mut self, name: &[u8], folded: &[u8]) -> DbResult<()> {
+        let owner = self.schema.ddl_schema;
+        let found = self
+            .schema
+            .tables
+            .iter()
+            .enumerate()
+            .find_map(|(at, table)| {
+                if table.database != owner {
+                    return None;
+                }
+                table
+                    .indexes
+                    .iter()
+                    .position(|index| index.folded == folded)
+                    .map(|which| (at, which, table.root))
+            });
+        let Some((table_at, index_at, table_root)) = found else {
+            return Err(refusal(format!(
+                "no such index: {}",
+                String::from_utf8_lossy(name)
+            )));
+        };
+        // **A vector index is dropped by dropping the store that holds
+        // it (task-1979, R6).** `CREATE INDEX v ON t USING
+        // inillucent_hnsw (c)` records a virtual table, not an index
+        // row, so the loop below found nothing to forget and the
+        // `release_tree` underneath it was handed the zero root a module
+        // owned index carries: `DROP INDEX v` reported success, removed
+        // nothing, and the planner went on choosing the index for every
+        // query - which then failed, because the module had been told
+        // the statement dropped it.
+        let module = self
+            .schema
+            .tables
+            .get(table_at)
+            .and_then(|table| table.indexes.get(index_at))
+            .is_some_and(|index| index.origin == inillucent_sql::catalog_view::IndexOrigin::Module);
+        if module {
+            self.drop_module_table(name)?;
+            self.rebuild_tables()?;
+            self.refresh_catalog();
+            self.refresh_vector_indexes();
+            self.sort_covering(table_root);
+            return Ok(());
+        }
+        let index_root = self
+            .schema
+            .tables
+            .get(table_at)
+            .and_then(|table| table.indexes.get(index_at))
+            .map(|index| index.root)
+            .ok_or_else(|| refusal("the index that was just found is gone"))?;
+        let rowids: Vec<i64> = self
+            .entries_of(self.schema.ddl_schema)
+            .iter()
+            .filter(|held| {
+                held.entry.kind == ObjectKind::Index
+                    && held.entry.name.to_ascii_lowercase() == folded
+            })
+            .map(|held| held.rowid)
+            .collect();
+        for rowid in rowids {
+            self.forget(rowid)?;
+        }
+        self.release_tree(index_root)?;
+        let _ = (table_at, index_at);
+        self.sort_covering(table_root);
+        Ok(())
+    }
+
     /// Runs an `ALTER TABLE`.
     ///
     /// Every rewrite is a rewrite of *stored text*, and the catalog is then

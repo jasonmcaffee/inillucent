@@ -19,11 +19,14 @@ irm https://inillucent.com/downloads/install.ps1 | iex   # Windows
 curl -fsSL https://inillucent.com/downloads/install.sh | sh  # macOS, Linux
 ```
 
-Go is tagged and **not installable yet**:
-`go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent-install@latest` fails
-with `404 ... fatal: could not read Username`, because `proxy.golang.org` cannot clone a private
-repository. `GOPRIVATE=github.com/Black-Rainbow-Labs/*` makes your own git do the clone instead,
-which works only for somebody who already has read access. Use the two commands above.
+Go is tagged and installable from the public repository:
+
+```sh
+go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent-install@latest
+```
+
+It downloads the release archive for your platform and puts `inillucent` on your `PATH`, the same
+files the installer above writes.
 
 `npm install -g inillucent`, `pip install inillucent`, `cargo install inillucent-cli`,
 `brew install black-rainbow-labs/inillucent/inillucent` and `composer require black-rainbow-labs/inillucent`

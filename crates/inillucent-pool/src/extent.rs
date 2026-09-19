@@ -293,6 +293,24 @@ pub mod shared {
         Ok(floor.saturating_sub(directory) >= length)
     }
 
+    /// Returns the longest value a *fresh* shared page can hold.
+    ///
+    /// **A shared page holds less than a dedicated one, and the difference is
+    /// where a bound TEXT of 32,700 bytes was lost (task-1979, section 10,
+    /// D2).** [`super::payload_capacity`] is what an extent page of its own
+    /// holds - the page minus its header - and a shared page spends another
+    /// forty eight bytes on its own header and eight on each directory entry.
+    /// `write_extent` routed by the first number and then placed by the second,
+    /// so a value between the two reached [`place`] on a page freshly made for
+    /// it, was refused with `a shared extent page has no room for this value`,
+    /// and the caller read `bad parameter or other API misuse`. Measured on the
+    /// default 32,768 byte page: 32,000 bytes stored and 32,700 did not.
+    ///
+    /// @param page_size - the database's page size in bytes
+    pub fn capacity(page_size: usize) -> usize {
+        page_size.saturating_sub(at::DIRECTORY.saturating_add(ENTRY))
+    }
+
     /// Places a value on a page and returns the slot it went into.
     ///
     /// @param image - the page bytes

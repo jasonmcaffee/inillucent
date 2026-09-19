@@ -1315,3 +1315,124 @@ fn every_registry_command_has_a_subprocess_test() {
         absent.join("\n  ")
     );
 }
+
+/// A read verb on a path that is not there refuses, and makes no file.
+///
+/// **It used to make one (task-1979, E2).** `inillucent --db typo.rdb tables`
+/// created `typo.rdb`, wrote a log segment beside it, printed an empty table
+/// and exited 0 - so a mistyped path answered "this database has no tables",
+/// which is the wrong answer to a question nobody asked, and left a file the
+/// next command would open without complaint. `create` is the verb that makes a
+/// file and says so in its own help.
+#[test]
+fn a_read_verb_on_a_missing_path_refuses_and_creates_nothing() {
+    let Some(binary) = program("inillucent") else {
+        return;
+    };
+    let directory = area("missing");
+    let database = directory.join("not-there.rdb");
+    for verb in ["tables", "schema", "indexes", "databases", "stats"] {
+        let ran = run(
+            &binary,
+            &[
+                "--db",
+                &database.to_string_lossy(),
+                verb,
+                "--output",
+                "json",
+            ],
+        );
+        assert_ne!(
+            ran.code,
+            0,
+            "{verb} on a missing path exited 0: {}",
+            ran.said()
+        );
+        assert_eq!(
+            text_field(&ran.stdout, "status"),
+            "not_found",
+            "{verb} on a missing path: {}",
+            ran.said()
+        );
+        assert!(
+            !database.exists(),
+            "{verb} created {} instead of refusing",
+            database.display()
+        );
+    }
+    // `create` still makes one, and the verbs then answer.
+    let made = run(&binary, &["create", &database.to_string_lossy()]);
+    assert_eq!(made.code, 0, "create: {}", made.said());
+    let ran = run(
+        &binary,
+        &[
+            "--db",
+            &database.to_string_lossy(),
+            "tables",
+            "--output",
+            "json",
+        ],
+    );
+    succeeded("tables", &ran);
+}
+
+/// A database of a newer format version is refused by name, not as damage.
+///
+/// **Both answered `corrupt` (task-1979, E3).** A file this build cannot read
+/// because it is newer is perfectly well formed, and reporting it as corruption
+/// sends a reader looking for a torn page. The refusal now carries the status
+/// `unsupported`, which is the same answer every other "this build has not got
+/// that" gives, and the command line exits 3.
+///
+/// The fixture is a real database with the four format bytes of both the meta
+/// page and its shadow raised, and the checksum recomputed - which is why the
+/// test writes it through the engine first rather than assembling a header.
+#[test]
+fn a_newer_format_version_is_refused_as_unsupported() {
+    let Some(binary) = program("inillucent") else {
+        return;
+    };
+    let directory = area("format");
+    let database = directory.join("newer.rdb");
+    let made = run(&binary, &["create", &database.to_string_lossy()]);
+    assert_eq!(made.code, 0, "create: {}", made.said());
+
+    let mut bytes = std::fs::read(&database).expect("the database reads back");
+    let page_size = {
+        let mut four = [0u8; 4];
+        four.copy_from_slice(bytes.get(12..16).expect("a header"));
+        u32::from_le_bytes(four) as usize
+    };
+    // The meta record lives on page 0 and its shadow on page 1, and each one
+    // carries its own copy of the version; raising one alone would be read as a
+    // damaged primary with a good shadow, which is a different case.
+    for page in [0usize, page_size] {
+        let at = page.saturating_add(8);
+        let slot = bytes.get_mut(at..at + 4).expect("the format field");
+        slot.copy_from_slice(&99u32.to_le_bytes());
+    }
+    std::fs::write(&database, &bytes).expect("the database writes back");
+
+    let ran = run(
+        &binary,
+        &[
+            "--db",
+            &database.to_string_lossy(),
+            "tables",
+            "--output",
+            "json",
+        ],
+    );
+    assert_eq!(ran.code, 3, "a newer format should exit 3: {}", ran.said());
+    assert_eq!(
+        text_field(&ran.stdout, "status"),
+        "unsupported",
+        "a newer format: {}",
+        ran.said()
+    );
+    let message = text_field(&ran.stdout, "message");
+    assert!(
+        message.contains("format version 99"),
+        "the refusal names the version it found: {message}"
+    );
+}

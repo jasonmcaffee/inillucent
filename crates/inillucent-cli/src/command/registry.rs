@@ -31,8 +31,18 @@ const QUERY_PARAMS: &[Param] = &[
         required: false,
         positional: false,
         description: "The values for ?1, ?2 ... in order, as a JSON array of strings, numbers, \
-                      booleans or nulls. Binding is how you avoid quoting mistakes and SQL \
-                      injection.",
+                      booleans or nulls. An array of numbers is a vector and \
+                      {\"blob\":\"<hex>\"} is bytes. Binding is how you avoid quoting mistakes \
+                      and SQL injection.",
+    },
+    Param {
+        name: "params-file",
+        kind: Kind::Text,
+        required: false,
+        positional: false,
+        description: "A file holding the JSON array for 'params', or - for standard input. What \
+                      a wrapper that spawns this binary uses: a command line has a length \
+                      ceiling, about 32 KB on Windows, and a parameter past it fails outright.",
     },
     LIMIT,
     DB,
@@ -54,7 +64,17 @@ const EXEC_PARAMS: &[Param] = &[
         kind: Kind::Values,
         required: false,
         positional: false,
-        description: "The values for ?1, ?2 ... in order, as a JSON array.",
+        description: "The values for ?1, ?2 ... in order, as a JSON array. An array of numbers \
+                      is a vector and {\"blob\":\"<hex>\"} is bytes.",
+    },
+    Param {
+        name: "params-file",
+        kind: Kind::Text,
+        required: false,
+        positional: false,
+        description: "A file holding the JSON array for 'params', or - for standard input. What \
+                      a wrapper that spawns this binary uses: a command line has a length \
+                      ceiling, about 32 KB on Windows, and a parameter past it fails outright.",
     },
     DB,
     FORMAT,

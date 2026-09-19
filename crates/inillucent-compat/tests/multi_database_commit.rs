@@ -79,35 +79,43 @@ fn prepare(main: &Path, aux: &Path) {
 /// @param main - the database the connection is opened on
 /// @param aux - the database it attaches
 fn write_across(main: &Path, aux: &Path) {
-    let database = Database::open(main).expect("the database reopens");
-    let connection = database.session().expect("the connection opens");
-    connection
-        .execute_batch(&format!(
-            "PRAGMA locking_mode = EXCLUSIVE;
-             ATTACH DATABASE '{}' AS aux;
-             BEGIN;
-             INSERT INTO t VALUES (1);
-             INSERT INTO aux.t VALUES (2);
-             COMMIT;
-             PRAGMA locking_mode = NORMAL;",
-            aux.display().to_string().replace('\\', "/")
-        ))
-        .expect("the transaction commits");
-    // **Abandoned rather than closed, which is what a crash is.** Dropping the
+    // **Killed rather than closed, which is what a crash is.** Closing the
     // handle folds the pools' dirty pages into the two files, and a page already
     // in the file is a page recovery has no say over - so a test that closed
     // tidily would be asserting about a decision something else had taken.
     //
-    // The `locking_mode = NORMAL` above is the other half of the same
-    // simulation, and it is there because the engine now takes real file locks.
-    // A crashing process has its locks released by the operating system, which
-    // is what that pragma does here - it lets the file go without checkpointing,
-    // so the pages stay dirty and unwritten. Forgetting the handle instead would
-    // hold the default `exclusive` lock for the rest of the process, and the
-    // reopen below would be told the file was busy rather than being allowed to
-    // recover it.
-    std::mem::forget(connection);
-    std::mem::forget(database);
+    // This used to abandon an in-process connection and let the file go with
+    // `PRAGMA locking_mode = NORMAL`, whose drop to `normal` released it without
+    // checkpointing. That release is gone (task-1980): a connection that let the
+    // file go with pages still dirty left the file describing a database without
+    // the statement that had just succeeded, and two writer processes lost 43%
+    // of their acknowledged commits to it. With the release gone, the batch's own
+    // end checkpointed - and a checkpoint here writes the undecided
+    // transaction's pages into the files, which is the decision this test exists
+    // to say nothing else may take.
+    //
+    // So the process is a real one and it is killed: `exclusive` checkpoints
+    // nothing, the kill runs no destructor, and the operating system releases
+    // the locks.
+    let Some(shell) = inillucent_compat::cliproc::program("inillucent-shell") else {
+        panic!("inillucent-shell is not built, and this case is about a crashed process");
+    };
+    let said = inillucent_compat::cliproc::write_and_crash(
+        &shell,
+        main,
+        &format!(
+            "ATTACH DATABASE '{}' AS aux;
+             BEGIN;
+             INSERT INTO t VALUES (1);
+             INSERT INTO aux.t VALUES (2);
+             COMMIT;",
+            aux.display().to_string().replace('\\', "/")
+        ),
+    );
+    assert!(
+        said.contains("written"),
+        "the transaction did not commit before the process was killed:\n{said}"
+    );
 }
 
 /// Returns how many rows each database holds, reopening both.

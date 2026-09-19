@@ -16,17 +16,25 @@ use crate::*;
 impl ImportedDatabase {
     /// Chooses whether the file lock is kept between transactions.
     ///
-    /// Dropping to `normal` releases the lock immediately, which is the moment
-    /// a second process may open the file; raising to `exclusive` takes it at
-    /// the next statement rather than here, because taking it now would make a
-    /// pragma block on a lock the caller has not asked to wait for.
+    /// Neither direction moves a lock here. Raising to `exclusive` takes it at
+    /// the next statement, because taking it now would make a pragma block on a
+    /// lock the caller has not asked to wait for; dropping to `normal` releases
+    /// it at the end of this statement, which is `leave`'s job and is the next
+    /// thing that happens.
+    ///
+    /// **It used to release the file here, and that lost writes (task-1979,
+    /// section 4, found again in task-1980).** `inillucent --db f batch "PRAGMA
+    /// locking_mode = normal; INSERT ..."` runs both statements between one
+    /// `enter` and one `leave`. The pragma released the file in the middle of
+    /// that window, and the insert after it then ran believing the lock was
+    /// still held - so two processes wrote the same file at once. Measured at
+    /// six of a hundred and twenty acknowledged inserts missing, intermittently
+    /// and only under load, which is what an unsynchronised write looks like
+    /// from outside.
     ///
     /// @param exclusive - whether to keep the lock
     pub(crate) fn set_locking_exclusive(&mut self, exclusive: bool) -> DbResult<()> {
         self.pragmas.set_locking_exclusive(exclusive);
-        if !exclusive && self.writing.batch().is_none() {
-            self.storage.database.end_access()?;
-        }
         Ok(())
     }
 
@@ -41,6 +49,38 @@ impl ImportedDatabase {
     pub(crate) fn enter(&mut self, writing: bool) -> DbResult<()> {
         self.writing
             .set_running(self.writing.running().saturating_add(1));
+        // **A failure puts the count back (task-1979, section 4, measured
+        // again in task-1980).** `execute_compiled` calls this with `?` and
+        // reaches `leave` only on the way out of a statement that ran, so an
+        // error here used to leave `running` raised for the life of the
+        // connection. What followed was silent: every later statement read
+        // `running > 1` as "inside a transaction", so it took no lock, made no
+        // resynchronisation and never released - and `leave` returned early
+        // because the count never reached zero, so nothing was ever committed
+        // or checkpointed. The statements reported success and wrote nothing.
+        //
+        // Measured on `two_processes_attaching_one_file_lose_nothing`: one
+        // writer refused at line 42 of a three hundred statement script by an
+        // ordinary busy timeout, and the file then held forty of its rows with
+        // no error printed for the other two hundred and fifty eight.
+        let entered = self.enter_within(writing);
+        if entered.is_err() {
+            self.writing
+                .set_running(self.writing.running().saturating_sub(1));
+            // The same release `leave` performs, so a statement that could not
+            // start leaves the file exactly as one that finished does.
+            self.release_if_idle()?;
+        }
+        entered
+    }
+
+    /// Takes every lock one statement needs, and re-derives what has moved.
+    ///
+    /// The body of [`ImportedDatabase::enter`], separated so that the count it
+    /// raises is put back on every path out of it.
+    ///
+    /// @param writing - whether the statement changes the database
+    fn enter_within(&mut self, writing: bool) -> DbResult<()> {
         // **A transaction holds its lock from the first write to the commit.**
         // Once inside one, the retry loop's release would open a window another
         // process could write through - see `Database::begin_write_within`.
@@ -66,14 +106,31 @@ impl ImportedDatabase {
         } else {
             self.storage.database.begin_read()?
         };
-        // **The log is asked the same question the meta record is.** A commit
-        // that is durable in the log and not yet checkpointed does not move the
-        // generation, so the meta record alone reports "nothing has changed"
-        // about a file another process has just written - which is how 120
-        // acknowledged inserts became 60 rows (task-1979, section 4.2). The
-        // segment beside the file is where that commit is, and its length is
-        // the answer.
-        let moved = reloaded || (taking && !inside && self.the_log_moved()?);
+        // **Two questions, because the log's tail alone does not answer it.**
+        // This asked only whether the log had moved, and that is not sound: the
+        // other process's own `leave` checkpoints, a checkpoint rolls a new
+        // segment and deletes the ones below the new recovery point, so the
+        // tail this connection remembers can be the length of a *different*
+        // segment and compare equal. Measured: one to three of a hundred and
+        // twenty acknowledged inserts missing, intermittently, after the two
+        // larger holes in this path were closed.
+        //
+        // The meta record's generation is what closes it, and it is exactly
+        // the case the tail cannot see - a checkpoint bumps the generation, and
+        // a checkpoint is the only thing that retires a segment. Committed
+        // records nobody has folded yet move the tail and not the generation,
+        // which is why both are asked.
+        //
+        // **Re-deriving unconditionally was tried first and is wrong**: the
+        // resynchronisation below builds a new log writer, and a new log writer
+        // starts at the default `synchronous`, so `PRAGMA synchronous = NORMAL`
+        // followed by `PRAGMA synchronous` read back FULL. It also threw away
+        // an attached file's uncommitted pages under a `ROLLBACK` that had
+        // already discarded them, which `attach.rs` reads as a row that
+        // survived a rollback. Two page reads and a `file_size` per lock are
+        // the price of not doing that.
+        let moved =
+            reloaded || (taking && !inside && (self.the_meta_moved()? || self.the_log_moved()?));
         if moved && !inside {
             self.resync_from_file()?;
         }
@@ -136,7 +193,10 @@ impl ImportedDatabase {
                     held.database.begin_read()?
                 }
             };
-            let moved = reloaded || (taking && !inside && self.attached_log_moved(index)?);
+            let moved = reloaded
+                || (taking
+                    && !inside
+                    && (self.attached_meta_moved(index)? || self.attached_log_moved(index)?));
             if moved && !inside {
                 self.resync_attached(index, &path)?;
                 any = true;
@@ -148,6 +208,26 @@ impl ImportedDatabase {
             }
         }
         Ok(any)
+    }
+
+    /// Reports whether one attached file's meta record names a generation
+    /// other than the one this connection's cache describes.
+    ///
+    /// The attached half of [`ImportedDatabase::the_meta_moved`], and there for
+    /// the same reason.
+    ///
+    /// @param index - which attachment
+    fn attached_meta_moved(&self, index: usize) -> DbResult<bool> {
+        let Some(held) = self.session_state.attached.get(index) else {
+            return Ok(false);
+        };
+        if held.path.is_none() {
+            return Ok(false);
+        }
+        Ok(match held.database.meta_on_disk()? {
+            Some(found) => found != *held.database.meta(),
+            None => true,
+        })
     }
 
     /// Reports whether one attached file's log ends somewhere other than where
@@ -193,6 +273,36 @@ impl ImportedDatabase {
         }
         held.wal = crate::recovery::resync_file(&mut held.database, &vfs, &db_path, &doubtful)?;
         Ok(())
+    }
+
+    /// Reports whether the file's meta record names a generation other than the
+    /// one this connection's cache describes.
+    ///
+    /// **The question [`ImportedDatabase::the_log_moved`] cannot answer.** A
+    /// checkpoint by another process rolls a new log segment and deletes the
+    /// ones below the new recovery point, so the tail this connection remembers
+    /// can be the length of a different segment and compare equal - and the
+    /// connection then reads its own stale pages with the lock in its hand.
+    /// A checkpoint is also the one thing that moves the generation, so this
+    /// reports exactly the case the tail misses.
+    ///
+    /// **The whole record, and unreadable counts as moved.** Comparing the
+    /// generation alone left one insert of six hundred missing on the
+    /// reviewer's two writer script, and both halves of that are fail-open
+    /// answers: a record this connection cannot decode says "nothing changed",
+    /// and a field that moved without the generation moving says the same. The
+    /// record is `Eq`, so asking about all of it costs nothing over asking
+    /// about one field of it, and the page has already been read.
+    ///
+    /// A database with no file has no second process and answers no.
+    fn the_meta_moved(&self) -> DbResult<bool> {
+        if self.storage.path.as_os_str().is_empty() {
+            return Ok(false);
+        }
+        Ok(match self.storage.database.meta_on_disk()? {
+            Some(found) => found != *self.storage.database.meta(),
+            None => true,
+        })
     }
 
     /// Reports whether the log beside the file ends somewhere other than where
@@ -246,8 +356,15 @@ impl ImportedDatabase {
             self.storage.database.adopt_from_file(found)?;
         }
         let vfs = std::sync::Arc::clone(&self.storage.vfs);
+        // **`synchronous` is the connection's, not the log writer's.**
+        // `resync_file` builds a new writer, a new writer starts at the default
+        // FULL, and `PRAGMA synchronous = NORMAL` on a connection that later
+        // resynchronised read back 2. The pragma is set once and expected to
+        // hold for the connection, so it is carried across.
+        let synchronous = self.storage.wal.synchronous();
         self.storage.wal =
             crate::recovery::resync_file(&mut self.storage.database, &vfs, &db_path, &doubtful)?;
+        self.storage.wal.set_synchronous(synchronous);
         Ok(())
     }
 
@@ -259,6 +376,15 @@ impl ImportedDatabase {
     pub(crate) fn leave(&mut self) -> DbResult<()> {
         self.writing
             .set_running(self.writing.running().saturating_sub(1));
+        self.release_if_idle()
+    }
+
+    /// Releases every file this connection holds, when nothing is using them.
+    ///
+    /// Shared by [`ImportedDatabase::leave`] and by the failure path of
+    /// [`ImportedDatabase::enter`], because a statement that could not start
+    /// has to leave the file exactly as one that finished does.
+    fn release_if_idle(&mut self) -> DbResult<()> {
         if self.writing.running() > 0
             || self.pragmas.locking_exclusive()
             || self.writing.batch().is_some()

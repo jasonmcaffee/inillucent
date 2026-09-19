@@ -872,6 +872,17 @@ impl<'d> Connection<'d> {
         Ok(self.engine()?.schema_generation())
     }
 
+    /// Returns how many parameters one statement declares.
+    ///
+    /// The bound a caller supplied bind index is checked against; see
+    /// `inillucent_driver::Connection::parameter_count` for what an unbounded
+    /// one cost.
+    ///
+    /// @param sql - the statement text
+    pub fn parameter_count(&self, sql: &str) -> DbResult<u32> {
+        self.database.engine.borrow().parameter_count(sql)
+    }
+
     /// Returns the named parameters one statement declares, with their indexes.
     ///
     /// What a shell needs to bind `.parameter set :name value` onto a statement

@@ -40,7 +40,8 @@ const AREA: &str = "fts5-parity";
 /// correct answer; the alternative is a second `Step` type that borrows.
 fn steps() -> Vec<Step> {
     let base = workspace_root().join("crates/inillucent-compat/tests/corpora/fts5-parity");
-    let corpus = std::fs::read_to_string(base.join("corpus.sql")).expect("the corpus is in the tree");
+    let corpus =
+        std::fs::read_to_string(base.join("corpus.sql")).expect("the corpus is in the tree");
     let queries =
         std::fs::read_to_string(base.join("queries.list")).expect("the queries are in the tree");
     let mut steps: Vec<Step> = Vec::new();

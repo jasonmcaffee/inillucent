@@ -200,9 +200,9 @@ sha256 = "bc8c99f22be1196d8381b20212f450331c583419f61d85c7451f91f5f72c8af5"
 
 [[amendment]]
 path = "crates/inillucent-core/src/index.rs"
-ticket = "task-1953"
-reason = "task-1946 H4: the six search entry points return anyhow::Result and call check_query first. The check runs only when the vector branch runs, because a lexical-only search passes an empty vector on purpose. Four tests beside them, two of which go red with the check stubbed out."
-sha256 = "44e37fbfcaa8aadd1f387b4e5382d644dacf0794cb3a7855ece31c899c267d1d"
+ticket = "task-1980"
+reason = "R16: a document with no embedding is no longer returned by the vector branch, so a pure vector query stops answering it at score zero and a hybrid query stops labelling it origin=both. The filter is on the answer rather than on the scan, so the exhaustive reference every recall number is graded against is unchanged."
+sha256 = "965325d2adbd1cae4f0005adc75c82934bed3a9dbf5878be8b92d1419394b4e2"
 
 [[amendment]]
 path = "crates/inillucent-core/src/install.rs"

@@ -48,6 +48,68 @@ final class Inillucent
     }
 
     /**
+     * Encodes the bound values as the JSON text the command line reads.
+     *
+     * **`json_encode` cannot carry three things a parameter can be
+     * (task-1979, D13, D15 and D16).** A binary string is not valid UTF-8, so
+     * encoding one threw and PHP could not bind a BLOB at all; a NAN or an INF
+     * throws too, where the honest answer is to name the value; and a negative
+     * zero is written `-0`, which reads back as a positive zero.
+     *
+     * What is written instead: bytes become `{"blob":"<hex>"}`, a non-finite
+     * number is refused here with the value in the message, and a negative zero
+     * is written `-0.0`, which JSON's own grammar carries.
+     *
+     * @param list<mixed> $values the bound values, in order
+     * @throws Error when a value has no SQL spelling
+     */
+    private static function encodeParams(array $values): string
+    {
+        $parts = [];
+        foreach ($values as $value) {
+            $parts[] = self::encodeParam($value);
+        }
+
+        return '[' . implode(',', $parts) . ']';
+    }
+
+    /**
+     * Encodes one bound value. See {@see self::encodeParams}.
+     *
+     * @param mixed $value one element of the parameter list
+     * @throws Error when the value has no SQL spelling
+     */
+    private static function encodeParam($value): string
+    {
+        if (is_float($value)) {
+            if (is_nan($value) || is_infinite($value)) {
+                throw new Error(
+                    'a parameter cannot be NAN or INF: SQL has no spelling for either.',
+                    'invalid_state'
+                );
+            }
+            // `1 / $value` is a DivisionByZeroError in PHP 8, so the sign bit
+            // is read off the bytes instead: `pack('e', ...)` is little-endian
+            // IEEE 754, and the top bit of its last byte is the sign.
+            if ($value === 0.0 && (ord(pack('e', $value)[7]) & 0x80) !== 0) {
+                return '-0.0';
+            }
+
+            return json_encode($value, JSON_THROW_ON_ERROR | JSON_PRESERVE_ZERO_FRACTION);
+        }
+        // `preg_match('//u', ...)` rather than `mb_check_encoding`, because
+        // mbstring is an extension a PHP build may not have and PCRE is not.
+        if (is_string($value) && preg_match('//u', $value) !== 1) {
+            return json_encode(['blob' => bin2hex($value)], JSON_THROW_ON_ERROR);
+        }
+        if (is_array($value)) {
+            return self::encodeParams(array_values($value));
+        }
+
+        return json_encode($value, JSON_THROW_ON_ERROR);
+    }
+
+    /**
      * Runs one inillucent command and returns its whole result array.
      *
      * The command line's `--output json` contract, unchanged: `ok`, `command`,
@@ -70,6 +132,7 @@ final class Inillucent
             $argv[] = '--root';
             $argv[] = $this->root;
         }
+        $stdin = null;
         foreach ($arguments as $name => $value) {
             if ($value === null || $value === false) {
                 continue;
@@ -79,15 +142,25 @@ final class Inillucent
                 $argv[] = $flag;
                 continue;
             }
+            // **`params` travels on standard input.** It carries what a command
+            // line cannot: a value larger than the argument ceiling, and a
+            // binary string, which had no spelling at all before (task-1979,
+            // D15 and D17).
+            if ($name === 'params' && is_array($value)) {
+                $stdin = self::encodeParams(array_values($value));
+                $argv[] = '--params-file';
+                $argv[] = '-';
+                continue;
+            }
             $argv[] = $flag;
-            // `params` and `vector` are JSON arguments and the command line
-            // reads them as JSON, so an array is encoded rather than joined.
+            // `vector` is a JSON argument and the command line reads it as
+            // JSON, so an array is encoded rather than joined.
             $argv[] = is_array($value)
                 ? json_encode(array_values($value), JSON_THROW_ON_ERROR)
                 : (string) $value;
         }
 
-        $output = Process::run($argv);
+        $output = Process::run($argv, $stdin);
         $trimmed = trim($output['stdout']);
         // A refusal exits non-zero *and* prints the result object, because JSON
         // was asked for. So the document is what is read, and only an

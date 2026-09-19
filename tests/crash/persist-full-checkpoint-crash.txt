@@ -1,4 +1,4 @@
-cut points: 84, every one recovered to the committed state
+cut points: 86, every one recovered to the committed state
 1	checkpoint	new
 2	checkpoint	new
 3	checkpoint	new
@@ -83,4 +83,6 @@ cut points: 84, every one recovered to the committed state
 82	checkpoint	new
 83	checkpoint	new
 84	checkpoint	new
-85	unarmed	new
+85	checkpoint	new
+86	checkpoint	new
+87	unarmed	new

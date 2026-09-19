@@ -362,6 +362,10 @@ kind = "test"
 name = "analyze_reopen"
 tier = "engine"
 covers = ["inillucent-engine"]
+# The case that needs a log nothing has folded into the file gets one by running
+# the statements in `inillucent-shell` and killing it, which is what a crash is
+# (task-1980). The shell has to be built for that.
+requires = ["programs"]
 
 # The half `analyze_reopen` cannot ask, because every case in it reopens first:
 # that the connection which ran `ANALYZE` reads the statistics it wrote.
@@ -458,6 +462,9 @@ kind = "test"
 name = "multi_database_commit"
 tier = "engine"
 covers = ["inillucent-engine"]
+# The transaction that must stay undecided is written by `inillucent-shell` in a
+# process that is then killed, for the reason `analyze_reopen`'s row gives.
+requires = ["programs"]
 
 [[target]]
 package = "inillucent-compat"

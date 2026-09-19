@@ -19,7 +19,96 @@ import { resolveBinary, PROGRAMS, platformPackage } from './resolve.mjs';
 
 const run = promisify(execFile);
 
+/**
+ * Encodes one bound value as the JSON text the command line reads.
+ *
+ * **`JSON.stringify` loses three things a parameter can be (task-1979, D13 and
+ * D16).** A NaN and an Infinity both become `null`, so a REAL column silently
+ * stored NULL and nothing said so; `-0` becomes `0`, so the sign of negative
+ * zero was gone before the value left Node; and a byte string has no JSON form
+ * at all, so there was no way to bind a BLOB.
+ *
+ * What is written instead: a non-finite number throws here, where the caller
+ * can see which value it was, rather than turning into a NULL nobody asked for.
+ * Negative zero is written `-0.0`, which JSON's own grammar carries and the
+ * command line's parser reads back as a negative zero. Bytes are written
+ * `{"blob":"<hex>"}`.
+ *
+ * @param value - one element of `params`
+ */
+function encodeParam(value) {
+  if (typeof value === 'number') {
+    if (!Number.isFinite(value)) {
+      throw new TypeError(
+        `a parameter cannot be ${value}: SQL has no spelling for NaN or Infinity.`,
+      );
+    }
+    return Object.is(value, -0) ? '-0.0' : JSON.stringify(value);
+  }
+  if (value instanceof Uint8Array) {
+    const hex = Buffer.from(value).toString('hex');
+    return JSON.stringify({ blob: hex });
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(encodeParam).join(',')}]`;
+  }
+  return JSON.stringify(value === undefined ? null : value);
+}
+
+/**
+ * Encodes the whole `params` array as JSON text.
+ *
+ * @param values - the bound values, in order
+ */
+function encodeParams(values) {
+  return `[${values.map(encodeParam).join(',')}]`;
+}
+
 export { resolveBinary, PROGRAMS, platformPackage };
+
+/**
+ * Runs a program, writing `stdin` to it when there is any.
+ *
+ * `execFile` cannot write to standard input, so a call that has something to
+ * write goes through `spawn` and the two are answered the same way: `{ stdout,
+ * stderr }`, or a rejection carrying both plus the exit code, which is the
+ * shape the caller below already handles.
+ *
+ * @param binary - the program to run
+ * @param args - its command line
+ * @param stdin - what to write to its standard input, or null
+ */
+async function spawnWith(binary, args, stdin) {
+  if (stdin === null) {
+    return run(binary, args, { maxBuffer: 256 * 1024 * 1024 });
+  }
+  const { spawn } = await import('node:child_process');
+  return new Promise((resolve, reject) => {
+    const child = spawn(binary, args, { stdio: ['pipe', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk;
+    });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolve({ stdout, stderr });
+        return;
+      }
+      const why = new Error(`inillucent exited ${code}`);
+      why.stdout = stdout;
+      why.stderr = stderr;
+      why.code = code;
+      reject(why);
+    });
+    child.stdin.on('error', () => {});
+    child.stdin.end(stdin);
+  });
+}
 
 /**
  * Runs one inillucent command and returns its result object.
@@ -40,6 +129,7 @@ export { resolveBinary, PROGRAMS, platformPackage };
 export async function inillucent(command, options = {}) {
   const { db, ...rest } = options;
   const args = [command, '--output', 'json'];
+  let stdin = null;
   if (db) {
     args.push('--db', db);
   }
@@ -54,13 +144,23 @@ export async function inillucent(command, options = {}) {
     if (value === false) {
       continue;
     }
-    // An array is a JSON argument - `params` and `vector` are the two - and the
+    // **`params` travels on standard input (task-1979, D17).** A command line
+    // has a length ceiling - about 32 KB on Windows - and a parameter past it
+    // failed with an operating system error rather than with anything about
+    // SQL. `--params-file -` has no such limit, and it is also what lets the
+    // encoding above carry bytes and a negative zero.
+    if (name === 'params' && Array.isArray(value)) {
+      stdin = encodeParams(value);
+      args.push('--params-file', '-');
+      continue;
+    }
+    // Any other array is a JSON argument - `vector` is the one - and the
     // command line reads it as JSON, so it is serialised rather than joined.
     args.push(`--${name}`, Array.isArray(value) ? JSON.stringify(value) : String(value));
   }
   const binary = resolveBinary('inillucent');
   try {
-    const { stdout } = await run(binary, args, { maxBuffer: 256 * 1024 * 1024 });
+    const { stdout } = await spawnWith(binary, args, stdin);
     return JSON.parse(stdout);
   } catch (why) {
     // A non-zero exit still prints the result object on standard output when

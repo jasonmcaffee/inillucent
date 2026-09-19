@@ -175,6 +175,26 @@ for program in inillucent inillucent-shell inillucent-mcp inillucent-migrate; do
   cp "$built/$program" "$stage/bin/"
 done
 
+# **Every staged binary answers with the version on the tin (task-1979, D18).**
+# One release shipped four version numbers: the manifests said 0.1.4, the staged
+# binaries answered 0.1.1, and npm's optionalDependencies pinned 0.1.2. The lane
+# that checked this compared the three manifests against the *freshly built*
+# binary, which agreed - and the archive is made of the staged copies, which
+# were a build from an earlier tree that nothing re-checked.
+#
+# `inillucent-shell` is not on the list because its `--version` answers
+# `SQLite 3.53.4`: it mimics `sqlite3`, deliberately, and the number it reports
+# is the dialect it implements rather than its own. `inillucent-migrate` has no
+# `--version` flag at all. The two that do carry it are the two checked.
+for program in inillucent inillucent-mcp; do
+  staged_version="$("$stage/bin/$program" --version 2>&1)" || {
+    echo "the staged $program did not run: $staged_version" >&2; exit 1; }
+  case "$staged_version" in
+    *"$manifest_version"*) : ;;
+    *) echo "the staged $program reports '$staged_version', not $manifest_version - the archive would be labelled for a build it does not contain" >&2; exit 1 ;;
+  esac
+done
+
 # The C ABI, which is how every language that is not Rust reaches the engine.
 copied_library=0
 for library in libinillucent_driver_capi.dylib libinillucent_driver_capi.so inillucent_driver_capi.dll; do

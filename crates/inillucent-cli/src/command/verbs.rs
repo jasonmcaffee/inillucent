@@ -301,10 +301,53 @@ fn refuse_a_script(context: &mut Context, command: &str, sql: &str) -> Result<()
     ))
 }
 
+/// Returns the values to bind, from `params` or from `params-file`.
+///
+/// **A command line has a length ceiling and a parameter can be past it
+/// (task-1979, D17).** About 32 KB on Windows: the Node and PHP wrappers spawn
+/// this binary and put the JSON array in an argument, so a parameter larger
+/// than that failed outright with an operating system error rather than with
+/// anything about SQL. A file, or `-` for standard input, has no such limit,
+/// and it is also where `{"blob": "<hex>"}` becomes practical - bytes are
+/// exactly what a caller has a lot of.
+///
+/// Naming both is a refusal rather than a precedence rule, because a caller
+/// that supplied two sets of values has made a mistake and guessing which one
+/// it meant is how the wrong values get bound.
+///
+/// @param arguments - the command line as it was parsed
+fn bound_values(arguments: &Arguments) -> Result<Vec<Json>, Failed> {
+    let inline = arguments.values("params");
+    let Some(named) = arguments.text("params-file") else {
+        return Ok(inline);
+    };
+    if !inline.is_empty() {
+        return Err(Failed::misuse(
+            "give the values in 'params' or in 'params-file', not both.",
+        ));
+    }
+    let text = match named {
+        "-" => {
+            let mut held = String::new();
+            std::io::Read::read_to_string(&mut std::io::stdin(), &mut held)
+                .map_err(|error| Failed::said(Status::Io, format!("standard input: {error}")))?;
+            held
+        }
+        path => std::fs::read_to_string(path)
+            .map_err(|error| Failed::said(Status::Io, format!("{path}: {error}")))?,
+    };
+    let parsed = json::parse(text.trim())
+        .map_err(|why| Failed::misuse(format!("'params-file' is not JSON: {why}")))?;
+    match parsed {
+        Json::Array(values) => Ok(values),
+        _ => Err(Failed::misuse("'params-file' has to hold a JSON array.")),
+    }
+}
+
 /// `query`: runs a statement that returns rows.
 pub fn query(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
     let sql = arguments.required_text("sql")?.to_string();
-    let params = arguments.values("params");
+    let params = bound_values(arguments)?;
     let limit = limit_of(context, arguments)?;
     produce(context, "query", &sql, &params, limit)
 }
@@ -312,7 +355,7 @@ pub fn query(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Fa
 /// `exec`: runs one statement for its effect.
 pub fn exec(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
     let sql = arguments.required_text("sql")?.to_string();
-    let params = arguments.values("params");
+    let params = bound_values(arguments)?;
     let before = context
         .shell()
         .connection()
@@ -724,7 +767,18 @@ pub fn explain(context: &mut Context, arguments: &Arguments) -> Result<Outcome, 
 /// @param command - the verb, for the outcome
 /// @param line - the dot command, already assembled
 fn dot(context: &mut Context, command: &str, line: &str) -> Result<Outcome, Failed> {
+    // **Safe mode is about a dot command a caller typed, and this is not one.**
+    // `import`, `dump`, `export`, `backup` and `restore` are commands of the
+    // table in `registry.rs` with their own parameters, and each one confined
+    // its path through `Context::confine` before building this line - so the
+    // check that stops `.import` reaching outside an MCP server has already
+    // been made, by the command, against the argument the caller passed. Left
+    // on, it refused `inillucent_import` over MCP with
+    // `.import is prohibited in safe mode`, which is a refusal of the server's
+    // own verb rather than of anything the caller could have escaped through.
+    let guarded = std::mem::replace(&mut context.shell().safe, false);
     let printed = context.collect_output(line);
+    context.shell().safe = guarded;
     let failed = context.shell().failed;
     context.shell().failed = false;
     if failed {

@@ -1093,6 +1093,23 @@ impl Connection<'_> {
             .map_err(|error| self.database.classify(&error))
     }
 
+    /// Returns how many parameters one statement declares.
+    ///
+    /// **What a bind index is checked against (task-1979, D3).** The C ABI's
+    /// bind functions take a caller supplied `uint32_t` and had no upper bound,
+    /// so one call with a large index grew the parameter vector to match it: an
+    /// index near `u32::MAX` asked for about 137 GB and stalled the process for
+    /// tens of seconds before the allocator gave up. A count the statement
+    /// itself declares is the bound, and it is the same number `prepare` uses
+    /// to size its own parameter list.
+    ///
+    /// @param sql - the statement text
+    pub fn parameter_count(&self, sql: &str) -> Result<u32> {
+        self.engine
+            .parameter_count(sql)
+            .map_err(|error| self.database.classify(&error))
+    }
+
     /// Returns the named parameters one statement declares, with their indexes.
     ///
     /// For a front end that binds by name and has to know which names the

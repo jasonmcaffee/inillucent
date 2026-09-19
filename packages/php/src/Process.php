@@ -20,10 +20,11 @@ final class Process
      * Runs a program and returns its output, its errors and its exit code.
      *
      * @param list<string> $argv the program and its arguments
+     * @param string|null $stdin what to write to its standard input
      * @return array{stdout:string,stderr:string,code:int}
      * @throws Error when the program could not be started at all
      */
-    public static function run(array $argv): array
+    public static function run(array $argv, ?string $stdin = null): array
     {
         $descriptors = [
             0 => ['pipe', 'r'],
@@ -37,6 +38,13 @@ final class Process
                 sprintf('could not run %s. Is it installed and on PATH?', $argv[0] ?? 'inillucent'),
                 'io'
             );
+        }
+        // **Standard input is written rather than closed (task-1979, D17).**
+        // A parameter travelling on the command line hits an operating system
+        // ceiling - about 32 KB on Windows - and fails there, with an error
+        // about the argument list rather than anything about SQL.
+        if ($stdin !== null) {
+            fwrite($pipes[0], $stdin);
         }
         fclose($pipes[0]);
         $stdout = stream_get_contents($pipes[1]) ?: '';

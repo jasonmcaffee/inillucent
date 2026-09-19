@@ -8,6 +8,38 @@
 //! Arity is checked here too, because SQLite reports "wrong number of arguments
 //! to function abs()" from prepare rather than from execution.
 
+/// The names that exist in inillucent but need a component this build has not
+/// got.
+///
+/// **`embed` is the whole list, and it is here rather than in the registry
+/// because the registry is where it is absent** (task-1979, section 8.1, gap
+/// 12). `inillucent-search` registers `embed` only when the `embed` feature is
+/// compiled in, so on a build without it the name reaches the binder's
+/// "no such function" path and answered exit 1 - which says the caller
+/// misspelled something. The statement is spelled correctly and this build has
+/// not got the function, which is exactly what exit 3 means.
+///
+/// A build that *does* have `embed` never reaches here, because the registry
+/// resolves the name before the refusal is built. A machine that has the
+/// function and not the model is a third thing again and keeps its own status:
+/// `inillucent-search`'s `no_model` answers `invalid_state` and names
+/// `inillucent setup-embeddings`, because the component is installable and
+/// exit 3 would say the opposite.
+const NEEDS_A_COMPONENT: &[(&[u8], &str)] = &[(
+    b"embed",
+    "embed(TEXT): this build has no embedding support compiled in",
+)];
+
+/// Returns what a name needs, when the name is one this build left out.
+///
+/// @param name - the folded function name that did not resolve
+pub fn needs_a_component(name: &[u8]) -> Option<&'static str> {
+    NEEDS_A_COMPONENT
+        .iter()
+        .find(|(known, _)| *known == name)
+        .map(|(_, said)| *said)
+}
+
 /// A scalar built-in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScalarFunc {

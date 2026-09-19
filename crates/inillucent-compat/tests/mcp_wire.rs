@@ -530,11 +530,43 @@ fn a_server_refuses_the_dot_commands_that_reach_outside_it() {
             "`{input}` was not refused by a server confined to its root:\n{answer}"
         );
     }
+    // **And the same commands with a path the confinement allows.** Every case
+    // above names a path outside the root, so the confinement refuses them and
+    // the assertion passes whether safe mode is on or not - which is how six of
+    // these went unrefused for as long as they did. Measured before the fix:
+    // `.output out.txt` through `inillucent-mcp` created `out.txt` in the
+    // server's working directory and answered no error at all. A path inside
+    // the root is the case only safe mode can refuse.
+    let inside = root.join("inside.txt").to_string_lossy().replace('\\', "/");
+    for input in [
+        format!(".output {inside}"),
+        format!(".once {inside}"),
+        format!(".read {inside}"),
+        format!(".import {inside} note"),
+        format!(".backup {inside}"),
+        format!(".restore {inside}"),
+        ".cd .".to_string(),
+        ".load libwhatever".to_string(),
+    ] {
+        let flattened = input.replace('"', "'");
+        let answer = session.tool("inillucent_run", &format!("{{\"input\":\"{flattened}\"}}"));
+        assert!(
+            answer
+                .to_ascii_lowercase()
+                .contains("prohibited in safe mode"),
+            "`{input}` names a path inside the root, so only safe mode refuses it, and it \
+             was not refused:\n{answer}"
+        );
+    }
     drop(session);
 
     assert!(
         !outside.join("escaped.txt").is_file(),
         "a dot command wrote outside the root the server was confined to"
+    );
+    assert!(
+        !root.join("inside.txt").is_file(),
+        "a dot command wrote a file inside the root, which safe mode refuses"
     );
 }
 

@@ -13,6 +13,8 @@ use crate::*;
 
 /// A materialised result.
 pub struct inillucent_rows {
+    /// The word this handle carries while it is alive - see [`Live`].
+    live: Live,
     /// The rows themselves.
     rows: Rows,
     /// Column names as C strings, built once so a pointer into one is stable.
@@ -38,6 +40,7 @@ pub(crate) fn built(rows: Rows) -> inillucent_rows {
         .collect();
     let tag = c_string(&rows.tag);
     inillucent_rows {
+        live: Live::new(inillucent_rows::MAGIC),
         rows,
         names,
         types,
@@ -66,7 +69,10 @@ pub unsafe extern "C" fn inillucent_rows_free(rows: *mut inillucent_rows) {
     guarded_value(
         || {
             if !rows.is_null() {
-                drop(Box::from_raw(rows));
+                if held(rows as *const inillucent_rows).is_none() {
+                    return;
+                }
+                drop(reclaim(rows));
             }
         },
         (),
@@ -326,4 +332,11 @@ pub unsafe extern "C" fn inillucent_value_bytes(
         },
         std::ptr::null(),
     )
+}
+
+impl Handle for inillucent_rows {
+    const MAGIC: u32 = 0x5244_4235;
+    fn live(&self) -> &Live {
+        &self.live
+    }
 }

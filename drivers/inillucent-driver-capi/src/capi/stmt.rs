@@ -16,10 +16,18 @@ use crate::*;
 
 /// A statement and the values bound to it.
 pub struct inillucent_stmt {
+    /// The word this handle carries while it is alive - see [`Live`].
+    live: Live,
     /// The connection it was prepared on, shared rather than pointed at.
     connection: Rc<ConnState>,
     /// The statement text.
     sql: String,
+    /// How many parameters the statement declares.
+    ///
+    /// The bound a bind index is checked against - see
+    /// [`inillucent_driver::Connection::parameter_count`] for what an unbounded
+    /// one cost.
+    pub(crate) declared: u32,
     /// The values bound so far, by one-based index.
     pub(crate) params: Vec<Value>,
 }
@@ -58,12 +66,24 @@ pub unsafe extern "C" fn inillucent_prepare(
             report(error, &why, false);
             return status;
         }
+        // The count the bind index is checked against, read from the statement
+        // that has just compiled - see `inillucent_stmt::declared`.
+        let declared = match connection.parameter_count(sql) {
+            Ok(declared) => declared,
+            Err(why) => {
+                let status = why.status as i32;
+                report(error, &why, false);
+                return status;
+            }
+        };
         let Some(handle) = held(conn as *const inillucent_conn) else {
             return misused("inillucent_prepare", error);
         };
         *out = Box::into_raw(Box::new(inillucent_stmt {
+            live: Live::new(inillucent_stmt::MAGIC),
             connection: Rc::clone(&handle.state),
             sql: sql.to_owned(),
+            declared,
             params: Vec::new(),
         }));
         INILLUCENT_OK
@@ -81,7 +101,10 @@ pub unsafe extern "C" fn inillucent_stmt_free(stmt: *mut inillucent_stmt) {
     guarded_value(
         || {
             if !stmt.is_null() {
-                drop(Box::from_raw(stmt));
+                if held(stmt as *const inillucent_stmt).is_none() {
+                    return;
+                }
+                drop(reclaim(stmt));
             }
         },
         (),
@@ -253,4 +276,11 @@ pub unsafe extern "C" fn inillucent_stmt_execute(
             }
         }
     })
+}
+
+impl Handle for inillucent_stmt {
+    const MAGIC: u32 = 0x5244_4234;
+    fn live(&self) -> &Live {
+        &self.live
+    }
 }
