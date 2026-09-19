@@ -11,18 +11,24 @@
         aarch64-apple-darwin            cargo-zigbuild, no Apple SDK
         x86_64-apple-darwin             cargo-zigbuild, no Apple SDK
 
+    Since task-1995 that list is the whole release: the macOS half is signed,
+    packaged and notarised here too.
+
     The `.2.28` suffix on the Linux triples is a cargo-zigbuild feature: it is
     the oldest glibc the result will start against. 2.28 is Debian 10, Ubuntu
     18.10, RHEL 8 and Amazon Linux 2023. Building on this machine's WSL instead
     would produce a 2.39 floor, which refuses to start on Debian 12 or RHEL 9.
 
-    The two Apple targets are built but not archived here. Joining them into
-    universal binaries, signing them and notarising them all happen on a Mac,
-    because codesign and notarytool are Apple's own tools and neither runs on
-    this machine: packaging/macos/release-macos.sh does the whole sequence and
-    packaging/macos/notarize.sh is the notarisation half on its own. An archive
-    of unsigned Mach-O is not something anybody should be able to pick up by
-    accident, which is why nothing here writes one.
+    The macOS half is packaging/macos/release-macos.ps1, which this calls: it
+    joins the two Apple builds into universal binaries with rcodesign, signs
+    them with the Developer ID, writes the archives and the .pkg, and notarises
+    them over Apple's HTTPS API. None of that needs a Mac any more.
+    packaging/macos/release-macos.sh still does the same thing on one, and is
+    kept for a machine that has one.
+
+    The one thing that still cannot happen here is running the result, because
+    a Mach-O only executes on macOS. release-macos.ps1 prints which checks it
+    ran and which four it could not, every time.
 
 .PARAMETER Version
     Overrides the version taken from the workspace manifest.
@@ -33,6 +39,10 @@
 .PARAMETER SkipBuild
     Stage from what is already built. For iterating on the packaging itself.
 
+.PARAMETER SkipNotarize
+    Passed through to the macOS half: sign and package, submit nothing to
+    Apple. Nothing produced under it is publishable.
+
 .EXAMPLE
     pwsh packaging/release-all.ps1
     pwsh packaging/release-all.ps1 -Targets linux
@@ -42,12 +52,18 @@ param(
     [string] $Version,
     [ValidateSet('all', 'windows', 'linux', 'macos')]
     [string] $Targets = 'all',
-    [switch] $SkipBuild
+    [switch] $SkipBuild,
+    [switch] $SkipNotarize
 )
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot 'stage-layout.ps1')
+
+# Where cargo puts its output. Reading CARGO_TARGET_DIR rather than assuming
+# <root>/target is what lets a release keep tens of gigabytes of intermediate
+# objects off the C: drive, which has filled on this machine before.
+$targetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $root 'target' }
 
 $crossBin = Join-Path $root 'tools/cross/bin'
 $zigDir = Join-Path $crossBin 'zig'
@@ -134,7 +150,7 @@ if ($wantWindows) {
     Write-Host "== $target"
     if (-not $SkipBuild) { Invoke-CargoNative -Target $target }
     $stage = New-InillucentStage -Root $root -Version $Version -Target $target `
-        -BuiltDir (Join-Path $root "target/$target/release") -Dist $dist
+        -BuiltDir (Join-Path $targetDir "$target/release") -Dist $dist
     $archive = New-InillucentZip -Stage $stage -Dist $dist
     Write-Host "   $archive"
 }
@@ -147,21 +163,20 @@ if ($wantLinux) {
         Write-Host "== $($pair.Build)"
         if (-not $SkipBuild) { Invoke-CargoZigbuild -Target $pair.Build }
         $stage = New-InillucentStage -Root $root -Version $Version -Target $pair.Triple `
-            -BuiltDir (Join-Path $root "target/$($pair.Triple)/release") -Dist $dist
+            -BuiltDir (Join-Path $targetDir "$($pair.Triple)/release") -Dist $dist
         $archive = New-InillucentTarGz -Stage $stage -Dist $dist
         Write-Host "   $archive"
     }
 }
 
 if ($wantMacos) {
-    foreach ($target in @('aarch64-apple-darwin', 'x86_64-apple-darwin')) {
-        Write-Host "== $target"
-        if (-not $SkipBuild) {
-            Invoke-CargoZigbuild -Target $target -ConfigArgs @('--config', ($appleLinkArgs -f $target))
-        }
-        Write-Host "   built, unsigned: target/$target/release"
-    }
-    Write-Host '   sign them on a Mac with: packaging/macos/release-macos.sh'
+    # The macOS half builds its own two targets, because it sets a deployment
+    # target per architecture that the Linux and Windows builds have no use for.
+    $macosArguments = @('-Version', $Version)
+    if ($SkipBuild) { $macosArguments += '-SkipBuild' }
+    if ($SkipNotarize) { $macosArguments += '-SkipNotarize' }
+    & (Join-Path $PSScriptRoot 'macos/release-macos.ps1') @macosArguments
+    if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) { throw "the macOS release failed with $LASTEXITCODE" }
 }
 
 $sums = Update-Sha256Sums -Dist $dist

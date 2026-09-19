@@ -80,6 +80,12 @@ function Repair-StagedLink {
         @{ File = 'docs/feature-comparison.md';  From = '[`tools/feature-probe/`](../tools/feature-probe/README.md)'; To = '`tools/feature-probe/`, in the repository,' },
         @{ File = 'docs/feature-comparison.md';  From = '[`drivers/README.md`](../drivers/README.md)'; To = '[`DRIVER.md`](../DRIVER.md)' },
         @{ File = 'docs/feature-comparison.md';  From = '[`compat/README.md`](../compat/README.md)'; To = '`compat/README.md`, in the repository' },
+        # task-1962 added a link from the glossary's Transaction entry to
+        # drivers/README.md, which the archive stages as DRIVER.md. No release
+        # was cut between then and task-1995, so the dead-link check below has
+        # been failing every target's staging - Windows and Linux as well as
+        # macOS - since that commit.
+        @{ File = 'docs/glossary.md';            From = '[`Transaction`](../drivers/README.md)'; To = '[`Transaction`](../DRIVER.md)' },
         @{ File = 'DRIVER.md';                   From = '](inillucent-driver-capi/include/inillucent_driver.h)'; To = '](include/inillucent_driver.h)' },
         @{ File = 'README.md';                   From = '[**`examples/rag-agent/`**](examples/rag-agent/README.md)'; To = '**`examples/rag-agent/`**, in the repository,' }
     )

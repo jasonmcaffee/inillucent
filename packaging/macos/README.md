@@ -1,149 +1,206 @@
-# macOS packaging - what runs on the MacBook
+# macOS packaging — the whole release, on the Windows machine
 
-The macOS half of a release is built, signed and notarised on the MacBook and
-nowhere else. `lipo`, `codesign`, `pkgbuild`, `productbuild`, `notarytool` and
-`stapler` are macOS programs, the Developer ID certificate lives in the login
-keychain, and only a Mac can run a Mach-O to check that any of it worked.
+Until task-1995 this file opened by saying the macOS half of a release was built,
+signed and notarised on the MacBook and nowhere else. That is no longer true.
+Every macOS program the release used has a replacement that runs on Windows:
+
+| Apple's program | What runs here instead |
+|---|---|
+| `lipo` | `rcodesign macho-universal-create` |
+| `codesign` | `rcodesign sign` |
+| `pkgbuild` | `tools/macos-pkg` |
+| `productbuild` | `tools/macos-pkg`, which writes the product archive directly |
+| `productsign` | `rcodesign sign`, which signs a XAR archive |
+| `notarytool` | `rcodesign notary-submit` |
+| `stapler` | `rcodesign staple` |
 
 **One command does all of it:**
 
-```sh
-./packaging/macos/release-macos.sh --version 0.1.1 --upload
-```
-
-It builds both architectures, `lipo`s them into universal binaries, signs them
-with the hardened runtime and a trusted timestamp, writes the `.tar.gz` that
-install.sh and Homebrew fetch and the `.zip` that Apple's notary accepts, builds
-the `.pkg` from the binaries it just signed, notarises both containers, staples
-the ticket to the `.pkg`, runs the result, and uploads the four files to the
-GitHub release that carries them to the Windows machine.
-
-Then, on the Windows machine:
-
 ```powershell
-pwsh packaging/fetch-macos-artifacts.ps1 -Version 0.1.1
+pwsh packaging/macos/release-macos.ps1
 ```
 
-which verifies the checksums and reads the signature back out of the binaries
-before letting them near the site. `packaging/README.md` has the whole sequence,
-both machines.
+It builds both architectures with zig, joins them into universal binaries, signs
+them with the hardened runtime and a trusted timestamp, writes the `.tar.gz` that
+`install.sh` and Homebrew fetch and the `.zip` that Apple's notary accepts,
+builds the `.pkg` from the binaries it just signed, notarises both containers and
+staples the ticket to the `.pkg`.
 
-**`verify-macos.sh` is the release gate**, and it is the reason the release ends
-on a Mac rather than at the upload:
+`packaging/release-all.ps1` calls it, so the ordinary release is still one
+command for every target at once.
+
+## The one thing that cannot happen here
+
+**A Mach-O only executes on macOS.** `verify-macos.sh` has seven checks and four
+of them run the binary: `spctl` on a quarantined copy, a database round trip, the
+MCP server's tool list, and the x86-64 slice under Rosetta. No tooling changes
+that, and the release script prints which checks it ran and which four it could
+not, every time, so a release cut here is never mistaken for one that went
+through the Mac gate.
+
+Two things stand in for them.
+
+**Apple's notary service is a real external check.** It unpacks the submission,
+walks every Mach-O inside it, and rejects an unsigned binary, a missing hardened
+runtime, a missing secure timestamp, an SDK that is too old, or a package it
+cannot parse. An `Accepted` is a statement by Apple about the exact bytes that
+were submitted, and the release does not publish without one.
+
+**`verify-macos.sh` still exists and still runs against the published bytes.** On
+any Mac that can be borrowed:
 
 ```sh
-curl -fsSL https://inillucent.com/downloads/verify-macos.sh | sh -s -- --version 0.1.1
+curl -fsSL https://inillucent.com/downloads/verify-macos.sh | sh -s -- --version 0.1.4
 ```
 
-It quarantines the published archive the way a browser would, asks `spctl`
-whether Gatekeeper accepts it, verifies every signature, runs a database round
-trip, asks the MCP server for its tool list, and runs the x86-64 slice under
-Rosetta. Nothing on the site links to a macOS download until that passes.
+## The minimum macOS version, which is 13.0 and cannot currently be lowered
 
-**The install script needs none of this.** `packaging/install.sh` downloads the
-tarball, checks its SHA-256 and puts the four programs in `~/.local/bin`, with no
-Apple account, no `sudo` and no Gatekeeper prompt, because a file fetched with
-curl carries no quarantine attribute.
+The binaries declare `Minimum OS: 13.0.0`. That is zig's default rather than a
+choice, and it was measured rather than assumed:
 
-```sh
-curl -fsSL https://inillucent.com/downloads/install.sh | sh
-```
+- zig sets the minimum through its own target string. `zig cc -target
+  aarch64-macos.11.0-none` produces `Minimum OS: 11.0.0`.
+- cargo-zigbuild builds that string as `{arch}-macos-none{suffix}`, which puts a
+  version after the ABI, and zig rejects it with `InvalidAbiVersion`.
+- A second `-target` passed as a link argument does not reach zig either:
+  `cargo-zigbuild zig cc` drops a duplicate `-target` deliberately.
+- `MACOSX_DEPLOYMENT_TARGET` appears nowhere in cargo-zigbuild, and
+  `-mmacosx-version-min` is accepted and ignored by zig.
 
-The `.pkg` is the convenience for somebody who would rather double-click, and it
-is the only artifact that can carry a stapled ticket, so it is also the only one
-that installs on a machine with no network.
+So macOS 11 and 12 are excluded, which matters for an Apple Silicon Mac that
+never moved past Big Sur or Monterey. This is a first floor rather than a floor
+that moved — no macOS release of inillucent has been published before. The
+release asserts the value rather than trusting it, so a zig upgrade that changes
+the default stops the release instead of shipping a different floor quietly.
 
 ---
-
-## The older scripts
-
-`build-pkg.sh` and `notarize.sh` predate `release-macos.sh` and still work. They
-build and notarise the `.pkg` alone, without the archives and without the smoke
-test. Use `release-macos.sh` for a release; reach for these two only when the
-`.pkg` is the only thing being rebuilt.
 
 ## The one-time setup
 
 Three things, none of which is in this repository and none of which ever should
-be. `release-macos.sh` refuses to run until they exist and says which is missing.
+be. `release-macos.ps1` refuses to run until they exist and says which is
+missing.
 
 ### 1. The Rust targets
 
-```sh
-rustup target add aarch64-apple-darwin x86_64-apple-darwin
-```
+`rust-toolchain.toml` names them, so `rustup` installs them on a fresh machine.
+Nothing to do by hand.
 
-### 2. The two certificates - $99/year, one afternoon
+### 2. The two certificates — $99/year, and no Mac
 
 Enrol at <https://developer.apple.com/programs/> ($99/year, needs an Apple ID
-with two-factor on). Then, in Xcode → Settings → Accounts → Manage
-Certificates, create both of:
+with two-factor on). There is no way to sign for macOS without a membership.
 
-- **Developer ID Application** — signs the four executables and the dylib;
-- **Developer ID Installer** — signs the `.pkg` itself.
+The certificates come from a browser, not from Xcode. A certificate is issued
+from a signing request, and a signing request is a file — what produced it does
+not matter to Apple:
 
-Both are needed. A `.pkg` signed with the wrong one of the two fails
-notarisation with a message that does not say which.
-
-### 3. A notarytool credential, stored in the keychain
-
-At <https://appleid.apple.com> → Sign-In and Security → App-Specific Passwords.
-Then store it in the keychain once, so it is never on a command line or in this
-repository:
-
-```sh
-xcrun notarytool store-credentials inillucent-notary \
-  --apple-id you@example.com \
-  --team-id ABCDE12345 \
-  --password xxxx-xxxx-xxxx-xxxx
+```powershell
+pwsh packaging/macos/new-apple-csr.ps1 -Kind application
+pwsh packaging/macos/new-apple-csr.ps1 -Kind installer
 ```
 
-`--team-id` is on the membership page. `inillucent-notary` is the profile name
-`notarize.sh` looks for.
+Each run writes a `.csr` into `%LOCALAPPDATA%\inillucent\apple\` and seals the
+private key it belongs to with DPAPI. Then, at developer.apple.com →
+Certificates, Identifiers & Profiles → Certificates → **+**:
 
-### 4. gh, if the artifacts are to travel over a release
+- the flavour is **Developer ID Application** for the programs and the library,
+  and **Developer ID Installer** for the `.pkg`. Both are needed; a `.pkg` signed
+  with the Application certificate fails notarisation with a message that does
+  not say which one is wrong;
+- the profile type is **G2 Sub-CA (Xcode 11.4.1 or later)**;
+- upload the `.csr`, download the `.cer`, and install it:
 
-```sh
-brew install gh && gh auth login
+```powershell
+pwsh packaging/macos/new-apple-csr.ps1 -Kind application -Certificate <the .cer>
 ```
 
-`release-macos.sh --upload` puts the four files on the `v<version>` release of
-the private repository, and the Windows machine collects them with
-`packaging/fetch-macos-artifacts.ps1`. Without `--upload` the script prints the
-four paths and they can be copied across by any other means;
-`fetch-macos-artifacts.ps1 -FromDirectory` takes them from a folder.
+which checks it is the right flavour before accepting it.
+
+A `.p12` exported from a Mac's keychain works too: put it in the same directory
+as `developer-id-<kind>.p12` and seal its password once with
+
+```powershell
+pwsh -c ". packaging/macos/apple-credentials.ps1; Set-AppleP12Password -Kind application"
+```
+
+### 3. An App Store Connect API key, for notarisation
+
+At <https://appstoreconnect.apple.com> → Users and Access → Integrations, create
+a key with the **Developer** role. That gives an issuer ID, a key ID, and a `.p8`
+file downloadable once. Fold them into the one file the release reads:
+
+```powershell
+tools\cross\bin\rcodesign.exe encode-app-store-connect-api-key `
+  -o $env:LOCALAPPDATA\inillucent\apple\notary-key.json `
+  <issuer-id> <key-id> AuthKey_<key-id>.p8
+```
+
+This is used rather than an Apple ID and an app-specific password because it is
+revocable on its own and does not carry the password to the Apple ID itself.
+
+### Where the secrets live, and why that is enough
+
+`%LOCALAPPDATA%\inillucent\apple\` holds them, and `$env:INILLUCENT_APPLE_DIR`
+overrides the location. The private key and any `.p12` password are sealed with
+`ConvertFrom-SecureString`, which encrypts under the current Windows account, so
+what is on disk is worthless on another machine or to another user and there is
+no key of its own to keep somewhere else. `rcodesign` reads a key from a file, so
+for the seconds a signature takes the key is a file — written to the RAM disk at
+`R:\`, which is memory, and deleted in a `finally`.
+
+Nothing secret is in this repository, on a command line, or in an environment
+variable a child process inherits.
 
 ---
 
-## Then, on the Mac
+## Proving the pipeline before the certificates exist
 
-```sh
-./packaging/macos/release-macos.sh --version 0.1.1 --upload
+```powershell
+pwsh packaging/macos/release-macos.ps1 -SelfSigned -SkipNotarize -Unpublishable
 ```
 
-`inillucent-notary` is the profile name it looks for, and the Developer ID
-identity is read out of the keychain rather than typed, because the full string
-includes the team id and getting it wrong fails late.
+signs with a certificate generated on the spot. That exercises every step except
+the two that are about Apple's opinion of the certificate: notarisation refuses
+it and Gatekeeper would refuse it. The artifacts go to `dist/unpublishable/`
+rather than `dist/`, because they are bit for bit what a release looks like apart
+from who signed them, and that is how an unsignable build gets published by
+accident.
 
 ---
 
-## What to check before publishing a macOS release
+## The Mac path, which still works
 
-Nothing by hand: `packaging/macos/verify-macos.sh` is that list, and it runs
-against the published bytes rather than against the build directory, so what it
-checks is what a reader gets.
+`release-macos.sh` produces the same artifacts on a Mac and is unchanged.
+`build-pkg.sh` and `notarize.sh` predate it and build and notarise the `.pkg`
+alone. `packaging/fetch-macos-artifacts.ps1` still collects and verifies what a
+Mac produced. A machine with a Mac available loses nothing; a machine without one
+is no longer stopped.
 
-```sh
-curl -fsSL https://inillucent.com/downloads/verify-macos.sh | sh -s -- --version 0.1.1
+The Mac route needs what it always needed: the two certificates in the login
+keychain, and a `notarytool` credential profile called `inillucent-notary`.
+
+---
+
+## What the `.pkg` is, and where it comes from
+
+A product archive is a XAR archive holding four things:
+
+```
+Distribution                          an XML description of the install
+Resources/                            the welcome, conclusion and licence text
+inillucent-component-<version>.pkg/PackageInfo
+inillucent-component-<version>.pkg/Payload   a gzipped cpio archive of the files
+inillucent-component-<version>.pkg/Bom       the list the receipt is recorded from
 ```
 
-It asserts, in order: the archive matches the published `SHA256SUMS`; `spctl`
-reports `source=Notarized Developer ID` on a quarantined copy; every signature
-verifies `--strict`; a database round trip returns its row; the MCP server lists
-its tools; the x86-64 slice runs under Rosetta; and the C ABI library loads.
+`tools/macos-pkg` writes all of it. Its `README` in the source header says why
+each part is written by hand rather than called, including the three faults in
+`apple-bom`'s own builder that make it unusable as published.
 
-`release-macos.sh` runs the same script against the local archive before it
-uploads anything, so a bad build is caught on the Mac that made it.
+`rcodesign` is the independent reader: it parses the table of contents, rewrites
+every entry's offset and signs the archive, so a package the writer got wrong
+fails on the machine that built it rather than on somebody's Mac.
 
 ## A note on where it installs
 

@@ -165,7 +165,7 @@ None of these is reachable by reading the scripts. Each came from running one.
 - **`rust-toolchain.toml` named three targets out of five**, so `release-all.ps1` stopped at its
   macOS step with `can't find crate for std`. The macOS section above has it.
 - **`fetch-macos-artifacts.ps1` reported success having checked nothing, and published what it
-  refused.** It is the gate between the MacBook's artifacts and the site, and on a machine without
+  refused.** It is the gate between the macOS artifacts and the site, and on a machine without
   `rcodesign` the committed version printed a warning, said *"every check passed"*, exited 0, and
   wrote the artifacts into `dist/SHA256SUMS`. Run against three text files reading
   `this is not a Mach-O`, that is exactly what it did. Four faults in one script:
@@ -288,6 +288,16 @@ before 0.1.2 carried an ARM Linux archive. It was invisible for the Apple pair b
 and nothing rebuilt them. `rust-toolchain.toml` names all five targets now.
 
 ### What Jason has to run, and where
+
+**Since task-1995 there is no second machine.** `packaging/release-all.ps1` on
+the Windows box builds, signs, packages and notarises macOS as well, because
+`rcodesign` and `tools/macos-pkg` replace every Apple program the release used
+and Apple's notary service is an HTTPS API. `packaging/macos/README.md` is the
+detail, including how the two Developer ID certificates are obtained in a
+browser rather than in Xcode.
+
+The paragraph below describes the route that was in place when this section was
+written, and it still works on a Mac.
 
 On the MacBook, with the repository checked out at the `v0.1.2` tag:
 
@@ -551,28 +561,19 @@ that reach the most people fastest.
 Two machines. `packaging/README.md` has the full sequence; the short form is:
 
 ```powershell
-# the Windows box: Windows and both Linux architectures, then the packages
+# the Windows box, all of it: every target, signed, notarised and packaged
 pwsh tools/cross/fetch-toolchain.ps1
 pwsh packaging/release-all.ps1
 pwsh packaging/linux/package-linux.ps1
-```
-
-```sh
-# the MacBook: build, sign, notarise, verify, hand over
-./packaging/macos/release-macos.sh --version 0.1.2 --upload
-```
-
-```powershell
-# the Windows box again: collect, sign the checksums, publish
-pwsh packaging/fetch-macos-artifacts.ps1 -Version 0.1.2
 pwsh packaging/sign-sums.ps1
-pwsh packaging/publish-site.ps1 -Version 0.1.2 -Stage
-#   ... verify on the Mac, then:
-pwsh packaging/publish-site.ps1 -Version 0.1.2 -Link
+pwsh packaging/publish-site.ps1 -Version 0.1.4 -Stage
+#   ... verify on any Mac that can be borrowed, then:
+pwsh packaging/publish-site.ps1 -Version 0.1.4 -Link
 ```
 
-**The distribution point is inillucent.com.** GitHub carries the macOS artifacts
-from the MacBook to the Windows box; the site is what a user downloads from.
+**The distribution point is inillucent.com**, and since task-1995 GitHub carries
+nothing at all: there are no macOS artifacts to move between machines, because
+the machine that builds them is the machine that publishes them.
 
 `release.ps1` refuses to build an untagged archive, so the tag comes first.
 `provenance.json` records the commit, the tag, the toolchain and the six checks

@@ -86,42 +86,46 @@ packaging is checked continuously rather than once at a tag.
 
 ## Cutting a release
 
-Two machines, and each does only what it alone can do. The Windows box builds
-Windows and Linux, packages everything, signs the checksums and publishes the
-site. The MacBook builds, signs and notarises macOS, because Apple's linker,
-`codesign` and `notarytool` run nowhere else.
+One machine. The Windows box builds Windows, both Linux architectures and both
+Apple architectures, signs and notarises macOS, packages everything, signs the
+checksums and publishes the site.
+
+That was not true until task-1995. The macOS half used to run on a MacBook,
+because `lipo`, `codesign`, `pkgbuild`, `productbuild`, `notarytool` and
+`stapler` are macOS programs. Each of them now has a replacement that runs here:
+`rcodesign` for five of them, `tools/macos-pkg` for the two that build the
+`.pkg`. Apple's notary service is an HTTPS API and answers a Windows client the
+same way it answers a Mac. `packaging/macos/README.md` is the detail, including
+how the Developer ID certificates are obtained without a Mac.
 
 ```powershell
-# --- on the Windows box -------------------------------------------------
 pwsh tools/cross/fetch-toolchain.ps1        # once: zig, cargo-zigbuild, rcodesign, nfpm, minisign
-pwsh packaging/release-all.ps1              # Windows, both Linux architectures, and the macOS builds
+pwsh packaging/release-all.ps1              # every target, including the signed and notarised macOS half
 pwsh packaging/linux/package-linux.ps1      # the .deb and the .rpm, signed
+pwsh packaging/sign-sums.ps1                # minisign over SHA256SUMS; needs packaging/inillucent.pub
+bash tools/release-verify-linux.sh --version 0.1.4   # from WSL
+pwsh packaging/publish-site.ps1 -Version 0.1.4 -Stage  # on the site, not yet linked
 ```
 
-`release-all.ps1` builds the two Apple targets as well and archives neither,
-because an archive of unsigned Mach-O is not something anybody should be able to
-pick up by accident. The five targets it needs are named in
-`rust-toolchain.toml`, which is what installs them; the two Apple ones were
-missing from that list until task-1951, so on a machine holding only the pinned
-toolchain the default run stopped at its macOS step with
-`error[E0463]: can't find crate for std`.
+`0.1.4` throughout this section is an example. Pass the version being cut.
+**0.1.0 was withdrawn** — `PUBLISHING.md` says why — so that one is never a
+version to pass here.
 
-```sh
-# --- on the MacBook -----------------------------------------------------
-./packaging/macos/release-macos.sh --version 0.1.2 --upload
-```
+The five targets `release-all.ps1` needs are named in `rust-toolchain.toml`,
+which is what installs them; the two Apple ones were missing from that list until
+task-1951, so on a machine holding only the pinned toolchain the default run
+stopped at its macOS step with `error[E0463]: can't find crate for std`.
 
-`0.1.2` throughout this section is an example, and it is the version that was published on
-2026-09-14. Pass the version being cut. **0.1.0 was withdrawn** — `PUBLISHING.md` says why — so
-that one is never a version to pass here.
+`packaging/macos/release-macos.ps1` runs on its own too, for a macOS-only
+rebuild, and it prints at the end which checks it ran and which four it could
+not. The four it cannot run are the ones that execute a Mach-O, and no tooling
+changes that — see "What cannot be checked here" below.
 
-```powershell
-# --- back on the Windows box --------------------------------------------
-pwsh packaging/fetch-macos-artifacts.ps1 -Version 0.1.2   # collect and verify what the Mac made
-pwsh packaging/sign-sums.ps1                              # minisign over SHA256SUMS; needs packaging/inillucent.pub
-bash tools/release-verify-linux.sh --version 0.1.2        # from WSL
-pwsh packaging/publish-site.ps1 -Version 0.1.2 -Stage     # on the site, not yet linked
-```
+**The Mac path still works and is still in the repository.**
+`packaging/macos/release-macos.sh` produces the same four artifacts on a Mac,
+and `packaging/fetch-macos-artifacts.ps1` still collects and verifies them. A
+machine with a Mac available loses nothing; a machine without one is no longer
+stopped.
 
 Then, on any Mac, against the bytes the site is now serving:
 
@@ -142,10 +146,10 @@ reach them before anything on the site mentions them.
 **The distribution point is inillucent.com.** Both GitHub repositories are
 private, and a private repository's release assets are private too: an
 unauthenticated request for one answers 404, which was checked with no credential
-of any kind in task-1951. So GitHub carries nothing a user downloads. It is used
-for one thing, carrying the macOS artifacts from the MacBook to the Windows box,
-and `packaging/fetch-macos-artifacts.ps1 -FromDirectory` skips even that when the
-two machines are on the same network.
+of any kind in task-1951. So GitHub carries nothing a user downloads. It used to
+be the transport that carried the macOS artifacts from the MacBook to the Windows
+box; since task-1995 there is nothing to carry, because the machine that builds
+them is the machine that publishes them.
 
 One route does not survive that: `go install` resolves through
 `proxy.golang.org`, which clones the repository with no credential and gets a
@@ -170,11 +174,16 @@ location. The macOS `.pkg` is the exception, because a `.pkg` installs to
 
 ## What is not automated, and why
 
-- **Running a macOS binary.** Everything else about a macOS build can be checked
+- **Running a macOS binary.** Everything else about a macOS build is checked
   from Windows - the architectures, the signature, the hardened runtime, the
-  timestamp - but whether it runs cannot be, and neither can whether Gatekeeper
-  accepts it. `packaging/macos/verify-macos.sh` is both of those checks and it is
-  the release gate.
+  timestamp, and the package's own structure - but whether it *runs* cannot be,
+  and neither can whether Gatekeeper accepts it. Two things stand in for that.
+  Apple's notary service unpacks the submission, walks every Mach-O in it and
+  rejects an unsigned binary, a missing hardened runtime, a missing timestamp or
+  a package it cannot parse, so an `Accepted` is a statement by Apple about the
+  exact bytes submitted. And `packaging/macos/verify-macos.sh` still exists, runs
+  against the published bytes, and is a one-line check on any Mac that can be
+  borrowed.
 - **The registry uploads.** Every registry needs an interactive login: a browser,
   an OAuth redirect, and for PyPI a mandatory second factor. That is deliberate on
   their part and it is what stops somebody else publishing under your name.
@@ -186,4 +195,4 @@ location. The macOS `.pkg` is the exception, because a `.pkg` installs to
 What *used* to be here, and is not any more: cross-compiling and signing. Both
 are automated now. `cargo-zigbuild` builds every Linux target on the Windows box
 with a chosen glibc floor of 2.28, and the macOS half is a single command on the
-MacBook.
+same machine.

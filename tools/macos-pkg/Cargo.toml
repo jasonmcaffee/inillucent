@@ -1,0 +1,46 @@
+# The flat package writer, which exists because `pkgbuild` and `productbuild`
+# are macOS programs and a release is cut on Windows (task-1995).
+#
+# **Deliberately not a member of the workspace.** `docs/dependency-policy.md`
+# governs what the engine may link and `cargo test -p inillucent-compat --test
+# policy` enforces it. A packaging tool that pulls in a compression library, a
+# BOM writer and an archive reader has no business inside that boundary, and
+# adding it as a member would also move the crate count that the documentation
+# and the scorecard state. The empty `[workspace]` table below is what detaches
+# it: cargo would otherwise walk up to the parent manifest and refuse to build
+# a crate that is not listed there.
+[package]
+name = "macos-pkg"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Builds a macOS flat package (.pkg) on any platform"
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+apple-bom = "0.3"
+chrono = "0.4"
+clap = { version = "4", features = ["derive"] }
+crc32fast = "1"
+flate2 = "1"
+scroll = { version = "0.12", features = ["derive"] }
+sha2 = "0.10"
+walkdir = "2"
+
+# There is no development dependency on `apple-xar`, and that is deliberate.
+# It would be the obvious way to read back what `xar.rs` writes, but it reaches
+# `ring` through its signing support, and `ring` compiles C that needs the
+# Windows SDK headers on the include path. `cargo test` would then pass or fail
+# depending on whether the shell had been through `vcvars64.bat`, which is a
+# worse property for a test than the one it buys.
+#
+# The independent reader is `rcodesign` instead, run as a program by
+# `packaging/macos/release-macos.ps1`: it parses the table of contents, rewrites
+# every entry's offset and signs the archive, which exercises more of the format
+# than reading it would. A package this tool writes that `rcodesign` cannot sign
+# fails the release on the machine that built it.
+
+[profile.release]
+opt-level = 2
