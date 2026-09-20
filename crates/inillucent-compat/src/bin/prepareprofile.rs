@@ -224,6 +224,11 @@ fn sizes(label: &str, mut body: impl FnMut() -> Result<(), String>) -> Result<()
         }
     }
     println!("    {total:>4} allocations in total");
+    // Per stage rather than once at the end, because the stages are cumulative - the plan
+    // stage parses too - and a single list cannot be attributed to the stage that made it.
+    if TRACE_UPTO.load(Ordering::Relaxed) > 0 {
+        print_traces();
+    }
     Ok(())
 }
 
@@ -439,13 +444,6 @@ fn profile(
                 .map(|_| ())
                 .map_err(|e| format!("{e:?}"))
         })?;
-        if TRACE_UPTO.load(Ordering::Relaxed) > 0 {
-            println!(
-                "  where each allocation of {} bytes or fewer came from",
-                TRACE_UPTO.load(Ordering::Relaxed)
-            );
-            print_traces();
-        }
     }
     let shown: String = sql.chars().take(34).collect();
     println!(
