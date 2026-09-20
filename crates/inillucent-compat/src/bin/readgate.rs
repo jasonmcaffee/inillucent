@@ -418,7 +418,7 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
         // asked for. Building it needs a sink, so a throwaway one is handed in
         // and never pushed into.
         let chain = database
-            .pipeline(
+            .pipeline_described(
                 &entry.plan,
                 &entry.choice,
                 &entry.params_for(1, plan.rows),

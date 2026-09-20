@@ -613,7 +613,7 @@ fn every_forced_plan_gives_the_same_answer() {
             };
             let rows = Rc::new(RefCell::new(Vec::new()));
             let sink = Box::new(inillucent_exec::ops::CollectInto::new(Rc::clone(&rows)));
-            let built = inillucent_exec::physical::build_prepared(
+            let built = inillucent_exec::physical::build_prepared_described(
                 &plan,
                 &fixture,
                 &prepared,

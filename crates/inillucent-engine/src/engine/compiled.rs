@@ -314,8 +314,11 @@ impl crate::ImportedDatabase {
             .with_foreign_keys(
                 self.pragmas.foreign_keys(),
                 self.pragmas.defer_foreign_keys(),
-            );
-        let bound = binder.bind_statement(inner).map_err(refused)?;
+            )
+            .with_scratch(self.compiled.take_binder_scratch());
+        let outcome = binder.bind_statement(inner);
+        self.compiled.recycle_binder(binder.into_scratch());
+        let bound = outcome.map_err(refused)?;
         let lines = match bound {
             BoundStatement::Select(select) => {
                 plan_select_with(*select, self.pragmas.levers()).describe()

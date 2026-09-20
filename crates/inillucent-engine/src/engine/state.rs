@@ -901,6 +901,20 @@ pub(crate) struct Compiled {
     /// would be the inner parse clearing the arena the outer statement is still
     /// holding nodes in.
     pub(crate) scratch_ast: std::cell::RefCell<Option<inillucent_sql::ast::Ast>>,
+    /// One set of binder vectors, kept and cleared rather than made per
+    /// statement.
+    ///
+    /// **The same argument as `scratch_ast`, one stage later (task-2026).**
+    /// Binding `SELECT 1` took the scope stack's buffer and the result-alias
+    /// buffer out of the allocator every time - 96 and 320 bytes, two of the
+    /// twenty-one allocations the gate's `prepare.trivial` iteration makes -
+    /// to build vectors thrown away a microsecond later.
+    ///
+    /// It is taken out on the way in and put back on the way out, so a nested
+    /// bind - a view body, a trigger - finds the cell empty and makes its own
+    /// rather than clearing the vectors the outer statement is holding names
+    /// in.
+    pub(crate) scratch_binder: std::cell::RefCell<Option<inillucent_sql::bind::BinderScratch>>,
     /// Where the last `CREATE INDEX` spent its time, in nanoseconds.
     ///
     /// Scan, sort, uniqueness check, pack. On the harness's own type, in a
@@ -1281,6 +1295,7 @@ impl Compiled {
             .set(fresh.statement_cache_limit.get());
         self.compiles.set(fresh.compiles.get());
         self.scratch_ast.replace(fresh.scratch_ast.take());
+        self.scratch_binder.replace(fresh.scratch_binder.take());
         self.index_stages.set(fresh.index_stages.get());
     }
 }
@@ -1291,6 +1306,26 @@ impl Compiled {
     /// @param parsed - the parse nothing holds a reference into any more
     pub(crate) fn recycle(&self, parsed: inillucent_sql::parser::ParsedStatement) {
         *self.scratch_ast.borrow_mut() = Some(parsed.ast);
+    }
+
+    /// Takes the binder's vectors out for one bind, leaving the cell empty.
+    ///
+    /// Empty rather than shared, for the reason [`Compiled::scratch_ast`]
+    /// gives: a bind that starts while another is running - a view's body, a
+    /// trigger - gets its own vectors rather than clearing the ones the outer
+    /// statement is still holding names in.
+    pub(crate) fn take_binder_scratch(&self) -> inillucent_sql::bind::BinderScratch {
+        self.scratch_binder
+            .borrow_mut()
+            .take()
+            .unwrap_or_else(inillucent_sql::bind::BinderScratch::new)
+    }
+
+    /// Puts a finished bind's vectors back for the next statement to fill.
+    ///
+    /// @param scratch - the vectors nothing holds a reference into any more
+    pub(crate) fn recycle_binder(&self, scratch: inillucent_sql::bind::BinderScratch) {
+        *self.scratch_binder.borrow_mut() = Some(scratch);
     }
 }
 

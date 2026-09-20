@@ -1283,6 +1283,76 @@ pub struct Dependencies {
     pub generation: u64,
 }
 
+/// The vectors a binder works in, kept by the connection rather than made for
+/// every statement.
+///
+/// **The parse arena's counterpart, for the stage after the parse
+/// (task-2026).** `Compiled::scratch_ast` exists because every vector in an
+/// `Ast` is empty at construction and grows on its first push, so a parse that
+/// is thrown away a microsecond later pays the allocator for capacity it
+/// already had last time. The binder has exactly that shape and was not getting
+/// that treatment: binding `SELECT 1` took the scope stack's buffer and the
+/// result-alias buffer - 96 and 320 bytes - out of the allocator on every
+/// compile, and `prepare.trivial` is a workload the gate compiles on every
+/// iteration.
+///
+/// What is here is the binder's own working state. What the binder *returns* is
+/// not: a `BoundStatement`'s vectors leave with it and belong to whoever asked
+/// for the bind, so recycling them would mean handing back memory something
+/// else is still reading.
+///
+/// Like the arena, it is cleared on the way in rather than on the way out, and
+/// it keeps whatever capacity the largest statement so far needed - a
+/// connection that once bound a statement with ten thousand FROM terms holds
+/// that much `sources` until it closes. That is the trade [`crate::ast::Ast`]
+/// already makes, made once more here rather than differently.
+#[derive(Default)]
+pub struct BinderScratch {
+    sources: Vec<BoundSource>,
+    scopes: Vec<Vec<usize>>,
+    aggregates: Vec<BoundAggregate>,
+    result_aliases: Vec<(Vec<u8>, BoundExpr)>,
+    schemas: Vec<(usize, u32)>,
+    ctes: Vec<Vec<CteBinding>>,
+    recursing: Vec<RecursiveTarget>,
+    binding_ctes: Vec<ast::SelectId>,
+    correlations: Vec<usize>,
+    windows: Vec<BoundWindow>,
+    named_windows: Vec<(Vec<u8>, ast::WindowId)>,
+    firing: Vec<Vec<u8>>,
+    firing_foreign_keys: Vec<Vec<u8>>,
+    pending_constraints: Vec<BoundExpr>,
+}
+
+impl BinderScratch {
+    /// Returns a scratch with nothing in it and nothing allocated.
+    pub fn new() -> BinderScratch {
+        BinderScratch::default()
+    }
+
+    /// Empties every vector, keeping the memory each has already taken.
+    ///
+    /// A `clear` rather than a `new` for the reason [`crate::ast::Ast::clear`]
+    /// gives: the capacity is the point, and dropping it would leave a scratch
+    /// that costs an allocation to refill.
+    fn clear(&mut self) {
+        self.sources.clear();
+        self.scopes.clear();
+        self.aggregates.clear();
+        self.result_aliases.clear();
+        self.schemas.clear();
+        self.ctes.clear();
+        self.recursing.clear();
+        self.binding_ctes.clear();
+        self.correlations.clear();
+        self.windows.clear();
+        self.named_windows.clear();
+        self.firing.clear();
+        self.firing_foreign_keys.clear();
+        self.pending_constraints.clear();
+    }
+}
+
 /// A bound statement.
 #[derive(Clone, Debug, PartialEq)]
 pub enum BoundStatement {
@@ -1629,6 +1699,57 @@ impl<'a> Binder<'a> {
         }
     }
 
+    /// Binds into vectors the caller keeps, rather than into fresh ones.
+    ///
+    /// **For a caller that binds one statement after another**, which is every
+    /// connection: the scratch is cleared on the way in, so the second bind
+    /// pushes into capacity the first one took. See [`BinderScratch`] for what
+    /// is in it and what is deliberately not.
+    ///
+    /// @param scratch - the vectors to fill, cleared first
+    pub fn with_scratch(mut self, mut scratch: BinderScratch) -> Binder<'a> {
+        scratch.clear();
+        self.sources = scratch.sources;
+        self.scopes = scratch.scopes;
+        self.aggregates = scratch.aggregates;
+        self.result_aliases = scratch.result_aliases;
+        self.dependencies.schemas = scratch.schemas;
+        self.ctes = scratch.ctes;
+        self.recursing = scratch.recursing;
+        self.binding_ctes = scratch.binding_ctes;
+        self.correlations = scratch.correlations;
+        self.windows = scratch.windows;
+        self.named_windows = scratch.named_windows;
+        self.firing = scratch.firing;
+        self.firing_foreign_keys = scratch.firing_foreign_keys;
+        self.pending_constraints = scratch.pending_constraints;
+        self
+    }
+
+    /// Returns the vectors this bind filled, for the next bind to reuse.
+    ///
+    /// The binder is consumed, so nothing can still be reading what is handed
+    /// back. The bound statement is not in here - it was returned by
+    /// [`Binder::bind_statement`] and owns its own vectors.
+    pub fn into_scratch(self) -> BinderScratch {
+        BinderScratch {
+            sources: self.sources,
+            scopes: self.scopes,
+            aggregates: self.aggregates,
+            result_aliases: self.result_aliases,
+            schemas: self.dependencies.schemas,
+            ctes: self.ctes,
+            recursing: self.recursing,
+            binding_ctes: self.binding_ctes,
+            correlations: self.correlations,
+            windows: self.windows,
+            named_windows: self.named_windows,
+            firing: self.firing,
+            firing_foreign_keys: self.firing_foreign_keys,
+            pending_constraints: self.pending_constraints,
+        }
+    }
+
     /// Names the limits this connection is configured with.
     ///
     /// Only `Limit::TriggerDepth` is read here; the parser reads the rest for
@@ -1784,12 +1905,21 @@ impl<'a> Binder<'a> {
             }
             bound.compounds.push((*op, armed));
         }
-        let columns = bound.columns.clone();
-        bound.order_by = if bound.compounds.is_empty() {
-            self.bind_order_by(&select.order_by, &columns)?
-        } else {
-            self.bind_compound_order_by(&select.order_by, &columns)?
+        // **The result columns are read where they are, not copied first
+        // (task-2026).** `bound` is a parameter rather than a field, so a
+        // shared borrow of its columns and the mutable borrow of the binder are
+        // two different objects and the compiler accepts both at once. The
+        // clone that used to stand here was a `Vec<BoundResultColumn>` plus one
+        // allocation for every name, origin and declared type in it - six of
+        // the 109 allocations `SELECT a FROM t WHERE id = ?1` made, and two of
+        // `SELECT 1`'s 21 - spent to hand `bind_order_by` a copy of something
+        // it only reads, on every statement including the ones with no
+        // `ORDER BY` at all.
+        let order_by = match bound.compounds.is_empty() {
+            true => self.bind_order_by(&select.order_by, &bound.columns)?,
+            false => self.bind_compound_order_by(&select.order_by, &bound.columns)?,
         };
+        bound.order_by = order_by;
         bound.limit = match select.limit {
             Some(expr) => Some(self.bind_expr(expr)?),
             None => None,
@@ -2997,11 +3127,17 @@ impl<'a> Binder<'a> {
     /// SQLite does, and is the only way `sqlite3_create_collation` can be used
     /// to change how an existing schema compares.
     fn collation_named(&self, name: &[u8]) -> Option<Collation> {
-        let folded = name.to_ascii_uppercase();
+        // **The name is compared where it is (task-2026).** `create_collation`
+        // stores the name uppercased, so an uppercase-insensitive comparison
+        // against a stored name answers exactly what building an uppercase copy
+        // of `name` and comparing bytes answered. Building the copy cost an
+        // allocation per column reference, whether or not the connection had
+        // registered any collation at all - two of the 109 allocations
+        // `SELECT a FROM t WHERE id = ?1` made.
         if let Some((_, collation)) = self
             .collations
             .iter()
-            .find(|(candidate, _)| candidate.as_bytes() == folded)
+            .find(|(candidate, _)| candidate.as_bytes().eq_ignore_ascii_case(name))
         {
             return Some(*collation);
         }

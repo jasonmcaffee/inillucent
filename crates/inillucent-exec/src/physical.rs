@@ -97,7 +97,8 @@ mod translate;
 mod catalog;
 
 pub use catalog::{ForcePlan, SourceLayout, TreeCatalog};
-pub use chain::{build, build_prepared, build_statement, Statement};
+pub(crate) use chain::Listing;
+pub use chain::{build, build_prepared, build_prepared_described, build_statement, Statement};
 pub use params::Params;
 pub use run::{
     prepare_any, rowid_seek_key, run, run_any, run_any_prepared, run_compound, run_prepared,

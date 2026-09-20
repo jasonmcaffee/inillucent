@@ -469,7 +469,19 @@ pub fn try_compile(
     let before = params.reads();
     let collected = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
     let sink = Box::new(CollectInto::new(std::rc::Rc::clone(&collected)));
-    let upper = crate::physical::build_upper(plan, catalog, prepared, &space, params, sink)?;
+    // The listing is kept here: a `Compiled` builds its chain once and every
+    // later execution reuses it, so rendering the operators costs one render
+    // per compiled statement rather than one per execution, and
+    // `Compiled::shape` is what reports it.
+    let upper = crate::physical::build_upper(
+        plan,
+        catalog,
+        prepared,
+        &space,
+        params,
+        sink,
+        crate::physical::Listing::kept(),
+    )?;
     if !upper.correlations.is_empty() {
         // Should not happen - the cheap check above already refused any plan
         // with one - but `build_upper` is the ground truth here, and a
@@ -479,8 +491,9 @@ pub fn try_compile(
     }
     let rebindable = params.reads() == before;
     let bindings = params.bindings();
-    let mut operators = upper.operators;
-    operators.push(describe_source(prepared));
+    let mut listing = upper.operators;
+    listing.add(|| describe_source(prepared));
+    let mut operators = listing.into_lines();
     operators.reverse();
     Ok(Some(Compiled {
         prepared: prepared.clone(),
