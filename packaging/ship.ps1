@@ -70,6 +70,10 @@ param(
     # machine holds.
     [ValidatePattern('^[0-9]{6}$')]
     [string] $Otp,
+    # Where inillucent-site and the Homebrew tap are. Both default to siblings of the main checkout,
+    # which is right whether this runs there or in a worktree somewhere else.
+    [string] $SitePath,
+    [string] $TapPath,
     [switch] $AllowDirty,
     [switch] $WhatIf
 )
@@ -91,9 +95,29 @@ $script:Dist = Join-Path $root 'dist'
 # scriptblock's free variables when it runs, not where it was written, so a local of `Get-Routes` is
 # gone by then and reads as $null - which `Join-Path` then refuses with "Cannot bind argument to
 # parameter 'Path' because it is null", from inside preflight, naming nothing useful.
+# **Resolved against the main checkout, not against $root (task-1995).** A release is often cut from
+# a `git worktree` - the ordinary checkout is where day to day work happens and is frequently dirty,
+# and `cargo publish` and this script both refuse a dirty tree. A worktree lives wherever it was put,
+# usually on another drive, so `../inillucent-site` and `../homebrew-inillucent` resolve to nothing
+# and the site and Homebrew routes skip with "does not exist" - the two routes a person is most
+# likely to assume ran. `git rev-parse --git-common-dir` names the original repository's .git from
+# inside any worktree, so the siblings are found from there.
+$script:MainCheckout = $root
+$commonDir = (& git -C $root rev-parse --git-common-dir 2>$null)
+if ($commonDir) {
+    $resolved = if ([System.IO.Path]::IsPathRooted($commonDir)) { $commonDir } else { Join-Path $root $commonDir }
+    $script:MainCheckout = Split-Path -Parent ([System.IO.Path]::GetFullPath($resolved))
+}
+# zig, rcodesign and the macOS SDK are gitignored - they are a few gigabytes of downloaded
+# toolchain, not source - so a fresh worktree has an empty tools/cross/bin and the build route skips
+# with "run fetch-toolchain". The toolchain is not per checkout, so the main one is used.
 $script:CrossBin = Join-Path $root 'tools/cross/bin'
-$script:SitePath = Join-Path (Split-Path -Parent $root) 'inillucent-site'
-$script:TapPath = Join-Path (Split-Path -Parent $root) 'homebrew-inillucent'
+if (-not (Get-ChildItem -Path $script:CrossBin -File -ErrorAction SilentlyContinue)) {
+    $shared = Join-Path $script:MainCheckout 'tools/cross/bin'
+    if (Get-ChildItem -Path $shared -File -ErrorAction SilentlyContinue) { $script:CrossBin = $shared }
+}
+$script:SitePath = if ($SitePath) { $SitePath } else { Join-Path (Split-Path -Parent $script:MainCheckout) 'inillucent-site' }
+$script:TapPath = if ($TapPath) { $TapPath } else { Join-Path (Split-Path -Parent $script:MainCheckout) 'homebrew-inillucent' }
 $script:Packaging = $PSScriptRoot
 $script:Root = $root
 
@@ -390,6 +414,12 @@ function Import-SigningSecrets {
     $resolved = Resolve-GitHubToken
     if ($resolved) { $env:GH_TOKEN = $resolved }
 
+    # crates.io reads CARGO_REGISTRY_TOKEN, so the sealed token is all this route needs.
+    $sealedCrates = Join-Path $store 'crates.token.sealed'
+    if (-not $env:CARGO_REGISTRY_TOKEN -and (Test-Path -LiteralPath $sealedCrates)) {
+        $env:CARGO_REGISTRY_TOKEN = Unprotect-AppleSecret -Path $sealedCrates
+    }
+
     $keyIdFile = Join-Path $store 'gpg.keyid'
     $sealedPassphrase = Join-Path $store 'gpg.passphrase.sealed'
     if (-not $env:INILLUCENT_GPG_KEY -and (Test-Path -LiteralPath $keyIdFile)) {
@@ -410,6 +440,7 @@ function Remove-SigningSecrets {
     }
     $env:INILLUCENT_GPG_PASSPHRASE = $null
     $env:INILLUCENT_MINISIGN_PASSPHRASE = $null
+    $env:CARGO_REGISTRY_TOKEN = $null
     $env:GH_TOKEN = $null
     $env:TWINE_PASSWORD = $null
     # Put back whatever the machine had, rather than clearing it: npm outside this script should
@@ -633,7 +664,15 @@ function Publish-Tag {
         & git -C $root tag -a "v$Version" -m "inillucent $Version"
         if ($LASTEXITCODE -ne 0) { throw "tagging v$Version failed" }
     }
-    & git -C $root push
+    # **The branch is named rather than implied.** Cut from a worktree, HEAD is on a branch of its
+    # own with no upstream, and a bare `git push` then fails with "no upstream branch" after the
+    # commit and the tag have already been made - which is the worst place to stop, because the next
+    # run sees the tag and skips the work. Pushing HEAD to the default branch is what was meant in
+    # either case.
+    $default = (& git -C $root symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>$null)
+    $branch = if ($default) { $default -replace '^origin/', '' } else { 'main' }
+    & git -C $root push origin "HEAD:$branch"
+    if ($LASTEXITCODE -ne 0) { throw "pushing HEAD to origin/$branch failed" }
     & git -C $root push origin "v$Version"
     if ($LASTEXITCODE -ne 0) { throw "pushing v$Version failed" }
 }
