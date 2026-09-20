@@ -530,6 +530,18 @@ function Get-Routes {
             Needs = { $null }
             Run   = { Publish-Tag -Version $Version }
         },
+        # **The mirror goes first, and the order is load bearing (task-1995).** The GitHub
+        # release is created on the public repository, and `gh release create` against a tag
+        # that does not exist makes one at that repository's current HEAD - which, before the
+        # mirror route has run, is the previous release's commit. The release would then carry
+        # this version's artifacts on last version's source. The Go module tag has the same
+        # dependency and already ran after this.
+        @{
+            Name  = 'mirror'
+            What  = 'the public source mirror'
+            Needs = { $null }
+            Run   = { & (Join-Path $script:Packaging 'mirror-github.ps1') -Version $Version -Push -Verify }
+        },
         @{
             Name   = 'github'
             What   = 'the GitHub release, with every asset'
@@ -547,12 +559,6 @@ function Get-Routes {
             }
             Run    = { Publish-GitHubRelease -Version $Version }
             Verify = { Test-GitHubRelease -Version $Version }
-        },
-        @{
-            Name  = 'mirror'
-            What  = 'the public source mirror'
-            Needs = { $null }
-            Run   = { & (Join-Path $script:Packaging 'mirror-github.ps1') -Version $Version -Push -Verify }
         },
         @{
             Name   = 'site'
