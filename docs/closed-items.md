@@ -6,12 +6,65 @@ happened to it here.
 
 ## Memory
 
-**42.40 MiB against SQLite's 37.20, which is 14% more**, on the same 128 MiB budget, while running
-330% faster and spending 70% less processor. It came down twice, from 102% more, then 43% more.
-The remaining 5.4 MiB is a page pool holding a file that is within 4% of SQLite's, a process floor
-of which 4.1 MiB is what any Rust binary in this workspace costs before the engine exists, and one
-`CREATE INDEX`. [Where the memory goes](performance.md#memory) attributes every megabyte. Closed by
-decision: this is where it stays.
+**40.93 MiB against SQLite's 37.21, which is 10% more**, on the same 128 MiB budget, while running
+363% faster and spending 61% less processor. It came down three times, from 102% more, then 43%, then
+14%. The last step was task-2000's design 2: a bulk index build used to write each page into a buffer
+pool frame that then had to be written out and evicted, and it writes into the file directly now, so
+`schema.index` - which is what sets this plan's high water mark - raises it by 10.73 MiB rather than
+12.50.
+
+The remaining 3.7 MiB is a page pool holding a file that is within 4% of SQLite's, a process floor, and
+one `CREATE INDEX`. **The allocator is not part of it, and that is measured rather than assumed**: a
+130 KB Rust program whose `main` reads its own working set and returns peaks at **3.62 MiB with
+`inillucent-alloc` installed and 3.62 MiB without it**, 0.66 MiB private either way. It has no initial
+reservation to size down - its free lists start empty and a full class hands its block back to the
+system allocator - so the question task-2000's design 10 asked, whether two to three of these mebibytes
+were the allocator's arena, is answered no. [Where the memory goes](performance.md#memory) attributes
+every megabyte. Closed by decision: this is where it stays.
+
+## What task-2000 closed
+
+Four of its ten designs are built and measured; the pair of four-run gates that measures them was taken
+back to back on one box, because the same pinned SQLite binary reads 2.16x faster on a quiet box than
+on a busy one and a stored baseline is therefore not a comparison. **3.51x weighted before, 4.63x
+after**, with processor time 0.670 of SQLite's before and 0.385 after.
+
+**A commit is one log append and one sync of it** (design 1). It used to be a checkpoint: the log
+folded into the file, and a rollback journal holding the pre-image of every page the fold was about to
+overwrite, at six to eight `fsync` class calls a statement. The fold is deferred now - until the log
+passes four mebibytes, until a caller asks, or until the connection closes - and it is made safe
+without a rollback journal by appending the after image of every page it is about to write to the log
+first. Measured on the gate's own new counters: `txn.autocommit`'s hundred statements make **100 log
+writes, 100 log syncs, no data file syncs and no folds**, where they used to make 202 syncs and write
+3,252 KiB of log for 50 KiB of rows. `txn.autocommit` went from 0.13x to 0.94x and
+`write.insert.autocommit` from 0.47x to 3.04x; the `transaction` family from 1.25x to 2.36x and `write`
+from 1.46x to 2.12x, both lower bounds now clear of the 1.50x bar.
+
+**A bulk index build writes each page once** (design 2). `schema.index` went from 0.66x to 1.37x and
+the plan's peak resident set from 42.45 MiB to 40.93. Its crash campaign cuts 1,200 points of a
+`CREATE INDEX`, including the one cut where the statement commits and the power then goes: that
+snapshot holds a database whose catalog has never been written in place, so the committed index exists
+in the log and nowhere else, and recovery rebuilds it over pages that were synced before the commit.
+
+**`count(*)` is one addition a batch** (design 4). The operators answered it by calling the accumulator
+once a row with a `NULL` argument, so a hundred thousand row scan made a hundred thousand calls that
+each compared a discriminant and added one. `scan.aggregate` went from 11.41x to **52.16x** and
+`scan.group` from 7.89x to **27.51x**, which took `read.analytical` from 5.29x to 10.48x and its lower
+bound from 4.67x to 8.14x, over the 5.00x bar it had been missing.
+
+**The retrieval index builds on every core** (design 9). `HnswParams::build_threads` defaults to
+`available_parallelism()`, the two legs of a hybrid search run under `rayon::join`, and
+`distance::dot` dispatches once to an AVX2 and FMA kernel with eight 256-bit accumulators. The index
+build went from 129.7 s to **16.8 s** for 185,078 chunks at 768 dimensions, and vector search p50 from
+0.934 ms to **0.5766**. The acceptance condition was the score card's ranking verdicts, because a
+parallel build's graph is not the serial one: they are byte for byte what they were, **15 better, 1
+equivalent, 1 inconclusive, 0 worse, every correctness gate passing**, which is why the default is the
+parallel build everywhere rather than only in the command line.
+
+The wide kernel does not produce bit identical answers to the scalar one and cannot - a different
+number of accumulators is a different summation order - and the measured worst disagreement over ten
+thousand random L2 normalised pairs at 768 dimensions is **5.4e-8**, under half a unit in the last
+place of an `f32` near 1.0.
 
 ## Two per family bars that arithmetic cannot reach
 

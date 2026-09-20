@@ -17,10 +17,10 @@ them.
 
 | | | measured |
 |---|---|---|
-| **Faster than SQLite** | **339% faster** | 4.39x weighted over the contract's ten families, median of four consecutive 30-round runs at the v0.1.3 tag. The 95% lower bound the gate actually grades on is **4.09x**, i.e. **309% faster**, against a 3.00x bound it clears on all four |
-| **Faster than pgvector** | **113% faster unfiltered, 5,582% faster filtered** | retrieval p50 0.9340 ms against 1.990, and 0.6262 ms against 35.583 with a `source =` predicate, against the *better* of the two pgvector configurations. In production, on Nikaya's 598,560-chunk mailbox, semantic p50 went 33.7 ms warm to **4.41 ms** - **664% faster**, and recall@100 0.899 to **1.000** |
-| **Less CPU** | **68% less CPU** | 391 ms of processor against SQLite's 1,207, same plan, one child process each. Ratio 0.325x against a 0.40x bar, which it meets on all four runs |
-| **Less RAM** | **it is not less. It is 15% MORE** | 42.6 MiB peak resident against SQLite's 37.2, on the same 128 MiB budget. It was **102% more** before review 6 and **43% more** before review 7, and the bar asks for **5% less** - so this is the one headline that is still a loss |
+| **Faster than SQLite** | **363% faster** | 4.63x weighted over the contract's ten families, median of four consecutive 30-round runs on `main`. The 95% lower bound the gate actually grades on is **4.30x**, i.e. **330% faster**, against a 3.00x bound it clears on all four |
+| **Faster than pgvector** | **144% faster unfiltered, 5,970% faster filtered** | retrieval p50 0.8149 ms against 1.990, and 0.5804 ms against 35.221 with a `source =` predicate, against the *better* of the two pgvector configurations. In production, on Nikaya's 598,560-chunk mailbox, semantic p50 went 33.7 ms warm to **4.41 ms** - **664% faster**, and recall@100 0.899 to **1.000** |
+| **Less CPU** | **61% less CPU** | 453 ms of processor against SQLite's 1,172, same plan, one child process each. Ratio 0.385x against a 0.40x bar, which it meets on all four runs |
+| **Less RAM** | **it is not less. It is 10% MORE** | 40.93 MiB peak resident against SQLite's 37.21, on the same 128 MiB budget. It was **102% more** before review 6, **43% more** before review 7 and **14% more** before task-2000, and the bar asks for **5% less** - so this is the one headline that is still a loss |
 | **Same features as SQLite** | **96.9% byte for byte, 98.3% of what SQLite answers, none refused** | 403 of 416 probed cases produce SQLite's exact bytes. 6 of the other 13 are vector features SQLite does not have, and 7 answer differently. [Why it is not 100%](#why-it-is-not-100) says what each is and which can ever be closed |
 
 **This figure has read 403 twice, with a dip to 391 between.** It was first measured at **403 of 416
@@ -163,15 +163,15 @@ and this engine wins two of those three.
 | features both answer **differently** | - | 7 | **1.7%**, none of them silent |
 | vector features with no SQLite equivalent | 0 | 6 | **6 extra** |
 | **the surface audited against SQLite's own registers**, not against our case list | 218 functions, 67 pragmas, 19 modules, 5 collations, 65 dot commands | all called in both engines, and now **compared on every build** | **4 functions, 2 modules and 2 dot commands absent**, and the **silent difference is closed** - see [Is the feature list itself complete?](#is-the-feature-list-itself-complete) |
-| **Elapsed time**, weighted over the contract's ten families | the reference | 4.39x the speed | **339% faster** |
-| Elapsed time, the 95% lower bound the contract grades on | - | 4.09x | **309% faster** (bar: 200% faster) |
-| **Processor time**, same plan, one child process each | 1,207 ms | 391 ms | **68% less CPU** (bar: 60%, met on all four runs) |
-| **Peak resident memory**, same plan, matched 128 MiB budget | 37.2 MiB | 42.5 MiB | **14% MORE memory** (was 102%, then 43%; the bar asks for 5% *less*) |
+| **Elapsed time**, weighted over the contract's ten families | the reference | 4.63x the speed | **363% faster** |
+| Elapsed time, the 95% lower bound the contract grades on | - | 4.30x | **330% faster** (bar: 200% faster) |
+| **Processor time**, same plan, one child process each | 1,172 ms | 453 ms | **61% less CPU** (bar: 60%, met on all four runs) |
+| **Peak resident memory**, same plan, matched 128 MiB budget | 37.21 MiB | 40.93 MiB | **10% MORE memory** (was 102%, then 43%, then 14%; the bar asks for 5% *less*) |
 | **The database on disk**, the same fixture imported | 16.05 MiB | 16.62 MiB | **1.036x** (was 1.41x) |
-| The family that was **under the floor** | - | `transaction`, now **150% faster** (2.50x, lower bound 2.01x) | the release condition is that no required family is below the 1.00x floor, and two runs of the four met it outright; `schema` went under on the other two, at a 0.91x and 0.96x lower bound against a 1.36x ratio. `transaction` reads 150% rather than the 241% recorded at review 7 because task-1911 made the rollback journal perform the sync it exists for, which `txn.autocommit` pays once per statement - see [Performance](performance.md#by-family) |
+| The family that was **under the floor** | - | `transaction`, now **136% faster** (2.36x, lower bound 1.73x) | the release condition is that no required family is below the 1.00x floor, and three runs of the four met it; `schema` went under on the first, at a 0.68x lower bound against a 1.36x ratio, and reads 1.03x, 1.36x and 1.35x on the other three. `transaction` was 1.25x before task-2000 made a commit one log append and one sync - see [Performance](performance.md#by-family) |
 | Retrieval ranking, 17 graded comparisons against pgvector | the baseline | 15 better, 2 not worse | **none worse** |
-| Retrieval latency, unfiltered, p50 | 1.990 ms | 0.9340 ms | **113% faster** |
-| Retrieval latency, filtered to a minority source, p50 | 35.583 ms | 0.6262 ms | **5,582% faster** |
+| Retrieval latency, unfiltered, p50 | 1.990 ms | 0.8149 ms | **144% faster** |
+| Retrieval latency, filtered to a minority source, p50 | 35.221 ms | 0.5804 ms | **5,970% faster** |
 
 **Read the performance rows together.** inillucent finishes the same work in **a quarter of the
 time** while spending **about a third of the processor**, so the speed is not bought by burning
@@ -234,7 +234,7 @@ until the window path was reconnected, and it reads 403 agree, 0 refused and 7 d
 | Same observable semantics | **Nothing SQLite answers is refused silently, and the one silent difference is closed.** `pragma_function_list` and `pragma_module_list` answered fewer rows than SQLite's while the functionality behind the difference worked, so a caller that introspected the register was told less than the truth with no error. It was found by [auditing the list against SQLite's own enumerations](#is-the-feature-list-itself-complete) rather than by the 416 cases, and review 6 closed it and turned the audit into `crates/inillucent-compat/tests/registers.rs`, which compares all four registers on every build. Every one of the seven rows that answers differently reports something a caller can read and act on: a page size and a locking mode this engine chose and can measure the cost of choosing otherwise, a build option the two pinned reference artifacts disagree about, or a number that describes SQLite's own C structures - a VDBE program, `sizeof(sqlite3_file)`, a lookaside allocator's counters - which no engine that is not SQLite can print. The twelve window function refusals are visible too: each returns exit code `3`, not `1`, so a caller can tell "not built" from "your SQL is wrong". |
 | The PRAGMA surface an application uses | **59 of the 67 pragmas SQLite lists answer; the other 8 answer nothing in SQLite either.** None is silent here, and none is refused here. |
 | Embedding search like pgvector | **The ranking is better and the SQL surface matches**, operator spellings included. Re-graded in full for this review. See [Vector search](#vector-search-against-postgresql--pgvector). |
-| Faster than SQLite | **Yes on time and on processor, no on memory.** 339% faster at 68% less CPU over four consecutive runs, at **14% more** resident memory - down from 102% before review 6 and 43% before review 7, and now graded by a bar in the contract rather than left ungraded. See [Performance](#performance). |
+| Faster than SQLite | **Yes on time and on processor, no on memory.** 363% faster at 61% less CPU over four consecutive runs, at **10% more** resident memory - down from 102% before review 6, 43% before review 7 and 14% before task-2000, and now graded by a bar in the contract rather than left ungraded. See [Performance](#performance). |
 
 ---
 
@@ -1133,7 +1133,7 @@ Every one, with what it measures. Nothing here is refused and nothing here is si
 and each reports something a caller can read.
 
 **Two are one decision, measured.** Both of the experiments in this section were run when the
-weighted headline stood at 3.83x rather than today's 4.39x, and neither has been re-run since. What
+weighted headline stood at 3.83x rather than today's 4.63x, and neither has been re-run since. What
 each measures is the *difference* between two settings, which is why it is still quoted.
 
 1. **`PRAGMA page_size` is 32768** where the reference is 4096. Measured both ways on the medium
@@ -1298,10 +1298,10 @@ the configured one returns the rows and pays for them.
 
 | query | inillucent | pgvector, configured | vs configured | pgvector, defaults | vs defaults |
 |---|---|---|---|---|---|
-| no predicate, p50 | **0.9340 ms** | 1.990 ms | **113% faster** | 1.299 ms | **39% faster** |
-| no predicate, p95 | **1.585 ms** | 3.371 ms | **113% faster** | 2.410 ms | **52% faster** |
-| `source = slack`, p50 | **0.6262 ms** | 35.583 ms | **5,582% faster** | 1.139 ms | **82% faster** |
-| `source = slack`, p95 | **0.7352 ms** | 87.733 ms | **11,833% faster** | 2.054 ms | **179% faster** |
+| no predicate, p50 | **0.8149 ms** | 1.990 ms | **144% faster** | 1.397 ms | **71% faster** |
+| no predicate, p95 | **1.491 ms** | 3.233 ms | **117% faster** | 2.180 ms | **46% faster** |
+| `source = slack`, p50 | **0.5804 ms** | 35.221 ms | **5,970% faster** | 1.110 ms | **91% faster** |
+| `source = slack`, p95 | **0.6988 ms** | 89.758 ms | **12,745% faster** | 1.940 ms | **178% faster** |
 
 The filtered row stands for the whole comparison: pgvector's cost of *being correct under a
 filter* is to repeat the scan, and it is two orders of magnitude. inillucent's probe widens itself
@@ -1385,10 +1385,13 @@ files are `_agent_output/task-1935-sqlite/v013-run1.txt` through `v013-run4.txt`
 `v013-summary.json` beside them, and every figure in this section is read out of them by
 `summarise.mjs` rather than typed.
 
-**`main` is slower than this section, and it is one commit.** db3be74 measures 3.48x against v0.1.3's
-4.39x, with `transaction` and `schema` under the contract's floor on all four runs.
-[What main measures today](performance.md#what-main-measures-today-and-why-it-is-slower-than-this-page)
-has the bisect, the cause and the ticket. Nothing released carries it.
+**`main` was slower than the released tag for two days, and it is faster than it now.** The default
+locking mode changed after v0.1.3, and under it every statement that wrote folded the log into the file
+before releasing: db3be74 measured 3.48x against the tag's 4.39x, with `transaction` and `schema` under
+the contract's floor on all four runs. task-1999 took five pieces of housekeeping off that path and
+task-2000 changed what a commit costs - one append to the log and one sync of it, with the fold
+deferred - and `main` measures **4.63x** with every family's lower bound clear of the floor on three of
+four runs. [Performance](performance.md) is that run.
 
 `compat/perf/contract.toml` carries a `[memory]` bar of 0.95x and a `[cpu]` bar of 0.40x, both ratios
 of SQLite's on the same plan and the same budget, and both **written before the work that had to meet
@@ -1405,17 +1408,29 @@ down rather than assumed.
 **Where the numbers have been.** The engine has been measured in full five times, and the headline
 has moved every time; nothing here is a figure carried forward from a previous document.
 
-| | review 6 | review 7 | after task-1885 | before task-1911 | task-1890's run | **v0.1.3, now** |
+| | review 7 | after task-1885 | before task-1911 | task-1890's run | v0.1.3 | **`main`, now** |
 |---|---|---|---|---|---|---|
-| weighted headline | 3.81x | 3.79x | 3.83x | 4.26x | 4.30x | **4.39x** |
-| 95% lower bound (bound 3.00x) | 3.55x | 3.65x | 3.60x | 4.13x | 4.06x | **4.09x** |
-| `transaction` (floor 1.00x) | 1.14x | 0.84x - `UNDER THE FLOOR` | 0.90x - `UNDER THE FLOOR` | 3.41x | 2.52x | **2.50x** |
-| `write` (bar 1.50x) | 1.93x | 1.71x | 1.60x | 1.92x | 2.08x | **2.17x** |
-| `extension` (bar 1.50x) | - | - | - | 1.30x | 1.52x | **1.58x** |
-| `read.analytical` (bar 5.00x) | - | - | - | - | 6.67x | **5.36x** |
-| processor time | 406 ms | 445 ms | 414 ms | 422 ms | 390 ms | **391 ms** |
-| peak resident set | 53.28 MiB | 42.61 | 42.59 | 42.61 | 42.40 | **42.45 MiB** |
-| the imported `.rdb` | 22.66 MiB | 17,432,576 B | 17,432,576 B | 17,432,576 B | 17,432,576 B | **17,432,576 B** - 1.036x the `.db` |
+| weighted headline | 3.79x | 3.83x | 4.26x | 4.30x | 4.39x | **4.63x** |
+| 95% lower bound (bound 3.00x) | 3.65x | 3.60x | 4.13x | 4.06x | 4.09x | **4.30x** |
+| `transaction` (floor 1.00x) | 0.84x - `UNDER THE FLOOR` | 0.90x - `UNDER THE FLOOR` | 3.41x | 2.52x | 2.50x | **2.36x** |
+| `write` (bar 1.50x) | 1.71x | 1.60x | 1.92x | 2.08x | 2.17x | **2.12x** |
+| `extension` (bar 1.50x) | - | - | 1.30x | 1.52x | 1.58x | **1.57x** |
+| `read.analytical` (bar 5.00x) | - | - | - | 6.67x | 5.36x | **10.48x** |
+| `schema` (bar 3.00x) | - | - | - | - | 1.36x | **1.37x** |
+| processor time | 445 ms | 414 ms | 422 ms | 390 ms | 391 ms | **453 ms** |
+| peak resident set | 42.61 MiB | 42.59 | 42.61 | 42.40 | 42.45 | **40.93 MiB** |
+| the imported `.rdb` | 17,432,576 B | 17,432,576 B | 17,432,576 B | 17,432,576 B | 17,432,576 B | **17,432,576 B** - 1.036x the `.db` |
+
+Review 6's column is dropped to make room; it measured 3.81x weighted, a 3.55x bound, `transaction`
+1.14x, `write` 1.93x, 406 ms of processor and 53.28 MiB resident.
+
+**Two of those columns are not comparable with each other and the table cannot show why**, so it is
+written here: the v0.1.3 column and the `main` column were measured six days apart, and the same
+pinned SQLite binary on the same fixture reads **2.16x faster on a quiet box than on one that has just
+run the test suite**. Every ratio in this table is against that moving denominator. The one pair
+measured back to back on one box, minutes apart, is the commit before task-2000 against `main` after
+it: **3.51x against 4.63x**, with processor time 0.670 of SQLite's against 0.385. That pair is the
+honest measure of what the work did; the columns beside it are each honest about their own day.
 
 Review 5's arm is dropped from this table; it measured only the resident set, at 75.25 MiB.
 
@@ -1445,10 +1460,10 @@ is never left as the only statement of a loss. Memory and processor time are wri
 
 | | SQLite 3.53.4 | inillucent | the difference | the contract |
 |---|---|---|---|---|
-| **elapsed time**, weighted geometric mean over the ten families | the reference | 4.39x the speed | **339% faster** | - |
-| **elapsed time**, the 95% lower bound the contract grades on | - | 4.09x | **309% faster** | bound 3.00x - **MET on all four runs** |
-| **processor time**, one round of the whole plan | 1,207 ms | 391 ms | **68% less CPU** | bar 0.40x, measured **0.325x** - **MET on all four** |
-| **peak resident set**, one round of the whole plan | 37.20 MiB | 42.45 MiB | **14% more memory** | bar 0.95x, measured **1.14x** - **MISSED on all four** |
+| **elapsed time**, weighted geometric mean over the ten families | the reference | 4.63x the speed | **363% faster** | - |
+| **elapsed time**, the 95% lower bound the contract grades on | - | 4.30x | **330% faster** | bound 3.00x - **MET on all four runs** |
+| **processor time**, one round of the whole plan | 1,172 ms | 453 ms | **61% less CPU** | bar 0.40x, measured **0.385x** - **MET on all four** |
+| **peak resident set**, one round of the whole plan | 37.21 MiB | 40.93 MiB | **10% more memory** | bar 0.95x, measured **1.10x** - **MISSED on all four** |
 
 The processor and memory figures are the gate's *comparable pair*: **one child process each**, both
 opening a finished file the parent built, both running one round of the same plan, neither figure a
@@ -1456,26 +1471,30 @@ delta.
 
 **The memory row is the one that has moved furthest.** Review 5 measured 75.25 MiB - 102% more than
 SQLite - and named four consumers. Review 6 reached 53.28, review 7 reached 42.61 by shrinking the
-file rather than a buffer, and it has not moved since.
+file rather than a buffer, and task-2000 reached **40.93** by stopping the index build going through
+the page pool: a bulk build writes its pages into the file directly now, so the frames it used to take
+and then have to evict are never taken, and `schema.index` is what sets this plan's high water mark.
 [Where the memory goes](#where-the-memory-goes) has the per-workload attribution and the measured
-reason the last 5.4 MiB is not going to come from another buffer either.
+reason the last 3.7 MiB is not going to come from another buffer either - including the trivial binary
+that measures the process floor at 3.62 MiB with this engine's allocator installed and 3.62 MiB
+without it.
 
 **The four runs, one by one.**
 
 | | run 1 | run 2 | run 3 | run 4 | median |
 |---|---|---|---|---|---|
-| weighted geometric mean | 4.50x | 4.45x | 4.31x | 4.33x | **4.39x - 339% faster** |
-| weighted lower bound (bound 3.00x) | 4.33x | 4.01x | 4.13x | 4.04x | **4.09x - `MET` on all four** |
-| floor: every required family above 1.00x | **met** | `schema` 0.91x | `schema` 0.96x | **met** | **met on two of four** |
+| weighted geometric mean | 4.59x | 4.55x | 4.67x | 4.69x | **4.63x - 363% faster** |
+| weighted lower bound (bound 3.00x) | 4.16x | 4.32x | 4.29x | 4.38x | **4.30x - `MET` on all four** |
+| floor: every required family above 1.00x | `schema` 0.68x | **met** | **met** | **met** | **met on three of four** |
 | digests | 30 of 30 equal | 30 of 30 | 30 of 30 | 30 of 30 | **all equal** |
-| processor time, ours / SQLite's | 359 / 1,203 ms | 438 / 1,211 | 391 / 1,234 | 391 / 1,188 | **0.325x - `MET`** |
-| peak resident set, ours / SQLite's | 44.61 / 37.21 MiB | 42.43 / 37.20 | 42.48 / 37.20 | 42.37 / 37.21 | **1.14x - `MISSED`** |
-| **SQLite's own `txn.batched`** | 879 ms | 852 | 855 | 861 | **the volume's state, see below** |
+| processor time, ours / SQLite's | 438 / 1,133 ms | 453 / 1,156 | 406 / 1,141 | 438 / 1,156 | **0.385x - `MET`** |
+| peak resident set, ours / SQLite's | 40.89 / 37.21 MiB | 40.93 / 37.21 | 40.81 / 37.22 | 40.83 / 37.20 | **1.10x - `MISSED`** |
+| **SQLite's own `txn.batched`** | 836 ms | 846 | 840 | 854 | **steady across the four, see below** |
 
-**`schema` is the only family that went under the floor, and it did so on two runs of the four.** Its
-median ratio is 1.36x and the two runs that went under have lower bounds of 0.91x and 0.96x. It is a
-one-workload family, so its bootstrap has three values and a wide interval; the ratio is comfortably
-above the floor and the bound is not.
+**`schema` is the only family that went under the floor, and it did so on one run of the four.** Its
+median ratio is 1.37x, the run that went under has a lower bound of 0.68x, and the other three read
+1.03x, 1.36x and 1.35x. It is a one-workload family, so its bootstrap has three values and the widest
+interval on the page; the ratio is comfortably above the floor and the bound is not.
 
 **That last row is a fact about the volume rather than about either engine, and it is in the table
 because a reader has to be able to tell the two apart.** `txn.batched` is 200 commits and 200
@@ -1486,11 +1505,18 @@ keeping up. It is not accumulated files - 37.8 GB of abandoned gate scratch was 
 set and its runs 3 and 4 degraded anyway.
 
 **This sequence did not degrade through its four runs, and it did not start fast either.** SQLite's
-`txn.batched` reads 879, 852, 855 and 861 ms, which is steady to within 3% but sits at the slow end
+`txn.batched` reads 836, 846, 840 and 854 ms, which is steady to within 2% but sits at the slow end
 of what that earlier sequence saw. So the volume was in its slower state throughout, for both arms
-and for every one of the eight runs taken this morning, including the four at `main`. That is a
-reason to read `txn.batched`'s **absolute** milliseconds with suspicion and no reason at all to
-doubt the ratios, which pair the two arms round by round on the same disk in the same second.
+and for every one of the eight runs in this pair. That is a reason to read `txn.batched`'s
+**absolute** milliseconds with suspicion and no reason at all to doubt the ratios, which pair the two
+arms round by round on the same disk in the same second.
+
+**And it is why the before-and-after pair was taken back to back rather than against a stored
+baseline.** The same pinned SQLite binary on the same fixture reads **2.16x faster on a quiet box**
+than on one that has just run the test suite - `point.rowid`'s reference arm measured 107.7 ms in one
+sitting and 50.0 ms in another, six hours apart. A ratio quoted against a denominator from another day
+is not a measurement of either engine, so both halves of "what task-2000 did" were measured minutes
+apart on one machine: **3.51x before, 4.63x after**.
 
 **`transaction` used to be the family that follows it, and `txn.large` was why.** At 0.09x it was the
 slowest workload on the board, so the family's three-workload bootstrap had a wide interval and its
@@ -1509,74 +1535,98 @@ family; **weight** is what the contract gives it in the headline.
 
 | family | weight | measured | the difference | the bar asks | verdict | lower bounds |
 |---|---|---|---|---|---|---|
-| `read.point` | 16% | 30.07x | **2,907% faster** | 100% faster | **MET**, 4 of 4 | 27.15-28.19 |
-| `large.values` | 4% | 12.70x | **1,170% faster** | 50% faster | **MET**, 4 of 4 | 7.71-9.52 |
-| `read.analytical` | 10% | 5.36x | **436% faster** | 400% faster | **MISSED** on the lower bound, 4 of 4 | 4.47-4.92 |
-| `read.range` | 12% | 5.13x | **413% faster** | 200% faster | **MET**, 4 of 4 | 4.02-4.25 |
-| `read.join` | 8% | 4.38x | **338% faster** | 200% faster | **MET** on 3 of 4, missed on the fourth | 2.86-3.09 |
-| `transaction` | 10% | 2.50x | **150% faster** | no slower than SQLite | **MET**, 4 of 4 - it was below the floor on all four before task-1890 | 1.90-2.27 |
-| `write` | 20% | 2.17x | **117% faster** | 50% faster | **MET**, 4 of 4 | 1.74-2.12 |
-| `extension` | 8% | 1.58x | **58% faster** | 50% faster | **MISSED** on the lower bound, 4 of 4 | 1.29-1.45 |
-| `open.prepare` | 8% | 1.50x | **50% faster** | 400% faster | **MISSED**, 4 of 4 - the bar asks for more than SQLite itself reaches, see below | 1.15-1.19 |
-| `schema` | 4% | 1.36x | **36% faster** | 200% faster | **MISSED**, 4 of 4, and under the floor on 2 of 4 | 0.91-1.35 |
+| `read.point` | 16% | 29.34x | **2,834% faster** | 100% faster | **MET**, 4 of 4 | 26.97-28.02 |
+| `large.values` | 4% | 11.93x | **1,093% faster** | 50% faster | **MET**, 4 of 4 | 7.79-8.26 |
+| `read.analytical` | 10% | 10.48x | **948% faster** | 400% faster | **MET**, 4 of 4 | 7.79-8.40 |
+| `read.range` | 12% | 5.06x | **406% faster** | 200% faster | **MET**, 4 of 4 | 3.94-4.02 |
+| `read.join` | 8% | 4.22x | **322% faster** | 200% faster | **MISSED** on the lower bound, 4 of 4 | 2.82-2.93 |
+| `transaction` | 10% | 2.36x | **136% faster** | no slower than SQLite | **MET**, 4 of 4 - it was below the floor on all four before task-1890 | 1.65-1.84 |
+| `write` | 20% | 2.12x | **112% faster** | 50% faster | **MET**, 4 of 4 | 1.81-2.04 |
+| `extension` | 8% | 1.57x | **57% faster** | 50% faster | **MISSED** on the lower bound, 4 of 4 | 1.17-1.45 |
+| `open.prepare` | 8% | 1.46x | **46% faster** | 400% faster | **MISSED**, 4 of 4 - the bar asks for more than SQLite itself reaches, see below | 1.14-1.15 |
+| `schema` | 4% | 1.37x | **37% faster** | 200% faster | **MISSED**, 4 of 4, and under the floor on 1 of 4 | 0.68-1.36 |
 
-**`read.analytical` misses its bar for the first time.** It read 6.67x on the run this table used to
-carry and reads 5.36x now, and the bar is graded on the lower bound, so a family measuring above
-5.00x can still miss. `scan.distinct` at 1.69x is what holds the bound down; the other three are
-`scan.aggregate` 11.54x, `scan.group` 7.96x and `scan.sort` 5.24x.
+**`read.analytical` meets its bar again, and it is the biggest single move on this page.** It read
+5.36x when this table last carried a full run and reads **10.48x** now, with a lower bound of 8.14x
+against the 5.00x the bar grades. Two of its four workloads are the whole of it: `scan.aggregate` from
+11.54x to **52.16x** and `scan.group` from 7.96x to **27.51x**. The operators answered `count(*)` by
+calling the accumulator once a row with a `NULL` argument, so a hundred thousand row scan made a
+hundred thousand calls that each compared a discriminant and added one; a batch's live count is one
+addition. `scan.sort` reads 5.09x and `scan.distinct` 1.65x, neither moved, and `scan.distinct` is
+still what holds the bound furthest from the family's ratio.
+
+**`read.join` now misses on the lower bound where it used to clear on three runs of four.** It reads
+4.22x with bounds of 2.82x to 2.93x against a 3.00x requirement. Nothing in that family changed: it
+read 4.28x with the same bounds on the commit before task-2000, measured back to back. `join.range` at
+0.87x is the half that holds it down.
 
 ### The three bars, and what each would take
 
 Two of the four missed bars are not gaps to close; they ask for more than the workload can give, and
 the arithmetic says so rather than an opinion.
 
-- **`open.prepare`, bar 5.00x.** The family is `prepare.point` at 4.59x and `prepare.trivial` at
-  0.50x, whose geometric mean is 1.50x. For the family to reach 5.00x, `prepare.trivial` would have
-  to reach **5.45x** - and SQLite compiles, binds, steps and resets `SELECT 1` in **433 ns** here, so
-  that is a demand for **79 ns**. No SQL front end does that; SQLite's own number is five times it.
-- **`schema`, bar 3.00x.** One workload. Ours is 26.37 ms against SQLite's 35.42, and its stages are
-  `scan 3.2 ms, sort 4.8, pack 11.6, catalog 0.3, seal 6.4`. A packer that cost **nothing at all**
-  leaves 14.8 ms, which is **2.40x**. The bar is unreachable even by deleting the stage it is aimed
-  at.
+- **`open.prepare`, bar 5.00x.** The family is `prepare.point` at 4.32x and `prepare.trivial` at
+  0.49x, whose geometric mean is 1.46x. For the family to reach 5.00x, `prepare.trivial` would have
+  to reach **5.78x** - and SQLite compiles, binds, steps and resets `SELECT 1` in **460 ns** here, so
+  that is a demand for **80 ns**. No SQL front end does that; SQLite's own number is five times it.
+  What is reachable is parity: ours is **837 ns over 24 allocations**, measured by
+  `inillucent-prepareprofile`, of which 8 are in the parse, 6 more by the end of planning and 10 in
+  the physical and pipeline stages.
+- **`schema`, bar 3.00x.** One workload. Ours is 25.84 ms against SQLite's 35.9, and its stages are
+  `scan 3.2 ms, sort 4.7, pack 15.2, catalog 0.2, seal 1.3`. `pack` is where the pages are written,
+  and it is 4 MB of file at a 32 KiB page; a packer that cost **nothing at all** leaves 9.4 ms, which
+  is 3.81x, so the bar is reachable only by not writing the index. The stage that came out of this
+  workload was the pool: a bulk build used to write each page into a frame that then had to be evicted,
+  and it writes to the file directly now, which took the workload from 0.66x to **1.37x** and the
+  plan's peak resident set from 42.45 MiB to 40.93.
 - **`extension`, bar 1.50x.** This one is reachable and is a real gap. `extension.fts.build` is
-  0.70x - 8.12 ms against 5.76 - and its own stage timers put `content 1.4 ms`, `docsize 1.0`,
-  `dict write 1.6` and `flush 1.6` against SQLite's 5.76 ms for the whole workload. Four tree writes
-  per document is the shape to change: a dictionary row and a doclist row per new term could be one.
-  The family reads 1.58x here and the gate grades it on its 95% lower bound, which runs 1.29x to
+  0.69x - 8.07 ms against 5.77 - and **52% of that is not the index**: a timer around the whole of
+  `Fts5Table::add` measures 3.9 ms of the 8.07, so building the index for one document costs 7.8 µs
+  and everything between the `INSERT` and the index costs 8.4 µs. Inside the index the stages are
+  `content 1.4 ms`, `docsize 1.1`, `tokenize 0.4`, `dict write 1.7` and `new terms 0.4` over 507
+  terms. The family reads 1.57x and the gate grades it on its 95% lower bound, which runs 1.17x to
   1.45x across the four runs against the 1.50x bar, so it reads MISSED on every one of them.
 
 **The gate prints `NOT MET`, and it is exact about which tests that is.** The headline clears its
 bound on all four runs and the processor bar is met on all four. What is missed is the **memory
-bar** - 1.14x against 0.95x, taken apart below - and four per-family **bars**, which are targets
-rather than requirements. The **floor** - no required family slower than SQLite - is met on two runs
-of the four, and `schema` went under it on the other two. It was missed by `transaction` on all four
+bar** - 1.10x against 0.95x, taken apart below - and four per-family **bars**, which are targets
+rather than requirements. The **floor** - no required family slower than SQLite - is met on three runs
+of the four, and `schema` went under it on the first. It was missed by `transaction` on all four
 before task-1890.
 
 ### The workloads that are slower than SQLite
 
-Thirty workloads, median of four runs. Twenty-four are faster; these six are slower.
+Thirty workloads, median of four runs. Twenty-three are faster; these seven are slower.
 
-| workload | family | ratio | how much slower | absolute | why |
+| workload | family | ratio | how much slower | per operation | why |
 |---|---|---|---|---|---|
-| `prepare.trivial` | `open.prepare` | 0.50x | **100% slower** | 3.30 ms against 1.73 | `SELECT 1` compiled per iteration, in **25 allocations** |
-| `extension.fts.build` | `extension` | 0.70x | **42% slower** | 8.12 ms against 5.76 | four tree writes per document - `%_content` and `%_docsize`, and at the flush a dictionary row and a doclist row for each of 507 terms - where SQLite writes about 1,000 rows and one segment blob |
-| `write.insert.batch` | `write` | 0.71x | **41% slower** | 29.72 ms against 21.47 | 2,000 inserts in one transaction; a split writes four whole page images to the log |
-| `join.range` | `read.join` | 0.90x | **11% slower** | 27.37 ms against 24.87 | one statement's overhead spread over two hundred rows, where a point lookup hides it |
-| `range.lookaside` | `read.range` | 0.97x | **3% slower** | 28.09 ms against 27.72 | the same shape |
-| `extension.json` | `extension` | 0.98x | **2% slower** | 1.16 ms against 1.14 | the extraction itself plus two uncontended mutex acquisitions; a repeated document and path are already cached |
+| `prepare.trivial` | `open.prepare` | 0.49x | **104% slower** | 837 ns against 460 | `SELECT 1` compiled per iteration, in **24 allocations** |
+| `extension.fts.build` | `extension` | 0.69x | **45% slower** | 16.2 µs a document against 11.5 | **52% of it is not the index.** Building the index for one document is 7.8 µs; everything between the `INSERT` and the index is 8.4 µs |
+| `write.insert.batch` | `write` | 0.72x | **39% slower** | 14.6 µs a row against 10.8 | 2,000 inserts in one transaction. The two secondary indexes are **69%** of it, and split records are **55%** of the log it writes |
+| `join.range` | `read.join` | 0.87x | **15% slower** | 54.9 µs against 48.1 | an index range and a probe per entry, about 210 ns a probe, where SQLite amortises one statement's overhead over two hundred rows |
+| `txn.autocommit` | `transaction` | 0.94x | **6% slower** | 1.27 ms a statement against 1.18 | one `fsync` each, and on this device an `fsync` is most of the millisecond. It was **0.13x** before task-2000 |
+| `range.lookaside` | `read.range` | 0.97x | **3% slower** | 55.5 µs against 54.2 | the same shape as `join.range`, 200 rowid probes at about 228 ns |
+| `extension.json` | `extension` | 0.99x | **1% slower** | 290 ns a call against 288 | the extraction, plus one uncontended mutex and two comparisons a call; a repeated document and path are already cached |
 
-**`extension.fts.build` has moved furthest of the six.** It read 0.36x, 178% slower, on the run this
-table used to carry, and reads 0.70x now.
+**`txn.autocommit` joined this list by getting seven times faster.** It was 0.13x - 10.91 ms a
+statement - because a commit was a checkpoint: the log folded into the file, a rollback journal holding
+the pre-image of every page the fold was about to overwrite, six to eight `fsync` class calls a
+statement. A commit is one append to the log and one sync of it now, measured on the gate's own
+counters as **100 log writes and 100 log syncs for 100 statements, with no data file syncs and no
+folds**, where the same workload used to make 202 of them and write 3,252 KiB of log for 50 KiB of
+rows. Both engines now do exactly one `fsync` a commit, so what is left is everything either does
+around that one call.
 
 **`txn.large` has left this list.** It was the slowest workload on the board at 0.09x and it decided
-the `transaction` floor; it is now **4.17x**, where the median round takes 2.82 ms against SQLite's
-12.11. What that took is in
+the `transaction` floor; it is now **3.97x**, where the median round takes 2.85 ms against SQLite's
+11.70. What that took is in
 [the performance page](performance.md#the-workload-that-was-measuring-nothing), including the part
 that was a defect in the measurement rather than in the engine.
 
-And the other end of the same table, as ratios: `point.miss` 50.84x, `large.read` 40.97x,
-`point.rowid` 32.08x, `join.selective` 21.24x, `point.index` 16.63x, `range.reverse` 16.39x,
-`scan.aggregate` 11.54x, `range.covering` 8.52x, `scan.group` 7.96x.
+And the other end of the same table, as ratios: `scan.aggregate` **52.16x**, `point.miss` 51.40x,
+`large.read` 39.94x, `point.rowid` 30.70x, `scan.group` **27.51x**, `join.selective` 20.58x,
+`point.index` 16.21x, `range.reverse` 15.73x, `range.covering` 8.43x. The two in bold are where
+`count(*)` stopped being one accumulator call a row.
 
 **Four of the six had one cause, and it was not the storage engine.** The whole tree write was
 ablated out of the in-place update path - the statement found its row, decided what to write, and
@@ -1769,13 +1819,19 @@ is left is two quantities, and one of them is no longer the file:
 | | inillucent | SQLite | why |
 |---|---|---|---|
 | **the cached database** | 16.56 MiB | ~16 MiB | the `.rdb` is **1.036x** the `.db`, down from 1.41x. What remains is the class array's two bits a row and the page directory |
-| **the process floor** | 8.49 MiB | ~4.2 MiB | of which **4.1 MiB is what any Rust binary in this workspace costs before the engine exists** - a 110 KB one measures the same. About 2.2 is this engine's code and statics; the rest is the gate child's plan and the opened catalog, which `sqlite-bench` does not build |
-| **`schema.index`'s rise** | 12.50 MiB | ~15.9 MiB | the pages the new index occupies plus the sort's arena. Ours is the *smaller* of the two |
+| **the process floor** | 8.38 MiB | ~4.2 MiB | of which **4.1 MiB is what any Rust binary in this workspace costs before the engine exists** - a 110 KB one measures the same. About 2.2 is this engine's code and statics; the rest is the gate child's plan and the opened catalog, which `sqlite-bench` does not build |
+| **`schema.index`'s rise** | 10.73 MiB | ~15.9 MiB | the pages the new index occupies plus the sort's arena. Ours is the *smaller* of the two |
 
-**The bar is still missed: 1.15x against 0.95x, 42.61 MiB against the 35.33 it would need.** The file
+**The bar is still missed: 1.10x against 0.95x, 40.93 MiB against the 35.35 it would need.** The file
 is no longer where it is: at 1.036x of SQLite's there is under 0.6 MiB left in the cached database.
-What is left is 4.3 MiB of process - most of it the operating system's, which neither engine escapes -
+What is left is 4.2 MiB of process - most of it the operating system's, which neither engine escapes -
 and one `CREATE INDEX`.
+
+**And the engine's own allocator is measured out of it.** A 130 KB Rust program whose `main` reads its
+own working set and returns peaks at **3.62 MiB with `inillucent-alloc` installed as its global
+allocator and 3.62 MiB without it**, 0.66 MiB private either way, over five runs each. It has no
+initial reservation to size down, so the two to three mebibytes task-2000's design 10 went looking for
+are not there.
 
 ### Two causes, ruled out in review 5 and still ruled out
 

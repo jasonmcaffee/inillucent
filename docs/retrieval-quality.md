@@ -81,18 +81,27 @@ the configured one returns the rows and pays for them.
 
 | query | inillucent | pgvector, configured | | pgvector, defaults | |
 |---|---|---|---|---|---|
-| no predicate, p50 | **0.9340 ms** | 1.990 ms | **113% faster** | 1.299 ms | **39% faster** |
-| no predicate, p95 | **1.585 ms** | 3.371 ms | **113% faster** | 2.410 ms | **52% faster** |
-| `source = slack`, p50 | **0.6262 ms** | 35.583 ms | **5,582% faster** | 1.139 ms | **82% faster** |
-| `source = slack`, p95 | **0.7352 ms** | 87.733 ms | **11,833% faster** | 2.054 ms | **179% faster** |
+| no predicate, p50 | **0.8149 ms** | 1.990 ms | **144% faster** | 1.397 ms | **71% faster** |
+| no predicate, p95 | **1.491 ms** | 3.233 ms | **117% faster** | 2.180 ms | **46% faster** |
+| `source = slack`, p50 | **0.5804 ms** | 35.221 ms | **5,970% faster** | 1.110 ms | **91% faster** |
+| `source = slack`, p95 | **0.6988 ms** | 89.758 ms | **12,745% faster** | 1.940 ms | **178% faster** |
 
 **Latency is the family that moves between runs, and these are not the figures an earlier version of
-this page carried.** It read 0.8954 ms unfiltered and 0.6631 filtered, against 2.459 and 42.182. The
-ranking families reproduced to four decimal places across the two runs and latency did not, which is
-what latency does: it is measured in wall clock on a shared machine, and
+this page carried.** Two versions ago it read 0.8954 ms unfiltered and 0.6631 filtered, against 2.459
+and 42.182; one version ago 0.9340 and 0.6262, against 1.990 and 35.583. The ranking families
+reproduce to four decimal places across all of those runs and latency does not, which is what latency
+does: it is measured in wall clock on a shared machine, and
 [the corpus recipe](../tests/synthetic-corpus.md) says not to compare figures taken while something
 else was running. The relationship is unchanged - the filtered query is still faster than the
 unfiltered one here and still two orders of magnitude faster than the configured baseline's.
+
+**This run is also the first with the parallel index build and the explicit AVX2 kernel**, and the
+unfiltered p50 moved with them: 0.9340 ms to 0.8149. The build itself went from 129.7 seconds to
+**16.8** for the same 185,078 chunks at 768 dimensions, because `HnswParams::build_threads` defaults
+to every core rather than one. A parallel build's graph is not the serial one - the levels come from
+the same seeded generator but the order in which nodes link to each other is whatever the thread pool
+produced - so the condition for shipping it was the ranking verdicts on this card, and they are
+unchanged: **15 better, 1 equivalent, 1 inconclusive, 0 worse**.
 
 The filtered row stands for the whole comparison. pgvector's cost of being *correct* under a
 filter is to repeat the scan, and that is two orders of magnitude. inillucent's probe widens itself

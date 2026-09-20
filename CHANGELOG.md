@@ -8,6 +8,55 @@ the shell, the MCP server, the migration tool, the C ABI library, and the Go,
 npm, PyPI and Composer wrappers are all one number. `tools/doc-facts/check.mjs`
 fails the build when any copy of it disagrees.
 
+## Unreleased
+
+**A commit is one append to the log and one sync of it.** It used to be a
+checkpoint: the log folded into the file, and a rollback journal holding the
+pre-image of every page the fold was about to overwrite, which is six to eight
+`fsync` class calls a statement. The fold is deferred now - until the log passes
+four mebibytes, until a caller asks for a checkpoint, or until the connection
+closes - and it is made safe without a rollback journal by appending the after
+image of every page it is about to write to the log first. Measured on the
+gate's own counters, an autocommit `UPDATE`'s hundred statements make **100 log
+writes, 100 log syncs, no data file syncs and no folds**, where the same
+workload used to make 202 syncs and write 3,252 KiB of log for 50 KiB of rows.
+
+A bulk index build writes each page into the file directly rather than through
+a buffer pool frame that then has to be evicted. `count(*)` is one addition a
+batch rather than one accumulator call a row. The retrieval index builds on
+every core, the two legs of a hybrid search run in parallel, and the distance
+kernel dispatches once to an explicit AVX2 and FMA version.
+
+Measured against SQLite 3.53.4, four consecutive 30-round runs either side of
+the work on one machine, minutes apart:
+
+| | before | after |
+|---|---:|---:|
+| weighted over the ten families | 3.51x | **4.63x** |
+| 95% lower bound | 3.45x | **4.30x** |
+| processor time, ratio to SQLite's | 0.670 | **0.385** |
+| peak resident set, ratio to SQLite's | 1.140 | **1.100** |
+| an autocommit `UPDATE` of one row | 0.13x | **0.94x** |
+| an autocommit `INSERT` | 0.47x | **3.04x** |
+| `count(*)` over 100,000 rows | 11.41x | **52.16x** |
+| `GROUP BY` over the same | 7.89x | **27.51x** |
+| `CREATE INDEX` over 100,000 rows | 0.66x | **1.37x** |
+| the retrieval index build, 185,078 chunks | 129.7 s | **16.8 s** |
+| vector search p50 | 0.934 ms | **0.5766 ms** |
+
+The retrieval score card's ranking verdicts are unchanged - 15 better, 1
+equivalent, 1 inconclusive, 0 worse, every correctness gate passing - which is
+the condition the parallel build had to meet, because a parallel build's graph
+is not the serial one.
+
+**Known not to do.** Seven of the thirty measured workloads are still slower
+than SQLite: compiling `SELECT 1` on every call, building an FTS5 index, a
+2,000 row insert batch, a join over an index range, an autocommit `UPDATE` of
+one row, a range scan of the join's shape, and `json_extract`. The resident set
+is 10% more than SQLite's against a bar asking for 5% less, and the allocator is
+measured out of the difference: a trivial binary's floor is 3.62 MiB with it and
+3.62 MiB without.
+
 ## 0.1.4 — 2026-09-17
 
 **A statement no longer pays for the log's housekeeping on its way out, which

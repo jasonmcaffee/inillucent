@@ -105,10 +105,14 @@ mistaken for a green run.
 If you do use `cargo test --workspace`, pass `--no-fail-fast`. Without it the run stops at the first
 failing binary, and has reported about a quarter of the suite.
 
-**No test fails today.** `inillucent-testrun --strict` reports 0 failed and 0 undetermined over the
-190 rows in `tests/selection.toml`. The wall clock was 840 seconds on a 24 processor desktop that
-was carrying other work while it ran, so read it as one run on one machine rather than as a figure
-to plan against.
+**One test fails today, and it is a pinned checksum rather than a behaviour.**
+`inillucent-testrun --strict` reports 1 failed over the 196 rows in `tests/selection.toml`:
+`harness::the_retrieval_baseline_is_unchanged`, which pins the retrieval engine's source files by
+checksum so that work on the relational engine cannot disturb them. task-2000's design 9 changed three
+of those files deliberately - the distance kernel, the graph build and the index - and the amendment
+that records each file, its ticket and its new digest is written when that design is finished. The
+wall clock was 3,250 seconds on a 24 processor desktop, so read it as one run on one machine rather
+than as a figure to plan against.
 
 **It will still print `not ok` on your machine, and how many suites it names depends on what you
 have installed.** This page used to answer that with a list of the five suites one run on one
@@ -163,9 +167,9 @@ already removed the cause and nobody re-ran it, which is recorded in
 
 ## What the tests cover
 
-3,033 tests across 190 test targets in the workspace, in these classes:
+3,126 tests across 196 test targets in the workspace, in these classes:
 
-The 190 is the `[[target]]` row count in `tests/selection.toml`, which is what
+The 196 is the `[[target]]` row count in `tests/selection.toml`, which is what
 `tools/doc-facts/check.mjs` compares this sentence against and what the runner is asked to run.
 The number of `#[test]` attributes in the tree is higher - 3,051 at the time of writing - because
 a `#[cfg(windows)]` and a `#[cfg(unix)]` pair is two attributes and one test on any one machine,

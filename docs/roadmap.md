@@ -38,6 +38,18 @@ the same way:
 | 3 | 1.59x | 1.39x | 1.50x |
 | 4 | 1.67x | 1.45x | 1.50x |
 
+**And it still misses inside the whole plan, measured 2026-09-20**: 1.57x with lower bounds of 1.17x,
+1.33x, 1.38x and 1.45x. `extension.fts.build` at 0.69x is what holds the bound down, and what that
+workload's time is has now been measured rather than described: a timer around the whole of
+`Fts5Table::add` puts **52% of the workload outside the index**, 8.4 µs a document between the `INSERT`
+and the indexing against 7.8 µs for all of the indexing. The stages inside are `content 1.4 ms`,
+`docsize 1.1`, `tokenize 0.4`, `dict write 1.7` and `new terms 0.4` over 507 terms, for five hundred
+documents. So this item's lever is the virtual table write path as much as the index, and **the one
+change that looked obvious cannot ship**: moving the per column token counts out of `%_docsize` and
+into the content row saves one shadow row write a document, and `%_content`'s shape is compared against
+SQLite's own FTS5 shadow tables by `fts5::the_content_table_holds_the_rows`, which fails on the extra
+column.
+
 `extension.fts.build` is the worst workload in every run, at 0.56x to 0.58x, and it is what holds
 the bound down. The rest of the family is well clear, with `extension.fts.query` at **1.70x to
 1.85x**.
@@ -69,45 +81,53 @@ the dictionary. SQLite writes about 1,000 rows and one segment blob for the same
 means a design against those three numbers rather than against the segment format, and it is not
 designed here.
 
-## 2. `write.insert.batch` is 43% slower than SQLite
+## 2. `write.insert.batch` is 39% slower than SQLite
 
-**0.70x**: 2,000 inserts in one transaction. It was 72% slower; the improvement came with the
-delta log seek in task-1911. It sits inside a family that clears its bar, so it blocks nothing.
+**0.72x**: 2,000 inserts in one transaction. It was 72% slower, then 43%, and it sits inside a family
+that clears its bar, so it blocks nothing.
 
-**The cause named here was the wrong one, and the measurement says so.** The text said `locate()`'s
-walk of each leaf's unsorted delta area, and the fix designed for it was a 16 bit fingerprint per
-delta entry so an insert that misses the delta area would pay halfword compares and no decode. That
-design carried its own stop condition - "if the saving is under a fifth of the gap, record it and
-stop" - and the stop condition is met before the format change, on the numbers below.
+**This item has now named the wrong cause twice, and the second time the measurement says which
+number was the misleading one.** The first text blamed `locate()`'s walk of each leaf's unsorted delta
+area; that was counted and came to under eight per cent. The second blamed the split record's log
+volume, which is real and is not what the workload waits for.
 
-`inillucent-writelogattrib` on the medium fixture, 2,000 inserts into `main_table` with its two
-secondary indexes, which is the gate's own shape:
+`inillucent-writelogattrib` on the medium fixture at the gate's own geometry, a 32 KiB page, 2,000
+inserts into `main_table` with its two secondary indexes, and then the identical run with both indexes
+dropped:
+
+| | with both indexes | without either | the two indexes |
+|---|---:|---:|---:|
+| wall | 50.43 ms | 15.47 ms | **34.96 ms, 69%** |
+| applying the changes to pages | 46.37 ms | 11.77 ms | 34.60 ms |
+| log written | 1,563.9 KiB | 1,163.4 KiB | 400.5 KiB |
+| leaf compactions | 181 | 58 | 123 |
+| splits | 9 | 8 | 1 |
 
 | where the log goes | records | bytes | share |
 |---|---:|---:|---:|
-| `Structural` (a split) | 40 | 963.1 KiB | **58%** |
-| `InsertRow` | 6,000 | 687.5 KiB | 41% |
-| `CompactLeaf` | 187 | 11.7 KiB | 0.7% |
-| `AllocPage` and the commit | 41 | 1.6 KiB | 0.1% |
+| `Structural` (a split) | 9 | 864.7 KiB | **55%** |
+| `InsertRow` | 6,000 | 687.5 KiB | 44% |
+| `CompactLeaf` | 181 | 11.3 KiB | 0.7% |
+| `AllocPage` and the commit | 10 | 0.4 KiB | 0.03% |
 
-1,664 KiB of log for about 240 KiB of rows, and a split costs **24,656 bytes** - three whole 8 KiB
-page images for one row that would not fit.
+A split costs **98,384 bytes** at this page size - three whole pages for one row that would not fit -
+so a logical split record would take 55% off the log's volume. **It would take about 2% off the
+workload's time**, because the log is written once and synced once at the commit and the bytes are not
+what the workload is waiting for. The time is the 34.96 ms of index maintenance: 8.7 µs for each of
+the four thousand index row insertions, against 2.4 µs for each of the two thousand table rows.
 
-And `locate`'s delta walk, counted directly: **8,329 calls, 119,645 entries walked, 5.1 ms**, 14.4
-entries a call, against **66.8 ms** of apply time across both arms. Under eight per cent, and that
-is the whole walk rather than what a fingerprint block would save - a probe that matches still
-decodes, and the block itself costs a hash per insert and 64 bytes a leaf. Removing all of it would
-move 0.70x to about 0.755x: five and a half points of a forty-three point gap, where a fifth is
-eight and a half. `crates/inillucent-compat/src/bin/writelogattrib.rs`'s own header already recorded
-that a previous fix to that decode "did not move the gate ratio"; this is the number behind that
-sentence.
+So done, now, means the number rather than either guess: **make maintaining a secondary index cheaper
+per row.** The two indexes take 69% of the transaction and cause 123 of its 181 leaf compactions, and
+their keys arrive in no order at all, so each one descends. Nothing here designs it. The split record
+remains a real saving in log volume and a real crash campaign to write, and it is now recorded as the
+smaller of the two rather than the lever.
 
-Done, now, means the lever the measurement points at rather than the one that was guessed: **a
-split that logs less than three whole pages.** A batch insert at the end of a key range splits
-right, and the right page it creates is nearly empty - so the record carries an 8 KiB image of a
-page that holds one row. Nothing here designs it; a format change to the split record is its own
-ticket with its own crash campaigns, and the honest state of this item is that its cause is now
-measured rather than supposed.
+And the earlier delta walk measurement, kept because it is what closed the first guess: **8,329 calls,
+119,645 entries walked, 5.1 ms**, 14.4 entries a call, against 66.8 ms of apply time at an 8 KiB page.
+Under eight per cent, and that is the whole walk rather than what a fingerprint block would save - a
+probe that matches still decodes, and the block itself costs a hash per insert and 64 bytes a leaf.
+`crates/inillucent-compat/src/bin/writelogattrib.rs`'s own header already recorded that a previous fix
+to that decode "did not move the gate ratio"; this is the number behind that sentence.
 
 ## 3. The retrieval index's footprint
 

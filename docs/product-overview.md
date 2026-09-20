@@ -26,7 +26,7 @@ and an embedding model served over a socket. inillucent replaces all three with 
 **Somebody who already uses SQLite and wants it faster.** The SQL is the same: 403 of 416 probed
 cases produce SQLite's exact bytes, nothing is refused, 7 answer differently, and 6 are vector search
 features SQLite has no equivalent for. What changes is the
-storage underneath, and the measurement is 330% faster at 100,000 rows.
+storage underneath, and the measurement is 363% faster at 100,000 rows.
 
 ## Where it stands
 
@@ -34,17 +34,19 @@ Everything here is measured, and each row links to the page carrying the run.
 
 | | | |
 |---|---|---|
-| **330% faster than SQLite 3.53.4** | 4.30x weighted over ten workload families at 100,000 rows, four consecutive 30-round runs, every answer hashed and compared before its timing counts | [Performance](performance.md) |
-| **70% less processor time** | 390 ms against 1,320 for the same plan, one child process each | [Performance](performance.md) |
-| **14% more memory** | 42.40 MiB against 37.20, on the same 128 MiB budget. The one measurement SQLite wins | [Performance](performance.md#memory) |
+| **363% faster than SQLite 3.53.4** | 4.63x weighted over ten workload families at 100,000 rows, four consecutive 30-round runs, every answer hashed and compared before its timing counts | [Performance](performance.md) |
+| **61% less processor time** | 453 ms against 1,172 for the same plan, one child process each | [Performance](performance.md) |
+| **10% more memory** | 40.93 MiB against 37.21, on the same 128 MiB budget. The one measurement SQLite wins | [Performance](performance.md#memory) |
 | **A file within 4% of SQLite's** | 1.036x on the same imported data | [Performance](performance.md#disk) |
 | **403 of 416 SQL cases byte for byte, none refused** | every case run through both shells over a fresh database and compared byte by byte | [SQL support](sql.md) |
 | **Better than pgvector on 15 of 17 graded comparisons, worse on none** | both engines reading byte identical vectors | [Retrieval quality](retrieval-quality.md) |
-| **175% faster unfiltered and 6,262% faster filtered** than pgvector | median in the calling process, against the correctly configured baseline | [Retrieval quality](retrieval-quality.md#latency) |
+| **144% faster unfiltered and 5,970% faster filtered** than pgvector | median in the calling process, against the correctly configured baseline | [Retrieval quality](retrieval-quality.md#latency) |
 
-Six of the thirty timed workloads are slower than SQLite. **All ten families meet the 1.00x floor
-the performance contract sets.** The `transaction` family missed the floor in four earlier runs and
-now measures 152% faster.
+Seven of the thirty timed workloads are slower than SQLite. **Every family clears the 1.00x floor the
+performance contract sets on three runs of the four**, and `schema` went under it on the first, at a
+0.68x lower bound against a 1.37x ratio - it is a one-workload family with the widest interval on the
+page. The `transaction` family missed the floor on all four runs of two earlier measurements and now
+measures 136% faster.
 [The workloads that are slower](performance.md#the-workloads-that-are-slower) names each one and what
 it costs.
 
