@@ -267,7 +267,10 @@ function Set-ReleaseVersion {
     # already rewritten seven files. `--offline` because nothing about a version bump needs the
     # network, and `--workspace` so only the members' own entries move - a release is not the place
     # to pick up a new dependency.
-    if (-not $WhatIf -and $Version -ne $Previous) {
+    # Unconditional, not "only when the version changed". A re-run of a release that already wrote
+    # the version finds nothing to change and skipped this, so the lock stayed at the old version
+    # and the build stopped in exactly the same place the second time. It is idempotent and offline.
+    if (-not $WhatIf) {
         Write-Host '   Cargo.lock'
         & cargo update --manifest-path (Join-Path $root 'Cargo.toml') --workspace --offline *> $null
         if ($LASTEXITCODE -ne 0) { throw 'refreshing Cargo.lock after the version bump failed' }
