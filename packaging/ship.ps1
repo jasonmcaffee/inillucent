@@ -126,6 +126,8 @@ $env:INILLUCENT_CROSS_BIN = $script:CrossBin
 $script:SitePath = if ($SitePath) { $SitePath } else { Join-Path (Split-Path -Parent $script:MainCheckout) 'inillucent-site' }
 $script:TapPath = if ($TapPath) { $TapPath } else { Join-Path (Split-Path -Parent $script:MainCheckout) 'homebrew-inillucent' }
 $script:Packaging = $PSScriptRoot
+# Packagist signs in with GitHub, so the account is a person rather than the organisation.
+$script:PackagistUser = if ($env:PACKAGIST_USER) { $env:PACKAGIST_USER } else { 'jasonmcaffee' }
 $script:Root = $root
 
 function Write-Phase {
@@ -712,6 +714,33 @@ function Get-Routes {
             Needs  = { $null }
             Run    = { Publish-GoModule -Version $Version }
             Verify = { Test-Registry -Url "https://proxy.golang.org/github.com/black-rainbow-labs/inillucent/packages/go/@latest" -Version $Version }
+        },
+        @{
+            Name   = 'packagist'
+            What   = 'Composer: Packagist re-reads the tags'
+            Needs  = {
+                $sealed = Join-Path $env:LOCALAPPDATA 'inillucent\signing\packagist.token.sealed'
+                if (-not (Test-Path -LiteralPath $sealed)) {
+                    return 'no Packagist token: nothing sealed at %LOCALAPPDATA%\inillucent\signing\packagist.token.sealed.'
+                }
+                $null
+            }
+            # **Told, rather than left to notice (task-1995).** Packagist crawls on its own schedule,
+            # and it pins a version's commit the first time it sees the tag and never moves it -
+            # the same immutability the Go proxy has. v0.1.6 was crawled while the mirror's tag
+            # still pointed at the previous release's commit, so `composer require
+            # black-rainbow-labs/inillucent:0.1.6` installs 0.1.3's source and cannot be corrected.
+            # Asking for the crawl here, after the mirror route has pushed, is what makes the commit
+            # it reads the right one.
+            Run    = {
+                $token = Unprotect-AppleSecret -Path (Join-Path $env:LOCALAPPDATA 'inillucent\signing\packagist.token.sealed')
+                $url = "https://packagist.org/api/update-package?username=$script:PackagistUser&apiToken=$token"
+                $body = '{"repository":{"url":"https://github.com/Black-Rainbow-Labs/Inillucent"}}'
+                $answer = Invoke-RestMethod -Uri $url -Method Post -ContentType 'application/json' -Body $body -TimeoutSec 60
+                Write-Host "  packagist: $($answer.status)"
+                if ($answer.status -ne 'success') { throw "Packagist answered $($answer.status)" }
+            }
+            Verify = { Test-Registry -Url 'https://repo.packagist.org/p2/black-rainbow-labs/inillucent.json' -Version $Version }
         },
         @{
             Name  = 'homebrew'
