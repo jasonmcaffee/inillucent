@@ -80,6 +80,14 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
+
+# **-Only site,pypi arrives as one string under `pwsh -File` (task-1995).** PowerShell splits a
+# comma separated list into an array when a script is dot sourced or called from another script,
+# and does not when it is launched with -File - there the whole thing is a single element, so
+# `$Only -contains 'site'` is false and every route reports "not asked for". That looks exactly like
+# a release where nothing needed doing. Splitting here makes both spellings work.
+if ($Only) { $Only = @($Only -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
+if ($Skip) { $Skip = @($Skip -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }) }
 . (Join-Path $PSScriptRoot 'stage-layout.ps1')
 # The DPAPI sealing helpers live in apple-credentials.ps1 because that is where sealing was first
 # needed. Nothing about `Protect-AppleSecret` is Apple-specific: it is `ConvertFrom-SecureString`,
