@@ -162,7 +162,7 @@ is a seven fold improvement and still short of parity.
 |---|---|---|---|---|---|
 | `prepare.trivial` | `open.prepare` | 0.49x | **104% slower** | 837 ns against 460 | `SELECT 1` compiled on every call. `inillucent-prepareprofile` splits it: 793 ns and **24 allocations**, of which 8 are in the parse, 6 more by the end of planning and 10 in the physical and pipeline stages |
 | `extension.fts.build` | `extension` | 0.69x | **45% slower** | 16.2 µs a document against 11.5 | **52% of it is not the index.** Building the index for one document is 7.8 µs and everything between the `INSERT` and the index is 8.4 µs |
-| `write.insert.batch` | `write` | 0.72x | **39% slower** | 14.6 µs a row against 10.8 | 2,000 inserts in one transaction into a table carrying two secondary indexes. The two indexes are **69% of it**, measured below |
+| `write.insert.batch` | `write` | about 0.60x | **about 67% slower** | 16.5 µs a row against 10.0 | 2,000 inserts in one transaction into a table carrying two secondary indexes. The two indexes are **69% of it**, measured below. The 0.72x this row carried until task-2029 came from a gate that ran each workload's `pre` on the SQLite arm and not on this one, so the two arms were not doing the same work |
 | `join.range` | `read.join` | 0.87x | **15% slower** | 54.9 µs against 48.1 | an index range and a probe per entry, about 210 ns a probe, where SQLite amortises one statement's overhead over two hundred rows |
 | `txn.autocommit` | `transaction` | 0.94x | **6% slower** | 1.27 ms a statement against 1.18 | one `fsync` each, and on this device an `fsync` is most of the millisecond. What is left is everything either engine does around that one call |
 | `range.lookaside` | `read.range` | 0.97x | **3% slower** | 55.5 µs against 54.2 | the same shape as `join.range`, 200 rowid probes at about 228 ns |
@@ -235,6 +235,22 @@ other caller has to stop at the first row that does not fit. `fit_all_widths` ma
 resolves once and compares once: 4.00 ms to 1.16, and the transaction 33.91 ms to 29.60. It cannot
 disagree with the incremental pass, because the price of a run of rows never falls as rows are added,
 so a leaf that fits whole had every prefix of it fit.
+
+**At the gate, four runs alternating between that build and a control with the sizing pass put back**,
+so that drift in the box shows up in both:
+
+| | control | with the one-pass sizing |
+|---|---|---|
+| `write.insert.batch`, this engine's arm | 38.34 ms, 36.95 ms | **33.14 ms, 32.93 ms** |
+| the same workload's ratio | 0.46x, 0.58x | **0.56x, 0.63x** |
+| the `write` family | 1.54x, 1.74x | **1.67x, 1.80x** |
+
+**Read this engine's own arm rather than the ratio here.** The box was not quiet for those runs -
+another ticket held both GPUs and the local model server throughout - and it shows in the SQLite arm,
+which drifted from 18.49 ms to 21.33 ms across the sitting while this engine's arm varied by 3.8% in
+the control and 0.6% with the change. On its own arm the change is **12.2% faster**, 37.65 ms to
+33.04 ms as medians, which is what `inillucent-writelogattrib` reports for the same workload off the
+gate entirely.
 
 What is left of the lever named by [roadmap item 2](roadmap.md) - a compaction that splices its delta
 rows in rather than re-encoding every kept row - is the 2.22 ms encode. It cannot also remove the

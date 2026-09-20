@@ -81,10 +81,18 @@ the dictionary. SQLite writes about 1,000 rows and one segment blob for the same
 means a design against those three numbers rather than against the segment format, and it is not
 designed here.
 
-## 2. `write.insert.batch` is 39% slower than SQLite
+## 2. `write.insert.batch` is about 67% slower than SQLite
 
-**0.72x**: 2,000 inserts in one transaction. It was 72% slower, then 43%, and it sits inside a family
-that clears its bar, so it blocks nothing.
+**About 0.60x**: 2,000 inserts in one transaction. It was 72% slower, then 43%, and it sits inside a
+family that clears its bar, so it blocks nothing.
+
+**The 0.72x this item carried until now was measured by a gate that was not asking both arms the same
+question.** `inillucent-writegate` never ran a workload's own `pre`, and `sqlite_bench.c` runs one
+before it starts its clock - so on `txn.batched` and `txn.large`, which both carry
+`UPDATE side_table SET note = 'note ' || id`, SQLite did work this engine skipped. task-2029 fixed it
+in `aa140c7`, and every workload agrees again. Measured after that fix, four runs alternating between
+this build and a control, at a 32 KiB page: `write.insert.batch` reads **0.56x and 0.63x**, and the
+`write` family 1.67x and 1.80x against its 1.50x bar.
 
 **This item has now named the wrong cause twice, and the second time the measurement says which
 number was the misleading one.** The first text blamed `locate()`'s walk of each leaf's unsorted delta
@@ -151,6 +159,22 @@ The two cannot disagree, because the price of a run of rows never falls as rows 
 that fits whole had every prefix of it fit, and the layout the incremental loop ends on is `resolve`
 over the shapes of all the rows. `fit_all_widths_agrees_with_fit_widths` asserts the page bytes and
 not only the verdict.
+
+**What that is worth at the gate**, once task-2029 made the gate measure again. Four runs at a 32 KiB
+page, alternating between this build and a control with the sizing pass put back, so that drift in
+the box shows up in both:
+
+| | control | this build |
+|---|---|---|
+| `write.insert.batch`, this engine's arm | 38.34 ms, 36.95 ms | **33.14 ms, 32.93 ms** |
+| the same workload's ratio | 0.46x, 0.58x | **0.56x, 0.63x** |
+| the `write` family | 1.54x, 1.74x | **1.67x, 1.80x** |
+
+**Read this engine's own arm rather than the ratio.** The box was not quiet - another ticket held
+both GPUs and the local model server throughout - and it shows in the SQLite arm, which drifted from
+18.49 ms to 21.33 ms across the four runs while this engine's arm varied by 3.8% in the control and
+0.6% here. On its own arm the change is **12.2% faster**, 37.65 ms to 33.04 ms as medians, which is
+the same figure `inillucent-writelogattrib` reports for the same workload off the gate.
 
 **What is left for a splice is the encode, 2.22 ms of 29.60.** A compaction that spliced its delta
 rows into the column-major image rather than re-encoding every kept row still has to decide which
