@@ -96,12 +96,16 @@ verify() {
   archive="$1"
   sums="$2"
   name="$(basename "$archive")"
-  # tr -d '
-' because a SHA256SUMS written on Windows arrives with CRLF, and
-  # awk on Linux keeps the carriage return in $NF - so the name never matches
-  # and a correct download is reported as unpublished.
-  expected="$(tr -d '
-' < "$sums" | awk -v want="$name" '$NF == want { print $1 }' | head -1)"
+  # **tr -d with the escape, not a literal carriage return (task-1995).** A SHA256SUMS
+  # written on Windows arrives with CRLF and awk on Linux keeps the CR in $NF, so the name
+  # never matches and a correct download is reported as unpublished. This was written with
+  # an actual CR byte between the quotes, and line-ending normalisation turned that byte
+  # into a newline - which split the command across two lines and left the quotes
+  # unbalanced. The whole script then died on line 1 with
+  #     sh: Syntax error: Unterminated quoted string
+  # so `curl ... | sh`, the install command the README gives for macOS and Linux, did
+  # nothing at all. `` is interpreted by tr and survives any checkout.
+  expected="$(tr -d '' < "$sums" | awk -v want="$name" '$NF == want { print $1 }' | head -1)"
   if [ -z "$expected" ]; then
     echo "SHA256SUMS does not list $name" >&2
     exit 1

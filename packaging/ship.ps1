@@ -592,6 +592,19 @@ function Get-Routes {
             What   = 'inillucent.com: the artifacts, then the links'
             Needs  = {
                 if (-not (Test-Path -LiteralPath $script:SitePath)) { return "$script:SitePath does not exist." }
+                # **The installers are parsed before they are published (task-1995).** install.sh is
+                # what `curl -fsSL https://inillucent.com/downloads/install.sh | sh` runs, and it
+                # shipped with an unbalanced quote for at least three releases: a literal carriage
+                # return inside `tr -d '...'` had been normalised into a newline, which split the
+                # command and left the script unparseable. It failed on line 1 with "Unterminated
+                # quoted string", so the install command the README gives for macOS and Linux did
+                # nothing, and no release noticed because nothing ever ran it.
+                foreach ($script in @('install.sh', 'macos/verify-macos.sh')) {
+                    $path = Join-Path $script:Packaging $script
+                    if (-not (Test-Path -LiteralPath $path)) { continue }
+                    $complaint = (& bash -n $path 2>&1 | Out-String).Trim()
+                    if ($LASTEXITCODE -ne 0) { return "packaging/$script does not parse: $complaint" }
+                }
                 $null
             }
             Run    = {
@@ -690,7 +703,27 @@ function Get-Routes {
                 }
                 $null
             }
-            Run   = { & bash (Join-Path $script:Packaging 'homebrew/update.sh') --tap $script:TapPath }
+            Run   = {
+                & bash (Join-Path $script:Packaging 'homebrew/update.sh') --tap $script:TapPath
+                if ($LASTEXITCODE -ne 0) { throw "homebrew/update.sh failed with $LASTEXITCODE" }
+                # **And commit and push it (task-1995).** update.sh writes Formula/inillucent.rb and
+                # prints the git commands to run next, so the route reported success while the tap
+                # on GitHub - the only copy `brew install` reads - still served the previous
+                # release. Measured after the 0.1.6 run: the formula on disk said 0.1.6 and
+                # raw.githubusercontent.com served 0.1.3.
+                & git -C $script:TapPath add Formula/inillucent.rb
+                $staged = & git -C $script:TapPath diff --cached --name-only
+                if (-not $staged) { Write-Host "  the tap already has $Version"; return }
+                & git -C $script:TapPath commit -m "inillucent $Version"
+                if ($LASTEXITCODE -ne 0) { throw 'committing the formula failed' }
+                & git -C $script:TapPath push
+                if ($LASTEXITCODE -ne 0) { throw 'pushing the tap failed' }
+            }
+            Verify = {
+                # The published copy, because that is the one brew reads.
+                $url = 'https://raw.githubusercontent.com/Black-Rainbow-Labs/homebrew-inillucent/main/Formula/inillucent.rb'
+                Test-Registry -Url $url -Version $Version
+            }
         }
     )
 }

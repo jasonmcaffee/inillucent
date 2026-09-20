@@ -164,13 +164,22 @@ def stage(version: str, target: str) -> None:
     print(f"staged {len(PROGRAMS)} programs, {copied} library, and the reference binding")
 
 
-def build(tag: str, sdist: bool) -> None:
+def build(tag: str, sdist: bool, clean: bool = True) -> None:
     """Build the wheel, and optionally a source distribution.
 
     :param tag: the wheel platform tag
     :param sdist: whether to build an sdist as well
+    :param clean: empty dist/ first. False keeps wheels built earlier in the same run.
     """
-    shutil.rmtree(HERE / "dist", ignore_errors=True)
+    # **`clean` exists because --all builds four wheels and twine uploads dist/ (task-1995).**
+    # Emptying dist/ inside every build meant each one deleted the last, so a run that printed four
+    # wheels uploaded one - and which one depended on the order. PyPI ended up with a single
+    # `manylinux_2_28_aarch64` wheel for 0.1.6 and a single `win_amd64` for 0.1.5, so
+    # `pip install inillucent` answered "no matching distribution" on every machine except one.
+    if clean:
+        shutil.rmtree(HERE / "dist", ignore_errors=True)
+    # build/ is setuptools' scratch and has to go between platforms either way: it holds the staged
+    # binaries from the previous target, and bdist_wheel would happily package them again.
     shutil.rmtree(HERE / "build", ignore_errors=True)
     # `setup.py bdist_wheel --plat-name` rather than `python -m build`, because
     # this package has no compiled extension - setuptools would mark the wheel
@@ -192,7 +201,10 @@ def publish(test: bool) -> None:
 
     :param test: whether to upload to TestPyPI rather than PyPI
     """
-    command = [sys.executable, "-m", "twine", "upload"]
+    # --skip-existing so a re-run finishes the job instead of failing on the wheel that already
+    # went up. 0.1.6 published one of its four wheels before the bug that deleted the others was
+    # found, and without this the repair run stops on that one.
+    command = [sys.executable, "-m", "twine", "upload", "--skip-existing"]
     if test:
         command += ["--repository", "testpypi"]
     command.append(str(HERE / "dist" / "*"))
@@ -240,12 +252,21 @@ def main() -> None:
             # second would rebuild an identical wheel over the first.
             if tag in seen_tags:
                 continue
-            seen_tags.add(tag)
             print(f"inillucent {version} for {one} -> {tag}")
             stage(version, one)
-            build(tag, parsed.sdist)
+            build(tag, parsed.sdist, clean=not seen_tags)
+            seen_tags.add(tag)
         for one in missing:
             print(f"  skipped {one}: no archive in dist/")
+        made = sorted((HERE / "dist").glob("*.whl"))
+        print(f"{len(made)} wheels to publish:")
+        for one in made:
+            print(f"  {one.name}")
+        if len(made) != len(seen_tags):
+            raise SystemExit(
+                f"built {len(seen_tags)} platform tags and dist/ holds {len(made)} wheels. "
+                f"Uploading now would publish a release most machines cannot install."
+            )
     else:
         target = parsed.target or host_target()
         print(f"inillucent {version} for {target}")
