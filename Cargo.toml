@@ -83,7 +83,7 @@ doc_lazy_continuation = "allow"
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
 
 [workspace.package]
-version = "0.1.6"
+version = "0.1.7"
 repository = "https://github.com/Black-Rainbow-Labs/Inillucent"
 readme = "README.md"
 edition = "2021"
