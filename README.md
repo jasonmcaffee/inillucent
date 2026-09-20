@@ -30,6 +30,9 @@ workloads that are slower than SQLite along with what each one costs.
 
 ## Install
 
+Pick one. Every command here installs the same four programs - `inillucent`,
+`inillucent-shell`, `inillucent-mcp` and `inillucent-migrate`.
+
 **Windows**
 
 ```powershell
@@ -42,52 +45,53 @@ irm https://inillucent.com/downloads/install.ps1 | iex
 curl -fsSL https://inillucent.com/downloads/install.sh | sh
 ```
 
-Both download the archive for the machine, check its SHA-256 against the published
-`SHA256SUMS`, and put the four programs on `PATH`. Nothing is written outside your
-home directory and neither needs administrator rights.
+Both download the archive for the machine, check its SHA-256 against the
+published `SHA256SUMS`, and put the programs on `PATH`. Nothing is written
+outside your home directory and neither needs administrator rights.
 
-Verified on 2026-09-11 by running each command as written: Windows installs and
-runs, and so does Ubuntu 24.04. **macOS has no prebuilt archive yet**, so the
-second command works on Linux today and reports that there is no release for
-Darwin; building it needs a Mac.
+### From a package manager
 
-Building from source is the macOS route until there is an archive:
+| | |
+|---|---|
+| **Homebrew** | `brew install black-rainbow-labs/inillucent/inillucent` |
+| **npm** | `npm install -g inillucent`, or `npx inillucent help` with nothing installed |
+| **pip** | `pip install inillucent` - the wheel carries the programs and an in-process driver |
+| **cargo** | `cargo install inillucent-cli` - builds from source, and works on any platform |
+| **Go** | `go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent-install@latest && inillucent-install` |
+| **Composer** | `composer require black-rainbow-labs/inillucent && vendor/bin/inillucent-install` |
+
+### From a download
+
+Everything is at [inillucent.com](https://inillucent.com) and on the
+[GitHub release](https://github.com/Black-Rainbow-Labs/Inillucent/releases/latest).
+
+| | |
+|---|---|
+| **macOS installer** | `inillucent-<version>.pkg` - signed with a Developer ID and notarised by Apple, so it opens with no warning. Universal: Apple silicon and Intel |
+| **Debian, Ubuntu** | `inillucent_<version>_amd64.deb`, `inillucent_<version>_arm64.deb` - signed with the project's OpenPGP key |
+| **Fedora, RHEL** | `inillucent-<version>.x86_64.rpm`, `inillucent-<version>.aarch64.rpm` |
+| **Archives** | `.zip` for Windows, `.tar.gz` for macOS (universal) and Linux (x86-64 and aarch64) |
+
+### Checking what you downloaded
+
+`SHA256SUMS` names every published file, and `SHA256SUMS.minisig` signs it:
+
+```sh
+minisign -Vm SHA256SUMS -p inillucent.pub     # inillucent.com/downloads/inillucent.pub
+sha256sum -c SHA256SUMS --ignore-missing
+```
+
+The install scripts already check the SHA-256; the signature is there for anyone
+who wants to confirm the checksum list itself came from this project.
+
+### Building it yourself
 
 ```sh
 git clone https://github.com/Black-Rainbow-Labs/Inillucent
 cargo install --path Inillucent/crates/inillucent-cli
 ```
 
-### From Go
-
-```sh
-go install github.com/Black-Rainbow-Labs/Inillucent/packages/go/cmd/inillucent-install@latest
-inillucent-install
-```
-
-`go install` resolves a module through `proxy.golang.org`, which clones the
-repository with no credential. The proxy serves it: `@latest` and `@v/list` both
-answer 200 to a signed-out caller, which `tools/check-public-urls.mjs` checks on
-every `tools/validate` run.
-
-The module and its tags are correct and the command starts working the day the
-repository is public. What it does then: `go install` builds a small program that
-downloads the release for your machine, checks its SHA-256 and puts the four
-programs in `GOBIN`.
-
-### The other five package managers are not published yet
-
-| | |
-|---|---|
-| **npm** | `npm install -g inillucent`, or `npx inillucent help` with nothing installed |
-| **pip** | `pip install inillucent`. The wheel carries the programs and an in process driver |
-| **cargo** | `cargo install inillucent-cli`. It builds from source, and it is the fallback on any platform with no prebuilt archive |
-| **Homebrew** | `brew install black-rainbow-labs/inillucent/inillucent` |
-| **Composer** | `composer require black-rainbow-labs/inillucent && vendor/bin/inillucent-install` |
-
-None of those five answers yet. Each is waiting on an account, a CAPTCHA a person
-has to solve, or the macOS archive. `packaging/PUBLISHING.md` says which, per
-registry, and what unblocks it. Use the two commands at the top meanwhile.
+Minimum macOS is 13.0. Linux builds need glibc 2.28 or newer.
 
 
 ## A first database

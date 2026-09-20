@@ -3,20 +3,70 @@
 > ## Releasing: one command
 >
 > ```powershell
-> pwsh packaging/ship.ps1            # the version in Cargo.toml
-> pwsh packaging/ship.ps1 -Part patch
 > pwsh packaging/ship.ps1 -WhatIf    # the plan, and nothing written
+> pwsh packaging/ship.ps1 -Part patch
+> pwsh packaging/ship.ps1 -Only site,github    # part of a release, no rebuild
 > ```
 >
-> It builds every target, signs and notarises macOS, writes the version into all five manifests that
-> carry it, tags, pushes, and publishes the GitHub release, the public mirror, inillucent.com and
-> every registry a credential exists for - then prints what reached each one and, for anything it
-> skipped, the sentence that would fix it.
+> **Run it from a `git worktree`, not from the checkout you work in.** It refuses a dirty tree and
+> so does `cargo publish`, and the ordinary checkout usually has something in flight:
 >
-> **Do not run the scripts in `packaging/` by hand.** They are what it calls, and running them one at
-> a time is how 0.1.3 ended up tagged, half published and left that way for four days, and how the
-> version came to say 0.1.4 in three files while naming 0.1.2 in two others. `-Only site,github`
-> re-runs part of a release without rebuilding.
+> ```powershell
+> git worktree add -b release-0.1.6 J:/build/release main
+> pwsh J:/build/release/packaging/ship.ps1 -Part patch
+> ```
+>
+> It finds the site checkout, the Homebrew tap and `tools/cross/bin` through the repository the
+> worktree belongs to, so a worktree on another drive needs no arguments. `-SitePath` and `-TapPath`
+> override them.
+>
+> ### What it publishes
+>
+> Twelve routes: the five build targets, the Linux packages, the signature over `SHA256SUMS`, the
+> tag, the GitHub release, the public mirror, inillucent.com, **crates.io, npm, PyPI, the Go module
+> tag and the Homebrew tap**. A route with no credential is a **skip carrying the sentence that
+> fixes it**, never a failure - a script that refuses without all twelve is one nobody runs.
+>
+> Every credential is DPAPI-sealed under `%LOCALAPPDATA%\inillucent\signing` and unsealed to the
+> RAM disk for the run: the Apple Developer ID and notary key, minisign, OpenPGP, and the npm,
+> PyPI and crates.io tokens. **Nothing needs to be exported by hand.** GitHub is the exception and
+> needs nothing either - the token comes from the credential `git push` already uses.
+>
+> ### The five phases, and why the order is the design
+>
+> **preflight** reads every credential and prints the plan while mutating nothing, because a tag is
+> the one step that cannot be taken back quietly. **version** writes the new version into all seven
+> files that carry it and refreshes `Cargo.lock`. **build** compiles, signs and notarises; nothing
+> has left the machine yet. **publish** tags, pushes and reaches every destination. **report** asks
+> each destination what it serves rather than trusting an exit code.
+>
+> ### Do not run the scripts in `packaging/` by hand
+>
+> They are what it calls. Running them one at a time is how 0.1.3 ended up tagged, half published
+> and left that way for four days, with a GitHub release that was still a **draft** - uploads go
+> into a draft and report success while nothing is visible.
+>
+> ### macOS is built here, on Windows
+>
+> No Mac is involved. zig cross-links the Mach-O, `rcodesign` replaces `lipo`, `codesign`,
+> `productsign`, `notarytool` and `stapler`, and Apple's notary is an HTTPS API. The toolchain is in
+> `tools/cross/bin`, which is gitignored - `pwsh tools/cross/fetch-toolchain.ps1` fetches it, and a
+> worktree shares the main checkout's copy.
+>
+> ### Four things that will waste an afternoon
+>
+> - **The version lives in seven files.** Add an eighth and put it in `Get-VersionCarriers`. The
+>   straggler scan names any tracked file still holding the old version; two of the seven name it in
+>   code rather than in a manifest, which is how they were found.
+> - **A published version is permanent.** npm, crates.io and PyPI all refuse to replace one, and an
+>   unpublished npm version number can never be reused. `inillucent@0.1.3` and `@0.1.4` on npm are
+>   deprecated because they shipped broken and could not be fixed in place.
+> - **npm needs a granular token minted to bypass two-factor**, or `-Otp <six digits>`. npm prints
+>   every token as "Publish token" and gives no way to tell before the publish. Bypass tokens stop
+>   working for direct publishing in January 2027; trusted publishing over OIDC is the successor.
+> - **The Windows build needs the MSVC environment.** `onig_sys` compiles oniguruma with cl.exe, and
+>   an agent terminal has no INCLUDE, so it fails on `stddef.h`. `Import-MsvcEnvironment` runs
+>   vcvars64 when it has to.
 
 This is the shortest path to being useful here. Two audiences, and the split is the first thing to
 get right:
