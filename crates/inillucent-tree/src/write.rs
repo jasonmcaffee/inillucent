@@ -368,6 +368,10 @@ pub struct WriteStats {
     /// Nanoseconds spent deciding what will fit and building the image, which for a
     /// compaction is reading every live row of the leaf and encoding it again.
     pub choose_nanos: u128,
+    /// Writes whose leaf the hint named, costing two key comparisons.
+    pub hinted: u64,
+    /// Writes that descended the tree from its root to find their leaf.
+    pub descended: u64,
     /// Nanoseconds spent making room: compacting a leaf, or splitting one.
     ///
     /// **Because `write.insert.batch`'s cost has been attributed to three different
@@ -751,6 +755,15 @@ impl PagedTree {
         // must reuse the run rather than write a second and leak the first.
         let (mut encoded_row, spilled) =
             self.encode_row_spilling_wide_values(database, log, row)?;
+        // **Where this transaction's time goes, measured once rather than timed on every
+        // write** (task-2006). Timers here read the clock and copy the whole `WriteStats`
+        // through its `Cell` twice a block, which is why they are not in this path any
+        // more; what they said, over the 6,000 writes `inillucent-writelogattrib` makes
+        // into a table carrying two secondary indexes, was a 29.66 ms transaction split
+        // as: making room 8.89 ms, of which building a compacted image 5.46; placing the
+        // row, its log record and its undo record 4.14; locating the key 3.97; encoding
+        // the row 1.46. The rest is the descent, the room check and the commit.
+        let mut from_hint = false;
 
         // Two attempts at most: the first may find the leaf full, and the
         // compaction or split that follows leaves a page that has room for one
@@ -765,7 +778,10 @@ impl PagedTree {
             // the leaf turns out to be full, and this loop re-descends for one then.
             let (page, mut path) = match attempt {
                 0 => match self.leaf_for_hinted(database.pool(), &encoded_key) {
-                    Some(page) => (page, Vec::new()),
+                    Some(page) => {
+                        from_hint = true;
+                        (page, Vec::new())
+                    }
                     None => self.leaf_for(database.pool(), &encoded_key)?,
                 },
                 _ => self.leaf_for(database.pool(), &encoded_key)?,
@@ -812,8 +828,14 @@ impl PagedTree {
             }
             self.record_undo(log, &key, &mut previous, caller_wants_previous)?;
             self.apply_row(database, log, page, located, &mut encoded_row, spilled)?;
+            // One read and one write of `WriteStats`, because a `Cell` of it copies the
+            // whole struct each way and it is nineteen counters wide.
             let mut stats = self.stats.get();
             stats.inserted = stats.inserted.saturating_add(1);
+            match from_hint {
+                true => stats.hinted = stats.hinted.saturating_add(1),
+                false => stats.descended = stats.descended.saturating_add(1),
+            }
             self.stats.set(stats);
             if previous.is_none() {
                 self.note_rows(1);
@@ -2024,14 +2046,14 @@ impl PagedTree {
         // leaf's window means the descent has to place this key, and that answer costs
         // nothing beyond the comparisons. See `PagedTree::leaf_hint` for why a
         // rightmost leaf is tested at the low end only.
-        let (page, right) = match self.leaf_hint.try_borrow().ok()?.as_ref() {
-            Some(hint)
-                if encoded_key >= hint.low.as_slice()
-                    && (hint.right.is_none() || encoded_key <= hint.high.as_slice()) =>
-            {
-                (hint.page, hint.right)
-            }
-            _ => return None,
+        let (at, page, right) = {
+            let hints = self.leaf_hints.try_borrow().ok()?;
+            let at = hints.iter().position(|hint| {
+                encoded_key >= hint.low.as_slice()
+                    && (hint.right.is_none() || encoded_key <= hint.high.as_slice())
+            })?;
+            let hint = hints.get(at)?;
+            (at, hint.page, hint.right)
         };
         // The header on a hit, for the reasons `PagedTree::leaf_hint` gives: a page
         // handed to another tree, and a fence moved by something other than this write
@@ -2040,14 +2062,14 @@ impl PagedTree {
         // changes it. This fetches a page the insert is about to fetch regardless, and
         // it parses nothing.
         let Ok(guard) = pool.fetch(page) else {
-            self.forget_leaf_hint();
+            self.forget_leaf_hint(at);
             return None;
         };
         if page::kind_of(&guard).ok() != Some(page::PageKind::Leaf)
             || page::tree_of(&guard).ok() != Some(self.tree_id())
             || page::right_of(&guard).ok() != Some(right)
         {
-            self.forget_leaf_hint();
+            self.forget_leaf_hint(at);
             return None;
         }
         Some(page)
@@ -2074,40 +2096,59 @@ impl PagedTree {
         else {
             return;
         };
-        let Ok(mut hint) = self.leaf_hint.try_borrow_mut() else {
+        let Ok(mut hints) = self.leaf_hints.try_borrow_mut() else {
             return;
         };
-        match hint.as_mut() {
-            Some(held) if held.page == leaf => {
-                held.right = right;
-                if encoded_key < held.low.as_slice() {
-                    held.low.clear();
-                    held.low.extend_from_slice(encoded_key);
-                }
-                if encoded_key > held.high.as_slice() {
-                    held.high.clear();
-                    held.high.extend_from_slice(encoded_key);
-                }
+        if let Some(held) = hints.iter_mut().find(|hint| hint.page == leaf) {
+            held.right = right;
+            if encoded_key < held.low.as_slice() {
+                held.low.clear();
+                held.low.extend_from_slice(encoded_key);
             }
-            _ => {
-                *hint = Some(crate::paged::LeafHint {
-                    page: leaf,
-                    low: encoded_key.to_vec(),
-                    high: encoded_key.to_vec(),
-                    right,
-                })
+            if encoded_key > held.high.as_slice() {
+                held.high.clear();
+                held.high.extend_from_slice(encoded_key);
             }
+            return;
+        }
+        if hints.len() < crate::paged::LEAF_HINTS {
+            hints.push(crate::paged::LeafHint {
+                page: leaf,
+                low: encoded_key.to_vec(),
+                high: encoded_key.to_vec(),
+                right,
+            });
+            return;
+        }
+        // The victim's two key buffers are written over rather than freed and allocated
+        // again, which is why this replaces an entry in place instead of removing one and
+        // pushing another.
+        let at = self.hint_victim.get() % crate::paged::LEAF_HINTS;
+        self.hint_victim
+            .set(at.saturating_add(1) % crate::paged::LEAF_HINTS);
+        if let Some(slot) = hints.get_mut(at) {
+            slot.page = leaf;
+            slot.right = right;
+            slot.low.clear();
+            slot.low.extend_from_slice(encoded_key);
+            slot.high.clear();
+            slot.high.extend_from_slice(encoded_key);
         }
     }
 
-    /// Drops the leaf hint, because the hinted page is not a leaf of this tree any
-    /// more.
+    /// Drops one entry of the leaf hint set, because the page it names is not a leaf of
+    /// this tree any more.
     ///
-    /// See [`PagedTree::leaf_hint`]. A split or a merge clears it through
-    /// [`PagedTree::note_leaves`] instead, which holds `&mut self`.
-    fn forget_leaf_hint(&self) {
-        if let Ok(mut hint) = self.leaf_hint.try_borrow_mut() {
-            *hint = None;
+    /// One entry and not the set: the entries name different leaves, and the proof that
+    /// failed was this one's. See [`PagedTree::leaf_hints`]. A split or a merge clears
+    /// the whole set through [`PagedTree::note_leaves`] instead, which holds `&mut self`.
+    ///
+    /// @param at - which entry failed its proof
+    fn forget_leaf_hint(&self, at: usize) {
+        if let Ok(mut hints) = self.leaf_hints.try_borrow_mut() {
+            if at < hints.len() {
+                hints.remove(at);
+            }
         }
     }
 

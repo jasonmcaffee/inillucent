@@ -631,8 +631,50 @@ pub struct PagedTree {
     /// A `RefCell` rather than a `Cell` because the keys are `Vec`s; the write path
     /// holds the tree by shared reference, the same reason [`PagedTree::stats`] is a
     /// `Cell`.
-    pub(crate) leaf_hint: std::cell::RefCell<Option<LeafHint>>,
+    ///
+    /// **Several windows and not one, because one window only ever fitted the primary
+    /// key** (task-2006). A counter on each side of it, over the 6,000 writes
+    /// `inillucent-writelogattrib` makes into a table carrying two secondary indexes,
+    /// said the single slot answered 3,773 of them and sent 2,227 down the tree from its
+    /// root. The 2,000 writes to `main_table` are a rowid append and 1,999 of them hit;
+    /// the 4,000 writes to `main_key` and `main_category` arrive in the primary key's
+    /// order and not in their own, so consecutive rows land in different leaves and each
+    /// one evicted the window the row before it had just proved.
+    ///
+    /// The windows of different leaves cannot overlap, which is what makes a set of them
+    /// no weaker than one. A window is the lowest and highest probes seen to descend
+    /// into a leaf, so it lies inside that leaf's fence range, and fence ranges are
+    /// disjoint - so at most one entry claims any key, and the first that claims it is
+    /// the only one that could. Every entry is then proved the way the single entry was:
+    /// the page is still a leaf, still this tree's, and still has the right sibling it
+    /// had when the window was recorded. A split or a merge clears the whole set through
+    /// [`PagedTree::note_leaves`], and one done by another process is caught by that
+    /// sibling, per entry.
+    ///
+    /// **Eight entries take 2,227 of those descents down to 153, and the transaction's
+    /// wall time does not clearly move.** The A/B is the same binary with `LEAF_HINTS` at
+    /// 1 and at 8, nine runs each, medians 32.99 ms and 30.51 ms - but the two spreads
+    /// are 28.37..36.26 and 28.09..77.38, so 2.5 ms is inside them and this instrument is
+    /// one transaction where the gate's workload is the median of thirty rounds. What the
+    /// counters say is not in doubt: 2,074 descents of a root and its interior levels are
+    /// not made. What that is worth is a question for the gate.
+    pub(crate) leaf_hints: std::cell::RefCell<Vec<LeafHint>>,
+    /// Which entry of `leaf_hints` the next unknown leaf overwrites, round robin.
+    ///
+    /// Round robin rather than least recently used: the set is small enough that finding
+    /// the coldest entry costs more than replacing an entry that is merely old, and a
+    /// secondary index walks its leaves in a cycle, which is the case both policies get
+    /// right. It is an index into a full set and means nothing until the set is full.
+    pub(crate) hint_victim: std::cell::Cell<usize>,
 }
+
+/// How many leaves one connection remembers per tree for its next write.
+///
+/// Eight, because the miss path is what a larger set costs: every entry is two
+/// comparisons against bytes the caller already has, and they are paid in full by a key
+/// that is in none of the windows. Eight covers a secondary index whose rows arrive in
+/// another index's order while leaving that miss at a handful of `memcmp`s.
+pub(crate) const LEAF_HINTS: usize = 8;
 
 /// The leaf a write is likely to want next, and the keys that prove it.
 ///
@@ -762,7 +804,8 @@ impl PagedTree {
             leaf_count,
             row_count,
             scratch: RefCell::new(Vec::new()),
-            leaf_hint: std::cell::RefCell::new(None),
+            leaf_hints: std::cell::RefCell::new(Vec::new()),
+            hint_victim: std::cell::Cell::new(0),
             stats: std::cell::Cell::new(crate::write::WriteStats::default()),
         })
     }
@@ -836,9 +879,10 @@ impl PagedTree {
         // both come through here**, so this is where the leaf hint is dropped. See
         // [`PagedTree::leaf_hint`]: the hint says "a key at or above these bytes
         // belongs in that page", and that sentence is about a fence.
-        if let Ok(mut hint) = self.leaf_hint.try_borrow_mut() {
-            *hint = None;
+        if let Ok(mut hints) = self.leaf_hints.try_borrow_mut() {
+            hints.clear();
         }
+        self.hint_victim.set(0);
     }
 
     /// Adjusts the row count by a signed amount.

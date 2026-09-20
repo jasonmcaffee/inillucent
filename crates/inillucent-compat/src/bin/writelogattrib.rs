@@ -233,6 +233,14 @@ fn run(fixture: &Path, page_size: usize, frames: usize, iterations: u32) -> Resu
             .image_nanos
             .saturating_sub(plain.after.image_nanos))
     );
+    println!(
+        "  leaf from the hint : {:>11} indexed, {:>6} without",
+        indexed.after.hinted, plain.after.hinted
+    );
+    println!(
+        "  leaf by a descent  : {:>11} indexed, {:>6} without",
+        indexed.after.descended, plain.after.descended
+    );
     Ok(())
 }
 
@@ -366,6 +374,8 @@ fn subtract(
         splits: after.splits.saturating_sub(before.splits),
         merges: after.merges.saturating_sub(before.merges),
         room_nanos: after.room_nanos.saturating_sub(before.room_nanos),
+        hinted: after.hinted.saturating_sub(before.hinted),
+        descended: after.descended.saturating_sub(before.descended),
         compaction_nanos: after
             .compaction_nanos
             .saturating_sub(before.compaction_nanos),
