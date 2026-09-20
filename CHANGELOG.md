@@ -42,7 +42,7 @@ the work on one machine, minutes apart:
 | `GROUP BY` over the same | 7.89x | **27.51x** |
 | `CREATE INDEX` over 100,000 rows | 0.66x | **1.37x** |
 | the retrieval index build, 185,078 chunks | 129.7 s | **16.8 s** |
-| vector search p50 | 0.934 ms | **0.5766 ms** |
+| vector search p50 | 0.934 ms | **0.8462 ms** |
 
 The retrieval score card's ranking verdicts are unchanged - 15 better, 1
 equivalent, 1 inconclusive, 0 worse, every correctness gate passing - which is
