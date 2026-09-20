@@ -728,6 +728,38 @@ impl Bm25Index {
             })
             .collect();
 
+        self.top_k(hits, k, &query_terms, &tiers, tier, params)
+    }
+
+    /// Orders the answer and returns the `k` rows that reach the top.
+    ///
+    /// Split out of [`Bm25Index::search`] in task-2006, which the argument below took
+    /// past its recorded length. The ratchet in `policy.rs` asks for an extraction
+    /// rather than a raised number, and this is the whole of one step: everything after
+    /// the scores exist.
+    ///
+    /// @param hits - one hit per chunk that matched, in whatever order the score map
+    ///   produced
+    /// @param k - how many rows the caller asked for
+    /// @param query_terms - the query's terms, for the proximity rescore
+    /// @param tiers - how many query terms each chunk held, for the tiered order
+    /// @param tier - whether to order by that count first
+    /// @param params - the ranking knobs, for the proximity and phrase weights
+    fn top_k(
+        &self,
+        mut hits: Vec<LexicalHit>,
+        k: usize,
+        query_terms: &[String],
+        tiers: &HashMap<u32, u32>,
+        tier: bool,
+        params: LexicalParams,
+    ) -> Vec<LexicalHit> {
+        let LexicalParams {
+            proximity,
+            phrase,
+            rescore_depth_factor,
+            ..
+        } = params;
         // Most query terms held first when tiering, then descending score, then
         // ascending chunk, so the order is total and stable.
         let order = |a: &LexicalHit, b: &LexicalHit| {
@@ -784,7 +816,7 @@ impl Bm25Index {
         // order the score map happened to produce would rescore an arbitrary subset.
         if rescoring {
             if let Some(head) = hits.get_mut(..reach) {
-                self.rescore_by_position(head, &query_terms, proximity, phrase);
+                self.rescore_by_position(head, query_terms, proximity, phrase);
             }
             // **The whole vector, not the head.** A rescore can lower a head hit's
             // score below a hit it was ahead of, and the one it was ahead of has not
