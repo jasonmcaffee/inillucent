@@ -131,6 +131,8 @@ function Invoke-CargoNative {
         The triple.
     #>
     param([string] $Target)
+    # onig_sys compiles oniguruma with cl.exe, which needs INCLUDE and LIB from vcvars64.
+    Import-MsvcEnvironment
     & cargo build --manifest-path (Join-Path $root 'Cargo.toml') --release --locked --target $Target @packages
     if ($LASTEXITCODE -ne 0) { throw "cargo build failed for $Target with $LASTEXITCODE" }
 }

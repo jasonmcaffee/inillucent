@@ -302,6 +302,41 @@ function New-InillucentZip {
     return $archive
 }
 
+function Import-MsvcEnvironment {
+    <#
+    .SYNOPSIS
+        Puts the MSVC compiler's own environment variables into this process, if they are missing.
+
+    .DESCRIPTION
+        **A C dependency cannot compile without them (task-1995).** The Windows target is built with
+        native cargo, and `onig_sys` compiles oniguruma with `cl.exe`. cl.exe finds its headers
+        through INCLUDE, LIB and PATH, which `vcvars64.bat` sets - a developer shell has run it, and
+        an agent terminal, a scheduled task and a service have not. The failure names the header
+        rather than the cause:
+
+            regenc.h(39): fatal error C1083: Cannot open include file: 'stddef.h'
+
+        vswhere.exe ships with every Visual Studio since 2017 and is always at the same absolute
+        path, so the installation is found rather than guessed at. Nothing happens when INCLUDE is
+        already set, so a developer shell is left exactly as it is.
+    #>
+    if ($env:INCLUDE) { return }
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio' | Join-Path -ChildPath 'Installer' | Join-Path -ChildPath 'vswhere.exe'
+    if (-not (Test-Path -LiteralPath $vswhere)) {
+        throw "INCLUDE is not set and $vswhere does not exist, so the MSVC environment cannot be found. Build from a Developer PowerShell, or install Visual Studio's C++ tools."
+    }
+    $install = (& $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null | Select-Object -First 1)
+    if (-not $install) { throw 'vswhere found no Visual Studio with the C++ tools installed.' }
+    $vcvars = Join-Path $install 'VC' | Join-Path -ChildPath 'Auxiliary' | Join-Path -ChildPath 'Build' | Join-Path -ChildPath 'vcvars64.bat'
+    if (-not (Test-Path -LiteralPath $vcvars)) { throw "$vcvars does not exist." }
+    # `set` after the batch file prints the environment it produced; each line is copied in.
+    & cmd /c "`"$vcvars`" >nul 2>&1 && set" | ForEach-Object {
+        if ($_ -match '^([^=]+)=(.*)$') { Set-Item -Path "env:$($Matches[1])" -Value $Matches[2] }
+    }
+    if (-not $env:INCLUDE) { throw "running $vcvars did not set INCLUDE." }
+    Write-Host "  MSVC environment from $install"
+}
+
 function Get-CrossBin {
     <#
     .SYNOPSIS

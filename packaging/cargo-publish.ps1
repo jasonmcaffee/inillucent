@@ -41,6 +41,7 @@
 [CmdletBinding()]
 param(
     [switch] $Execute,
+    [switch] $Confirmed,
     [string] $Token
 )
 
@@ -68,10 +69,17 @@ Write-Host '    is private; publishing makes it public, under MIT, permanently.'
 Write-Host '  * The version being published is the one in [workspace.package], and the same'
 Write-Host '    number can never be published twice.'
 Write-Host ''
-$answer = Read-Host 'Type PUBLISH to continue'
-if ($answer -ne 'PUBLISH') {
-    Write-Host 'Nothing was published.'
-    exit 1
+# **-Confirmed exists because ship.ps1 cannot answer a prompt (task-1995).** Without it this route
+# printed the warning, read an empty line from a non-interactive host, said "Nothing was published"
+# and exited 1 - so crates.io was a route the one-command release could never run, and the report
+# called it a failure rather than a question nobody was there to answer. The confirmation is still
+# given: ship.ps1's preflight names this route in the plan it prints before anything is written.
+if (-not $Confirmed) {
+    $answer = Read-Host 'Type PUBLISH to continue'
+    if ($answer -ne 'PUBLISH') {
+        Write-Host 'Nothing was published.'
+        exit 1
+    }
 }
 
 & cargo @arguments
