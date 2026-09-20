@@ -158,15 +158,15 @@ sha256 = "0c6c4ace63ffcb8104de467d93ae011623a00d0418c5bb2dcdd2a3cd97a49944"
 
 [[amendment]]
 path = "crates/inillucent-core/src/bm25.rs"
-ticket = "task-1932"
-reason = "M4: the 33rd flag name is an error rather than an abort, so add_chunks and the four Index methods over it answer a Result"
-sha256 = "a489f36745aac5bdcf9160277e1d7fd3b13161aeda88d628caf265d0e9d96f3e"
+ticket = "task-2006"
+reason = "task-2000 design 9: the ranked path selects the rows that reach the top instead of sorting every match. A term occurring in a tenth of the corpus produces a hit per chunk it occurs in, and the answer is k of them, so the full sort ordered thousands of rows to throw all but ten away; select_nth_unstable_by puts the top reach at the front in linear time and whichever sort follows orders the answer. The result is the same result - order is total and a hit is one chunk - and the card's ranking verdicts are byte for byte unchanged, 15 better, 1 equivalent, 1 inconclusive, 0 worse, every correctness gate passing. It does not move the number it was aimed at: the hybrid search with a title as the query reads 4.629 ms against 4.636, so that query's 4.6 ms is the lexical leg's posting read and scoring rather than its ordering."
+sha256 = "310936839338d104381166762beb8011af3d89a31ac54b53ca5ebf3f4f7eeada"
 
 [[amendment]]
 path = "crates/inillucent-core/src/distance.rs"
-ticket = "task-1953"
-reason = "task-1946 H4: check_query refuses a query whose width is not the index's and one holding a component that is not finite, with the wording inillucent-search's vector_of already uses. dot is untouched - it is the hot loop, and the check belongs at the boundary, once per query rather than once per candidate."
-sha256 = "bcc20230f1d306dd3bf693be2063929457d95c02cc5196a5349a86483bba960f"
+ticket = "task-2006"
+reason = "task-2000 design 9: an explicit AVX2 and FMA dot product with eight 256-bit accumulators, selected once through is_x86_feature_detected! and falling back to the scalar loop. The release profile sets no target-cpu, because a published binary has to run on the processors people have, so the auto-vectorised four accumulator loop compiled to 128-bit lanes. It does not produce bit-identical answers and cannot - a different number of accumulators is a different summation order - and the measured worst absolute disagreement over ten thousand random L2 normalised pairs at 768 dimensions is 5.4e-8, under half a unit in the last place of an f32 near 1.0. Vector search p50 went 0.934 ms to 0.7974."
+sha256 = "b4533c58c4dfd3b5e73fc4449b3cba46d8fc4d320e678e62b773d6615a455e7c"
 
 [[amendment]]
 path = "crates/inillucent-core/src/embed.rs"
@@ -194,15 +194,15 @@ sha256 = "ef2b935a4f7ec6a35b8755f758e11eb863dc37fb28f7abeda781f3b9154c2e0d"
 
 [[amendment]]
 path = "crates/inillucent-core/src/hnsw.rs"
-ticket = "task-1962"
-reason = "task-1961 A9: search_layer_filtered takes a VisitBudget instead of ef, max_visits and exhausted as its last three arguments - two usize in a row, which is the pair a caller swaps. The walk is unchanged: the same budget, the same stopping condition, the same exhausted flag. task-1932 M4's two graph invariants are still there."
-sha256 = "bc8c99f22be1196d8381b20212f450331c583419f61d85c7451f91f5f72c8af5"
+ticket = "task-2006"
+reason = "task-2000 design 9: HnswParams::build_threads defaults to available_parallelism() rather than one, which took the index build from 129.7 s to 16.1 s for 185,078 chunks at 768 dimensions. What it costs is reproducibility: the levels come from the same seeded generator so the level distribution is identical, but the order in which nodes link to each other is whatever the thread pool produced, and neither graph is byte-comparable to the other. The condition for making it the default was the score card's ranking verdicts, and they are unchanged. Two tests that compare two graphs now pin build_threads: 1, because that is what isolates the variable each is named for - extra_entry_points_do_not_lower_recall and, in index.rs, thirty_appends_stay_close_to_a_clean_rebuild."
+sha256 = "2ba8e2fa16870df8b5763ddee62a62e1f052ef75bfcb78ccda2146ee1238abc8"
 
 [[amendment]]
 path = "crates/inillucent-core/src/index.rs"
-ticket = "task-1980"
-reason = "R16: a document with no embedding is no longer returned by the vector branch, so a pure vector query stops answering it at score zero and a hybrid query stops labelling it origin=both. The filter is on the answer rather than on the scan, so the exhaustive reference every recall number is graded against is unchanged."
-sha256 = "965325d2adbd1cae4f0005adc75c82934bed3a9dbf5878be8b92d1419394b4e2"
+ticket = "task-2006"
+reason = "task-2000 design 9: the two legs of a hybrid search run under rayon::join, because they touch disjoint structures - the graph and the postings - and the hybrid rows on the card fell to about the slower leg, 5.125 ms to 4.629 for a title as the query. And thirty_appends_stay_close_to_a_clean_rebuild pins build_threads: 1: it measures how far an incremental insert's graph drifts from a rebuilt one, and under the parallel default neither graph is the same graph twice - run on its own it passes either way, run inside the suite with two dozen test binaries each asking for every core it measured recall 0.8975 against a 0.90 bar, which is two graphs differing rather than the appends drifting."
+sha256 = "6d1eacf81f83db597fd68b7b04d866859538393586cb02704f69d377fcb6a47f"
 
 [[amendment]]
 path = "crates/inillucent-core/src/install.rs"
@@ -266,13 +266,13 @@ sha256 = "6784023d2abb05e4d0a5ddf644c92aaf0656a03f937b82fdbb058f52bd30da8f"
 
 [[amendment]]
 path = "inillucent-scorecard.json"
-ticket = "task-2001"
-reason = "Moved by b47d6d0 (task-1935): a fresh retrieval run, published to both files. Never declared here; task-2001 declares it because the guard was red at HEAD and this file is not its work. Note that the run this pins is the one whose header reads '185078 chunks across 38977 documents', which is the defect task-2001 fixed: the corpus holds 38,847 documents and the same build command prints 38847 now. Neither file was edited by hand and no measurement was touched. The header and the build cost table will read 38847 the next time the card is generated, and this pin has to move again then."
-sha256 = "54b88f1494290002f204424f80d8ac3885191e5bc2ad20fdc545f7ebfabe4bc7"
+ticket = "task-2006"
+reason = "task-2000: a fresh grade against PostgreSQL with pgvector on the synthetic corpus, the protocol task-1935 published, published to both files. The build is 16.1 s from 129.7, vector search p50 0.7974 ms from 0.934, and the ranking verdicts are what they were: 15 better, 1 equivalent, 1 inconclusive, 0 worse, every correctness gate passing. Latency does not reproduce between runs and is not expected to; the ranking families reproduce to four decimal places."
+sha256 = "fab23453272447f890b72d01f078cf5ad69235fd77d66e3d69db22df2d423acc"
 
 [[amendment]]
 path = "inillucent-scorecard.md"
-ticket = "task-2001"
-reason = "Moved by b47d6d0 (task-1935): a fresh retrieval run, published to both files. Never declared here; task-2001 declares it because the guard was red at HEAD and this file is not its work. Note that the run this pins is the one whose header reads '185078 chunks across 38977 documents', which is the defect task-2001 fixed: the corpus holds 38,847 documents and the same build command prints 38847 now. Neither file was edited by hand and no measurement was touched. The header and the build cost table will read 38847 the next time the card is generated, and this pin has to move again then."
-sha256 = "4f82f033c640060eb53c3347f4d5ea1b198683b223a119340c8c056ddc0f0783"
+ticket = "task-2006"
+reason = "task-2000: a fresh grade against PostgreSQL with pgvector on the synthetic corpus, the protocol task-1935 published, published to both files. The build is 16.1 s from 129.7, vector search p50 0.7974 ms from 0.934, and the ranking verdicts are what they were: 15 better, 1 equivalent, 1 inconclusive, 0 worse, every correctness gate passing. Latency does not reproduce between runs and is not expected to; the ranking families reproduce to four decimal places."
+sha256 = "7567b8236a976c24b37e7ac28a9e0dc20ff28faa6b10321391895245c20b098b"
 
