@@ -104,8 +104,8 @@ verify() {
   # unbalanced. The whole script then died on line 1 with
   #     sh: Syntax error: Unterminated quoted string
   # so `curl ... | sh`, the install command the README gives for macOS and Linux, did
-  # nothing at all. `` is interpreted by tr and survives any checkout.
-  expected="$(tr -d '' < "$sums" | awk -v want="$name" '$NF == want { print $1 }' | head -1)"
+  # nothing at all. `\r` is interpreted by tr and survives any checkout.
+  expected="$(tr -d '\r' < "$sums" | awk -v want="$name" '$NF == want { print $1 }' | head -1)"
   if [ -z "$expected" ]; then
     echo "SHA256SUMS does not list $name" >&2
     exit 1

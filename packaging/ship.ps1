@@ -612,6 +612,17 @@ function Get-Routes {
                     if (-not (Test-Path -LiteralPath $path)) { continue }
                     $complaint = (& bash -n $path 2>&1 | Out-String).Trim()
                     if ($LASTEXITCODE -ne 0) { return "packaging/$script does not parse: $complaint" }
+                    # **And no carriage returns, which `bash -n` does not object to.** These scripts
+                    # run under `sh`, which on Debian and Ubuntu is dash, and dash reads a CR as
+                    # part of the command: a CRLF script fails at `set: Illegal option -` on its
+                    # second line. .gitattributes marks *.sh as eol=lf, and install.sh escaped that
+                    # conversion for three releases because git leaves a file that already contains
+                    # a carriage return alone - and this one had one, inside a `tr -d` argument.
+                    $bytes = [System.IO.File]::ReadAllBytes($path)
+                    $carriageReturns = @($bytes | Where-Object { $_ -eq 13 }).Count
+                    if ($carriageReturns -gt 0) {
+                        return "packaging/$script holds $carriageReturns carriage return(s). sh on Linux is dash, which fails on the first one. Write it with LF."
+                    }
                 }
                 $null
             }
