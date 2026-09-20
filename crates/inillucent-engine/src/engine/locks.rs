@@ -224,8 +224,10 @@ impl ImportedDatabase {
         if held.path.is_none() {
             return Ok(false);
         }
+        // Against the record last seen on the disk, for the reason
+        // `the_meta_moved` gives.
         Ok(match held.database.meta_on_disk()? {
-            Some(found) => found != *held.database.meta(),
+            Some(found) => found != *held.database.seen_on_disk(),
             None => true,
         })
     }
@@ -266,7 +268,11 @@ impl ImportedDatabase {
         if let Some(found) = held.database.meta_on_disk()? {
             held.database.adopt_from_file(found)?;
         }
-        held.wal = crate::recovery::resync_file(&mut held.database, &vfs, &db_path, &doubtful)?;
+        let (wal, highest_txn) =
+            crate::recovery::resync_file(&mut held.database, &vfs, &db_path, &doubtful)?;
+        held.wal = wal;
+        // Past every number the shared log holds - see `resync_file`.
+        self.writing.raise_transactions_past(highest_txn);
         Ok(())
     }
 
@@ -289,13 +295,27 @@ impl ImportedDatabase {
     /// record is `Eq`, so asking about all of it costs nothing over asking
     /// about one field of it, and the page has already been read.
     ///
+    /// **Compared against the record this connection last saw on the disk, not
+    /// against its own** (task-2000, design 1b). The two were the same thing until
+    /// the fold became lazy: a statement folded on its way out, so the connection's
+    /// record reached the file before the lock was released. They are not the same
+    /// any more - a `CREATE TABLE` bumps `schema_cookie` and a `PRAGMA user_version`
+    /// sets `user_version`, and neither reaches the file until a fold is due - so
+    /// comparing against `meta` made the very next statement read *its own* pending
+    /// edit as another process's write. It then resynchronised, which throws the
+    /// pool away and replays the log from the file's checkpoint, and the statement
+    /// that had just reported success was gone. `new_engine_ddl`'s
+    /// `creating_a_table_writes_the_row_sqlite_writes` is the measurement: `CREATE
+    /// TABLE plain (a, b)` ran, said ok, and was not in `sqlite_schema` afterwards.
+    /// See `Database::disk_meta`.
+    ///
     /// A database with no file has no second process and answers no.
     fn the_meta_moved(&self) -> DbResult<bool> {
         if self.storage.path.as_os_str().is_empty() {
             return Ok(false);
         }
         Ok(match self.storage.database.meta_on_disk()? {
-            Some(found) => found != *self.storage.database.meta(),
+            Some(found) => found != *self.storage.database.seen_on_disk(),
             None => true,
         })
     }
@@ -355,9 +375,12 @@ impl ImportedDatabase {
         // resynchronised read back 2. The pragma is set once and expected to
         // hold for the connection, so it is carried across.
         let synchronous = self.storage.wal.synchronous();
-        self.storage.wal =
+        let (wal, highest_txn) =
             crate::recovery::resync_file(&mut self.storage.database, &vfs, &db_path, &doubtful)?;
+        self.storage.wal = wal;
         self.storage.wal.set_synchronous(synchronous);
+        // Past every number the shared log holds - see `resync_file`.
+        self.writing.raise_transactions_past(highest_txn);
         Ok(())
     }
 
@@ -384,60 +407,58 @@ impl ImportedDatabase {
         {
             return Ok(());
         }
-        // **Durable before the file is let go, and this is the whole cost of
-        // `locking_mode = normal`.** A connection that released the lock with
-        // dirty pages would leave the file describing a database without the
-        // statement that just succeeded - and the next process to write would
-        // build on that file and overwrite the statement for good. It is not a
-        // stale read; it is a lost write, and it is what the first version of
-        // this did eight times in ten under two concurrent writers.
+        // **Durable before the file is let go, and after task-2000 that is one
+        // sync of the log and nothing else.**
         //
-        // **What it costs, measured (task-1979, section 18, decision 1).** 300
-        // autocommit inserts through `inillucent-shell` take 1.91 s with this
-        // checkpoint removed and 10.70 s with it, against 0.46 s under
-        // `locking_mode = exclusive`, where this function returns above and
-        // never reaches here. The 32 ms per statement is a checkpoint's own
-        // work: it rewrites the catalog's statistics, syncs the log twice,
-        // rolls a new log segment, rewrites the free map's pages, writes the
-        // meta record and deletes every segment below the new recovery point.
+        // What a lock release owes the next process is that every statement this
+        // one acknowledged can be *found*, not that it is already folded into the
+        // data file. The invariant moved with design 1b, and this is where it
+        // moved from and to:
         //
-        // **Most of that 32 ms was not what a lock release owes, and it is no
-        // longer done here (task-1999).** The checkpoint this takes is
-        // `CheckpointKind::Releasing`: it writes the dirty pages and the meta
-        // record, so the file holds the statement that just succeeded, and it
-        // does the catalog's statistics and the log's reclamation only once the
-        // log has grown past `checkpoint::RECLAIM_BYTES`. What was
-        // measured of the 19 ms a release checkpoint took on the medium gate:
-        // 5.9 ms writing the pages, and 12 ms rolling a segment, locating a
-        // segment by LSN, writing a checkpoint record, deleting segments and
-        // rewriting the catalog's statistics. See `CheckpointKind`.
+        // - before: the file holds every acknowledged statement at release;
+        // - now: **the file plus the log hold every acknowledged statement at
+        //   release, and a connection that takes the lock replays what it has
+        //   not seen before it reads or writes anything.**
         //
-        // **Removing it was tried and put back.** The next process does replay
-        // the log, so the *committed* statement is not lost either way - but
-        // leaving every statement's records unfolded meant every later open
-        // replayed them, which changed what eighteen suites saw: a recovery
-        // report on the front of ordinary command output, and the crash
-        // campaigns grading a file with a log nothing had folded. The cost is
-        // the price of a default that two processes can share; an application
-        // that never opens a second connection sets
-        // `PRAGMA locking_mode = exclusive` and pays none of it.
+        // The second half is `enter_within`'s: `the_meta_moved` and
+        // `the_log_moved` are asked on every take under `normal`, and a moved log
+        // sends the connection through `resync_from_file`, which discards its
+        // pages and replays the log from the file's own checkpoint. That replay
+        // is what puts a statement another process left in the log into this
+        // connection's pool, and it is deterministic, so two connections that
+        // have both caught up hold identical pages.
         //
-        // **Only when this statement wrote something.** A checkpoint is a
-        // write: it rolls a log segment, rewrites the free map's pages, moves
-        // the meta record's generation and deletes the segments below the new
-        // recovery point. Running one after a `SELECT` makes reading a database
-        // change it, which `lifecycle.rs`'s `a_long_session_changes_no_byte`
+        // **What it cost to fold here, measured.** A fold per statement is six to
+        // eight fsync class calls: the log, the journal's pre images and its
+        // seal, the pages, the free map, the meta pages' journal, the meta record,
+        // and the journal's unlink with its directory entry. `txn.autocommit` was
+        // 8.7 ms a statement against SQLite's 1.17 and `write.insert.autocommit`
+        // 8.5 against 4.06, which put `write`, `transaction` and `schema` under
+        // `compat/perf/contract.toml`'s floor on four consecutive gate runs.
+        //
+        // **Removing it was tried once before and put back**, and what put it
+        // back was not a lost write - the next process replayed the log and lost
+        // nothing - but that eighteen suites saw the log where they expected the
+        // file. Those suites now assert the file after a `close` or a `PRAGMA
+        // wal_checkpoint` rather than after a release, which is the same property
+        // stated at the moment it is true. The two process campaigns are the
+        // correctness gate and are not weakened.
+        //
+        // **Only when this statement wrote something.** A fold is a write: it
+        // rewrites the free map's pages, moves the meta record's generation and
+        // retires log segments. Running one after a `SELECT` makes reading a
+        // database change it, which `lifecycle.rs`'s `a_long_session_changes_no_byte`
         // compares byte for byte, and made four reads delete log segments a
-        // handle still had open. A read takes SHARED and a write raises past
-        // it, so the lock level is the question already answered; the dirty
-        // count is the second half, for a statement that wrote and released
-        // before reaching here.
+        // handle still had open. A read takes SHARED and a write raises past it,
+        // so the lock level is the question already answered; the dirty count is
+        // the second half, for a statement that wrote and released before
+        // reaching here.
         //
-        // **Every file the connection holds, not only `main`.** A statement
-        // that wrote an attached database and nothing else leaves `main` clean,
-        // so asking `main` alone answered "nothing was written" and released
-        // every file with the attachment's pages still dirty - which lost 116
-        // of 599 acknowledged inserts through `ATTACH` under load.
+        // **Every file the connection holds, not only `main`.** A statement that
+        // wrote an attached database and nothing else leaves `main` clean, so
+        // asking `main` alone answered "nothing was written" and released every
+        // file with the attachment's pages still dirty - which lost 116 of 599
+        // acknowledged inserts through `ATTACH` under load.
         let wrote = self.storage.database.lock_level() > inillucent_vfs::FileLock::Shared
             || self.storage.database.pool().dirty_pages() > 0
             || self.session_state.attached.iter().any(|held| {
@@ -446,7 +467,63 @@ impl ImportedDatabase {
                         || held.database.pool().dirty_pages() > 0)
             });
         if wrote && self.storage.database.pool().lock_level() != inillucent_vfs::FileLock::None {
-            self.checkpoint_of(crate::checkpoint::CheckpointKind::Releasing)?;
+            // **The log, once.** `Wal::commit` already syncs under `synchronous =
+            // FULL`, so for an autocommit statement this returns without doing
+            // anything: `drive` compares the durable end against the point asked
+            // for and stops. It is here for the statements whose commit did not
+            // go through that path, and for `synchronous = NORMAL`, where a
+            // release is a boundary the next process's replay starts from and a
+            // buffered tail it could not read is not one.
+            self.storage.wal.sync()?;
+            for held in self.session_state.attached.iter() {
+                if held.path.is_some() {
+                    held.wal.sync()?;
+                }
+            }
+            // **An `ATTACH`ed file still folds at release, and `main` does not.**
+            //
+            // The lazy fold rests on the lock handoff catching up: a connection
+            // that takes the lock and finds the log moved replays what it has not
+            // seen before it reads or writes anything. `main` does that through
+            // `the_meta_moved`, `the_log_moved` and `resync_from_file`, and the two
+            // process campaigns say it holds - a thousand statements alternating
+            // between two processes with a fold forced every fifty lose nothing.
+            //
+            // **The attached path does not hold, measured** (task-2000, design 1b).
+            // Two processes, each with its own `main` and both `ATTACH`ing one
+            // shared file, sixty inserts each: a hundred and twenty acknowledged
+            // and between one and fourteen in the file, with `ANALYZE` afterwards
+            // reporting the table empty and every process exit zero. It is not the
+            // detection - forcing a resynchronisation on every take made it worse,
+            // not better, and took the count to nought - so the loss is inside the
+            // resynchronisation of an attached file when another process holds
+            // records in the same log: `resync_attached` throws the pool away,
+            // replays, and then `truncate_after` cuts the shared log to what its
+            // own scan reached. Under the eager fold that window never existed,
+            // because the file held every statement at release and the replay had
+            // nothing to rebuild.
+            //
+            // So the attachment keeps the fold it has always had, and `main` gets
+            // the lazy one. That is where the measurement is: the performance
+            // contract's `write`, `transaction` and `schema` families are all
+            // `main`, the gate never attaches a file, and an application that
+            // writes through `ATTACH` keeps today's cost rather than a correctness
+            // hole. Making the attached handoff sound is its own ticket and its own
+            // campaign; it is named in this one's closing comment.
+            if self.any_attached_is_dirty() {
+                self.checkpoint_attached_only()?;
+            }
+            // **And `main`'s fold only once its log has grown past the bar** - see
+            // `crate::checkpoint::RECLAIM_BYTES` for why four mebibytes and why
+            // bytes rather than pages. At the 32 KiB default page size an
+            // autocommit statement writes about 34 KiB of log, so this is one fold
+            // every hundred and twenty statements, and a hot leaf is imaged once
+            // per fold however many statements touched it.
+            if self.a_fold_is_due() {
+                // `false`: a statement letting the file go is not somebody asking for
+                // a checkpoint - see `checkpoint_of` for what the difference costs.
+                self.checkpoint_of(false)?;
+            }
         }
         // Every attached file is let go on the same terms `main` is: the
         // checkpoint above wrote all of them - `checkpoint_attached` is part of
@@ -457,6 +534,122 @@ impl ImportedDatabase {
             }
         }
         self.storage.database.end_access()
+    }
+
+    /// Takes the lock, folds every file, and lets the lock go.
+    ///
+    /// The body of `Drop for ImportedDatabase`, separated so the `Drop` has one
+    /// statement in it and so this can say what it refuses and why.
+    ///
+    /// **Through `enter` and `leave`, exactly as a statement does.** A fold is a
+    /// write - it rewrites the free map's pages, moves the meta record's
+    /// generation and retires log segments - and doing one without the file lock
+    /// is doing it while another process may be doing the same thing to the same
+    /// bytes, which is task-1987's lost commits. Under `locking_mode = normal` the
+    /// lock is not held between statements, so it is taken here and released
+    /// again; under `exclusive` `enter` compares two integers and `leave` returns.
+    ///
+    /// A file the lock cannot be taken on - another process is writing it, and
+    /// the busy timeout ran out - is left with its log, which the next open
+    /// replays.
+    pub(crate) fn fold_on_close(&mut self) -> DbResult<()> {
+        // A read only connection has nothing to fold and a file handle that would
+        // refuse the write; `:memory:` and a temporary database have no file.
+        if self.storage.read_only || self.storage.path.as_os_str().is_empty() {
+            return Ok(());
+        }
+        // An open transaction is a rollback, not a fold. See `Drop`.
+        if self.writing.batch().is_some() {
+            return Ok(());
+        }
+        // **Nothing to fold means nothing to lock, and that is not a shortcut.**
+        // `enter(true)` takes the file EXCLUSIVE, and a connection that only read is
+        // a connection with nothing the file does not already have - so folding it
+        // would take a write lock on the way out of `inillucent query`. Under the
+        // per-statement fold that never happened, because a read released without
+        // checkpointing; with the fold at close it happened on every process,
+        // including every short-lived one. It showed up as contention rather than as
+        // a wrong answer: `cli`, `confinement`, `mcp_wire` and `budgets` each spawn
+        // hundreds of processes against one file, and under the test runner's
+        // twenty-four way parallelism they began reporting the file busy.
+        //
+        // Asked of the dirty count rather than of the log, because the question is
+        // what *this* connection holds that the file does not. Another process's
+        // unfolded records are in the log and are that process's to fold.
+        let holding = self.storage.database.pool().dirty_pages() > 0
+            || self
+                .session_state
+                .attached
+                .iter()
+                .any(|held| held.path.is_some() && held.database.pool().dirty_pages() > 0);
+        if !holding {
+            return Ok(());
+        }
+        self.enter(true)?;
+        let folded = self.checkpoint();
+        let left = self.leave();
+        folded.and(left)
+    }
+
+    /// Reports whether any file this connection holds has piled up enough log
+    /// to be worth folding.
+    ///
+    /// **The bar, and the only thing that decides a fold on the release path**
+    /// (task-2000, design 1b). A fold runs at exactly four points now: here, when
+    /// a file's log passes [`crate::checkpoint::RECLAIM_BYTES`]; when the
+    /// connection is dropped, so a closed file is self contained; when a caller
+    /// asks, through `PRAGMA wal_checkpoint`, `VACUUM`, a backup, an integrity
+    /// check or the driver's `checkpoint`; and before a switch of `journal_mode`
+    /// or `locking_mode`.
+    ///
+    /// Asked of every file, because each has its own log and its own size. One
+    /// file over the bar folds all of them, which is what `checkpoint` does
+    /// anyway and costs the others nothing - a file with no dirty page writes no
+    /// page.
+    /// **Every journal mode, because the mode decides what protects a fold and not
+    /// when one runs** (task-2000, design 1). The two halves of design 1 come apart:
+    /// the **after images** are `wal`'s and stay there, since they are what replaces
+    /// a rollback journal and a caller who asks for `journal_mode = delete` is asking
+    /// for `app.db-journal` beside the database. Deferring the fold is the other
+    /// half, and the rollback journal protects the fold's in place writes whenever
+    /// the fold happens, so a deferred one is safe in `delete` by the same argument
+    /// that makes an eager one safe.
+    ///
+    /// **And the measurement is why it has to be every mode.** task-2000 states its
+    /// goals for "the shipped defaults, `locking_mode = normal` and
+    /// `journal_mode = wal`", and says of design 1 that it "changes `wal` mode, which
+    /// is the default". `wal` is not the default and was not when that was written:
+    /// `Pragmas::fresh` starts at `JournalMode::Delete` for SQLite parity, and the
+    /// gate sets `journal_mode = delete` on both arms. A fold deferred in `wal` alone
+    /// is a fold deferred in a mode nothing measures, so the goals could not be
+    /// reached by honouring that sentence.
+    ///
+    /// What deferring does change in a rollback mode is where an acknowledged commit
+    /// lives until the fold: in the log, and only there. An eager fold put it in the
+    /// log *and* in the data file before `COMMIT` returned, and that second copy is
+    /// what let `delete` mode survive a device which acknowledges a write and stores
+    /// half of it. The redundancy was the second write and the second sync this
+    /// design removes, rather than anything the journal did.
+    /// `durability::a_short_write_at_every_cut_point_is_recoverable` is where that is
+    /// argued and counted, and `wal_crash.rs` is where the same exemption was already
+    /// granted for `wal`.
+    fn a_fold_is_due(&self) -> bool {
+        self.storage.wal.since_checkpoint() >= crate::checkpoint::RECLAIM_BYTES
+    }
+
+    /// Reports whether any attached file holds a change its own file does not.
+    ///
+    /// The condition the attachment's eager fold rides on - see `release_if_idle`
+    /// for why an attached file still folds at release when `main` does not. Asked
+    /// off the dirty count rather than off the lock level, because a statement that
+    /// wrote `main` alone raises the attachment's lock too and folding it then would
+    /// make reading a database change it.
+    fn any_attached_is_dirty(&self) -> bool {
+        self.session_state.attached.iter().any(|held| {
+            held.path.is_some()
+                && held.database.lock_level() > inillucent_vfs::FileLock::Shared
+                && held.database.pool().dirty_pages() > 0
+        })
     }
 
     /// Changes how the pre-commit state is protected.
@@ -512,6 +705,15 @@ impl ImportedDatabase {
             )
         });
         self.storage.database.pool().set_journal(journal);
+        // **And the fold's protection follows the mode** (task-2000, design 1a).
+        // Under `wal` the fold appends an after image of every page it is about
+        // to write to the log it already has, so it asks the journal for
+        // nothing; the journal stays in place for an eviction, which is undo and
+        // needs a pre image. See `Pool::fold_protected_by_log`.
+        self.storage
+            .database
+            .pool()
+            .set_fold_protected_by_log(mode == inillucent_pool::journal::JournalMode::Wal);
         // **`PRAGMA journal_mode` names the connection, not one file of it.**
         // `checkpoint_attached` writes an attached file's pages in place
         // exactly as `main`'s checkpoint does, so an attachment left on its
@@ -539,6 +741,10 @@ impl ImportedDatabase {
                 )
             });
             held.database.pool().set_journal(attached_journal);
+            // The same rule `main` takes two blocks above.
+            held.database
+                .pool()
+                .set_fold_protected_by_log(mode == inillucent_pool::journal::JournalMode::Wal);
         }
         Ok(())
     }
@@ -567,6 +773,23 @@ impl ImportedDatabase {
 /// checkpoint's meta record is durable. The cost is the one the default mode
 /// already pays; what it buys is that an interrupted checkpoint is undoable in
 /// every mode rather than in three of the five.
+///
+/// **In `wal` mode the fold no longer asks it, and an eviction still does**
+/// (task-2000, design 1a). The paragraph above is the argument for a journal and it
+/// is answered differently now: immediately before the fold writes any page in
+/// place, it appends a `Body::WritePage` **after** image of every page it is about
+/// to write to the redo log it already has, and syncs behind them. Recovery installs
+/// one idempotently by page LSN, and a page whose checksum fails reads as "no LSN",
+/// so the torn page the campaign found is repaired from the log rather than put back
+/// from a journal. That is cheaper by the whole of the journal's read before write,
+/// its two seals and its unlink with the directory sync.
+///
+/// The journal object is still handed out, because **an eviction is a different
+/// question**. Stealing an uncommitted page out to the file is undo, and a redo log
+/// cannot do undo, so `Pool::writeback` asks the journal for `Writing::Eviction` and
+/// not for a fold - see `Pool::fold_protected_by_log`. The file is created at the
+/// first pre image, so a connection that never steals never creates one, and a
+/// transaction whose dirty pages outgrow the pool can still steal.
 ///
 /// `off` is the one mode that gets nothing, because that is what it asks for.
 ///

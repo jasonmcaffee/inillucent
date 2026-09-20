@@ -46,6 +46,13 @@ const ONE_SHOT_INSERTS: usize = 60;
 /// How many inserts each long-lived writer sends.
 const LONG_LIVED_INSERTS: usize = 300;
 
+/// How many inserts each writer sends in the alternating case.
+///
+/// Five hundred each, so the two together are the thousand statements task-2000's
+/// testing strategy asks for, with a fold forced every fifty on whichever writer
+/// holds the lock.
+const ALTERNATING_INSERTS: usize = 500;
+
 /// Returns a directory of this case's own, emptied first.
 ///
 /// @param name - the case's name, which is also the directory's
@@ -271,6 +278,154 @@ fn two_writer_processes_lose_nothing_long_lived() {
     }
 }
 
+/// A second process reads a statement the first has not folded into the file.
+///
+/// **The fourth of task-2000's testing strategy, and the invariant design 1b
+/// moved.** A statement used to fold on its way out, so the file held it at
+/// release. It no longer does: the file plus the log hold it, and the connection
+/// that takes the lock replays what it has not seen. This is that sentence as a
+/// test - the writer is still alive and holding its dirty pages when the reader
+/// looks, so the row the reader sees can only have come from the log.
+///
+/// **The writer has to still be alive**, which is why this drives the shell
+/// through a pipe that stays open rather than running `inillucent exec`. A
+/// process that exits drops its connection, and `Drop for ImportedDatabase`
+/// folds - so a one-shot writer would leave the file complete and the test would
+/// be measuring nothing.
+#[test]
+fn a_second_process_reads_the_first_processes_unfolded_statement() {
+    let Some(binary) = program("inillucent") else {
+        return;
+    };
+    let Some(shell) = program("inillucent-shell") else {
+        return;
+    };
+    let directory = area("unfolded-read");
+    let database = prepared(&binary, &directory);
+    let mut writer = Command::new(&shell)
+        .arg(database.to_string_lossy().replace('\\', "/"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap_or_else(|error| panic!("the shell did not start: {error}"));
+    let mut pipe = writer.stdin.take().expect("the shell takes input");
+    // `.echo on` and a sentinel are not needed: what is asserted is what the
+    // *reader* sees, and the writer's own acknowledgement is its exit code at the
+    // end. The insert is flushed and the pipe left open, so the shell has run the
+    // statement, released the file lock, and is waiting for the next line with
+    // its pages still dirty.
+    pipe.write_all(b"INSERT INTO note (who, n) VALUES ('a', 1);\nSELECT 'written';\n")
+        .expect("the insert reaches the shell");
+    pipe.flush().expect("the insert is flushed");
+    // The shell echoes the `SELECT`'s answer, which is how this waits for the
+    // insert to have actually run rather than for a guessed number of
+    // milliseconds. Reading one line is enough: the shell writes the row before
+    // it asks for the next statement.
+    let mut said = String::new();
+    if let Some(out) = writer.stdout.as_mut() {
+        use std::io::Read;
+        let mut byte = [0u8; 1];
+        while !said.contains("written") {
+            match out.read(&mut byte) {
+                Ok(0) => break,
+                Ok(_) => said.push(byte[0] as char),
+                Err(_) => break,
+            }
+        }
+    }
+    assert!(
+        said.contains("written"),
+        "the writer never acknowledged its insert; it said {said:?}"
+    );
+    // The reader is a separate process with its own pool and its own log handle.
+    // It has to take the lock, see that the log moved, and replay - which is the
+    // whole of what is being tested.
+    let seen = present(&binary, &database);
+    drop(pipe);
+    let finished = writer.wait_with_output().expect("the writer finished");
+    assert_eq!(
+        seen,
+        1,
+        "a second process did not see the unfolded statement; the writer said:\n{}",
+        String::from_utf8_lossy(&finished.stderr)
+    );
+    // And the file is complete once the writer has gone, which is `Drop`'s job.
+    assert_eq!(
+        present(&binary, &database),
+        1,
+        "the row is not there after the writer closed"
+    );
+}
+
+/// Two processes alternate for a thousand statements with folds forced along the
+/// way, and the file holds every acknowledgement.
+///
+/// **The fifth of task-2000's testing strategy.** The two rules that make a lazy
+/// fold safe against the lost write class are that a fold only runs while holding
+/// EXCLUSIVE and only after catching up, and that a page the other process
+/// already folded has its dirty flag cleared rather than being written again.
+/// Neither is visible in one statement; both are visible in a thousand
+/// alternating ones with a fold forced every fifty, because a fold that wrote an
+/// older version of a page over a newer one would lose the rows in between.
+///
+/// **A fold every fifty statements, asked for rather than waited for.** The 4 MiB
+/// bar would be reached eventually, but which statement reached it would depend on
+/// how much log each one happened to write - and a test whose coverage depends on
+/// that is one whose coverage nobody knows. `PRAGMA wal_checkpoint` is the same
+/// fold on the same path, at a point the script names.
+#[test]
+fn two_processes_alternate_with_folds_and_lose_nothing() {
+    let Some(binary) = program("inillucent") else {
+        return;
+    };
+    let Some(shell) = program("inillucent-shell") else {
+        return;
+    };
+    let directory = area("alternating-folds");
+    let database = prepared(&binary, &directory);
+    let script = |who: &str| {
+        let mut text = String::from("PRAGMA locking_mode = normal;\n");
+        for n in 1..=ALTERNATING_INSERTS {
+            text.push_str(&format!(
+                "INSERT INTO note (who, n) VALUES ('{who}', {n});\n"
+            ));
+            if n % 50 == 0 {
+                text.push_str("PRAGMA wal_checkpoint;\n");
+            }
+        }
+        text.push_str(&format!("SELECT 'finished-{who}';\n"));
+        text
+    };
+    let acknowledged = std::thread::scope(|scope| {
+        let left = {
+            let shell = shell.clone();
+            let database = database.clone();
+            let text = script("a");
+            scope.spawn(move || shell_script(&shell, &database, &text))
+        };
+        let right = {
+            let shell = shell.clone();
+            let database = database.clone();
+            let text = script("b");
+            scope.spawn(move || shell_script(&shell, &database, &text))
+        };
+        let a = left.join().expect("writer a finished");
+        let b = right.join().expect("writer b finished");
+        acknowledged_out_of(&a.said(), "a", ALTERNATING_INSERTS)
+            .saturating_add(acknowledged_out_of(&b.said(), "b", ALTERNATING_INSERTS))
+    });
+    assert!(
+        acknowledged > 0,
+        "no insert was acknowledged, so this round tested nothing"
+    );
+    assert_eq!(
+        present(&binary, &database),
+        acknowledged,
+        "the file does not hold every acknowledged insert"
+    );
+}
+
 /// Two processes with different main databases attaching one shared file lose
 /// nothing (task-1979, C2).
 #[test]
@@ -375,6 +530,23 @@ fn two_processes_attaching_one_file_lose_nothing() {
 /// @param said - both of the writer's streams
 /// @param who - the writer's name, which its sentinel carries
 fn acknowledged_by(said: &str, who: &str) -> usize {
+    acknowledged_out_of(said, who, LONG_LIVED_INSERTS)
+}
+
+/// The same count, for a script that sent a different number of inserts.
+///
+/// **The count has to be told how many were sent** (task-2000). `acknowledged_by`
+/// read [`LONG_LIVED_INSERTS`] out of the air, which is right for the two cases
+/// that existed when it was written and silently wrong for any other: the
+/// alternating case sends five hundred each, and the old arithmetic reported three
+/// hundred - so a file holding every one of its thousand acknowledged inserts read
+/// as six hundred acknowledged against a thousand present, which is a *pass*
+/// misread as a failure.
+///
+/// @param said - both of the writer's streams
+/// @param who - the writer's name, which its sentinel carries
+/// @param sent - how many inserts the script sent
+fn acknowledged_out_of(said: &str, who: &str, sent: usize) -> usize {
     let finished = said.contains(&format!("finished-{who}"));
     let failures: Vec<usize> = said
         .lines()
@@ -382,7 +554,7 @@ fn acknowledged_by(said: &str, who: &str) -> usize {
         .filter(|at| *at >= 2)
         .collect();
     if finished {
-        return LONG_LIVED_INSERTS.saturating_sub(failures.len());
+        return sent.saturating_sub(failures.len());
     }
     match failures.first() {
         Some(at) => at.saturating_sub(2),

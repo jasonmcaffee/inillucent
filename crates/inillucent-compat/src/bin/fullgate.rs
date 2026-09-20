@@ -307,10 +307,16 @@ fn print_configuration(
         -(plan.cache_size as f64) / 1024.0
     );
     println!("  fairness    : matched - one memory budget, both engines");
-    println!(
-        "  sqlite lock : locking_mode = {} (this engine takes no file lock at all)",
-        settings.locking
-    );
+    println!("  sqlite lock : locking_mode = {}", settings.locking);
+    // **It used to say "this engine takes no file lock at all", and that stopped
+    // being true two releases ago** (task-2000, design 1d). `locking_mode = normal`
+    // is the shipped default and under it this engine takes SHARED, RESERVED and
+    // EXCLUSIVE on every statement and lets them go again - which is the whole
+    // reason the `write` and `transaction` families cost what they do. A gate that
+    // told a reader the two arms were locking differently when they were not is a
+    // gate that was describing an older engine.
+    println!("  inillucent lock: locking_mode = normal, the shipped default - the file is");
+    println!("                taken and released once per statement, exactly as SQLite's arm does");
     println!("  plan cache  : declared, and NOT used by either arm of this gate");
     println!(
         "                inillucent keeps a prepared plan per statement text, and the TDD names"
@@ -926,6 +932,7 @@ fn round_on(
         // The `pre` above and the `post` below are setup and are outside both.
         let before = ProcessCost::now();
         let log_before = database.wal().stats();
+        let pool_before = database.pool_stats();
         let timed = if workload.mutates {
             time_write(database, workload, plan.rows)
         } else {
@@ -933,6 +940,7 @@ fn round_on(
         };
         let spent = ProcessCost::now().since(&before);
         let log_after = database.wal().stats();
+        let pool_after = database.pool_stats();
         match timed {
             Ok(sample) => {
                 costs.push((
@@ -943,6 +951,8 @@ fn round_on(
                         writes: log_after.writes.saturating_sub(log_before.writes),
                         syncs: log_after.syncs.saturating_sub(log_before.syncs),
                         bytes: log_after.bytes.saturating_sub(log_before.bytes),
+                        file_syncs: pool_after.file_syncs.saturating_sub(pool_before.file_syncs),
+                        folds: pool_after.folds.saturating_sub(pool_before.folds),
                     },
                 ));
                 samples.push(sample)
@@ -1035,6 +1045,16 @@ struct LogCost {
     syncs: u64,
     /// Bytes appended to the log.
     bytes: u64,
+    /// Calls to the **data** file's `sync`.
+    ///
+    /// **What design 1 of task-2000 is graded on.** A commit is one log append and
+    /// one sync of the log; the data file is synced only by a fold, twice - once
+    /// behind the pages and once behind the meta record. A per-statement number
+    /// above zero on `txn.autocommit` means a fold is back on the release path,
+    /// which is what took that workload from 1.18 ms to 8.7.
+    file_syncs: u64,
+    /// Folds: page writes into the data file followed by a meta record.
+    folds: u64,
 }
 
 /// Prints what each arm cost besides time.
@@ -1066,8 +1086,16 @@ fn report_costs(
     println!();
     println!("## memory and CPU, this engine, per workload   (median over rounds)");
     println!(
-        "  {:<24} {:>12} {:>10} {:>10} {:>8} {:>8} {:>10}",
-        "workload", "rss delta MiB", "cpu ms", "pool frames", "log wr", "log sync", "log KiB"
+        "  {:<24} {:>12} {:>10} {:>10} {:>8} {:>8} {:>10} {:>9} {:>6}",
+        "workload",
+        "rss delta MiB",
+        "cpu ms",
+        "pool frames",
+        "log wr",
+        "log sync",
+        "log KiB",
+        "file sync",
+        "fold"
     );
     for workload in &plan.workloads {
         let mut rss: Vec<f64> = Vec::new();
@@ -1076,6 +1104,8 @@ fn report_costs(
         let mut writes: Vec<f64> = Vec::new();
         let mut syncs: Vec<f64> = Vec::new();
         let mut bytes: Vec<f64> = Vec::new();
+        let mut file_syncs: Vec<f64> = Vec::new();
+        let mut folds: Vec<f64> = Vec::new();
         for round in ours {
             let Some((_, cost, resident, log)) = round
                 .costs
@@ -1090,19 +1120,23 @@ fn report_costs(
             writes.push(log.writes as f64);
             syncs.push(log.syncs as f64);
             bytes.push(log.bytes as f64 / 1024.0);
+            file_syncs.push(log.file_syncs as f64);
+            folds.push(log.folds as f64);
         }
         if cpu.is_empty() {
             continue;
         }
         println!(
-            "  {:<24} {:>12.2} {:>10.2} {:>10.0} {:>8.0} {:>8.0} {:>10.1}",
+            "  {:<24} {:>12.2} {:>10.2} {:>10.0} {:>8.0} {:>8.0} {:>10.1} {:>9.0} {:>6.0}",
             workload.name,
             middle(&mut rss),
             middle(&mut cpu),
             middle(&mut frames),
             middle(&mut writes),
             middle(&mut syncs),
-            middle(&mut bytes)
+            middle(&mut bytes),
+            middle(&mut file_syncs),
+            middle(&mut folds)
         );
     }
 

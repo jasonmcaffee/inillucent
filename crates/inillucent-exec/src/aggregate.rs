@@ -419,6 +419,26 @@ impl Accumulator {
         true
     }
 
+    /// Folds a whole batch's worth of rows into a `count(*)`.
+    ///
+    /// **Design 4 of task-2000: `count(*)` is a batch's row count, not a loop.**
+    /// Every aggregate operator answered `count(*)` by calling [`Accumulator::push`]
+    /// once a row with a `NULL`, so a hundred thousand row scan made a hundred
+    /// thousand calls that each compared a discriminant and added one. There is no
+    /// value to read - `count(*)` counts rows - so the whole batch is one addition.
+    ///
+    /// It is `count(*)` only. `count(x)` skips a NULL and so has to see each value,
+    /// and a `DISTINCT` count has to compare each one; both keep the per-row path,
+    /// and calling this for either would count rows this aggregate must not count.
+    ///
+    /// @param rows - how many rows the batch contributes
+    pub fn push_count(&mut self, rows: usize) {
+        if self.kind != AggregateKind::CountStar {
+            return;
+        }
+        self.count = self.count.saturating_add(rows as i64);
+    }
+
     /// Folds one value in.
     ///
     /// @param value - the argument's value for this row, or NULL for `count(*)`

@@ -1268,6 +1268,31 @@ name = "wal_crash"
 tier = "durability"
 covers = ["inillucent-engine", "inillucent-wal"]
 
+# What a statement costs and what a fold costs, counted at the file system rather
+# than at a counter in the engine (task-2000, design 1). It is `durability`
+# because the two syncs it counts *are* the durability order, and because it
+# asserts a rollback journal is never created in wal mode - which is the
+# protection the redo log's after images replaced.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "fold_protocol"
+tier = "durability"
+covers = ["inillucent-engine", "inillucent-pool", "inillucent-wal"]
+
+# Power loss at every cut point of a `CREATE INDEX` (task-2000, design 2). The
+# bulk build stopped logging a whole page image per page it builds, and what
+# replaces the image is an ordering - pages written, data file synced, then the
+# statement's own records. This is the campaign that says the ordering holds:
+# every cut leaves the index whole or absent, and never a catalog row naming
+# pages nobody wrote.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "bulk_build_crash"
+tier = "durability"
+covers = ["inillucent-engine", "inillucent-tree", "inillucent-pool"]
+
 # The ordering `journal.rs` states as its whole invariant: a page's old image is
 # on disk and synced before its new image is written.
 [[target]]

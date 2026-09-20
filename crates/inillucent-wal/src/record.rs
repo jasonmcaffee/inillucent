@@ -180,6 +180,37 @@ pub enum Body<'a> {
         /// The whole page.
         image: &'a [u8],
     },
+    /// A run of pages was built by the bulk loader and written straight to the
+    /// data file.
+    ///
+    /// **It carries no image, and that is the point** (task-2000, design 2).
+    /// `PagedTree::bulk_build_rows` used to log a whole page `WritePage` per page
+    /// it built and install it in the pool, so the next fold wrote every page a
+    /// second time: `CREATE INDEX` over 100,000 text values logged 6.2 MB and
+    /// wrote 6.2 MB, and `pack` was 11.4 ms of a 26 ms statement. The build now
+    /// writes its pages into the data file itself, sequentially, and syncs the
+    /// file **before** the statement's own records are appended and synced.
+    ///
+    /// That order is the whole safety argument, and it is why no image is needed.
+    /// If the process dies before the log sync, the catalog never names the root
+    /// and the `AllocPage` records are not in the log either, so the pages are
+    /// still free and the bytes in them are unreachable. If it dies after, the
+    /// pages were durable first. A torn page cannot exist at the commit point,
+    /// because the file sync preceded it.
+    ///
+    /// So what is this record *for*? A log reader. Without it the log holds
+    /// `AllocPage` records for a run of pages whose contents no record describes,
+    /// which is indistinguishable from a gap; with it, `inillucent integrity_check`
+    /// and the recovery report can say that a build wrote them outside the log.
+    /// Recovery applies nothing.
+    BulkBuilt {
+        /// The tree's root page, as the catalog will name it.
+        root: u64,
+        /// The first page of the run the build wrote.
+        first: u64,
+        /// How many pages the run holds.
+        count: u64,
+    },
     /// A page was taken out of the free map.
     AllocPage {
         /// The page's number.
@@ -255,6 +286,7 @@ impl Body<'_> {
             Body::Checkpoint { .. } => kind::CHECKPOINT,
             Body::CatalogChange { .. } => kind::CATALOG_CHANGE,
             Body::Pad { .. } => kind::PAD,
+            Body::BulkBuilt { .. } => kind::BULK_BUILT,
         }
     }
 }
@@ -289,6 +321,13 @@ pub mod kind {
     pub const CATALOG_CHANGE: u8 = 13;
     /// [`super::Body::Pad`].
     pub const PAD: u8 = 14;
+    /// [`super::Body::BulkBuilt`].
+    ///
+    /// **Added by task-2000, design 2.** A log written before it holds no record
+    /// of this kind, so an older log reads unchanged; a log holding one cannot be
+    /// read by an older build, which refuses with "a log record has kind 15, which
+    /// this format does not define" rather than misreading it.
+    pub const BULK_BUILT: u8 = 15;
 }
 
 /// One decoded log record.
@@ -325,12 +364,17 @@ impl<'a> Record<'a> {
                 parent,
                 ..
             } => PageList::three(left, right, parent),
+            // **`BulkBuilt` names no page, deliberately.** The pages it describes
+            // were written to the data file and synced before this record was
+            // appended, so recovery has nothing to apply and the page-LSN rule has
+            // nothing to decide. See `Body::BulkBuilt`.
             Body::AllocPage { .. }
             | Body::FreePage { .. }
             | Body::Commit { .. }
             | Body::Abort
             | Body::Checkpoint { .. }
             | Body::CatalogChange { .. }
+            | Body::BulkBuilt { .. }
             | Body::Pad { .. } => PageList::none(),
         }
     }
@@ -566,6 +610,11 @@ fn encode_body(body: &Body<'_>, out: &mut Vec<u8>) -> DbResult<()> {
         Body::Pad { len } => {
             out.resize(out.len().saturating_add(*len as usize), 0);
         }
+        Body::BulkBuilt { root, first, count } => {
+            out.extend_from_slice(&root.to_le_bytes());
+            out.extend_from_slice(&first.to_le_bytes());
+            out.extend_from_slice(&count.to_le_bytes());
+        }
     }
     Ok(())
 }
@@ -663,6 +712,11 @@ fn decode_body(kind: u8, payload: &[u8]) -> DbResult<(Body<'_>, usize)> {
         },
         kind::PAD => Body::Pad {
             len: cursor.zero_rest()?,
+        },
+        kind::BULK_BUILT => Body::BulkBuilt {
+            root: cursor.u64()?,
+            first: cursor.u64()?,
+            count: cursor.u64()?,
         },
         other => {
             return Err(corrupt(format!(
@@ -922,6 +976,11 @@ mod tests {
             },
             Body::CatalogChange { delta: b"delta" },
             Body::Pad { len: 16 },
+            Body::BulkBuilt {
+                root: 2_048,
+                first: 2_049,
+                count: 191,
+            },
         ]
     }
 
@@ -939,6 +998,69 @@ mod tests {
         .encode(&mut out)
         .expect("the record encodes");
         out
+    }
+
+    /// The kind byte of every record an earlier build could have written is the
+    /// value that build wrote.
+    ///
+    /// **This is what "a log written before this change still recovers" means in a
+    /// form that can be checked** (task-2000). The obvious test is to ship a log
+    /// file written by an older binary and replay it, and that is a fixture that
+    /// goes stale the first time somebody regenerates it, from a binary nobody can
+    /// rebuild. What actually has to hold is narrower and permanent: the kind table
+    /// is append-only. A record's kind is one byte in its header, `decode_body`
+    /// dispatches on it, and every reader ever built dispatches on the same numbers
+    /// - so an old log replays under a new reader if and only if no old number has
+    /// moved and no new number has been given to an old meaning.
+    ///
+    /// The numbers below are written out rather than read from `kind`, which is the
+    /// point: a change to the constant fails this test, and the failure is the
+    /// question "does any file anywhere hold the old value" being asked out loud.
+    #[test]
+    fn the_kind_table_is_append_only() {
+        assert_eq!(kind::INSERT_ROW, 1);
+        assert_eq!(kind::DELETE_ROW, 2);
+        assert_eq!(kind::UPDATE_IN_PLACE, 3);
+        assert_eq!(kind::COMPACT_LEAF, 4);
+        assert_eq!(kind::SPLIT_LEAF, 5);
+        assert_eq!(kind::MERGE_LEAF, 6);
+        assert_eq!(kind::WRITE_PAGE, 7);
+        assert_eq!(kind::ALLOC_PAGE, 8);
+        assert_eq!(kind::FREE_PAGE, 9);
+        assert_eq!(kind::COMMIT, 10);
+        assert_eq!(kind::ABORT, 11);
+        assert_eq!(kind::CHECKPOINT, 12);
+        assert_eq!(kind::CATALOG_CHANGE, 13);
+        assert_eq!(kind::PAD, 14);
+        // Added by task-2000, design 2. Fifteen was not a defined kind before it,
+        // so no file holds a record of this number with another meaning.
+        assert_eq!(kind::BULK_BUILT, 15);
+    }
+
+    /// A kind this format does not define is refused rather than guessed at.
+    ///
+    /// The other half of the append-only rule: a log written by a **newer** build
+    /// than the reader has to fail loudly. A reader that skipped an unknown record
+    /// would open a database missing whatever that record said.
+    #[test]
+    fn an_undefined_kind_is_refused() {
+        // Asked of `decode_body` rather than of a patched record, because the
+        // header carries a checksum: flipping the kind byte in an encoded record
+        // fails the checksum first and would test that instead.
+        let refused = decode_body(200, &[0u8; 8]);
+        assert!(
+            refused.is_err(),
+            "kind 200 decoded instead of being refused"
+        );
+        // And every number the table does define decodes, which is what says the
+        // refusal above is about the number rather than about the payload.
+        for body in every_body() {
+            let bytes = encoded(body);
+            assert!(
+                Record::decode(&bytes).is_ok(),
+                "a defined kind was refused: {body:?}"
+            );
+        }
     }
 
     /// Every kind survives a round trip, and every record is 8-byte aligned.

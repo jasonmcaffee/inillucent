@@ -221,6 +221,25 @@ impl Pool {
         *self.journal.borrow_mut() = journal;
     }
 
+    /// Says whether the redo log carries an after image of every page a fold
+    /// writes, so the fold needs no pre images.
+    ///
+    /// See `Pool::fold_protected_by_log` for the argument. The caller that sets
+    /// it is also the caller that has to append the images - there is no way for
+    /// the pool to check that it did, because the pool cannot see the log, which
+    /// is the layering the whole engine is arranged around.
+    ///
+    /// @param protected - whether the log holds the fold's after images
+    pub fn set_fold_protected_by_log(&self, protected: bool) {
+        self.fold_protected_by_log.set(protected);
+    }
+
+    /// Reports whether the fold's in place writes are protected by after images
+    /// in the redo log rather than by pre images in a rollback journal.
+    pub fn fold_is_protected_by_log(&self) -> bool {
+        self.fold_protected_by_log.get()
+    }
+
     /// Syncs the journal, which must happen before the first page is written.
     pub fn seal_journal(&self) -> DbResult<()> {
         match self.journal.borrow().as_ref() {

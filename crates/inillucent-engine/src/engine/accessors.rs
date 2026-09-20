@@ -83,6 +83,18 @@ impl crate::ImportedDatabase {
         self.storage.database.pool().stats()
     }
 
+    /// Returns how many resident frames hold a change the file does not.
+    ///
+    /// **The number a fold is graded against** (task-2000, design 1). A fold
+    /// writes each of these once and appends one after image of each to the log
+    /// before it writes any of them, and `tests/fold_protocol.rs` is what checks
+    /// that those two counts are the same and that this reaches zero afterwards.
+    /// Between statements it is expected to be above zero, which is what the lazy
+    /// fold means.
+    pub fn dirty_pages(&self) -> usize {
+        self.storage.database.pool().dirty_pages()
+    }
+
     /// Reads every page of every tree, so a measurement starts warm.
     ///
     /// A cold pool measures the file system, and neither engine's scorecard

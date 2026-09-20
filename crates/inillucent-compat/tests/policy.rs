@@ -107,7 +107,24 @@ const UNSAFE_CRATES: [&str; 1] = ["inillucent-driver-capi"];
 // are FFI. Each call installs a handler and reads nothing back; each handler
 // stores `true` into an already-allocated `AtomicBool` and returns, which is
 // the whole of what a handler is allowed to do.
-const UNSAFE_ALLOWED: [&str; 15] = [
+const UNSAFE_ALLOWED: [&str; 16] = [
+    // **The AVX2 dot product, added by task-2000's design 9.** It is the one place
+    // in the engine where safe Rust cannot express the thing that has to happen: a
+    // 256-bit fused multiply-add is an intrinsic, every intrinsic in
+    // `std::arch::x86_64` is `unsafe` because calling one on a processor that does
+    // not have the feature is undefined, and there is no safe wrapper for them in
+    // the standard library. The alternative is not a safe version of this kernel -
+    // it is not having one, and relying on the optimiser to vectorise a scalar loop
+    // it compiles to 128-bit lanes without `target-cpu`, which a published binary
+    // cannot set because it has to run on the processors people have.
+    //
+    // The whole of the unsafety is confined to one function: `dot_wide` carries a
+    // `# Safety` section naming `avx2` and `fma` as its requirement, `dot` is the
+    // only caller and checks for both immediately above the call, and every block
+    // inside it carries its own `SAFETY:` note about the one load or the one
+    // arithmetic instruction it contains. Nothing in it allocates, frees, or holds a
+    // reference past the statement it was made in.
+    "crates/inillucent-core/src/distance.rs",
     "crates/inillucent-cli/src/interrupt.rs",
     // The allocator's own concurrency suite, added in task-1932 (H9). It
     // allocates on one thread and frees on another through `GlobalAlloc`, which

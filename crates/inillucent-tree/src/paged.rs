@@ -193,7 +193,7 @@ pub fn write_extent(
     let first = database.allocate(pages)?;
     let images = extent::encode_run(value, first, page_size, tree_id)?;
     for (id, mut image) in images {
-        log_built_page(&mut Some(log), database, id, &mut image)?;
+        log_allocated_page(&mut Some(log), database, id, &mut image)?;
     }
     Ok(ExtentRef::run(first, value.len() as u64))
 }
@@ -372,23 +372,30 @@ impl Spill for Carrying<'_> {
     }
 }
 
-/// Describes one bulk-built page in the log, then installs it.
+/// Describes one freshly allocated page in the log, then installs it.
 ///
 /// Two records rather than one: the allocation and the contents are separate
 /// facts and recovery needs both. `AllocPage` is what stops a later allocation
 /// handing the same page out twice after a crash; `WritePage` is what puts the
 /// bytes back. The image is stamped with the write's LSN before it is
-/// installed, so the page-LSN rule holds for a bulk-built page exactly as it
-/// does for one a split wrote.
+/// installed, so the page-LSN rule holds for it exactly as it does for a page a
+/// split wrote.
 ///
 /// With no log the image is installed unstamped, which is the byte-for-byte
 /// behaviour the unlogged builder has always had.
+///
+/// **This is the out-of-line value run's path, and it is not the bulk builder's**
+/// (task-2000, design 2). A bulk build can write its pages past the log because
+/// it syncs the data file before the statement that names its root commits; an
+/// overflow run written in the middle of an ordinary statement has no such sync
+/// to hide behind, so its bytes are in the log like any other page's. See
+/// [`write_built_page`].
 ///
 /// @param log - where the records go, when there is one
 /// @param database - the file the page is installed in
 /// @param id - the page, already allocated
 /// @param image - the page bytes, stamped in place with the LSN
-fn log_built_page(
+fn log_allocated_page(
     log: &mut Option<&mut dyn crate::write::TreeLog>,
     database: &mut Database,
     id: PageId,
@@ -400,6 +407,47 @@ fn log_built_page(
         page::write_u64(image, page::header::LSN, lsn)?;
     }
     database.install(id, image)
+}
+
+/// Records one bulk-built page's allocation and writes the page itself straight
+/// into the data file.
+///
+/// **Design 2 of task-2000: a bulk built page is written once.** This used to log
+/// the page's whole image as a `WritePage` and hand it to `Database::install`,
+/// which marks the frame dirty - so the next fold wrote the same page a second
+/// time, and the frame stayed resident until it did. `CREATE INDEX` over 100,000
+/// text values logged 6.2 MB, wrote 6.2 MB, and then wrote 6.2 MB again, with
+/// `pack` at 11.4 ms of a 26 ms statement.
+///
+/// **The `AllocPage` record stays and the `WritePage` goes.** The allocation still
+/// has to be in the log, because it is what stops a later allocation handing the
+/// same page out twice; the contents do not, because the caller syncs the data
+/// file before the statement commits - see [`PagedTree::bulk_build_rows`] for the
+/// order and `inillucent_wal::record::Body::BulkBuilt` for why that makes an
+/// image unnecessary rather than merely cheaper.
+///
+/// **The page is left with the stamp the builder gave it**, which is zero for a
+/// page nothing has described. That is what the unlogged builder has always
+/// produced, so the logged and unlogged builds now write byte-identical pages -
+/// which `ImportedDatabase::import_with` depends on, because it reads the catalog
+/// back and refuses if it differs from what it wrote. Nothing is lost: no record
+/// names the page, so there is no record for the page-LSN rule to order it
+/// against, and a later write to it stamps it then.
+///
+/// @param log - where the allocation record goes, when there is one
+/// @param database - the file the page is written into
+/// @param id - the page, already allocated
+/// @param image - the page bytes, checksummed in place
+fn write_built_page(
+    log: &mut Option<&mut dyn crate::write::TreeLog>,
+    database: &mut Database,
+    id: PageId,
+    image: &mut [u8],
+) -> DbResult<()> {
+    if let Some(log) = log.as_mut() {
+        log.log(inillucent_wal::record::Body::AllocPage { page: id.0 })?;
+    }
+    database.pool().write_built_page(id, image)
 }
 
 /// Returns the collation of each key column.
@@ -545,6 +593,47 @@ pub struct PagedTree {
     /// counter can be bumped from a `&self` method - the read side reports them
     /// and the write side is the only thing that moves them.
     pub(crate) stats: std::cell::Cell<crate::write::WriteStats>,
+    /// The page this tree's rightmost leaf was on, the last time a write looked.
+    ///
+    /// **The leaf hint** (task-2000, designs 6 and 7). A write descends from the
+    /// root for every row: `PagedTree::leaf_for` walks the interior levels and
+    /// allocates a `Vec<PageId>` for the path it took. An append at the right edge
+    /// - which is what a rowid insert into `main_table` is, and what FTS5's
+    /// dictionary flush is once its terms are in order - lands in the same leaf
+    /// every time, so the descent answers a question it has already answered.
+    ///
+    /// **A miss has to cost a comparison and nothing else, which is why the key is
+    /// kept here beside the page.** The first version held only the `PageId` and
+    /// answered by fetching the page, parsing the leaf and comparing the probe
+    /// against its first row - so every key that was *not* an append paid a page
+    /// fetch, a leaf parse and a column by column tuple comparison *before* the
+    /// descent it then had to do anyway. `write.insert.batch` inserts into a rowid
+    /// table carrying two secondary indexes, and the two index keys arrive in no
+    /// order at all: one hint in three hit, and the other two paid twice.
+    ///
+    /// The bytes are the lowest probe this connection has seen descend into the
+    /// hinted leaf, in [`PagedTree::key_encoding`]'s comparable form. A probe that
+    /// descended into a leaf is at or above that leaf's low fence by construction,
+    /// and a rightmost leaf's fence range runs from its low fence to positive
+    /// infinity, so **any key at or above those bytes belongs in the hinted leaf** -
+    /// for as long as the fence has not moved. `memcmp` order is the descent's order
+    /// because that is what the encoding is for.
+    ///
+    /// Two things keep the fence still, and the hint needs both:
+    ///
+    /// - [`PagedTree::note_leaves`] drops the hint, and every split and every merge
+    ///   calls it. Those are the only operations that move a leaf's fence.
+    /// - `leaf_for_hinted` still reads the hinted page's header on a **hit** and
+    ///   takes it only when it is a leaf, of *this* tree, with no right sibling. That
+    ///   is what covers a page freed and handed to another tree, and a fence moved by
+    ///   something other than this write path. It costs one fetch of a page the
+    ///   insert is about to fetch anyway, and it is on the hit path only, so a miss
+    ///   never pays it.
+    ///
+    /// A `RefCell` rather than a `Cell` because the key is a `Vec`; the write path
+    /// holds the tree by shared reference, the same reason [`PagedTree::stats`] is a
+    /// `Cell`.
+    pub(crate) right_edge: std::cell::RefCell<Option<(PageId, Vec<u8>)>>,
 }
 
 /// How many key-prefix columns a skip scan borrows on the stack.
@@ -746,6 +835,12 @@ impl PagedTree {
         // full scan sequential - and one image is live at a time.
         let leaf_pages = boundaries.len();
         let first_leaf = database.allocate(leaf_pages as u64)?;
+        // Counted rather than derived, because the interior levels allocate one
+        // page at a time out of the free map and the run they land in is not
+        // guaranteed to follow the leaves. See `Body::BulkBuilt`: `first` names the
+        // first leaf and `count` how many pages the build wrote in total, and the
+        // `AllocPage` records are the authority on which pages they were.
+        let mut pages_written = 0u64;
         let mut leaves: Vec<PageId> = Vec::with_capacity(leaf_pages);
         let mut placed_at = 0usize;
         for (index, placed) in boundaries.iter().copied().enumerate() {
@@ -771,7 +866,8 @@ impl PagedTree {
                 PageId::NONE
             };
             page::set_right(&mut image, right)?;
-            log_built_page(&mut log, database, id, &mut image)?;
+            write_built_page(&mut log, database, id, &mut image)?;
+            pages_written = pages_written.saturating_add(1);
             leaves.push(id);
         }
 
@@ -811,7 +907,8 @@ impl PagedTree {
                     .collect();
                 let mut image = interior.build(&group_separators, &group)?;
                 let id = database.allocate(1)?;
-                log_built_page(&mut log, database, id, &mut image)?;
+                write_built_page(&mut log, database, id, &mut image)?;
+                pages_written = pages_written.saturating_add(1);
                 parents.push(id);
                 parent_keys.push(child_keys.get(cursor).cloned().unwrap_or_default());
                 cursor = cursor.saturating_add(fit);
@@ -826,6 +923,27 @@ impl PagedTree {
                     "the bulk builder made a tree deeper than 32 levels",
                 ));
             }
+        }
+        // **The data file is synced before the statement's own records are, and
+        // that is the whole of design 2's safety argument** (task-2000). Every page
+        // this build wrote went straight into the file with no log record behind
+        // it, so the pages have to be on the media before the commit that names
+        // the root is. A crash before the commit's log sync leaves a catalog that
+        // never named the root and `AllocPage` records belonging to an uncommitted
+        // transaction, which are not replayed - so the pages are still free. A
+        // crash after it leaves pages that were durable first. A torn page cannot
+        // exist at the commit point, because this sync preceded it.
+        database.pool().sync_data_file()?;
+        // And one record naming what happened, which recovery applies nothing for.
+        // Without it the log holds `AllocPage` records for a run of pages whose
+        // contents no record describes, which a reader cannot tell from a gap. See
+        // `inillucent_wal::record::Body::BulkBuilt`.
+        if let Some(log) = log.as_mut() {
+            log.log(inillucent_wal::record::Body::BulkBuilt {
+                root: root.0,
+                first: first_leaf.0,
+                count: pages_written,
+            })?;
         }
         let collations = collations_of(&columns, key_columns);
         let directions = directions_of(&columns, key_columns);
@@ -843,6 +961,7 @@ impl PagedTree {
             leaf_count: leaves.len() as u64,
             row_count,
             scratch: RefCell::new(Vec::new()),
+            right_edge: std::cell::RefCell::new(None),
             stats: std::cell::Cell::new(crate::write::WriteStats::default()),
         })
     }
@@ -911,6 +1030,7 @@ impl PagedTree {
             leaf_count,
             row_count,
             scratch: RefCell::new(Vec::new()),
+            right_edge: std::cell::RefCell::new(None),
             stats: std::cell::Cell::new(crate::write::WriteStats::default()),
         })
     }
@@ -980,6 +1100,13 @@ impl PagedTree {
     /// @param delta - how many leaves were gained or lost
     pub(crate) fn note_leaves(&mut self, delta: i64) {
         self.leaf_count = self.leaf_count.saturating_add_signed(delta);
+        // **A split and a merge are the only things that move a leaf's low fence, and
+        // both come through here**, so this is where the leaf hint is dropped. See
+        // [`PagedTree::right_edge`]: the hint says "a key at or above these bytes
+        // belongs in that page", and that sentence is about a fence.
+        if let Ok(mut hint) = self.right_edge.try_borrow_mut() {
+            *hint = None;
+        }
     }
 
     /// Adjusts the row count by a signed amount.

@@ -89,6 +89,33 @@ pub struct HnswParams {
     pub build_threads: usize,
 }
 
+/// How many threads a build uses when nothing says otherwise.
+///
+/// **Design 9 of task-2000: the parallel build is on by default.** It was 1, and
+/// `inillucent-search`'s SQL table was the only caller that overrode it - so
+/// `inillucent-core`'s own builds, the command line's, and the grading harness's
+/// all ran an index build on one of this machine's twenty-four threads. 185,078
+/// chunks at 768 dimensions took **129.7 s**.
+///
+/// **What it costs is reproducibility, and that is why the number is not 1 any
+/// more rather than why it was.** `Hnsw::build_parallel`'s own comment records the
+/// bargain: levels come from the same seeded generator so the level distribution is
+/// identical, but the order in which nodes link to each other is whatever the
+/// thread pool produced, and neighbour selection depends on who was already there.
+/// Both graphs are valid and measure the same on recall; neither is byte-comparable
+/// to the other. A caller that needs a byte-reproducible index sets
+/// `build_threads` to 1, which is one field rather than a rebuild, and the grading
+/// harness records the number it used in the run's manifest so a card can never be
+/// read without it.
+///
+/// One when the operating system will not say, which is the answer that behaves
+/// exactly as the old default did.
+fn available_parallelism() -> usize {
+    std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(1)
+}
+
 impl Default for HnswParams {
     fn default() -> Self {
         HnswParams {
@@ -99,7 +126,7 @@ impl Default for HnswParams {
             exhaustive_below: 1_000,
             entry_points: 1,
             keep_pruned_connections: true,
-            build_threads: 1,
+            build_threads: available_parallelism(),
         }
     }
 }

@@ -266,6 +266,33 @@ fn catalog_before_redo(
         Ok(checkpointed) => Ok((checkpointed, false)),
         Err(_) => {
             {
+                // **The whole page images first** (task-2000, design 1a). The
+                // pass below is the full applier: it replays logical row
+                // records, and replaying one means reading the leaf it names.
+                // When the page a crash tore is the catalog's own, that read is
+                // the thing that fails - so the pass sent to repair it died on
+                // the damage it was sent to repair, and the open was refused
+                // with `page 3 checksum ... is not the computed ...`. Measured
+                // by `wal_crash`'s checkpoint campaign at cut 57, which the
+                // rollback journal used to answer by putting the page back
+                // before the log was ever read.
+                //
+                // An images pass needs no catalog and no row decoder - it copies
+                // `WritePage`, `CompactLeaf` and split images into their pages
+                // and nothing else - so it can go first, and after it every page
+                // the log carries whole is whole. It is the same pass
+                // `replay_with_repair` runs for the same reason one layer up.
+                let mut images = inillucent_txn::redo::Applier::images(
+                    database,
+                    LearningRows::new_tolerant(&[]),
+                );
+                inillucent_wal::recover(vfs.as_ref(), db_path, start.clone(), &mut images)
+                    .map_err(|why| {
+                        let said = why.detail().unwrap_or_default().to_string();
+                        why.with_detail(format!("applying the log's page images: {said}"))
+                    })?;
+            }
+            {
                 let mut repair =
                     inillucent_txn::redo::Applier::new(database, LearningRows::new_tolerant(&[]));
                 inillucent_wal::recover(vfs.as_ref(), db_path, start.clone(), &mut repair)?;
@@ -468,7 +495,7 @@ pub(crate) fn resync_file(
     vfs: &std::sync::Arc<dyn inillucent_vfs::Vfs>,
     db_path: &DbPath,
     doubtful: &std::collections::BTreeSet<u64>,
-) -> DbResult<std::rc::Rc<Wal>> {
+) -> DbResult<(std::rc::Rc<Wal>, u64)> {
     let meta = database.meta();
     let start = if meta.checkpoint_lsn == 0 {
         inillucent_wal::RecoveryStart {
@@ -489,6 +516,33 @@ pub(crate) fn resync_file(
         Ok(checkpointed) => checkpointed,
         Err(_) => {
             repaired = true;
+            {
+                // **The whole page images first** (task-2000, design 1a). The
+                // pass below is the full applier: it replays logical row
+                // records, and replaying one means reading the leaf it names.
+                // When the page a crash tore is the catalog's own, that read is
+                // the thing that fails - so the pass sent to repair it died on
+                // the damage it was sent to repair, and the open was refused
+                // with `page 3 checksum ... is not the computed ...`. Measured
+                // by `wal_crash`'s checkpoint campaign at cut 57, which the
+                // rollback journal used to answer by putting the page back
+                // before the log was ever read.
+                //
+                // An images pass needs no catalog and no row decoder - it copies
+                // `WritePage`, `CompactLeaf` and split images into their pages
+                // and nothing else - so it can go first, and after it every page
+                // the log carries whole is whole. It is the same pass
+                // `replay_with_repair` runs for the same reason one layer up.
+                let mut images = inillucent_txn::redo::Applier::images(
+                    database,
+                    LearningRows::new_tolerant(&[]),
+                );
+                inillucent_wal::recover(vfs.as_ref(), db_path, start.clone(), &mut images)
+                    .map_err(|why| {
+                        let said = why.detail().unwrap_or_default().to_string();
+                        why.with_detail(format!("applying the log's page images: {said}"))
+                    })?;
+            }
             let mut repair =
                 inillucent_txn::redo::Applier::new(database, LearningRows::new_tolerant(&[]));
             inillucent_wal::recover(vfs.as_ref(), db_path, start.clone(), &mut repair)?;
@@ -518,7 +572,28 @@ pub(crate) fn resync_file(
         .pool()
         .set_retained_lsn(database.meta().checkpoint_lsn);
     let_the_pool_ask_the_log(database.pool(), &wal);
-    Ok(wal)
+    // **The highest transaction number the log holds, so the caller can raise
+    // its own counter past it** (task-2000, design 1b). Until the fold became
+    // lazy this did not matter: a connection folded on its way out of every
+    // statement, so the log beside a file never held more than the statement that
+    // had just run, and the numbers in it were this connection's own. Now the log
+    // holds every statement since the last fold, from **every** process sharing
+    // the file - and two processes each counting their transactions from what
+    // they saw at open issue the same numbers.
+    //
+    // What that costs is not a collision of names. Recovery decides which records
+    // to replay by transaction number, so one number used by two processes makes
+    // two different transactions into one: a transaction the other process left
+    // open at the end of the log is a loser, and discarding it discards this
+    // process's committed records that happen to carry the same number. That is a
+    // lost write, and it was measured - two processes each inserting five rows
+    // into one `ATTACH`ed file acknowledged ten and the file held two.
+    //
+    // `Recovered::highest_txn` is the field `inillucent-wal` documents for exactly
+    // this, and `open` and `ATTACH` already read it. A resynchronisation is the
+    // third moment a connection learns what a log holds, and it was the one that
+    // did not.
+    Ok((wal, outcome.highest_txn))
 }
 
 /// Returns a log for a connection that will never write one.

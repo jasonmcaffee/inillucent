@@ -206,12 +206,11 @@ impl Sink for SimpleAggregate {
                 continue;
             }
             match &spec.argument {
-                // `count(*)` over a dense batch: the row count, no values read.
-                None => {
-                    for _ in 0..live {
-                        accumulator.push(&Datum::Null);
-                    }
-                }
+                // **`count(*)` over a batch: one addition** (task-2000, design 4).
+                // This was a loop of `live` calls, each of which compared a
+                // discriminant and added one. There is no value to read, so the
+                // whole batch is one call. See `Accumulator::push_count`.
+                None => accumulator.push_count(live),
                 Some(argument) => {
                     // The vectorised path: a bare reference to a dense integer
                     // column of a batch with no selection vector.
@@ -477,12 +476,11 @@ impl StreamAggregate {
                 continue;
             }
             match &spec.argument {
-                None => {
-                    // `count(*)` over a run: the length, no value read at all.
-                    for _ in 0..len {
-                        accumulator.push(&Datum::Null);
-                    }
-                }
+                // `count(*)` over a run: the length, no value read at all, and
+                // one addition rather than `len` of them (task-2000, design 4).
+                // A run of 1,562 rows in `scan.group` is now one subtraction the
+                // run finder already did plus one add.
+                None => accumulator.push_count(len),
                 Some(argument) => {
                     // As above: a `DISTINCT` accumulator sees every value.
                     let dense = if accumulator.takes_dense() {

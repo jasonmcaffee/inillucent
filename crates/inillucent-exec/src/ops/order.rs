@@ -332,7 +332,13 @@ pub struct Distinct {
     /// that query; this used to refuse it, because comparing the carried column
     /// too would have de-duplicated on something the caller never selected.
     compared: usize,
-    seen: std::collections::HashSet<Vec<u8>>,
+    /// The encoded keys already emitted.
+    ///
+    /// **The workspace's own hasher rather than SipHash** (task-2000, design 4).
+    /// The keys are ones this operator encoded itself out of a page, so nothing
+    /// here has to resist a chosen key - see `inillucent_base::table_hash` for what
+    /// that buys and what it gives up.
+    seen: inillucent_base::table_hash::TableSet<Vec<u8>>,
     pub(crate) rows: Vec<Vec<OwnedDatum>>,
     downstream: Box<dyn Sink>,
 }
@@ -358,7 +364,7 @@ impl Distinct {
         Distinct {
             collations,
             compared,
-            seen: std::collections::HashSet::new(),
+            seen: inillucent_base::table_hash::TableSet::default(),
             rows: Vec::new(),
             downstream,
         }
@@ -367,35 +373,47 @@ impl Distinct {
 impl Sink for Distinct {
     fn push(&mut self, batch: &Batch<'_>) -> DbResult<Flow> {
         let mut encoded = Vec::with_capacity(32);
+        let columns = batch.columns.len();
+        // A carried column is kept in the row and left out of the key, so it
+        // reaches the sort without deciding what is a duplicate.
+        let compared = self.compared.min(columns);
         for nth in 0..batch.live() {
+            // **The key is built and asked about before anything is owned**
+            // (task-2000, design 4). This used to build the whole owned row, then
+            // the key, then clone the key into the set - for every row, duplicate
+            // or not. `scan.distinct` over a hundred thousand rows with sixty-four
+            // distinct values therefore built a hundred thousand owned rows and a
+            // hundred thousand key clones to keep sixty-four of each. The key is
+            // what decides, so the key goes first and the rest happens only for a
+            // row that survives.
             encoded.clear();
-            let mut row = Vec::with_capacity(batch.columns.len());
-            for column in 0..batch.columns.len() {
+            for column in 0..compared {
                 let value = batch.value(nth, column)?;
-                // A carried column is kept in the row and left out of the key,
-                // so it reaches the sort without deciding what is a duplicate.
-                if column < self.compared {
-                    key::encode_into_with(
-                        &value,
-                        self.collations
-                            .get(column)
-                            .copied()
-                            .unwrap_or(Collation::Binary),
-                        &mut encoded,
-                    );
-                }
-                row.push(OwnedDatum::from_datum(&value));
+                key::encode_into_with(
+                    &value,
+                    self.collations
+                        .get(column)
+                        .copied()
+                        .unwrap_or(Collation::Binary),
+                    &mut encoded,
+                );
             }
-            if self.seen.insert(encoded.clone()) {
-                // **Both halves are charged (task-1932, H6).** `DISTINCT` holds
-                // the key set *and* every surviving row until `finish`, so its
-                // memory is decided by how many rows are distinct - which is
-                // the input size whenever they all are.
-                inillucent_base::budget::materialise(
-                    owned_row_bytes(&row).saturating_add(encoded.len() as u64),
-                )?;
-                self.rows.push(row);
+            if self.seen.contains(&encoded) {
+                continue;
             }
+            let mut row = Vec::with_capacity(columns);
+            for column in 0..columns {
+                row.push(OwnedDatum::from_datum(&batch.value(nth, column)?));
+            }
+            // **Both halves are charged (task-1932, H6).** `DISTINCT` holds
+            // the key set *and* every surviving row until `finish`, so its
+            // memory is decided by how many rows are distinct - which is
+            // the input size whenever they all are.
+            inillucent_base::budget::materialise(
+                owned_row_bytes(&row).saturating_add(encoded.len() as u64),
+            )?;
+            self.seen.insert(encoded.clone());
+            self.rows.push(row);
         }
         Ok(Flow::Continue)
     }

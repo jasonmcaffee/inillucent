@@ -52,6 +52,9 @@ pub mod page;
 pub mod probe;
 pub mod rng;
 pub mod sha3;
+/// The hasher this engine's own hash tables use - see the module for why it is
+/// not SipHash and not a checksum.
+pub mod table_hash;
 // The one skip helper, below every crate that needs one.
 //
 // **It is here because of the layering contract, not in spite of it

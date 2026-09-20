@@ -72,6 +72,36 @@ pub struct Database {
     pool: Pool,
     /// What the meta record last said, with the caller's edits applied.
     meta: Meta,
+    /// The record the **file** held the last time this connection looked at it or
+    /// wrote it.
+    ///
+    /// **`meta` is what this connection means the file to say; this is what it
+    /// last saw it say** (task-2000, design 1b). The two were the same field until
+    /// the fold became lazy, because a statement folded on its way out and the
+    /// connection's record therefore reached the file before the lock was
+    /// released. They are not the same any more: a `CREATE TABLE` bumps
+    /// `schema_cookie`, a `PRAGMA user_version = 7` sets `user_version`, and
+    /// neither reaches the file until a fold is due.
+    ///
+    /// **Why that matters, measured.** `ImportedDatabase::the_meta_moved` asks
+    /// "has another process folded since I last held the lock", and it asked it by
+    /// comparing the whole of `meta` with the record on disk - which is sound only
+    /// while the two cannot differ for this connection's own reasons. With the lazy
+    /// fold they can, so the very next statement after a `CREATE TABLE` read *its
+    /// own* pending cookie as another process's write, resynchronised, and threw
+    /// the catalog row away with the pool. `new_engine_ddl`'s
+    /// `creating_a_table_writes_the_row_sqlite_writes` found it: `CREATE TABLE
+    /// plain (a, b)` ran, reported success, and was not in `sqlite_schema`
+    /// afterwards. Eleven of its twelve cases failed the same way, and so did
+    /// `new_engine_vtab`, `schema_forms`, `temp_objects` and every other suite that
+    /// runs a DDL statement and then reads.
+    ///
+    /// Comparing against this instead answers the question that was always meant:
+    /// the record on the disk is compared with the last one this connection saw
+    /// there, so a change by anybody else shows and a change of its own does not.
+    /// The whole record is still compared - see `the_meta_moved` for why one field
+    /// is not enough.
+    disk_meta: Meta,
     /// The free map, held resident because it is consulted on every allocation.
     free: FreeMap,
     /// The shared extent page a small out-of-line value goes on next.
@@ -103,6 +133,25 @@ pub struct Database {
     /// and refuses a write here rather than relying on somebody above to have
     /// asked.
     read_only: bool,
+    /// Whether the owner replays the log after this cache is thrown away.
+    ///
+    /// **Set by `ImportedDatabase`, false for anything holding a `Database` on
+    /// its own** (task-2000, design 1b). A connection that no longer folds on the
+    /// way out of a statement holds dirty pages between statements, so the moment
+    /// another process folds, this cache is both stale and dirty at once - which
+    /// is the ordinary case now and used to be a defect.
+    ///
+    /// The two answers to it differ in what happens to the dirty frames.
+    /// `discard_all` writes them back on its way out, which is exactly wrong when
+    /// the file is ahead of the cache; `abandon_all` drops them, which loses
+    /// nothing **if and only if** the owner then replays the log from the file's
+    /// own checkpoint, because the write-ahead rule means every change a dirty
+    /// frame holds is in a record there. `ImportedDatabase::resync_from_file` is
+    /// that replay and it runs on every take where the meta record or the log
+    /// moved. A caller with no replay - the benchmark binaries and the model
+    /// campaigns, which hold one `Database` in one process - gets the refusal it
+    /// always got, because for it the changes really would be gone.
+    replayed_by_its_owner: bool,
     /// Whether what this connection holds was derived while it held the file.
     ///
     /// **False from `open` until the owner says otherwise.** The open path
@@ -152,10 +201,12 @@ impl Database {
         let mut database = Database {
             pool,
             meta,
+            disk_meta: meta,
             free: FreeMap::new(options.page_size),
             shared_extent: None,
             busy_millis: DEFAULT_BUSY_MILLIS,
             read_only: false,
+            replayed_by_its_owner: false,
             trusted: false,
         };
         let mut next = FIRST_DATA_PAGE.0;
@@ -163,6 +214,13 @@ impl Database {
         database.pool.set_page_count(next);
         database.meta.page_count = next;
         database.meta.free_map = database.free.first();
+        // **`disk_meta` is deliberately left at what the two slots above hold**,
+        // which is the record as it was before these three lines. That is the whole
+        // invariant: `disk_meta` says what the file says, `meta` says what this
+        // connection means it to say, and a fresh database's page count and free map
+        // are the connection's first pending edit. Nothing checkpoints here, so the
+        // first statement's `the_meta_moved` compares the file's record against the
+        // record the file holds and correctly answers no.
         let _ = created;
         database.write_free_map()?;
         // **The file is let go once it exists.** The exclusive lock above is
@@ -186,10 +244,12 @@ impl Database {
         Ok(Database {
             pool,
             meta,
+            disk_meta: meta,
             free,
             shared_extent: None,
             busy_millis: DEFAULT_BUSY_MILLIS,
             read_only: false,
+            replayed_by_its_owner: false,
             trusted: false,
         })
     }
@@ -214,10 +274,12 @@ impl Database {
         Ok(Database {
             pool,
             meta,
+            disk_meta: meta,
             free,
             shared_extent: None,
             busy_millis: DEFAULT_BUSY_MILLIS,
             read_only: true,
+            replayed_by_its_owner: false,
             trusted: false,
         })
     }
@@ -255,10 +317,12 @@ impl Database {
         Ok(Database {
             pool,
             meta,
+            disk_meta: meta,
             free,
             shared_extent: None,
             busy_millis: DEFAULT_BUSY_MILLIS,
             read_only: false,
+            replayed_by_its_owner: false,
             trusted: false,
         })
     }
@@ -839,6 +903,25 @@ impl Database {
         self.busy_millis = millis;
     }
 
+    /// Returns the record the file held the last time this connection looked.
+    ///
+    /// See [`Database::disk_meta`] for what it is for. A caller asking "has anybody
+    /// else folded" compares the file's record with this one and never with
+    /// [`Database::meta`], which carries this connection's own pending edits.
+    pub fn seen_on_disk(&self) -> &Meta {
+        &self.disk_meta
+    }
+
+    /// Says that the owner replays the log whenever this cache is thrown away.
+    ///
+    /// See [`Database::replayed_by_its_owner`]. `ImportedDatabase` sets it for
+    /// every file it holds, at open and at `ATTACH`; nothing else does.
+    ///
+    /// @param replayed - whether the owner replays
+    pub fn set_replayed_by_its_owner(&mut self, replayed: bool) {
+        self.replayed_by_its_owner = replayed;
+    }
+
     /// Returns how long this connection waits for a contended file.
     pub fn busy_millis(&self) -> u64 {
         self.busy_millis
@@ -894,6 +977,8 @@ impl Database {
         // long-lived writer processes lost 261 of 599 acknowledged inserts.
         self.pool.note_high_water_lsn(found.high_water_lsn);
         self.meta = found;
+        // Adopted from the file, so it is also the last record seen there.
+        self.disk_meta = found;
         self.free = FreeMap::new(self.pool.page_size());
         self.shared_extent = None;
         Ok(())
@@ -941,10 +1026,25 @@ impl Database {
         if found.generation <= self.meta.generation {
             return Ok(false);
         }
-        self.refuse_if_the_cache_is_dirty()?;
-        self.pool.discard_all()?;
+        // **Abandoned when the owner replays, refused when it does not.** See
+        // `Database::replayed_by_its_owner` for why the two come apart, and
+        // `adopt_from_file`, which is the same pair of lines for the same reason.
+        match self.replayed_by_its_owner {
+            true => {
+                self.pool.abandon_all()?;
+                // The high water the adopted file carries, folded in before a
+                // page is written - `adopt_from_file`'s own comment carries the
+                // 261 of 599 acknowledged inserts that went missing without it.
+                self.pool.note_high_water_lsn(found.high_water_lsn);
+            }
+            false => {
+                self.refuse_if_the_cache_is_dirty()?;
+                self.pool.discard_all()?;
+            }
+        }
         self.pool.set_page_count(found.page_count);
         self.meta = found;
+        self.disk_meta = found;
         self.free = read_free_map(&self.pool, self.meta.free_map)?;
         Ok(true)
     }
@@ -1037,6 +1137,9 @@ impl Database {
         let mut meta = self.meta;
         self.pool.checkpoint(&mut meta)?;
         self.meta = meta;
+        // The file now holds this record, so it is what the next staleness check
+        // compares against - see [`Database::disk_meta`].
+        self.disk_meta = meta;
         Ok(())
     }
 }

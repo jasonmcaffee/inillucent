@@ -182,6 +182,20 @@ pub fn crc32(data: &[u8]) -> u32 {
 /// one above; `crc32_matches_the_byte_at_a_time_form` is what says so, over
 /// every length from zero to sixteen and a random long buffer.
 ///
+/// **The SSE4.2 `crc32` instruction cannot be used here, and the reason is the
+/// polynomial rather than the portability** (task-2000, design 1d). That design
+/// asked for the hardware instruction behind `is_x86_feature_detected!`, with this
+/// as the fallback, on the measurement that a 32 KiB page is about 2 us in hardware
+/// against about 10 in a table. `_mm_crc32_u64` computes CRC-32C, the Castagnoli
+/// polynomial `0x82f63b78`; this is CRC-32/ISO-HDLC, the reflected `0xedb88320`
+/// that [`build_crc32_table`] builds. They are different functions of the same
+/// bytes, so substituting one for the other would make every page and every log
+/// record written by an earlier build fail its checksum - a change to the on disk
+/// format, which task-2000's own non-goals rule out. The 10 us the design quoted
+/// is the byte-at-a-time form, which this is not: slice-by-eight took the same
+/// measurement from 9.7 ms to well under a millisecond, and the comment above
+/// records it.
+///
 /// @param previous - the result so far, or zero to start
 /// @param data - the next piece
 pub fn crc32_continue(previous: u32, data: &[u8]) -> u32 {

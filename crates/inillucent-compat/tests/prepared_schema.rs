@@ -44,7 +44,13 @@ fn scratch(name: &str) -> PathBuf {
 fn run(engine: &mut ImportedDatabase, sql: &str) {
     engine
         .execute_any(sql, &Params::new())
-        .unwrap_or_else(|failure| panic!("{sql} did not run: {failure}"));
+        .unwrap_or_else(|failure| {
+            // The detail as well as the message: "bad parameter or other API
+            // misuse" names nothing, and a misuse raised deep in the pool names
+            // the page and the reason in its detail.
+            let said = failure.detail().unwrap_or_default().to_string();
+            panic!("{sql} did not run: {failure}: {said}")
+        });
 }
 
 /// Returns the first value of the first row an outcome holds, as an integer.

@@ -183,16 +183,27 @@ impl crate::ImportedDatabase {
             // which one a caller gets without asking, and the answer is now the
             // one every other SQLite gives.
             //
-            // `exclusive` because it does not. The same gate with
-            // `locking_mode = normal` as the default reads **3.03x with a lower
-            // bound of 2.95x - under the contract's 3.00x bar** - and takes
-            // `write` from 1.94x to 1.19x, `transaction` from 0.89x to 0.37x
-            // and `schema` from 1.34x to 0.66x, because releasing the file
-            // between statements means re-reading the meta record before each
-            // one. `PRAGMA locking_mode = normal` is a real switch and a second
-            // process can then open the file; making it the default would pay
-            // for that on every statement of every program that never opens a
-            // second connection.
+            // **The second half of this comment argued for `exclusive` as the
+            // default, and the default is `normal` - it has been since task-1980
+            // and the comment was never corrected** (task-2000, design 1d). It
+            // said `locking_mode = normal` took the weighted headline to 3.03x
+            // with `write` at 1.19x, `transaction` at 0.37x and `schema` at
+            // 0.66x, and concluded that a program which never opens a second
+            // connection should not pay for one that does. What settled it the
+            // other way is that a default a second process cannot share is not a
+            // default an embedded database can ship, and the multi-process
+            // protocol task-1979 and task-1980 built is what the roadmap
+            // advertises.
+            //
+            // Those numbers were also a measurement of one particular commit
+            // path, not of the mode. What made `normal` expensive was that a
+            // statement's release *folded the log into the file*: six to eight
+            // fsync class calls a statement, with a rollback journal protecting
+            // the fold's in place page writes. Design 1 of task-2000 took the
+            // fold off the release path - a commit is one log append and one
+            // sync, and the fold runs every four mebibytes of log - so the mode
+            // costs the two cheap staleness checks `enter_within` makes and
+            // nothing else.
             counters: std::rc::Rc::new(Counters {
                 last_rowid: std::cell::Cell::new(0),
                 last_changes: std::cell::Cell::new(0),
@@ -292,6 +303,23 @@ impl crate::ImportedDatabase {
             )
         });
         self.storage.database.pool().set_journal(journal);
+        // **And the fold's protection follows the mode** (task-2000, design 1a).
+        // Under `wal` the fold appends an after image of every page it is about
+        // to write to the log it already has, so it asks the journal for
+        // nothing; the journal stays in place for an eviction, which is undo and
+        // needs a pre image. See `Pool::fold_protected_by_log`.
+        self.storage
+            .database
+            .pool()
+            .set_fold_protected_by_log(mode == inillucent_pool::journal::JournalMode::Wal);
+        // **And the owner replays whenever this cache is thrown away**
+        // (task-2000, design 1b). With the fold lazy, a connection holds dirty
+        // pages between statements, so a take where another process has folded
+        // finds a cache that is stale and dirty at once. `resync_from_file`
+        // replays the log from the file's own checkpoint on every such take,
+        // which is what makes dropping those frames rather than refusing them
+        // lose nothing. See `Database::replayed_by_its_owner`.
+        self.storage.database.set_replayed_by_its_owner(true);
         Ok(())
     }
 

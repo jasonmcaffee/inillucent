@@ -605,6 +605,15 @@ pub struct RedoStats {
     pub skipped: u64,
     /// The newest commit timestamp seen.
     pub latest_cts: u64,
+    /// Pages a bulk build wrote straight to the data file inside this window.
+    ///
+    /// **Not applied, counted** (task-2000, design 2). The build syncs the data
+    /// file before the statement's own records are appended, so by the time this
+    /// record is in the log its pages are durable and recovery has nothing to do
+    /// with them. What the count is for is a reader: without it the log holds
+    /// `AllocPage` records for a run of pages no record describes, which reads as
+    /// a gap. See `inillucent_wal::record::Body::BulkBuilt`.
+    pub bulk_built: u64,
     /// Whether a catalog change was replayed.
     pub catalog_changed: bool,
 }
@@ -889,6 +898,14 @@ impl<R: RowRedo> Redo for Applier<'_, R> {
             // Pure filler - see `inillucent_wal::record::Body::Pad` - so
             // replaying one changes nothing.
             Body::Pad { .. } => {}
+            // **A bulk build's pages were durable before this record was
+            // appended**, so there is nothing to apply - see
+            // `inillucent_wal::record::Body::BulkBuilt` for the commit order that
+            // makes that true. It is counted so a recovery report can say a build
+            // happened in the window, which is the only reason the record exists.
+            Body::BulkBuilt { count, .. } => {
+                self.stats.bulk_built = self.stats.bulk_built.saturating_add(count)
+            }
         }
         Ok(())
     }

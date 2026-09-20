@@ -626,7 +626,19 @@ impl PagedTree {
         // row by construction. A third attempt would mean the second did not,
         // which is a bug rather than a case to loop on.
         for attempt in 0..2 {
-            let (page, path) = self.leaf_for(database.pool(), &encoded_key)?;
+            // **The hint on the first attempt, a descent on the second.** See
+            // `PagedTree::right_edge`: an append at the right edge - a rowid insert,
+            // FTS5's ordered dictionary flush - lands in the leaf the last one did,
+            // and the descent answers a question it has already answered. The path
+            // is empty when the hint answered, because a path is only wanted when
+            // the leaf turns out to be full, and this loop re-descends for one then.
+            let (page, mut path) = match attempt {
+                0 => match self.leaf_for_hinted(database.pool(), &encoded_key) {
+                    Some(page) => (page, Vec::new()),
+                    None => self.leaf_for(database.pool(), &encoded_key)?,
+                },
+                _ => self.leaf_for(database.pool(), &encoded_key)?,
+            };
             // **The key is found once.** Where it sits decides three things -
             // whether it was there, what the caller gets back, and what the
             // mutation below has to displace - and the first version asked the
@@ -657,6 +669,12 @@ impl PagedTree {
                     return Err(corrupt(
                         "a leaf had no room for one row after being compacted and split",
                     ));
+                }
+                // The path the hint did not produce. A split needs to rewrite
+                // the parent, so this is the one point a hinted write pays for a
+                // descent - once per split rather than once per row.
+                if path.is_empty() {
+                    path = self.leaf_for(database.pool(), &encoded_key)?.1;
                 }
                 self.make_room(database, log, page, &path, Some(&key), encoded_row.len())?;
                 continue;
@@ -1836,7 +1854,97 @@ impl PagedTree {
     fn leaf_for(&self, pool: &Pool, encoded_key: &[u8]) -> DbResult<(PageId, Vec<PageId>)> {
         let descent = self.descend(pool, encoded_key)?;
         let path: Vec<PageId> = descent.steps.iter().map(|step| step.0).collect();
+        self.note_right_edge(pool, descent.leaf, encoded_key);
         Ok((descent.leaf, path))
+    }
+
+    /// Returns the leaf a key belongs in without descending, when the hint says so.
+    ///
+    /// **The leaf hint** - see [`PagedTree::right_edge`] for the whole argument and
+    /// for why a stale hint cannot give a wrong answer. `None` means "descend", which
+    /// is every key that is not an append at the right edge and every first write to
+    /// a tree.
+    ///
+    /// No path comes back with it. A path is only wanted when the leaf turns out to
+    /// be full, and the caller re-descends for one then - which is once per split
+    /// rather than once per row.
+    ///
+    /// @param pool - the buffer pool
+    /// @param encoded_key - the key's comparable bytes
+    fn leaf_for_hinted(&self, pool: &Pool, encoded_key: &[u8]) -> Option<PageId> {
+        // **The comparison first, and it is the whole of the miss path.** One
+        // `memcmp` against bytes the caller has already built. Below the hinted
+        // leaf's recorded key means the descent has to place this one, and that
+        // answer costs nothing beyond the comparison.
+        let page = match self.right_edge.try_borrow().ok()?.as_ref() {
+            Some((page, low)) if encoded_key >= low.as_slice() => *page,
+            _ => return None,
+        };
+        // The header on a hit, for the reasons `PagedTree::right_edge` gives: a page
+        // handed to another tree, and a fence moved by something other than this
+        // write path, are both visible here and neither is visible in the comparison
+        // above. This fetches a page the insert is about to fetch regardless, and it
+        // parses nothing.
+        let Ok(guard) = pool.fetch(page) else {
+            self.forget_right_edge();
+            return None;
+        };
+        if page::kind_of(&guard).ok() != Some(page::PageKind::Leaf)
+            || page::tree_of(&guard).ok() != Some(self.tree_id())
+            || page::right_of(&guard).ok() != Some(PageId::NONE)
+        {
+            self.forget_right_edge();
+            return None;
+        }
+        Some(page)
+    }
+
+    /// Records the rightmost leaf and the probe that reached it, after a descent.
+    ///
+    /// The lowest probe seen, not the latest: a hint answers for every key at or
+    /// above the bytes it holds, so the lowest probe known to belong to the leaf is
+    /// the one that answers most often. For a tree being appended to the probes only
+    /// rise, so this records the first and then leaves it alone.
+    ///
+    /// One header read off a page the descent has just fetched, and a key copy only
+    /// when the hint moves. See [`PagedTree::right_edge`].
+    ///
+    /// @param pool - the buffer pool
+    /// @param leaf - the leaf the descent reached
+    /// @param encoded_key - the probe the descent used, in comparable bytes
+    fn note_right_edge(&self, pool: &Pool, leaf: PageId, encoded_key: &[u8]) {
+        let rightmost = pool
+            .fetch(leaf)
+            .ok()
+            .and_then(|guard| page::right_of(&guard).ok())
+            == Some(PageId::NONE);
+        let Ok(mut hint) = self.right_edge.try_borrow_mut() else {
+            return;
+        };
+        if !rightmost {
+            *hint = None;
+            return;
+        }
+        match hint.as_mut() {
+            Some((page, low)) if *page == leaf => {
+                if encoded_key < low.as_slice() {
+                    low.clear();
+                    low.extend_from_slice(encoded_key);
+                }
+            }
+            _ => *hint = Some((leaf, encoded_key.to_vec())),
+        }
+    }
+
+    /// Drops the leaf hint, because the hinted page is not a rightmost leaf of this
+    /// tree any more.
+    ///
+    /// See [`PagedTree::right_edge`]. A split or a merge clears it through
+    /// [`PagedTree::note_leaves`] instead, which holds `&mut self`.
+    fn forget_right_edge(&self) {
+        if let Ok(mut hint) = self.right_edge.try_borrow_mut() {
+            *hint = None;
+        }
     }
 
     /// Returns where a key sits in a leaf.

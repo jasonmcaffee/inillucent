@@ -194,6 +194,10 @@ impl Redo for PageStore {
             // there is nothing for a page store to redo. Recovery still reads
             // and checksums it; see `Body::Pad`.
             Body::Pad { .. } => {}
+            // A bulk build's pages were written to the data file and synced
+            // before this record was appended, so a page store has nothing to
+            // put anywhere. See `Body::BulkBuilt`.
+            Body::BulkBuilt { .. } => {}
         }
         Ok(())
     }

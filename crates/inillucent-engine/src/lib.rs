@@ -286,6 +286,38 @@ pub struct ImportedDatabase {
     pub(crate) counters: std::rc::Rc<Counters>,
 }
 
+impl Drop for ImportedDatabase {
+    /// Folds the log into every file this connection holds, so a closed file is
+    /// self contained.
+    ///
+    /// **The property `inillucent backup` and anybody copying an `.rdb` rely on**
+    /// (task-2000, design 1b). Until design 1b a statement folded on its way out,
+    /// so a connection that had run one left the file complete whether it was
+    /// closed tidily or not, and nothing in this engine checkpointed at close -
+    /// `RECLAIM_BYTES`'s own note records that, and records that the
+    /// per-statement fold was what hid it. With the fold lazy, a file whose
+    /// connection went away with less than four mebibytes of log behind it would
+    /// need that log to be read, which is true of a SQLite database in WAL mode
+    /// and is not what this engine has ever promised for a file it has finished
+    /// with.
+    ///
+    /// **Best effort, because a `Drop` has nobody to tell.** A fold that fails
+    /// here leaves the file and its log exactly as they were, and the next open
+    /// replays the log and reaches the same database - which is the whole reason
+    /// swallowing the failure is honest rather than convenient. It is not a
+    /// silent loss of anything: every acknowledged statement is in the log and is
+    /// durable, because `release_if_idle` synced it before it let the file go.
+    ///
+    /// **Nothing is folded while a transaction is open.** Its records are in the
+    /// log, uncommitted, and recovery discards them; a fold would hold its pages
+    /// back by no-steal and bound the recovery point beneath them, so the file
+    /// would not be self contained anyway. A connection dropped mid-transaction
+    /// is a rollback, and that is what the next open performs.
+    fn drop(&mut self) {
+        let _ = self.fold_on_close();
+    }
+}
+
 /// A database file this connection has attached beside the one it was opened
 /// on, or its own temporary database.
 ///

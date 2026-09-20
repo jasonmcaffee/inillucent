@@ -95,46 +95,23 @@ use inillucent_base::DbResult;
 
 use crate::ImportedDatabase;
 
-/// Why a checkpoint is being taken, and so how much of one it is.
+/// **`CheckpointKind` is gone and the distinction it carried is not** (task-2000,
+/// design 1b). The enum had two variants, `Asked` and `Releasing`, and what they
+/// told apart is whether the log's housekeeping runs - the catalog's statistics, a
+/// rolled segment, a checkpoint record and the retirement of the segments the fold
+/// made redundant. That is a yes or no about one call, so it is a `bool` parameter
+/// on `ImportedDatabase::checkpoint_of` now rather than a type; nothing about which
+/// half of a fold runs when has changed.
 ///
-/// **Under `locking_mode = normal` a checkpoint is two different events
-/// wearing one name, and giving them one body cost a factor of twenty
-/// (task-1999).** Every statement that writes checkpoints on its way out of
-/// [`ImportedDatabase::release_if_idle`], so the work that belongs to a
-/// checkpoint *somebody asked for* - making the catalog's statistics honest,
-/// rolling a log segment, writing a checkpoint record and deleting the
-/// segments the checkpoint made redundant - was running once a statement. An
-/// autocommit insert went from 1.26 ms to 27.4 ms and an autocommit update
-/// from 1.18 ms to 22.6 ms, against SQLite's 4.09 ms and 1.21 ms on the same
-/// fixture and the same disk, which put the `write`, `transaction` and
-/// `schema` families under `compat/perf/contract.toml`'s floor on four
-/// consecutive gate runs.
+/// Design 1b's first cut *did* retire the distinction, on the argument that a
+/// release no longer folds at all in `wal` mode - so by the time one runs the log
+/// has passed [`RECLAIM_BYTES`] and the housekeeping is due anyway. The argument is
+/// right about `wal` and wrong about everything else: the lazy fold is `wal`'s,
+/// because the after images in the log are what make an interrupted one repairable,
+/// and `journal_mode = delete` and its siblings still fold on the way out of every
+/// statement. Making every one of those folds do the whole of a checkpoint is
+/// exactly the 20x task-1999 measured and removed.
 ///
-/// What a lock release owes the next process is that the file hold every
-/// statement this one acknowledged, which is the flush and the meta record and
-/// nothing else. The rest is log housekeeping, and it waits until the log has
-/// grown past [`RECLAIM_BYTES`].
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CheckpointKind {
-    /// Somebody asked for a checkpoint: `Database::checkpoint`, `PRAGMA
-    /// wal_checkpoint`, a `VACUUM`, a backup, an integrity check, a
-    /// journal-mode switch, `PRAGMA user_version` or `application_id`, and the
-    /// open, import and rebuild paths.
-    ///
-    /// Closing a connection is *not* one of these - see [`RECLAIM_BYTES`].
-    ///
-    /// The whole of it, exactly as before this distinction existed.
-    Asked,
-    /// A statement is letting the file go at the end of an autocommit
-    /// statement.
-    ///
-    /// The pages are written and the recovery point moves, so the file
-    /// describes the statement that just succeeded. The statistics and the
-    /// log's reclamation wait until the log has grown past [`RECLAIM_BYTES`],
-    /// and then this does the whole of a checkpoint too.
-    Releasing,
-}
-
 /// How much log may pile up before a statement letting the file go reclaims it
 /// on its way out.
 ///
@@ -142,10 +119,16 @@ pub(crate) enum CheckpointKind {
 /// reclamation was put behind `Wal::checkpoint_due`, whose bar is 256 MiB -
 /// which answers "is a whole checkpoint overdue", a different question from "has
 /// enough piled up that the statement already folding its pages may as well
-/// reclaim while it is here". Nothing in this engine checkpoints when a
-/// connection closes: `ImportedDatabase` has no `Drop`, and the command line,
-/// the shell and the driver all leave it to a caller. Until this change the
+/// reclaim while it is here". Nothing in this engine checkpointed when a
+/// connection closed: `ImportedDatabase` had no `Drop`, and the command line, the
+/// shell and the driver all left it to a caller. Until task-1999's change the
 /// per-statement checkpoint hid that, because it reclaimed every statement.
+///
+/// **It has a `Drop` now** (task-2000, design 1b): with the fold lazy in `wal` mode,
+/// a connection that went away with less than this much log behind it would leave a
+/// file that needs its log read, and a closed `.rdb` being self contained is what
+/// `inillucent backup` and anybody copying one rely on. The bar still decides
+/// everything else, and it is still the reason it has to be small.
 ///
 /// The same run measured at three bars - 4,000 autocommit statements through
 /// `inillucent-shell` against a 320 KB database, and what was on disk after the
@@ -174,7 +157,7 @@ pub(crate) enum CheckpointKind {
 ///
 /// A clock was considered and rejected. A reclamation that fired on elapsed time
 /// would make what a suite sees depend on how long it took to get there.
-const RECLAIM_BYTES: u64 = 4 << 20;
+pub(crate) const RECLAIM_BYTES: u64 = 4 << 20;
 
 /// Records the checkpoint in the log and deletes the segments it has made
 /// redundant.
@@ -220,17 +203,33 @@ impl ImportedDatabase {
     /// the log has already described durably. The other order is the durability
     /// mutant the Phase 3 gate exists to kill.
     pub fn checkpoint(&mut self) -> DbResult<()> {
-        self.checkpoint_of(CheckpointKind::Asked)
+        self.checkpoint_of(true)
     }
 
-    /// Writes every dirty page and advances the log's recovery point, doing as
-    /// much of a checkpoint as the reason for it calls for.
+    /// Writes every dirty page and advances the log's recovery point, doing as much
+    /// of the log's housekeeping as the reason for it calls for.
     ///
-    /// See [`CheckpointKind`] for which parts a lock release leaves out and
-    /// why.
+    /// **`asked` is the distinction `CheckpointKind` used to carry, and it is back
+    /// because `journal_mode = delete` needs it** (task-2000, design 1b). A fold has
+    /// two halves: the flush and the meta record, which are what makes the file hold
+    /// the statement that just committed, and the log's housekeeping - the catalog's
+    /// statistics, a rolled segment, a checkpoint record and the retirement of the
+    /// segments the fold made redundant - which is what makes the log shrink.
+    /// task-1999 measured the second half at two thirds of a 19 ms fold and put it
+    /// behind [`RECLAIM_BYTES`], because under `locking_mode = normal` a fold was a
+    /// per-statement event and an autocommit insert went from 1.26 ms to 27.4.
     ///
-    /// @param kind - why this checkpoint is being taken
-    pub(crate) fn checkpoint_of(&mut self, kind: CheckpointKind) -> DbResult<()> {
+    /// In `wal` mode that no longer matters, because a fold is not a per-statement
+    /// event any more: `release_if_idle` only folds once the log has passed the bar,
+    /// so by the time one runs the housekeeping is due as well. In every other
+    /// journal mode the fold is still per statement - the after images in the log are
+    /// what make a lazy one repairable, and those modes protect the fold with pre
+    /// images instead - so the distinction is exactly as load bearing there as
+    /// task-1999 found it.
+    ///
+    /// @param asked - whether somebody asked for a whole checkpoint, rather than a
+    ///   statement letting the file go
+    pub(crate) fn checkpoint_of(&mut self, asked: bool) -> DbResult<()> {
         // **A read only connection has nothing to fold down.** Its pool holds
         // no change the file does not, its log is a scratch one in memory, and
         // its file handle would refuse the write. Answering `Ok` rather than a
@@ -261,7 +260,36 @@ impl ImportedDatabase {
             self.counters.last_changes.get(),
             self.counters.changed_ever.get(),
         );
-        let outcome = self.checkpoint_within(kind);
+        let outcome = self.checkpoint_within(asked);
+        self.writing.set_decided_over(held.0);
+        self.counters.last_rowid.set(held.1);
+        self.counters.last_changes.set(held.2);
+        self.counters.changed_ever.set(held.3);
+        outcome
+    }
+
+    /// Folds every attached file and leaves `main` alone.
+    ///
+    /// **What a lock release does for an attachment** - see
+    /// `ImportedDatabase::release_if_idle` for why an attached file still folds at
+    /// release and `main` does not. The caller's own counters are put back the way
+    /// [`ImportedDatabase::checkpoint`] puts them back, and for the same reason: a
+    /// fold is the engine's bookkeeping and not a statement the caller ran, so
+    /// `last_insert_rowid`, `changes`, `total_changes` and the participant count of
+    /// the last commit are none of its business to move.
+    pub(crate) fn checkpoint_attached_only(&mut self) -> DbResult<()> {
+        if self.storage.read_only {
+            return Ok(());
+        }
+        let held = (
+            self.writing.decided_over(),
+            self.counters.last_rowid.get(),
+            self.counters.last_changes.get(),
+            self.counters.changed_ever.get(),
+        );
+        // `false`: a release is not somebody asking for a checkpoint, so each
+        // attached file's own log decides whether this one reclaims.
+        let outcome = self.checkpoint_attached(false);
         self.writing.set_decided_over(held.0);
         self.counters.last_rowid.set(held.1);
         self.counters.last_changes.set(held.2);
@@ -323,7 +351,7 @@ impl ImportedDatabase {
 
     /// Everything [`ImportedDatabase::checkpoint`] does, without putting the
     /// caller's own counters back.
-    fn checkpoint_within(&mut self, kind: CheckpointKind) -> DbResult<()> {
+    fn checkpoint_within(&mut self, asked: bool) -> DbResult<()> {
         // **The log is reclaimed once it has grown past [`RECLAIM_BYTES`], not
         // once a statement.** `roll_segment`, the checkpoint record and
         // `retire_segments_below` below exist so the log can shrink, and none
@@ -335,10 +363,10 @@ impl ImportedDatabase {
         // the checkpoint record 1.2 ms, and deleting the segments 4.9 ms rising
         // to 14.5 ms as the run went on - together about two thirds of a 19 ms
         // checkpoint.
-        let reclaiming = match kind {
-            CheckpointKind::Asked => true,
-            CheckpointKind::Releasing => self.storage.wal.since_checkpoint() >= RECLAIM_BYTES,
-        };
+        // See [`ImportedDatabase::checkpoint_of`]: a fold somebody asked for does
+        // the whole of it, and one a statement took on its way out does the log's
+        // housekeeping only once the log has grown past [`RECLAIM_BYTES`].
+        let reclaiming = asked || self.storage.wal.since_checkpoint() >= RECLAIM_BYTES;
         // **The catalog's statistics are made honest first, and inside the
         // transaction the checkpoint is about to make durable - but only on a
         // checkpoint that is doing the rest of the housekeeping too.** A tree's
@@ -398,6 +426,29 @@ impl ImportedDatabase {
         // flushed unconditionally by this same checkpoint regardless of any
         // open transaction, so they were never a page recovery could miss.
         let oldest_dirty = self.storage.database.pool().oldest_dirty_lsn();
+        // **An after image of every page this fold is about to write in place**
+        // (task-2000, design 1a), so a torn in place write is repairable from the
+        // log rather than from a rollback journal of pre images. See
+        // `inillucent_txn::engine::log_dirty_page_images` for why this and not
+        // the journal, and `Pool::fold_protected_by_log` for the two callers -
+        // this one and an eviction - that the journal is now split between.
+        //
+        // **Before `log_free_map_pages` rather than after it.** That function
+        // dirties the free map's own pages and appends a `WritePage` for each one
+        // itself, so a pass run afterwards would image them a second time for
+        // nothing. A free map page that was already dirty before this checkpoint
+        // is imaged twice, which is a record the replay applies twice to the same
+        // bytes and costs one page of log at the 4 MiB bar.
+        //
+        // Only under `journal_mode = wal`, which is what
+        // `fold_is_protected_by_log` reports: `delete` and its siblings keep the
+        // rollback journal and the path they were measured on.
+        if self.storage.database.pool().fold_is_protected_by_log() {
+            inillucent_txn::engine::log_dirty_page_images(
+                &mut self.storage.database,
+                &self.storage.wal,
+            )?;
+        }
         // The free map's own pages, logged and stamped before they are
         // rewritten - see `inillucent_txn::engine::log_free_map_pages` - and
         // done *before* `set_log_position` reads the durable point below.
@@ -449,7 +500,7 @@ impl ImportedDatabase {
         // Every attached database too, because a log is per file and a
         // connection closed after a checkpoint should leave databases rather
         // than databases and logs nobody will open again.
-        self.checkpoint_attached(kind)?;
+        self.checkpoint_attached(asked)?;
         Ok(())
     }
 
@@ -474,8 +525,7 @@ impl ImportedDatabase {
     /// rewritten on every checkpoint, with no `WritePage` record and no LSN
     /// stamp behind it, so a crash mid-write could leave it unrecoverable.
     ///
-    /// @param kind - why this checkpoint is being taken
-    fn checkpoint_attached(&mut self, kind: CheckpointKind) -> DbResult<()> {
+    fn checkpoint_attached(&mut self, asked: bool) -> DbResult<()> {
         for nth in 0..self.session_state.attached.len() {
             let Some(held) = self.session_state.attached.get_mut(nth) else {
                 continue;
@@ -515,12 +565,9 @@ impl ImportedDatabase {
             if held.database.lock_level() <= inillucent_vfs::FileLock::Shared {
                 continue;
             }
-            // Each file's log is reclaimed on its own terms, because each
-            // file has its own log and its own size. See `checkpoint_within`.
-            let reclaiming = match kind {
-                CheckpointKind::Asked => true,
-                CheckpointKind::Releasing => held.wal.since_checkpoint() >= RECLAIM_BYTES,
-            };
+            // Each file's log is reclaimed on its own terms, because each file has
+            // its own log and its own size. See `checkpoint_within`.
+            let reclaiming = asked || held.wal.since_checkpoint() >= RECLAIM_BYTES;
             held.wal.sync()?;
             if reclaiming {
                 held.wal.roll_segment()?;
@@ -528,6 +575,12 @@ impl ImportedDatabase {
             // See `checkpoint`'s own comment: read before this file's free-map
             // pages are touched below, and without an extra `flush()`.
             let oldest_dirty = held.database.pool().oldest_dirty_lsn();
+            // The same after images `main`'s fold appends, for the same reason:
+            // an attached file's fold writes its pages in place too, and it has
+            // its own log to carry them. See `checkpoint_within`.
+            if held.database.pool().fold_is_protected_by_log() {
+                inillucent_txn::engine::log_dirty_page_images(&mut held.database, &held.wal)?;
+            }
             inillucent_txn::engine::log_free_map_pages(&mut held.database, &held.wal)?;
             held.wal.sync()?;
             let durable = held.wal.write_ahead_point();

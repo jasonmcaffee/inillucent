@@ -166,7 +166,15 @@ fn recovered(snapshot: &CrashSnapshot, seed: u64) -> Recovery {
     match reopen(Arc::clone(&vfs) as Arc<dyn Vfs>).and_then(|mut engine| try_contents(&mut engine))
     {
         Ok(rows) => Recovery::Rows(rows),
-        Err(failure) => Recovery::Broken(format!("{failure}")),
+        // **The detail as well as the message.** `DbError`'s `Display` prints the
+        // primary message, and every unreadable database in this campaign prints
+        // the same one - "database disk image is malformed" - which says nothing
+        // about which page failed or why. The detail names the page and the two
+        // checksums, which is the difference between a diagnosis and a rerun.
+        Err(failure) => Recovery::Broken(match failure.detail() {
+            Some(said) => format!("{failure}: {said}"),
+            None => format!("{failure}"),
+        }),
     }
 }
 

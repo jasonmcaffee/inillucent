@@ -18,6 +18,23 @@
 //! journal leaves nothing on disk beside the database, which is what an
 //! application shipping a database as one file needs.
 //!
+//! **And since task-2000 the fold no longer runs on every commit**, in this mode
+//! or any other, which makes the paragraph below true of the whole of a
+//! connection's life rather than of the gap between an eviction and the next
+//! statement. A commit is an append to the log and a sync of it; the fold happens
+//! when the log passes `RECLAIM_BYTES`, when somebody asks for a checkpoint, or
+//! when the connection is dropped, and this journal protects it whenever it runs.
+//! That is the same protection as before and it covers the same moment - what
+//! changed is how often that moment arrives.
+//!
+//! One thing did go with the per-commit fold, and it is named here because a test
+//! used to assert it. An eager fold left every acknowledged commit in the log
+//! *and* in the data file, so a device that acknowledges a write and stores half
+//! of it could lose one copy and not both. That was redundancy - the second write
+//! and the second sync - rather than anything this journal did, and
+//! `durability.rs`'s short write campaign is where the argument and the
+//! measurement now live.
+//!
 //! **In `delete` mode that is true after a checkpoint, not after a commit**,
 //! and the difference is visible to the same application. A journal is created
 //! by the first page this connection writes back, which is a checkpoint or an

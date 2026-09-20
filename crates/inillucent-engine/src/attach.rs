@@ -177,7 +177,7 @@ impl ImportedDatabase {
         let doubtful = self.doubt_for(&path)?;
         let in_doubt = !doubtful.is_empty();
         let OpenedFile {
-            database,
+            mut database,
             wal,
             catalog_tree,
             // An attachment's own recovery is reported by the statement that
@@ -204,6 +204,22 @@ impl ImportedDatabase {
             )
         });
         database.pool().set_journal(journal);
+        // **And the fold's protection follows the mode** (task-2000, design 1a).
+        // Under `wal` the fold appends an after image of every page it is about
+        // to write to the log it already has, so it asks the journal for
+        // nothing; the journal stays in place for an eviction, which is undo and
+        // needs a pre image. See `Pool::fold_protected_by_log`.
+        database.pool().set_fold_protected_by_log(
+            self.pragmas.journal_mode() == inillucent_pool::journal::JournalMode::Wal,
+        );
+        // **And the owner replays whenever this cache is thrown away**
+        // (task-2000, design 1b). With the fold lazy, a connection holds dirty
+        // pages between statements, so a take where another process has folded
+        // finds a cache that is stale and dirty at once. `resync_from_file`
+        // replays the log from the file's own checkpoint on every such take,
+        // which is what makes dropping those frames rather than refusing them
+        // lose nothing. See `Database::replayed_by_its_owner`.
+        database.set_replayed_by_its_owner(true);
         // **The connection has one transaction counter and now two logs.** A
         // file attached mid-session may hold higher numbers than anything this
         // connection has issued, and a number reused across the two would make

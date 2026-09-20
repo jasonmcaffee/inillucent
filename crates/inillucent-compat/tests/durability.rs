@@ -553,6 +553,12 @@ fn recovered(journal: Journal, snapshot: &CrashSnapshot, seed: u64) -> Recovery 
 /// bytes: no durability scheme can undo a write that never said it failed, and
 /// the guarantee that remains is that the damage is *detected* rather than
 /// served as rows.
+///
+/// **The short write is also the one failure where an acknowledged commit may
+/// come back as the old state**, since the lazy fold means an acknowledged
+/// commit lives in the log alone until a fold runs. The committed arm below
+/// carries the argument for that and the counter that records how often it
+/// happens.
 fn campaign(journal: Journal, failure: Failure, limit: u64, corruption_allowed: bool) -> String {
     let (before, after) = expected_states(journal);
     assert_ne!(before, after, "the workload has to change something");
@@ -560,6 +566,10 @@ fn campaign(journal: Journal, failure: Failure, limit: u64, corruption_allowed: 
     let mut cut_points = 0u64;
     let mut committed_runs = 0u64;
     let mut detected = 0u64;
+    // How many acknowledged commits came back as the old state. Reported rather
+    // than asserted about, because it is a count of what a lying device cost and
+    // a change in it is something a review should be shown. See the committed arm.
+    let mut acknowledged_and_lost = 0u64;
     for nth in 1..=limit {
         let outcome = attempt(journal, 1786 + nth, nth, failure);
         if outcome.reached < nth {
@@ -606,11 +616,61 @@ fn campaign(journal: Journal, failure: Failure, limit: u64, corruption_allowed: 
                     );
                     detected = detected.saturating_add(1);
                 }
-                other => assert_eq!(
-                    *other,
-                    Recovery::Rows(after.clone()),
-                    "call {nth}: the commit was reported and then lost"
-                ),
+                // **A device that reports a write it did not do can lose an
+                // acknowledged commit, and under `Failure::ShortWrite` that is what
+                // this arm now allows** (task-2000, design 1). Three sentences carry
+                // it, and they are here rather than in a commit message because this
+                // assertion used to be stronger and a reader deserves to know why it
+                // is not.
+                //
+                // **A commit's durability comes from the log in every journal mode.**
+                // `inillucent-pool`'s `journal` module says so in its own words: an
+                // application's `ROLLBACK` never touches the rollback journal, undo
+                // reads the log under every mode including `off`, and what
+                // `PRAGMA journal_mode` selects is how the *fold* is protected - after
+                // images in the log for `wal`, pre images in `app.db-journal` for the
+                // rollback modes. The lazy fold changes when a fold runs. It does not
+                // change what protects one, so no mode name means anything different.
+                //
+                // **What this arm used to prove in `delete` mode was not a property of
+                // the rollback journal. It was a side effect of writing every commit
+                // twice.** With the eager fold, an acknowledged commit was in the log
+                // *and* in the data file before `COMMIT` returned, and a device that
+                // acknowledges one write and stores half of it can lose one of two
+                // copies but not both. That redundancy is exactly the second write and
+                // second sync design 1 removes, and it was never documented as a
+                // guarantee - the campaign asserted it because the eager path happened
+                // to provide it.
+                //
+                // **What remains is the promise `wal_crash.rs` already makes**, in its
+                // own words: the old state or the new one, never a mixture, and always
+                // a database a reader can read. SQLite's WAL mode does the same thing
+                // deliberately - recovery scans frames until the first checksum that
+                // does not verify and discards that frame and every frame after it,
+                // commit frames included, with no error to the application.
+                //
+                // **Scoped to the short write, and only to it.** A crash cut never
+                // returns from `COMMIT` and an I/O error cut returns `Err`, so neither
+                // ever acknowledges a commit; both keep the full strength of this arm,
+                // which is what `failure` is matched on rather than `corruption_allowed`.
+                other => match failure {
+                    Failure::ShortWrite => {
+                        let held = *other == Recovery::Rows(after.clone());
+                        let lost_it = *other == Recovery::Rows(before.clone());
+                        assert!(
+                            held || lost_it,
+                            "call {nth}: an acknowledged commit came back as neither state\n                               got {other:?}\n  before {before:?}\n  after {after:?}"
+                        );
+                        if lost_it {
+                            acknowledged_and_lost = acknowledged_and_lost.saturating_add(1);
+                        }
+                    }
+                    _ => assert_eq!(
+                        *other,
+                        Recovery::Rows(after.clone()),
+                        "call {nth}: the commit was reported and then lost"
+                    ),
+                },
             }
         } else {
             match &recovery {
@@ -641,7 +701,7 @@ fn campaign(journal: Journal, failure: Failure, limit: u64, corruption_allowed: 
         "a campaign that covers {cut_points} cut points is not a campaign"
     );
     format!(
-        "cut points: {cut_points}, acknowledged commits: {committed_runs}, detected damage: {detected}\n{report}"
+        "cut points: {cut_points}, acknowledged commits: {committed_runs}, detected damage:          {detected}, acknowledged and lost to a half written call: {acknowledged_and_lost}\n{report}"
     )
 }
 

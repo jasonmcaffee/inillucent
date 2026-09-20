@@ -81,8 +81,27 @@ rebuilt, its service restarted, and `tests/live-errors.mjs` clean.
   gate measures it; the rest stays there.
 - The retrieval index's resident footprint, roadmap item 3, is a memory design and is not built
   here. The retrieval work here is speed only.
-- `journal_mode = delete`, the mode with no redo log, keeps its rollback journal and its current
-  commit path. Design 1 changes `wal` mode, which is the default.
+- ~~`journal_mode = delete`, the mode with no redo log, keeps its rollback journal and its current
+  commit path. Design 1 changes `wal` mode, which is the default.~~ **Corrected during
+  implementation, task-2006.** Two of those three claims are false and the correction changes what
+  design 1 covers, so it is struck rather than edited away. `wal` is not the default:
+  `Pragmas::fresh` starts at `JournalMode::Delete` (`crates/inillucent-engine/src/engine/state.rs`)
+  for SQLite parity, and the gate sets `journal_mode = delete` on both arms
+  (`crates/inillucent-compat/src/perf.rs`, and `PRAGMA journal_mode=delete` to SQLite in
+  `compat/oracle/sqlite_bench.c`). And `delete` is not "the mode with no redo log" - every mode in
+  this engine has one, and `PRAGMA journal_mode` selects how the **fold** is protected, after images
+  in the log for `wal` and pre images in `app.db-journal` for the rollback modes. So design 1
+  confined to `wal` would have been measured by nothing.
+
+  **What design 1 does instead:** it changes the fold's timing in every mode. The rollback modes
+  keep their rollback journal around the fold; what changes is that the fold no longer runs on every
+  commit. The after images are `wal`'s alone, as this non-goal intended. One durability property
+  goes with the per-commit fold and it is not a journal property: an eager fold left every
+  acknowledged commit in the log *and* in the data file, so a device that acknowledges a write and
+  stores half of it could lose one copy of two. `wal` mode already granted that exemption in
+  `crates/inillucent-compat/tests/wal_crash.rs`, and
+  `durability::a_short_write_at_every_cut_point_is_recoverable` is where the argument and the count
+  now live for every mode.
 - No change to the on disk page format, the record format inside a leaf, or the meta record.
   Design 1 adds one log record kind and design 6 changes one, and both are additive.
 - No new dependency. The parallel build uses `rayon`, which `inillucent-core` already links.

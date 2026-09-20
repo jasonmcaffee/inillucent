@@ -291,6 +291,65 @@ fn resume_above_every_stamp(database: &mut Database, outcome: &Recovered) -> DbR
 /// is the test that measures it - a checkpoint that changes nothing leaves
 /// nothing new for the next reopen to scan.
 ///
+/// Appends an after image of every page the next fold will write in place.
+///
+/// **What makes a fold crash safe without a rollback journal** (task-2000,
+/// design 1a). A fold writes pages into the data file in place, so a crash in
+/// the middle of one leaves a page that is neither its old bytes nor its new
+/// ones, and no logical record can rebuild that: `InsertRow` and `DeleteRow` are
+/// reapplied through the tree's own decode, which needs the page it applies to
+/// intact. Until this existed the repair came from a rollback journal of pre
+/// images, and that journal cost the fold a read of every page before it wrote
+/// it, two seals, and an unlink with a directory sync.
+///
+/// An after image in the redo log answers the same question and rides in an
+/// append the fold is making anyway. Recovery already installs a `WritePage`
+/// idempotently by page LSN, and a page whose checksum fails reads as "no LSN"
+/// in `Applier::page_lsn`, so every record naming it is applied - which is the
+/// image. `replay_with_repair` in `inillucent-engine` then re-runs the logical
+/// pass against a file the images have made whole.
+///
+/// **The caller owns the sync, and it owns the order.** This appends and nothing
+/// else. The fold's order is: these images appended, the log synced once, the
+/// pages written in place, the meta record written and synced. A caller that
+/// wrote the pages before syncing the log would have removed the only copy of
+/// the old bytes and not yet made the new ones recoverable, which is the
+/// durability mutant the Phase 3 gate exists to kill -
+/// `refuse_if_ahead_of_the_log` is the second guard on it, because every page
+/// this images carries a stamp below the point the sync moves.
+///
+/// **The pages are the ones the flush will actually write**, which
+/// `Pool::each_fold_image` decides by asking the same no-steal question
+/// `Pool::writeback` asks. An after image of an uncommitted page would be
+/// replayed unconditionally, since these records belong to transaction `0` the
+/// way `log_free_map_pages`'s do, and that is precisely the uncommitted page
+/// reaching the file that no-steal exists to prevent.
+///
+/// **Nothing is restamped.** `log_free_map_pages` writes its record's LSN into
+/// the image before installing it, because it is *replacing* the page. This is
+/// not: the page in the pool is already correct and already stamped by the
+/// records that built it, and the image is a copy of it. Recovery stamps its own
+/// copy with the record's LSN in `put_image`, which is above every logical
+/// record the image already contains, so the second replay skips them - and that
+/// is the whole of why one pass over the images repairs a torn fold.
+///
+/// Returns how many images were appended.
+///
+/// @param database - the file whose pages are about to be folded in
+/// @param wal - the log to append the after images to
+pub fn log_dirty_page_images(database: &mut Database, wal: &Wal) -> DbResult<usize> {
+    database.pool().each_fold_image(|page, image| {
+        wal.append(
+            0,
+            Body::WritePage {
+                page: page.0,
+                image,
+            },
+        )?;
+        Ok(())
+    })
+}
+
 /// @param database - the file whose free map is about to be checkpointed
 /// @param wal - the log to record each page's rewrite in
 pub fn log_free_map_pages(database: &mut Database, wal: &Wal) -> DbResult<()> {
