@@ -208,16 +208,53 @@ def main() -> None:
     parser.add_argument("--sdist", action="store_true", help="build a source distribution too")
     parser.add_argument("--publish", action="store_true", help="upload to PyPI with twine")
     parser.add_argument("--test", action="store_true", help="with --publish, upload to TestPyPI")
+    parser.add_argument(
+        "--all",
+        action="store_true",
+        help="a wheel for every target whose archive is in dist/, not just this machine's",
+    )
     parsed = parser.parse_args()
 
     version = parsed.version or workspace_version()
-    target = parsed.target or host_target()
-    print(f"inillucent {version} for {target}")
-    stage(version, target)
-    # The target's tag when the target is named, the host's otherwise. `platform_tag()` asks
-    # sysconfig about *this* machine, which is the wrong answer for a cross built wheel.
-    tag = WHEEL_TAGS.get(target) if parsed.target else None
-    build(tag or platform_tag(), parsed.sdist)
+
+    # **--all is what a release wants.** Without it this builds one wheel, for the machine it runs
+    # on, and the release script called it with no target - so inillucent 0.1.3 reached PyPI as a
+    # Windows wheel alone and `pip install inillucent` on a Mac or on Linux answered "no matching
+    # distribution". The four wheels had to be built by hand afterwards. A target whose archive is
+    # not in dist/ is reported and skipped rather than failing the release, because a partial
+    # release is still better than none - but it is said out loud.
+    if parsed.all:
+        targets, missing = [], []
+        for candidate in WHEEL_TAGS:
+            source = SOURCE_ARCHIVES.get(candidate, candidate)
+            if (ROOT / "dist" / f"inillucent-{version}-{source}").exists():
+                targets.append(candidate)
+            else:
+                missing.append(candidate)
+        if not targets:
+            raise SystemExit(f"dist/ holds no staged archive for {version}; build the release first")
+        seen_tags = set()
+        for one in targets:
+            tag = WHEEL_TAGS[one]
+            # Both macOS targets come from the one universal archive and carry the same tag, so the
+            # second would rebuild an identical wheel over the first.
+            if tag in seen_tags:
+                continue
+            seen_tags.add(tag)
+            print(f"inillucent {version} for {one} -> {tag}")
+            stage(version, one)
+            build(tag, parsed.sdist)
+        for one in missing:
+            print(f"  skipped {one}: no archive in dist/")
+    else:
+        target = parsed.target or host_target()
+        print(f"inillucent {version} for {target}")
+        stage(version, target)
+        # The target's tag when the target is named, the host's otherwise. `platform_tag()` asks
+        # sysconfig about *this* machine, which is the wrong answer for a cross built wheel.
+        tag = WHEEL_TAGS.get(target) if parsed.target else None
+        build(tag or platform_tag(), parsed.sdist)
+
     if parsed.publish:
         publish(parsed.test)
 

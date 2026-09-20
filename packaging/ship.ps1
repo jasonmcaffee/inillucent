@@ -632,7 +632,7 @@ function Get-Routes {
                 if ($LASTEXITCODE -ne 0) { return 'twine is not installed: python -m pip install twine' }
                 $null
             }
-            Run    = { & python (Join-Path $script:Root 'packages/python/build.py') --publish }
+            Run    = { & python (Join-Path $script:Root 'packages/python/build.py') --all --publish }
             Verify = { Test-Registry -Url "https://pypi.org/pypi/inillucent/json" -Version $Version }
         },
         @{
