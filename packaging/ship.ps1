@@ -64,9 +64,10 @@ param(
     [string] $Part,
     [string[]] $Only,
     [string[]] $Skip,
-    # The six digits from the authenticator app, for an npm account with two-factor on writes.
-    # Without it the npm route is skipped rather than attempted, because npm refuses the publish and
-    # a route that is going to be refused should say so in the plan instead of in the report.
+    # The six digits from the authenticator app. Only needed when the npm credential cannot get past
+    # two-factor on its own - a classic publish token cannot, a granular one minted to bypass it can,
+    # and npm gives no way to tell them apart before the publish. Not needed with the token this
+    # machine holds.
     [ValidatePattern('^[0-9]{6}$')]
     [string] $Otp,
     [switch] $AllowDirty,
@@ -549,20 +550,19 @@ function Get-Routes {
                 }
                 $script:NpmAccount = $who
 
-                # **Being signed in is not being able to publish, and that distinction cost a
-                # release.** The token below authenticates fine and `npm whoami` names the account,
-                # and then the publish answers `403 ... Two-factor authentication or granular access
-                # token with bypass 2fa enabled is required to publish packages` - so the plan said
-                # ready and the run failed, which is the second time this route has been a false
-                # positive. npm will say which kind of token it is holding if it is asked, and only
-                # an automation token, or one of the granular ones minted to skip the second factor,
-                # can publish on its own. Anything else needs -Otp.
-                if (-not $Otp) {
-                    $tokens = (& npm token list 2>&1 | Out-String)
-                    if ($tokens -match 'Publish token' -and $tokens -notmatch 'Automation token') {
-                        return 'the npm token can read but not publish: it is a publish token, and this account requires a second factor on a write. Re-run with -Otp <six digits> from the authenticator app.'
-                    }
-                }
+                # **Being signed in is not being able to publish, and npm will not say which you
+                # have.** A classic publish token and a granular token minted to bypass two-factor
+                # both authenticate, both name the account, and `npm token list` prints both as
+                # "Publish token" - the first then answers `403 ... Two-factor authentication or
+                # granular access token with bypass 2fa enabled is required to publish packages` and
+                # the second publishes. Reading that output was tried and it is wrong in both
+                # directions: it passed the token that could not publish, and once a working one was
+                # minted it skipped the route that would have succeeded.
+                #
+                # So there is no preflight for this, and pretending otherwise is the worse failure.
+                # The publish is the test, it fails with npm's own sentence, and `Verify` asks the
+                # registry what it serves. `-Otp` is there for an account whose token cannot bypass
+                # the second factor.
                 $null
             }
             Run    = {
