@@ -950,49 +950,125 @@ function Test-GitHubRelease {
     return $null
 }
 
-function Test-SiteVersion {
+function Get-SitePlatforms {
     <#
     .SYNOPSIS
-        Whether the live site says it serves this version.
+        Every platform this release ships, and the artifact each one is downloaded as.
+
+    .DESCRIPTION
+        **The list is here so a platform cannot quietly stop being offered.** Checking that every
+        name in SHA256SUMS resolves catches a missing file and not a download page that dropped a
+        row, because the page is never consulted. A platform that is not built belongs out of this
+        table rather than reported missing on every release.
 
     .PARAMETER Version
         The version being released.
     #>
     param([string] $Version)
+    return @(
+        @{ Platform = 'Windows x86-64';   File = "inillucent-$Version-x86_64-pc-windows-msvc.zip" },
+        @{ Platform = 'macOS installer';  File = "inillucent-$Version.pkg" },
+        @{ Platform = 'macOS archive';    File = "inillucent-$Version-universal-apple-darwin.tar.gz" },
+        @{ Platform = 'Linux x86-64';     File = "inillucent-$Version-x86_64-unknown-linux-gnu.tar.gz" },
+        @{ Platform = 'Linux aarch64';    File = "inillucent-$Version-aarch64-unknown-linux-gnu.tar.gz" },
+        @{ Platform = 'Debian x86-64';    File = "inillucent_${Version}_amd64.deb" },
+        @{ Platform = 'Debian aarch64';   File = "inillucent_${Version}_arm64.deb" },
+        @{ Platform = 'Fedora x86-64';    File = "inillucent-$Version.x86_64.rpm" },
+        @{ Platform = 'Fedora aarch64';   File = "inillucent-$Version.aarch64.rpm" }
+    )
+}
+
+function Test-SiteVersion {
+    <#
+    .SYNOPSIS
+        Whether inillucent.com offers this release, on every platform it ships.
+
+    .DESCRIPTION
+        **The site is where a person actually gets the software**, so a release that reached GitHub
+        and the registries and left the site behind is a release most people cannot get. Four things
+        are asked, and each one has been wrong at least once:
+
+        1. `downloads/VERSION` names this release.
+        2. The **home page links an artifact for every platform in the table.** A page that stopped
+           offering a platform passes every check that only reads SHA256SUMS.
+        3. Every name in the published SHA256SUMS is served. A name with nothing behind it reads, to
+           anyone running `sha256sum -c`, exactly like a download that was tampered with.
+        4. What is served is **this build**: each artifact's Content-Length matches the file in
+           dist/, and the smallest one is fetched and hashed in full. A 200 says a file is there, not
+           that it is this release's file - a stale artifact of the right name passes a HEAD.
+
+        Hashing all nine would pull about 240 MB on every release. Length catches a truncated or
+        stale file, the full SHA256SUMS is published for anyone who wants certainty, and one artifact
+        is hashed end to end so the published checksums are known to describe what is served.
+
+    .PARAMETER Version
+        The version being released.
+    #>
+    param([string] $Version)
+    $base = 'https://inillucent.com/downloads'
+
     try {
-        $served = (Invoke-WebRequest -Uri 'https://inillucent.com/downloads/VERSION' -UseBasicParsing -TimeoutSec 30).Content.Trim()
+        $served = (Invoke-WebRequest -Uri "$base/VERSION" -UseBasicParsing -TimeoutSec 30).Content.Trim()
     } catch {
         return "inillucent.com/downloads/VERSION could not be read: $($_.Exception.Message)"
     }
     if ($served -ne $Version) { return "inillucent.com serves $served, not $Version" }
 
-    # **Every name in the published SHA256SUMS is fetched (task-1995).** Reading VERSION says the
-    # page was written; it says nothing about the files. The live 0.1.3 had a SHA256SUMS naming a
-    # macOS zip that answered 404, no line at all for the .pkg the page offers first, and later an
-    # arm64 .deb and an aarch64 .rpm that were built and hashed but never copied. Each one is
-    # indistinguishable, to a person running `sha256sum -c`, from a download that was interfered
-    # with. Checking hashes here rather than only names would mean pulling about 240 MB on every
-    # release, so this asks for the first byte and trusts Content-Length; the hashes are checked
-    # against the files on disk when SHA256SUMS is written.
     try {
-        $sums = (Invoke-WebRequest -Uri 'https://inillucent.com/downloads/SHA256SUMS' -UseBasicParsing -TimeoutSec 30).Content
+        $page = (Invoke-WebRequest -Uri 'https://inillucent.com/' -UseBasicParsing -TimeoutSec 30).Content
+    } catch {
+        return "inillucent.com could not be read: $($_.Exception.Message)"
+    }
+    $unlinked = @(Get-SitePlatforms -Version $Version | Where-Object { $page -notlike "*$($_.File)*" })
+    if ($unlinked.Count -gt 0) {
+        return "the download page offers no $(($unlinked | ForEach-Object { $_.Platform }) -join ', ')"
+    }
+
+    try {
+        $sums = (Invoke-WebRequest -Uri "$base/SHA256SUMS" -UseBasicParsing -TimeoutSec 30).Content
     } catch {
         return "inillucent.com/downloads/SHA256SUMS could not be read: $($_.Exception.Message)"
     }
+
     $absent = @()
+    $wrongSize = @()
+    $smallest = $null
     foreach ($line in ($sums -split "`n")) {
         $name = ($line -split '\s+', 2)[1]
         if (-not $name) { continue }
         $name = $name.Trim()
+        $local = Join-Path $script:Dist $name
         try {
-            $head = Invoke-WebRequest -Uri "https://inillucent.com/downloads/$name" -Method Head -UseBasicParsing -TimeoutSec 30
-            if ([int] $head.StatusCode -ne 200) { $absent += $name }
+            $head = Invoke-WebRequest -Uri "$base/$name" -Method Head -UseBasicParsing -TimeoutSec 30
+            if ([int] $head.StatusCode -ne 200) { $absent += $name; continue }
+            if (Test-Path -LiteralPath $local) {
+                $expected = (Get-Item -LiteralPath $local).Length
+                $actual = [int64] $head.Headers['Content-Length'][0]
+                if ($actual -ne $expected) { $wrongSize += "$name is $actual bytes, built as $expected" }
+                if (-not $smallest -or $expected -lt $smallest.Size) {
+                    $smallest = @{ Name = $name; Size = $expected; Sum = ($line -split '\s+', 2)[0] }
+                }
+            }
         } catch {
             $absent += $name
         }
     }
-    if ($absent.Count -gt 0) {
-        return "SHA256SUMS names $($absent.Count) file(s) inillucent.com does not serve: $($absent -join ', ')"
+    if ($absent.Count -gt 0) { return "SHA256SUMS names $($absent.Count) file(s) inillucent.com does not serve: $($absent -join ', ')" }
+    if ($wrongSize.Count -gt 0) { return "served artifacts differ from the build: $($wrongSize -join '; ')" }
+
+    if ($smallest) {
+        $scratch = Join-Path ([System.IO.Path]::GetTempPath()) ("inillucent-verify-" + [guid]::NewGuid().ToString('N'))
+        try {
+            Invoke-WebRequest -Uri "$base/$($smallest.Name)" -OutFile $scratch -UseBasicParsing -TimeoutSec 300
+            $hash = (Get-FileHash -LiteralPath $scratch -Algorithm SHA256).Hash.ToLower()
+            if ($hash -ne $smallest.Sum) {
+                return "$($smallest.Name) is served with SHA-256 $hash, and SHA256SUMS says $($smallest.Sum)"
+            }
+        } catch {
+            return "$($smallest.Name) could not be fetched to hash: $($_.Exception.Message)"
+        } finally {
+            Remove-Item -LiteralPath $scratch -Force -ErrorAction SilentlyContinue
+        }
     }
     return $null
 }
