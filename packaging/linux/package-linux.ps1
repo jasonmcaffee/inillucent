@@ -47,7 +47,7 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path $root 'packaging/stage-layout.ps1')
 
-$nfpm = Join-Path $root 'tools/cross/bin/nfpm.exe'
+$nfpm = Join-Path (Get-CrossBin -Root $root) 'nfpm.exe'
 if (-not (Test-Path -LiteralPath $nfpm)) {
     throw 'nfpm is missing. Run: pwsh tools/cross/fetch-toolchain.ps1'
 }

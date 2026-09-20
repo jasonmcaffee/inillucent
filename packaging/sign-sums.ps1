@@ -48,7 +48,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 
-$minisign = Join-Path $root 'tools/cross/bin/minisign.exe'
+. (Join-Path $PSScriptRoot 'stage-layout.ps1')
+$minisign = Join-Path (Get-CrossBin -Root $root) 'minisign.exe'
 if (-not (Test-Path -LiteralPath $minisign)) {
     throw 'minisign is missing. Run: pwsh tools/cross/fetch-toolchain.ps1'
 }

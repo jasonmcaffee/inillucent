@@ -78,7 +78,7 @@ $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 . (Join-Path (Split-Path -Parent $PSScriptRoot) 'stage-layout.ps1')
 . (Join-Path $PSScriptRoot 'apple-credentials.ps1')
 
-$crossBin = Join-Path $root 'tools/cross/bin'
+$crossBin = Get-CrossBin -Root $root
 $rcodesign = Join-Path $crossBin 'rcodesign.exe'
 $cargoZigbuild = Join-Path $crossBin 'cargo-zigbuild.exe'
 $zigDir = Join-Path $crossBin 'zig'

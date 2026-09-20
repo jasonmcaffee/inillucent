@@ -145,7 +145,7 @@ foreach ($artifact in @("$name.tar.gz", "$name.zip", "inillucent-$Version.pkg"))
 
 # --- the signature, read out of the binaries themselves ---------------------
 
-$rcodesign = Join-Path $root 'tools/cross/bin/rcodesign.exe'
+$rcodesign = Join-Path (Get-CrossBin -Root $root) 'rcodesign.exe'
 if (Test-Path -LiteralPath $rcodesign) {
     Write-Host ''
     Write-Host 'verifying the signatures'

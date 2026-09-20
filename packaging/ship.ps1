@@ -111,11 +111,10 @@ if ($commonDir) {
 # zig, rcodesign and the macOS SDK are gitignored - they are a few gigabytes of downloaded
 # toolchain, not source - so a fresh worktree has an empty tools/cross/bin and the build route skips
 # with "run fetch-toolchain". The toolchain is not per checkout, so the main one is used.
-$script:CrossBin = Join-Path $root 'tools/cross/bin'
-if (-not (Get-ChildItem -Path $script:CrossBin -File -ErrorAction SilentlyContinue)) {
-    $shared = Join-Path $script:MainCheckout 'tools/cross/bin'
-    if (Get-ChildItem -Path $shared -File -ErrorAction SilentlyContinue) { $script:CrossBin = $shared }
-}
+$script:CrossBin = Get-CrossBin -Root $root
+# Exported so every script this one calls resolves the same directory, rather than each repeating
+# the search and one of them getting a different answer from the preflight that cleared it.
+$env:INILLUCENT_CROSS_BIN = $script:CrossBin
 $script:SitePath = if ($SitePath) { $SitePath } else { Join-Path (Split-Path -Parent $script:MainCheckout) 'inillucent-site' }
 $script:TapPath = if ($TapPath) { $TapPath } else { Join-Path (Split-Path -Parent $script:MainCheckout) 'homebrew-inillucent' }
 $script:Packaging = $PSScriptRoot
@@ -260,6 +259,18 @@ function Set-ReleaseVersion {
         }
         Write-Host "   $relative -> $Version ($($carrier.What))"
         if (-not $WhatIf) { [System.IO.File]::WriteAllText($carrier.Path, $updated) }
+    }
+
+    # **Cargo.lock carries the workspace's own versions, and the build passes --locked.** Writing
+    # 0.1.5 into Cargo.toml and leaving the lock at 0.1.4 made the first build of the release stop
+    # at `cannot update the lock file because --locked was passed`, after the version phase had
+    # already rewritten seven files. `--offline` because nothing about a version bump needs the
+    # network, and `--workspace` so only the members' own entries move - a release is not the place
+    # to pick up a new dependency.
+    if (-not $WhatIf -and $Version -ne $Previous) {
+        Write-Host '   Cargo.lock'
+        & cargo update --manifest-path (Join-Path $root 'Cargo.toml') --workspace --offline *> $null
+        if ($LASTEXITCODE -ne 0) { throw 'refreshing Cargo.lock after the version bump failed' }
     }
 
     Find-VersionStraggler -Previous $Previous -Version $Version
@@ -548,8 +559,11 @@ function Get-Routes {
                 $null
             }
             Run    = {
-                & (Join-Path $script:Packaging 'publish-site.ps1') -Version $Version -Stage
-                & (Join-Path $script:Packaging 'publish-site.ps1') -Version $Version -Link
+                # -SitePath, because publish-site.ps1 defaults to a sibling of its own checkout and
+                # a release is cut from a worktree, where that is nothing. Preflight checked the
+                # path this script resolved and the run used a different one.
+                & (Join-Path $script:Packaging 'publish-site.ps1') -Version $Version -Stage -SitePath $script:SitePath
+                & (Join-Path $script:Packaging 'publish-site.ps1') -Version $Version -Link -SitePath $script:SitePath
             }
             Verify = { Test-SiteVersion -Version $Version }
         },

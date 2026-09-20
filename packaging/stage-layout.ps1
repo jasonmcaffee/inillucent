@@ -302,6 +302,39 @@ function New-InillucentZip {
     return $archive
 }
 
+function Get-CrossBin {
+    <#
+    .SYNOPSIS
+        Where zig, rcodesign, minisign and nfpm are.
+
+    .DESCRIPTION
+        **It is not always inside this checkout (task-1995).** The toolchain is gitignored - a few
+        gigabytes of downloaded zig, rcodesign and the macOS SDK, not source - so a `git worktree`
+        has an empty `tools/cross/bin`, and a release is normally cut from a worktree because the
+        ordinary checkout is where work happens and is frequently dirty. Every script that reached
+        for a tool then stopped with "run fetch-toolchain", which reads as a machine that was never
+        set up rather than as a checkout that shares one.
+
+        INILLUCENT_CROSS_BIN wins, then this checkout if it has anything in it, then the repository
+        the worktree belongs to - `git rev-parse --git-common-dir` names its .git from inside any
+        worktree.
+
+    .PARAMETER Root
+        The repository root the caller is working in.
+    #>
+    param([string] $Root)
+    if ($env:INILLUCENT_CROSS_BIN) { return $env:INILLUCENT_CROSS_BIN }
+    $here = Join-Path $Root 'tools/cross/bin'
+    if (Get-ChildItem -Path $here -File -ErrorAction SilentlyContinue) { return $here }
+    $commonDir = (& git -C $Root rev-parse --git-common-dir 2>$null)
+    if ($commonDir) {
+        $resolved = if ([System.IO.Path]::IsPathRooted($commonDir)) { $commonDir } else { Join-Path $Root $commonDir }
+        $shared = Join-Path (Split-Path -Parent ([System.IO.Path]::GetFullPath($resolved))) 'tools/cross/bin'
+        if (Get-ChildItem -Path $shared -File -ErrorAction SilentlyContinue) { return $shared }
+    }
+    return $here
+}
+
 function Update-Sha256Sums {
     <#
     .SYNOPSIS

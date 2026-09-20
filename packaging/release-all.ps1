@@ -65,7 +65,7 @@ $root = Split-Path -Parent $PSScriptRoot
 # objects off the C: drive, which has filled on this machine before.
 $targetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $root 'target' }
 
-$crossBin = Join-Path $root 'tools/cross/bin'
+$crossBin = Get-CrossBin -Root $root
 $zigDir = Join-Path $crossBin 'zig'
 $cargoZigbuild = Join-Path $crossBin 'cargo-zigbuild.exe'
 
