@@ -559,7 +559,15 @@ function Get-Routes {
             Name  = 'mirror'
             What  = 'the public source mirror'
             Needs = { $null }
-            Run   = { & (Join-Path $script:Packaging 'mirror-github.ps1') -Version $Version -Push -Verify }
+            # **-Push alone. -Verify means "check the mirror as it stands and exit".** Passing both
+            # made this route print a tidy report of the mirror's existing tags and push nothing,
+            # every time, while reporting success - so the public source mirror was never updated by
+            # a release. The damage showed up two routes later: `gh release create` against a tag
+            # that does not exist makes one at the repository's current HEAD, which was the previous
+            # release's commit, and the Go module tag then followed it. proxy.golang.org caches a
+            # module version permanently on first fetch, so v0.1.5 of the Go module serves 0.1.3's
+            # source and cannot be corrected.
+            Run   = { & (Join-Path $script:Packaging 'mirror-github.ps1') -Version $Version -Push }
         },
         @{
             Name   = 'github'
