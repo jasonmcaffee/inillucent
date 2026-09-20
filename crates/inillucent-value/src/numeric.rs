@@ -16,6 +16,8 @@
 //! `sqlite3AtoF`, `real_to_i64` is `sqlite3RealToI64`, `real_same_as_int` is
 //! `sqlite3RealSameAsInt`, and `real_to_text` is `%!.15g`.
 
+use std::borrow::Cow;
+
 use crate::encoding::{self, TextEncoding};
 
 /// The largest positive value an `i64` holds, as SQLite's `LARGEST_INT64`.
@@ -147,9 +149,20 @@ pub fn is_digit(byte: u8) -> bool {
 /// SQLite's scanners walk UTF-16 input two bytes at a time and treat a
 /// non-zero high byte as "this is not a number", which is exactly what
 /// dropping to the low byte and remembering that it happened reproduces.
-fn ascii_view(bytes: &[u8], encoding: TextEncoding) -> (Vec<u8>, bool) {
+///
+/// **A `Cow` and not a `Vec`, because UTF-8 needs no view at all** (task-2006). This
+/// returned `bytes.to_vec()` for UTF-8, so every call of `atoi64` and `atof` copied its
+/// input to the heap in order to read it - on the compile path for every numeric literal,
+/// and at run time for every text value given numeric affinity, compared with a number or
+/// passed through `CAST`. A backtrace on each allocation a `SELECT 1` compile makes found
+/// this one under `atoi64` for the single byte `1`. UTF-16 still builds a vector, because
+/// there the low bytes are a new sequence rather than a window on an existing one.
+///
+/// @param bytes - the text, in `encoding`
+/// @param encoding - how the text is encoded
+fn ascii_view(bytes: &[u8], encoding: TextEncoding) -> (Cow<'_, [u8]>, bool) {
     match encoding {
-        TextEncoding::Utf8 => (bytes.to_vec(), false),
+        TextEncoding::Utf8 => (Cow::Borrowed(bytes), false),
         TextEncoding::Utf16Le | TextEncoding::Utf16Be => {
             let big_endian = encoding == TextEncoding::Utf16Be;
             let mut output = Vec::with_capacity(bytes.len() / 2);
@@ -173,7 +186,7 @@ fn ascii_view(bytes: &[u8], encoding: TextEncoding) -> (Vec<u8>, bool) {
                 output.push(low);
                 index = index.saturating_add(2);
             }
-            (output, non_ascii)
+            (Cow::Owned(output), non_ascii)
         }
     }
 }

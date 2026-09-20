@@ -25,7 +25,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::path::PathBuf;
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use inillucent_compat::newengine::ImportedDatabase;
@@ -43,6 +43,102 @@ const DEFAULT_ITERATIONS: u32 = 20_000;
 /// count is what turns that into a list of things to stop allocating.
 static ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 
+/// How many size buckets the histogram keeps, each eight bytes wide.
+///
+/// **Because a count of 24 says to stop allocating and not what to stop allocating.**
+/// A `SELECT 1` compile makes two dozen allocations and the only cheap fingerprint of
+/// one is its size: a `Vec<usize>` of four is 32 bytes and a `String` of a table name is
+/// not, so a histogram of sizes turns the count into a list of candidates to go and read
+/// the code for. The last bucket holds everything above it.
+const BUCKETS: usize = 96;
+
+/// How many allocations of each size the recorded region made.
+///
+/// A fixed array of counters rather than a list of sizes, because recording inside the
+/// allocator must not allocate: pushing to a `Vec` here would call this function from
+/// inside itself.
+static SIZES: [AtomicU64; BUCKETS] = [const { AtomicU64::new(0) }; BUCKETS];
+
+/// Whether the histogram is being recorded. Off for every timed pass.
+static RECORDING: AtomicBool = AtomicBool::new(false);
+
+/// The largest allocation a backtrace is captured for, or zero for none.
+///
+/// **Because a size is a candidate and a call site is an answer.** Eight allocations of
+/// under eight bytes each are 30% of what a `SELECT 1` compile costs on this machine, and
+/// nothing about "under eight bytes" says which `Vec` asked for them. Capturing where they
+/// came from is the difference between reading the whole compiler and reading four
+/// functions.
+static TRACE_UPTO: AtomicU64 = AtomicU64::new(0);
+
+/// Where each traced allocation came from, in the order they happened.
+///
+/// Capturing and formatting a backtrace allocates, so `RECORDING` is turned off around
+/// the capture: what the backtrace machinery allocates is not part of the compile being
+/// measured, and counting it would make the instrument its own subject.
+static TRACES: std::sync::OnceLock<std::sync::Mutex<Vec<(usize, String)>>> =
+    std::sync::OnceLock::new();
+
+/// Captures where one allocation was made, when tracing asks for that size.
+///
+/// @param size - how many bytes were asked for
+fn trace(size: usize) {
+    let upto = TRACE_UPTO.load(Ordering::Relaxed) as usize;
+    if upto == 0 || size > upto || !RECORDING.load(Ordering::Relaxed) {
+        return;
+    }
+    RECORDING.store(false, Ordering::Relaxed);
+    let captured = std::backtrace::Backtrace::force_capture().to_string();
+    let held = TRACES.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    if let Ok(mut traces) = held.lock() {
+        traces.push((size, captured));
+    }
+    RECORDING.store(true, Ordering::Relaxed);
+}
+
+/// Prints the frames of each traced allocation that name this workspace.
+///
+/// The standard library and the backtrace machinery are dropped: every frame that
+/// survives is a line of this repository, which is the only part a fix can touch.
+fn print_traces() {
+    let held = TRACES.get_or_init(|| std::sync::Mutex::new(Vec::new()));
+    let Ok(mut traces) = held.lock() else {
+        return;
+    };
+    for (nth, (size, captured)) in traces.iter().enumerate() {
+        println!("    [{nth}] {size} bytes");
+        let mut shown = 0usize;
+        for line in captured.lines() {
+            let trimmed = line.trim();
+            if !trimmed.contains("inillucent") || trimmed.contains("prepareprofile") {
+                continue;
+            }
+            if trimmed.starts_with("at ") {
+                continue;
+            }
+            println!("         {trimmed}");
+            shown = shown.saturating_add(1);
+            if shown >= 6 {
+                break;
+            }
+        }
+    }
+    traces.clear();
+}
+
+/// Records one allocation's size in the histogram, when recording is on.
+///
+/// @param size - how many bytes were asked for
+fn record(size: usize) {
+    if !RECORDING.load(Ordering::Relaxed) {
+        return;
+    }
+    let bucket = size.div_euclid(8).min(BUCKETS.saturating_sub(1));
+    if let Some(counter) = SIZES.get(bucket) {
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// An allocator that counts, and otherwise delegates to the system one.
 struct CountingAllocator;
 
@@ -53,6 +149,8 @@ unsafe impl GlobalAlloc for CountingAllocator {
     // SAFETY: the layout is the caller's, forwarded unchanged.
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        record(layout.size());
+        trace(layout.size());
         // SAFETY: forwarded unchanged to the system allocator.
         unsafe { System.alloc(layout) }
     }
@@ -66,6 +164,8 @@ unsafe impl GlobalAlloc for CountingAllocator {
     // SAFETY: the pointer and layout are the ones this allocator handed out.
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
         ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        record(size);
+        trace(size);
         // SAFETY: forwarded unchanged to the allocator that made the pointer.
         unsafe { System.realloc(pointer, layout, size) }
     }
@@ -89,6 +189,42 @@ fn allocations(
     }
     let after = ALLOCATIONS.load(Ordering::Relaxed);
     Ok((after.saturating_sub(before)) as f64 / f64::from(iterations.max(1)))
+}
+
+/// Prints the size of every allocation one call of a closure makes.
+///
+/// One call and not an average: the point is the list, and a size seen twice in one
+/// compile is two rows of it rather than a fraction.
+///
+/// @param label - what the region is, for the heading
+/// @param body - the work to record
+fn sizes(label: &str, mut body: impl FnMut() -> Result<(), String>) -> Result<(), String> {
+    // A warm pass outside the recording, so a lazy static allocated once is not counted
+    // as part of a compile.
+    body()?;
+    for counter in SIZES.iter() {
+        counter.store(0, Ordering::Relaxed);
+    }
+    RECORDING.store(true, Ordering::Relaxed);
+    let outcome = body();
+    RECORDING.store(false, Ordering::Relaxed);
+    outcome?;
+    println!("  {label}");
+    let mut total = 0u64;
+    for (bucket, counter) in SIZES.iter().enumerate() {
+        let count = counter.load(Ordering::Relaxed);
+        if count == 0 {
+            continue;
+        }
+        total = total.saturating_add(count);
+        let low = bucket.saturating_mul(8);
+        match bucket == BUCKETS.saturating_sub(1) {
+            true => println!("    {count:>4} x  {low} bytes or more"),
+            false => println!("    {count:>4} x  {low}..{} bytes", low.saturating_add(7)),
+        }
+    }
+    println!("    {total:>4} allocations in total");
+    Ok(())
 }
 
 /// Returns the average nanoseconds one call of a closure took.
@@ -137,6 +273,8 @@ fn fixture() -> Result<ImportedDatabase, String> {
 }
 
 fn main() -> ExitCode {
+    let mut histogram = false;
+    let mut trace_upto = 0u64;
     let mut iterations = DEFAULT_ITERATIONS;
     let mut statements: Vec<String> = Vec::new();
     let mut arguments = std::env::args().skip(1);
@@ -147,6 +285,14 @@ fn main() -> ExitCode {
                     .next()
                     .and_then(|value| value.parse().ok())
                     .unwrap_or(DEFAULT_ITERATIONS)
+            }
+            "--sizes" => histogram = true,
+            "--trace" => {
+                histogram = true;
+                trace_upto = arguments
+                    .next()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(8);
             }
             "--sql" => {
                 if let Some(sql) = arguments.next() {
@@ -167,6 +313,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    TRACE_UPTO.store(trace_upto, Ordering::Relaxed);
     println!("## compiling a statement, stage by stage   (nanoseconds)");
     println!(
         "  {:<34} {:>8} {:>8} {:>8} {:>10} {:>9} {:>9} {:>7} {:>7} {:>7}",
@@ -182,7 +329,7 @@ fn main() -> ExitCode {
         "a/pipe"
     );
     for sql in &statements {
-        match profile(&mut database, sql, iterations) {
+        match profile(&mut database, sql, iterations, histogram) {
             Ok(()) => {}
             Err(why) => {
                 eprintln!("{sql}: {why}");
@@ -198,7 +345,13 @@ fn main() -> ExitCode {
 /// @param database - the database to compile against
 /// @param sql - the statement
 /// @param iterations - how many calls to average over
-fn profile(database: &mut ImportedDatabase, sql: &str, iterations: u32) -> Result<(), String> {
+/// @param histogram - whether to also print the size of every allocation
+fn profile(
+    database: &mut ImportedDatabase,
+    sql: &str,
+    iterations: u32,
+    histogram: bool,
+) -> Result<(), String> {
     let limits = inillucent_base::limits::Limits::default();
     let parse = per(iterations, || {
         inillucent_sql::parser::parse_next_statement(sql.as_bytes(), 0, &limits)
@@ -267,6 +420,33 @@ fn profile(database: &mut ImportedDatabase, sql: &str, iterations: u32) -> Resul
             .map(|_| ())
             .map_err(|e| format!("{e:?}"))
     })?;
+    if histogram {
+        println!("## every allocation one compile makes, by size   ({sql})");
+        sizes("parsing", || {
+            inillucent_sql::parser::parse_next_statement(sql.as_bytes(), 0, &limits)
+                .map(|_| ())
+                .map_err(|error| format!("{error:?}"))
+        })?;
+        sizes("parse, bind and plan", || {
+            database.plan(sql).map(|_| ()).map_err(|e| format!("{e:?}"))
+        })?;
+        sizes("the whole pipeline the gate builds", || {
+            let plan = database.plan(sql).map_err(|e| format!("{e:?}"))?;
+            let choice = database.prepare(&plan).map_err(|e| format!("{e:?}"))?;
+            let sink = Box::new(inillucent_exec::ops::Collect::default());
+            database
+                .pipeline(&plan, &choice, &params, sink)
+                .map(|_| ())
+                .map_err(|e| format!("{e:?}"))
+        })?;
+        if TRACE_UPTO.load(Ordering::Relaxed) > 0 {
+            println!(
+                "  where each allocation of {} bytes or fewer came from",
+                TRACE_UPTO.load(Ordering::Relaxed)
+            );
+            print_traces();
+        }
+    }
     let shown: String = sql.chars().take(34).collect();
     println!(
         "  {shown:<34} {parse:>8.1} {bind:>8.1} {plan:>8.1} {physical:>10.1} {built:>9.1} {prepared:>9.1} {parse_allocs:>7.1} {plan_allocs:>7.1} {built_allocs:>7.1}"

@@ -13,6 +13,9 @@
 //! and only when no real column shadows them.
 
 mod cte;
+mod literal;
+
+use literal::integer_literal;
 
 pub use cte::CteBinding;
 use cte::RecursiveTarget;
@@ -3491,12 +3494,49 @@ impl<'a> Binder<'a> {
         self.record_dependency(database);
     }
 
+    /// Binds a unary operator over one expression.
+    ///
+    /// **A negated integer literal is one literal, not an operator over one.**
+    /// `-9223372036854775808` is the smallest integer there is; `9223372036854775808` on
+    /// its own is one past the largest, so binding the operand first turned it into a real
+    /// and the negation then produced `-9.2233720368547758e+18`. Every comparison, every
+    /// affinity and every write of that value is a different value from the one that was
+    /// written. SQLite folds the sign into the literal in its own parser for exactly this
+    /// reason.
+    ///
+    /// @param op - the operator
+    /// @param operand - the expression it applies to
+    fn bind_unary(&mut self, op: UnaryOp, operand: ExprId) -> Result<BoundExpr, ParseError> {
+        if op == UnaryOp::Negate {
+            if let Some(Expr::Literal(Literal::Integer(text))) = self.ast.expr(operand) {
+                let mut negated = Vec::with_capacity(text.len().saturating_add(1));
+                negated.push(b'-');
+                negated.extend_from_slice(text);
+                return Ok(integer_literal(&negated));
+            }
+        }
+        let operand = Box::new(self.bind_expr(operand)?);
+        match op {
+            UnaryOp::Not => Ok(BoundExpr::Not(operand)),
+            _ => Ok(BoundExpr::Unary { op, operand }),
+        }
+    }
+
     /// Binds one expression.
     pub fn bind_expr(&mut self, id: ExprId) -> Result<BoundExpr, ParseError> {
         let span = self.ast.expr_span(id);
         let Some(expr) = self.ast.expr(id) else {
             return Err(unsupported("missing expression", span));
         };
+        // **A literal is bound off the arena, before the clone** (task-2006). `Literal`
+        // owns its digits, so `SELECT 1` allocated one byte to copy the byte `1` in order
+        // to match on it, and a statement full of literals paid that per literal. The
+        // clone below is a borrow split rather than a choice - the arms call `&mut self`
+        // methods and need the owned names and sub-expression lists their variants hold -
+        // but a literal needs neither.
+        if let Expr::Literal(literal) = expr {
+            return self.bind_literal(literal, span);
+        }
         match expr.clone() {
             Expr::Literal(literal) => self.bind_literal(&literal, span),
             Expr::Parameter { index, .. } => Ok(BoundExpr::Parameter(index)),
@@ -3512,30 +3552,7 @@ impl<'a> Binder<'a> {
                 },
                 span,
             )),
-            Expr::Unary { op, operand } => {
-                // **A negated integer literal is one literal, not an operator
-                // over one.** `-9223372036854775808` is the smallest integer
-                // there is; `9223372036854775808` on its own is one past the
-                // largest, so binding the operand first turned it into a real
-                // and the negation then produced `-9.2233720368547758e+18`.
-                // Every comparison, every affinity and every write of that
-                // value is a different value from the one that was written.
-                // SQLite folds the sign into the literal in its own parser for
-                // exactly this reason.
-                if op == UnaryOp::Negate {
-                    if let Some(Expr::Literal(Literal::Integer(text))) = self.ast.expr(operand) {
-                        let mut negated = Vec::with_capacity(text.len().saturating_add(1));
-                        negated.push(b'-');
-                        negated.extend_from_slice(text);
-                        return Ok(integer_literal(&negated));
-                    }
-                }
-                let operand = Box::new(self.bind_expr(operand)?);
-                match op {
-                    UnaryOp::Not => Ok(BoundExpr::Not(operand)),
-                    _ => Ok(BoundExpr::Unary { op, operand }),
-                }
-            }
+            Expr::Unary { op, operand } => self.bind_unary(op, operand),
             Expr::Binary { op, left, right } => self.bind_binary(op, left, right),
             Expr::Collate { operand, collation } => {
                 let name = self.ast.text(collation);
@@ -4770,47 +4787,6 @@ fn apply_collation(expr: BoundExpr, collation: Collation) -> BoundExpr {
         operand: Box::new(expr),
         collation,
     }
-}
-
-/// Converts an integer literal's text into a bound value.
-///
-/// A decimal literal too large for `i64` becomes a real, which is what SQLite
-/// does rather than failing, and a hexadecimal literal wraps into `i64`, which
-/// is also what SQLite does.
-fn integer_literal(text: &[u8]) -> BoundExpr {
-    // The sign is read off first, so `0x` is still recognised under one: the
-    // binder folds a unary minus into the literal (see `Expr::Unary`), and
-    // `-0x10` arrives here as `-0x10` rather than as an operator over `0x10`.
-    let (negative, digits) = match text.first() {
-        Some(b'-') => (true, text.get(1..).unwrap_or(&[])),
-        _ => (false, text),
-    };
-    if digits.len() > 2
-        && digits.first() == Some(&b'0')
-        && digits
-            .get(1)
-            .is_some_and(|byte| byte.eq_ignore_ascii_case(&b'x'))
-    {
-        let mut value: u64 = 0;
-        for byte in digits.get(2..).unwrap_or(&[]) {
-            let digit = (*byte as char).to_digit(16).unwrap_or(0) as u64;
-            value = value.wrapping_mul(16).wrapping_add(digit);
-        }
-        let value = value as i64;
-        return BoundExpr::Integer(if negative {
-            value.wrapping_neg()
-        } else {
-            value
-        });
-    }
-    let cleaned: Vec<u8> = text.iter().copied().filter(|byte| *byte != b'_').collect();
-    let (value, syntax) =
-        inillucent_value::numeric::atoi64(&cleaned, inillucent_value::TextEncoding::Utf8);
-    if syntax.is_exact() {
-        return BoundExpr::Integer(value);
-    }
-    let parsed = inillucent_value::numeric::atof(&cleaned, inillucent_value::TextEncoding::Utf8);
-    BoundExpr::Real(parsed.value)
 }
 
 /// Returns a refusal whose text is computed rather than a fixed phrase.
