@@ -522,21 +522,12 @@ impl ImportedDatabase {
     pub fn write_stats(&self) -> inillucent_tree::write::WriteStats {
         let mut total = inillucent_tree::write::WriteStats::default();
         for tree in self.schema.trees.values() {
-            let held = tree.write_stats();
-            total.inserted = total.inserted.saturating_add(held.inserted);
-            total.deleted = total.deleted.saturating_add(held.deleted);
-            total.updated_in_place = total.updated_in_place.saturating_add(held.updated_in_place);
-            total.compactions = total.compactions.saturating_add(held.compactions);
-            total.splits = total.splits.saturating_add(held.splits);
-            total.merges = total.merges.saturating_add(held.merges);
-            total.room_nanos = total.room_nanos.saturating_add(held.room_nanos);
-            total.hinted = total.hinted.saturating_add(held.hinted);
-            total.descended = total.descended.saturating_add(held.descended);
-            total.compaction_nanos = total.compaction_nanos.saturating_add(held.compaction_nanos);
-            total.split_nanos = total.split_nanos.saturating_add(held.split_nanos);
-            total.choose_nanos = total.choose_nanos.saturating_add(held.choose_nanos);
-            total.source_nanos = total.source_nanos.saturating_add(held.source_nanos);
-            total.image_nanos = total.image_nanos.saturating_add(held.image_nanos);
+            // **`+` rather than one field at a time.** This added thirteen of the
+            // sixteen counters by name, so three added later - the merge, the sizing
+            // pass and the encode - read zero in every total printed from here, which
+            // is a measurement that looks taken and is not. `WriteStats::add` is a
+            // struct literal and does not compile until a new field is named in it.
+            total = total + tree.write_stats();
         }
         total
     }

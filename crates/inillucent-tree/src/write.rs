@@ -45,7 +45,7 @@ use inillucent_pool::{Database, PageId, Pool, Swip};
 use inillucent_wal::record::{Body, Structural};
 
 use crate::datum::{Datum, OwnedDatum};
-use crate::leaf::{LeafBuilder, LeafRef, Packed, Rows};
+use crate::leaf::{ImageTiming, LeafBuilder, LeafRef, Packed, Rows};
 use crate::mutate::LeafMut;
 use crate::paged::PagedTree;
 
@@ -210,7 +210,10 @@ const TIGHT_FILL: f64 = 0.95;
 ///
 /// Measured on `inillucent-writelogattrib`, 2,000 inserts into a table carrying two
 /// secondary indexes at a 32 KiB page: `compact_image` was 16.28 ms of a 46.04 ms
-/// transaction, which is 35% of it and 53% of what the two indexes cost.
+/// transaction, which was 35% of it and 53% of what the two indexes cost. It is
+/// **3.45 ms of 29.60** now - 1.16 ms pricing the page and 2.22 ms writing it - after
+/// the sizing pass stopped re-pricing the whole leaf on every row (task-2024), which
+/// is `LeafBuilder::fit_all_widths`.
 ///
 /// @param builder - the leaf builder for this tree
 /// @param rows - the leaf's live rows, sorted
@@ -218,10 +221,31 @@ pub fn compact_image<'d>(
     builder: &LeafBuilder,
     rows: &dyn crate::leaf::Rows<'d>,
 ) -> DbResult<Option<Vec<u8>>> {
+    let mut timing = ImageTiming::default();
+    compact_image_timed(builder, rows, &mut timing)
+}
+
+/// [`compact_image`], saying what its sizing pass and its encode each cost.
+///
+/// **So that what a splice could remove is a measured number rather than a share
+/// of a stage.** The sizing pass prices the page and settles the slot widths, and
+/// a caller that moved slots instead of re-encoding values would still have to run
+/// it; the encode is the half such a caller would replace. They were timed together
+/// as `image_nanos`, and the split between them moves with the page size - which is
+/// why a figure taken at one page size does not answer the question at another.
+///
+/// @param builder - the leaf builder for this tree
+/// @param rows - the leaf's live rows, sorted
+/// @param timing - where the cost of the two passes is added
+pub fn compact_image_timed<'d>(
+    builder: &LeafBuilder,
+    rows: &dyn crate::leaf::Rows<'d>,
+    timing: &mut ImageTiming,
+) -> DbResult<Option<Vec<u8>>> {
     // `pack_all_rows` rather than `pack`: a rung that cannot hold every row costs one
     // sizing pass here, where `pack` would encode a whole page image and then have it
     // discarded.
-    builder.pack_all_rows(rows, TIGHT_FILL)
+    builder.pack_all_rows_timed(rows, TIGHT_FILL, timing)
 }
 
 /// Where a mutation writes its log records.
@@ -365,6 +389,24 @@ pub struct WriteStats {
     /// Nanoseconds spent in `compact_image`: one or two sizing passes and one encode of
     /// every live row.
     pub image_nanos: u128,
+    /// Nanoseconds of `source_nanos` spent deciding *which* rows are live, rather than
+    /// reading them: the tombstone scan, the delta decode and the merge.
+    ///
+    /// **Split out because a compaction that spliced its delta rows in would still pay
+    /// this and would not pay the rest.** `source_nanos` on its own cannot say how much
+    /// of it such a compaction would keep.
+    pub merge_nanos: u128,
+    /// Nanoseconds of `image_nanos` spent pricing the page, in `fit_widths`.
+    pub sizing_nanos: u128,
+    /// Nanoseconds of `image_nanos` spent writing it, in `encode_rows_with`.
+    ///
+    /// **The one number that bounds what a splice is worth.** A compaction that moved
+    /// slots rather than re-encoding values would still size the page, so this - and
+    /// the materialisation half of `source_nanos` - is the whole of what it could
+    /// remove. Measured separately because the split between sizing and encoding moves
+    /// with the page size, and a figure taken at one page size does not answer the
+    /// question at another.
+    pub encode_nanos: u128,
     /// Nanoseconds spent deciding what will fit and building the image, which for a
     /// compaction is reading every live row of the leaf and encoding it again.
     pub choose_nanos: u128,
@@ -382,6 +424,42 @@ pub struct WriteStats {
     /// those compactions are the 69% is the next question, and a number answers it
     /// where arithmetic over four other numbers does not.
     pub room_nanos: u128,
+}
+
+impl std::ops::Add for WriteStats {
+    type Output = WriteStats;
+
+    /// Adds two trees' counters together, saturating.
+    ///
+    /// **A struct literal rather than a field at a time, so a counter added later
+    /// cannot be left out of a total silently.** The engine adds every tree's
+    /// counters up to answer `write_stats`, and it did so by assigning thirteen of
+    /// the sixteen fields by name - so the three added for this ticket read zero in
+    /// every total that was printed, which is a measurement that looks taken and is
+    /// not. This form does not compile until a new field is named here as well.
+    ///
+    /// @param other - the counters to add to these
+    fn add(self, other: WriteStats) -> WriteStats {
+        WriteStats {
+            inserted: self.inserted.saturating_add(other.inserted),
+            deleted: self.deleted.saturating_add(other.deleted),
+            updated_in_place: self.updated_in_place.saturating_add(other.updated_in_place),
+            compactions: self.compactions.saturating_add(other.compactions),
+            splits: self.splits.saturating_add(other.splits),
+            merges: self.merges.saturating_add(other.merges),
+            compaction_nanos: self.compaction_nanos.saturating_add(other.compaction_nanos),
+            split_nanos: self.split_nanos.saturating_add(other.split_nanos),
+            source_nanos: self.source_nanos.saturating_add(other.source_nanos),
+            image_nanos: self.image_nanos.saturating_add(other.image_nanos),
+            merge_nanos: self.merge_nanos.saturating_add(other.merge_nanos),
+            sizing_nanos: self.sizing_nanos.saturating_add(other.sizing_nanos),
+            encode_nanos: self.encode_nanos.saturating_add(other.encode_nanos),
+            choose_nanos: self.choose_nanos.saturating_add(other.choose_nanos),
+            hinted: self.hinted.saturating_add(other.hinted),
+            descended: self.descended.saturating_add(other.descended),
+            room_nanos: self.room_nanos.saturating_add(other.room_nanos),
+        }
+    }
 }
 
 impl PagedTree {
@@ -1057,6 +1135,55 @@ impl PagedTree {
         Ok(true)
     }
 
+    /// Reads a leaf's live rows, timing the merge apart from the read.
+    ///
+    /// **In two steps, because only the first of them is work a splice would also
+    /// do.** `live_order` decides which rows are live and in what order, which is
+    /// per delta row and so does not grow with the page size; `materialise` then
+    /// reads every value of every live row into a flat vector, which exists so that
+    /// the builder's two passes each cost an index rather than a slot decode. The
+    /// two were timed together as `source_nanos`, and a single figure for them
+    /// cannot say how much of it a compaction that moved slots would keep.
+    ///
+    /// @param leaf - the leaf being compacted, already parsed
+    fn timed_live_source<'p>(&self, leaf: &LeafRef<'p>) -> DbResult<crate::leaf::LiveSource<'p>> {
+        let sourcing = std::time::Instant::now();
+        let order = leaf.live_order()?;
+        let merged = sourcing.elapsed().as_nanos();
+        let source = order.materialise()?;
+        let mut stats = self.stats.get();
+        stats.source_nanos = stats
+            .source_nanos
+            .saturating_add(sourcing.elapsed().as_nanos());
+        stats.merge_nanos = stats.merge_nanos.saturating_add(merged);
+        self.stats.set(stats);
+        Ok(source)
+    }
+
+    /// Packs a leaf's live rows into one page, timing the sizing apart from the encode.
+    ///
+    /// `None` when they do not fit one page, which is the caller's signal to split.
+    ///
+    /// @param builder - the leaf builder for this tree
+    /// @param source - the leaf's live rows, sorted
+    fn timed_compact_image<'d>(
+        &self,
+        builder: &LeafBuilder,
+        source: &dyn Rows<'d>,
+    ) -> DbResult<Option<Vec<u8>>> {
+        let imaging = std::time::Instant::now();
+        let mut timing = ImageTiming::default();
+        let compacted = compact_image_timed(builder, source, &mut timing)?;
+        let mut stats = self.stats.get();
+        stats.image_nanos = stats
+            .image_nanos
+            .saturating_add(imaging.elapsed().as_nanos());
+        stats.sizing_nanos = stats.sizing_nanos.saturating_add(timing.sizing_nanos);
+        stats.encode_nanos = stats.encode_nanos.saturating_add(timing.encode_nanos);
+        self.stats.set(stats);
+        Ok(compacted)
+    }
+
     /// Compacts a leaf, or splits it when its live rows no longer fit one page.
     ///
     /// @param database - the file
@@ -1106,15 +1233,7 @@ impl PagedTree {
         // thousand allocations per compaction, to produce values that are
         // already on the page. `live_order` is one allocation of four bytes
         // a row and the builder reads through it.
-        let sourcing = std::time::Instant::now();
-        let source = leaf.live_source()?;
-        {
-            let mut stats = self.stats.get();
-            stats.source_nanos = stats
-                .source_nanos
-                .saturating_add(sourcing.elapsed().as_nanos());
-            self.stats.set(stats);
-        }
+        let source = self.timed_live_source(&leaf)?;
         // **A leaf with out-of-line values always takes the owned route.**
         // The fast path below packs straight out of the page, which needs
         // the guard held - and repacking an extent needs the *file*, to
@@ -1193,15 +1312,7 @@ impl PagedTree {
         // function of the rows alone, or the replayed page would differ from
         // the logged one. A compaction whose page has no room for the
         // arriving row is therefore not a tighter compaction, it is a split.
-        let imaging = std::time::Instant::now();
-        let mut compacted = compact_image(&builder, &source)?;
-        {
-            let mut stats = self.stats.get();
-            stats.image_nanos = stats
-                .image_nanos
-                .saturating_add(imaging.elapsed().as_nanos());
-            self.stats.set(stats);
-        }
+        let mut compacted = self.timed_compact_image(&builder, &source)?;
         if let Some(image) = compacted.as_mut() {
             if !LeafMut::new(image)?.room_for(needed)? {
                 compacted = None;

@@ -178,60 +178,69 @@ fn run(fixture: &Path, page_size: usize, frames: usize, iterations: u32) -> Resu
     // **The one number that says whether the compactions ARE the index cost.** The rows
     // above give how many there were, not what they took, and this workload's cost has
     // been attributed to three different things and measured to be none of them.
-    let ms = |nanos: u128| nanos as f64 / 1e6;
-    println!(
-        "  making room    : {:>9.2} ms indexed, {:>6.2} ms without, {:>6.2} ms for the two indexes",
-        ms(indexed.after.room_nanos),
-        ms(plain.after.room_nanos),
-        ms(indexed
-            .after
-            .room_nanos
-            .saturating_sub(plain.after.room_nanos))
+    report_stage(
+        "making room",
+        indexed.after.room_nanos,
+        plain.after.room_nanos,
     );
-    println!(
-        "    of which compacting  : {:>9.2} ms indexed, {:>6.2} ms without, {:>6.2} ms for the two indexes",
-        ms(indexed.after.compaction_nanos),
-        ms(plain.after.compaction_nanos),
-        ms(indexed
-            .after
-            .compaction_nanos
-            .saturating_sub(plain.after.compaction_nanos))
+    report_stage(
+        "  of which compacting",
+        indexed.after.compaction_nanos,
+        plain.after.compaction_nanos,
     );
-    println!(
-        "    of which splitting   : {:>9.2} ms indexed, {:>6.2} ms without, {:>6.2} ms for the two indexes",
-        ms(indexed.after.split_nanos),
-        ms(plain.after.split_nanos),
-        ms(indexed
-            .after
-            .split_nanos
-            .saturating_sub(plain.after.split_nanos))
+    report_stage(
+        "  of which splitting",
+        indexed.after.split_nanos,
+        plain.after.split_nanos,
     );
-    println!(
-        "    building the image   : {:>9.2} ms indexed, {:>6.2} ms without, {:>6.2} ms for the two indexes",
-        ms(indexed.after.choose_nanos),
-        ms(plain.after.choose_nanos),
-        ms(indexed
-            .after
-            .choose_nanos
-            .saturating_sub(plain.after.choose_nanos))
+    report_stage(
+        "  building the image",
+        indexed.after.choose_nanos,
+        plain.after.choose_nanos,
     );
-    println!(
-        "      live_source        : {:>9.2} ms indexed, {:>6.2} ms without, {:>6.2} ms for the two indexes",
-        ms(indexed.after.source_nanos),
-        ms(plain.after.source_nanos),
-        ms(indexed
+    report_stage(
+        "    live_source",
+        indexed.after.source_nanos,
+        plain.after.source_nanos,
+    );
+    report_stage(
+        "    pack + encode",
+        indexed.after.image_nanos,
+        plain.after.image_nanos,
+    );
+    // **The four lines a splice is decided on.** The two stages above are each one pass
+    // a caller wants and one pass it only pays for: `live_source` decides which rows are
+    // live and then reads all of them, and `compact_image` prices the page and then
+    // writes it. A compaction that spliced its delta rows into the column-major image
+    // would still merge and still size; what it would remove is the materialisation and
+    // the encode. Printed apart because the split between them moves with the page size,
+    // and the whole of the argument about whether the splice is worth building is which
+    // side of it grows.
+    report_stage(
+        "      merge",
+        indexed.after.merge_nanos,
+        plain.after.merge_nanos,
+    );
+    report_stage(
+        "      materialise",
+        indexed
             .after
             .source_nanos
-            .saturating_sub(plain.after.source_nanos))
-    );
-    println!(
-        "      pack + encode      : {:>9.2} ms indexed, {:>6.2} ms without, {:>6.2} ms for the two indexes",
-        ms(indexed.after.image_nanos),
-        ms(plain.after.image_nanos),
-        ms(indexed
+            .saturating_sub(indexed.after.merge_nanos),
+        plain
             .after
-            .image_nanos
-            .saturating_sub(plain.after.image_nanos))
+            .source_nanos
+            .saturating_sub(plain.after.merge_nanos),
+    );
+    report_stage(
+        "      sizing pass",
+        indexed.after.sizing_nanos,
+        plain.after.sizing_nanos,
+    );
+    report_stage(
+        "      encode",
+        indexed.after.encode_nanos,
+        plain.after.encode_nanos,
     );
     println!(
         "  leaf from the hint : {:>11} indexed, {:>6} without",
@@ -242,6 +251,21 @@ fn run(fixture: &Path, page_size: usize, frames: usize, iterations: u32) -> Resu
         indexed.after.descended, plain.after.descended
     );
     Ok(())
+}
+
+/// Prints one stage's cost in both rounds and the difference between them.
+///
+/// @param label - what the stage is, indented to show what it is part of
+/// @param indexed - nanoseconds with both secondary indexes
+/// @param plain - nanoseconds with neither
+fn report_stage(label: &str, indexed: u128, plain: u128) {
+    let ms = |nanos: u128| nanos as f64 / 1e6;
+    println!(
+        "  {label:<22}: {:>9.2} ms indexed, {:>6.2} ms without, {:>6.2} ms for the two indexes",
+        ms(indexed),
+        ms(plain),
+        ms(indexed.saturating_sub(plain))
+    );
 }
 
 /// What one round of the batch cost, gathered before the log is re-read.
@@ -383,6 +407,9 @@ fn subtract(
         choose_nanos: after.choose_nanos.saturating_sub(before.choose_nanos),
         source_nanos: after.source_nanos.saturating_sub(before.source_nanos),
         image_nanos: after.image_nanos.saturating_sub(before.image_nanos),
+        merge_nanos: after.merge_nanos.saturating_sub(before.merge_nanos),
+        sizing_nanos: after.sizing_nanos.saturating_sub(before.sizing_nanos),
+        encode_nanos: after.encode_nanos.saturating_sub(before.encode_nanos),
     }
 }
 

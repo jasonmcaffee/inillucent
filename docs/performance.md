@@ -211,12 +211,35 @@ written once and synced once at the commit and the bytes are not what the worklo
 | wall | 44.17 ms | 15.68 ms | 28.49 ms |
 | **making room** | **23.97 ms** | 5.10 ms | **18.87 ms** |
 
-**Making room is 54% of the transaction and 66% of what the two indexes cost**, over 181 compactions
-and 9 splits, which is about **126 µs an event**. A compaction re-encodes every live row of a 32 KiB
-leaf to reclaim a delta area of at most thirty-two rows: for narrow index rows that is on the order of
-a thousand rows re-serialised, about 84 ns each. The lever is a compaction that keeps what it is
-keeping - the leaf is column-major, so splicing the delta rows in is a shift of each column's region
-rather than a re-encode - and that is [roadmap item 2](roadmap.md).
+**Making room was 54% of the transaction** when that table was taken. It is **36%** now, 10.57 ms of
+29.60, and it has been split into the four passes it actually is (task-2024). Medians of five runs,
+same fixture, same geometry:
+
+| | with both indexes | without either |
+|---|---:|---:|
+| making room | 10.57 ms | 4.12 ms |
+| building the image | 7.77 | 1.59 |
+| - the merge, which rows are live | 1.98 | 0.50 |
+| - reading every one of them | 1.90 | 0.33 |
+| - the sizing pass | 1.16 | 0.12 |
+| - the encode | 2.22 | 0.35 |
+
+**The merge is the one pass that does not grow with the page size** - it is per delta row and a delta
+area holds at most thirty-two - and the other three roughly double between an 8 KiB page and this
+one, because a 32 KiB leaf keeps four times as many rows. An attribution of this stage taken at 8 KiB
+understates it by about half, and the gate runs at 32 KiB.
+
+**2.84 ms of the sizing pass came off by asking it a simpler question.** A compaction needs one bit,
+do all the live rows fit one page, and `fit_widths` was pricing the leaf a row at a time because its
+other caller has to stop at the first row that does not fit. `fit_all_widths` makes one pass,
+resolves once and compares once: 4.00 ms to 1.16, and the transaction 33.91 ms to 29.60. It cannot
+disagree with the incremental pass, because the price of a run of rows never falls as rows are added,
+so a leaf that fits whole had every prefix of it fit.
+
+What is left of the lever named by [roadmap item 2](roadmap.md) - a compaction that splices its delta
+rows in rather than re-encoding every kept row - is the 2.22 ms encode. It cannot also remove the
+merge or the sizing pass, because the widths it would have to reproduce exactly are a function of
+every value the leaf keeps.
 
 **And the delta area is not where the time is either.** `LeafRef::locate` walks each leaf's unsorted
 delta area on every insert, which `docs/roadmap.md` named as the cause. Counted directly at an 8 KiB

@@ -337,6 +337,22 @@ impl<'p> LeafRef<'p> {
     /// The shadowing rules are `live`'s, and the two are checked against each
     /// other by `live_order_agrees_with_live`.
     pub fn live_source(&self) -> DbResult<LiveSource<'p>> {
+        self.live_order()?.materialise()
+    }
+
+    /// Returns which rows are live, in key order, without reading their values.
+    ///
+    /// **The half of [`LeafRef::live_source`] that does not depend on what the
+    /// caller intends to do with the rows.** Deciding which rows are live is a
+    /// tombstone scan, a decode of at most [`DELTA_LIMIT`] delta rows and a
+    /// binary-search merge; reading every value of every live row afterwards is
+    /// a separate pass, and a caller that copies slots rather than values does
+    /// not need it. The two were one function, so the only way to price them
+    /// apart was to guess.
+    ///
+    /// The shadowing rules are `live`'s, and the two are checked against each
+    /// other by `live_order_agrees_with_live`.
+    pub fn live_order(&self) -> DbResult<LiveOrder<'p>> {
         let mut columns = Vec::with_capacity(self.column_count);
         for index in 0..self.column_count {
             columns.push(self.column(index)?);
@@ -405,17 +421,10 @@ impl<'p> LeafRef<'p> {
                 None => order.insert(low, entry),
             }
         }
-        // The order is settled; now one flat pass to materialise it. Reading
-        // through the mini-columns here rather than in the builder's two passes
-        // means each value is decoded once instead of twice.
-        let mut values = Vec::with_capacity(order.len().saturating_mul(self.column_count));
-        for at in &order {
-            for column in 0..self.column_count {
-                values.push(live_value(&columns, &delta, *at, column)?);
-            }
-        }
-        Ok(LiveSource {
-            values,
+        Ok(LiveOrder {
+            columns,
+            delta,
+            order,
             width: self.column_count,
         })
     }
@@ -696,6 +705,74 @@ pub enum LiveRow {
     /// In the delta area, at this index.
     Delta(u32),
 }
+/// Which rows of a leaf are live, in key order, before any of them is read.
+///
+/// **The merge on its own, so the merge and the read can be priced apart.**
+/// A compaction pays for both and a splice pays only for this one: it needs to
+/// know which rows it is keeping and in what order, and then it moves their
+/// slots rather than their values. The views it carries - the mini-columns and
+/// the decoded delta rows - are what [`LiveOrder::materialise`] reads through,
+/// and what a slot-level caller would read through instead.
+pub struct LiveOrder<'p> {
+    /// One view per column of the sorted region.
+    columns: Vec<MiniColumn<'p>>,
+    /// The delta rows, each decoded once.
+    delta: Vec<Vec<Datum<'p>>>,
+    /// Which row is live, in key order.
+    order: Vec<LiveRow>,
+    /// How many columns each row has.
+    width: usize,
+}
+
+impl<'p> LiveOrder<'p> {
+    /// How many live rows the leaf holds.
+    pub fn len(&self) -> usize {
+        self.order.len()
+    }
+
+    /// Reports whether the leaf holds none.
+    pub fn is_empty(&self) -> bool {
+        self.order.is_empty()
+    }
+
+    /// How many columns each row has.
+    pub fn width(&self) -> usize {
+        self.width
+    }
+
+    /// Where each live row sits, in key order.
+    pub fn order(&self) -> &[LiveRow] {
+        &self.order
+    }
+
+    /// The sorted region's columns, one view each.
+    pub fn columns(&self) -> &[MiniColumn<'p>] {
+        &self.columns
+    }
+
+    /// The delta rows, decoded.
+    pub fn delta(&self) -> &[Vec<Datum<'p>>] {
+        &self.delta
+    }
+
+    /// Reads every value of every live row into one flat vector.
+    ///
+    /// One allocation of `rows * width`, and each value decoded once rather
+    /// than once per pass the builder makes over it.
+    pub fn materialise(self) -> DbResult<LiveSource<'p>> {
+        let mut values = Vec::with_capacity(self.order.len().saturating_mul(self.width));
+        for at in &self.order {
+            for column in 0..self.width {
+                values.push(live_value(&self.columns, &self.delta, *at, column)?);
+            }
+        }
+        Ok(LiveSource {
+            values,
+            width: self.width,
+        })
+    }
+}
+
 /// A leaf's live rows in key order, as a [`Rows`] the builder packs from.
 ///
 /// **One allocation, and a direct index per value.** `live` produces a

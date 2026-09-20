@@ -253,6 +253,22 @@ pub enum Packed {
     /// and nowhere to put it.
     RowTooLarge,
 }
+/// What each half of packing one leaf image cost.
+///
+/// **Two numbers rather than one, because they answer different questions.**
+/// Pricing the page is work any packer has to do to know the slot widths its
+/// rows force; writing the page is the work a caller holding the rows in
+/// column-major form already could copy instead of repeat. A single figure for
+/// "pack and encode" cannot say how much of it a splice could remove, and the
+/// share of it that is the encode moves with the page size.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ImageTiming {
+    /// Nanoseconds in the sizing pass, [`LeafBuilder::fit_widths`].
+    pub sizing_nanos: u128,
+    /// Nanoseconds writing the page, [`LeafBuilder::encode_rows_with`].
+    pub encode_nanos: u128,
+}
+
 impl LeafBuilder {
     /// Returns a builder for one tree's leaves.
     ///
@@ -323,17 +339,100 @@ impl LeafBuilder {
     /// @param rows - the rows to pack, sorted by key
     /// @param fill - the fraction of the page to fill, 0.0..=1.0
     pub fn pack_all_rows<'d>(&self, rows: &dyn Rows<'d>, fill: f64) -> DbResult<Option<Vec<u8>>> {
-        let (placed, layout) = self.fit_widths(rows, 0, fill, false);
-        if placed != rows.len() {
+        let mut timing = ImageTiming::default();
+        self.pack_all_rows_timed(rows, fill, &mut timing)
+    }
+
+    /// [`LeafBuilder::pack_all_rows`], saying what each of its two passes cost.
+    ///
+    /// **One body, so the timed form and the plain one cannot disagree about the
+    /// bytes.** A compaction's page is re-derived by recovery from the same rows
+    /// rather than copied out of the log, so a second implementation of the same
+    /// sizing-then-encode sequence would be a second chance for the two to drift -
+    /// and such a divergence is silent, because the page checksum is computed over
+    /// whatever was produced.
+    ///
+    /// The two `Instant::now` calls are per leaf, not per row, against a pass that
+    /// reads every value of the leaf twice.
+    ///
+    /// @param rows - the rows to pack, sorted by key
+    /// @param fill - the fraction of the page to fill, 0.0..=1.0
+    /// @param timing - where the cost of the two passes is added
+    pub fn pack_all_rows_timed<'d>(
+        &self,
+        rows: &dyn Rows<'d>,
+        fill: f64,
+        timing: &mut ImageTiming,
+    ) -> DbResult<Option<Vec<u8>>> {
+        let sizing = std::time::Instant::now();
+        let fitted = self.fit_all_widths(rows, fill, false);
+        timing.sizing_nanos = timing
+            .sizing_nanos
+            .saturating_add(sizing.elapsed().as_nanos());
+        let Some(layout) = fitted else {
             return Ok(None);
+        };
+        let encoding = std::time::Instant::now();
+        let image = self.encode_rows_with(rows, 0, rows.len(), None, Some(&layout))?;
+        timing.encode_nanos = timing
+            .encode_nanos
+            .saturating_add(encoding.elapsed().as_nanos());
+        Ok(Some(image))
+    }
+
+    /// Returns the layout every row resolves to, or `None` when they do not all
+    /// fit one page.
+    ///
+    /// **The whole-leaf question, asked once instead of once per row.**
+    /// [`LeafBuilder::fit_widths`] prices a leaf incrementally because its other
+    /// caller, [`LeafBuilder::pack_rows`], has to stop at the first row that does
+    /// not fit - so it resolves the candidate layout and recomputes the page size
+    /// on **every row**, and copies the column shapes twice per row to be able to
+    /// undo the last one. A compaction never needs the running answer: it either
+    /// keeps every live row or it is a split.
+    ///
+    /// The two agree, and the reason is that the price of a run of rows never
+    /// falls as rows are added. A column's shape only widens, the heap only grows
+    /// and the fixed area only grows with the row count - so if the whole leaf
+    /// fits the budget, so did every prefix of it, and the layout the incremental
+    /// loop ends on is `resolve` over the shapes of all the rows, which is what
+    /// this computes directly. When they do not all fit, both answer "no" and the
+    /// layout is discarded either way. `fit_all_widths_agrees_with_fit_widths`
+    /// checks it over the value classes that make the widths move.
+    ///
+    /// Measured on `inillucent-writelogattrib`, 2,000 inserts into a table carrying
+    /// two secondary indexes at a 32 KiB page: the sizing pass inside a compaction
+    /// was 4.00 ms of a 33.91 ms transaction, which was more than the encode it
+    /// sizes for (2.27 ms).
+    ///
+    /// @param rows - the rows, sorted by key
+    /// @param fill - the fraction of the page to fill, 0.0..=1.0
+    /// @param spilling - whether the real pass will have a spiller
+    fn fit_all_widths<'d>(&self, rows: &dyn Rows<'d>, fill: f64, spilling: bool) -> Option<Layout> {
+        let budget = ((self.page_size as f64) * fill.clamp(0.05, 1.0)) as usize;
+        let total = rows.len();
+        let mut shapes: Vec<Shape> = vec![Shape::new(); self.columns.len()];
+        let mut heap = 0usize;
+        for row in 0..total {
+            for (index, column) in self.columns.iter().enumerate() {
+                let value = rows.value(row, index);
+                // One classification per value, as in `fit_widths`: the heap cost
+                // and the column's shape are both functions of the class.
+                let class = classify_at(column.physical, &value, self.threshold(index, spilling));
+                heap = heap.saturating_add(heap_cost_of(column.physical, &value, class));
+                if let Some(shape) = shapes.get_mut(index) {
+                    shape.observe(column.physical, &value, class, self.page_size);
+                }
+            }
         }
-        Ok(Some(self.encode_rows_with(
-            rows,
-            0,
-            placed,
-            None,
-            Some(&layout),
-        )?))
+        let layout = self.resolve(&shapes);
+        let size = self
+            .fixed_size_with(total, &layout.widths, layout.has_bases())
+            .saturating_add(heap);
+        match size > budget {
+            true => None,
+            false => Some(layout),
+        }
     }
 
     /// Returns how many rows from `at` would fit in one page, without encoding.
@@ -905,5 +1004,122 @@ impl LeafBuilder {
             }
         }
         Ok(page)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One leaf's worth of rows, built to move the things a layout depends on.
+    ///
+    /// @param count - how many rows
+    /// @param labels - the text values, which outlive the rows that borrow them
+    /// @param widen - whether the last row carries a value that widens a column
+    /// @param ragged - whether some rows carry a null and a wrongly typed value
+    fn rows_of<'t>(
+        count: usize,
+        labels: &'t [String],
+        widen: bool,
+        ragged: bool,
+    ) -> Vec<Vec<Datum<'t>>> {
+        (0..count)
+            .map(|n| {
+                let last = n.saturating_add(1) == count;
+                let third = match widen && last {
+                    true => Datum::Int(i64::MAX),
+                    false => Datum::Int(n as i64),
+                };
+                let second = match ragged && n % 7 == 3 {
+                    // An integer in a text column is an exception, which is
+                    // stored on the heap and narrows nothing.
+                    true => Datum::Int(n as i64),
+                    false => match ragged && n % 11 == 5 {
+                        true => Datum::Null,
+                        false => labels
+                            .get(n)
+                            .map(|held| Datum::Text(held.as_bytes()))
+                            .unwrap_or(Datum::Null),
+                    },
+                };
+                vec![Datum::Int(n as i64), second, third]
+            })
+            .collect()
+    }
+
+    /// The one-pass sizing pass answers exactly what the incremental one does.
+    ///
+    /// **Because a compaction's page is re-derived by recovery rather than copied
+    /// out of the log.** `pack_all_rows` sizes a leaf with `fit_all_widths` and
+    /// `pack_rows` sizes it with `fit_widths`, and if the two ever chose different
+    /// slot widths for the same rows, a leaf compacted by a live write and the same
+    /// leaf compacted by a replay would differ in their bytes - and nothing would
+    /// say so, because the page checksum is computed over whatever was produced.
+    ///
+    /// So this asserts the page, not just the verdict: for every row set and every
+    /// fill, the two agree on whether the rows fit, on the widths and bases they
+    /// force, and on the 4,096 bytes that come out.
+    #[test]
+    fn fit_all_widths_agrees_with_fit_widths() {
+        let columns = vec![
+            ColumnSpec::key(PhysicalType::Int64),
+            ColumnSpec::new(PhysicalType::Text),
+            ColumnSpec::new(PhysicalType::Int64),
+        ];
+        let builder = LeafBuilder::new(4_096, 1, columns, 1).expect("a builder");
+        let labels: Vec<String> = (0..400).map(|n| format!("label-{n:06}")).collect();
+        let mut fitted = 0usize;
+        let mut refused = 0usize;
+        for count in [0usize, 1, 2, 17, 64, 120, 260, 400] {
+            for widen in [false, true] {
+                for ragged in [false, true] {
+                    for fill in [0.25f64, 0.75, 0.95, 1.0] {
+                        let rows = rows_of(count, &labels, widen, ragged);
+                        let source = RowSlice(&rows);
+                        let (placed, incremental) = builder.fit_widths(&source, 0, fill, false);
+                        let whole = builder.fit_all_widths(&source, fill, false);
+                        let all = placed == rows.len();
+                        assert_eq!(
+                            all,
+                            whole.is_some(),
+                            "count {count}, widen {widen}, ragged {ragged}, fill {fill}: \
+                             incremental placed {placed} of {}, one-pass said {}",
+                            rows.len(),
+                            whole.is_some()
+                        );
+                        let Some(whole) = whole else {
+                            refused = refused.saturating_add(1);
+                            continue;
+                        };
+                        fitted = fitted.saturating_add(1);
+                        assert_eq!(
+                            incremental.widths, whole.widths,
+                            "count {count}, widen {widen}, ragged {ragged}, fill {fill}: widths"
+                        );
+                        assert_eq!(
+                            incremental.bases, whole.bases,
+                            "count {count}, widen {widen}, ragged {ragged}, fill {fill}: bases"
+                        );
+                        let by_hand = builder
+                            .encode_rows_with(&source, 0, placed, None, Some(&incremental))
+                            .expect("the incremental layout encodes");
+                        let packed = builder
+                            .pack_all_rows(&source, fill)
+                            .expect("packing does not fail")
+                            .expect("the rows fit");
+                        assert_eq!(
+                            by_hand, packed,
+                            "count {count}, widen {widen}, ragged {ragged}, fill {fill}: \
+                             the two sizing passes produced different pages"
+                        );
+                    }
+                }
+            }
+        }
+        // **The case counts are asserted so the test cannot pass by testing
+        // nothing.** A row set that never fits would make every comparison above
+        // vacuous, and a fill that always fits would never exercise the refusal.
+        assert!(fitted >= 40, "only {fitted} row sets fitted a page");
+        assert!(refused >= 10, "only {refused} row sets were refused");
     }
 }

@@ -118,24 +118,62 @@ the four thousand index row insertions, against 2.4 µs for each of the two thou
 
 **And the third measurement says which part of the index maintenance it is.** `WriteStats` gained
 `room_nanos`, the time inside `make_room` - compacting a leaf, or splitting one - because the rows
-above say how many there were and not what they took:
+above say how many there were and not what they took. It read 23.97 ms of a 44.17 ms transaction
+then, 54% of it.
 
-| | with both indexes | without either | the two indexes |
-|---|---:|---:|---:|
-| wall | 44.17 ms | 15.68 ms | 28.49 ms |
-| **making room** | **23.97 ms** | 5.10 ms | **18.87 ms** |
+**Making room is now 10.57 ms of 29.60, and it has been split into the four passes it actually is**
+(task-2024). `LeafRef::live_source` is `live_order` and then `materialise` - deciding which rows
+survive, then reading every one of them - and `compact_image` reports its sizing pass and its encode
+apart. Medians of five runs, 32 KiB page, the same fixture:
 
-**Making room is 54% of the whole transaction and 66% of what the two indexes cost**, over 181
-compactions and 9 splits - about **126 µs an event**. A compaction re-encodes every live row of a
-32 KiB leaf, which for narrow index rows is on the order of a thousand of them, so it is about 84 ns a
-row of encoding to reclaim a delta area of at most thirty-two.
+| | with both indexes | without either |
+|---|---:|---:|
+| wall | 29.60 ms | 14.30 ms |
+| **making room** | **10.57 ms** | 4.12 ms |
+| building the image | 7.77 | 1.59 |
+| - the merge, which rows are live | 1.98 | 0.50 |
+| - reading every one of them | 1.90 | 0.33 |
+| - the sizing pass | 1.16 | 0.12 |
+| - the encode | 2.22 | 0.35 |
 
-So done means a compaction that does not re-encode what it is keeping. The leaf is column-major, so
-splicing the delta rows into the sorted region is a shift of each column's region rather than a
-memcpy of the page - cheaper than re-serialising every value, and not trivial. That is its own ticket
-with its own crash campaign, and what this item now carries is the number rather than a guess: the
-delta walk was under eight per cent, the split record is 55% of the bytes and about 2% of the time,
-and making room is 54% of the transaction.
+**Only one of those four does not grow with the page size, and it is the one a splice cannot
+remove.** At an 8 KiB page the merge is 1.89 ms against 1.98 here - it is per delta row, and a delta
+area holds at most thirty-two whatever the page holds - while reading the rows, sizing the page and
+encoding it all roughly double, because a 32 KiB leaf keeps four times as many rows. An attribution
+of this stage taken at 8 KiB therefore understates it by about half, and the gate runs at 32 KiB.
+
+**2.84 ms of it came off by asking the sizing pass a simpler question.** `pack_all_rows` wants one
+bit - do *all* the live rows fit one page - and `fit_widths` answered it by pricing the leaf a row at
+a time, resolving the whole candidate layout and recomputing the page size on every row, because its
+other caller stops at the first row that does not fit. `fit_all_widths` observes every column's shape
+in one pass, resolves once and compares once: 4.00 ms to 1.16, and the transaction 33.91 to 29.60.
+The two cannot disagree, because the price of a run of rows never falls as rows are added - so a leaf
+that fits whole had every prefix of it fit, and the layout the incremental loop ends on is `resolve`
+over the shapes of all the rows. `fit_all_widths_agrees_with_fit_widths` asserts the page bytes and
+not only the verdict.
+
+**What is left for a splice is the encode, 2.22 ms of 29.60.** A compaction that spliced its delta
+rows into the column-major image rather than re-encoding every kept row still has to decide which
+rows survive, and still has to settle the slot widths: `compact_image` narrows a column when the
+widest value in it was tombstoned, and `CompactLeaf` carries an empty image and a `from_lsn` so that
+recovery re-derives those bytes rather than copying them. A splice that chose different widths would
+produce a correct page that is not the same page, and nothing would say so, because the checksum is
+computed over whatever was produced. Settling the widths means observing every value, and
+`live_source`'s own measurement says reading values straight through the mini-columns instead of
+materialising them once is *slower* - `txn.large` 4.1 ms to 5.7. So the splice's ceiling is 7% of the
+transaction, before its own memcpys, offset rewrites and class-array shifts cost anything, against a
+second row source on the hottest write path and its own crash campaign.
+
+**And two things outside making room are now larger than that ceiling.** Timed with temporary
+per-write timers, which cost about 27% of the wall themselves and so give shares rather than
+absolutes, the apply time of the same transaction divides as: making room 38%, **locating the key
+16%**, placing the row with its log and undo records 14%, **the room check 10%**, encoding the row
+3%, the descent 2%. The room check is `LeafMut::room_for`, which reads - and it is reached through
+`Pool::modify`, which takes the page mutably and marks the frame dirty, once per row written.
+
+What this item carries is the number rather than a guess: the delta walk was under eight per cent,
+the split record is 55% of the bytes and about 2% of the time, making room is 36% of the transaction,
+and inside it the encode a splice would replace is 7%.
 
 And the earlier delta walk measurement, kept because it is what closed the first guess: **8,329 calls,
 119,645 entries walked, 5.1 ms**, 14.4 entries a call, against 66.8 ms of apply time at an 8 KiB page.
