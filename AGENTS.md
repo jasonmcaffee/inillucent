@@ -53,20 +53,38 @@
 > `tools/cross/bin`, which is gitignored - `pwsh tools/cross/fetch-toolchain.ps1` fetches it, and a
 > worktree shares the main checkout's copy.
 >
-> ### Four things that will waste an afternoon
+> ### Five things that will waste an afternoon
 >
-> - **The version lives in seven files.** Add an eighth and put it in `Get-VersionCarriers`. The
->   straggler scan names any tracked file still holding the old version; two of the seven name it in
->   code rather than in a manifest, which is how they were found.
+> - **A registry pins a version's commit the first time it sees the tag, and never moves it.**
+>   proxy.golang.org and Packagist both do this. The GitHub release is created on the mirror, and
+>   `gh release create` against a tag that does not exist makes one at that repository's current
+>   HEAD - so if the mirror has not been pushed yet, both registries cache the *previous* release's
+>   source under the new version and it cannot be corrected. That is why `mirror` runs before
+>   `github`, and why `packagist` runs after both. inillucent's Go module at v0.1.5 and Composer
+>   package at v0.1.6 are permanently wrong for this reason.
+> - **The version lives in eight files.** Add a ninth and put it in `Get-VersionCarriers`. Two of
+>   the eight name it in code rather than in a manifest - the PHP installer's `NATIVE_VERSION` and
+>   the Go wrapper's `nativeVersion` - and the Go one cannot be caught by the straggler scan,
+>   because `packages/go/` legitimately names old versions in test data.
 > - **A published version is permanent.** npm, crates.io and PyPI all refuse to replace one, and an
 >   unpublished npm version number can never be reused. `inillucent@0.1.3` and `@0.1.4` on npm are
 >   deprecated because they shipped broken and could not be fixed in place.
-> - **npm needs a granular token minted to bypass two-factor**, or `-Otp <six digits>`. npm prints
->   every token as "Publish token" and gives no way to tell before the publish. Bypass tokens stop
->   working for direct publishing in January 2027; trusted publishing over OIDC is the successor.
+> - **`packaging/install.sh` must be LF and contain no carriage return.** `sh` on Debian and Ubuntu
+>   is dash, which reads a CR as part of the command and dies at `set: Illegal option -`. It shipped
+>   unrunnable for three releases, because a literal CR inside a `tr -d` argument is also what made
+>   git skip it when `.gitattributes` converted every other `.sh` to LF. The site route refuses to
+>   publish a shell script that does not parse or that holds a CR.
 > - **The Windows build needs the MSVC environment.** `onig_sys` compiles oniguruma with cl.exe, and
 >   an agent terminal has no INCLUDE, so it fails on `stddef.h`. `Import-MsvcEnvironment` runs
 >   vcvars64 when it has to.
+>
+> ### Verify against what is published, not against the build
+>
+> `Test-SiteVersion` fetches every name in the published `SHA256SUMS`, and each registry route asks
+> that registry what it serves, retrying for three minutes because they are eventually consistent.
+> Running the installs found four defects that had all reported success at release time: a
+> `curl | sh` that did not parse, one PyPI wheel where there should have been four, a Homebrew
+> formula written into the tap and never pushed, and a mirror route that had never pushed anything.
 
 This is the shortest path to being useful here. Two audiences, and the split is the first thing to
 get right:
