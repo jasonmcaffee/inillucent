@@ -666,8 +666,17 @@ function Publish-Tag {
         The version being released.
     #>
     param([string] $Version)
-    $paths = @('Cargo.toml', 'Cargo.lock', 'packages/npm/inillucent/package.json',
-        'packages/python/pyproject.toml', 'packaging/homebrew/inillucent.rb')
+    # **Read from the carrier table rather than written out again (task-1995).** This was a list of
+    # five beside a table of seven, so `packages/php/bin/inillucent-install` and the Python
+    # package's `__init__.py` were rewritten by the version phase and never committed - left as
+    # uncommitted changes in a tree the next release refuses to build from. They are the two
+    # carriers that name the version in code rather than in a manifest, which is exactly why the
+    # straggler scan had to find them in the first place; adding them to a second hand-kept list
+    # would have been the same mistake again.
+    $paths = @('Cargo.lock') + (Get-VersionCarriers -Version $Version |
+        ForEach-Object { Resolve-Path -LiteralPath $_.Path -Relative -RelativeBasePath $root -ErrorAction SilentlyContinue } |
+        ForEach-Object { $_ -replace '^\.[\/]', '' })
+    $paths = $paths | Where-Object { $_ } | Select-Object -Unique
     & git -C $root add -- $paths
     $staged = & git -C $root diff --cached --name-only
     if ($staged) {
