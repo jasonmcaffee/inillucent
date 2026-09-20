@@ -722,7 +722,13 @@ function Get-Routes {
             What   = 'the Go module tag'
             Needs  = { $null }
             Run    = { Publish-GoModule -Version $Version }
-            Verify = { Test-Registry -Url "https://proxy.golang.org/github.com/black-rainbow-labs/inillucent/packages/go/@latest" -Version $Version }
+            # **The path is case escaped, which is not optional (task-1995).** proxy.golang.org
+            # lower cases a module path and marks each original capital with a leading `!`, so
+            # `Black-Rainbow-Labs/Inillucent` is asked for as `!black-!rainbow-!labs/!inillucent`.
+            # The unescaped path is a different module that does not exist, so this reported "does
+            # not name 0.1.7 yet" for a tag that had been pushed correctly - a verifier that fails
+            # on a healthy release teaches people to ignore it.
+            Verify = { Test-Registry -Url 'https://proxy.golang.org/github.com/!black-!rainbow-!labs/!inillucent/packages/go/@latest' -Version $Version }
         },
         @{
             Name   = 'packagist'
