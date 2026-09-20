@@ -529,6 +529,7 @@ impl ImportedDatabase {
             total.compactions = total.compactions.saturating_add(held.compactions);
             total.splits = total.splits.saturating_add(held.splits);
             total.merges = total.merges.saturating_add(held.merges);
+            total.room_nanos = total.room_nanos.saturating_add(held.room_nanos);
         }
         total
     }

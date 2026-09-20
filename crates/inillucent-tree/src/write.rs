@@ -334,6 +334,16 @@ pub struct WriteStats {
     pub splits: u64,
     /// Leaves merged away.
     pub merges: u64,
+    /// Nanoseconds spent making room: compacting a leaf, or splitting one.
+    ///
+    /// **Because `write.insert.batch`'s cost has been attributed to three different
+    /// things and measured to be none of them** (task-2006). The delta walk was
+    /// counted at under eight per cent; the split record is 55% of the log's bytes and
+    /// about 2% of its time; and `inillucent-writelogattrib` then put the two secondary
+    /// indexes at 69% of the transaction and 123 of its 181 leaf compactions. Whether
+    /// those compactions are the 69% is the next question, and a number answers it
+    /// where arithmetic over four other numbers does not.
+    pub room_nanos: u128,
 }
 
 impl PagedTree {
@@ -1156,6 +1166,33 @@ impl PagedTree {
     /// @param arriving - the key about to be written, when there is one
     /// @param needed - how many bytes the arriving row needs
     pub fn make_room(
+        &mut self,
+        database: &mut Database,
+        log: &mut dyn TreeLog,
+        page: PageId,
+        path: &[PageId],
+        arriving: Option<&[Datum<'_>]>,
+        needed: usize,
+    ) -> DbResult<()> {
+        let started = std::time::Instant::now();
+        let outcome = self.make_room_timed(database, log, page, path, arriving, needed);
+        let mut stats = self.stats.get();
+        stats.room_nanos = stats
+            .room_nanos
+            .saturating_add(started.elapsed().as_nanos());
+        self.stats.set(stats);
+        outcome
+    }
+
+    /// The whole of making room, timed by the wrapper above.
+    ///
+    /// @param database - the file
+    /// @param log - where the record goes
+    /// @param page - the leaf
+    /// @param path - the interior pages above it, for a split
+    /// @param arriving - the key about to be written, when there is one
+    /// @param needed - how many bytes the arriving row needs
+    fn make_room_timed(
         &mut self,
         database: &mut Database,
         log: &mut dyn TreeLog,

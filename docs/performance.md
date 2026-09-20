@@ -186,8 +186,21 @@ A split record carries the left page, the right page and the parent, whole - 98,
 page size, for one row that would not fit. So a logical split record, which is roadmap item 2, would
 take 55% off the log's volume. **It would take about 2% off the workload's time**, because the log is
 written once and synced once at the commit and the bytes are not what the workload is waiting for.
-The time is in the 34.96 ms of index maintenance, at 8.7 µs for each of the four thousand index row
-insertions.
+
+**What the time is, measured rather than divided.** `WriteStats::room_nanos` times the inside of
+`make_room` - compacting a leaf, or splitting one:
+
+| | with both indexes | without either | the two indexes |
+|---|---:|---:|---:|
+| wall | 44.17 ms | 15.68 ms | 28.49 ms |
+| **making room** | **23.97 ms** | 5.10 ms | **18.87 ms** |
+
+**Making room is 54% of the transaction and 66% of what the two indexes cost**, over 181 compactions
+and 9 splits, which is about **126 µs an event**. A compaction re-encodes every live row of a 32 KiB
+leaf to reclaim a delta area of at most thirty-two rows: for narrow index rows that is on the order of
+a thousand rows re-serialised, about 84 ns each. The lever is a compaction that keeps what it is
+keeping - the leaf is column-major, so splicing the delta rows in is a shift of each column's region
+rather than a re-encode - and that is [roadmap item 2](roadmap.md).
 
 **And the delta area is not where the time is either.** `LeafRef::locate` walks each leaf's unsorted
 delta area on every insert, which `docs/roadmap.md` named as the cause. Counted directly at an 8 KiB

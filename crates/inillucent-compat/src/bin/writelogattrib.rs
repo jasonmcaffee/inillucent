@@ -175,6 +175,19 @@ fn run(fixture: &Path, page_size: usize, frames: usize, iterations: u32) -> Resu
         plain.after.splits,
         indexed.after.splits.saturating_sub(plain.after.splits)
     );
+    // **The one number that says whether the compactions ARE the index cost.** The rows
+    // above give how many there were, not what they took, and this workload's cost has
+    // been attributed to three different things and measured to be none of them.
+    let ms = |nanos: u128| nanos as f64 / 1e6;
+    println!(
+        "  making room    : {:>9.2} ms indexed, {:>6.2} ms without, {:>6.2} ms for the two indexes",
+        ms(indexed.after.room_nanos),
+        ms(plain.after.room_nanos),
+        ms(indexed
+            .after
+            .room_nanos
+            .saturating_sub(plain.after.room_nanos))
+    );
     Ok(())
 }
 
@@ -307,6 +320,7 @@ fn subtract(
         compactions: after.compactions.saturating_sub(before.compactions),
         splits: after.splits.saturating_sub(before.splits),
         merges: after.merges.saturating_sub(before.merges),
+        room_nanos: after.room_nanos.saturating_sub(before.room_nanos),
     }
 }
 

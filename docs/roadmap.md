@@ -116,11 +116,26 @@ workload's time**, because the log is written once and synced once at the commit
 what the workload is waiting for. The time is the 34.96 ms of index maintenance: 8.7 µs for each of
 the four thousand index row insertions, against 2.4 µs for each of the two thousand table rows.
 
-So done, now, means the number rather than either guess: **make maintaining a secondary index cheaper
-per row.** The two indexes take 69% of the transaction and cause 123 of its 181 leaf compactions, and
-their keys arrive in no order at all, so each one descends. Nothing here designs it. The split record
-remains a real saving in log volume and a real crash campaign to write, and it is now recorded as the
-smaller of the two rather than the lever.
+**And the third measurement says which part of the index maintenance it is.** `WriteStats` gained
+`room_nanos`, the time inside `make_room` - compacting a leaf, or splitting one - because the rows
+above say how many there were and not what they took:
+
+| | with both indexes | without either | the two indexes |
+|---|---:|---:|---:|
+| wall | 44.17 ms | 15.68 ms | 28.49 ms |
+| **making room** | **23.97 ms** | 5.10 ms | **18.87 ms** |
+
+**Making room is 54% of the whole transaction and 66% of what the two indexes cost**, over 181
+compactions and 9 splits - about **126 µs an event**. A compaction re-encodes every live row of a
+32 KiB leaf, which for narrow index rows is on the order of a thousand of them, so it is about 84 ns a
+row of encoding to reclaim a delta area of at most thirty-two.
+
+So done means a compaction that does not re-encode what it is keeping. The leaf is column-major, so
+splicing the delta rows into the sorted region is a shift of each column's region rather than a
+memcpy of the page - cheaper than re-serialising every value, and not trivial. That is its own ticket
+with its own crash campaign, and what this item now carries is the number rather than a guess: the
+delta walk was under eight per cent, the split record is 55% of the bytes and about 2% of the time,
+and making room is 54% of the transaction.
 
 And the earlier delta walk measurement, kept because it is what closed the first guess: **8,329 calls,
 119,645 entries walked, 5.1 ms**, 14.4 entries a call, against 66.8 ms of apply time at an 8 KiB page.
