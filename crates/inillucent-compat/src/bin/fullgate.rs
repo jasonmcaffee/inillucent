@@ -1498,7 +1498,8 @@ fn fts_stage_line(stages: inillucent_ext::vtab::fts5::BuildStages) -> String {
     format!(
         "{} rows, content {:.1} ms, tokenize {:.1} ms, docsize {:.1} ms, \
          group {:.1} ms, terms {:.1} ms, new terms {:.1} ms ({}), \
-         dict read {:.1} ms, dict write {:.1} ms, totals {:.1} ms, flush {:.1} ms",
+         dict read {:.1} ms, dict write {:.1} ms, totals {:.1} ms, flush {:.1} ms, \
+         whole {:.1} ms",
         stages.rows,
         ms(stages.content),
         ms(stages.tokenize),
@@ -1511,6 +1512,7 @@ fn fts_stage_line(stages: inillucent_ext::vtab::fts5::BuildStages) -> String {
         ms(stages.dictionary_write),
         ms(stages.totals),
         ms(stages.flush),
+        ms(stages.whole),
     )
 }
 

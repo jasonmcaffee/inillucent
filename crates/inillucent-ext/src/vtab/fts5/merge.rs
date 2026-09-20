@@ -193,6 +193,7 @@ impl Fts5Table {
         rowid: i64,
         values: &[Value<'static>],
     ) -> DbResult<()> {
+        let whole_started = std::time::Instant::now();
         let width = self.options.columns.len();
         let started = std::time::Instant::now();
         // **Nothing is stored when the rows are somebody else's.** An
@@ -280,6 +281,9 @@ impl Fts5Table {
 
         record_stage(|stages| {
             stages.rows = stages.rows.saturating_add(1);
+            stages.whole = stages
+                .whole
+                .saturating_add(whole_started.elapsed().as_nanos());
             stages.content = stages.content.saturating_add(content_ns);
             stages.tokenize = stages.tokenize.saturating_add(tokenize_ns);
             stages.docsize = stages.docsize.saturating_add(docsize_ns);

@@ -476,7 +476,7 @@ impl PagedTree {
             leaf_count: leaves.len() as u64,
             row_count,
             scratch: RefCell::new(Vec::new()),
-            right_edge: std::cell::RefCell::new(None),
+            leaf_hint: std::cell::RefCell::new(None),
             stats: std::cell::Cell::new(crate::write::WriteStats::default()),
         })
     }

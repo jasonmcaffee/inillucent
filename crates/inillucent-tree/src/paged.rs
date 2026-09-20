@@ -590,10 +590,75 @@ pub struct PagedTree {
     ///   insert is about to fetch anyway, and it is on the hit path only, so a miss
     ///   never pays it.
     ///
-    /// A `RefCell` rather than a `Cell` because the key is a `Vec`; the write path
+    /// **Any leaf, not only the rightmost one** (task-2006). The first version hinted
+    /// the rightmost leaf, which is every descent of a tree being appended to and none
+    /// of a tree being written in sorted order *through the middle*. FTS5's dictionary
+    /// flush is the second shape: the pending terms are a `BTreeMap`, so they arrive in
+    /// key order, but a term new to the index lands between terms already in it rather
+    /// than past all of them.
+    ///
+    /// **What the hint is measured to do, and what it is not.** The A/B is one box, two
+    /// adjacent gate runs, the hint the only difference. Read the two halves of it in
+    /// the right order, because they disagree and one is weaker: the stage line the gate
+    /// prints is a **single round**, while a workload's ratio is the median of thirty, so
+    /// the stage numbers below are one sample each and the ratio is not.
+    ///
+    /// The stage line says it cuts the stages it touches by about a third: FTS5's `dict write` from 2.4 ms to 1.6, its `content` row
+    /// writes from 2.0 to 1.4 and its `docsize` rows from 1.6 to 1.1, over 500
+    /// documents. It does **not** move `extension.fts.build`'s ratio, which reads 0.68x
+    /// without it and 0.69x with it, nor `write.insert.batch`, nor the weighted
+    /// headline. Where the saved time goes is not accounted for: the named stages sum to
+    /// about 5.5 ms of that workload's 8.1 and the rest is unattributed, so the saving
+    /// lands somewhere the stage timers do not name.
+    ///
+    /// It is kept because it demonstrably does less work - a descent skipped is a
+    /// descent skipped - and removing a change that does less work because a noisy
+    /// total did not move would be reading the noise. It is not kept on a claim about
+    /// any ratio, and an earlier comment here that credited it with
+    /// `extension.fts.build` at 1.24x was reading a run that had four gate processes on
+    /// one disk.
+    ///
+    /// So the hint holds a **window**: the lowest and highest probes this connection
+    /// has seen descend into the hinted leaf. A leaf's key range is contiguous, so a
+    /// key between two keys known to be in it is in it too - which is the whole of the
+    /// argument for a middle leaf, and it needs both ends.
+    ///
+    /// `rightmost` is why the window is not enough on its own. A rightmost leaf's range
+    /// runs to positive infinity, so an append is above every probe seen so far and a
+    /// window would reject it; for that leaf the test is the low end alone. Keeping the
+    /// flag is what lets one hint serve both shapes.
+    ///
+    /// A `RefCell` rather than a `Cell` because the keys are `Vec`s; the write path
     /// holds the tree by shared reference, the same reason [`PagedTree::stats`] is a
     /// `Cell`.
-    pub(crate) right_edge: std::cell::RefCell<Option<(PageId, Vec<u8>)>>,
+    pub(crate) leaf_hint: std::cell::RefCell<Option<LeafHint>>,
+}
+
+/// The leaf a write is likely to want next, and the keys that prove it.
+///
+/// See [`PagedTree::leaf_hint`] for the argument. Held rather than derived because
+/// the proof is two comparisons and deriving it is a descent.
+#[derive(Clone, Debug)]
+pub(crate) struct LeafHint {
+    /// The leaf.
+    pub(crate) page: PageId,
+    /// The lowest probe seen to descend into it, in comparable bytes.
+    pub(crate) low: Vec<u8>,
+    /// The highest probe seen to descend into it.
+    pub(crate) high: Vec<u8>,
+    /// The right sibling it had when it was recorded.
+    ///
+    /// Two jobs. `PageId::NONE` means the leaf was the rightmost one, whose range runs
+    /// to positive infinity, so the high end of the window is unnecessary for it - an
+    /// append is above every probe seen so far and a window would reject it.
+    ///
+    /// And it is **how a split by anybody is detected**. A split of this leaf points it
+    /// at the new page, and a merge changes it too, so a sibling that still matches is
+    /// a leaf whose fence range has not moved since the window was proved. That covers
+    /// the one case the window's own argument cannot: another process splitting this
+    /// leaf between two of our statements. It costs nothing, because the hit path
+    /// already reads this page's header to check the page is still a leaf of this tree.
+    pub(crate) right: PageId,
 }
 
 /// How many key-prefix columns a skip scan borrows on the stack.
@@ -697,7 +762,7 @@ impl PagedTree {
             leaf_count,
             row_count,
             scratch: RefCell::new(Vec::new()),
-            right_edge: std::cell::RefCell::new(None),
+            leaf_hint: std::cell::RefCell::new(None),
             stats: std::cell::Cell::new(crate::write::WriteStats::default()),
         })
     }
@@ -769,9 +834,9 @@ impl PagedTree {
         self.leaf_count = self.leaf_count.saturating_add_signed(delta);
         // **A split and a merge are the only things that move a leaf's low fence, and
         // both come through here**, so this is where the leaf hint is dropped. See
-        // [`PagedTree::right_edge`]: the hint says "a key at or above these bytes
+        // [`PagedTree::leaf_hint`]: the hint says "a key at or above these bytes
         // belongs in that page", and that sentence is about a fence.
-        if let Ok(mut hint) = self.right_edge.try_borrow_mut() {
+        if let Ok(mut hint) = self.leaf_hint.try_borrow_mut() {
             *hint = None;
         }
     }

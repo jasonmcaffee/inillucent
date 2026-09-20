@@ -792,6 +792,7 @@ thread_local! {
             dictionary_write: 0,
             totals: 0,
             flush: 0,
+            whole: 0,
         }) };
 }
 

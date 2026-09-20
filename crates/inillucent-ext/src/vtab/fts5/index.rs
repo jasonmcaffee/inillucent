@@ -59,6 +59,15 @@ pub struct BuildStages {
     pub totals: u128,
     /// Writing the staged doclists out to `%_data`.
     pub flush: u128,
+    /// The whole of one `add`, from its first statement to its last.
+    ///
+    /// **Because the named stages do not add up, and guessing which one grew is how a
+    /// ticket optimises the wrong thing** (task-2006). They summed to about 5.5 ms of
+    /// `extension.fts.build`'s 8.1, leaving 2.6 ms that could have been inside `add`
+    /// between two timers or outside it in the SQL and virtual table plumbing. This
+    /// says which: `whole` minus the other stages is what `add` does and does not name,
+    /// and the workload's own time minus `whole` is everything around it.
+    pub whole: u128,
 }
 /// Adds one measurement to this thread's tally.
 ///

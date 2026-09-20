@@ -701,7 +701,7 @@ fn campaign(journal: Journal, failure: Failure, limit: u64, corruption_allowed: 
         "a campaign that covers {cut_points} cut points is not a campaign"
     );
     format!(
-        "cut points: {cut_points}, acknowledged commits: {committed_runs}, detected damage:          {detected}, acknowledged and lost to a half written call: {acknowledged_and_lost}\n{report}"
+        "cut points: {cut_points}, acknowledged commits: {committed_runs}, detected damage: {detected}, lost to a half written call: {acknowledged_and_lost}\n{report}"
     )
 }
 

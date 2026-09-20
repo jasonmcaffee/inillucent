@@ -714,7 +714,7 @@ impl PagedTree {
         // which is a bug rather than a case to loop on.
         for attempt in 0..2 {
             // **The hint on the first attempt, a descent on the second.** See
-            // `PagedTree::right_edge`: an append at the right edge - a rowid insert,
+            // `PagedTree::leaf_hint`: an append at the right edge - a rowid insert,
             // FTS5's ordered dictionary flush - lands in the leaf the last one did,
             // and the descent answers a question it has already answered. The path
             // is empty when the hint answered, because a path is only wanted when
@@ -1899,13 +1899,13 @@ impl PagedTree {
     fn leaf_for(&self, pool: &Pool, encoded_key: &[u8]) -> DbResult<(PageId, Vec<PageId>)> {
         let descent = self.descend(pool, encoded_key)?;
         let path: Vec<PageId> = descent.steps.iter().map(|step| step.0).collect();
-        self.note_right_edge(pool, descent.leaf, encoded_key);
+        self.note_leaf_hint(pool, descent.leaf, encoded_key);
         Ok((descent.leaf, path))
     }
 
     /// Returns the leaf a key belongs in without descending, when the hint says so.
     ///
-    /// **The leaf hint** - see [`PagedTree::right_edge`] for the whole argument and
+    /// **The leaf hint** - see [`PagedTree::leaf_hint`] for the whole argument and
     /// for why a stale hint cannot give a wrong answer. `None` means "descend", which
     /// is every key that is not an append at the right edge and every first write to
     /// a tree.
@@ -1917,77 +1917,94 @@ impl PagedTree {
     /// @param pool - the buffer pool
     /// @param encoded_key - the key's comparable bytes
     fn leaf_for_hinted(&self, pool: &Pool, encoded_key: &[u8]) -> Option<PageId> {
-        // **The comparison first, and it is the whole of the miss path.** One
-        // `memcmp` against bytes the caller has already built. Below the hinted
-        // leaf's recorded key means the descent has to place this one, and that
-        // answer costs nothing beyond the comparison.
-        let page = match self.right_edge.try_borrow().ok()?.as_ref() {
-            Some((page, low)) if encoded_key >= low.as_slice() => *page,
+        // **The comparisons first, and they are the whole of the miss path.** Two
+        // `memcmp`s against bytes the caller has already built. Outside the hinted
+        // leaf's window means the descent has to place this key, and that answer costs
+        // nothing beyond the comparisons. See `PagedTree::leaf_hint` for why a
+        // rightmost leaf is tested at the low end only.
+        let (page, right) = match self.leaf_hint.try_borrow().ok()?.as_ref() {
+            Some(hint)
+                if encoded_key >= hint.low.as_slice()
+                    && (hint.right.is_none() || encoded_key <= hint.high.as_slice()) =>
+            {
+                (hint.page, hint.right)
+            }
             _ => return None,
         };
-        // The header on a hit, for the reasons `PagedTree::right_edge` gives: a page
-        // handed to another tree, and a fence moved by something other than this
-        // write path, are both visible here and neither is visible in the comparison
-        // above. This fetches a page the insert is about to fetch regardless, and it
-        // parses nothing.
+        // The header on a hit, for the reasons `PagedTree::leaf_hint` gives: a page
+        // handed to another tree, and a fence moved by something other than this write
+        // path, are both visible here and neither is visible in the comparisons above.
+        // The sibling is what catches the second: a split or a merge of this leaf
+        // changes it. This fetches a page the insert is about to fetch regardless, and
+        // it parses nothing.
         let Ok(guard) = pool.fetch(page) else {
-            self.forget_right_edge();
+            self.forget_leaf_hint();
             return None;
         };
         if page::kind_of(&guard).ok() != Some(page::PageKind::Leaf)
             || page::tree_of(&guard).ok() != Some(self.tree_id())
-            || page::right_of(&guard).ok() != Some(PageId::NONE)
+            || page::right_of(&guard).ok() != Some(right)
         {
-            self.forget_right_edge();
+            self.forget_leaf_hint();
             return None;
         }
         Some(page)
     }
 
-    /// Records the rightmost leaf and the probe that reached it, after a descent.
+    /// Records the leaf a descent reached and widens the window that proves it.
     ///
-    /// The lowest probe seen, not the latest: a hint answers for every key at or
-    /// above the bytes it holds, so the lowest probe known to belong to the leaf is
-    /// the one that answers most often. For a tree being appended to the probes only
-    /// rise, so this records the first and then leaves it alone.
+    /// The window is the lowest and highest probes seen to land in this leaf, so a hit
+    /// is every key between them. A descent into the leaf already hinted widens the
+    /// window by one end at most; a descent into a different leaf starts a new window
+    /// at that probe.
     ///
     /// One header read off a page the descent has just fetched, and a key copy only
-    /// when the hint moves. See [`PagedTree::right_edge`].
+    /// when an end of the window moves. See [`PagedTree::leaf_hint`].
     ///
     /// @param pool - the buffer pool
     /// @param leaf - the leaf the descent reached
     /// @param encoded_key - the probe the descent used, in comparable bytes
-    fn note_right_edge(&self, pool: &Pool, leaf: PageId, encoded_key: &[u8]) {
-        let rightmost = pool
+    fn note_leaf_hint(&self, pool: &Pool, leaf: PageId, encoded_key: &[u8]) {
+        let Some(right) = pool
             .fetch(leaf)
             .ok()
             .and_then(|guard| page::right_of(&guard).ok())
-            == Some(PageId::NONE);
-        let Ok(mut hint) = self.right_edge.try_borrow_mut() else {
+        else {
             return;
         };
-        if !rightmost {
-            *hint = None;
+        let Ok(mut hint) = self.leaf_hint.try_borrow_mut() else {
             return;
-        }
+        };
         match hint.as_mut() {
-            Some((page, low)) if *page == leaf => {
-                if encoded_key < low.as_slice() {
-                    low.clear();
-                    low.extend_from_slice(encoded_key);
+            Some(held) if held.page == leaf => {
+                held.right = right;
+                if encoded_key < held.low.as_slice() {
+                    held.low.clear();
+                    held.low.extend_from_slice(encoded_key);
+                }
+                if encoded_key > held.high.as_slice() {
+                    held.high.clear();
+                    held.high.extend_from_slice(encoded_key);
                 }
             }
-            _ => *hint = Some((leaf, encoded_key.to_vec())),
+            _ => {
+                *hint = Some(crate::paged::LeafHint {
+                    page: leaf,
+                    low: encoded_key.to_vec(),
+                    high: encoded_key.to_vec(),
+                    right,
+                })
+            }
         }
     }
 
-    /// Drops the leaf hint, because the hinted page is not a rightmost leaf of this
-    /// tree any more.
+    /// Drops the leaf hint, because the hinted page is not a leaf of this tree any
+    /// more.
     ///
-    /// See [`PagedTree::right_edge`]. A split or a merge clears it through
+    /// See [`PagedTree::leaf_hint`]. A split or a merge clears it through
     /// [`PagedTree::note_leaves`] instead, which holds `&mut self`.
-    fn forget_right_edge(&self) {
-        if let Ok(mut hint) = self.right_edge.try_borrow_mut() {
+    fn forget_leaf_hint(&self) {
+        if let Ok(mut hint) = self.leaf_hint.try_borrow_mut() {
             *hint = None;
         }
     }
