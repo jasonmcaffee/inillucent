@@ -2420,12 +2420,24 @@ mod tests {
         // A month of daily syncs, then the same corpus built in one pass. The graph
         // an incremental insert produces is not identical to a rebuilt one, so this
         // measures how far apart they drift rather than asserting they agree.
+        //
+        // **`build_threads: 1`, because the drift this measures has to be the appends'
+        // and not the thread pool's** (task-2006).
+        // `HnswParams::default().build_threads` became `available_parallelism()` in
+        // design 9 of task-2000, and a parallel build's link order is whatever the pool
+        // produced - see `available_parallelism`'s own note. Run on its own the test
+        // passes either way; run inside the suite, where two dozen test binaries are
+        // each asking for every core, the pool's order varies enough that recall after
+        // the appends measured 0.8975 against a 0.90 bar. That is two graphs differing,
+        // which is what the default is documented to allow, rather than the appends
+        // drifting - and this test is about the appends.
         let mut appended = build(
             3000,
             32,
             IndexConfig {
                 hnsw: HnswParams {
                     exhaustive_below: 0,
+                    build_threads: 1,
                     ..Default::default()
                 },
                 ..Default::default()
@@ -2459,6 +2471,7 @@ mod tests {
             IndexConfig {
                 hnsw: HnswParams {
                     exhaustive_below: 0,
+                    build_threads: 1,
                     ..Default::default()
                 },
                 ..Default::default()
