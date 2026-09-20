@@ -573,6 +573,12 @@ function Get-Routes {
                 # path this script resolved and the run used a different one.
                 & (Join-Path $script:Packaging 'publish-site.ps1') -Version $Version -Stage -SitePath $script:SitePath
                 & (Join-Path $script:Packaging 'publish-site.ps1') -Version $Version -Link -SitePath $script:SitePath
+                # **And deploy it, because staging is not publishing.** The site is a static export
+                # served out of `out/` by a small Rust binary, and `public/downloads/` is gitignored
+                # - so the artifacts reach the live site only through a build and a restart. Without
+                # this the 0.1.5 run staged and linked everything and inillucent.com still answered
+                # 0.1.3, which the route's own Verify caught.
+                & (Join-Path $script:Packaging 'deploy-site.ps1') -SitePath $script:SitePath
             }
             Verify = { Test-SiteVersion -Version $Version }
         },
