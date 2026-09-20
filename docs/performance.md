@@ -17,21 +17,28 @@ run.
 
 | | SQLite 3.53.4 | inillucent | |
 |---|---|---|---|
-| **elapsed time**, weighted over the ten families | the reference | 4.63x the speed | **363% faster** |
-| **elapsed time**, the 95% lower bound the gate grades on | | 4.30x | **330% faster**, against a bar asking 200% |
-| **processor time**, one round of the whole plan | 1,172 ms | 453 ms | **61% less processor** |
-| **peak resident memory**, one round of the whole plan | 37.21 MiB | 40.93 MiB | **10% more**, the one loss |
+| **elapsed time**, weighted over the ten families | the reference | 4.53x the speed | **353% faster** |
+| **elapsed time**, the 95% lower bound the gate grades on | | 4.21x | **321% faster**, against a bar asking 200% |
+| **processor time**, one round of the whole plan | 1,168 ms | 461 ms | **60% less processor** |
+| **peak resident memory**, one round of the whole plan | 37.21 MiB | 40.76 MiB | **9.5% more**, the one loss |
 | **the database file**, the same imported fixture | 16,830,464 B | 17,432,576 B | **3.6% larger** |
 
 Every workload's answer is hashed and compared with SQLite's before its timing is allowed to count.
 **All 30 workloads agreed on every round of all four runs.**
 
-The four runs read 4.59x, 4.55x, 4.67x and 4.69x, with 95% lower bounds of 4.16x, 4.32x, 4.29x and
-4.38x. The bound the contract grades on cleared its 3.00x requirement on all four.
+The four runs read 4.37x, 4.56x, 4.59x and 4.49x, with 95% lower bounds of 3.98x, 4.28x, 4.13x and
+4.37x. The bound the contract grades on cleared its 3.00x requirement on all four.
 
-**What task-2000 moved, measured as a pair in one sitting.** The commit before that work reads 3.51x
-weighted with a 3.45x bound and burns 0.67 of SQLite's processor; this run reads 4.63x, 4.30x and
-0.385. Both arms are four runs of this protocol on the same machine, minutes apart, because a pair
+**The processor ratio sits exactly on its bar, and one run of the four is above it.** The contract
+asks for at most 0.400 and the median of the two middle runs is 0.400. The four runs read 0.430,
+0.381, 0.408 and 0.392, so the first one misses. What moves it is the reference arm rather than this
+one: our own processor time is 453, 438, 484 and 469 ms across those runs, a spread of 7%, while
+SQLite's is 1,055, 1,148, 1,188 and 1,195 ms, and the run that misses is the run where SQLite used
+the least. An earlier sitting read 0.385 on all four.
+
+**What task-2000 moved, measured as a pair in one sitting.** The commit before that work reads 3.55x
+weighted with a 3.42x bound and burns 0.635 of SQLite's processor; this run reads 4.53x, 4.21x and
+0.400. Both arms are four runs of this protocol on the same machine, minutes apart, because a pair
 measured on two different box states is not a pair: the same pinned SQLite binary on the same fixture
 reads **2.16x faster on a quiet box than on one that has just run the test suite**, so a before-figure
 taken at another time flatters or penalises everything compared against it.
@@ -40,15 +47,24 @@ Four families moved and six did not:
 
 | family | before | after | |
 |---|---:|---:|---|
-| `schema` | 0.66x | **1.37x** | 108% faster than it was |
-| `read.analytical` | 5.29x | **10.48x** | 98% |
-| `transaction` | 1.25x | **2.36x** | 89% |
-| `write` | 1.46x | **2.12x** | 45% |
+| `schema` | 0.65x | **1.36x** | 109% faster than it was |
+| `read.analytical` | 5.36x | **10.75x** | 101% |
+| `transaction` | 1.23x | **2.37x** | 93% |
+| `write` | 1.47x | **2.15x** | 46% |
 
-and inside them, five workloads carry almost all of it: `txn.autocommit` from 0.13x to 0.94x,
-`write.insert.autocommit` from 0.47x to 3.04x, `scan.aggregate` from 11.41x to 52.16x, `scan.group`
-from 7.89x to 27.51x, and `schema.index` from 0.66x to 1.37x. Every other workload is within 4% of
+and inside them, five workloads carry almost all of it: `txn.autocommit` from 0.13x to 0.93x,
+`write.insert.autocommit` from 0.47x to 3.02x, `scan.aggregate` from 11.39x to 53.78x, `scan.group`
+from 7.94x to 27.59x, and `schema.index` from 0.65x to 1.36x. Every other workload is within 4% of
 where it was, which is this gate's run to run noise.
+
+**An earlier sitting read 4.63x, and the difference is the reference arm.** That sitting graded the
+commit four changes back and its before arm read 3.51x, which agrees with this sitting's 3.55x. Run
+for run, this engine's own nanoseconds are the same or better on every workload: `prepare.trivial`
+6.5% quicker, `write.update.indexed` 6.2%, `scan.aggregate` 2.9%, `write.insert.batch` 1.0%, and the
+rest inside each workload's own interval in both directions. SQLite's arm is what differs - 2.9%
+slower on `scan.sort`, 6.0% slower on `write.update.indexed`, 2.0% quicker on `prepare.trivial` - and
+a ratio moves when either half does. The figure published here is the newer sitting because it grades
+the commit this page describes.
 
 Both engines get the same memory budget: a pool of 4,096 frames of 32 KiB here, 128 MiB, and
 `PRAGMA cache_size = -131072` on SQLite's arm, also 128 MiB. Both run under `synchronous = FULL`.
@@ -291,7 +307,7 @@ the state the original write saw, and the relocation is a function of that page 
 
 ## Memory
 
-**40.93 MiB against SQLite's 37.21, which is 10% more.** The contract asks for 5% less, so this bar is
+**40.76 MiB against SQLite's 37.21, which is 9.5% more.** The contract asks for 5% less, so this bar is
 missed, and it is the only headline that is a loss.
 
 It has been worked three times. It was **102% more** three rounds of work ago, **43% more** two rounds
@@ -300,15 +316,15 @@ redo buffer to 512 KiB, stopping the index build holding three copies of the tre
 version log that nothing was collecting, and capping the allocator's free list in bytes as well as in
 blocks. What took it from 43% to 14% was the **file**, not another buffer.
 
-**What took it from 14% to 10% was the index build stopping going through the page pool** (task-2000,
+**What took it from 14% to 9.5% was the index build stopping going through the page pool** (task-2000,
 design 2). A bulk build wrote each page into a pool frame, which then had to be written out and
 evicted; it writes the page into the file directly and the frame is never taken. `schema.index` is
 what sets this plan's high water mark, so the frames it no longer occupies are the peak:
 
 | | before | after |
 |---|---:|---:|
-| the child's peak | 42.45 MiB | **40.93 MiB** |
-| `schema.index` raises the mark by | 12.50 MiB | **10.73 MiB** |
+| the child's peak | 42.45 MiB | **40.76 MiB** |
+| `schema.index` raises the mark by | 12.50 MiB | **10.53 MiB** |
 | and the pool at that point holds | 24.66 MiB | **22.91 MiB** |
 
 The attribution reads the process high water mark after every workload and prints the page pool's own
@@ -334,7 +350,7 @@ is, the write family raises it to 30.20, and `schema.index` takes it to its peak
 | every read workload | 25.00 | at most 0.02 | 16.56 | 8.44 |
 | `write.insert.batch` | 28.20 | 3.20 | 16.84 | 11.36 |
 | `txn.batched` | 30.20 | 0.98 | 16.88 | 11.19 |
-| `schema.index` | **40.93** | **10.73** | 22.91 | 11.34 |
+| `schema.index` | **40.75** | **10.53** | 22.91 | 11.18 |
 
 Where the remaining 3.7 MiB is:
 
@@ -342,7 +358,7 @@ Where the remaining 3.7 MiB is:
 |---|---|---|---|
 | the cached database | 16.56 MiB | about 16 MiB | the `.rdb` is 1.036x the `.db`. Under 0.6 MiB left here |
 | the process floor | 8.38 MiB | about 4.2 MiB | **3.62 MiB of it is what any Rust binary on this machine costs before the engine exists**, measured rather than inferred: a 130 KB program whose `main` reads its own working set and returns peaks at 3.62 MiB over five runs, 0.66 MiB of it private. The remaining 4.76 MiB is this engine's own code, its statics and opening the file |
-| `schema.index`'s rise | 10.73 MiB | about 15.9 MiB | the pages the new index occupies plus the sort's arena. This one is **smaller** than SQLite's, and it is 1.77 MiB smaller than it was before design 2 stopped the build going through the pool |
+| `schema.index`'s rise | 10.53 MiB | about 15.9 MiB | the pages the new index occupies plus the sort's arena. This one is **smaller** than SQLite's, and it is 1.97 MiB smaller than it was before design 2 stopped the build going through the pool |
 
 So most of what is left is the operating system's, which neither engine escapes, and one
 `CREATE INDEX`.
@@ -386,12 +402,11 @@ after every workload:
 | `write.insert.batch` | 28.20 | 3.20 |
 | the other four write workloads | 29.21 | 1.01 in total |
 | `txn.batched` | 30.20 | 0.98 |
-| **`schema.index`** | **40.93** | **10.73** |
-| every remaining workload | 40.93 | nothing |
+| **`schema.index`** | **40.75** | **10.53** |
+| every remaining workload | 40.75 | nothing |
 
-The whole plan holds **30.20 MiB** until it builds an index, and building one adds ten and three
-quarters - it added twelve and a half before task-2000's design 2 stopped the build going through the
-page pool. So the bar is not missed by a buffer that is slightly too big everywhere; it is missed by
+The whole plan holds **30.20 MiB** until it builds an index, and building one adds ten and a half - it
+added twelve and a half before task-2000's design 2 stopped the build going through the page pool. So the bar is not missed by a buffer that is slightly too big everywhere; it is missed by
 one statement, and by the arena its sort holds.
 
 That arena is the one lever left, and it is priced rather than pulled: task-1869 measured spilling
@@ -433,7 +448,7 @@ retires to **0.0 MB** at a checkpoint, where it used to hold 94.6 MB across two 
 
 **The same binary measured 53% faster on Linux, where Windows measured 279% at the time.** That
 difference was settled by experiment rather than argued about, and the finding is that it is not a
-Linux problem. The Linux arm has not been re-measured since; the Windows headline has moved to 363%
+Linux problem. The Linux arm has not been re-measured since; the Windows headline has moved to 353%
 in the meantime, so treat the pair as the finding it was rather than as a comparison with the number
 at the top of this page.
 

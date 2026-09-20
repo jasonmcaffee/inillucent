@@ -6,8 +6,8 @@ happened to it here.
 
 ## Memory
 
-**40.93 MiB against SQLite's 37.21, which is 10% more**, on the same 128 MiB budget, while running
-363% faster and spending 61% less processor. It came down three times, from 102% more, then 43%, then
+**40.76 MiB against SQLite's 37.21, which is 9.5% more**, on the same 128 MiB budget, while running
+353% faster and spending 60% less processor. It came down three times, from 102% more, then 43%, then
 14%. The last step was task-2000's design 2: a bulk index build used to write each page into a buffer
 pool frame that then had to be written out and evicted, and it writes into the file directly now, so
 `schema.index` - which is what sets this plan's high water mark - raises it by 10.73 MiB rather than
@@ -26,8 +26,8 @@ every megabyte. Closed by decision: this is where it stays.
 
 Four of its ten designs are built and measured; the pair of four-run gates that measures them was taken
 back to back on one box, because the same pinned SQLite binary reads 2.16x faster on a quiet box than
-on a busy one and a stored baseline is therefore not a comparison. **3.51x weighted before, 4.63x
-after**, with processor time 0.670 of SQLite's before and 0.385 after.
+on a busy one and a stored baseline is therefore not a comparison. **3.55x weighted before, 4.53x
+after**, with processor time 0.635 of SQLite's before and 0.400 after.
 
 **A commit is one log append and one sync of it** (design 1). It used to be a checkpoint: the log
 folded into the file, and a rollback journal holding the pre-image of every page the fold was about to
@@ -41,7 +41,7 @@ writes, 100 log syncs, no data file syncs and no folds**, where they used to mak
 from 1.46x to 2.12x, both lower bounds now clear of the 1.50x bar.
 
 **A bulk index build writes each page once** (design 2). `schema.index` went from 0.66x to 1.37x and
-the plan's peak resident set from 42.45 MiB to 40.93. Its crash campaign cuts 1,200 points of a
+the plan's peak resident set from 42.45 MiB to 40.76. Its crash campaign cuts 1,200 points of a
 `CREATE INDEX`, including the one cut where the statement commits and the power then goes: that
 snapshot holds a database whose catalog has never been written in place, so the committed index exists
 in the log and nowhere else, and recovery rebuilds it over pages that were synced before the commit.
@@ -55,8 +55,8 @@ bound from 4.67x to 8.14x, over the 5.00x bar it had been missing.
 **The retrieval index builds on every core** (design 9). `HnswParams::build_threads` defaults to
 `available_parallelism()`, the two legs of a hybrid search run under `rayon::join`, and
 `distance::dot` dispatches once to an AVX2 and FMA kernel with eight 256-bit accumulators. The index
-build went from 129.7 s to **16.1 s** for 185,078 chunks at 768 dimensions, and vector search p50 from
-0.934 ms to **0.5766**. The acceptance condition was the score card's ranking verdicts, because a
+build went from 129.7 s to **16.8 s** for 185,078 chunks at 768 dimensions, and vector search p50 from
+0.934 ms to **0.8462**. The acceptance condition was the score card's ranking verdicts, because a
 parallel build's graph is not the serial one: they are byte for byte what they were, **15 better, 1
 equivalent, 1 inconclusive, 0 worse, every correctness gate passing**, which is why the default is the
 parallel build everywhere rather than only in the command line.
@@ -111,7 +111,7 @@ first two are fixed; the last two are excluded from reuse by the verdict.
 classed free list in place of the system allocator the two platforms run the same absolute speed,
 38.97 ms against 38.20, and it is SQLite's own arm that moves across platforms rather than this
 engine's. [Linux](performance.md#linux) has the measurement and the caveat: nothing since the
-allocator change has been measured on Linux, so the Linux figure is older than the 330% Windows
+allocator change has been measured on Linux, so the Linux figure is older than the 321% Windows
 headline. Re-measuring wants a Linux machine that is not also running the Windows arm; both inside
 one box would measure the contention and not the platform.
 

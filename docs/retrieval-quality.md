@@ -13,7 +13,7 @@ The corpus is 185,078 chunks assembled from public data by this repository:
 by anyone with this repository, an internet connection and a few hours.
 
 **Every figure on this page and every figure on the score card are the same run**, taken
-**2026-09-19** at commit e2a81e1, and `inillucent-scorecard.md` at the repository root is that run's
+**2026-09-20** at commit cd53317, and `inillucent-scorecard.md` at the repository root is that run's
 own output file. Read the card for the intervals, the p-values and the diagnostics.
 
 ## Ranking
@@ -81,9 +81,9 @@ the configured one returns the rows and pays for them.
 
 | query | inillucent | pgvector, configured | | pgvector, defaults | |
 |---|---|---|---|---|---|
-| no predicate, p50 | **0.7974 ms** | 2.077 ms | **161% faster** | 1.246 ms | **56% faster** |
+| no predicate, p50 | **0.8462 ms** | 2.315 ms | **174% faster** | 1.492 ms | **76% faster** |
 | no predicate, p95 | **1.389 ms** | 3.359 ms | **142% faster** | 2.046 ms | **47% faster** |
-| `source = slack`, p50 | **0.5998 ms** | 35.390 ms | **5,800% faster** | 1.137 ms | **90% faster** |
+| `source = slack`, p50 | **0.5820 ms** | 36.486 ms | **6,169% faster** | 1.114 ms | **91% faster** |
 | `source = slack`, p95 | **0.8172 ms** | 89.097 ms | **10,803% faster** | 2.015 ms | **147% faster** |
 
 **Latency is the family that moves between runs, and these are not the figures an earlier version of
@@ -97,8 +97,8 @@ else was running. The relationship is unchanged - the filtered query is still fa
 unfiltered one here and still two orders of magnitude faster than the configured baseline's.
 
 **This run is also the first with the parallel index build and the explicit AVX2 kernel**, and the
-unfiltered p50 moved with them: 0.9340 ms to **0.7974**. The build itself went from 129.7 seconds to
-**16.1** for the same 185,078 chunks at 768 dimensions, because `HnswParams::build_threads` defaults
+unfiltered p50 moved with them: 0.9340 ms to **0.8462**. The build itself went from 129.7 seconds to
+**16.8** for the same 185,078 chunks at 768 dimensions, because `HnswParams::build_threads` defaults
 to every core rather than one. A parallel build's graph is not the serial one - the levels come from
 the same seeded generator but the order in which nodes link to each other is whatever the thread pool
 produced - so the condition for shipping it was the ranking verdicts on this card, and they are

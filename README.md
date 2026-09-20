@@ -1,6 +1,6 @@
 # inillucent
 
-**An embedded database for agents, written in Rust. It runs SQLite's SQL dialect 363% faster than
+**An embedded database for agents, written in Rust. It runs SQLite's SQL dialect 353% faster than
 SQLite does, and it holds vector search and keyword search in the same file. A local AI agent can
 query a body of written material by meaning and by exact term without standing up PostgreSQL,
 pgvector and an embedding server.**
@@ -17,8 +17,8 @@ tables, a full text index and a vector index, and all three commit and roll back
 
 |  |  |  |
 |---|---|---|
-| **363% faster than SQLite 3.53.4** | the same ten workload families at 100,000 rows | [Performance](docs/performance.md) |
-| **61% less processor time** | 453 ms against SQLite's 1,172 for the same plan | [Performance](docs/performance.md) |
+| **353% faster than SQLite 3.53.4** | the same ten workload families at 100,000 rows | [Performance](docs/performance.md) |
+| **60% less processor time** | 461 ms against SQLite's 1,168 for the same plan | [Performance](docs/performance.md) |
 | **403 of 416 SQL cases byte for byte, none refused** | every case run through both engines and compared byte by byte. Of the thirteen that differ, six are vector search features SQLite has no equivalent for | [SQL support](docs/sql.md) |
 | **Better than pgvector on 15 of 17 graded comparisons, worse on none** | both engines reading identical vectors | [Retrieval quality](docs/retrieval-quality.md) |
 | **10% more memory than SQLite** | 40.9 MiB against 37.2. The one measurement SQLite still wins | [Performance](docs/performance.md#memory) |
@@ -363,7 +363,7 @@ each cost and how each was fixed:
   difference was traced to what SQLite pays the operating system on each platform rather than to
   anything this engine does differently there, and the finding is in
   [Performance](docs/performance.md#linux). The Linux arm has not been re-measured since the Windows
-  headline reached 330%.
+  headline reached 321%.
 - **Publishing a retrieval generation costs the whole corpus.** Adding content folds each new row
   into the published generation. Writing the generation still reads and writes the full index,
   however few rows changed, because a generation is one serialised structure. A build from scratch,

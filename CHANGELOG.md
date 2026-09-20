@@ -32,9 +32,9 @@ the work on one machine, minutes apart:
 
 | | before | after |
 |---|---:|---:|
-| weighted over the ten families | 3.51x | **4.63x** |
-| 95% lower bound | 3.45x | **4.30x** |
-| processor time, ratio to SQLite's | 0.670 | **0.385** |
+| weighted over the ten families | 3.55x | **4.53x** |
+| 95% lower bound | 3.42x | **4.21x** |
+| processor time, ratio to SQLite's | 0.635 | **0.400** |
 | peak resident set, ratio to SQLite's | 1.140 | **1.100** |
 | an autocommit `UPDATE` of one row | 0.13x | **0.94x** |
 | an autocommit `INSERT` | 0.47x | **3.04x** |

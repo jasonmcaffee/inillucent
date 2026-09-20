@@ -267,12 +267,12 @@ sha256 = "6784023d2abb05e4d0a5ddf644c92aaf0656a03f937b82fdbb058f52bd30da8f"
 [[amendment]]
 path = "inillucent-scorecard.json"
 ticket = "task-2006"
-reason = "task-2000: a fresh grade against PostgreSQL with pgvector on the synthetic corpus, the protocol task-1935 published, published to both files. The build is 16.1 s from 129.7, vector search p50 0.7974 ms from 0.934, and the ranking verdicts are what they were: 15 better, 1 equivalent, 1 inconclusive, 0 worse, every correctness gate passing. Latency does not reproduce between runs and is not expected to; the ranking families reproduce to four decimal places."
-sha256 = "fab23453272447f890b72d01f078cf5ad69235fd77d66e3d69db22df2d423acc"
+reason = "task-2000: a fresh grade against PostgreSQL with pgvector on the synthetic corpus, the protocol task-1935 published, published to both files. Re-run at the commit the documents publish, so the card and the pages are one run. The build is 16.8 s from 129.7, vector search p50 0.8462 ms from 0.934 - which is short of the TDD asking for 0.65 - and the ranking verdicts are what they were: 15 better, 1 equivalent, 1 inconclusive, 0 worse, every correctness gate passing. Latency does not reproduce between runs and is not expected to: it is wall clock against a live PostgreSQL and both engines moved by tenths of a millisecond between the 09-19 and 09-20 sittings. The ranking families reproduce to four decimal places."
+sha256 = "4088dd3c9d798a6664786cfecd1af797a1c712844dc5ce140c41e78fe8eefc01"
 
 [[amendment]]
 path = "inillucent-scorecard.md"
 ticket = "task-2006"
-reason = "task-2000: a fresh grade against PostgreSQL with pgvector on the synthetic corpus, the protocol task-1935 published, published to both files. The build is 16.1 s from 129.7, vector search p50 0.7974 ms from 0.934, and the ranking verdicts are what they were: 15 better, 1 equivalent, 1 inconclusive, 0 worse, every correctness gate passing. Latency does not reproduce between runs and is not expected to; the ranking families reproduce to four decimal places."
-sha256 = "7567b8236a976c24b37e7ac28a9e0dc20ff28faa6b10321391895245c20b098b"
+reason = "task-2000: a fresh grade against PostgreSQL with pgvector on the synthetic corpus, the protocol task-1935 published, published to both files. Re-run at the commit the documents publish, so the card and the pages are one run. The build is 16.8 s from 129.7, vector search p50 0.8462 ms from 0.934 - which is short of the TDD asking for 0.65 - and the ranking verdicts are what they were: 15 better, 1 equivalent, 1 inconclusive, 0 worse, every correctness gate passing. Latency does not reproduce between runs and is not expected to: it is wall clock against a live PostgreSQL and both engines moved by tenths of a millisecond between the 09-19 and 09-20 sittings. The ranking families reproduce to four decimal places."
+sha256 = "f491c9bfea4fd2f96ad3619535abc3b7ef5bfd89ce6b7f55365ff70c0c907006"
 
