@@ -391,6 +391,14 @@ impl LeafBuilder {
         let mut shapes: Vec<Shape> = vec![Shape::new(); self.columns.len()];
         let mut wanted: Vec<Shape> = shapes.clone();
         let mut layout = self.resolve(&shapes);
+        // **The candidate layout is one buffer, written over, and not a new one a
+        // row.** `resolve` returns a `Layout`, and a `Layout` owns two `Vec`s - so
+        // asking it for the price of each row in turn allocated and freed two
+        // vectors per row of every leaf a compaction repacks, to read four numbers
+        // out of them and usually throw them away. The widths and bases a row
+        // forces are written into these two buffers instead, and accepting a row
+        // copies them into `layout` in place.
+        let mut candidate = layout.clone();
         while row < total {
             let mut row_heap = 0usize;
             wanted.copy_from_slice(&shapes);
@@ -408,7 +416,7 @@ impl LeafBuilder {
                 }
             }
             let next = placed.saturating_add(1);
-            let candidate = self.resolve(&wanted);
+            self.resolve_into(&mut candidate, &wanted);
             let size = self
                 .fixed_size_with(next, &candidate.widths, candidate.has_bases())
                 .saturating_add(heap.saturating_add(row_heap));
@@ -416,7 +424,8 @@ impl LeafBuilder {
                 break;
             }
             shapes.copy_from_slice(&wanted);
-            layout = candidate;
+            layout.widths.copy_from_slice(&candidate.widths);
+            layout.bases.copy_from_slice(&candidate.bases);
             heap = heap.saturating_add(row_heap);
             placed = next;
             row = row.saturating_add(1);
@@ -580,17 +589,40 @@ impl LeafBuilder {
 
     /// Turns a set of column shapes into the layout they resolve to.
     ///
+    /// Allocates. [`LeafBuilder::fit_widths`] asks for a layout once per row and
+    /// uses [`LeafBuilder::resolve_into`] instead.
+    ///
     /// @param shapes - one shape per column
     fn resolve(&self, shapes: &[Shape]) -> Layout {
-        let mut widths = Vec::with_capacity(self.columns.len());
-        let mut bases = Vec::with_capacity(self.columns.len());
+        let mut layout = Layout {
+            widths: vec![0; self.columns.len()],
+            bases: vec![0; self.columns.len()],
+        };
+        self.resolve_into(&mut layout, shapes);
+        layout
+    }
+
+    /// Writes the layout a set of column shapes resolves to into a buffer that
+    /// already has room for it.
+    ///
+    /// Same rule as [`LeafBuilder::resolve`] and the same numbers; it writes them
+    /// into `layout` rather than into two fresh vectors. A layout whose vectors are
+    /// shorter than the column count keeps whatever it held past the end, which is
+    /// why the only caller sizes its buffer from `resolve` before the loop.
+    ///
+    /// @param layout - the buffer to write into, one slot per column
+    /// @param shapes - one shape per column
+    fn resolve_into(&self, layout: &mut Layout, shapes: &[Shape]) {
         for (index, column) in self.columns.iter().enumerate() {
             let shape = shapes.get(index).copied().unwrap_or_else(Shape::new);
             let (width, base) = shape.resolve(column.physical);
-            widths.push(width);
-            bases.push(base);
+            if let Some(slot) = layout.widths.get_mut(index) {
+                *slot = width;
+            }
+            if let Some(slot) = layout.bases.get_mut(index) {
+                *slot = base;
+            }
         }
-        Layout { widths, bases }
     }
 
     /// Encodes the rows into a page.
