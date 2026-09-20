@@ -35,7 +35,11 @@ function resolverPackages() {
   const source = readFileSync(join(here, 'resolve.mjs'), 'utf8');
   const table = source.slice(source.indexOf('const PACKAGES'));
   const body = table.slice(table.indexOf('{'), table.indexOf('};') + 1);
-  return [...body.matchAll(/'([\w-]+)':\s*'(@inillucent\/[\w-]+)'/g)].map(
+  // **Any scope, not `@inillucent` (task-1995).** Hard-coding the scope meant that when the
+  // packages were renamed to `@blackrainbowlabs/*`, the matcher below found nothing in build.mjs,
+  // the comparison ran over an empty list, and the test passed while the published wrapper could
+  // not find its own binary on any platform.
+  return [...body.matchAll(/'([\w-]+)':\s*'(@[\w-]+\/[\w-]+)'/g)].map(
     ([, platform, name]) => ({ platform, name })
   );
 }
@@ -43,7 +47,7 @@ function resolverPackages() {
 /** Reads the platform table out of the build script. */
 function builtPackages() {
   const source = readFileSync(join(here, '..', 'build.mjs'), 'utf8');
-  return [...source.matchAll(/npm:\s*'(@inillucent\/[\w-]+)',\s*target:\s*'([\w-]+)'/g)].map(
+  return [...source.matchAll(/npm:\s*'(@[\w-]+\/[\w-]+)',\s*target:\s*'([\w-]+)'/g)].map(
     ([, name, target]) => ({ name, target })
   );
 }

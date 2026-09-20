@@ -18,13 +18,21 @@ import { dirname, join } from 'node:path';
 
 const require = createRequire(import.meta.url);
 
+// **The scope here is the scope they are published under, and the two came apart (task-1995).**
+// The packages were renamed from `@inillucent/*` to `@blackrainbowlabs/*` in build.mjs and in this
+// package's optionalDependencies, and this table was missed. npm then installed
+// `@blackrainbowlabs/cli-win32-x64` correctly and the shim looked for `@inillucent/cli-win32-x64`,
+// so every install on every platform ended at "inillucent's binary for win32-x64 is not installed"
+// - naming a package that does not exist. It reached the registry, where a version cannot be
+// replaced. resolve.test.mjs compares this table against package.json and against build.mjs, and it
+// no longer hard-codes a scope, so a rename that touches one of the three fails here instead.
 /** The platform packages, by the `process.platform`-`process.arch` pair each serves. */
 const PACKAGES = {
-  'win32-x64': '@inillucent/cli-win32-x64',
-  'darwin-arm64': '@inillucent/cli-darwin-arm64',
-  'darwin-x64': '@inillucent/cli-darwin-x64',
-  'linux-x64': '@inillucent/cli-linux-x64',
-  'linux-arm64': '@inillucent/cli-linux-arm64',
+  'win32-x64': '@blackrainbowlabs/cli-win32-x64',
+  'darwin-arm64': '@blackrainbowlabs/cli-darwin-arm64',
+  'darwin-x64': '@blackrainbowlabs/cli-darwin-x64',
+  'linux-x64': '@blackrainbowlabs/cli-linux-x64',
+  'linux-arm64': '@blackrainbowlabs/cli-linux-arm64',
 };
 
 /** The four programs the release ships, and what each one is for. */

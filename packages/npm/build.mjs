@@ -6,6 +6,7 @@
 //   node packages/npm/build.mjs --publish           # and publish, platform packages first
 //   node packages/npm/build.mjs --publish --dry-run # say what it would publish
 //   node packages/npm/build.mjs --publish --otp 123456   # 2FA on writes
+//   node packages/npm/build.mjs --publish --version 0.1.3 # a release the tree has moved past
 //
 // **--otp is how a publish reaches an account that has two-factor on.** npm
 // answers a publish without one with `403 ... Two-factor authentication or
@@ -36,6 +37,9 @@ import { existsSync, mkdirSync, rmSync, copyFileSync, writeFileSync, readFileSyn
 import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+/** A trailing newline, so the staged package.json ends the way every other JSON file here does. */
+const NEWLINE = String.fromCharCode(10);
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..', '..');
@@ -74,7 +78,13 @@ function optionValue(name) {
   const at = argv.indexOf(name);
   return at >= 0 && argv[at + 1] ? argv[at + 1] : null;
 }
-const version = JSON.parse(readFileSync(join(here, 'inillucent', 'package.json'), 'utf8')).version;
+// **`--version` stages a release the working tree is not on.** The tree moves to the next version
+// as soon as a release is cut, so by the time anything is being published the wrapper's package.json
+// already names the version after it. Reading only that number meant npm could be given 0.1.4 while
+// the site, PyPI, Homebrew and the GitHub release all served 0.1.3 - the mismatch the release is
+// built to prevent, in the one channel that had not been published yet.
+const version = optionValue('--version') ??
+  JSON.parse(readFileSync(join(here, 'inillucent', 'package.json'), 'utf8')).version;
 
 /**
  * Writes one platform package's manifest.
@@ -218,7 +228,34 @@ for (const file of ['package.json', 'index.mjs', 'resolve.mjs', 'README.md']) {
 for (const program of PROGRAMS) {
   copyFileSync(join(here, 'inillucent', 'bin', `${program}.mjs`), join(wrapper, 'bin', `${program}.mjs`));
 }
-console.log('  inillucent: staged');
+
+// **The wrapper's own version and its pins are rewritten to what is being published.** Copying its
+// package.json verbatim was right only while `version` came from that same file. With `--version`
+// it is not, and the effect was published: `inillucent@0.1.4` went to npm pinning
+// `@blackrainbowlabs/cli-*@0.1.4` while the five platform packages beside it were 0.1.3. npm skips
+// an optionalDependency it cannot resolve **without a word**, so `npm install inillucent` installed
+// the shim and no binary at all, and the first thing the user saw was the shim failing to find one.
+const manifest = JSON.parse(readFileSync(join(wrapper, 'package.json'), 'utf8'));
+manifest.version = version;
+for (const platform of PLATFORMS) {
+  if (manifest.optionalDependencies?.[platform.npm]) {
+    manifest.optionalDependencies[platform.npm] = version;
+  }
+}
+writeFileSync(join(wrapper, 'package.json'), `${JSON.stringify(manifest, null, 2)}${NEWLINE}`);
+
+// A pin the release did not build is a pin npm will skip in silence, so it is a hard failure here
+// rather than a broken install on somebody else's machine.
+const unbuilt = PLATFORMS.filter((p) => !built.some((b) => b.endsWith(p.npm.replace('@', '').replace('/', '-'))))
+  .filter((p) => manifest.optionalDependencies?.[p.npm]);
+if (unbuilt.length > 0 && options.has('--publish')) {
+  throw new Error(
+    `the wrapper pins ${unbuilt.map((p) => p.npm).join(', ')} at ${version}, and this run did not ` +
+      `stage them. Publishing would put a wrapper on npm whose binaries do not exist, which npm ` +
+      `installs without complaining. Build their archives into dist/ first.`,
+  );
+}
+console.log(`  inillucent: staged at ${version}`);
 
 if (options.has('--pack')) {
   console.log('\npacking:');
