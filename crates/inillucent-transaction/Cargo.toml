@@ -4,10 +4,10 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-# Never published. Retired with the old pager, and kept for the same reason
-# `inillucent-storage` is: its `recovery` and `open_database` are what reads a
-# SQLite file.
-publish = false
+# **Published for the reason `inillucent-storage` is (task-1995):** `inillucent-sqlite-reader`
+# depends on it and the published engine depends on that, so leaving it unpublished left the
+# workspace unpublishable. Still retired with the old pager, and still here only because its
+# `recovery` and `open_database` are what reads a SQLite file.
 repository.workspace = true
 description = "Locks, autocommit, savepoints, rollback journal, WAL, checkpoints, and recovery."
 

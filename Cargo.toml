@@ -119,7 +119,11 @@ rust-version = "1.88"
 inillucent-alloc = { path = "crates/inillucent-alloc", version = "0.1.0" }
 inillucent-base = { path = "crates/inillucent-base", version = "0.1.0" }
 inillucent-vfs = { path = "crates/inillucent-vfs", version = "0.1.0" }
-inillucent-sim = { path = "crates/inillucent-sim", version = "0.1.0" }
+# **No version, deliberately.** `inillucent-sim` is `publish = false` and is a dev-dependency of
+# `inillucent-pool`, `-txn` and `-wal`, which are published. Cargo strips a dev-dependency that
+# carries no version requirement when it packages a crate; with one, it looks the crate up on
+# crates.io and `cargo publish --workspace` stops at "no matching package named `inillucent-sim`".
+inillucent-sim = { path = "crates/inillucent-sim" }
 inillucent-value = { path = "crates/inillucent-value", version = "0.1.0" }
 inillucent-pool = { path = "crates/inillucent-pool", version = "0.1.0" }
 inillucent-wal = { path = "crates/inillucent-wal", version = "0.1.0" }

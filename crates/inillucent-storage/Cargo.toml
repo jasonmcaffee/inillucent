@@ -4,10 +4,13 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-# Never published. Retired with the old pager, and kept only so
-# `inillucent-sqlite-reader` can read a SQLite file. Nothing should `cargo add`
-# it, and reserving the name would say the opposite.
-publish = false
+# **Published, because `inillucent-engine` reaches it (task-1995).** This said "never published",
+# and that was not a choice the dependency graph allowed: the engine depends on
+# `inillucent-catalog` and `inillucent-sqlite-reader`, both of which depend on this, and a crate on
+# crates.io cannot depend on one that is not there. Marking it unpublished made the whole workspace
+# unpublishable rather than making this crate private, and the first `cargo publish --workspace`
+# said so. It is still retired with the old pager and still exists only so a SQLite file can be
+# read; nothing should `cargo add` it, and the description says what it is.
 repository.workspace = true
 description = "SQLite file codec, pager, page cache, B-trees, overflow chains, freelist, and vacuum."
 
