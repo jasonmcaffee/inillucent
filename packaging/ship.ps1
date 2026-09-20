@@ -201,6 +201,18 @@ function Get-VersionCarriers {
             What    = 'the five platform packages the wrapper pins'
         },
         @{
+            # **The Go wrapper pins the release it installs, so it carries the version in code.**
+            # Its own comment says why - `go install ...@v0.1.1` must install 0.1.1 rather than
+            # whatever is newest - and nothing updated it, so v0.1.5 of the module would have
+            # installed the 0.1.4 binaries. The straggler scan cannot catch it either: it ignores
+            # `packages/go/`, which legitimately names old versions in test data and in examples.
+            Path    = Join-Path $root 'packages/go/cmd/inillucent-install/main.go'
+            Pattern = '(?m)^(const nativeVersion = ")[^"]+(")'
+            Replace = "`${1}$Version`${2}"
+            Check   = "const nativeVersion = " + [char]34 + $escaped + [char]34
+            What    = 'the Go wrapper pinned release'
+        },
+        @{
             Path    = Join-Path $root 'packages/python/pyproject.toml'
             Pattern = '(?m)^(version = ")[^"]+(")'
             Replace = "`${1}$Version`${2}"
@@ -890,13 +902,25 @@ function Test-Registry {
         The version being released.
     #>
     param([string] $Url, [string] $Version)
-    try {
-        $body = (Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 30).Content
-    } catch {
-        return "$Url could not be read: $($_.Exception.Message)"
+    # **Retried, because these registries are eventually consistent (task-1995).** npm answers
+    # `Your package is being processed and may take a few minutes to become available` on the
+    # publish itself, and PyPI's JSON and crates.io's index lag their uploads too. Asking once, the
+    # instant the upload returned, reported "does not name 0.1.5 yet" for six npm packages that had
+    # all published successfully - a report that says a route failed when it did not is worse than
+    # no report, because the obvious next move is to publish again.
+    $deadline = (Get-Date).AddSeconds(180)
+    $last = $null
+    while ($true) {
+        try {
+            $body = (Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec 30).Content
+            if ($body -match [regex]::Escape($Version)) { return $null }
+            $last = "$Url does not name $Version yet"
+        } catch {
+            $last = "$Url could not be read: $($_.Exception.Message)"
+        }
+        if ((Get-Date) -gt $deadline) { return "$last (asked for 3 minutes)" }
+        Start-Sleep -Seconds 10
     }
-    if ($body -notmatch [regex]::Escape($Version)) { return "$Url does not name $Version yet" }
-    return $null
 }
 
 # ---------------------------------------------------------------------------
