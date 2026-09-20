@@ -88,6 +88,18 @@ fn as_datums<'v>(
         })
         .collect()
 }
+/// Adds one shadow row write to this thread's tally.
+///
+/// @param borrowed - nanoseconds spent borrowing the row as the tree's data
+/// @param put - nanoseconds spent writing it
+fn record_shadow_write(borrowed: u128, put: u128) {
+    super::stages::record(|stages| {
+        stages.shadow_writes = stages.shadow_writes.saturating_add(1);
+        stages.datums = stages.datums.saturating_add(borrowed);
+        stages.put = stages.put.saturating_add(put);
+    });
+}
+
 /// Returns a module's row as owned data.
 ///
 /// For the callers that keep it past the values it came from. Everything on the
@@ -468,6 +480,15 @@ impl ShadowStore for WriteStore<'_> {
     }
 
     fn write_row(&mut self, root: u32, rowid: i64, values: &[Value<'static>]) -> DbResult<()> {
+        // **Timed here because this is where a virtual table's time turned out
+        // to be (task-2025).** `extension.fts.build` writes two shadow rows a
+        // document - `%_content` and `%_docsize` - and one `%_idx` row a term at
+        // the flush: 1,508 writes for 500 documents, `6.32 ms` of the `10.2 ms`
+        // one round costs, 62% of it. The module's own stage line charges them to
+        // `content`, `docsize` and `flush` and cannot say which half of a shadow
+        // write they are, and the answer is that `borrowed_bytes` and
+        // `as_datums` are `0.09 ms` of the 6.41 and `tree.put` is the rest.
+        let borrowing = super::stages::clock();
         let holder = borrowed_bytes(values);
         let mut row = as_datums(values, &holder);
         // A rowid table stores its key once, as the tree's key column, and the
@@ -485,7 +506,14 @@ impl ShadowStore for WriteStore<'_> {
         // caller throws that away. On FTS5's `%_data` the replaced row is the
         // term's whole doclist, so a shadow write was paying to materialise a
         // multi-kilobyte value nobody reads. It is the same write otherwise.
-        tree.put(self.database, self.log, &row)?;
+        let borrowed = super::stages::elapsed(borrowing);
+        let writing = super::stages::clock();
+        // Recorded before the `?`, so a refused write is still a write that was
+        // paid for: a counter that only sees the successes cannot be compared
+        // against a workload's own clock, which saw both.
+        let answer = tree.put(self.database, self.log, &row);
+        record_shadow_write(borrowed, super::stages::elapsed(writing));
+        answer?;
         Ok(())
     }
 
@@ -557,6 +585,9 @@ impl ShadowStore for WriteStore<'_> {
         _key_columns: usize,
         values: &[Value<'static>],
     ) -> DbResult<()> {
+        // See `write_row`: the same two halves, on the path FTS5's dictionary
+        // flush takes.
+        let borrowing = super::stages::clock();
         let holder = borrowed_bytes(values);
         let row = as_datums(values, &holder);
         let tree = self
@@ -568,7 +599,14 @@ impl ShadowStore for WriteStore<'_> {
         // caller throws that away. On FTS5's `%_data` the replaced row is the
         // term's whole doclist, so a shadow write was paying to materialise a
         // multi-kilobyte value nobody reads. It is the same write otherwise.
-        tree.put(self.database, self.log, &row)?;
+        let borrowed = super::stages::elapsed(borrowing);
+        let writing = super::stages::clock();
+        // Recorded before the `?`, so a refused write is still a write that was
+        // paid for: a counter that only sees the successes cannot be compared
+        // against a workload's own clock, which saw both.
+        let answer = tree.put(self.database, self.log, &row);
+        record_shadow_write(borrowed, super::stages::elapsed(writing));
+        answer?;
         Ok(())
     }
 

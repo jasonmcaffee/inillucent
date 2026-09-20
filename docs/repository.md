@@ -167,9 +167,9 @@ already removed the cause and nobody re-ran it, which is recorded in
 
 ## What the tests cover
 
-3,126 tests across 196 test targets in the workspace, in these classes:
+3,126 tests across 197 test targets in the workspace, in these classes:
 
-The 196 is the `[[target]]` row count in `tests/selection.toml`, which is what
+The 197 is the `[[target]]` row count in `tests/selection.toml`, which is what
 `tools/doc-facts/check.mjs` compares this sentence against and what the runner is asked to run.
 The number of `#[test]` attributes in the tree is higher - 3,051 at the time of writing - because
 a `#[cfg(windows)]` and a `#[cfg(unix)]` pair is two attributes and one test on any one machine,

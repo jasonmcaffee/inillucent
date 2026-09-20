@@ -487,6 +487,18 @@ name = "multi_database_participants"
 tier = "engine"
 covers = ["inillucent-engine"]
 
+# Where a write into a virtual table spends its time, and the switch that stops
+# the measuring from moving the measurement: always-on, the timing took
+# `extension.rtree.insert` from a paired 1.29x to 1.10x, so the first case here
+# asserts the counters are silent until a harness asks (task-2025). No oracle and
+# no built program: it creates its own file and reads the engine's own counters.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "module_stages"
+tier = "engine"
+covers = ["inillucent-engine"]
+
 [[target]]
 package = "inillucent-compat"
 kind = "test"

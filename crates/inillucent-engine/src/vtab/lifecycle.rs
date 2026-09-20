@@ -127,6 +127,7 @@ impl crate::ImportedDatabase {
     /// @param name - the table's name
     /// @param change - what to do
     pub(crate) fn change_module(&mut self, name: &[u8], change: &Change) -> DbResult<Option<i64>> {
+        let entered = super::stages::clock();
         // **The first write to any module opens the transaction on all of them
         // (task-1932, M2).** Before the flag existed there was no moment at
         // which a module could start buffering, because the engine's only
@@ -185,12 +186,24 @@ impl crate::ImportedDatabase {
                 limits: &self.pragmas.limits().borrow(),
                 catalog: Some(&self.schema.catalog),
             };
-            connected.table.update(&mut context, change)
+            let called = super::stages::clock();
+            let outcome = connected.table.update(&mut context, change);
+            (outcome, super::stages::elapsed(called))
         };
+        // The module's own time, and the whole call's, so the difference is the
+        // plumbing this function builds per row - the map removal, the `WalLog`,
+        // the `WriteStore`, the `Context`. Measured at 0.16 microseconds a row
+        // of `extension.fts.build`'s 20.3 (task-2025).
         // Put it back whatever happened: a module that failed a write is still
         // the connected table, and dropping it would make the next statement
         // say the table does not exist.
         self.session_state.virtual_tables.insert(key, connected);
+        let (outcome, inside) = outcome;
+        let around = super::stages::elapsed(entered);
+        super::stages::record(|stages| {
+            stages.change = stages.change.saturating_add(around);
+            stages.update = stages.update.saturating_add(inside);
+        });
         outcome
     }
     /// Applies an `INSERT` into a virtual table by handing the row to the module.
@@ -312,6 +325,16 @@ impl crate::ImportedDatabase {
         let width = statement.table.columns.len();
         let mut changed = 0usize;
         for row in values {
+            // **Timed per row, because 4.2 ms of `extension.fts.build`'s 8.07
+            // was believed to be here and is not (task-2025).** What this arm
+            // costs - the owned copy of every text value, the column map, the
+            // rowid - was invisible between `execute_statement` and
+            // `Fts5Table::add`, so it could be assumed. Measured, the whole arm
+            // including `change_module`'s plumbing is 0.45 microseconds a
+            // document against the module's own 12.03, and the 4.2 ms was the
+            // transaction's commit: FTS5 flushes its doclists at `xSync`, which
+            // is outside the `Fts5Table::add` that `BuildStages::whole` times.
+            let row_started = super::stages::clock();
             // The statement's own column list decides where each value lands:
             // `INSERT INTO documents(title, body)` supplies two of however many
             // the module declared, and the rest are NULL.
@@ -374,13 +397,21 @@ impl crate::ImportedDatabase {
             // statement that changed nothing. Recording here, on the way out,
             // is what makes a refused command's `changes()` its own instead
             // of an earlier statement's leftover.
-            if let Err(error) = self.change_module(
+            let built = super::stages::elapsed(row_started);
+            let applied = self.change_module(
                 &statement.table.name,
                 &Change::Insert {
                     rowid,
                     values: cells,
                 },
-            ) {
+            );
+            let whole = super::stages::elapsed(row_started);
+            super::stages::record(|stages| {
+                stages.rows = stages.rows.saturating_add(1);
+                stages.values = stages.values.saturating_add(built);
+                stages.whole = stages.whole.saturating_add(whole);
+            });
+            if let Err(error) = applied {
                 self.record_changes(changed as i64, changed as i64);
                 return Err(error);
             }

@@ -41,6 +41,15 @@
 //! Usage:
 //!   inillucent-fullgate `<sqlite fixture>` [--rounds N] [--page-size N]
 //!                       [--scale S] [--frames N] [--families a,b] [--repeat N]
+//!                       [--module-split]
+//!
+//! `--module-split` prints, under each `extension` workload that writes to a
+//! module, where the write went: the module's own `update`, the arm above it,
+//! the commit, every shadow row write split into borrowing the row and writing
+//! the tree, and whether those writes descended or reused the leaf the hint
+//! names. It is off by default because the timing costs enough to move the
+//! ratio it sits beside - `extension.rtree.insert` went from 1.29x to 1.10x
+//! with it always on - so a run that decides a bar does not carry it.
 
 /// The engine's own allocator, installed for this program.
 ///
@@ -104,6 +113,8 @@ struct Settings {
     repeat_override: Option<u32>,
     /// The locking mode SQLite's arm runs in: `normal` or `exclusive`.
     locking: String,
+    /// Whether to time and print where a virtual table write's time goes.
+    module_split: bool,
 }
 
 fn main() -> ExitCode {
@@ -126,7 +137,8 @@ fn main() -> ExitCode {
     let Some(fixture) = arguments.first().filter(|first| !first.starts_with("--")) else {
         eprintln!(
             "usage: inillucent-fullgate <sqlite fixture> [--rounds N] [--page-size N] \
-             [--scale S] [--frames N] [--families a,b] [--repeat N] [--locking normal|exclusive]"
+             [--scale S] [--frames N] [--families a,b] [--repeat N] [--locking normal|exclusive] \
+             [--module-split]"
         );
         return ExitCode::from(2);
     };
@@ -185,6 +197,12 @@ fn settings_from(arguments: &[String]) -> Settings {
             .unwrap_or_else(|| FAMILIES.iter().map(|(name, _)| name.to_string()).collect()),
         repeat_override: flag(arguments, "--repeat").and_then(|value| value.parse().ok()),
         locking: flag(arguments, "--locking").unwrap_or_else(|| "normal".to_string()),
+        // **Off by default, because the split is not free (task-2025).** It
+        // times every shadow row write and every pass through the insert arm,
+        // and measured always-on it took `extension.rtree.insert` from 1.29x to
+        // 1.10x. A gate run that decides whether a bar is met must be the code
+        // an application runs, so the breakdown is asked for by name.
+        module_split: arguments.iter().any(|value| value == "--module-split"),
     }
 }
 
@@ -202,7 +220,7 @@ fn memory_round(database: &Path, settings: &Settings) -> Result<(), String> {
     let mut opened =
         ImportedDatabase::open(database.to_path_buf(), settings.page_size, settings.frames)
             .map_err(|error| format!("open failed: {}", why(&error)))?;
-    let (_, _, cost) = round_on(&mut opened, &plan)?;
+    let (_, _, cost) = round_on(&mut opened, &plan, settings.module_split)?;
     // **The only place a per-workload peak means anything.** This process runs
     // the plan once and nothing else, so its high-water mark is the engine's;
     // the parent's is the harness's. The parent reads these lines back off the
@@ -456,18 +474,7 @@ fn report_results(measured: &[Paired]) -> bool {
             low,
             high
         );
-        if entry.workload == "schema.index" {
-            let stages = INDEX_STAGES.with(|held| held.borrow().clone());
-            if !stages.is_empty() {
-                println!("  {:<24} {stages}", "  last round");
-            }
-        }
-        if entry.workload == "extension.fts.build" {
-            let stages = FTS_STAGES.with(|held| held.borrow().clone());
-            if !stages.is_empty() {
-                println!("  {:<24} {stages}", "  last round");
-            }
-        }
+        print_stage_lines(&entry.workload);
     }
     every_workload_agreed
 }
@@ -878,7 +885,7 @@ fn time_new_engine(
     let copy = restore(fixture, scratch, "ours")?;
     let mut database = ImportedDatabase::import_with(copy, settings.page_size, settings.frames)
         .map_err(|error| format!("import failed: {}", why(&error)))?;
-    round_on(&mut database, plan)
+    round_on(&mut database, plan, settings.module_split)
 }
 
 /// Runs one round of the plan against an open database.
@@ -890,9 +897,11 @@ fn time_new_engine(
 ///
 /// @param database - the engine to run against
 /// @param plan - the workloads
+/// @param module_split - whether to time where a virtual table write's time goes
 fn round_on(
     database: &mut ImportedDatabase,
     plan: &inillucent_compat::perf::Plan,
+    module_split: bool,
 ) -> Result<(Vec<Sample>, Vec<String>, RoundCost), String> {
     // **The pool is filled before the clock starts, which is what the read gate
     // does and what makes these numbers comparable to Phase 2's and Phase 3's.**
@@ -934,7 +943,7 @@ fn round_on(
         let log_before = database.wal().stats();
         let pool_before = database.pool_stats();
         let timed = if workload.mutates {
-            time_write(database, workload, plan.rows)
+            time_write(database, workload, plan.rows, module_split)
         } else {
             time_read(database, workload, plan.rows)
         };
@@ -1482,6 +1491,173 @@ thread_local! {
     /// `extension.fts.build` has been at 0.30x for two tickets and each of them
     /// had to re-derive where the time went; this prints it every run.
     static FTS_STAGES: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+
+    /// Where the last round of each virtual table write workload spent its time.
+    ///
+    /// Keyed by workload, because two of them write to a module -
+    /// `extension.fts.build` and `extension.rtree.insert` - and they go through
+    /// the same engine path, which is the reason the split is measured at all:
+    /// what it costs is charged to every module and not only to fts5.
+    static MODULE_STAGES: std::cell::RefCell<std::collections::BTreeMap<String, String>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+}
+
+/// Prints whatever breakdown the last round of one workload recorded.
+///
+/// Nothing for a workload that records none, so the table stays a table.
+///
+/// @param workload - the workload just reported
+fn print_stage_lines(workload: &str) {
+    if workload == "schema.index" {
+        let stages = INDEX_STAGES.with(|held| held.borrow().clone());
+        if !stages.is_empty() {
+            println!("  {:<24} {stages}", "  last round");
+        }
+    }
+    if workload == "extension.fts.build" {
+        let stages = FTS_STAGES.with(|held| held.borrow().clone());
+        if !stages.is_empty() {
+            println!("  {:<24} {stages}", "  last round");
+        }
+    }
+    let split = MODULE_STAGES.with(|held| held.borrow().get(workload).cloned());
+    if let Some(split) = split {
+        println!("  {:<24} {split}", "  engine path");
+    }
+}
+
+/// What the gate itself paid around a module workload's statements, in nanoseconds.
+///
+/// **The first split charged everything outside `execute_statement` to one
+/// bucket called the harness, and it was 5.07 us a row against the statement's
+/// 8.55** - larger than every engine stage the same run named, and not the
+/// gate's parameter binding, which is two string allocations. Three buckets
+/// rather than one is what tells the transaction's own commit apart from the
+/// binding, and the commit is where it was: `commit_batch` flushes every module
+/// and seals the log once for the whole workload, so it is charged per row here
+/// and paid once.
+#[derive(Clone, Copy, Default)]
+struct OutsideStatements {
+    /// The total of every `execute_statement` call.
+    statement: u128,
+    /// Building the parameters each iteration binds.
+    binds: u128,
+    /// `begin_batch` and `commit_batch`, which happen once for the workload.
+    commit: u128,
+}
+
+/// Renders what the trees did during one module workload, as one line.
+///
+/// **The question a stage timing cannot answer: whether a write descended.**
+/// Staging rows and writing them as one ordered run at the commit is worth a
+/// descent per row, and only if the rows were descending - a rowid append at
+/// the right edge already reuses the leaf the hint names, and staging it buys
+/// the call overhead and nothing else. `hinted` against `descended` says which
+/// of those two a shadow write is before anybody builds the staging.
+///
+/// @param before - the counters when the clock started
+/// @param after - the counters when it stopped
+/// @param rows - how many rows the workload wrote
+fn tree_work_line(
+    before: inillucent_tree::write::WriteStats,
+    after: inillucent_tree::write::WriteStats,
+    rows: u64,
+) -> String {
+    if rows == 0 {
+        return String::new();
+    }
+    let ms = |after: u128, before: u128| after.saturating_sub(before) as f64 / 1e6;
+    let mut line = format!(
+        "hinted {}, descended {}, compactions {}, splits {}",
+        after.hinted.saturating_sub(before.hinted),
+        after.descended.saturating_sub(before.descended),
+        after.compactions.saturating_sub(before.compactions),
+        after.splits.saturating_sub(before.splits),
+    );
+    line.push_str(&format!(
+        ", making room {:.2} ms (compact {:.2}, split {:.2})",
+        ms(after.room_nanos, before.room_nanos),
+        ms(after.compaction_nanos, before.compaction_nanos),
+        ms(after.split_nanos, before.split_nanos),
+    ));
+    line.push_str(&format!(
+        ", of the compaction: source {:.2}, image {:.2} (sizing {:.2}, encode {:.2})",
+        ms(after.source_nanos, before.source_nanos),
+        ms(after.image_nanos, before.image_nanos),
+        ms(after.sizing_nanos, before.sizing_nanos),
+        ms(after.encode_nanos, before.encode_nanos),
+    ));
+    line
+}
+
+/// Renders where the engine spent its time getting one row to a module, as one line.
+///
+/// **Microseconds a row rather than milliseconds a workload**, because the bar
+/// this is aimed at is stated that way: `extension.fts.build` costs 7.8 us a
+/// document to index and 8.4 us to reach the index, against SQLite's 11.5 us for
+/// the whole thing.
+///
+/// `module` is the module's own `update` and should agree with `BuildStages`'
+/// `whole` on the line above. `plumbing` is what `change_module` builds around
+/// it per row; `values` is the arm's own owned copy of the row; `rest` is what
+/// the arm does and does not name; `statement` is everything
+/// `execute_statement` did, so `statement` minus `arm` is the plan check, the
+/// file lock and the foreign key settle; and `harness` is the workload's own
+/// time minus that, which is the gate binding parameters.
+///
+/// @param stages - what the engine measured
+/// @param outside - what the gate paid around the statements
+/// @param total - the workload's whole timed region, in nanoseconds
+fn module_stage_line(
+    stages: inillucent_engine::ModuleStages,
+    outside: OutsideStatements,
+    total: f64,
+) -> String {
+    if stages.rows == 0 {
+        return String::new();
+    }
+    let rows = stages.rows as f64;
+    let per = |nanos: u128| nanos as f64 / rows / 1e3;
+    let plumbing = stages.change.saturating_sub(stages.update);
+    let rest = stages
+        .whole
+        .saturating_sub(stages.values)
+        .saturating_sub(stages.change);
+    let counted = outside.statement + outside.binds + outside.commit;
+    let mut line = format!(
+        "{} rows, us/row: statement {:.2}",
+        stages.rows,
+        per(outside.statement)
+    );
+    line.push_str(&format!(
+        ", arm {:.2} (values {:.2}, plumbing {:.2}, module {:.2}, rest {:.2})",
+        per(stages.whole),
+        per(stages.values),
+        per(plumbing),
+        per(stages.update),
+        per(rest),
+    ));
+    line.push_str(&format!(
+        ", statement above arm {:.2}, binds {:.2}, commit {:.2}, unattributed {:.2}",
+        per(outside.statement.saturating_sub(stages.whole)),
+        per(outside.binds),
+        per(outside.commit),
+        (total - counted as f64) / rows / 1e3,
+    ));
+    let written = stages.shadow_writes.max(1) as f64;
+    line.push_str(&format!(
+        "\n  {:<24} {} shadow rows, {:.2} ms writing them",
+        "  shadow writes",
+        stages.shadow_writes,
+        (stages.datums + stages.put) as f64 / 1e6,
+    ));
+    line.push_str(&format!(
+        " ({:.2} ms borrowing the row, {:.2} ms in the tree), {:.2} us a row",
+        stages.datums as f64 / 1e6,
+        stages.put as f64 / 1e6,
+        (stages.datums + stages.put) as f64 / written / 1e3,
+    ));
+    line
 }
 
 /// Renders where an FTS5 build spent its time, as one line.
@@ -1521,10 +1697,12 @@ fn fts_stage_line(stages: inillucent_ext::vtab::fts5::BuildStages) -> String {
 /// @param database - the imported fixture, opened for writing
 /// @param workload - what to run
 /// @param rows - how many rows the base table holds
+/// @param module_split - whether to time where a virtual table write's time goes
 fn time_write(
     database: &mut ImportedDatabase,
     workload: &Workload,
     rows: u32,
+    module_split: bool,
 ) -> Result<Sample, String> {
     if workload.prepare_each {
         // A DDL statement, or any other the plan marks `prepare: each`. The
@@ -1559,15 +1737,43 @@ fn time_write(
     if workload.name == "extension.fts.build" {
         inillucent_ext::vtab::fts5::reset_build_stages();
     }
+    // **The engine's own half of the same measurement.** A workload that writes
+    // to a module pays for the arm above the module as well as for the module,
+    // and the two are fixed in different crates, so both are reset here and both
+    // are printed below.
+    let splits = module_split && workload.family == "extension" && workload.mutates;
+    if splits {
+        database.record_module_stages(true);
+    }
+    let mut outside = OutsideStatements::default();
+    let trees_before = database.write_stats();
     let started = Instant::now();
     if workload.grouping != Grouping::Autocommit {
         database.begin_batch();
     }
+    outside.commit = started.elapsed().as_nanos();
     for iteration in 0..workload.repeat {
+        // Read only for the two module workloads, because two `Instant::now`
+        // calls a row is nothing against 16 us and something against the 1 us a
+        // point read costs - and a timer that moves the number it is measuring
+        // is how a family gets attributed to the wrong stage.
+        let bound = splits.then(Instant::now);
         let params = params_for(workload, iteration, rows);
+        let entered = match bound {
+            Some(bound) => {
+                outside.binds = outside.binds.saturating_add(bound.elapsed().as_nanos());
+                Some(Instant::now())
+            }
+            None => None,
+        };
         let outcome = database
             .execute_statement(&statement, &params)
             .map_err(|error| why(&error))?;
+        if let Some(entered) = entered {
+            outside.statement = outside
+                .statement
+                .saturating_add(entered.elapsed().as_nanos());
+        }
         changed = changed.saturating_add(outcome.changes.rows as u64);
         // The grouping decides where the commits are, and the rule is
         // `sqlite_bench.c`'s, clause for clause.
@@ -1580,11 +1786,25 @@ fn time_write(
             }
         }
     }
+    let sealing = Instant::now();
     database.commit_batch().map_err(|error| why(&error))?;
+    outside.commit = outside.commit.saturating_add(sealing.elapsed().as_nanos());
     let nanos = started.elapsed().as_secs_f64() * 1e9;
     if workload.name == "extension.fts.build" {
         let line = fts_stage_line(inillucent_ext::vtab::fts5::build_stages());
         FTS_STAGES.with(|held| *held.borrow_mut() = line);
+    }
+    if splits {
+        let stages = database.module_stage_nanos();
+        let line = module_stage_line(stages, outside, nanos);
+        let trees = tree_work_line(trees_before, database.write_stats(), stages.rows);
+        database.record_module_stages(false);
+        if !line.is_empty() {
+            let whole = format!("{line}\n  {:<24} {trees}", "  tree work");
+            MODULE_STAGES.with(|held| {
+                held.borrow_mut().insert(workload.name.clone(), whole);
+            });
+        }
     }
     Ok(Sample {
         workload: workload.name.clone(),

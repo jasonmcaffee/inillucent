@@ -139,6 +139,7 @@ mod session_changes;
 /// The engine's half of a vector index a module owns.
 mod vectors;
 pub mod vtab;
+pub use vtab::ModuleStages;
 
 use std::collections::HashMap;
 use std::path::PathBuf;

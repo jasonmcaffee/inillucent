@@ -45,11 +45,17 @@ use super::{ImportedDatabase, Outcome, WalLog};
 // host is what is left here.
 mod lifecycle;
 mod shadow;
+pub mod stages;
 
 // `Nowhere` was `pub` at `vtab::Nowhere` before the split and stays there:
 // `inillucent-ext`'s module contract names it in its own documentation.
 pub use shadow::Nowhere;
 pub(crate) use shadow::{ReadStore, WriteStore};
+// `ModuleStages` is named as `inillucent_engine::ModuleStages` by the gate and by
+// `crates/inillucent-compat/tests/module_stages.rs`, beside `StageTimings` which
+// lives at the crate root, so `lib.rs` re-exports it there rather than moving it
+// behind a path a caller would have to learn.
+pub use stages::ModuleStages;
 
 /// A connected virtual table and the shadow roots it was given.
 pub struct Connected {
