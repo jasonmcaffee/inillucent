@@ -55,7 +55,7 @@ bound from 4.67x to 8.14x, over the 5.00x bar it had been missing.
 **The retrieval index builds on every core** (design 9). `HnswParams::build_threads` defaults to
 `available_parallelism()`, the two legs of a hybrid search run under `rayon::join`, and
 `distance::dot` dispatches once to an AVX2 and FMA kernel with eight 256-bit accumulators. The index
-build went from 129.7 s to **16.8 s** for 185,078 chunks at 768 dimensions, and vector search p50 from
+build went from 129.7 s to **16.1 s** for 185,078 chunks at 768 dimensions, and vector search p50 from
 0.934 ms to **0.5766**. The acceptance condition was the score card's ranking verdicts, because a
 parallel build's graph is not the serial one: they are byte for byte what they were, **15 better, 1
 equivalent, 1 inconclusive, 0 worse, every correctness gate passing**, which is why the default is the

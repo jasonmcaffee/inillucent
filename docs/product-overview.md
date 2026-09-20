@@ -40,7 +40,7 @@ Everything here is measured, and each row links to the page carrying the run.
 | **A file within 4% of SQLite's** | 1.036x on the same imported data | [Performance](performance.md#disk) |
 | **403 of 416 SQL cases byte for byte, none refused** | every case run through both shells over a fresh database and compared byte by byte | [SQL support](sql.md) |
 | **Better than pgvector on 15 of 17 graded comparisons, worse on none** | both engines reading byte identical vectors | [Retrieval quality](retrieval-quality.md) |
-| **144% faster unfiltered and 5,970% faster filtered** than pgvector | median in the calling process, against the correctly configured baseline | [Retrieval quality](retrieval-quality.md#latency) |
+| **161% faster unfiltered and 5,800% faster filtered** than pgvector | median in the calling process, against the correctly configured baseline | [Retrieval quality](retrieval-quality.md#latency) |
 
 Seven of the thirty timed workloads are slower than SQLite. **Every family clears the 1.00x floor the
 performance contract sets on three runs of the four**, and `schema` went under it on the first, at a

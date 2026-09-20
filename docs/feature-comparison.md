@@ -18,7 +18,7 @@ them.
 | | | measured |
 |---|---|---|
 | **Faster than SQLite** | **363% faster** | 4.63x weighted over the contract's ten families, median of four consecutive 30-round runs on `main`. The 95% lower bound the gate actually grades on is **4.30x**, i.e. **330% faster**, against a 3.00x bound it clears on all four |
-| **Faster than pgvector** | **144% faster unfiltered, 5,970% faster filtered** | retrieval p50 0.8149 ms against 1.990, and 0.5804 ms against 35.221 with a `source =` predicate, against the *better* of the two pgvector configurations. In production, on Nikaya's 598,560-chunk mailbox, semantic p50 went 33.7 ms warm to **4.41 ms** - **664% faster**, and recall@100 0.899 to **1.000** |
+| **Faster than pgvector** | **161% faster unfiltered, 5,800% faster filtered** | retrieval p50 0.7974 ms against 2.077, and 0.5998 ms against 35.390 with a `source =` predicate, against the *better* of the two pgvector configurations. In production, on Nikaya's 598,560-chunk mailbox, semantic p50 went 33.7 ms warm to **4.41 ms** - **664% faster**, and recall@100 0.899 to **1.000** |
 | **Less CPU** | **61% less CPU** | 453 ms of processor against SQLite's 1,172, same plan, one child process each. Ratio 0.385x against a 0.40x bar, which it meets on all four runs |
 | **Less RAM** | **it is not less. It is 10% MORE** | 40.93 MiB peak resident against SQLite's 37.21, on the same 128 MiB budget. It was **102% more** before review 6, **43% more** before review 7 and **14% more** before task-2000, and the bar asks for **5% less** - so this is the one headline that is still a loss |
 | **Same features as SQLite** | **96.9% byte for byte, 98.3% of what SQLite answers, none refused** | 403 of 416 probed cases produce SQLite's exact bytes. 6 of the other 13 are vector features SQLite does not have, and 7 answer differently. [Why it is not 100%](#why-it-is-not-100) says what each is and which can ever be closed |
@@ -170,8 +170,8 @@ and this engine wins two of those three.
 | **The database on disk**, the same fixture imported | 16.05 MiB | 16.62 MiB | **1.036x** (was 1.41x) |
 | The family that was **under the floor** | - | `transaction`, now **136% faster** (2.36x, lower bound 1.73x) | the release condition is that no required family is below the 1.00x floor, and three runs of the four met it; `schema` went under on the first, at a 0.68x lower bound against a 1.36x ratio, and reads 1.03x, 1.36x and 1.35x on the other three. `transaction` was 1.25x before task-2000 made a commit one log append and one sync - see [Performance](performance.md#by-family) |
 | Retrieval ranking, 17 graded comparisons against pgvector | the baseline | 15 better, 2 not worse | **none worse** |
-| Retrieval latency, unfiltered, p50 | 1.990 ms | 0.8149 ms | **144% faster** |
-| Retrieval latency, filtered to a minority source, p50 | 35.221 ms | 0.5804 ms | **5,970% faster** |
+| Retrieval latency, unfiltered, p50 | 2.077 ms | 0.7974 ms | **161% faster** |
+| Retrieval latency, filtered to a minority source, p50 | 35.390 ms | 0.5998 ms | **5,800% faster** |
 
 **Read the performance rows together.** inillucent finishes the same work in **a quarter of the
 time** while spending **about a third of the processor**, so the speed is not bought by burning
@@ -1298,10 +1298,10 @@ the configured one returns the rows and pays for them.
 
 | query | inillucent | pgvector, configured | vs configured | pgvector, defaults | vs defaults |
 |---|---|---|---|---|---|
-| no predicate, p50 | **0.8149 ms** | 1.990 ms | **144% faster** | 1.397 ms | **71% faster** |
-| no predicate, p95 | **1.491 ms** | 3.233 ms | **117% faster** | 2.180 ms | **46% faster** |
-| `source = slack`, p50 | **0.5804 ms** | 35.221 ms | **5,970% faster** | 1.110 ms | **91% faster** |
-| `source = slack`, p95 | **0.6988 ms** | 89.758 ms | **12,745% faster** | 1.940 ms | **178% faster** |
+| no predicate, p50 | **0.7974 ms** | 2.077 ms | **161% faster** | 1.246 ms | **56% faster** |
+| no predicate, p95 | **1.389 ms** | 3.359 ms | **142% faster** | 2.046 ms | **47% faster** |
+| `source = slack`, p50 | **0.5998 ms** | 35.390 ms | **5,800% faster** | 1.137 ms | **90% faster** |
+| `source = slack`, p95 | **0.8172 ms** | 89.097 ms | **10,803% faster** | 2.015 ms | **147% faster** |
 
 The filtered row stands for the whole comparison: pgvector's cost of *being correct under a
 filter* is to repeat the scan, and it is two orders of magnitude. inillucent's probe widens itself
