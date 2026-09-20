@@ -18,6 +18,13 @@
 //! `inillucent_compat::perf::plan_for`, the function the scorecard itself calls,
 //! and `Grouping` decides the transaction boundaries on both sides.
 //!
+//! **Same setup, and it took task-2029 to notice it was missing.** A workload's
+//! `pre` runs on both arms, outside the clock, where `sqlite_bench.c` runs it.
+//! This gate ran it on neither, which meant SQLite reset `side_table.note`
+//! twice a round and inillucent never did, every round ended with the two arms
+//! holding different text, and the gate refused to time any of them. See
+//! [`time_one`] for what the numbers were.
+//!
 //! **Same cache size** - `--frames` sets the pool and SQLite's `cache_size` is
 //! set to the same number of bytes in the plan both arms read. Both numbers are
 //! printed and the report says whether they match.
@@ -340,80 +347,7 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
         .collect();
     let mut refused: Vec<(String, String)> = Vec::new();
 
-    // Where one statement's time goes, before any of it is compared to
-    // anything. The gate misses on per-statement overhead, and a guess about
-    // which half of a statement is expensive is a guess this project has been
-    // wrong about before.
-    println!();
-    println!("## where one statement goes, microseconds");
-    println!(
-        "  {:<24} {:>9} {:>9} {:>9} {:>8} {:>8} {:>8} {:>8}",
-        "workload", "find", "apply", "total", "ins", "del", "inplace", "compact"
-    );
-    {
-        // **A fresh database per workload, because the gate gives each one a
-        // fresh database.** All of them used to run against one copy, in list
-        // order, and the numbers that came out described a file the earlier
-        // workloads had already rewritten. On the `transaction` family that was
-        // not a small distortion: `txn.autocommit`, `txn.batched` and
-        // `txn.large` bind the same scattered rowids and the same
-        // `row {iteration} lorem ipsum ...` text, so by the time `txn.large`
-        // ran, every row it touched already held the exact bytes it was about
-        // to write. Nothing differed, the in-place path is only reached when
-        // exactly one column does, and the profile reported `inplace 0.00` for
-        // a workload that in the gate takes that path on every statement.
-        for workload in &plan.workloads {
-            let copy = restore(fixture, &scratch, "profile")?;
-            let mut database =
-                ImportedDatabase::import_with(copy, settings.page_size, settings.frames)
-                    .map_err(|error| format!("import failed: {}", why(&error)))?;
-            let Ok(statement) = database.prepare_statement(&workload.sql) else {
-                continue;
-            };
-            // **The workload's own repeat, not a sample of it.** Two hundred of
-            // `txn.large`'s two thousand statements never fill a delta area, so
-            // the compaction column read 0.000 for the workload whose
-            // compactions are the reason it is on this page at all. The probe
-            // now runs exactly what one gate round runs.
-            let iterations = workload.repeat.max(1);
-            let before = database.write_stats();
-            database.begin_batch();
-            let mut find = 0u128;
-            let mut apply = 0u128;
-            for iteration in 0..iterations {
-                let params = Params::from_values(
-                    workload
-                        .binds
-                        .iter()
-                        .map(|bind| bind_value(*bind, iteration, plan.rows))
-                        .collect(),
-                );
-                match database.execute_timed(&statement, &params) {
-                    Ok((one, two)) => {
-                        find = find.saturating_add(one);
-                        apply = apply.saturating_add(two);
-                    }
-                    Err(_) => break,
-                }
-            }
-            let _ = database.commit_batch();
-            let each = u128::from(iterations).max(1);
-            let after = database.write_stats();
-            let per =
-                |now: u64, was: u64| (now.saturating_sub(was) as f64) / (iterations.max(1) as f64);
-            println!(
-                "  {:<24} {:>9.2} {:>9.2} {:>9.2} {:>8.2} {:>8.2} {:>8.2} {:>8.3}",
-                workload.name,
-                (find / each) as f64 / 1000.0,
-                (apply / each) as f64 / 1000.0,
-                ((find + apply) / each) as f64 / 1000.0,
-                per(after.inserted, before.inserted),
-                per(after.deleted, before.deleted),
-                per(after.updated_in_place, before.updated_in_place),
-                per(after.compactions, before.compactions),
-            );
-        }
-    }
+    print_where_one_statement_goes(fixture, &scratch, &plan, settings)?;
 
     println!();
     println!("## {} paired rounds, interleaved", settings.rounds);
@@ -509,6 +443,113 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
     println!();
     println!("## gate: {}", if passed { "MET" } else { "NOT MET" });
     Ok(passed)
+}
+
+/// Prints where one statement's time goes, before any of it is compared to
+/// anything.
+///
+/// The gate misses on the overhead of a single statement, and a guess about
+/// which half of a statement is expensive is a guess this project has been
+/// wrong about before. So the report opens with a measurement of one statement
+/// on its own: how long finding the row takes, how long applying the change
+/// takes, and how many rows each statement inserted, deleted, updated in place
+/// or compacted for.
+///
+/// **Lifted out of [`run`] (task-2029), for the reason
+/// [`print_configuration`] was.** `run` was recorded at 226 lines and running
+/// the workloads' `pre` here pushed it to 237, and the ratchet in `policy.rs`
+/// says to split one out rather than raise the number. This is a stage: it
+/// measures, it prints, and it decides nothing the rest of the gate reads.
+///
+/// @param fixture - the pristine database each workload is profiled against
+/// @param scratch - where the per workload copy goes
+/// @param plan - the workloads to profile, and the row count their binds use
+/// @param settings - the page size and pool size the copies are opened with
+fn print_where_one_statement_goes(
+    fixture: &Path,
+    scratch: &Path,
+    plan: &inillucent_compat::perf::Plan,
+    settings: &Settings,
+) -> Result<(), String> {
+    println!();
+    println!("## where one statement goes, microseconds");
+    println!(
+        "  {:<24} {:>9} {:>9} {:>9} {:>8} {:>8} {:>8} {:>8}",
+        "workload", "find", "apply", "total", "ins", "del", "inplace", "compact"
+    );
+    // **A fresh database per workload, because the gate gives each one a
+    // fresh database.** All of them used to run against one copy, in list
+    // order, and the numbers that came out described a file the earlier
+    // workloads had already rewritten. On the `transaction` family that was
+    // not a small distortion: `txn.autocommit`, `txn.batched` and
+    // `txn.large` bind the same scattered rowids and the same
+    // `row {iteration} lorem ipsum ...` text, so by the time `txn.large`
+    // ran, every row it touched already held the exact bytes it was about
+    // to write. Nothing differed, the in-place path is only reached when
+    // exactly one column does, and the profile reported `inplace 0.00` for
+    // a workload that in the gate takes that path on every statement.
+    for workload in &plan.workloads {
+        let copy = restore(fixture, scratch, "profile")?;
+        let mut database = ImportedDatabase::import_with(copy, settings.page_size, settings.frames)
+            .map_err(|error| format!("import failed: {}", why(&error)))?;
+        // **The profile runs the workload's `pre` too, for the same reason
+        // the gate does.** This block exists to say which half of a
+        // statement is expensive, and a `txn` statement that rewrites the
+        // bytes already in the row takes a different path from one that
+        // changes a value - the update that happens in place. Profiling it
+        // without the reset described which path a round *used to* take, not
+        // the one it takes now.
+        if let Err(reason) = run_setup(&mut database, workload.pre.as_deref()) {
+            eprintln!("  {}: pre refused: {reason}", workload.name);
+            continue;
+        }
+        let Ok(statement) = database.prepare_statement(&workload.sql) else {
+            continue;
+        };
+        // **The workload's own repeat, not a sample of it.** Two hundred of
+        // `txn.large`'s two thousand statements never fill a delta area, so
+        // the compaction column read 0.000 for the workload whose
+        // compactions are the reason it is on this page at all. The probe
+        // now runs exactly what one gate round runs.
+        let iterations = workload.repeat.max(1);
+        let before = database.write_stats();
+        database.begin_batch();
+        let mut find = 0u128;
+        let mut apply = 0u128;
+        for iteration in 0..iterations {
+            let params = Params::from_values(
+                workload
+                    .binds
+                    .iter()
+                    .map(|bind| bind_value(*bind, iteration, plan.rows))
+                    .collect(),
+            );
+            match database.execute_timed(&statement, &params) {
+                Ok((one, two)) => {
+                    find = find.saturating_add(one);
+                    apply = apply.saturating_add(two);
+                }
+                Err(_) => break,
+            }
+        }
+        let _ = database.commit_batch();
+        let each = u128::from(iterations).max(1);
+        let after = database.write_stats();
+        let per =
+            |now: u64, was: u64| (now.saturating_sub(was) as f64) / (iterations.max(1) as f64);
+        println!(
+            "  {:<24} {:>9.2} {:>9.2} {:>9.2} {:>8.2} {:>8.2} {:>8.2} {:>8.3}",
+            workload.name,
+            (find / each) as f64 / 1000.0,
+            (apply / each) as f64 / 1000.0,
+            ((find + apply) / each) as f64 / 1000.0,
+            per(after.inserted, before.inserted),
+            per(after.deleted, before.deleted),
+            per(after.updated_in_place, before.updated_in_place),
+            per(after.compactions, before.compactions),
+        );
+    }
+    Ok(())
 }
 
 /// Returns the geometric mean of a family's per-workload ratios.
@@ -624,6 +665,36 @@ fn render_row(rows: &[Vec<OwnedDatum>]) -> String {
         .join(";")
 }
 
+/// Runs a workload's `pre` script, when it has one, outside every timed region.
+///
+/// Setup, not work: the statements here are what puts the table back into the
+/// state the workload is meant to start from, and `sqlite_bench.c` runs them
+/// before it reads its own clock. A gate arm that skips them is measuring a
+/// different database from the arm that does not, and the questions asked at
+/// the end of a round are what notice.
+///
+/// Split on `;` the way `run_batch` in `fullgate.rs` splits, because a `pre` is
+/// a script rather than a statement and the engine's `execute_any` takes one
+/// statement at a time.
+///
+/// @param database - the imported fixture, opened for writing
+/// @param script - the workload's `pre`, when it has one
+fn run_setup(database: &mut ImportedDatabase, script: Option<&str>) -> Result<(), String> {
+    let Some(script) = script else {
+        return Ok(());
+    };
+    for statement in script.split(';') {
+        let trimmed = statement.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        database
+            .execute_any(trimmed, &Params::new())
+            .map_err(|error| format!("{trimmed}: {}", why(&error)))?;
+    }
+    Ok(())
+}
+
 /// Times one workload and digests the table it changed.
 ///
 /// @param database - the imported fixture, opened for writing
@@ -634,6 +705,23 @@ fn time_one(
     workload: &Workload,
     rows: u32,
 ) -> Result<Sample, String> {
+    // **`pre` runs here, before the clock, because the other arm runs it.**
+    // `sqlite_bench.c` executes a workload's `pre` at line 321, ahead of
+    // `sqlite3_prepare_v2` and ahead of the timed loop. This gate used to skip
+    // it, and that was the whole of task-2029: `txn.batched` and `txn.large`
+    // both carry `UPDATE side_table SET note = 'note ' || id`, so SQLite reset
+    // every note twice per round and inillucent never did. The agreement
+    // question asked at the end of a round, `sum(length(note))`, then read
+    // 261865 against 258445 - a gap of 3420 that the gate correctly refused to
+    // time, on every workload, on every fixture.
+    //
+    // It also meant the two arms were not measuring the same work. The three
+    // `transaction` workloads bind the same scattered ids and the same text, so
+    // without the reset `txn.large` was writing back the bytes `txn.batched`
+    // had already written - 4,067 ns against 1,723 ns for an update that
+    // changes a value, which is the measurement that put the `pre` in
+    // `perf.rs` in the first place.
+    run_setup(database, workload.pre.as_deref())?;
     // The statement is bound once per iteration because its parameters change,
     // which is what SQLite's arm does too: it resets, re-binds and steps a
     // program compiled once. What must not differ is the *work*, and the work

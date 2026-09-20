@@ -47,6 +47,19 @@
 //! mean it ran** - plus the report itself. So the second case asserts the exit
 //! code is not 2 and that the report names a positive measurement. A gate that
 //! printed a pass having measured nothing fails on the second half.
+//!
+//! ## A third case, for the paired gates: the two arms hold the same data
+//!
+//! Added by task-2029, which found a gate that started, ran, refused every
+//! round and measured nothing - and did all of it correctly. The write gate
+//! compares the state of the database at the end of each round, and its own arm
+//! was skipping the `pre` statements `sqlite_bench.c` runs, so the two arms
+//! ended every round holding different text and the gate rightly declined to
+//! time them. Nothing above catches it: the gate exits 1 rather than 2, and the
+//! `write` family it measures has no workload with a `pre`.
+//!
+//! So a paired gate also gets a case that runs a family whose workloads *do*
+//! carry setup, and asserts the report says the arms agreed.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -325,6 +338,78 @@ fn writegate_refuses_a_fixture_that_is_not_there() {
         "writegate",
         &output,
         &["import", "fixture", "no such file", "sqlite-bench"],
+    );
+}
+
+/// The write gate's two arms end a round holding the same data.
+///
+/// **The case task-2029 needed and the one above does not provide.** A gate
+/// that starts, runs, refuses every round and measures nothing is what this
+/// one had become: `txn.batched` and `txn.large` carry a `pre` of
+/// `UPDATE side_table SET note = 'note ' || id`, `sqlite_bench.c` runs a
+/// workload's `pre` before it starts its clock, and `writegate.rs` did not run
+/// it at all. Every round then ended with `sum(length(note))` reading 261865 on
+/// our arm against 258445 on SQLite's, the agreement check refused the round,
+/// and the `write` and `transaction` families had no ratio from this gate at
+/// all - on any fixture, on any machine, since `aaa0d0c` put the `pre` in
+/// `perf.rs` on 2026-09-09.
+///
+/// The case above runs `--families write`, where no workload has a `pre`, so it
+/// passed throughout. This one runs the whole plan, and **both families are
+/// needed to see the defect**: the `transaction` workloads alone cannot show
+/// it, because all three bind `Bind::Scatter` and `Bind::Text` over the same
+/// iteration range, so `txn.autocommit`'s hundred rows are a subset of
+/// `txn.batched`'s two thousand carrying identical text, and resetting them or
+/// not ends in the same place. What diverges is the hundred rows
+/// `write.insert.autocommit` adds with `row {i} lorem ipsum ...` in `note`:
+/// SQLite's `pre` rewrites those to `'note ' || id` and no later workload binds
+/// their ids, so the arm that skipped the `pre` keeps the longer text.
+///
+/// The assertion is about what the report says of the data rather than of the
+/// clock: a round that disagreed prints `NO:` and the disagreement, and a round
+/// that agreed prints `yes`. It says nothing about the ratios - a debug build
+/// over a 1.2 MB fixture misses the bars, correctly, for the reason this file's
+/// header gives, so asserting the exit code or the verdict here would be
+/// asserting the build profile.
+#[test]
+fn writegate_arms_agree_on_a_round() {
+    if !sqlite_bench_built() {
+        inillucent_compat::differential::skipping(
+            "sqlite-bench is not built; run tools/sqlite-reference.{ps1,sh}",
+        );
+        return;
+    }
+    let Some(fixture) = fixture_copy("writegate-agreement") else {
+        inillucent_compat::differential::skipping(
+            "the small gate fixture is not built; run tools/build-gate-fixtures.sh",
+        );
+        return;
+    };
+    let output = run(
+        env!("CARGO_BIN_EXE_inillucent-writegate"),
+        &[
+            &fixture.to_string_lossy(),
+            "--scale",
+            "small",
+            "--rounds",
+            "1",
+        ],
+    );
+    let text = said(&output);
+    assert_ne!(
+        code(&output),
+        2,
+        "writegate could not start on the smallest real fixture. It printed:\n{text}"
+    );
+    assert!(
+        !text.contains("NO:"),
+        "writegate's two arms ended a round holding different data, so it timed nothing. \
+         Check that both arms run each workload's `pre`. It printed:\n{text}"
+    );
+    assert!(
+        text.contains("txn.large") && text.contains("  yes"),
+        "writegate's report named no workload whose arms agreed, so the check above passed \
+         by finding nothing to disagree. It printed:\n{text}"
     );
 }
 
