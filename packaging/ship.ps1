@@ -329,6 +329,13 @@ function Find-VersionStraggler {
             $path -notlike '*.md' -and
             $carriers -notcontains $path -and
             -not ($ignore | Where-Object { $path -like "$_*" })
+        } | Where-Object {
+            # **A version named only in a comment is prose (task-1995).** The scripts in packaging/
+            # explain past releases by name - "0.1.3 was tagged and not published for four days" -
+            # and flagging those on every release afterwards is how a warning stops being read. A
+            # file counts only if the old version appears somewhere that is not a comment line.
+            $lines = & git -C $root grep -h --fixed-strings -- $Previous -- $_ 2>$null
+            @($lines | Where-Object { $_ -notmatch '^\s*(#|//|\*|<#)' }).Count -gt 0
         })
     if ($unexpected.Count -gt 0) {
         Write-Host ''
