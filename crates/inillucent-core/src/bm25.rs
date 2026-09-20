@@ -602,14 +602,14 @@ impl Bm25Index {
         k: usize,
         params: LexicalParams,
     ) -> Vec<LexicalHit> {
+        // `proximity`, `phrase` and `rescore_depth_factor` are `top_k`'s, which takes
+        // `params` whole rather than three more arguments.
         let LexicalParams {
             prefix,
             coverage,
-            proximity,
             tier,
-            phrase,
-            rescore_depth_factor,
             heading_boost,
+            ..
         } = params;
         if k == 0 || filter.is_dead() || self.n_chunks == 0 {
             return Vec::new();
@@ -705,7 +705,7 @@ impl Bm25Index {
         // because folding it in would need a constant bigger than any possible score
         // difference, and there is no such constant that is also safe.
         let mut tiers: HashMap<u32, u32> = HashMap::new();
-        let mut hits: Vec<LexicalHit> = scores
+        let hits: Vec<LexicalHit> = scores
             .into_iter()
             .map(|(chunk, (score, mass, matched))| {
                 tiers.insert(chunk, matched);

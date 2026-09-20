@@ -187,22 +187,41 @@ const TIGHT_FILL: f64 = 0.95;
 /// rows and must land on the same bytes, so the fill has to be chosen from the
 /// rows and nothing else.
 ///
+/// **One rung, not two, and the reason is that the second one produced the same page
+/// as the first** (task-2006). This tried `COMPACT_FILL` and then `TIGHT_FILL`, and
+/// `pack_all_rows` is a sizing pass followed by an encode - so a rung that fails costs
+/// a whole pass over every value of the leaf for nothing. Its own comment recorded that
+/// "a leaf that arrived from a bulk build fails the first rung every time", and a bulk
+/// build packs to `BULK_FILL` of 0.9, so every compaction of such a leaf paid for three
+/// passes where two would do.
+///
+/// The two rungs cannot differ in what they produce. A fill is a cap on how many rows
+/// are placed, and `pack_all_rows` returns `None` unless *all* of them are - so when a
+/// rung succeeds, the rows placed are the same rows, the slot widths those rows force
+/// are the same widths, and the encode is handed the same layout. The page is
+/// byte-identical. What the looser rung decided was not the bytes but whether to
+/// compact at all, and the tight rung decides that in strictly more cases. So
+/// `COMPACT_FILL`'s role here was to answer "no" to a leaf that `TIGHT_FILL` then said
+/// "yes" to, one pass later, with the same answer.
+///
+/// `COMPACT_FILL` still means what it says everywhere else: `pack_rows` uses it to
+/// leave a leaf room for the delta rows that follow, which is a decision about how many
+/// rows to *place* and is exactly the decision a compaction does not get to make.
+///
+/// Measured on `inillucent-writelogattrib`, 2,000 inserts into a table carrying two
+/// secondary indexes at a 32 KiB page: `compact_image` was 16.28 ms of a 46.04 ms
+/// transaction, which is 35% of it and 53% of what the two indexes cost.
+///
 /// @param builder - the leaf builder for this tree
 /// @param rows - the leaf's live rows, sorted
 pub fn compact_image<'d>(
     builder: &LeafBuilder,
     rows: &dyn crate::leaf::Rows<'d>,
 ) -> DbResult<Option<Vec<u8>>> {
-    for fill in [COMPACT_FILL, TIGHT_FILL] {
-        // `pack_all_rows` rather than `pack`: a rung that cannot hold every row
-        // costs one sizing pass here, where `pack` would encode a whole page
-        // image and then have it discarded. A leaf that arrived from a bulk
-        // build fails the first rung every time.
-        if let Some(page) = builder.pack_all_rows(rows, fill)? {
-            return Ok(Some(page));
-        }
-    }
-    Ok(None)
+    // `pack_all_rows` rather than `pack`: a rung that cannot hold every row costs one
+    // sizing pass here, where `pack` would encode a whole page image and then have it
+    // discarded.
+    builder.pack_all_rows(rows, TIGHT_FILL)
 }
 
 /// Where a mutation writes its log records.
@@ -334,6 +353,21 @@ pub struct WriteStats {
     pub splits: u64,
     /// Leaves merged away.
     pub merges: u64,
+    /// Nanoseconds spent compacting a leaf, which is the cheaper of the two and the
+    /// one that happens sixty times more often.
+    pub compaction_nanos: u128,
+    /// Nanoseconds spent splitting a leaf, which rewrites three pages and copies every
+    /// row out of the old one first.
+    pub split_nanos: u128,
+    /// Nanoseconds spent in `LeafRef::live_source`: the tombstone scan, the delta
+    /// decode and the merge that puts the delta rows in key order among the sorted ones.
+    pub source_nanos: u128,
+    /// Nanoseconds spent in `compact_image`: one or two sizing passes and one encode of
+    /// every live row.
+    pub image_nanos: u128,
+    /// Nanoseconds spent deciding what will fit and building the image, which for a
+    /// compaction is reading every live row of the leaf and encoding it again.
+    pub choose_nanos: u128,
     /// Nanoseconds spent making room: compacting a leaf, or splitting one.
     ///
     /// **Because `write.insert.batch`'s cost has been attributed to three different
@@ -1050,7 +1084,15 @@ impl PagedTree {
         // thousand allocations per compaction, to produce values that are
         // already on the page. `live_order` is one allocation of four bytes
         // a row and the builder reads through it.
+        let sourcing = std::time::Instant::now();
         let source = leaf.live_source()?;
+        {
+            let mut stats = self.stats.get();
+            stats.source_nanos = stats
+                .source_nanos
+                .saturating_add(sourcing.elapsed().as_nanos());
+            self.stats.set(stats);
+        }
         // **A leaf with out-of-line values always takes the owned route.**
         // The fast path below packs straight out of the page, which needs
         // the guard held - and repacking an extent needs the *file*, to
@@ -1129,7 +1171,15 @@ impl PagedTree {
         // function of the rows alone, or the replayed page would differ from
         // the logged one. A compaction whose page has no room for the
         // arriving row is therefore not a tighter compaction, it is a split.
+        let imaging = std::time::Instant::now();
         let mut compacted = compact_image(&builder, &source)?;
+        {
+            let mut stats = self.stats.get();
+            stats.image_nanos = stats
+                .image_nanos
+                .saturating_add(imaging.elapsed().as_nanos());
+            self.stats.set(stats);
+        }
         if let Some(image) = compacted.as_mut() {
             if !LeafMut::new(image)?.room_for(needed)? {
                 compacted = None;
@@ -1174,12 +1224,21 @@ impl PagedTree {
         arriving: Option<&[Datum<'_>]>,
         needed: usize,
     ) -> DbResult<()> {
+        let before = self.stats.get();
         let started = std::time::Instant::now();
         let outcome = self.make_room_timed(database, log, page, path, arriving, needed);
+        let elapsed = started.elapsed().as_nanos();
         let mut stats = self.stats.get();
-        stats.room_nanos = stats
-            .room_nanos
-            .saturating_add(started.elapsed().as_nanos());
+        stats.room_nanos = stats.room_nanos.saturating_add(elapsed);
+        // **Which of the two it was, told by what it did rather than by a flag.** A
+        // split raises `splits`, a compaction raises `compactions`, and one call does
+        // one of them - so the counters that are already kept say which bucket the time
+        // belongs in, and a split that also compacted is charged to the split, which is
+        // the more expensive half.
+        match stats.splits > before.splits {
+            true => stats.split_nanos = stats.split_nanos.saturating_add(elapsed),
+            false => stats.compaction_nanos = stats.compaction_nanos.saturating_add(elapsed),
+        }
         self.stats.set(stats);
         outcome
     }
@@ -1201,7 +1260,13 @@ impl PagedTree {
         arriving: Option<&[Datum<'_>]>,
         needed: usize,
     ) -> DbResult<()> {
+        let choosing = std::time::Instant::now();
         let fit = self.choose_fit(database, page, arriving, needed)?;
+        let mut stats = self.stats.get();
+        stats.choose_nanos = stats
+            .choose_nanos
+            .saturating_add(choosing.elapsed().as_nanos());
+        self.stats.set(stats);
         match fit {
             Fit::Compact(image, right, max_cts) => {
                 self.compact_into(database, log, page, image, right, max_cts, true)

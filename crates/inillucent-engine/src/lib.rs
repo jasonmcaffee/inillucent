@@ -530,6 +530,11 @@ impl ImportedDatabase {
             total.splits = total.splits.saturating_add(held.splits);
             total.merges = total.merges.saturating_add(held.merges);
             total.room_nanos = total.room_nanos.saturating_add(held.room_nanos);
+            total.compaction_nanos = total.compaction_nanos.saturating_add(held.compaction_nanos);
+            total.split_nanos = total.split_nanos.saturating_add(held.split_nanos);
+            total.choose_nanos = total.choose_nanos.saturating_add(held.choose_nanos);
+            total.source_nanos = total.source_nanos.saturating_add(held.source_nanos);
+            total.image_nanos = total.image_nanos.saturating_add(held.image_nanos);
         }
         total
     }

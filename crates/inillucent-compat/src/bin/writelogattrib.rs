@@ -188,6 +188,51 @@ fn run(fixture: &Path, page_size: usize, frames: usize, iterations: u32) -> Resu
             .room_nanos
             .saturating_sub(plain.after.room_nanos))
     );
+    println!(
+        "    of which compacting  : {:>9.2} ms indexed, {:>6.2} ms without, {:>6.2} ms for the two indexes",
+        ms(indexed.after.compaction_nanos),
+        ms(plain.after.compaction_nanos),
+        ms(indexed
+            .after
+            .compaction_nanos
+            .saturating_sub(plain.after.compaction_nanos))
+    );
+    println!(
+        "    of which splitting   : {:>9.2} ms indexed, {:>6.2} ms without, {:>6.2} ms for the two indexes",
+        ms(indexed.after.split_nanos),
+        ms(plain.after.split_nanos),
+        ms(indexed
+            .after
+            .split_nanos
+            .saturating_sub(plain.after.split_nanos))
+    );
+    println!(
+        "    building the image   : {:>9.2} ms indexed, {:>6.2} ms without, {:>6.2} ms for the two indexes",
+        ms(indexed.after.choose_nanos),
+        ms(plain.after.choose_nanos),
+        ms(indexed
+            .after
+            .choose_nanos
+            .saturating_sub(plain.after.choose_nanos))
+    );
+    println!(
+        "      live_source        : {:>9.2} ms indexed, {:>6.2} ms without, {:>6.2} ms for the two indexes",
+        ms(indexed.after.source_nanos),
+        ms(plain.after.source_nanos),
+        ms(indexed
+            .after
+            .source_nanos
+            .saturating_sub(plain.after.source_nanos))
+    );
+    println!(
+        "      pack + encode      : {:>9.2} ms indexed, {:>6.2} ms without, {:>6.2} ms for the two indexes",
+        ms(indexed.after.image_nanos),
+        ms(plain.after.image_nanos),
+        ms(indexed
+            .after
+            .image_nanos
+            .saturating_sub(plain.after.image_nanos))
+    );
     Ok(())
 }
 
@@ -321,6 +366,13 @@ fn subtract(
         splits: after.splits.saturating_sub(before.splits),
         merges: after.merges.saturating_sub(before.merges),
         room_nanos: after.room_nanos.saturating_sub(before.room_nanos),
+        compaction_nanos: after
+            .compaction_nanos
+            .saturating_sub(before.compaction_nanos),
+        split_nanos: after.split_nanos.saturating_sub(before.split_nanos),
+        choose_nanos: after.choose_nanos.saturating_sub(before.choose_nanos),
+        source_nanos: after.source_nanos.saturating_sub(before.source_nanos),
+        image_nanos: after.image_nanos.saturating_sub(before.image_nanos),
     }
 }
 
