@@ -1072,17 +1072,22 @@ struct LogCost {
 /// @param plan - the workloads, for their order
 /// @param ours - what each of this engine's rounds cost
 /// @param theirs - what each of the reference's rounds cost
-fn report_costs(
-    plan: &inillucent_compat::perf::Plan,
-    ours: &[RoundCost],
-    theirs: &[ProcessCost],
-    child: Option<&ChildRound>,
-    page_size: usize,
-) {
+/// One row per workload: what it cost this engine in memory, processor time and
+/// log traffic.
+///
+/// **`file sync` and `fold` are task-2000's own columns.** Design 1 makes a commit
+/// one log append and one sync and defers the fold, and the claim is about counts
+/// rather than milliseconds, so the counts are printed per workload and the medians
+/// are over rounds like everything else here. A workload whose `file sync` is one
+/// and whose `fold` is zero is a workload where the design is doing what it says.
+///
+/// Split out of `report_costs` in task-2006, which those two columns took past its
+/// recorded length.
+///
+/// @param plan - the workloads, in the order the report prints them
+/// @param ours - one entry per round
+fn report_per_workload_costs(plan: &inillucent_compat::perf::Plan, ours: &[RoundCost]) {
     use inillucent_compat::procstat::{mebibytes, millis};
-    if ours.is_empty() {
-        return;
-    }
     println!();
     println!("## memory and CPU, this engine, per workload   (median over rounds)");
     println!(
@@ -1139,6 +1144,20 @@ fn report_costs(
             middle(&mut folds)
         );
     }
+}
+
+fn report_costs(
+    plan: &inillucent_compat::perf::Plan,
+    ours: &[RoundCost],
+    theirs: &[ProcessCost],
+    child: Option<&ChildRound>,
+    page_size: usize,
+) {
+    use inillucent_compat::procstat::{mebibytes, millis};
+    if ours.is_empty() {
+        return;
+    }
+    report_per_workload_costs(plan, ours);
 
     println!();
     println!("## memory and CPU, per round, both arms   (median over rounds)");

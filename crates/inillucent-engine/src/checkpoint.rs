@@ -460,35 +460,7 @@ impl ImportedDatabase {
         // `recovering_checkpointing_and_recovering_again_is_the_same_database`.
         inillucent_txn::engine::log_free_map_pages(&mut self.storage.database, &self.storage.wal)?;
         self.storage.wal.sync()?;
-        let durable = self.storage.wal.write_ahead_point();
-        self.storage.database.pool().set_durable_lsn(durable);
-        let recovery_from = self.recovery_point(durable, oldest_dirty);
-        // **The segment `recovery_from` actually lives in, not the one
-        // `roll_segment` just opened.** The freshly rolled segment is only
-        // where `recovery_from` lives when nothing bounded it below
-        // `durable`. The moment a held-back page's own `rec_lsn` pulls it
-        // earlier - the whole reason this function reads `oldest_dirty` at
-        // all - `recovery_from` can sit in an earlier segment than the new
-        // one, and pairing it with the new segment's number anyway told the
-        // next open's `read_chain` to start reading a segment that does not
-        // contain it, silently skipping every record between the true
-        // segment and the new one. See `Wal::sequence_containing`'s own doc
-        // comment for the reproduction this was caught by, and for why it
-        // refuses outright rather than guess when no present segment holds
-        // `recovery_from` - the `?` here is that refusal reaching this
-        // checkpoint: better a failed checkpoint than one that persists a
-        // recovery point `read_chain` cannot actually honor.
-        let recovery_sequence = self.storage.wal.sequence_containing(recovery_from)?;
-        self.storage
-            .database
-            .set_log_position(recovery_from, 0, recovery_sequence);
-        // **Before the segments below it are retired.** From this instant, any
-        // page that dirties for the first time floors its `rec_lsn` at
-        // `recovery_from` rather than at whatever stale stamp it happens to be
-        // carrying - see `Pool::note_dirty_from`. Set after `set_log_position`
-        // only because the two do not interact; what matters is that it is set
-        // before `retire_segments_below` below actually deletes anything.
-        self.storage.database.pool().set_retained_lsn(recovery_from);
+        let recovery_from = self.record_recovery_point(oldest_dirty)?;
         self.storage.database.checkpoint_after_free_map()?;
         if reclaiming {
             reclaim(&self.storage.wal, recovery_from)?;
@@ -502,6 +474,48 @@ impl ImportedDatabase {
         // than databases and logs nobody will open again.
         self.checkpoint_attached(asked)?;
         Ok(())
+    }
+
+    /// Settles where the next recovery starts, and writes it into the file.
+    ///
+    /// Answers `recovery_from`, which the caller needs to retire the segments below
+    /// it.
+    ///
+    /// **The segment `recovery_from` actually lives in, not the one `roll_segment`
+    /// just opened.** The freshly rolled segment is only where `recovery_from` lives
+    /// when nothing bounded it below the durable point. The moment a held-back page's
+    /// own `rec_lsn` pulls it earlier - which is the whole reason the caller reads
+    /// `oldest_dirty` at all - `recovery_from` can sit in an earlier segment than the
+    /// new one, and pairing it with the new segment's number anyway told the next
+    /// open's `read_chain` to start reading a segment that does not contain it,
+    /// silently skipping every record between the true segment and the new one. See
+    /// `Wal::sequence_containing`'s own doc comment for the reproduction this was
+    /// caught by, and for why it refuses outright rather than guess when no present
+    /// segment holds `recovery_from` - the `?` here is that refusal reaching the
+    /// checkpoint, and a failed checkpoint is better than one that persists a
+    /// recovery point `read_chain` cannot honour.
+    ///
+    /// **The retained point is set before anything is deleted.** From that instant
+    /// any page dirtying for the first time floors its `rec_lsn` at `recovery_from`
+    /// rather than at whatever stale stamp it is carrying - see
+    /// `Pool::note_dirty_from`. It is set after `set_log_position` only because the
+    /// two do not interact; what matters is that it is set before
+    /// `retire_segments_below` deletes a segment.
+    ///
+    /// Split out of `checkpoint_within` in task-2006, which design 1a's after image
+    /// pass took past the 150 line bar `policy.rs` holds a new function to.
+    ///
+    /// @param oldest_dirty - the earliest log position any dirty page still needs
+    fn record_recovery_point(&mut self, oldest_dirty: u64) -> DbResult<u64> {
+        let durable = self.storage.wal.write_ahead_point();
+        self.storage.database.pool().set_durable_lsn(durable);
+        let recovery_from = self.recovery_point(durable, oldest_dirty);
+        let recovery_sequence = self.storage.wal.sequence_containing(recovery_from)?;
+        self.storage
+            .database
+            .set_log_position(recovery_from, 0, recovery_sequence);
+        self.storage.database.pool().set_retained_lsn(recovery_from);
+        Ok(recovery_from)
     }
 
     /// Folds every attached database's log into its own file.

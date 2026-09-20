@@ -257,6 +257,41 @@ fn every_cut_of_a_bulk_index_build_is_recoverable() {
         let snapshot = vfs.crash();
         drop(connection);
         if reached < nth {
+            // **The failure was armed past the last call the statement makes, so it
+            // never fired: the `CREATE INDEX` committed and then the power went.**
+            // That is the one cut point this campaign exists for and the `break`
+            // used to skip it, which is why `with` was zero and the assertion below
+            // said the state after the commit was never tested.
+            //
+            // It is also the case design 1 of task-2000 changed. The fold is lazy
+            // now, and `vfs.crash()` above is taken while the connection is still
+            // open, so this snapshot holds a database whose catalog has never been
+            // written in place: the index exists in the log and nowhere else. A
+            // recovery that answers `ROWS` here is the log rebuilding a committed
+            // `CREATE INDEX` from nothing but its own records, over pages design 2
+            // wrote directly and synced before the commit.
+            assert!(
+                committed,
+                "an unarmed run must commit; the workload is not deterministic"
+            );
+            cuts = cuts.saturating_add(1);
+            match recovered(&snapshot, 6_000 + nth) {
+                Recovery::WithIndex(count) => {
+                    assert_eq!(
+                        count, ROWS,
+                        "the acknowledged commit's index answered {count} of {ROWS} rows"
+                    );
+                    with = with.saturating_add(1);
+                    report.push_str(&format!("{nth}	acknowledged	with
+"));
+                }
+                Recovery::WithoutIndex => panic!(
+                    "cut {nth}: the CREATE INDEX was acknowledged and the index is not there                      after recovery - an acknowledged commit that the log cannot rebuild"
+                ),
+                Recovery::Broken(said) => {
+                    panic!("cut {nth}: an acknowledged commit came back unreadable: {said}")
+                }
+            }
             break;
         }
         cuts = cuts.saturating_add(1);

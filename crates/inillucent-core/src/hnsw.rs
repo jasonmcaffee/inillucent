@@ -2310,11 +2310,28 @@ mod tests {
 
     /// More entry points must never make the answer worse; the walk starts from a
     /// superset of where it started before.
+    ///
+    /// **`build_threads: 1`, because this test's premise is that the two graphs are
+    /// the same one** (task-2006). It says so three lines down: "same seed, same
+    /// insertion order, so the two graphs are identical and only the number of
+    /// starting points differs". `HnswParams::default().build_threads` became
+    /// `available_parallelism()` in design 9 of task-2000, and a parallel build's
+    /// link order is whatever the thread pool produced - see
+    /// `available_parallelism`'s own note - so under the new default the two builds
+    /// produce two different valid graphs and this comparison has two variables in
+    /// it. It measured as eight entry points scoring 5.9 against one entry point's
+    /// 6.0 over six probes, which is the difference between two graphs rather than
+    /// a property of entry points.
+    ///
+    /// Pinning the threads here is what isolates the variable the test is named
+    /// for. `a_parallel_batch_insert_is_as_accurate_as_the_sequential_one` is where
+    /// the parallel build's own accuracy is measured.
     #[test]
     fn extra_entry_points_do_not_lower_recall() {
         let (vectors, store) = fixture(6000, 32);
         let base = HnswParams {
             exhaustive_below: 0,
+            build_threads: 1,
             ..Default::default()
         };
         let mut one = Hnsw::new(base);

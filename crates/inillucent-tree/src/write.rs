@@ -578,6 +578,93 @@ impl PagedTree {
         Ok(refs)
     }
 
+    /// Records the row that was there, for a log that can undo.
+    ///
+    /// Called after the room check rather than before it, because a retry
+    /// re-locates and would otherwise record the same row twice.
+    ///
+    /// Given rather than cloned when the caller did not ask for the row: `put` and
+    /// `put_absent` report presence and throw the row away, so cloning it for them
+    /// was a whole row copied per write for nothing.
+    ///
+    /// @param log - where the before-image goes
+    /// @param key - the key being written
+    /// @param previous - the row that was there, taken when nobody else wants it
+    /// @param caller_wants_previous - whether the caller asked for the row
+    fn record_undo(
+        &self,
+        log: &mut dyn TreeLog,
+        key: &[Datum<'_>],
+        previous: &mut Option<Vec<OwnedDatum>>,
+        caller_wants_previous: bool,
+    ) -> DbResult<()> {
+        if !log.wants_undo() {
+            return Ok(());
+        }
+        let recorded = match caller_wants_previous {
+            true => previous.clone(),
+            false => previous.take(),
+        };
+        log.undo(self.tree_id(), key, recorded)
+    }
+
+    /// Writes one row into the leaf that has been found and has room.
+    ///
+    /// The log record goes first and the page carries its LSN, which is what makes
+    /// redo idempotent: a page already stamped at or above the record's LSN has the
+    /// change and is left alone.
+    ///
+    /// Any extent the displaced row owned is freed after the page is written, not
+    /// before, so a failure in between leaves a run nothing points at rather than a
+    /// row pointing at a freed run.
+    ///
+    /// @param database - the file
+    /// @param log - where the record goes
+    /// @param page - the leaf
+    /// @param located - where the key sits in it, which decides what is displaced
+    /// @param encoded_row - the row's bytes, taken by the write
+    /// @param spilled - whether any of its values went out of line
+    fn apply_row(
+        &self,
+        database: &mut Database,
+        log: &mut dyn TreeLog,
+        page: PageId,
+        located: Located,
+        encoded_row: &mut Vec<u8>,
+        spilled: bool,
+    ) -> DbResult<()> {
+        let orphaned = self.orphaned_extents(database, page, located)?;
+        let lsn = log.log(Body::InsertRow {
+            tree: self.tree_id(),
+            page: page.0,
+            row: encoded_row,
+        })?;
+        database.pool().modify(page, |bytes| {
+            let mut leaf = LeafMut::new(bytes)?;
+            match located {
+                Located::Sorted(row_index) => {
+                    leaf.set_tombstone(row_index)?;
+                }
+                Located::Delta(index) => leaf.remove_delta(index)?,
+                Located::Absent => {}
+            }
+            let plan = leaf
+                // Taken rather than cloned: the loop only retries above the call
+                // to this function, and the attempt that reaches it returns.
+                .plan_encoded(std::mem::take(encoded_row))?
+                .ok_or_else(|| corrupt("a leaf that had room lost it before the write"))?;
+            leaf.apply_delta(&plan)?;
+            if spilled {
+                leaf.mark_extents()?;
+            }
+            leaf.set_lsn(lsn)
+        })?;
+        for reference in orphaned {
+            crate::paged::free_extent(database, log, reference)?;
+        }
+        Ok(())
+    }
+
     fn write_row(
         &mut self,
         database: &mut Database,
@@ -679,50 +766,8 @@ impl PagedTree {
                 self.make_room(database, log, page, &path, Some(&key), encoded_row.len())?;
                 continue;
             }
-            // Recorded here rather than above the room check, because a retry
-            // re-locates and would record the same row twice.
-            if log.wants_undo() {
-                // Given rather than cloned when the caller did not ask for the
-                // row: `put` and `put_absent` report presence and throw the
-                // row away, so cloning it for them was a whole row copied per
-                // write for nothing.
-                let recorded = match caller_wants_previous {
-                    true => previous.clone(),
-                    false => previous.take(),
-                };
-                log.undo(self.tree_id(), &key, recorded)?;
-            }
-
-            let orphaned = self.orphaned_extents(database, page, located)?;
-            let lsn = log.log(Body::InsertRow {
-                tree: self.tree_id(),
-                page: page.0,
-                row: &encoded_row,
-            })?;
-            database.pool().modify(page, |bytes| {
-                let mut leaf = LeafMut::new(bytes)?;
-                match located {
-                    Located::Sorted(row_index) => {
-                        leaf.set_tombstone(row_index)?;
-                    }
-                    Located::Delta(index) => leaf.remove_delta(index)?,
-                    Located::Absent => {}
-                }
-                let plan = leaf
-                    // Taken rather than cloned: the loop only retries
-                    // above this point, and the attempt that reaches here
-                    // returns.
-                    .plan_encoded(std::mem::take(&mut encoded_row))?
-                    .ok_or_else(|| corrupt("a leaf that had room lost it before the write"))?;
-                leaf.apply_delta(&plan)?;
-                if spilled {
-                    leaf.mark_extents()?;
-                }
-                leaf.set_lsn(lsn)
-            })?;
-            for reference in orphaned {
-                crate::paged::free_extent(database, log, reference)?;
-            }
+            self.record_undo(log, &key, &mut previous, caller_wants_previous)?;
+            self.apply_row(database, log, page, located, &mut encoded_row, spilled)?;
             let mut stats = self.stats.get();
             stats.inserted = stats.inserted.saturating_add(1);
             self.stats.set(stats);

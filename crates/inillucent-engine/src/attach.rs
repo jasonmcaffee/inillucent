@@ -137,6 +137,40 @@ impl ImportedDatabase {
     /// @param held - the path to report, or `None` when there is no file
     /// @param name - the name a statement qualifies with
     /// @param session - the connection this schema belongs to, for a `temp`
+    /// Makes the file an `ATTACH` names, when the path holds nothing.
+    ///
+    /// `ATTACH` on a path that holds nothing makes the database, which is what SQLite
+    /// does and what makes `ATTACH ':memory:'` mean anything at all.
+    ///
+    /// An empty catalog is a catalog tree with no rows, not the absence of one: every
+    /// later `CREATE TABLE` inserts into it, so the fresh file gets one before it is
+    /// closed again.
+    ///
+    /// The page size is the connection's, because an attachment created here has no
+    /// file to read one from; a file that already exists keeps its own.
+    ///
+    /// Split out of `attach_file` in task-2006, which design 1's two settings took
+    /// past the 150 line bar `policy.rs` holds a new function to.
+    ///
+    /// @param vfs - the file system the attachment lives on
+    /// @param path - where it lives
+    fn create_if_absent(&self, vfs: &dyn Vfs, path: &DbPath) -> DbResult<()> {
+        if vfs.access(path, inillucent_vfs::AccessMode::Exists)? {
+            return Ok(());
+        }
+        let mut fresh = Database::create(
+            vfs,
+            path,
+            Options::default()
+                .with_page_size(self.storage.page_size)
+                .with_frames(self.storage.frames.max(64)),
+        )?;
+        let _ = write_catalog(&mut fresh, &[])?;
+        fresh.checkpoint()?;
+        drop(fresh);
+        Ok(())
+    }
+
     pub(crate) fn attach_file(
         &mut self,
         vfs: Arc<dyn Vfs>,
@@ -145,23 +179,7 @@ impl ImportedDatabase {
         name: Vec<u8>,
         session: Option<u64>,
     ) -> DbResult<()> {
-        // **Created when it is not there.** `ATTACH` on a path that holds
-        // nothing makes the database, which is what SQLite does and what makes
-        // `ATTACH ':memory:'` mean anything at all.
-        if !vfs.access(&path, inillucent_vfs::AccessMode::Exists)? {
-            let mut fresh = Database::create(
-                vfs.as_ref(),
-                &path,
-                Options::default()
-                    .with_page_size(self.storage.page_size)
-                    .with_frames(self.storage.frames.max(64)),
-            )?;
-            // An empty catalog is a catalog tree with no rows, not the absence
-            // of one: every later `CREATE TABLE` inserts into it.
-            let _ = write_catalog(&mut fresh, &[])?;
-            fresh.checkpoint()?;
-            drop(fresh);
-        }
+        self.create_if_absent(vfs.as_ref(), &path)?;
         // **A hot rollback journal is replayed before anything reads a
         // page, exactly as `ImportedDatabase::open_on` does for `main`.**
         // An attached file checkpoints in place the same way `main` does, so

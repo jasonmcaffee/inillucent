@@ -1120,7 +1120,19 @@ fn no_new_crate_reaches_into_the_retired_engine() {
 // below already fails loudly with "is not there any more; remove its row"
 // for exactly this reason - removing them here is answering that failure
 // before it happens rather than after.
-const CEILINGS: [(&str, usize); 14] = [
+// **Two rows added and one lowered in task-2006.** `pool.rs` had grown 295 lines
+// past its ceiling and `paged.rs` 74, both while designs 1 and 2 of task-2000
+// changed what a fold and a bulk build do, and this list's own rule is that the
+// answer is an extraction. `crates/inillucent-pool/src/pool/fold.rs` took the fold
+// and the meta record - how a dirty page reaches the file and how the file is made
+// to account for it - and `crates/inillucent-tree/src/paged/bulk.rs` took the bulk
+// build. Both are whole units with nothing changed in the move, and both get a row
+// here at their post-split size, because a new file of four hundred lines with
+// nothing watching it is the shape every module on this list started as. `paged.rs`
+// is recorded at 2,300 from 2,450, which is what the shrunk check below asks for.
+const CEILINGS: [(&str, usize); 16] = [
+    ("crates/inillucent-pool/src/pool/fold.rs", 600),
+    ("crates/inillucent-tree/src/paged/bulk.rs", 600),
     // **The facade's own size, which had no ratchet (task-1979, Q2).** It is
     // the harness that runs every assertion against `inillucent::{Database,
     // Connection, Value}` rather than against `inillucent-engine`, so it grows
@@ -1222,7 +1234,7 @@ const CEILINGS: [(&str, usize); 14] = [
     // `skip` (the distinct prefix walk). What is left here is the tree itself:
     // its fields, its statistics, its key encoding, the extent store and the
     // integrity check.
-    ("crates/inillucent-tree/src/paged.rs", 2_450),
+    ("crates/inillucent-tree/src/paged.rs", 2_300),
     // **Lowered to 200 in task-1962 (A7).** 3,003 lines holding the write
     // target, the key search and the four statements became six modules under
     // `dml/`, beside the `index.rs` that was already there: `target` (where a
@@ -2532,10 +2544,14 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 52] = [
         "valid_fixtures",
         173,
     ),
+    // Moved to `paged/bulk.rs` in task-2006 and split into three named passes -
+    // `plan_leaves`, `write_leaf_run` and `build_interior_levels` - which took it
+    // from 197 lines to 71. Recorded where it lives now, because the `gone` check
+    // below matches on the path as well as the name.
     (
-        "crates/inillucent-tree/src/paged.rs",
+        "crates/inillucent-tree/src/paged/bulk.rs",
         "bulk_build_rows",
-        167,
+        80,
     ),
     ("crates/inillucent-core/src/bm25.rs", "search", 167),
     // 166 before task-1946 M12 moved the decision into `choose_fit`, which is

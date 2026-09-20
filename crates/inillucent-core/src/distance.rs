@@ -101,13 +101,22 @@ fn wide_is_available() -> bool {
 /// caller established, which is stated once at the top. The two loads compute an
 /// offset into a fixed-width window, which is stated where the offset is.
 ///
+/// @param a - one vector
+/// @param b - the other, the same length
+///
 /// # Safety
 ///
 /// The caller must have established that this processor has both `avx2` and `fma`,
 /// which [`wide_is_available`] is the only thing that answers.
 ///
-/// @param a - one vector
-/// @param b - the other, the same length
+/// **Last in the doc comment rather than before the `@param` lines, because
+/// `policy.rs` reads the eight lines above an `unsafe` and this section was the
+/// ninth.** `unsafe_code_is_confined_and_justified` accepts either a `SAFETY:`
+/// comment or a `# Safety` doc section within that window, and it refused
+/// `distance.rs:113` while the requirement was written four lines further up than
+/// the check looks. The rule is worth keeping as it is - a safety argument a reader
+/// has to scroll for is one they will not read - so the section moved rather than
+/// the window widening.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn dot_wide(a: &[f32], b: &[f32]) -> f32 {
