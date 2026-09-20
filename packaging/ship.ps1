@@ -577,7 +577,7 @@ function Get-Routes {
                 if (-not $env:CARGO_REGISTRY_TOKEN) { return 'CARGO_REGISTRY_TOKEN is not set.' }
                 $null
             }
-            Run    = { & (Join-Path $script:Packaging 'cargo-publish.ps1') -Execute }
+            Run    = { & (Join-Path $script:Packaging 'cargo-publish.ps1') -Execute -Confirmed }
             Verify = { Test-Registry -Url "https://crates.io/api/v1/crates/inillucent" -Version $Version }
         },
         @{
