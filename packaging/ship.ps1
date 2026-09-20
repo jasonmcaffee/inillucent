@@ -332,12 +332,17 @@ function Find-VersionStraggler {
     $carriers = @(Get-VersionCarriers -Version $Version | ForEach-Object {
             $_.Path.Substring($root.Length + 1).Replace('\', '/')
         })
+    # `Cargo.lock` matched only the one at the root. `tools/macos-pkg/Cargo.lock` is a lock file for
+    # exactly the reason the note above gives - it names every dependency's version - and it was
+    # reported on the 0.1.7 run for holding `android_system_properties 0.1.6`.
     $ignore = @('CHANGELOG.md', 'Cargo.lock', 'tasks/', 'docs/', 'dist/', 'packages/go/')
+    $ignoreLeaf = @('Cargo.lock')
     $hits = & git -C $root grep -l --fixed-strings -- $Previous 2>$null
     $unexpected = @($hits | Where-Object {
             $path = $_
             $path -notlike '*.md' -and
             $carriers -notcontains $path -and
+            $ignoreLeaf -notcontains (Split-Path -Leaf $path) -and
             -not ($ignore | Where-Object { $path -like "$_*" })
         } | Where-Object {
             # **A version named only in a comment is prose (task-1995).** The scripts in packaging/
@@ -345,7 +350,11 @@ function Find-VersionStraggler {
             # and flagging those on every release afterwards is how a warning stops being read. A
             # file counts only if the old version appears somewhere that is not a comment line.
             $lines = & git -C $root grep -h --fixed-strings -- $Previous -- $_ 2>$null
-            @($lines | Where-Object { $_ -notmatch '^\s*(#|//|\*|<#)' }).Count -gt 0
+            # **A whole version, not a substring.** `--fixed-strings` found 0.1.6 inside
+            # `iana-time-zone 0.1.65`, so a dependency's version reported the project's as a
+            # straggler. A digit or a dot on either side means it is part of a longer number.
+            $whole = "(?<![0-9.])" + [regex]::Escape($Previous) + "(?![0-9.])"
+            @($lines | Where-Object { $_ -notmatch '^\s*(#|//|\*|<#)' -and $_ -match $whole }).Count -gt 0
         })
     if ($unexpected.Count -gt 0) {
         Write-Host ''
