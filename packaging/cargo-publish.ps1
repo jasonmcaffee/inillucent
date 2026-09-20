@@ -82,12 +82,42 @@ if (-not $Confirmed) {
     }
 }
 
-& cargo @arguments
-if ($LASTEXITCODE -ne 0) {
+# **crates.io rate limits NEW crates, and this workspace is 25 of them (task-1995).** A new account
+# gets a small burst and then one new crate every ten minutes, so `cargo publish --workspace` stops
+# with `429 Too Many Requests ... Please try again after <date>` having published a handful. Crates
+# that went up stay up and cargo skips them on the next run, so the whole job is "run it again when
+# the clock says you may" - which is a person sitting with a timer for several hours, and the kind
+# of thing that gets abandoned half done. The refusal carries the exact time to come back, so this
+# reads it and waits.
+$attempt = 0
+while ($true) {
+    $attempt++
+    $output = & cargo @arguments 2>&1 | Tee-Object -Variable captured
+    $output | ForEach-Object { Write-Host $_ }
+    if ($LASTEXITCODE -eq 0) { break }
+
+    $text = ($captured | Out-String)
+    if ($text -notmatch 'Please try again after ([^)]+?) and see') {
+        Write-Host ''
+        Write-Host 'The publish stopped part way. Crates that went up are up: fix what failed,'
+        Write-Host 'then run this again - cargo skips the versions that already exist.'
+        exit $LASTEXITCODE
+    }
+
+    $until = $null
+    if (-not [datetime]::TryParse($Matches[1], [ref] $until)) {
+        Write-Host "crates.io asked us back at $($Matches[1]), which could not be parsed. Run this again then."
+        exit $LASTEXITCODE
+    }
+    # A minute of slack, because the server's clock is the one that counts.
+    $wait = [math]::Max(30, ($until.ToUniversalTime() - [datetime]::UtcNow).TotalSeconds + 60)
+    if ($wait -gt 3600) {
+        Write-Host "crates.io asked us back at $until, which is more than an hour away. Run this again then."
+        exit $LASTEXITCODE
+    }
     Write-Host ''
-    Write-Host 'The publish stopped part way. Crates that went up are up: fix what failed,'
-    Write-Host 'then run this again - cargo skips the versions that already exist.'
-    exit $LASTEXITCODE
+    Write-Host "rate limited: $([int] $wait)s until $($until.ToLocalTime().ToString('HH:mm:ss')), attempt $attempt. Crates already up are skipped on the next pass." -ForegroundColor Yellow
+    Start-Sleep -Seconds $wait
 }
 
 Write-Host ''
