@@ -749,3 +749,164 @@ fn a_rolled_back_virtual_table_leaves_no_module_behind() {
     }
     assert_eq!(values_after_reopen(&path), the_three_rows());
 }
+
+/// Returns the three rows plus the fourth these tests write after a rollback.
+fn the_four_rows() -> Vec<Vec<OwnedDatum>> {
+    let mut rows = the_three_rows();
+    rows.push(vec![OwnedDatum::Int(4), OwnedDatum::Int(40)]);
+    rows
+}
+
+/// A rolled-back `DROP COLUMN` leaves the column readable again.
+///
+/// The ticket's own reproduction. Before the fix `SELECT n FROM p` answered
+/// `the tree read for FROM term 0 does not carry column 1` for the rest of the
+/// connection's life, while a reopen of the same file read both columns and all
+/// three rows.
+///
+/// `ALTER TABLE ... DROP COLUMN` rebuilds: it releases the table's tree and
+/// registers a new one, holding only the surviving columns, under the same
+/// handle. The rollback restores the catalog row naming the original root page,
+/// and `reattach_entries` skipped the table because the handle was occupied -
+/// so the schema described two columns and the tree attached to it had one.
+///
+/// Asserted in the session that rolled back, because that is the only thing
+/// that is wrong: a reopen builds its trees from the catalog and cannot see it.
+#[test]
+fn a_rolled_back_dropped_column_is_readable_again() {
+    let directory = scratch("alter-drop-column");
+    let path = directory.join("d.rdb");
+    three_rows(&path);
+    {
+        let database = Database::open(&path).expect("the database opens");
+        let connection = database.session();
+        connection
+            .execute_batch("BEGIN; ALTER TABLE p DROP COLUMN n; ROLLBACK")
+            .expect("the transaction is abandoned");
+        assert_eq!(
+            connection
+                .query("SELECT id, n FROM p ORDER BY id")
+                .expect("the column the rollback put back is readable"),
+            the_three_rows(),
+            "the connection still reads p through the tree the ALTER built"
+        );
+    }
+    assert_eq!(values_after_reopen(&path), the_three_rows());
+}
+
+/// A row written after a rolled-back `DROP COLUMN` reaches the file.
+///
+/// **The read error above is the visible half of this defect and this is the
+/// expensive half.** The tree the `ALTER` built is an orphan once the rollback
+/// has restored the catalog row: no row names its root page, so nothing will
+/// ever read it again. A connection still attached to it accepted the `INSERT`,
+/// reported success, read the row back from its own buffer, and the reopened
+/// file did not have it.
+///
+/// The `INSERT` names only `id`, because before the fix this session could not
+/// write `n` at all - so a test that inserted both columns would fail on the
+/// write and never reach the question it is asking.
+#[test]
+fn a_rolled_back_dropped_column_does_not_strand_a_later_write() {
+    let directory = scratch("alter-drop-column-write");
+    let path = directory.join("d.rdb");
+    three_rows(&path);
+    {
+        let database = Database::open(&path).expect("the database opens");
+        let connection = database.session();
+        connection
+            .execute_batch("BEGIN; ALTER TABLE p DROP COLUMN n; ROLLBACK")
+            .expect("the transaction is abandoned");
+        connection
+            .execute_batch("INSERT INTO p (id, n) VALUES (4, 40)")
+            .expect("a write after the rollback");
+    }
+    assert_eq!(
+        values_after_reopen(&path),
+        the_four_rows(),
+        "the write after the rollback went into a tree the catalog does not name"
+    );
+}
+
+/// The same for `ADD COLUMN`, which rebuilds too and shows nothing at all.
+///
+/// **This case has no symptom a reader can see, which is why it is held
+/// separately.** The ticket recorded `ADD COLUMN` as fine, and every read in the
+/// session that rolled one back does answer correctly - because the tree the
+/// `ALTER` built carries a *superset* of the catalog's columns, so every column
+/// the restored catalog names still finds a slot in it. `SELECT c FROM p` is a
+/// parse error against the restored catalog, which looks like the rollback
+/// having worked.
+///
+/// The tree is stranded exactly as above, and the only thing that says so is the
+/// reopen: the `INSERT` below reports success, reads back in the same session,
+/// and is not in the file. A version of this test without the reopen passes
+/// against the bug.
+#[test]
+fn a_rolled_back_added_column_does_not_strand_a_later_write() {
+    let directory = scratch("alter-add-column-write");
+    let path = directory.join("d.rdb");
+    three_rows(&path);
+    {
+        let database = Database::open(&path).expect("the database opens");
+        let connection = database.session();
+        connection
+            .execute_batch("BEGIN; ALTER TABLE p ADD COLUMN c INTEGER DEFAULT 9; ROLLBACK")
+            .expect("the transaction is abandoned");
+        connection
+            .execute_batch("INSERT INTO p (id, n) VALUES (4, 40)")
+            .expect("a write after the rollback");
+        assert_eq!(
+            connection
+                .query("SELECT id, n FROM p ORDER BY id")
+                .expect("read in the same session"),
+            the_four_rows(),
+            "the session cannot see its own write",
+        );
+    }
+    assert_eq!(
+        values_after_reopen(&path),
+        the_four_rows(),
+        "the write after the rollback went into a tree the catalog does not name"
+    );
+}
+
+/// `ROLLBACK TO` a savepoint re-attaches, and the `COMMIT` after it is sound.
+///
+/// The third shape the ticket asked about. It fails the same way and it fails
+/// *past the commit*: the transaction goes on to commit successfully, writing
+/// the orphan tree's pages into the file where nothing will read them, while the
+/// connection goes on answering out of the tree the `ALTER` built.
+///
+/// The `INSERT` sits between the `ROLLBACK TO` and the `COMMIT` on purpose, so
+/// the row it writes is part of the committed transaction rather than a
+/// statement after it - which is what says the re-attach happened at the
+/// savepoint and not merely by the end of the transaction.
+#[test]
+fn an_alter_rolled_back_to_a_savepoint_reattaches() {
+    let directory = scratch("alter-savepoint");
+    let path = directory.join("d.rdb");
+    three_rows(&path);
+    {
+        let database = Database::open(&path).expect("the database opens");
+        let connection = database.session();
+        connection
+            .execute_batch(
+                "BEGIN; \
+                 SAVEPOINT here; \
+                 ALTER TABLE p DROP COLUMN n; \
+                 ROLLBACK TO here; \
+                 INSERT INTO p (id, n) VALUES (4, 40); \
+                 COMMIT",
+            )
+            .expect("the savepoint unwinds and the rest commits");
+        assert_eq!(
+            connection
+                .query("SELECT id, n FROM p ORDER BY id")
+                .expect("read in the same session"),
+            the_four_rows(),
+            "the connection still reads p through the tree the ALTER built"
+        );
+    }
+    assert_eq!(values_after_reopen(&path), the_four_rows());
+}

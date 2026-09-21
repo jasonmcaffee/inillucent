@@ -265,8 +265,19 @@ impl crate::ImportedDatabase {
                     held
                 })
                 .collect();
+            // **A tree that is attached at the wrong page counts as missing
+            // (task-2051).** This asked only whether the handle held something,
+            // which is the same assumption `reattach_entries` used to skip on,
+            // and it has to be relaxed in the same place: a re-attach that
+            // could not derive the entry's shape leaves the tree the `ALTER`
+            // built sitting in the handle, and a check that accepts any tree
+            // would report that rollback as having worked. The refusal below is
+            // the right answer to it - a connection that reads a table through
+            // a tree the catalog does not name gives wrong answers and strands
+            // every row it writes.
             for held in &reloaded {
-                if held.entry.tree_id != 0 && !self.schema.trees.contains_key(&held.root) {
+                let attached = self.schema.trees.get(&held.root).map(PagedTree::root);
+                if held.entry.tree_id != 0 && attached != Some(held.entry.root) {
                     missing.push(String::from_utf8_lossy(&held.entry.name).into_owned());
                 }
             }
@@ -325,7 +336,35 @@ impl crate::ImportedDatabase {
                 Some(root) if root != 0 => root,
                 _ => continue,
             };
-            if self.schema.trees.contains_key(&root) {
+            // **A handle that is occupied says nothing about whether it holds
+            // the tree the catalog describes, and the root page is what says
+            // so (task-2051).** This used to skip on `contains_key` alone,
+            // which is right for a rolled-back `DROP` - the handle is empty -
+            // and wrong for a rolled-back `ALTER TABLE` that rebuilt the tree.
+            // `rebuild_table` releases the old tree and registers a new one at
+            // a new root page under the *same* handle, so after the rollback
+            // restores the catalog row the handle still held the rebuilt tree
+            // and the schema and the tree described different tables.
+            //
+            // For `DROP COLUMN` that was a read error naming a column by
+            // position - `the tree read for FROM term 0 does not carry column
+            // 1` - for the rest of the connection's life. For `ADD COLUMN`
+            // with a `DEFAULT` there was no symptom at all, because the
+            // rebuilt tree carries a superset of the catalog's columns and
+            // every read still found its slot. Both lost every row written
+            // afterwards: the rebuilt tree is an orphan no catalog row names,
+            // so the `INSERT` reported success, read back in the same session,
+            // and was not in the reopened file.
+            //
+            // The catalog row is the authority, which is the principle
+            // task-2043 applied to the module map for the same class of
+            // defect: state a rollback made untrue that nobody put back.
+            if self
+                .schema
+                .trees
+                .get(&root)
+                .is_some_and(|tree| tree.root() == held.entry.root)
+            {
                 continue;
             }
             let Some((columns, key_columns, layout)) = self.shape_of_entry(entries, held, root)

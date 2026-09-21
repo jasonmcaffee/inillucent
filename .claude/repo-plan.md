@@ -232,3 +232,32 @@ they are touching do not collide; two that have not, do.
   you measured with `cargo test -p <crate>` fails under the runner and you cannot reproduce it,
   build it with the features the run printed before you look anywhere else. The guard asks the
   engine which build it is in rather than carrying two numbers. (task-2039)
+- **An occupied tree handle is not evidence that it holds the right tree - compare the root page.**
+  `reattach_entries` in `crates/inillucent-engine/src/engine/batch.rs` decided whether a rollback
+  had to re-attach a table by asking whether `schema.trees` had anything under its handle. That is
+  right for a rolled back `DROP`, where the handle is empty, and wrong for a rolled back
+  `ALTER TABLE`: `rebuild_table` releases the old tree and registers a new one at a **new root
+  page under the same handle**, so the restored catalog row and the attached tree described
+  different tables for the rest of the connection's life. If you write any other path that
+  re-registers a tree under a handle that is already in use, the catalog row's `root` is what says
+  which one it is. `PagedTree`'s own `root` field is assigned only in its two constructors, so the
+  comparison is safe - a root page does not move under ordinary writes. (task-2051)
+- **A rollback test that only asserts in the session that rolled back can be green against the
+  bug.** task-2051's `ALTER TABLE ... ADD COLUMN c INTEGER DEFAULT 9` case passed every in-session
+  assertion while broken, because the tree the `ALTER` built carries a *superset* of the catalog's
+  columns and every read still found its slot. What it lost was writes: the rebuilt tree is an
+  orphan no catalog row names, so an `INSERT` after the rollback reported success, read back in the
+  same session, and was not in the reopened file. Assert both ways - in the session, because a
+  reopen cannot see a connection's stale state, and after a reopen, because the session cannot see
+  its own stranded writes. (task-2051)
+- **`_agent_output/fixtures/` is missing from a worktree in the same way `.sqlite-ref/` is, and a
+  junction handles both.** task-2041 recorded copying `small.db` across; a junction is one command
+  and covers `medium.db` and `large.db` too:
+  `New-Item -ItemType Junction -Path <worktree>\_agent_output\fixtures -Target C:\jason\dev\inillucent\_agent_output\fixtures`.
+  Remove both junctions before retiring the worktree. (task-2051)
+- **`ddl/alter.rs::rebuild_table` has a second, unrelated defect in it - see task-2057.**
+  `ALTER TABLE ... DROP COLUMN` on a column that is not the last one fills each surviving column
+  from `old_layout.slots[declared]`, where `declared` is the position in the **new** declaration, so
+  every column after the dropped one takes its left neighbour's values. It is on `main`, it needs no
+  transaction, and dropping the last column is correct - which is why task-2051's own reproduction
+  on `(id, n)` did not show it. If you are in that function, the two tickets will collide. (task-2051)
