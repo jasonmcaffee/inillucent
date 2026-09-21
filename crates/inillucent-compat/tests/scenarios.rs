@@ -108,23 +108,37 @@ fn is_a_scenario_file(source: &Source) -> bool {
         || invokes_the_macro(&source.text)
 }
 
-/// The line that ends a `macro_rules!` definition: a closing brace in the
-/// first column, which nothing inside the macro body ever is.
-const CLOSING_BRACE: &str = "\n}\n";
-
 /// The body of `macro_rules! scenario`, and nothing after it.
 ///
-/// **Bounded at the macro's own closing brace.** Reading everything after the
-/// definition swept in this crate's `#[cfg(test)] mod tests` below it, so the
-/// count of expanded arms came back as eleven against six declared - the five
-/// extra being `matrix.rs`'s own unit tests.
+/// **Bounded by counting braces, not by matching a line.** Reading everything
+/// after the definition swept in `matrix.rs`'s own `#[cfg(test)] mod tests`, so
+/// the count of expanded arms came back as eleven against six declared - the
+/// five extra being unit test names. The first fix for that was to stop at the
+/// first `"\n}\n"`, a closing brace in the first column, and it worked until the
+/// file was checked out with CRLF line endings: the pattern then matched
+/// nowhere and the sweep came back. A scan that counts `{` and `}` cannot be
+/// broken by either, and the macro's body is balanced by the compiler's own
+/// rules.
 ///
 /// @param source - the text of `matrix.rs`
 fn macro_body(source: &str) -> Option<&str> {
-    source
-        .split("macro_rules! scenario")
-        .nth(1)
-        .and_then(|after| after.split(CLOSING_BRACE).next())
+    let at = source.find("macro_rules! scenario")?;
+    let rest = source.get(at..)?;
+    let opens = rest.find('{')?;
+    let mut depth = 0usize;
+    for (offset, character) in rest.char_indices().skip(opens) {
+        match character {
+            '{' => depth = depth.saturating_add(1),
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return rest.get(opens..=offset);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// What a story file must say to run at fewer than every arm.

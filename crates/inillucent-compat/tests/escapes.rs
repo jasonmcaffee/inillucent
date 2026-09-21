@@ -386,8 +386,8 @@ fn every_escape_the_design_names_has_a_row() {
     );
 }
 
-/// `Expect::Differs` is constructed by as many cases as the comparison document
-/// records differences.
+/// Every difference the comparison document argues for is a case that asserts
+/// it.
 ///
 /// **The variant was decorative for months, and a document was the only place
 /// seven measured differences lived.** `semantics.rs` declared `Differs`,
@@ -398,11 +398,51 @@ fn every_escape_the_design_names_has_a_row() {
 /// difference that only a document knows about can be closed, or widened, with
 /// nothing going red either way.
 ///
-/// So this counts both sides. A difference that is closed is moved to `Agrees`
-/// **and** its row in the comparison document goes with it, and this test is
-/// what makes those two the same action rather than two people remembering.
+/// **Named rather than counted, and the count was tried first.** Asserting that
+/// the two sides hold the same *number* of differences read as true and was
+/// not: `semantics.rs` also carries differences of the engine's own that the
+/// comparison document does not list - `alias.limit` is one - so the count
+/// disagreed the moment one of those was added, about nothing. What has to hold
+/// is that each of the seven the document argues for has a case, by name.
+///
+/// A difference that is closed loses its case **and** its row, and this is what
+/// makes those two the same action rather than two people remembering.
 #[test]
 fn the_differs_variant_is_used_as_often_as_the_comparison_records() {
+    // The seven `docs/feature-comparison.md` records, as the case that asserts
+    // each one. Closing a difference deletes both halves of a row here.
+    const MEASURED: [(&str, &str); 7] = [
+        (
+            "pragma.page.size",
+            "the page size is fixed, so the pragma reports rather than sets",
+        ),
+        (
+            "shell.recover.page.size",
+            "`.recover` prints the page size it found",
+        ),
+        (
+            "shell.limit.trigger.depth",
+            "the trigger depth limit is a different number",
+        ),
+        (
+            "explain.bytecode",
+            "the bytecode is this engine's, not SQLite's",
+        ),
+        (
+            "shell.vfslist",
+            "there is one VFS and it is named for this engine",
+        ),
+        (
+            "shell.stats",
+            "the statistics are the ones this storage has",
+        ),
+        // The one the document argues for in prose rather than in a table row.
+        (
+            "functions.sqlite.offset",
+            "`sqlite_offset` names the page, not the record",
+        ),
+    ];
+
     let root = workspace_root();
     let semantics =
         std::fs::read_to_string(root.join("crates/inillucent-compat/tests/semantics.rs"))
@@ -424,19 +464,50 @@ fn the_differs_variant_is_used_as_often_as_the_comparison_records() {
 
     let comparison = std::fs::read_to_string(root.join("docs/feature-comparison.md"))
         .expect("feature-comparison.md is readable");
+    // **The legend is not a difference.** The document explains its own column
+    // with a row reading `| **differs** | both answer, and the answers are not
+    // the same |`, and the first version of this counter read it as a seventh
+    // row - which made the arithmetic come out right for the wrong reason.
     let recorded = comparison
         .lines()
         .filter(|line| line.starts_with("| ") && line.contains("**differs"))
+        .filter(|line| !line.starts_with("| **differs** |"))
         .count();
-    assert!(
-        recorded > 0,
-        "docs/feature-comparison.md records no differing row, so this comparison is against \
-         nothing"
-    );
     assert_eq!(
-        constructed, recorded,
-        "semantics.rs constructs `Expect::Differs` {constructed} times and \
-         docs/feature-comparison.md records {recorded} differing rows. These move together: a \
-         difference that is closed loses its case and its row, and a new one gains both."
+        recorded,
+        MEASURED.len().saturating_sub(1),
+        "docs/feature-comparison.md marks {recorded} rows `**differs**` and this test names {}, \
+         one of which - `sqlite_offset` - the document argues for in prose at the end of its \
+         shell section rather than in a table row. A difference that is closed loses its row \
+         and its case together; one that is found gains both.",
+        MEASURED.len()
+    );
+
+    let mut absent: Vec<String> = Vec::new();
+    for (case, about) in MEASURED {
+        let Some(after) = semantics.split(&format!("name: \"{case}\"")).nth(1) else {
+            absent.push(format!("{case}: no case of that name ({about})"));
+            continue;
+        };
+        // The case's own block, which ends where the next one begins.
+        let block = after.split("        name: \"").next().unwrap_or(after);
+        if !block.contains("expect: Differs,") {
+            absent.push(format!(
+                "{case}: the case no longer expects a difference ({about})"
+            ));
+        }
+    }
+    assert!(
+        absent.is_empty(),
+        "docs/feature-comparison.md argues for these differences and semantics.rs does not \
+         assert them:\n  {}\n\
+         A difference nothing asserts can be closed, or widened, with nothing going red.",
+        absent.join("\n  ")
+    );
+    assert!(
+        constructed >= MEASURED.len(),
+        "semantics.rs constructs `Expect::Differs` {constructed} times and the comparison \
+         document argues for {}",
+        MEASURED.len()
     );
 }

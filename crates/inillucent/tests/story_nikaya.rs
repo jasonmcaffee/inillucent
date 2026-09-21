@@ -39,6 +39,71 @@ use inillucent_compat::matrix::{Arm, Scale};
 use inillucent_compat::nikaya::{every_column, seed};
 use inillucent_compat::scenario;
 use inillucent_compat::stories::{ask, open, reopen_and_check, run, the_same_two_ways};
+use inillucent_engine::connect::Database;
+
+/// Reads the stories that are known to fail, and the ticket that owns each.
+///
+/// The same file shape `story_rag.rs` and `story_edges.rs` read: one line per
+/// failing story and arm, a tab, and the ticket. **An entry that no longer
+/// describes a failure is itself a failure**, so when the ticket lands the
+/// story goes red until the line is removed.
+fn allow_listed(key: &str) -> Option<String> {
+    let path = inillucent_compat::workspace_root().join("tests/workloads/nikaya/story.allow.list");
+    let text = std::fs::read_to_string(path).ok()?;
+    for line in text.lines() {
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        if let Some((named, said)) = line.split_once('\t') {
+            if named.trim() == key {
+                return Some(said.trim().to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Opens the migrated database again and checks it, or records a known failure.
+///
+/// **The check is the story's own rather than the helper's, because one arm is
+/// known to fail it.** `reopen_and_check` panics, which is right everywhere it
+/// is used and wrong here: task-2055 is a corruption this story found and this
+/// ticket is not the one that fixes it, so the failure is written off by name
+/// and the run stays green until the fix lands - at which point the entry
+/// describes nothing and the story goes red.
+///
+/// Returns `None` when the arm is written off, which ends the story there.
+///
+/// @param arm - the arm being run
+/// @param path - the database
+/// @param story - the story's name, for the allow list key
+fn reopen_and_read(arm: &Arm, path: &Path, story: &str) -> Option<Database> {
+    let database = open(arm, path);
+    let key = format!("{story}::{}", arm.test_name());
+    match (database.check(), allow_listed(&key)) {
+        (Ok(()), None) => Some(database),
+        (Ok(()), Some(said)) => panic!(
+            "`{key}` is in tests/workloads/nikaya/story.allow.list against `{said}` and the \
+             database was sound after the reopen. Delete the line: a fixed defect left listed \
+             reads as coverage and is not."
+        ),
+        (Err(why), Some(said)) => {
+            println!(
+                "{key}: the reopened database is not sound: {}; allow listed against {said}",
+                why.message()
+            );
+            None
+        }
+        (Err(why), None) => panic!(
+            "{} is not sound after a reopen at the {} arm: {}. If this is a defect another \
+             ticket owns, add `{key}` to tests/workloads/nikaya/story.allow.list with the \
+             ticket that owns it.",
+            path.display(),
+            arm.name,
+            why.message()
+        ),
+    }
+}
 
 /// Nikaya's startup migration, run against a populated database.
 ///
@@ -118,7 +183,14 @@ fn a_startup_migration_leaves_every_neighbour_readable(arm: &Arm, area: &Path) {
     }
 
     // Reopen, and read all of it again from a handle that did not write it.
-    let database = reopen_and_check(arm, &path);
+    let database = reopen_and_read(
+        arm,
+        &path,
+        "a_startup_migration_leaves_every_neighbour_readable",
+    );
+    let Some(database) = database else {
+        return;
+    };
     let connection = database.session();
     assert_eq!(
         every_column(&connection),

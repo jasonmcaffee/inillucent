@@ -125,7 +125,7 @@ the two numbers and what was expected of them.
 
 ## 2. The shape of the suite
 
-**216 test targets in ten tiers.** A target is one binary
+**216 test targets, 3,298 tests, in ten tiers.** A target is one binary
 `cargo test` builds; a tier is a band you can ask for by name. Every target is
 in exactly one tier, so the tiers partition the suite rather than overlapping
 it. (Was 129 targets, 2,336 tests when this document was written; task-1911's
@@ -151,14 +151,14 @@ of a run rather than of the map and is not checked here.
 | tier | targets | tests | what it is for |
 |---|---:|---:|---|
 | `smoke` | 1 | 8 | the ten-second answer: a real file opened, written, reopened, read |
-| `unit` | 31 | 1,251 | every crate's own `#[cfg(test)]` modules |
+| `unit` | 31 | 1,388 | every crate's own `#[cfg(test)]` modules |
 | `engine` | 64 | 357 | SQL and storage behaviour over real database files |
 | `differential` | 33 | 309 | graded against the pinned SQLite 3.53.4 |
-| `durability` | 31 | 190 | crashes, injected faults, corruption and concurrency |
-| `e2e` | 35 | 302 | the public surfaces an application binds to, end to end |
+| `durability` | 31 | 216 | crashes, injected faults, corruption and concurrency |
+| `e2e` | 35 | 370 | the public surfaces an application binds to, end to end |
 | `perf` | 1 | 6 | the cost guards — **runs alone**, see §5 |
 | `retrieval` | 7 | 519 | the embedding and retrieval engine, and its graded harness |
-| `tooling` | 13 | 82 | the checks that keep the repository's own rules true |
+| `tooling` | 13 | 122 | the checks that keep the repository's own rules true |
 | `nightly` | 2 | 3 | the long forms, run on a schedule rather than on a change |
 
 The map that assigns them is `tests/selection.toml`, and it is data rather than
@@ -588,19 +588,37 @@ build-plus-run rather than a slice of one shared build.
 | tier | wall | targets | tests |
 |---|---:|---:|---:|
 | `smoke` | 0.8 s | 1 | 8 |
-| `tooling` | 5.0 s | 7 | 49 |
-| `e2e` | 8.6 s | 15 | 94 |
-| `unit` | 6.8 s | 26 | 1,230 |
+| `unit` | 7.8 s | 31 | 1,388 |
+| `e2e` | 23.5 s | 35 | 370 |
 | `perf` | 35.1 s | 1 | 6 |
-| `durability` | 134.7 s | 20 | 158 |
 | `differential` | 36.1 s | 29 | 292 |
 | `engine` | 37.8 s | 44 | 299 |
 | `retrieval` | 213.8 s | 6 | 506 |
+| `tooling` | 242.4 s | 13 | 122 |
+| `durability` | 988.2 s | 31 | 216 |
+| `nightly` | 1,650.3 s | 2 | 3 |
 
 `perf`'s 35.1 s agrees with §5.1's "about half a minute" where the old 9.1 s
 in this table did not; that inconsistency predates this pass and is corrected
 here rather than carried forward. Each figure includes the runner's own
 startup and its `cargo` target listing, about 1.2 s.
+
+**`unit`, `e2e`, `tooling`, `durability` and `nightly` were measured again for
+task-2036**, which added 26 targets across them; the other four rows are
+carried forward from the pass that measured them.
+
+**`e2e` is 23.5 s and the design asked for fifteen.** A tier's wall is its
+slowest target, and three of them are within a second of the whole tier:
+`story_nikaya` at 23.5 s, `cli_commands` at 23.2 s and `story_edges` at 21.8 s.
+`cli_commands` is not one of this ticket's suites and is over fifteen seconds on
+its own, so cutting the stories would not bring the tier under it. What the
+number bought is 370 tests where the tier had 130: nine stories, each asked at
+six configurations.
+
+**`durability` and `tooling` are minutes rather than seconds, and both are one
+target.** `vacuum_crash` is the whole of `durability`'s wall and
+`gates_fail_closed` is the whole of `tooling`'s; the other suites in each finish
+while those two are still going.
 
 ### 6.3 The eight that matter
 

@@ -189,44 +189,66 @@ fn pages_on_an_exact_total(session: &mut Session) {
     );
 }
 
-/// An export to a file is refused by name; an export with no file answers the
-/// rows.
+/// An export inside the root writes the file; one outside it is refused by
+/// name; and an export with no file named answers the rows.
 ///
-/// **This is `ad14898`'s rule, asserted from the client's side.** A server
-/// started with a root is in safe mode, and `export --out` is implemented as a
-/// `.once` redirection - so an agent that asks for a file gets *`.once` is
-/// prohibited in safe mode*, whether the path is inside the root or outside it.
-/// That is the right answer: the point of safe mode is that a model cannot be
-/// talked into writing a file. What the agent still gets is the rows, in the
-/// report, which is how an export over MCP is meant to work.
+/// **This case asserted the opposite until task-2044 landed, and the old
+/// answer was a defect rather than a policy.** `export --out` used to be
+/// implemented as a `.once` redirection, so a server in safe mode refused it -
+/// `.once` is prohibited there - and on the command line the same code created
+/// the file and wrote nothing into it while reporting success. task-2044 took
+/// the redirect through `shell().redirect()` instead, which means an agent can
+/// now export to a path inside the root it was given, which is what a root is
+/// for. What safe mode still stops is the path outside it.
 ///
 /// @param session - the running session
-/// @param directory - the server's root, where the refused file would have gone
+/// @param directory - the server's root, which the export writes inside
 fn refuses_an_export_to_a_file_and_answers_the_rows(session: &mut Session, directory: &Path) {
+    let inside = directory.join("note.csv");
     let exported = session.tool(
         "inillucent_export",
         &format!(
             "{{\"table\":\"note\",\"out\":\"{}\",\"format\":\"csv\"}}",
-            directory
-                .join("note.csv")
-                .to_string_lossy()
-                .replace('\\', "/")
+            inside.to_string_lossy().replace('\\', "/")
         ),
     );
     assert!(
-        is_an_error(&exported),
-        "an export that asks for a file was not refused by a server in safe mode:\n{}",
+        !is_an_error(&exported),
+        "an export to a path inside the server's own root was refused:\n{}",
         &exported[..exported.len().min(400)]
     );
+    let written = std::fs::read_to_string(&inside).unwrap_or_default();
     assert!(
-        exported.contains("safe mode"),
-        "the refusal does not say it is safe mode, so an agent cannot tell it from a broken \
-         statement:\n{}",
-        &exported[..exported.len().min(400)]
+        written.lines().count() > 10_000,
+        "the export reported success and the file holds {} line(s), which is the shape of \
+         task-2044: a redirect and the collecting sink both claiming the shell's output",
+        written.lines().count()
     );
     assert!(
-        !directory.join("note.csv").exists(),
-        "the export was refused and wrote the file anyway"
+        written.contains("first") && written.contains("second"),
+        "the exported file does not hold the rows the table does"
+    );
+
+    // And the path outside the root, which is what safe mode is for.
+    let outside = directory
+        .parent()
+        .map(|parent| parent.join("escaped.csv"))
+        .unwrap_or_else(|| PathBuf::from("escaped.csv"));
+    let refused = session.tool(
+        "inillucent_export",
+        &format!(
+            "{{\"table\":\"note\",\"out\":\"{}\",\"format\":\"csv\"}}",
+            outside.to_string_lossy().replace('\\', "/")
+        ),
+    );
+    assert!(
+        is_an_error(&refused),
+        "an export to a path outside the server's root was not refused:\n{}",
+        &refused[..refused.len().min(400)]
+    );
+    assert!(
+        !outside.exists(),
+        "the export outside the root was refused and wrote the file anyway"
     );
 
     let in_the_answer = session.tool(

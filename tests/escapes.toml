@@ -225,7 +225,7 @@ held_by = [
 [[escape]]
 ref = "task-2043"
 surface = "DDL, rollback, catalog"
-what = "a DROP TABLE followed by a CREATE TABLE of the same name, inside a transaction that is then rolled back, loses every row of the original table - durably, and PRAGMA integrity_check answers ok over it"
+what = "a DROP TABLE followed by a CREATE TABLE of the same name, inside a transaction that is then rolled back, lost every row of the original table - durably, and PRAGMA integrity_check answered ok over it. Fixed by task-2043: a page a transaction drops is freed at its commit rather than when the statement runs, so a rollback still has it"
 found_by = "writing story_edges.rs against section 6 of the design"
 held_by = [
   "inillucent::story_edges::a_dropped_and_recreated_table_rolls_back::default",
@@ -235,10 +235,14 @@ held_by = [
 [[escape]]
 ref = "task-2044"
 surface = "the command line, export"
-what = "`export --out` reports success with the path it wrote, creates the file and writes nothing into it, in all eight formats - because `verbs.rs::export` puts a `.once` redirection at the top of a script and then runs it through `collect_output`, and the two both claim the shell's output stream"
+what = "`export --out` reported success with the path it wrote, created the file and wrote nothing into it, in all eight formats - because `Shell::say` checked the collecting sink before the redirect, so a `.once` opened its file and every line went to the sink instead. Fixed by task-2044, which also found that the same defect broke `.once` and `.output` inside a script handed to `run`"
 found_by = "writing the agent session in mcp_session.rs"
-held_by = []
-open = "the MCP half is correct and is held by mcp_session::an_agent_session_runs_end_to_end, which asserts the safe-mode refusal; nothing holds the command line half until task-2044 adds the subprocess test that reads the file back"
+held_by = [
+  "inillucent-compat::cli_commands::export_to_a_file_writes_the_rows_in_every_format",
+  "inillucent-compat::cli_commands::export_to_a_file_of_an_empty_table_reports_no_rows",
+  "inillucent-compat::cli_commands::run_writes_the_file_a_once_in_the_script_names",
+  "inillucent-compat::mcp_session::an_agent_session_runs_end_to_end",
+]
 
 [[escape]]
 ref = "busy_timeout"
@@ -279,4 +283,24 @@ what = "0.1.1 answers `SELECT rowid FROM note_fts WHERE note_fts MATCH 'segment'
 found_by = "running each downloaded release against a database the current build wrote, in release_format_history.rs"
 held_by = [
   "inillucent-compat::release_format_history::every_released_binary_reads_what_this_build_writes",
+]
+
+[[escape]]
+ref = "task-2055"
+surface = "the page pool, DDL, rollback"
+what = "task-2043's fix - a page a transaction drops is freed at its commit rather than when the statement runs - leaves the file malformed after Nikaya's startup migration at a 4,096 byte page with a **64 frame** pool. The same page size with the default 4,096 frame pool is sound, and so are the other four arms, so it is the pool that decides it; checking out the eight engine files from that commit's parent makes the story pass and restoring them makes it fail again"
+found_by = "running the startup migration story at every arm of the configuration matrix, the run after task-2043 merged"
+held_by = [
+  "inillucent::story_nikaya::a_startup_migration_leaves_every_neighbour_readable::small_pool",
+]
+
+[[escape]]
+ref = "task-2033"
+surface = "fts5, page geometry"
+what = "an ordinary FTS5 ingest - one INSERT at a time into one table - refused with `database disk image is malformed` on document 42 at a 4,096 byte page, and answered correctly at 32,768. Reproduced by story_rag.rs at four of the six arms and written off against the ticket; the fix landed while task-2036 was being worked, and `refuse_to_be_allow_listed_for_nothing` is what said so by failing"
+found_by = "the retrieval lifecycle story, run at every arm of the configuration matrix"
+held_by = [
+  "inillucent::story_rag::an_ordinary_fts5_ingest::sqlite_page",
+  "inillucent::story_rag::an_ordinary_fts5_ingest::small_pool",
+  "inillucent::story_rag::ingest_and_search::sqlite_page",
 ]

@@ -5,7 +5,9 @@
 # itself a failure** - so when the ticket lands, this story goes red until the
 # line is removed. That is the rule from task-1969 section 4: a list that only
 # grows is a list of things nobody will take off it.
-an_ordinary_fts5_ingest::sqlite_page	task-2033: an ordinary FTS5 insert refuses with SQLITE_CORRUPT on row 42 at a 4,096 byte page
-an_ordinary_fts5_ingest::small_pool	task-2033: the same refusal, with a 64 frame pool
-an_ordinary_fts5_ingest::persist_journal	task-2033: the same refusal, under PERSIST journalling
-an_ordinary_fts5_ingest::waiting	task-2033: the same refusal, with a busy timeout set
+# **Empty, and the guard is what emptied it.** Every line here named task-2033 -
+# an ordinary FTS5 insert refusing with `database disk image is malformed` on
+# document 42 at a 4,096 byte page - and the fix landed while this ticket was
+# being worked. `refuse_to_be_allow_listed_for_nothing` failed the next run and
+# named all four lines, which is the rule from task-1969 section 4 doing exactly
+# what it is for: a fixed defect left listed reads as coverage and is not.

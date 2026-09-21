@@ -42,6 +42,7 @@
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use inillucent_compat::cliproc::program;
 use inillucent_compat::matrix::{default_arm, sqlite_page_arm, Arm, Scale};
@@ -141,6 +142,56 @@ fn started(shell: &Path, database: &Path, script: &Path) -> Child {
         .unwrap_or_else(|error| panic!("a shell did not start: {error}"))
 }
 
+/// Waits until the writer's first row is visible, and says whether it appeared.
+///
+/// **The readers used to start with the writer, and on a loaded machine that
+/// made the test about scheduling.** Each reader asks a fixed number of times
+/// and then exits; when the machine is busy the writer's first commit can land
+/// after a reader has finished all of its asks, and the reader then graded an
+/// empty table - which is a legitimate prefix, so nothing was wrong except that
+/// the run had checked nothing. One measured failure had one reader of four see
+/// a row.
+///
+/// So the harness waits for the first row and starts the readers after it. The
+/// deadline is a guard rather than the measurement: what is asserted is that
+/// every reader saw rows, and rule 1.7 is why no assertion here is about how
+/// long anything took.
+///
+/// @param shell - the built `inillucent-shell`
+/// @param database - the file the writer is writing
+/// @param directory - where the probe script may be written
+/// @param within - how long to wait before giving up
+fn a_row_exists(shell: &Path, database: &Path, directory: &Path, within: Duration) -> bool {
+    let probe = directory.join("probe.sql");
+    if std::fs::write(&probe, "SELECT count(*) FROM note;\n").is_err() {
+        return false;
+    }
+    let deadline = Instant::now() + within;
+    while Instant::now() < deadline {
+        let Ok(input) = std::fs::File::open(&probe) else {
+            return false;
+        };
+        let answered = Command::new(shell)
+            .arg(database.to_string_lossy().replace('\\', "/"))
+            .stdin(Stdio::from(input))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output();
+        if let Ok(output) = answered {
+            let said = String::from_utf8_lossy(&output.stdout);
+            if said
+                .lines()
+                .filter_map(|line| line.trim().parse::<u64>().ok())
+                .any(|count| count > 0)
+            {
+                return true;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
 /// What one reader saw, graded.
 struct Seen {
     /// How many answers were read.
@@ -230,6 +281,12 @@ fn readers_beside_a_writer_see_only_prefixes(arm: &Arm) {
         .collect();
 
     let writer = started(&shell, &database, &writer_path);
+    assert!(
+        a_row_exists(&shell, &database, &directory, Duration::from_secs(60)),
+        "the writer committed no row in a minute at the {} arm, so there was nothing for a \
+         reader to see a prefix of",
+        arm.name
+    );
     let readers: Vec<Child> = reader_paths
         .iter()
         .map(|script| started(&shell, &database, script))

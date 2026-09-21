@@ -170,13 +170,15 @@ already removed the cause and nobody re-ran it, which is recorded in
 
 ## What the tests cover
 
-3,136 tests across 199 test targets in the workspace, in these classes:
+3,298 tests across 216 test targets in the workspace, in these classes:
 
-The 199 is the `[[target]]` row count in `tests/selection.toml`, which is what
+The 216 is the `[[target]]` row count in `tests/selection.toml`, which is what
 `tools/doc-facts/check.mjs` compares this sentence against and what the runner is asked to run.
-The number of `#[test]` attributes in the tree is higher - 3,051 at the time of writing - because
-a `#[cfg(windows)]` and a `#[cfg(unix)]` pair is two attributes and one test on any one machine,
-and five `onnx` cases are built only when that feature is on.
+The number of `#[test]` attributes in the tree is 3,240, and it differs from the run's count in
+both directions. `scenario!` writes six tests from one line, so a story file holds no attribute at
+all for the six it contributes. The other way, a `#[cfg(windows)]` and a `#[cfg(unix)]` pair is two
+attributes and one test on any one machine, and five `onnx` cases are built only when that feature
+is on.
 
 - **A differential harness** that runs the same SQL through the pinned SQLite 3.53.4 and compares
   transcripts. 208 of those cases are `semantics.rs`, and 416 are the wider feature probe.

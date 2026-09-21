@@ -200,8 +200,15 @@ fn record(language: &str) -> Option<Record> {
 /// @returns every case's name, paired with the capabilities it needs
 fn cases() -> Vec<(String, BTreeSet<String>)> {
     let path: PathBuf = workspace_root().join("drivers/conformance/suite.json");
-    let text =
-        std::fs::read_to_string(&path).unwrap_or_else(|why| panic!("{}: {why}", path.display()));
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|why| panic!("{}: {why}", path.display()))
+        // **Line endings normalised before anything looks for a newline.** The
+        // scan below cuts the file on a newline, two spaces and a brace, and a
+        // checkout with CRLF endings holds a carriage return before each one -
+        // so it found no case at all and this guard failed saying the suite was
+        // empty. It is the same file either way; git hands out whichever the
+        // platform asks for.
+        .replace("\r\n", "\n");
     let mut out = Vec::new();
     // One case per `"name":` that is a case's own, which is every one at the
     // indentation the file is written at. A `"name"` inside a column list is

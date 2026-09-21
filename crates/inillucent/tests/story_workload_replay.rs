@@ -147,6 +147,14 @@ fn workload() -> (String, Vec<Statement>) {
 /// is in these arrays is a quoted string or an integer, and the values are
 /// written by `tools/extract-nikaya-workload.py` rather than by a person.
 ///
+/// **It splits on the commas between values, not on every comma.** Nikaya binds
+/// an embedding as a string that is itself a bracketed list -
+/// `"[0.1,0.2,0.3,0.4]"` is one parameter of
+/// `repositories/chunks.rs:115` - and a split on every comma turned that one
+/// value into four fragments, the first of them `"[0.1`, which is neither a
+/// string nor an integer. The parameter a consumer actually binds is the thing
+/// this file exists to replay, so the reader has to keep it whole.
+///
 /// @param text - the array, as it appears in the file
 /// @param source - which statement it belongs to, for the failure message
 fn parse_params(text: &str, source: &str) -> Vec<OwnedDatum> {
@@ -158,8 +166,8 @@ fn parse_params(text: &str, source: &str) -> Vec<OwnedDatum> {
     if inner.trim().is_empty() {
         return Vec::new();
     }
-    inner
-        .split(',')
+    split_values(inner)
+        .iter()
         .map(|item| {
             let item = item.trim();
             match item
@@ -174,6 +182,34 @@ fn parse_params(text: &str, source: &str) -> Vec<OwnedDatum> {
             }
         })
         .collect()
+}
+
+/// Splits an array's body on the commas that separate its values.
+///
+/// A comma inside a quoted string belongs to the string. There is no escaping
+/// to handle: `tools/extract-nikaya-workload.py` writes the file and refuses a
+/// value holding a quote, so a `"` here always opens or closes one.
+///
+/// @param inner - the text between the array's brackets
+fn split_values(inner: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    let mut current = String::new();
+    let mut quoted = false;
+    for character in inner.chars() {
+        match character {
+            '"' => {
+                quoted = !quoted;
+                current.push(character);
+            }
+            ',' if !quoted => {
+                values.push(current.clone());
+                current.clear();
+            }
+            _ => current.push(character),
+        }
+    }
+    values.push(current);
+    values
 }
 
 /// Reads the allow list: the statements that do not work yet, and their ticket.

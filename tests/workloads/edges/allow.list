@@ -8,9 +8,8 @@
 # rule from task-1969 section 4: a list that only grows is a list of things
 # nobody will take off it, and a fixed defect left listed reads as coverage and
 # is not.
-a_dropped_and_recreated_table_rolls_back::default	task-2043: a rolled back DROP then CREATE of the same table loses every row, durably
-a_dropped_and_recreated_table_rolls_back::sqlite_page	task-2043: a rolled back DROP then CREATE of the same table loses every row, durably
-a_dropped_and_recreated_table_rolls_back::small_pool	task-2043: a rolled back DROP then CREATE of the same table loses every row, durably
-a_dropped_and_recreated_table_rolls_back::truncate_journal	task-2043: a rolled back DROP then CREATE of the same table loses every row, durably
-a_dropped_and_recreated_table_rolls_back::persist_journal	task-2043: a rolled back DROP then CREATE of the same table loses every row, durably
-a_dropped_and_recreated_table_rolls_back::waiting	task-2043: a rolled back DROP then CREATE of the same table loses every row, durably
+# **Empty, and that is the point.** Every line that was here named task-2043 -
+# a rolled back DROP then CREATE of the same table losing every row - and the
+# fix landed while this file was being written. The lines came off in the same
+# change, which is what the rule above asks for: the story now asserts the
+# rollback works, at all six arms, and nothing is written off.
