@@ -424,3 +424,25 @@ they are touching do not collide; two that have not, do.
   third caller on that path, share the answer through `Database::disk_record_is_as_last_read`
   rather than reading the file again - and read `LastReadSlots::record` first, because a full read
   deliberately does **not** let the next caller short circuit. (task-2046)
+- **A change inside `inillucent-engine` or `inillucent-sql` selects almost the whole suite, and
+  nine targets are red in a worktree for reasons that are not yours.** `inillucent-testrun
+  --changed --strict` picked 178 targets for a four-file change in `ddl/` and `directive.rs`,
+  because fifteen packages depend on those two, and took 37 minutes. Every test passed, and the
+  run still exited 1, because nine suites had no prerequisite: `setup_embeddings` (`programs`),
+  `inillucent-remote::lib` (`network`), `bindings` (`conformance-records`), `rag_verify` (`onnx`,
+  `shell`), `new_engine_log_lead` (`fixtures`), `inillucent-remote::transport` (`python`,
+  `openssl`), `live_mysql` (`mysql`), `live_postgres` (`postgres`) and `gates_fail_closed`
+  (`fixtures`, `sqlite-bench`, `testrun`). That is `--strict` doing its job.
+  **Read the report at the end, not the `FAILED` lines scrolling past.** A target whose every
+  failure is the strict-skip sentinel is left out of the failure list and printed under
+  `suite(s) ran without a prerequisite and evidenced nothing`, with what each was missing, so the
+  report already separates a missing prerequisite from a defect. The summary line above it -
+  `178 target(s), 2157 test(s), 0 failed, 0 undetermined` - is the one that answers whether
+  anything is actually broken. Two of the nine even print `ok` on their own line, because they
+  skip cleanly, so counting `FAILED` lines undercounts. The last target runs alone and took 36
+  minutes of the 37. (task-2061)
+- **Copy `.sqlite-ref/` into the worktree rather than junctioning it.** task-2048 records a
+  recursive delete of a junction emptying the one shared copy for every worktree at once.
+  `Copy-Item -Recurse C:\jason\dev\inillucent\.sqlite-ref <worktree>\.sqlite-ref` costs about four
+  seconds and 40 MB and cannot do that, and the directory goes when the worktree is retired.
+  (task-2061)

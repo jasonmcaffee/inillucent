@@ -115,6 +115,22 @@ impl crate::ImportedDatabase {
         let page = tree.root();
         self.schema.trees.insert(root, tree);
         self.schema.layouts.insert(root, std::rc::Rc::new(layout));
+        // **Which file the handle belongs to is part of registering the tree
+        // (task-2061).** `allocate_in` records it for a handle it has just
+        // handed out, so a `CREATE TABLE` was already right. A *rebuild* does
+        // not allocate: `ALTER TABLE ... ADD COLUMN` on an existing table
+        // releases the old tree and builds a new one under the same handle, and
+        // `release_tree` takes the handle out of `owner` on the way through.
+        // Nothing put it back, so `schema_of` fell to its "not attached, so
+        // `main`" answer and every later read of that table went to `main`'s
+        // file at a page number belonging to another one -
+        // `read 0 of 32768 bytes at 163840` for an `ALTER TABLE side.t ADD
+        // COLUMN` and for the same statement on a `TEMP` table. `main`'s own
+        // handles stay out of the map, which is what `schema_of` is allowed to
+        // assume.
+        if at != crate::MAIN {
+            self.session_state.owner.insert(root, at);
+        }
         self.writing
             .set_touched(self.writing.touched() | crate::schema_bit(at));
         Ok(page)

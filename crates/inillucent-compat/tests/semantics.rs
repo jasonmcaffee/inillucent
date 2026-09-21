@@ -187,6 +187,56 @@
 //! no old column behind it, so a mapping written without a case for it would
 //! fill the new column from the last old one instead of from its `DEFAULT`.
 
+//! ## The ten `ALTER TABLE` cases on a database that is not `main`
+//!
+//! `ALTER TABLE` worked on `main` and on nothing else (task-2061). Three
+//! separate faults produced that, and the cases below are grouped by which one
+//! each grades, because a fix for one of them leaves the other two answering
+//! wrongly.
+//!
+//! **The tree was rebuilt into the right file and then read out of `main`'s.**
+//! `ALTER TABLE ... ADD COLUMN` and `DROP COLUMN` release the old tree and
+//! build a new one under the same handle, and `release_tree` takes that handle
+//! out of the map recording which file it belongs to. Nothing put it back, so
+//! `schema_of` fell to its "not attached, so `main`" answer and the next read
+//! of the table went to `main`'s file at a page number belonging to another
+//! one: `read 0 of 32768 bytes at 163840` where SQLite answers the row.
+//! `alter.attach.add`, `alter.attach.drop`, `alter.temp.actions` and
+//! `alter.temp.qualified` are that failure, on both kinds of schema.
+//!
+//! **The rebuild found its table by name with no schema, and wrote the new
+//! root page into `main`'s catalog rows.** `alter.attach.shadow` is the case
+//! that matters most, because it answered rather than failing: with a table
+//! called `t` in both schemas, `ALTER TABLE side.t DROP COLUMN b` rebuilt
+//! `main.t`'s tree and left `side.t`'s catalog row naming a page that had been
+//! given back to the free map. One statement about `side.t` changed what
+//! `main.t` answered. `alter.temp.shadow` is the same shape with a temporary
+//! table over a permanent one.
+//!
+//! `alter.attach.reopen` is what separates the two halves of that fault. The
+//! rebuilt tree's root page is written back into a catalog row, and the search
+//! for that row read `main`'s rows whatever schema the statement named - so a
+//! connection could answer correctly from its own derived view while the
+//! attached file on disk still pointed at the released page. It reopens
+//! `side.db` as `main` through a second connection, which reads the file and
+//! nothing else.
+//!
+//! `alter.attach.index` and `alter.attach.withoutrowid` carry task-2057's two
+//! hardest cases onto an attached database: an index whose layout has to be
+//! re-derived after the drop, and a rebuild over a keyed layout where a
+//! column's tree position is not its declared position. Both go through the
+//! same unfiltered lookup, so both were wrong for the same reason.
+//!
+//! **An unqualified `ALTER TABLE` searched `main` alone.** The binder resolved
+//! a name with no schema qualifier to `main` before searching, rather than
+//! searching in SQLite's order, so `CREATE TEMP TABLE t (a,b);
+//! ALTER TABLE t ADD COLUMN c` was `no such table: t`. `alter.temp.actions`
+//! grades the refusal and `alter.temp.shadow` grades the order - SQLite
+//! searches `temp` first, so with a `t` in both, the temporary one is the one
+//! altered and `main.t` must come back untouched.
+//! `alter.unqualified.attached` is the far end of that order: neither `temp`
+//! nor `main` holds a `t`, so the attached database's is the one found.
+
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -1340,6 +1390,129 @@ SELECT a, row_number() OVER (ORDER BY a) FROM t ORDER BY a;",
         name: "alter.add.default.wide",
         kind: "surface",
         script: "CREATE TABLE t (a INTEGER, b INTEGER, c INTEGER);\nINSERT INTO t VALUES (1,2,3),(10,20,30);\nALTER TABLE t ADD COLUMN d INTEGER DEFAULT 9;\nALTER TABLE t ADD COLUMN e TEXT DEFAULT 'x';\nSELECT a, b, c, d, e FROM t ORDER BY a;\nALTER TABLE t DROP COLUMN b;\nSELECT * FROM t ORDER BY a;",
+        expect: Agrees,
+    },
+    // -----------------------------------------------------------------------
+    // `ALTER TABLE` on a database that is not `main` (task-2061). Every one of
+    // these was an error or a wrong answer before the fix; the section of the
+    // module comment above says which fault each of them grades.
+    Case {
+        name: "alter.attach.add",
+        kind: "surface",
+        script: "ATTACH DATABASE 'side.db' AS side;
+CREATE TABLE side.t (a,b);
+INSERT INTO side.t VALUES (1,2);
+ALTER TABLE side.t ADD COLUMN c DEFAULT 9;
+SELECT * FROM side.t;",
+        expect: Agrees,
+    },
+    Case {
+        name: "alter.attach.drop",
+        kind: "surface",
+        script: "ATTACH DATABASE 'side.db' AS side;
+CREATE TABLE side.t (a,b,c);
+INSERT INTO side.t VALUES (1,2,3),(10,20,30);
+ALTER TABLE side.t DROP COLUMN b;
+SELECT * FROM side.t ORDER BY a;",
+        expect: Agrees,
+    },
+    Case {
+        name: "alter.attach.shadow",
+        kind: "surface",
+        script: "ATTACH DATABASE 'side.db' AS side;
+CREATE TABLE t (a,b,c,d);
+CREATE TABLE side.t (a,b,c,d);
+INSERT INTO t VALUES (1,2,3,4);
+INSERT INTO side.t VALUES (10,20,30,40);
+ALTER TABLE side.t DROP COLUMN b;
+SELECT 'main', * FROM main.t;
+SELECT 'side', * FROM side.t;",
+        expect: Agrees,
+    },
+    Case {
+        name: "alter.attach.reopen",
+        kind: "surface",
+        script: "ATTACH DATABASE 'side.db' AS side;
+CREATE TABLE side.t (a,b,c);
+INSERT INTO side.t VALUES (1,2,3),(10,20,30);
+ALTER TABLE side.t DROP COLUMN b;
+ALTER TABLE side.t ADD COLUMN e DEFAULT 7;
+.open side.db
+SELECT * FROM t ORDER BY a;
+SELECT sql FROM sqlite_master WHERE name = 't';",
+        expect: Agrees,
+    },
+    Case {
+        name: "alter.attach.index",
+        kind: "surface",
+        script: "ATTACH DATABASE 'side.db' AS side;
+CREATE TABLE side.t (a,b,c,d);
+CREATE INDEX side.ixd ON t(d);
+INSERT INTO side.t VALUES (1,2,3,4),(10,20,30,40);
+ALTER TABLE side.t DROP COLUMN b;
+SELECT d FROM side.t WHERE d = 40;
+SELECT a, c, d FROM side.t WHERE d > 4 ORDER BY d;",
+        expect: Agrees,
+    },
+    Case {
+        name: "alter.attach.withoutrowid",
+        kind: "surface",
+        script: "ATTACH DATABASE 'side.db' AS side;
+CREATE TABLE side.t (k TEXT PRIMARY KEY, a, b, c) WITHOUT ROWID;
+INSERT INTO side.t VALUES ('x',10,20,30),('y',100,200,300);
+ALTER TABLE side.t DROP COLUMN b;
+SELECT k, a, c FROM side.t ORDER BY k;
+SELECT * FROM side.t ORDER BY k;",
+        expect: Agrees,
+    },
+    Case {
+        name: "alter.temp.actions",
+        kind: "surface",
+        script: "CREATE TEMP TABLE t (a,b);
+INSERT INTO t VALUES (1,2);
+ALTER TABLE t ADD COLUMN c DEFAULT 9;
+SELECT * FROM t;
+ALTER TABLE t DROP COLUMN b;
+SELECT * FROM t;
+ALTER TABLE t RENAME TO u;
+SELECT * FROM u;",
+        expect: Agrees,
+    },
+    Case {
+        name: "alter.temp.qualified",
+        kind: "surface",
+        script: "CREATE TEMP TABLE t (a,b);
+INSERT INTO t VALUES (1,2);
+ALTER TABLE temp.t ADD COLUMN c DEFAULT 9;
+SELECT * FROM temp.t;
+ALTER TABLE temp.t DROP COLUMN b;
+SELECT * FROM temp.t;",
+        expect: Agrees,
+    },
+    Case {
+        name: "alter.temp.shadow",
+        kind: "surface",
+        script: "CREATE TABLE t (a,b,c);
+CREATE TEMP TABLE t (x,y);
+INSERT INTO main.t VALUES (1,2,3);
+INSERT INTO temp.t VALUES (10,20);
+ALTER TABLE t ADD COLUMN z DEFAULT 7;
+SELECT 'main', * FROM main.t;
+SELECT 'temp', * FROM temp.t;
+ALTER TABLE temp.t DROP COLUMN y;
+SELECT 'temp2', * FROM temp.t;",
+        expect: Agrees,
+    },
+    Case {
+        name: "alter.unqualified.attached",
+        kind: "surface",
+        script: "ATTACH DATABASE 'side.db' AS side;
+CREATE TABLE side.t (a,b,c);
+INSERT INTO side.t VALUES (1,2,3);
+ALTER TABLE t DROP COLUMN b;
+SELECT * FROM side.t;
+ALTER TABLE t ADD COLUMN d DEFAULT 4;
+SELECT * FROM side.t;",
         expect: Agrees,
     },
     Case {

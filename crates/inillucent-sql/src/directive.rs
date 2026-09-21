@@ -1148,16 +1148,37 @@ impl<'a> Binder<'a> {
         table: ast::NameId,
         action: &ast::AlterAction,
     ) -> Result<Directive, ParseError> {
-        let index = self.resolve_database(database)?;
-        let database_name = self.catalog.database_name(index).to_vec();
+        // **An unqualified `ALTER TABLE` searches `temp` before `main`
+        // (task-2061).** This resolved every unqualified name through
+        // `resolve_database(None)`, which answers `main` and nothing else, and
+        // then looked the table up in `main` alone - so
+        // `CREATE TEMP TABLE t (a, b); ALTER TABLE t ADD COLUMN c` was
+        // `no such table: t` when nothing called `t` was in `main`, and altered
+        // `main.t` when something was. SQLite searches `temp` first for an
+        // unqualified name in `ALTER TABLE` exactly as it does in a `SELECT`,
+        // and `find_table(None, ...)` is already that search - the same one
+        // every query goes through - so the schema comes back from the table
+        // that was found rather than being decided before the search.
+        let written = match database {
+            // A qualifier still has to name a database that exists, and it
+            // still restricts the search to that one.
+            Some(_) => Some(
+                self.catalog
+                    .database_name(self.resolve_database(database)?)
+                    .to_vec(),
+            ),
+            None => None,
+        };
         let folded = self.ast.folded(table).to_vec();
         let Some(target) = self
             .catalog
-            .find_table(Some(database_name.as_slice()), &folded)
+            .find_table(written.as_deref(), &folded)
             .cloned()
         else {
             return Err(no_such_table(self.ast.text(table), Span::default()));
         };
+        let index = target.database;
+        let database_name = self.catalog.database_name(index).to_vec();
         if target.kind != crate::catalog_view::TableKind::Table {
             return Err(refused(
                 format!(

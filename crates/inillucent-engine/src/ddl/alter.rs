@@ -340,7 +340,7 @@ impl crate::ImportedDatabase {
         }
         if let AlterKind::AddColumn { risk, .. } = action {
             if let Some(message) = risk.refusal() {
-                if self.table_has_a_row(&folded)? {
+                if self.table_has_a_row(at, &folded)? {
                     return Err(refusal(message));
                 }
             }
@@ -433,16 +433,16 @@ impl crate::ImportedDatabase {
         // rebuilt rather than edited in place: every leaf's column directory
         // would otherwise still describe a column the catalog no longer has.
         if let AlterKind::DropColumn { position, .. } = action {
-            self.rebuild_table_tree(&folded, Some(usize::from(*position)))?;
+            self.rebuild_table_tree(at, &folded, Some(usize::from(*position)))?;
         }
         if let AlterKind::AddColumn { .. } = action {
-            self.rebuild_table_tree(&folded, None)?;
+            self.rebuild_table_tree(at, &folded, None)?;
         }
         if matches!(
             action,
             AlterKind::DropColumn { .. } | AlterKind::AddColumn { .. }
         ) {
-            self.refresh_index_layouts(&folded);
+            self.refresh_index_layouts(at, &folded);
         }
         self.refresh_catalog();
         self.seal()?;
@@ -570,13 +570,14 @@ impl crate::ImportedDatabase {
     /// so an empty table takes all three and SQLite accepts them. It stops at
     /// the first row rather than counting, because the question is existence.
     ///
+    /// @param at - the schema the table is in
     /// @param folded - the table's folded name
-    fn table_has_a_row(&mut self, folded: &[u8]) -> DbResult<bool> {
+    fn table_has_a_row(&mut self, at: usize, folded: &[u8]) -> DbResult<bool> {
         let Some(root) = self
             .schema
             .tables
             .iter()
-            .find(|table| table.folded == folded)
+            .find(|table| table.database == at && table.folded == folded)
             .map(|table| table.root)
         else {
             return Ok(false);
@@ -594,15 +595,21 @@ impl crate::ImportedDatabase {
     /// through the old layout, re-shaped, and packed into a fresh tree. The old
     /// tree's pages go back to the free map.
     ///
+    /// @param at - the schema the table is in
     /// @param folded - the table's folded name
     /// @param dropped - the declared position `DROP COLUMN` removed, when that
     ///   is what is being rebuilt
-    fn rebuild_table_tree(&mut self, folded: &[u8], dropped: Option<usize>) -> DbResult<()> {
+    fn rebuild_table_tree(
+        &mut self,
+        at: usize,
+        folded: &[u8],
+        dropped: Option<usize>,
+    ) -> DbResult<()> {
         let Some(info) = self
             .schema
             .tables
             .iter()
-            .find(|table| table.folded == folded)
+            .find(|table| table.database == at && table.folded == folded)
             .cloned()
         else {
             return Ok(());
@@ -664,8 +671,7 @@ impl crate::ImportedDatabase {
             .map(PagedTree::root)
             .unwrap_or(PageId::NONE);
         let update = self
-            .schema
-            .entries
+            .entries_of(at)
             .iter()
             .find(|held| {
                 held.entry.kind == ObjectKind::Table
@@ -829,13 +835,14 @@ impl crate::ImportedDatabase {
     /// describing either with `index_shape` would call it an ordinary B-tree
     /// index.
     ///
+    /// @param at - the schema the table is in
     /// @param folded - the table's folded name
-    fn refresh_index_layouts(&mut self, folded: &[u8]) {
+    fn refresh_index_layouts(&mut self, at: usize, folded: &[u8]) {
         let Some(info) = self
             .schema
             .tables
             .iter()
-            .find(|table| table.folded == folded)
+            .find(|table| table.database == at && table.folded == folded)
             .cloned()
         else {
             return;
