@@ -211,9 +211,27 @@ const TRIVIAL_COMPILE_ALLOCATIONS: u64 = 15;
 /// on a warm connection.
 ///
 /// Higher than [`TRIVIAL_COMPILE_ALLOCATIONS`] because this statement names
-/// three things, and interning a name is four allocations of its own - the
-/// largest single item left on the compile path, and task-2039's subject.
-const POINT_COMPILE_ALLOCATIONS: u64 = 120;
+/// things and `SELECT 1` does not.
+///
+/// **120 when this guard was written, 92 since task-2039.** Interning a name
+/// cost four allocations - the written spelling copied out of the source, the
+/// folded key, and the map's owned key cloned twice - and it cost them on a
+/// name the arena already held, because the lookup had to build the key it
+/// looked up with. `Ast::interned` is keyed on a hash of the spelling and
+/// quote form now, so a hit allocates nothing, and `Ast::clear` keeps the
+/// names' byte buffers instead of dropping them, so a warm compile does not
+/// buy them again.
+///
+/// **Twenty-eight rather than the fourteen the statement's own three names
+/// account for**, because compiling it also reparses the `CREATE TABLE` text
+/// the catalog stores, and that declaration names every column of the table.
+/// It is the same saving twice over, and it is why this guard is worth more
+/// than the profile of one statement: `inillucent-prepareprofile` reads 93 to
+/// 79 on the gate's path, and the path an application takes saves twice that.
+///
+/// Read exactly, with no margin, for the reason
+/// [`TRIVIAL_COMPILE_ALLOCATIONS`] gives.
+const POINT_COMPILE_ALLOCATIONS: u64 = 92;
 
 /// Returns a fresh, empty directory for one test's files.
 ///
