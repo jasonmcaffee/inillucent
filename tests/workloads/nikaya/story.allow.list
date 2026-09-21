@@ -7,4 +7,3 @@
 # the ticket lands the story goes red until the line is removed. That is the
 # rule from task-1969 section 4: a fixed defect left listed reads as coverage
 # and is not.
-a_startup_migration_leaves_every_neighbour_readable::small_pool	task-2055: task-2043's page-free-at-commit corrupts the file at a 4,096 byte page with a 64 frame pool

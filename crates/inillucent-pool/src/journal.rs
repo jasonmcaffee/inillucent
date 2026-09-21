@@ -506,6 +506,38 @@ impl Journal {
         self.mode.is_rollback() && !self.saved.contains(&page.0)
     }
 
+    /// Reports whether this journal could put this page back.
+    ///
+    /// **The question a bulk build has to ask before it writes a page straight
+    /// into the data file** (task-2055). Such a page's contents are in the file
+    /// and in no log record, so a replay of this journal restores the page's
+    /// previous life and nothing anywhere can rebuild what was written over it.
+    /// See `inillucent_tree`'s `write_built_page`, which logs the page instead
+    /// when the answer is yes.
+    ///
+    /// The exact complement of [`Journal::wants`] within a rollback mode: a page
+    /// this journal wants a pre-image of is one it has not got, and a page it
+    /// does not want is one it already holds.
+    ///
+    /// @param page - the page about to be written
+    pub fn holds(&self, page: PageId) -> bool {
+        self.mode.is_rollback() && self.saved.contains(&page.0)
+    }
+
+    /// Reports whether this journal would be hot to the next open.
+    ///
+    /// **A durable mode with pre-images in it, and nothing else.** `memory`
+    /// keeps its pre-images in this process and writes none, so it is never on
+    /// the disk for an open to find; `wal` and `off` are not rollback journals
+    /// at all.
+    ///
+    /// Asked by the fold a connection does on its way out - see
+    /// `ImportedDatabase::fold_on_close` - because a journal is disposed of by
+    /// [`Journal::finish`] and only a checkpoint reaches it (task-2055).
+    pub fn is_hot(&self) -> bool {
+        self.mode.is_durable() && !self.saved.is_empty()
+    }
+
     /// Returns the pre-images a `memory` journal is holding.
     ///
     /// The rollback path reads them; nothing else does.

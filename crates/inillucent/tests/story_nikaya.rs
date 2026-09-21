@@ -65,12 +65,13 @@ fn allow_listed(key: &str) -> Option<String> {
 
 /// Opens the migrated database again and checks it, or records a known failure.
 ///
-/// **The check is the story's own rather than the helper's, because one arm is
-/// known to fail it.** `reopen_and_check` panics, which is right everywhere it
-/// is used and wrong here: task-2055 is a corruption this story found and this
-/// ticket is not the one that fixes it, so the failure is written off by name
-/// and the run stays green until the fix lands - at which point the entry
-/// describes nothing and the story goes red.
+/// **The check is the story's own rather than the helper's, so an arm this
+/// story finds broken can be written off by ticket while that ticket is open.**
+/// `reopen_and_check` panics, which is right everywhere else it is used; here
+/// the failure is looked up in `tests/workloads/nikaya/story.allow.list` first,
+/// and an entry that no longer describes a failure fails the story instead. The
+/// list is empty: task-2055 was the one entry it has had, and the fix took the
+/// line with it.
 ///
 /// Returns `None` when the arm is written off, which ends the story there.
 ///

@@ -240,6 +240,37 @@ impl Pool {
         self.fold_protected_by_log.get()
     }
 
+    /// Reports whether a live rollback journal could put this page back.
+    ///
+    /// **Asked by a bulk build before it writes a page straight into the data
+    /// file** (task-2055). See [`crate::journal::Journal::holds`] and
+    /// `inillucent_tree`'s `write_built_page` for what the answer decides.
+    ///
+    /// @param page - the page about to be written
+    pub fn journal_holds(&self, page: PageId) -> bool {
+        self.journal
+            .borrow()
+            .as_ref()
+            .is_some_and(|journal| journal.holds(page))
+    }
+
+    /// Reports whether a rollback journal is sitting beside the file with
+    /// pre-images in it.
+    ///
+    /// **The other half of "does this connection hold something the file does
+    /// not"** (task-2055). A journal is created by the first page a writeback
+    /// puts in the file and disposed of by a checkpoint, so a connection that
+    /// evicted every dirty page it had holds nothing dirty and still leaves a
+    /// journal the next open replays - which moves the file back past writes
+    /// that were acknowledged. `ImportedDatabase::fold_on_close` asks this
+    /// beside the dirty count and folds when either says yes.
+    pub fn journal_is_hot(&self) -> bool {
+        self.journal
+            .borrow()
+            .as_ref()
+            .is_some_and(|journal| journal.is_hot())
+    }
+
     /// Syncs the journal, which must happen before the first page is written.
     pub fn seal_journal(&self) -> DbResult<()> {
         match self.journal.borrow().as_ref() {

@@ -282,3 +282,55 @@ they are touching do not collide; two that have not, do.
   every column after the dropped one takes its left neighbour's values. It is on `main`, it needs no
   transaction, and dropping the last column is correct - which is why task-2051's own reproduction
   on `(id, n)` did not show it. If you are in that function, the two tickets will collide. (task-2051)
+- **A page written straight into the data file has to carry an LSN, and the rollback journal has
+  to be asked before it is written at all.** `Pool::write_built_page` is the only write in the
+  engine that skips the buffer pool and the log both, which is what makes `CREATE INDEX` write its
+  index once. Two rules come with it, and neither was there until task-2055: the page carries the
+  LSN of its own `AllocPage` record, so redo skips the records its page number carried in a
+  previous life; and a page the live rollback journal holds a pre-image of is logged instead,
+  because nothing replays a built page forward again after a journal has put it back. If you add a
+  second caller of `write_built_page`, it owes both. (task-2055)
+- **`Applier::page_lsn` asks the file's length, not `Pool::page_count`.** The pool's count is the
+  last checkpoint's, and every page allocated since then is past it - so asking the pool answered
+  "the file does not hold that page" about pages it was holding, and the page-LSN rule was off for
+  the whole tail of the file during recovery. (task-2055)
+- **A connection owes a fold at close for a hot rollback journal as well as for a dirty frame.**
+  The two are in tension at a small pool: eviction is what clears dirty flags and what fills the
+  journal, so the more a session evicts the more certain it was to reach `fold_on_close` with
+  nothing dirty and leave the journal behind. A journal is only ever disposed of by a checkpoint.
+  (task-2055)
+- **A crash test that snapshots after the connection is dropped is testing a close.**
+  `ImportedDatabase::drop` folds, so `vfs.crash()` taken after it holds a cleanly closed database
+  and passes against an engine that cannot recover. Take the snapshot while the connection is
+  still open - `bulk_build_crash.rs::migrated` is the shape. Both new cases there passed against
+  the unfixed engine until that was moved. (task-2055)
+- **`durability.rs`'s task-2043 cases run at all six matrix arms now**, through `scenario!`. They
+  ran at `Database::open`'s default alone, which is 32,768 byte pages and a 4,096 frame pool -
+  nothing evicts, no rollback journal is written and the file is folded at every close, which is
+  three of the conditions task-2055 needed. A new storage case in that file should go through
+  `scenario!` too. (task-2055)
+- **A test file invokes `scenario!` or holds a bare `#[test]`, never both**, and `scenarios`
+  refuses the mixture by name: "the file grades one story six ways and another once and the run's
+  output cannot tell them apart". `durability.rs` hit it the moment six of its cases went through
+  the matrix, which is why there is a `durability_arms.rs` beside it now and an
+  `inillucent_compat::durable` holding what the two build. If you add an arm-run case to a file
+  that has bare tests, the case goes in the arms file. Adding the target also means a
+  `tests/selection.toml` row **and** the tier table in `tests/inillucent-testing-tdd.md`, which
+  `documentation` compares against the map. (task-2055)
+- **`inillucent-compat::bindings` fails on this machine and it is nobody's ticket.** It reads
+  records the npm, go and php conformance runners write into `_agent_output/conformance/`, and
+  that directory exists in neither the main checkout nor any worktree - so the failure is "these
+  runners have produced no record", on any branch. Produce them with
+  `node --test packages/npm/inillucent/conformance.test.mjs`,
+  `go test -C packages/go -run TestConformanceSuite ./...` and
+  `php packages/php/tests/conformance.php`, or read past it. Do not spend a run bisecting your own
+  change against it. (task-2055)
+- **`small.db` alone is not the whole fixture gap.** task-2041's note says every case but the
+  fullgate one runs on it, and `new_engine_log_lead` does not: it wants
+  `_agent_output/fixtures/medium.db`, 17 MB, and skips both its cases without it - which is the
+  suite whose own header records that they "skipped for months, and that is why the defect
+  survived". The junction task-2051 describes covers all three fixtures and is the thing to do.
+  (task-2055)
+- **`inillucent-testrun --changed` takes no diff once you have committed**, and answers "nothing
+  has changed against HEAD / nothing selected" with exit code 0 - which reads exactly like a clean
+  run. Pass the base: `--changed origin/main` selects the branch's whole diff. (task-2055)

@@ -34,28 +34,60 @@ use super::*;
 /// order and `inillucent_wal::record::Body::BulkBuilt` for why that makes an
 /// image unnecessary rather than merely cheaper.
 ///
-/// **The page is left with the stamp the builder gave it**, which is zero for a
-/// page nothing has described. That is what the unlogged builder has always
-/// produced, so the logged and unlogged builds now write byte-identical pages -
-/// which `ImportedDatabase::import_with` depends on, because it reads the catalog
-/// back and refuses if it differs from what it wrote. Nothing is lost: no record
-/// names the page, so there is no record for the page-LSN rule to order it
-/// against, and a later write to it stamps it then.
+/// **A logged build stamps the page with its `AllocPage` record's LSN**, exactly
+/// as `log_allocated_page` stamps an ordinary page with its `WritePage` record's.
+/// The page used to be left at zero, on the argument that no record names a built
+/// page so the page-LSN rule has nothing to order it against. That argument holds
+/// for the records this build writes and not for the ones the page's previous life
+/// wrote: a page the free map hands back is some other tree's old leaf, and the
+/// records that filled it sit in the log until a checkpoint moves past them.
+/// Recovery replays a record onto any page stamped below it, and zero is below
+/// everything, so a `CREATE INDEX` built on pages an `ALTER TABLE` had just freed
+/// came back as pieces of the table it replaced (task-2055). See
+/// [`inillucent_pool::Pool::write_built_page`] for the whole of it.
+///
+/// **An unlogged build still writes a zero stamp**, which is what the unlogged
+/// builder has always produced and what keeps `ImportedDatabase::import_with`'s
+/// round trip meaningful. It builds into a file nothing has read and checkpoints
+/// before anything opens it, so there is no log window and no record to order a
+/// stamp against.
+///
+/// **A page the rollback journal can put back is logged instead of written
+/// straight in, and that is the rest of task-2055.** A built page's contents are
+/// in the data file and in no record, so anything that moves the file backwards
+/// past the build destroys them with nothing able to rebuild them - and a
+/// rollback journal is exactly a thing that moves the file backwards. The
+/// journal holds a pre-image of every page an eviction has written since the
+/// last checkpoint, and after an `ALTER TABLE` frees a populated table's pages
+/// the build is handed those very pages, so at a small buffer pool most of the
+/// index landed on pages the journal could put back. The next open replayed the
+/// journal, the log replayed forward and rebuilt the table, and the index came
+/// back as the table's old leaves.
+///
+/// So the page goes through [`log_allocated_page`] in that case, which is what
+/// every built page did before design 2 of task-2000: an `AllocPage`, a
+/// `WritePage` carrying the whole image, and an `install`. Design 2's saving is
+/// kept for every page the journal cannot put back, which is every page of a
+/// build onto fresh space and the whole of the measurement it was made against.
 ///
 /// @param log - where the allocation record goes, when there is one
 /// @param database - the file the page is written into
 /// @param id - the page, already allocated
-/// @param image - the page bytes, checksummed in place
+/// @param image - the page bytes, stamped and checksummed in place
 fn write_built_page(
     log: &mut Option<&mut dyn crate::write::TreeLog>,
     database: &mut Database,
     id: PageId,
     image: &mut [u8],
 ) -> DbResult<()> {
-    if let Some(log) = log.as_mut() {
-        log.log(inillucent_wal::record::Body::AllocPage { page: id.0 })?;
+    if log.is_some() && database.pool().journal_holds(id) {
+        return log_allocated_page(log, database, id, image);
     }
-    database.pool().write_built_page(id, image)
+    let mut stamp = 0u64;
+    if let Some(log) = log.as_mut() {
+        stamp = log.log(inillucent_wal::record::Body::AllocPage { page: id.0 })?;
+    }
+    database.pool().write_built_page(id, image, stamp)
 }
 
 /// How many rows each leaf takes, and the separator that opens each one.

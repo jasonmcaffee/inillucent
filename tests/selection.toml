@@ -1465,6 +1465,16 @@ kind = "test"
 name = "durability"
 tier = "e2e"
 
+# The other half of `durability`, held apart because `scenarios` refuses a file
+# that holds both a `scenario!` and a bare `#[test]` (task-2055). These are the
+# storage cases that run at every arm of the matrix; the ones that pick their own
+# page size and pool size are in `durability`.
+[[target]]
+package = "inillucent"
+kind = "test"
+name = "durability_arms"
+tier = "e2e"
+
 [[target]]
 package = "inillucent"
 kind = "test"

@@ -645,6 +645,14 @@ pub struct Applier<'a, R: RowRedo> {
     /// applied first, and the logical pass then reads pages the log has already
     /// made whole.
     images_only: bool,
+    /// How many pages the file held when this applier was made, or `None` until
+    /// something asks.
+    ///
+    /// See [`Applier::page_lsn`] for why the question has to be put to the file
+    /// rather than to the pool's page count. Read once and kept, because the
+    /// file can only grow while a replay runs and the pool's own count grows
+    /// with it, so the larger of the two is an upper bound that stays true.
+    pages_in_the_file: Option<u64>,
 }
 
 impl<'a, R: RowRedo> Applier<'a, R> {
@@ -659,6 +667,7 @@ impl<'a, R: RowRedo> Applier<'a, R> {
             stats: RedoStats::default(),
             free_map: Vec::new(),
             images_only: false,
+            pages_in_the_file: None,
         }
     }
 
@@ -780,12 +789,49 @@ impl<'a, R: RowRedo> Applier<'a, R> {
         self.stats.images = self.stats.images.saturating_add(1);
         Ok(())
     }
+
+    /// Returns how many pages this replay may find in the file.
+    ///
+    /// **Read from the file's own length. Asking the pool's page count instead
+    /// corrupted a database (task-2055).** The pool's count comes from the meta
+    /// record, which is the *last checkpoint's* - and every page allocated since
+    /// that checkpoint is past it, described only by the `AllocPage` records
+    /// this replay has not applied yet. Asking the pool therefore answered "the
+    /// file does not hold that page" about pages the file was holding perfectly
+    /// well, [`Applier::page_lsn`] returned `None` for all of them, and the
+    /// page-LSN rule - the one thing that stops redo writing an old record over
+    /// newer contents - was switched off for the whole tail of the file.
+    ///
+    /// What that cost: a `CREATE INDEX` bulk built onto pages an `ALTER TABLE`
+    /// had freed in the same session, on a file whose log had not been folded,
+    /// came back after the reopen as pieces of the table it was built beside.
+    ///
+    /// The larger of the two is taken because a replay can grow the file - a
+    /// `WritePage` for a page past the end installs it - and the pool's count
+    /// grows with it, while the length read here does not.
+    fn pages_the_file_holds(&mut self) -> DbResult<u64> {
+        let held = match self.pages_in_the_file {
+            Some(held) => held,
+            None => {
+                let size = self
+                    .database
+                    .pool()
+                    .file()
+                    .file_size()
+                    .map_err(inillucent_vfs::VfsError::into_db_error)?;
+                let held = size / self.database.page_size().max(1) as u64;
+                self.pages_in_the_file = Some(held);
+                held
+            }
+        };
+        Ok(held.max(self.database.pool().page_count()))
+    }
 }
 
 impl<R: RowRedo> Redo for Applier<'_, R> {
     fn page_lsn(&mut self, page: u64) -> DbResult<Option<u64>> {
         let id = PageId(page);
-        if page >= self.database.pool().page_count() {
+        if page >= self.pages_the_file_holds()? {
             return Ok(None);
         }
         match self.database.pool().fetch(id) {

@@ -576,12 +576,28 @@ impl ImportedDatabase {
         // Asked of the dirty count rather than of the log, because the question is
         // what *this* connection holds that the file does not. Another process's
         // unfolded records are in the log and are that process's to fold.
-        let holding = self.storage.database.pool().dirty_pages() > 0
-            || self
-                .session_state
-                .attached
-                .iter()
-                .any(|held| held.path.is_some() && held.database.pool().dirty_pages() > 0);
+        //
+        // **And of the rollback journal, which is the other half of that question
+        // and was missing (task-2055).** A journal is created by the first page a
+        // writeback puts in the file and is disposed of by `Journal::finish`,
+        // which only a checkpoint reaches - so the more a small buffer pool
+        // evicts, the larger the journal grows and the fewer frames are left
+        // dirty, and a connection that evicted everything it had reached here
+        // with nothing dirty and left a 686 KB journal beside the file. The next
+        // open replayed it, which put the file back past writes that had been
+        // acknowledged, and a `CREATE INDEX` built straight into the data file
+        // does not survive that: its pages are in no log record, so nothing
+        // replays them forward again. `story_nikaya`'s small-pool arm reopened
+        // on `a key below separator 0 is in the child above it`.
+        //
+        // It costs a read-only connection nothing, which is what the paragraph
+        // above is protecting: a journal is only ever written by a *dirty*
+        // page's writeback, so a session that read and evicted clean frames has
+        // none and still releases without taking the file exclusively.
+        let holding = self.holds_what_the_file_does_not(&self.storage.database)
+            || self.session_state.attached.iter().any(|held| {
+                held.path.is_some() && self.holds_what_the_file_does_not(&held.database)
+            });
         if !holding {
             return Ok(());
         }
@@ -589,6 +605,19 @@ impl ImportedDatabase {
         let folded = self.checkpoint();
         let left = self.leave();
         folded.and(left)
+    }
+
+    /// Reports whether one file holds something the data file does not.
+    ///
+    /// Two things count, and a fold on the way out is owed for either: a dirty
+    /// frame, whose contents have not reached the file, and a rollback journal
+    /// with pre-images in it, which would move the file *backwards* at the next
+    /// open. See [`Self::fold_on_close`] for what leaving the second one behind
+    /// cost (task-2055).
+    ///
+    /// @param database - the file to ask about
+    fn holds_what_the_file_does_not(&self, database: &inillucent_pool::Database) -> bool {
+        database.pool().dirty_pages() > 0 || database.pool().journal_is_hot()
     }
 
     /// Reports whether any file this connection holds has piled up enough log

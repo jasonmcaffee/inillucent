@@ -155,7 +155,7 @@ of a run rather than of the map and is not checked here.
 | `engine` | 64 | 357 | SQL and storage behaviour over real database files |
 | `differential` | 33 | 309 | graded against the pinned SQLite 3.53.4 |
 | `durability` | 31 | 216 | crashes, injected faults, corruption and concurrency |
-| `e2e` | 35 | 370 | the public surfaces an application binds to, end to end |
+| `e2e` | 36 | 412 | the public surfaces an application binds to, end to end |
 | `perf` | 1 | 6 | the cost guards — **runs alone**, see §5 |
 | `retrieval` | 7 | 519 | the embedding and retrieval engine, and its graded harness |
 | `tooling` | 13 | 122 | the checks that keep the repository's own rules true |
@@ -589,7 +589,7 @@ build-plus-run rather than a slice of one shared build.
 |---|---:|---:|---:|
 | `smoke` | 0.8 s | 1 | 8 |
 | `unit` | 7.8 s | 31 | 1,388 |
-| `e2e` | 23.5 s | 35 | 370 |
+| `e2e` | 25.4 s | 36 | 412 |
 | `perf` | 35.1 s | 1 | 6 |
 | `differential` | 36.1 s | 29 | 292 |
 | `engine` | 37.8 s | 44 | 299 |
@@ -605,7 +605,10 @@ startup and its `cargo` target listing, about 1.2 s.
 
 **`unit`, `e2e`, `tooling`, `durability` and `nightly` were measured again for
 task-2036**, which added 26 targets across them; the other four rows are
-carried forward from the pass that measured them.
+carried forward from the pass that measured them. **`e2e` was measured again
+for task-2055**, which split `durability` into two targets so that the cases
+running at every arm sit apart from the cases picking their own geometry - 36
+targets and 412 tests, at 25.4 s on a box that had one other agent on it.
 
 **`e2e` is 23.5 s and the design asked for fifteen.** A tier's wall is its
 slowest target, and three of them are within a second of the whole tier:

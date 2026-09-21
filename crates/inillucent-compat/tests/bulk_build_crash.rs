@@ -337,3 +337,169 @@ fn every_cut_of_a_bulk_index_build_is_recoverable() {
         ),
     );
 }
+
+// --- The same build, onto pages the statement before it freed (task-2055)
+//
+// The campaign above builds onto fresh space: the table is folded into the file
+// first, so the index's pages are past everything the file has ever held and no
+// record in the replay window names them. That is the easy half, and it is why
+// the campaign passed while `story_nikaya`'s small-pool arm reopened a migrated
+// database on `a key below separator 0 is in the child above it`.
+//
+// The other half is a build onto pages that were something else a statement ago.
+// `ALTER TABLE ADD COLUMN` on a populated table rebuilds its tree and, since
+// task-2043, frees the old one at the commit - so the `CREATE INDEX` after it is
+// handed the table's own old leaves, because `FreeMap::free` rewinds the
+// allocator hint to the lowest page it was given back. Those pages have a
+// previous life, and two different things in the engine can put that life back:
+//
+//  - **the log**, whose records for those pages are still in the replay window
+//    when nothing has been folded since they were written. A page written by
+//    `Pool::write_built_page` carries the LSN of its own `AllocPage` record so
+//    that redo skips them. It used to carry zero, which is below every record
+//    there is.
+//  - **the rollback journal**, which holds a pre-image of every page an eviction
+//    wrote since the last checkpoint and is replayed whole by the next open. No
+//    record describes a built page's contents, so nothing replays it forward
+//    again - which is why `write_built_page` in `inillucent_tree` logs the page
+//    instead when the journal can put it back.
+//
+// The two cases below are one cut each rather than a campaign, and the cut is the
+// same in both: the media as it stands the moment the `CREATE INDEX` commits,
+// with nothing folded since the table was written. That is the state that makes
+// the previous life reachable, and a campaign of four hundred other moments does
+// not reach it more than this does.
+
+/// How many rows the migrated table holds.
+///
+/// More than [`ROWS`], so the table's own pages outgrow the small pool the
+/// journal case runs at and the evictions that fill the journal really happen.
+const MIGRATED_ROWS: usize = 900;
+
+/// A pool small enough that an ordinary statement evicts.
+///
+/// The floor `ImportedDatabase::create_on` clamps to, and the size
+/// `inillucent_compat::matrix`'s `small-pool` arm runs at.
+const SMALL_FRAMES: usize = 64;
+
+/// Builds a populated table, adds a column to it and indexes the column.
+///
+/// **No checkpoint anywhere in it**, which is the point: the table's own
+/// `InsertRow` records have to still be in the replay window when the index is
+/// built over the pages they describe.
+///
+/// Returns the media as it stands at the commit, with the connection still open.
+///
+/// **The snapshot is taken before the connection is dropped, and that is the
+/// difference between a crash and a close.** A first version of this returned the
+/// simulator and let the caller snapshot it, by which time `ImportedDatabase::drop`
+/// had folded the log into the file - so both cases passed against the engine
+/// before the fix, which is the exact failure `tests/inillucent-testing-tdd.md`
+/// rule 1.2 is about.
+///
+/// @param mode - the `journal_mode` to run under
+/// @param frames - how many frames the pool holds
+/// @param seed - the run's seed
+fn migrated(mode: &str, frames: usize, seed: u64) -> CrashSnapshot {
+    let vfs = simulator(seed);
+    let mut engine =
+        ImportedDatabase::create_on(Arc::clone(&vfs) as Arc<dyn Vfs>, path(), PAGE_SIZE, frames)
+            .expect("the connection opens");
+    run(
+        &mut engine,
+        &format!(
+            "PRAGMA journal_mode={mode};
+             PRAGMA synchronous=full;
+             CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT);"
+        ),
+    )
+    .expect("the schema builds");
+    let mut rows = String::from("BEGIN;\n");
+    for nth in 1..=MIGRATED_ROWS {
+        // One value in five leaves the leaf, so the table has extent pages as
+        // well as leaves and the build is handed both kinds back.
+        let width = if nth % 5 == 0 { 3_000 } else { 200 };
+        rows.push_str(&format!(
+            "INSERT INTO t VALUES({nth}, '{}');\n",
+            "b".repeat(width)
+        ));
+    }
+    rows.push_str("COMMIT;\n");
+    run(&mut engine, &rows).expect("the rows insert");
+    run(
+        &mut engine,
+        "ALTER TABLE t ADD COLUMN c INTEGER DEFAULT 7;
+         CREATE INDEX t_c ON t(c);",
+    )
+    .expect("the migration runs");
+    // Read every row back, which at a small pool writes every dirty frame out
+    // and fills the rollback journal with their pre-images.
+    run(&mut engine, "SELECT a, b, c FROM t ORDER BY a;").expect("the read runs");
+    let snapshot = vfs.crash();
+    drop(engine);
+    snapshot
+}
+
+/// Asserts a crashed, migrated database comes back with its index intact.
+///
+/// @param snapshot - the media at the crash
+/// @param frames - how many frames the reopened pool holds
+/// @param seed - the recovery's own seed
+fn the_index_survives(snapshot: &CrashSnapshot, frames: usize, seed: u64) {
+    let recovered = Arc::new(SimVfs::recovered(
+        SimConfig {
+            seed,
+            model: MediaModel::default(),
+            ..SimConfig::default()
+        },
+        snapshot,
+    ));
+    let mut engine = ImportedDatabase::open_on(
+        Arc::clone(&recovered) as Arc<dyn Vfs>,
+        path(),
+        PAGE_SIZE,
+        frames,
+    )
+    .expect("the crashed database reopens");
+    let through_the_table = engine
+        .execute_any("SELECT count(*) FROM t", &Params::new())
+        .map(|answer| first_integer(&answer.rows))
+        .expect("the table reads");
+    assert_eq!(
+        through_the_table,
+        Some(MIGRATED_ROWS as i64),
+        "the table did not come back whole"
+    );
+    let through_the_index = engine
+        .execute_any("SELECT count(*) FROM t WHERE c = 7", &Params::new())
+        .map(|answer| first_integer(&answer.rows))
+        .unwrap_or(None);
+    assert_eq!(
+        through_the_index,
+        Some(MIGRATED_ROWS as i64),
+        "the index built on the freed pages does not agree with the table"
+    );
+}
+
+/// A crash after an index is built on freed pages leaves the index readable.
+///
+/// Write-ahead-log mode, so there is no rollback journal and the build always
+/// writes straight into the data file. What is left to put the pages' previous
+/// life back is the log itself, and the only thing standing in its way is the
+/// stamp `Pool::write_built_page` gives the page.
+#[test]
+fn a_crash_after_an_index_is_built_on_freed_pages_keeps_it() {
+    let crashed = migrated("wal", FRAMES, 7_100);
+    the_index_survives(&crashed, FRAMES, 7_101);
+}
+
+/// A hot rollback journal does not put back the pages an index was built on.
+///
+/// `delete` mode at a 64 frame pool, which is what fills the journal: every
+/// dirty page the read above evicts leaves a pre-image behind, and a journal is
+/// only ever disposed of by a checkpoint. The next open replays it whole.
+#[test]
+fn a_hot_journal_does_not_put_back_an_index_built_over_it() {
+    let crashed = migrated("delete", SMALL_FRAMES, 7_200);
+    the_index_survives(&crashed, SMALL_FRAMES, 7_201);
+}

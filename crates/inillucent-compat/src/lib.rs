@@ -31,6 +31,7 @@ pub mod cliproc;
 pub mod corpus;
 pub mod crashcampaign;
 pub mod differential;
+pub mod durable;
 pub mod facade;
 pub mod fixtures;
 pub mod hash;

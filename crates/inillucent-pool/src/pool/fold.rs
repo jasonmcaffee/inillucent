@@ -372,6 +372,31 @@ impl Pool {
     /// goes through [`Pool::writeback`] is checksummed on the way out, and this
     /// page does not go through it.
     ///
+    /// **And so is the stamp, which used to be left at zero and corrupted a
+    /// database (task-2055).** The argument for leaving it was that no record
+    /// names a built page, so the page-LSN rule has nothing to order it against.
+    /// That is true of records this build writes and false of records the page's
+    /// *previous life* wrote: a page the free map hands back was a leaf of
+    /// another tree until the statement that dropped it, and every `WritePage`
+    /// and `InsertRow` that filled it stays in the log until a checkpoint moves
+    /// past them. Recovery
+    /// replays a record only onto a page whose stamp is below the record's, and a
+    /// stamp of zero is below every record there is - so redo put the old tree's
+    /// bytes back over the index that had been built on those pages, and the
+    /// reopened file answered `a key below separator 0 is in the child above it`.
+    ///
+    /// The stamp is the `AllocPage` record's own LSN, which is the same thing
+    /// `PagedTree`'s ordinary allocation path writes from its `WritePage`
+    /// record's LSN: it is above every record describing what the page used to
+    /// hold, because the allocation is what ended that life, and it is a real
+    /// position in the log rather than a number invented here.
+    ///
+    /// It is noted as the pool's high water as well, because nothing else can:
+    /// [`Pool::writeback`] raises the high water for every page *it* writes, and
+    /// this page never goes through it. `resume_above_every_stamp` reads that
+    /// number to decide where a recovered log has to restart, and a file holding
+    /// a stamp no part of the pool had seen is exactly the case it exists for.
+    ///
     /// **A resident frame for the same page number is kept in step.** A freshly
     /// allocated page has no frame, which is the ordinary case and the one the
     /// memory win comes from - the built pages never enter the pool at all, so a
@@ -390,14 +415,21 @@ impl Pool {
     /// with the file.
     ///
     /// @param page - the page, already allocated
-    /// @param image - the page bytes, checksummed in place
-    pub fn write_built_page(&self, page: PageId, image: &mut [u8]) -> DbResult<()> {
+    /// @param image - the page bytes, stamped and checksummed in place
+    /// @param lsn - the log position the page's contents are as of, which is its
+    ///   `AllocPage` record's LSN; zero for an unlogged build, where there is no
+    ///   log to replay and the bytes stay what the unlogged builder always wrote
+    pub fn write_built_page(&self, page: PageId, image: &mut [u8], lsn: u64) -> DbResult<()> {
         if image.len() != self.page_size {
             return Err(misuse(format!(
                 "a built page image is {} bytes, not {}",
                 image.len(),
                 self.page_size
             )));
+        }
+        if lsn > 0 {
+            page::set_lsn(image, lsn)?;
+            self.note_high_water_lsn(lsn);
         }
         page::checksum_page(image)?;
         self.file
