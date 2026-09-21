@@ -78,7 +78,11 @@ node tools/feature-probe/registers.js    # both registers, compared name by name
 ## What runs
 
 **Queries.** `SELECT` with inner, cross and outer joins, planned as a hash join, an index nested loop
-or a scan. `GROUP BY`, `HAVING`, `DISTINCT`, `ORDER BY`, `LIMIT` and `OFFSET`. Compound selects
+or a scan. `GROUP BY`, `HAVING`, `DISTINCT`, `ORDER BY`, `LIMIT` and `OFFSET`. A `HAVING` needs no `GROUP BY`
+before it: a query with an aggregate among its result columns is one group over the whole table, and
+`SELECT count(*) AS n FROM t HAVING n > 0` filters that one group. A `HAVING` on a query with no
+`GROUP BY` and no aggregate among its result columns is refused, in SQLite's words -
+`HAVING clause on a non-aggregate query` - because SQLite refuses it too. Compound selects
 (`UNION`, `UNION ALL`, `EXCEPT`, `INTERSECT`). Common table expressions, including recursive ones.
 Derived tables in `FROM`. Subqueries in `WHERE`, in `IN`, in `EXISTS` and as values, including
 correlated ones. A correlated `IN` is answered by rewriting it as `EXISTS`, which keeps SQLite's NULL

@@ -156,3 +156,66 @@ fn a_failed_statement_leaves_the_counters_the_reference_leaves() {
         ],
     );
 }
+
+/// `HAVING` with no `GROUP BY` answers, and names its column, the way the
+/// reference does.
+///
+/// **It was a syntax error here (task-2040).** The grammar read `HAVING` only
+/// inside the `GROUP BY` arm, so `SELECT count(*) AS n FROM t HAVING n > 0`
+/// stopped at `near "HAVING": syntax error` where SQLite answers the count - a
+/// statement with an aggregate and no `GROUP BY` is one group over the whole
+/// table, and the `HAVING` filters that one group.
+///
+/// The column name is graded here as well as the rows because the alias is
+/// what the `HAVING` refers back to: `n` has to name the result column *and*
+/// resolve inside the `HAVING`, and a binder that dropped one of those would
+/// still answer the right number under a different heading.
+#[test]
+fn having_with_no_group_by_answers_as_the_reference_does() {
+    check(
+        "having-no-group-by",
+        &[
+            Step::Exec("CREATE TABLE h (a INTEGER PRIMARY KEY, b INTEGER)"),
+            Step::Exec("INSERT INTO h VALUES (1, 30), (2, 10), (3, 20)"),
+            Step::Query("SELECT count(*) AS n FROM h HAVING n > 0"),
+            Step::Query("SELECT count(*) AS n FROM h HAVING n > 9"),
+            Step::Query("SELECT sum(b) AS s, avg(b) FROM h HAVING s > 50"),
+            Step::Query("SELECT max(b) AS m, a FROM h HAVING m > 25"),
+            Step::Query("SELECT count(*) FROM h HAVING b > 0"),
+        ],
+    );
+}
+
+/// `HAVING` on a query that does not aggregate refuses with the reference's own
+/// code, which is 1 rather than 21.
+///
+/// **This is the half of task-2040 that stays refused, and the reason the fix
+/// is not "accept everything the grammar now parses".** SQLite makes a
+/// statement an aggregating one by finding an aggregate among the *result
+/// columns* and by nothing else: an aggregate that appears only in the
+/// `HAVING`, or only in the `ORDER BY`, does not. So all four of these are
+/// `HAVING clause on a non-aggregate query` there, and a binder that asked
+/// `self.aggregates.is_empty()` after binding the `HAVING` would have answered
+/// rows for two of them.
+///
+/// The code is graded rather than the sentence alone because the point of the
+/// ticket was the *class* of the failure. It used to be
+/// `ParseErrorKind::Unsupported`, which `inillucent-driver` reports as
+/// `unsupported` and the command line as exit code 3 - the pair that means
+/// "this engine has not built that yet". No release will build this one, so a
+/// caller branching on it would be waiting for a feature that is not coming.
+#[test]
+fn having_on_a_non_aggregate_query_refuses_with_the_references_code() {
+    check(
+        "having-non-aggregate",
+        &[
+            Step::Exec("CREATE TABLE h (a INTEGER PRIMARY KEY, b INTEGER)"),
+            Step::Exec("INSERT INTO h VALUES (1, 30), (2, 10), (3, 20)"),
+            Step::Query("SELECT b FROM h HAVING b > 15"),
+            Step::Query("SELECT 1 FROM h HAVING count(*) > 0"),
+            Step::Query("SELECT 1 FROM h HAVING 1 ORDER BY count(*)"),
+            Step::Query("SELECT 1 HAVING 1"),
+            Step::Query("SELECT b FROM h GROUP BY b HAVING b > 15"),
+        ],
+    );
+}

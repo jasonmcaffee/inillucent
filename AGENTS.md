@@ -210,6 +210,22 @@ target/debug/inillucent-testrun --strict          # fail on a missing prerequisi
 oracle, a corpus, a live PostgreSQL — and they *report success* when it is absent. `--strict` counts
 those and names them, so a green with nothing installed cannot be mistaken for a green.
 
+**Two things an agent terminal has to set up before the runner can build anything** (task-2040):
+
+- **The MSVC environment.** `onig_sys` compiles oniguruma with `cl.exe`, and a terminal that is not
+  a Developer PowerShell has no `INCLUDE`, so the whole run stops at
+  `regenc.h(39): fatal error C1083: Cannot open include file: 'stddef.h'` and reports
+  `the build failed` rather than a test result. `Import-MsvcEnvironment` in
+  `packaging/stage-layout.ps1` finds Visual Studio through `vswhere` and sets it; dot-source that
+  file and call it before running `inillucent-testrun`. It does nothing when `INCLUDE` is already
+  set, so a developer shell needs none of this.
+- **`.sqlite-ref/`, which a `git worktree` does not have.** It is gitignored, so a worktree starts
+  without it, and every suite graded against the reference then skips silently -
+  `semantics.rs` and everything using `differential::compare` among them. `INILLUCENT_STRICT=1`
+  turns those skips into named failures, which is how to tell a run that passed from a run that
+  did not happen. Copy the directory from the repository the worktree belongs to, or run
+  `pwsh tools/sqlite-reference.ps1`.
+
 ### Writing a test that is worth having
 
 The standard is `tests/inillucent-testing-tdd.md` and its six rules. The two that get broken most:

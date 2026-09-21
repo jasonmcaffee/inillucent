@@ -13,6 +13,7 @@
 //! and only when no real column shadows them.
 
 mod cte;
+mod having;
 mod literal;
 
 use literal::integer_literal;
@@ -2177,6 +2178,10 @@ impl<'a> Binder<'a> {
         }
         self.allow_aggregates = true;
         let bound_columns = self.bind_result_columns(columns)?;
+        // Read before the `HAVING` is bound, because by then `self.aggregates`
+        // holds the ones the `HAVING` itself introduced. `bind::having` says
+        // why that distinction is the whole rule.
+        let aggregates_in_columns = self.aggregates.len();
         for column in &bound_columns {
             if !column.name.is_empty() {
                 self.result_aliases
@@ -2191,12 +2196,11 @@ impl<'a> Binder<'a> {
             Some(expr) => Some(self.bind_expr(*expr)?),
             None => None,
         };
-        if bound_having.is_some() && bound_group.is_empty() && self.aggregates.is_empty() {
-            return Err(unsupported(
-                "HAVING requires GROUP BY or an aggregate",
-                core.span,
-            ));
-        }
+        having::refuse_when_nothing_aggregates(
+            bound_having.is_some(),
+            bound_group.len(),
+            aggregates_in_columns,
+        )?;
         // The sources stay in the binder's scope: `ORDER BY` and `LIMIT` belong
         // to the whole statement and are bound after this returns, and
         // `ORDER BY b.id` needs the same scope the result columns had.

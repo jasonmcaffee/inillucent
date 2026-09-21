@@ -146,3 +146,13 @@ __pycache__/
 # over them - so the first thing anybody did after measuring coverage was work
 # out what these were and delete them by hand.
 *.profraw
+
+# The per-worktree cargo configuration the Tasks board writes when it opens a
+# ticket's `git worktree` (task-2031): it points `build.target-dir` at a
+# directory outside the checkout, so two tickets in this repository do not wait
+# on each other's target-directory lock. It names a path that is true for one
+# worktree on one machine and is deleted when that worktree is retired, so
+# committing it would point everybody else's build somewhere that does not
+# exist. `tests/selection.toml` has a rule for it too, so a change to it selects
+# nothing rather than every suite in the workspace.
+/.cargo/

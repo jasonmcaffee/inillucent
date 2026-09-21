@@ -212,7 +212,6 @@ impl Parser<'_> {
             None
         };
         let mut group_by = Vec::new();
-        let mut having = None;
         if self.at_keyword(Keyword::GROUP)? {
             self.bump()?;
             self.expect_keyword(Keyword::BY)?;
@@ -222,10 +221,23 @@ impl Parser<'_> {
                     break;
                 }
             }
-            if self.eat_keyword(Keyword::HAVING)? {
-                having = Some(self.parse_expr()?);
-            }
         }
+        // **`HAVING` is parsed whether or not a `GROUP BY` came first
+        // (task-2040).** It used to be read inside the `GROUP BY` arm, so
+        // `SELECT count(*) AS n FROM t HAVING n > 0` - which SQLite answers
+        // with the count, because a query aggregating with no `GROUP BY` is
+        // one group over the whole table - stopped at
+        // `near "HAVING": syntax error`. A syntax error is the worst answer
+        // available for it: exit code 3 and the `unsupported` status exist so a
+        // caller can tell "not built" from "your SQL is wrong", and this said
+        // the SQL was wrong about a statement that is correct. Which of the
+        // parsed shapes are legal is the binder's question, and
+        // `bind_select_core` answers it in SQLite's own words.
+        let having = if self.eat_keyword(Keyword::HAVING)? {
+            Some(self.parse_expr()?)
+        } else {
+            None
+        };
         let windows = self.parse_window_clause()?;
         let end = self.cursor();
         Ok(self.ast.add_core(SelectCore {

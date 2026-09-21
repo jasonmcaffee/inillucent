@@ -167,6 +167,19 @@ prefix = "target/"
 packages = []
 reason = "build output"
 
+# The per-worktree cargo configuration the Tasks board writes when it opens a
+# ticket's `git worktree` (task-2031). It sets `build.target-dir` to a directory
+# of that worktree's own, because cargo takes a file lock on the target
+# directory and a shared one would make two tickets' builds wait for each other.
+# It is untracked and nothing compiles from it, and without a rule here it
+# matched nothing - so `--changed` answered "no rule covers .cargo/config.toml,
+# so everything is selected" for every ticket worked in a worktree, which is now
+# every ticket (task-2040).
+[[path]]
+prefix = ".cargo/"
+packages = []
+reason = "the worktree's own target directory, written by the board; no code reads it"
+
 [[path]]
 prefix = "README.md"
 packages = []

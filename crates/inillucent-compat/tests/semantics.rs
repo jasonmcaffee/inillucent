@@ -61,6 +61,49 @@
 //! column of every row. Two implementations of one merge is exactly the
 //! shape that drifts, so the answer is compared against the reference here.
 //!
+//! ## The three `HAVING` with no `GROUP BY` cases
+//!
+//! `SELECT count(*) AS n FROM t HAVING n > 0` answered
+//! `near "HAVING": syntax error` here and `3` at the reference, because the
+//! grammar read `HAVING` only inside the `GROUP BY` arm (task-2040). A syntax
+//! error is the worst refusal available for it: `AGENTS.md` tells a caller that
+//! exit code 3 and the `unsupported` status mean "this engine has not built
+//! that", so a *syntax* error says the SQL is wrong and sends them rewording a
+//! statement that is already correct.
+//!
+//! - `alias.having` is the statement from the ticket, in both directions - the
+//!   `HAVING` that keeps the group and the one that drops it - and with `max`
+//!   as well as `count`, because a bare column follows a single `min` or `max`
+//!   by a rule of its own and a `HAVING` must not disturb it.
+//! - `having.whole.table` is the surrounding surface: the aggregate beside a
+//!   `WHERE`, a bare column in the `HAVING`, `DISTINCT`, an `ORDER BY` with a
+//!   `LIMIT`, a subquery in the `HAVING`, a `HAVING` that is `NULL` or a
+//!   string, and an empty table - where the group still exists and the count
+//!   is zero.
+//! - `having.non.aggregate` is the half that stays refused, and it is the case
+//!   that says the grammar and the binder agree. SQLite makes a statement an
+//!   aggregating one by finding an aggregate **among the result columns** and
+//!   by nothing else, so `SELECT 1 FROM t HAVING count(*) > 0` and
+//!   `SELECT 1 FROM t HAVING 1 ORDER BY count(*)` are both
+//!   `HAVING clause on a non-aggregate query` there. A parser that accepts the
+//!   clause and a binder that then accepts every statement carrying it would
+//!   answer rows for all five of these, which is a wrong answer where the
+//!   syntax error was at least a refusal. The last three statements are the
+//!   ones that go on working, so a run cannot pass by refusing everything.
+//!
+//! All three arrive as `Agrees`, in the same commit as the fix. The ticket that
+//! asked for this expected to find `alias.having` already here as `Differs`,
+//! recording the syntax error so that fixing it would fail this file until the
+//! row moved - and no such row was ever written, so there was nothing to move.
+//! A case that is added at the same time as the behaviour it describes cannot
+//! have that history, and what it is worth is the other direction: it fails the
+//! day the grammar or the binder changes its mind again.
+//!
+//! The refusal is `ParseErrorKind::Refused` with a **default span**: the
+//! reference reports it with no offset, so its shell prints the sentence and no
+//! caret art, and a span here would have made the two transcripts differ on two
+//! lines of drawing rather than on an answer.
+//!
 //! ## All of them agree
 //!
 //! `index.partial`, `index.expr` and `without.rowid.index` - the three
@@ -1621,6 +1664,55 @@ SELECT * FROM im2;
 .imposter
 .imposter off
 SELECT * FROM im;",
+        expect: Agrees,
+    },
+    // The three `HAVING` with no `GROUP BY` cases (task-2040). This file's
+    // header says what each one is for.
+    Case {
+        name: "alias.having",
+        kind: "read",
+        script: "CREATE TABLE t(a INTEGER PRIMARY KEY, b INTEGER);
+INSERT INTO t VALUES(1,30),(2,10),(3,20);
+SELECT count(*) AS n FROM t HAVING n > 0;
+SELECT count(*) AS n FROM t HAVING n > 9;
+SELECT max(b) AS m FROM t HAVING m > 25;
+SELECT max(b) AS m FROM t HAVING m > 35;",
+        expect: Agrees,
+    },
+    Case {
+        name: "having.whole.table",
+        kind: "read",
+        script: "CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT);
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t');
+SELECT count(*) FROM t HAVING count(*) > 4;
+SELECT sum(a), avg(a) FROM t HAVING sum(a) > 100;
+SELECT max(a) AS m, b FROM t HAVING m > 25;
+SELECT min(a) AS m, b FROM t HAVING m < 25;
+SELECT count(*) FROM t WHERE a > 15 HAVING count(*) = 3;
+SELECT count(*) FROM t HAVING a > 5;
+SELECT DISTINCT count(*) FROM t HAVING count(*) > 0;
+SELECT count(*) FROM t HAVING count(*) > 0 ORDER BY 1 LIMIT 1;
+SELECT count(*) FROM t HAVING (SELECT count(*) FROM t) > 1;
+SELECT count(*) FROM t HAVING NULL;
+SELECT count(*) FROM t HAVING 'x';
+CREATE TABLE e(x);
+SELECT count(*) FROM e HAVING count(*) > 0;
+SELECT count(*) FROM e HAVING count(*) = 0;",
+        expect: Agrees,
+    },
+    Case {
+        name: "having.non.aggregate",
+        kind: "read",
+        script: "CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, b TEXT);
+INSERT INTO t VALUES (1,10,'p'),(2,20,'q'),(3,30,'r'),(4,20,'s'),(5,50,'t');
+SELECT a FROM t HAVING a > 15;
+SELECT 1 FROM t HAVING count(*) > 0;
+SELECT 1 FROM t HAVING 1 ORDER BY count(*);
+SELECT * FROM t HAVING 1;
+SELECT 1 HAVING 1;
+SELECT a FROM t GROUP BY a HAVING a > 15;
+SELECT 1 FROM t GROUP BY a HAVING count(*) > 1;
+SELECT count(*) FROM t;",
         expect: Agrees,
     },
 ];
