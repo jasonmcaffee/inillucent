@@ -1,0 +1,20 @@
+# The nightly history: which long-form suite passed, and when.
+#
+# Appended by `pwsh tools/run-nightly.ps1`, one row per target per run, never edited.
+#
+# `verdict` is pass, fail, or skipped - and skipped is the one worth reading. A
+# nightly suite needs something the workspace cannot build (the pinned SQLite
+# oracle, a downloaded release binary), and it reports success when that is
+# absent. The run passes --strict so those are counted and named rather than
+# read as passes, and they are recorded here as skipped so a month of them is
+# visible as a month of nothing having been checked.
+#
+# `seconds` is written only for a target that passed: a failure's duration is how
+# long it took to reach its first assertion, which is not a measurement of the
+# suite.
+#
+# `machine` is a label, not a hostname - the same rule performance-history.tsv uses.
+#
+stamp	commit	machine	target	verdict	seconds
+2026-09-21T06:20:51Z	0657915-dirty	machine-c9df3d5a	inillucent-compat::release_format_history	pass	3.5
+2026-09-21T06:20:51Z	0657915-dirty	machine-c9df3d5a	inillucent::story_ledger_day_nightly	pass	1602.4

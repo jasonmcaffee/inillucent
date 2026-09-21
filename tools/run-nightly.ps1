@@ -228,17 +228,23 @@ if ($Register -or $Unregister) {
 # `onig_sys` compiles oniguruma with cl.exe, and a scheduled task has no INCLUDE.
 Import-MsvcEnvironment | Out-Null
 
-$runner = Join-Path $root 'target/debug/inillucent-testrun.exe'
 if (-not $SkipBuild) {
     & cargo build --manifest-path (Join-Path $root 'Cargo.toml') -p inillucent-compat `
         --bin inillucent-testrun --features testrun
     if ($LASTEXITCODE -ne 0) { throw 'the runner would not build' }
 }
+
+# **Cargo is asked where it put the binary rather than told.** `target/` beside
+# the manifest is only the default: a `.cargo/config.toml` can move it to
+# another drive, which is what an agent's worktree does to keep its builds off
+# the repository, and this script then looked for a runner that was never going
+# to be there. `cargo metadata` answers with the directory in use.
+$metadata = & cargo metadata --manifest-path (Join-Path $root 'Cargo.toml') --no-deps --format-version 1 |
+    ConvertFrom-Json
+$target = if ($metadata.target_directory) { $metadata.target_directory } else { Join-Path $root 'target' }
+$runner = Join-Path $target 'debug/inillucent-testrun.exe'
 if (-not (Test-Path -LiteralPath $runner)) {
-    $found = Get-ChildItem -Path (Join-Path $root 'target') -Recurse -Filter 'inillucent-testrun.exe' -ErrorAction SilentlyContinue |
-        Select-Object -First 1
-    if (-not $found) { throw 'inillucent-testrun was not built' }
-    $runner = $found.FullName
+    throw "inillucent-testrun is not at $runner. Build it: cargo build -p inillucent-compat --bin inillucent-testrun --features testrun"
 }
 
 $targets = Get-SelectedTargets -Runner $runner
