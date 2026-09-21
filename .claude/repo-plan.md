@@ -93,6 +93,14 @@ they are touching do not collide; two that have not, do.
   everybody who branches after it. `crates/inillucent-sql/src/bind.rs` was 103 lines past its row
   at `b6e79d9`. Raising somebody else's number from your ticket is the diff nobody notices that the
   row exists to prevent - say so on their ticket instead. (task-2039)
+- **That `bind.rs` ceiling is settled: task-2048 moved row values into `bind/rowvalue.rs` and the
+  row now reads 4,968, the file's exact length.** So the ratchet bites on the next line anybody
+  adds to it, and it will bite on whoever adds that line rather than on the next person to branch.
+  The number went 5,282 to 5,422 and back to 5,290 inside four days with nobody deciding it should,
+  and two tickets spent time working out that the red gate was not theirs. If you need room in
+  `bind.rs`, move an idea out the way `cte.rs`, `having.rs`, `literal.rs`, `rowvalue.rs` and
+  `scratch.rs` each did; a child module can hold its own `impl Binder` block, and `Binder`'s fields
+  are `pub(crate)`, so a move needs no signature or visibility change at all. (task-2048)
 - **Build a second binary for a before-and-after into its own `CARGO_TARGET_DIR`.** cargo takes a
   file lock per target directory, so a release build started while `inillucent-testrun` is
   compiling waits for it rather than running beside it. The release profile is fat LTO with one

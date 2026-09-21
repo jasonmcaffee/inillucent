@@ -1243,7 +1243,25 @@ const CEILINGS: [(&str, usize); 16] = [
     // the repository does not hold would fail every clean checkout of it.
     // Nothing of task-1913's was reverted: only this number, and it goes
     // back to 5,111 when the extraction beside it lands.
-    ("crates/inillucent-sql/src/bind.rs", 5_315),
+    //
+    // **Lowered to 4,968 in task-2048.** Row values are `bind/rowvalue.rs`:
+    // the four that bind one - `bind_row_in`, `bind_row_against_query`,
+    // `bind_row_comparison` and the `row_value_parts` they read the parse
+    // arena with - and the three chains they desugar through,
+    // `equality_chain`, `lexicographic_chain` and `compare_bound_rows`, which
+    // sat 700 lines away at the bottom of the file and had no other caller.
+    // The seam is that nothing below the binder has a row value in it:
+    // `BoundExpr` has no tuple, so every spelling is rewritten into scalar
+    // comparisons here and the idea ends at this module's edge.
+    //
+    // The ticket was filed because this row was red on `main` for four
+    // commits at 5,422, and it went green on its own when task-2026's
+    // allocation work happened to take 136 lines out. That is the argument
+    // for extracting rather than raising: the number had moved 5,282 to
+    // 5,422 and back to 5,290 in four days without anyone deciding it
+    // should, and 25 lines of headroom in the file four tickets edited that
+    // week is a gate that fails next on somebody who did not cause it.
+    ("crates/inillucent-sql/src/bind.rs", 4_968),
     // **Lowered to 2,200 in task-1962 (A8).** 5,026 lines, the largest file
     // in the workspace, became four modules under `leaf/` beside the `delta.rs`
     // that was already there: `layout` (where a value goes in the page),
