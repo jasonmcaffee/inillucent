@@ -386,6 +386,41 @@ Only `profile.test` tells them apart, so a reader that took the first would run
 
 **Some tiers cannot share a machine** — §5.
 
+### 4.3.1 Three exit codes, because a run that did not happen is not a red run
+
+Rule 1.5 says a test that cannot fail is worse than no test, and §9 exists
+because a suite whose prerequisite was absent reported green. The runner's own
+answer had the same defect one level up: `the build failed` exited **1**, which
+is the code a failing test exits, so a caller branching on the status could not
+tell a broken toolchain from a real defect. task-2041 read one as the other.
+
+| code | what it means |
+|---|---|
+| `0` | every selected target ran and passed |
+| `1` | the run happened and was red — a target failed, a target could not be read, or `--strict` found a suite that evidenced nothing |
+| `2` | **the run did not happen.** The build failed, a `--target`/`--tier` pair matched nothing, `--filter` matched no test, or cargo could not say what it had built |
+
+`2` is the code that carries the rule: nothing in that run was graded, so
+nothing in it may be read as a pass. The command line spends a third code on
+`unsupported` for the same reason — a caller should be able to branch without
+matching on a message.
+
+**The report and the exit status have to agree**, or one of the two stops being
+read. A run that graded no test prints `not ok` and exits 2 from the same
+question, `nothing_was_graded`; there is no path that prints `ok` over a
+non-zero code.
+
+**Two empty selections, and only one of them is a failure.** `--changed` that
+finds nothing is a true answer and stays green. A `--target` and `--tier` the
+caller named by hand that do not overlap is a request that could not be
+honoured, and it refuses naming both — it used to print `nothing selected` and
+exit 0, with both names real so neither existing guard fired.
+
+The five cases holding this are in `crates/inillucent-compat/tests/gates_fail_closed.rs`,
+and each asserts an **exact** code rather than "non-zero". A test that only
+asserts non-zero on a broken build passes against a runner that refuses
+everything, which is a worse program than the one being fixed.
+
 ### 4.4 How many at a time
 
 Measured over `engine + differential + durability`:

@@ -110,6 +110,25 @@ target/debug/inillucent-testrun --strict
 one. Set up the prerequisites first: `tools/sqlite-reference.ps1` (or `.sh`) for the oracle, and the
 headers of `crates/inillucent-remote/tests/live_postgres.rs` and `live_mysql.rs` for the two servers.
 
+## "It printed an error and the exit code said zero"
+
+Two different things, and the second one is not the runner.
+
+**Exit code `2` means the run did not happen** (task-2047) — the build failed, a named selection
+matched nothing, `--filter` matched no test. Nothing was graded, so nothing in that run is evidence
+of anything. `1` means the run happened and was red, and `0` means it happened and passed. Branch on
+the code rather than on the last line.
+
+**A `0` after a shell pipeline is the pipeline's last command, not the runner.**
+
+```sh
+target/debug/inillucent-testrun --changed | tail -40 ; echo $?   # tail's 0, always
+target/debug/inillucent-testrun --changed > run.log 2>&1 ; echo $?   # the runner's
+```
+
+That is what made a failed build read as a passing suite on task-2041, and it cost 60 KB of log to
+find out.
+
 ## Still stuck
 
 | | |

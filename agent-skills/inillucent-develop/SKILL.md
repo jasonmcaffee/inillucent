@@ -41,6 +41,22 @@ the workspace cannot build — the pinned SQLite oracle, a fixture corpus, a liv
 *reports success* when it is absent. `--strict` counts and names those, so a green on a bare machine
 cannot be mistaken for a green.
 
+**The exit code has three values, and the third is the one to know about** (task-2047):
+
+| code | what happened |
+|---|---|
+| `0` | every selected target ran and passed |
+| `1` | the run happened and was red |
+| `2` | **the run did not happen** — the build failed, a named selection matched nothing, `--filter` matched no test. Nothing was graded |
+
+**And `$?` after a shell pipeline is the last command's status, not the runner's.**
+`inillucent-testrun --changed | tail -40` reports tail's `0` however the run went. Redirect and read
+the code from the runner:
+
+```sh
+target/debug/inillucent-testrun --changed > run.log 2>&1; echo $?
+```
+
 ## Adding a dependency
 
 **You probably cannot.** Production crates may not link another database engine, SQL parser, storage

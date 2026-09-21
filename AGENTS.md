@@ -210,21 +210,44 @@ target/debug/inillucent-testrun --strict          # fail on a missing prerequisi
 oracle, a corpus, a live PostgreSQL — and they *report success* when it is absent. `--strict` counts
 those and names them, so a green with nothing installed cannot be mistaken for a green.
 
-**Two things an agent terminal has to set up before the runner can build anything** (task-2040):
+**Read the exit code, and read all three of them** (task-2047):
 
-- **The MSVC environment.** `onig_sys` compiles oniguruma with `cl.exe`, and a terminal that is not
-  a Developer PowerShell has no `INCLUDE`, so the whole run stops at
-  `regenc.h(39): fatal error C1083: Cannot open include file: 'stddef.h'` and reports
-  `the build failed` rather than a test result. `Import-MsvcEnvironment` in
-  `packaging/stage-layout.ps1` finds Visual Studio through `vswhere` and sets it; dot-source that
-  file and call it before running `inillucent-testrun`. It does nothing when `INCLUDE` is already
-  set, so a developer shell needs none of this.
-- **`.sqlite-ref/`, which a `git worktree` does not have.** It is gitignored, so a worktree starts
-  without it, and every suite graded against the reference then skips silently -
-  `semantics.rs` and everything using `differential::compare` among them. `INILLUCENT_STRICT=1`
-  turns those skips into named failures, which is how to tell a run that passed from a run that
-  did not happen. Copy the directory from the repository the worktree belongs to, or run
-  `pwsh tools/sqlite-reference.ps1`.
+| code | what happened |
+|---|---|
+| `0` | every selected target ran and passed |
+| `1` | the run happened and was red: a target failed, a target could not be read, or `--strict` found a suite whose prerequisite was absent |
+| `2` | **the run did not happen.** The build failed, a named selection matched nothing, `--filter` matched no test, or cargo could not say what it had built. Nothing was graded, so nothing in that run may be read as a pass |
+
+The code is the thing to branch on. `2` used to be `1`, so a build that would not compile was
+indistinguishable from a real defect, and an agent read one as the other.
+
+**In a shell, `$?` after a pipeline is the status of the last command in it**, so
+`inillucent-testrun --changed | tail -40` reports tail's `0` however the run went. That is what
+task-2041 hit, and reading 60 KB of log to find out is the cost. Redirect to a file and read the
+code from the runner itself:
+
+```sh
+target/debug/inillucent-testrun --changed > run.log 2>&1; echo $?
+```
+
+**`.sqlite-ref/` is what a `git worktree` does not have.** It is gitignored, so a worktree starts
+without it, and every suite graded against the reference then skips silently — `semantics.rs` and
+everything using `differential::compare` among them. Pass **`--strict`** to turn those skips into
+named failures, which is how to tell a run that passed from a run that did not happen. Setting
+`INILLUCENT_STRICT=1` in the shell does **not** do it: the runner sets that variable on every child
+from its own `--strict` flag, so a value inherited from the shell is overwritten. Copy the directory
+from the repository the worktree belongs to, or run `pwsh tools/sqlite-reference.ps1`.
+
+**The MSVC environment is now the runner's own job** (task-2047). `onig_sys` compiles oniguruma with
+`cl.exe`, and a terminal that is not a Developer PowerShell has no `INCLUDE`, so the whole run used
+to stop at `regenc.h(39): fatal error C1083: Cannot open include file: 'stddef.h'`. The runner finds
+Visual Studio through `vswhere`, runs `vcvars64.bat` and copies the result into the environment its
+cargo children inherit — the same thing `Import-MsvcEnvironment` in `packaging/stage-layout.ps1`
+has done for the release path since task-1995, which nothing in the test path called. It does
+nothing when `INCLUDE` is already set, so a developer shell is untouched, and when Visual Studio
+genuinely is not installed it refuses with the sentence that fixes it rather than letting cargo
+fail on a header. **Every other program in `packaging/` still needs
+`Import-MsvcEnvironment` dot-sourced by hand.**
 
 ### Writing a test that is worth having
 

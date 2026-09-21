@@ -56,10 +56,15 @@ they are touching do not collide; two that have not, do.
   worktree. The directory is gitignored so it exists only in the main checkout. Copy the two
   binaries across before you run a gate; the failure message names the missing program and not the
   reason. (task-2034)
-- **The whole test suite needs the MSVC environment imported first.** `onig_sys` compiles oniguruma
-  with cl.exe and an agent terminal has no `INCLUDE`, so `inillucent-testrun` fails the build with
-  `cannot open include file 'stddef.h'`. Dot-source `packaging/stage-layout.ps1` and call
-  `Import-MsvcEnvironment` in a PowerShell session before running it. (task-2034)
+- **~~The whole test suite needs the MSVC environment imported first.~~ `inillucent-testrun` now
+  imports it itself.** It was true from task-2034 to task-2047: `onig_sys` compiles oniguruma with
+  cl.exe, an agent terminal has no `INCLUDE`, and the run died at
+  `regenc.h(39): fatal error C1083: Cannot open include file: 'stddef.h'` after building everything
+  else. The runner finds Visual Studio through `vswhere`, runs `vcvars64.bat` and copies the result
+  into the environment its cargo children inherit, so `inillucent-testrun` needs nothing from you.
+  **Everything else still does** - `cargo build` by hand, `cargo test` by hand,
+  `tools/sqlite-reference.ps1` and every program in `packaging/`. For those, dot-source
+  `packaging/stage-layout.ps1` and call `Import-MsvcEnvironment`. (task-2047)
 - **A cold worktree build costs real time.** The release `inillucent-fullgate` is about three
   minutes from cold and about ninety seconds after a source edit; the debug build the test runner
   needs is much longer, because every test target is its own binary. Start it before you need it.
@@ -94,13 +99,9 @@ they are touching do not collide; two that have not, do.
   `pwsh tools/sqlite-reference.ps1`: it downloads the 3.53.4 amalgamation and tools, checks both
   against the SHA3-256 sums SQLite publishes, and compiles the oracle and the benchmark driver. It
   took about a minute, and it needs the MSVC environment imported first. (task-2048)
-- **`inillucent-testrun` cannot build from an agent terminal until the MSVC environment is
-  imported.** `onig_sys` compiles oniguruma with `cl.exe` and an agent terminal has no `INCLUDE`,
-  so a `--changed` run dies at `regenc.h(39): fatal error C1083: Cannot open include file:
-  'stddef.h'` after building everything else. AGENTS.md names it for the release path and
-  `packaging/stage-layout.ps1` has `Import-MsvcEnvironment`, but nothing in the test path calls it.
-  Dot-source that function, or run vcvars64 and copy its variables in, before `cargo test` or
-  `inillucent-testrun`. It costs a whole build to find out. (task-2039)
+- **~~`inillucent-testrun` cannot build from an agent terminal until the MSVC environment is
+  imported.~~ Fixed in task-2047 — see the entry above.** The half that is still true is
+  `cargo test` and `cargo build` run by hand, which import nothing. (task-2039)
 - **Before you blame your own change for a `policy` failure, check which file it names.** The
   module-size ceilings are a ratchet over a fixed list, so a file another ticket grew fails for
   everybody who branches after it. `crates/inillucent-sql/src/bind.rs` was 103 lines past its row
@@ -150,10 +151,16 @@ they are touching do not collide; two that have not, do.
   counts them because the row declares `requires = ["fixtures", "sqlite-bench", "testrun"]`, so read
   what it names. Copy `small.db` across before you trust a green: it is 1.2 MB and every case but
   the fullgate one runs on it. (task-2041)
-- **`inillucent-testrun` exits 0 when the build fails.** A `--changed` run that dies on
-  `onig_sys` prints `inillucent-testrun: the build failed` and then exits 0, so a shell that
-  branches on the exit code reads a failed build as a passing suite. Read the last line, not `$?`.
-  (task-2041)
+- **~~`inillucent-testrun` exits 0 when the build fails.~~ It never did. `$?` after a shell
+  pipeline is the last command's status, not the runner's.** Measured in task-2047 against the
+  build failing on `onig_sys`: `inillucent-testrun --tier smoke >/dev/null 2>&1; echo $?` printed
+  **1**, and `inillucent-testrun --tier smoke 2>&1 | tail -1 >/dev/null; echo $?` printed **0** —
+  which is `tail`. Reading the tail of a 60 KB log is how a run gets read, so the shape is easy to
+  hit. Redirect to a file and read the code from the runner.
+  **And read all three codes**: `0` passed, `1` the run happened and was red, `2` the run did not
+  happen at all — a build that failed, a `--target`/`--tier` pair that matched nothing, a
+  `--filter` that matched no test. `2` is new in task-2047; that case used to be `1`, which is why
+  a broken toolchain and a real defect were indistinguishable. (task-2041, task-2047)
 - **`--manifest-path` does not find your worktree's `.cargo/config.toml`.** The backend writes that
   file inside your worktree pointing `build.target-dir` at
   `D:/agent-worktrees/cargo-target/<project>-<task-N>`, but **cargo looks for it from the directory
@@ -353,6 +360,18 @@ they are touching do not collide; two that have not, do.
   `go test -C packages/go -run TestConformanceSuite ./...` and
   `php packages/php/tests/conformance.php`, or read past it. Do not spend a run bisecting your own
   change against it. (task-2055)
+- **And it gets *worse* after you run the whole suite, which is when you are most likely to blame
+  yourself for it.** `bindings.rs` treats no records at all as a skip - "a machine that has never
+  run them" - and *some but not all* as a hard failure, because that is a runner that stopped
+  running. The rust and python conformance runners **are cargo targets**, so a full
+  `inillucent-testrun` runs them and writes `rust.json` and `python.json`; the npm, go and php
+  runners are not, so they never run. The suite therefore flips from a counted skip to a red
+  failure naming npm, go and php the first time you run everything, with nothing about your branch
+  having changed. Measured on task-2047: hollow with `needs conformance-records` at 19:05Z, red at
+  21:55Z, and the only thing in between was a full run.
+  **`go` is not installed on this machine at all**, so producing all three records is not something
+  a run here can do, and `bindings` cannot be made green by trying harder. Read past it.
+  (task-2047)
 - **`small.db` alone is not the whole fixture gap.** task-2041's note says every case but the
   fullgate one runs on it, and `new_engine_log_lead` does not: it wants
   `_agent_output/fixtures/medium.db`, 17 MB, and skips both its cases without it - which is the
@@ -362,6 +381,11 @@ they are touching do not collide; two that have not, do.
 - **`inillucent-testrun --changed` takes no diff once you have committed**, and answers "nothing
   has changed against HEAD / nothing selected" with exit code 0 - which reads exactly like a clean
   run. Pass the base: `--changed origin/main` selects the branch's whole diff. (task-2055)
+  **That 0 is deliberate and task-2047 left it alone**: `--changed` asks what the working tree can
+  break and "nothing" is a true answer. What task-2047 changed is the other empty selection - a
+  `--target` and `--tier` you named by hand that do not overlap, which used to print
+  `nothing selected` and exit 0 and now exits 2 naming both. A request that could not be honoured
+  is not a passing run; a derived one that is genuinely empty is. (task-2047)
 
 - **`inillucent-migrate`'s SQLite digest folds only the columns the source file stores.** A
   `VIRTUAL` generated column is declared and stored by neither engine, so `TableInventory::digested`

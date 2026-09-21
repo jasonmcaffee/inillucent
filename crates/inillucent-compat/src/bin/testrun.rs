@@ -67,6 +67,12 @@
 //! turns the count into a non-zero exit. A run that evidenced nothing must not
 //! look like a pass.
 //!
+//! The same rule reaches the exit code itself. A run that never started - a
+//! build that did not compile, a named selection that matched nothing, an MSVC
+//! environment that is not there - exits **2** rather than 1, so that "nothing
+//! was graded" is a state a caller can branch on instead of a sentence it has
+//! to find in the log. `main` has the three codes and why they are three.
+//!
 //! ## Building it
 //!
 //! ```text
@@ -257,7 +263,16 @@ fn usage() -> String {
        --list              print the selection and stop\n  \
        --list-tiers        print the tiers and stop\n  \
        --strict            fail when a selected suite's prerequisite is missing\n  \
-       --record            write the measured times to tests/timings.toml\n"
+       --record            write the measured times to tests/timings.toml\n\
+     \n\
+     Exit codes:\n  \
+       0                   everything selected ran and passed\n  \
+       1                   the run happened and was red\n  \
+       2                   the run did not happen: nothing was graded\n\
+     \n\
+     Read the code, not the last line. In a shell, `$?` after a pipeline is the\n\
+     status of the last command in it, so `inillucent-testrun | tail` reports\n\
+     tail's 0 however the run went.\n"
         .to_string()
 }
 
@@ -303,14 +318,39 @@ struct Outcome {
     retry_of: Option<String>,
 }
 
+/// The exit code for a run that did not happen. See `main`.
+///
+/// A function rather than a `const` because `ExitCode::from` is not const.
+fn did_not_run() -> ExitCode {
+    ExitCode::from(2)
+}
+
 /// Runs the whole thing.
+///
+/// **Three exit codes, because "the run was red" and "the run did not happen"
+/// are different facts (task-2047).** A build that does not compile printed
+/// `the build failed` and exited 1, which is the code a failing test exits, so
+/// nothing reading the status could tell a broken toolchain from a real defect.
+/// An agent read one as the other and had to go back through 60 KB of log to
+/// find out. The command line already spends a third code on `unsupported` for
+/// the same reason: a caller should be able to branch without matching on a
+/// message.
+///
+/// - `0` - every selected target ran and passed.
+/// - `1` - the run happened and was red: a target failed, a target was still
+///   undetermined after its second attempt, or `--strict` found a suite whose
+///   prerequisite was absent.
+/// - `2` - the run did not happen. The command line was wrong, a named
+///   selection matched nothing, the MSVC environment could not be found, the
+///   build failed, or cargo could not say what it had built. Nothing was
+///   graded, so nothing here may be read as a pass.
 fn main() -> ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let options = match parse_options(&arguments) {
         Ok(options) => options,
         Err(reason) => {
             eprintln!("{reason}");
-            return ExitCode::FAILURE;
+            return did_not_run();
         }
     };
     match run(&options) {
@@ -318,7 +358,7 @@ fn main() -> ExitCode {
         Ok(false) => ExitCode::FAILURE,
         Err(reason) => {
             eprintln!("inillucent-testrun: {reason}");
-            ExitCode::FAILURE
+            did_not_run()
         }
     }
 }
@@ -344,8 +384,7 @@ fn run(options: &Options) -> Result<bool, String> {
 
     let selected = choose(&root, &map, options)?;
     if selected.is_empty() {
-        println!("nothing selected");
-        return Ok(true);
+        return empty_selection(options);
     }
 
     if options.list {
@@ -361,6 +400,9 @@ fn run(options: &Options) -> Result<bool, String> {
         return Ok(true);
     }
 
+    // Before either cargo call, because `locate` compiles too: it asks cargo
+    // what it built, and cargo answers that by building.
+    import_msvc_environment()?;
     if !options.no_build {
         build(&root, &selected)?;
     }
@@ -433,8 +475,18 @@ fn run(options: &Options) -> Result<bool, String> {
 
     report(&outcomes, wall, &map, options.strict);
     if options.record {
-        write_ledger(&root.join("tests/timings.toml"), &ledger, &outcomes)?;
-        println!("recorded {} timing(s)", outcomes.len());
+        // **A ledger that could not be written is not "the run did not happen"
+        // (task-2047).** The targets ran and the report above is what they
+        // said, so returning `Err` here would give that run exit code 2 and
+        // throw its verdict away. Saying so and keeping the run red records the
+        // failure without pretending nothing was graded.
+        match write_ledger(&root.join("tests/timings.toml"), &ledger, &outcomes) {
+            Ok(()) => println!("recorded {} timing(s)", outcomes.len()),
+            Err(reason) => {
+                eprintln!("inillucent-testrun: the timings were not recorded: {reason}");
+                return Ok(false);
+            }
+        }
     }
 
     // Undetermined counts as red, and deliberately so. The run is a gate, and
@@ -443,7 +495,53 @@ fn run(options: &Options) -> Result<bool, String> {
     // undetermined here when a second, solitary attempt could not read it either.
     let red = outcomes.iter().any(|outcome| !outcome.verdict.is_green());
     let hollow = options.strict && !missing_prerequisites(&outcomes, &map).is_empty();
+    if !red && nothing_was_graded(&outcomes) {
+        return Err(graded_nothing(options, outcomes.len()));
+    }
     Ok(!red && !hollow)
+}
+
+/// Returns whether every target that ran counted no test.
+///
+/// Read by `report` as well as by `run`, so the word the report ends on and the
+/// code the process exits with come from the same question. The comment on
+/// `report`'s `ok` says why that matters: a report and an exit status that
+/// disagree end with one of the two being ignored.
+///
+/// @param outcomes - what the run produced
+fn nothing_was_graded(outcomes: &[Outcome]) -> bool {
+    !outcomes.is_empty() && outcomes.iter().all(|outcome| outcome.ran == 0)
+}
+
+/// Refuses a run whose binaries all started and graded no test.
+///
+/// **`--filter` with a name no test carries prints `ok` and exits zero
+/// (task-2047).** Every selected binary really did run, so no verdict is red,
+/// and the summary line reads `1 target(s), 0 test(s), 0 failed, 0
+/// undetermined` above a green word. It is the build-that-did-not-happen
+/// wearing a report: no test was graded, so there is nothing in the run to
+/// pass on, and `--filter` takes free text so a typo in a test name reaches it
+/// on the first try.
+///
+/// Zero across a whole run is always the filter and never the map.
+/// `selection.rs`'s `every_target_has_a_row` attributes every source file
+/// holding a `#[test]` to the target that compiles it, so a target the map
+/// names has tests in it by construction.
+///
+/// Checked only when nothing is red: a binary that died before its first test
+/// also ran none, and that is an undetermined target with its own reason,
+/// which the report has already said better than this sentence would.
+///
+/// @param options - what the command line asked for
+/// @param targets - how many targets ran
+fn graded_nothing(options: &Options, targets: usize) -> String {
+    match &options.filter {
+        Some(filter) => format!(
+            "{targets} target(s) ran and no test matched `--filter {filter}`, so nothing was \
+             graded"
+        ),
+        None => format!("{targets} target(s) ran and graded no test at all"),
+    }
 }
 
 /// Works out which rows to run.
@@ -504,6 +602,167 @@ fn choose<'map>(root: &Path, map: &'map Map, options: &Options) -> Result<Vec<&'
         rows.retain(|row| wanted.contains(row.tier.as_str()));
     }
     Ok(rows)
+}
+
+/// Answers a selection that came back empty.
+///
+/// **A request that could not be honoured is not a passing run (task-2047).**
+/// `--target inillucent-compat::dml --tier smoke` names a real target and a
+/// real tier, so neither guard in `choose` fires - those catch a name the map
+/// does not hold at all - and the intersection of the two is empty. The runner
+/// printed `nothing selected` and exited zero, which is the shape
+/// `tests/inillucent-testing-tdd.md` rule 1.5 is about: a gate that graded
+/// nothing read as a pass. Two real names are easier to type than one wrong
+/// one, so this was the reachable half of the defect.
+///
+/// `--changed` is the one case where an empty selection is an answer rather
+/// than a failure: it asks what the working tree can break, and "nothing" is
+/// both true and useful. So a derived selection stays green and only one the
+/// caller named by hand refuses.
+///
+/// @param options - what the command line asked for
+fn empty_selection(options: &Options) -> Result<bool, String> {
+    if options.changed.is_some() {
+        println!("nothing selected");
+        return Ok(true);
+    }
+    let mut named = Vec::new();
+    if !options.targets.is_empty() {
+        named.push(format!("--target {}", options.targets.join(", ")));
+    }
+    if !options.tiers.is_empty() {
+        named.push(format!("--tier {}", options.tiers.join(", ")));
+    }
+    if named.is_empty() {
+        return Err(
+            "tests/selection.toml names no target, so there was nothing to run".to_string(),
+        );
+    }
+    Err(format!(
+        "{} selected no target, so nothing ran. Each name is in tests/selection.toml; \
+         no target carries all of them.",
+        named.join(" with ")
+    ))
+}
+
+/// Puts the MSVC compiler's own environment into this process, when it is missing.
+///
+/// **`onig_sys` compiles oniguruma with `cl.exe`, and an agent terminal has
+/// never run `vcvars64.bat` (task-1995, task-2047).** cl.exe finds its headers
+/// through INCLUDE, LIB and PATH, so without them the whole run stops on
+///
+/// ```text
+/// regenc.h(39): fatal error C1083: Cannot open include file: 'stddef.h'
+/// ```
+///
+/// which names the header rather than the cause. `Import-MsvcEnvironment` in
+/// `packaging/stage-layout.ps1` has done this for the release path since
+/// task-1995 and nothing in the test path called it, so every agent running the
+/// suite from a terminal that was not a Developer PowerShell got a failed build
+/// where a test result should have been. That is one cause of the exit code
+/// this ticket is about, and the exit code being right does not make the run
+/// have happened.
+///
+/// Nothing happens when INCLUDE is already set, so a developer shell is left
+/// exactly as it is, and nothing happens off an MSVC host.
+///
+/// A failure here returns the sentence that fixes it instead of letting cargo
+/// fail on the header: the build cannot succeed either way, and only one of the
+/// two says what to do about it.
+#[cfg(all(windows, target_env = "msvc"))]
+fn import_msvc_environment() -> Result<(), String> {
+    use std::os::windows::process::CommandExt;
+
+    if std::env::var_os("INCLUDE").is_some() {
+        return Ok(());
+    }
+    let vswhere = PathBuf::from(std::env::var("ProgramFiles(x86)").map_err(|_| {
+        "INCLUDE is not set and ProgramFiles(x86) is not in this environment, so Visual \
+             Studio cannot be found. Run from a Developer PowerShell."
+            .to_string()
+    })?)
+    .join("Microsoft Visual Studio")
+    .join("Installer")
+    .join("vswhere.exe");
+    if !vswhere.is_file() {
+        return Err(format!(
+            "INCLUDE is not set and {} does not exist, so the MSVC environment cannot be found \
+             and `onig_sys` cannot compile oniguruma. Run from a Developer PowerShell, or \
+             install Visual Studio's C++ tools.",
+            vswhere.display()
+        ));
+    }
+    let found = Command::new(&vswhere)
+        .args([
+            "-latest",
+            "-products",
+            "*",
+            "-requires",
+            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+            "-property",
+            "installationPath",
+        ])
+        .output()
+        .map_err(|error| format!("cannot run {}: {error}", vswhere.display()))?;
+    let install = String::from_utf8_lossy(&found.stdout)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if install.is_empty() {
+        return Err(
+            "INCLUDE is not set and vswhere found no Visual Studio with the C++ tools, so \
+             `onig_sys` cannot compile oniguruma. Install Visual Studio's \"Desktop development \
+             with C++\" workload."
+                .to_string(),
+        );
+    }
+    let vcvars = PathBuf::from(&install)
+        .join("VC")
+        .join("Auxiliary")
+        .join("Build")
+        .join("vcvars64.bat");
+    if !vcvars.is_file() {
+        return Err(format!(
+            "INCLUDE is not set and {} does not exist, so the MSVC environment cannot be \
+             imported. Run from a Developer PowerShell.",
+            vcvars.display()
+        ));
+    }
+    // `set` after the batch file prints the environment it produced, and each
+    // line is copied into this process - which is what the cargo children then
+    // inherit. `raw_arg` rather than `arg`: cmd.exe does not parse a command
+    // line the way Rust quotes one, and the path holds a space.
+    let printed = Command::new("cmd")
+        .arg("/c")
+        .raw_arg(format!("\"\"{}\" >nul 2>&1 && set\"", vcvars.display()))
+        .output()
+        .map_err(|error| format!("cannot run {}: {error}", vcvars.display()))?;
+    if !printed.status.success() {
+        return Err(format!("{} did not run.", vcvars.display()));
+    }
+    for line in String::from_utf8_lossy(&printed.stdout).lines() {
+        if let Some((name, value)) = line.split_once('=') {
+            if !name.is_empty() {
+                std::env::set_var(name, value);
+            }
+        }
+    }
+    if std::env::var_os("INCLUDE").is_none() {
+        return Err(format!("running {} did not set INCLUDE.", vcvars.display()));
+    }
+    println!("the MSVC environment from {install}");
+    Ok(())
+}
+
+/// Nothing to import: the C dependency is not built with cl.exe here.
+///
+/// `target_env` rather than `windows` alone, so a Windows host on the GNU
+/// toolchain is not refused for a compiler it does not use.
+#[cfg(not(all(windows, target_env = "msvc")))]
+fn import_msvc_environment() -> Result<(), String> {
+    Ok(())
 }
 
 /// Asks git which paths differ from a revision, including untracked files.
@@ -1417,6 +1676,13 @@ fn report(outcomes: &[Outcome], wall: Duration, map: &Map, strict: bool) {
         // nothing installed pass for evidence, and as a target recorded FAILED
         // with all 156 of its tests passing: the report and the exit status
         // have to agree, or one of them stops being read.
+        // A run where every binary started and counted no test is the same
+        // defect reached through `--filter`, and `run` exits 2 for it. The word
+        // here has to agree with that code for the reason above.
+        if nothing_was_graded(outcomes) {
+            println!("\nnot ok - every target ran and no test was graded");
+            return;
+        }
         if strict && hollow > 0 {
             println!("\nnot ok - every test passed, and {hollow} suite(s) evidenced nothing");
             return;

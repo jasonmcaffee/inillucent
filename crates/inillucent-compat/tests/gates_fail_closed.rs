@@ -937,6 +937,358 @@ fn testrun_measures_the_smoke_tier_selection() {
     );
 }
 
+// --- testrun's three exit codes (task-2047) ----------------------------------
+//
+// The runner answers 0, 1 or 2, and the five cases below are one contract in
+// five parts rather than five tests that happen to be next to each other.
+//
+// - `0` - every selected target ran and passed.
+// - `1` - the run happened and was red.
+// - `2` - the run did not happen, so nothing was graded.
+//
+// **Why it takes five cases and not one.** The obvious test - "a broken build
+// exits non-zero" - passes against a runner that exits non-zero for everything,
+// which is a worse program than the one being fixed. Each case here asserts an
+// *exact* code, and the set is arranged so that every degenerate runner fails at
+// least one of them: one that always answers 0 fails the three refusals, one
+// that always answers 1 fails all five, one that always answers 2 fails the
+// green run, and one that answers 2 for a failing test fails the red run. That
+// last pair is the distinction the whole change is for, and neither case can
+// hold it alone.
+//
+// **Three of the five start a real nested run, and a nested run competes with
+// its own siblings.** `locate` asks cargo what it built and cargo answers by
+// building, so on a stale workspace it relinks - and Windows will not replace
+// an image that is running. `testrun_passes_a_real_run_with_code_zero` failed
+// exactly that way while `scorecard_measures_a_lever_it_knows`, a case in this
+// same binary, was executing `inillucent-scorecard.exe`:
+//
+//     error: failed to remove file `.../debug/inillucent-scorecard.exe`
+//     Caused by: Access is denied. (os error 5)
+//     inillucent-testrun: cargo could not list the built targets
+//
+// Through `inillucent-testrun` the outer build has already made every target
+// fresh, so `locate` has nothing to relink and this cannot happen. Through a
+// plain `cargo test --test gates_fail_closed` after an edit it can, which is
+// how it was found. Those three cases therefore announce a skip on that exact
+// signature rather than assert: an exit code read off a run that never started
+// is a statement about the machine, and this is the last file in the tree that
+// should make one.
+//
+// `testrun_measures_the_smoke_tier_selection` above asserts `code == 0` on a
+// `--list`, which needs no cargo at all - so even with all three skipped, "the
+// runner refuses everything" is still falsified. What is lost while they skip
+// is the `1` assertion, and `1` is the one code this ticket did not change.
+//
+// **Why `1` is asserted on a run that went red rather than on a failing test.**
+// This repository has no test that fails, so a case wanting one would have to
+// add a test that exists to fail - a test that cannot pass is the mirror image
+// of `tests/inillucent-testing-tdd.md` rule 1.5, and it would then fail every
+// ordinary run of the suite it lived in. `--strict` over a suite whose
+// prerequisite is absent is a real red run already in the tree: the targets
+// start, their tests execute, and the run ends red. What it holds is that a run
+// which *happened* does not answer 2. What it does not hold is the failing-test
+// path specifically, and that is said here rather than left for a reader to
+// work out.
+
+/// A build that does not complete exits 2, not 1 and not 0.
+///
+/// **This is the ticket (task-2047).** `the build failed` used to exit 1, the
+/// same code a failing test exits, so nothing reading the status could tell a
+/// broken toolchain from a real defect - and an agent read one as the other and
+/// had to go back through 60 KB of log.
+///
+/// The build is failed through `CARGO`, which `testrun::cargo` reads: any
+/// program that exits non-zero for cargo's arguments is a cargo that cannot
+/// build, and the runner itself is one - given `test --workspace ...` it
+/// refuses on `unknown option`. That makes the case instant, independent of
+/// which compiler is installed, and it mutates nothing, where the real failure
+/// needs an absent MSVC environment or a source file that does not compile.
+#[test]
+fn testrun_exits_two_when_the_build_does_not_complete() {
+    let Some(gate) = built(TESTRUN, BUILDS_TESTRUN) else {
+        return;
+    };
+    let output = run_with_cargo(gate, &["--tier", "smoke"], gate);
+    let text = said(&output);
+    assert_eq!(
+        code(&output),
+        2,
+        "a build that did not complete has to exit 2, so a caller can tell it from a test \
+         that failed. It printed:\n{text}"
+    );
+    assert!(
+        text.contains("the build failed"),
+        "the runner refused without saying the build failed, so the code is the only \
+         evidence:\n{text}"
+    );
+}
+
+/// A selection whose names do not overlap is refused, not reported green.
+///
+/// `--target inillucent-compat::dml --tier smoke` names a real target and a
+/// real tier, so neither of the two guards above fires - they catch a name the
+/// map does not hold at all - and the intersection is empty. The runner printed
+/// `nothing selected` and exited 0, which is rule 1.5's shape exactly: a gate
+/// that graded nothing reading as a pass. Two real names are easier to type
+/// than one wrong one, so this was the reachable half of the defect.
+///
+/// The two names are read off the map rather than typed here, because a case
+/// that hard-codes them starts passing for the wrong reason the day one is
+/// renamed - it would be asserting that a name is unknown.
+#[test]
+fn testrun_refuses_a_selection_whose_names_do_not_overlap() {
+    let Some(gate) = built(TESTRUN, BUILDS_TESTRUN) else {
+        return;
+    };
+    let listed = run(gate, &["--list"]);
+    let Some(outside) = a_target_outside_the_smoke_tier(&said(&listed)) else {
+        inillucent_compat::differential::skipping(
+            "`--list` named no target outside the smoke tier, so there is no pair of real \
+             names that cannot overlap",
+        );
+        return;
+    };
+    let output = run(gate, &["--target", &outside, "--tier", "smoke"]);
+    let text = said(&output);
+    assert_eq!(
+        code(&output),
+        2,
+        "`--target {outside} --tier smoke` selected nothing and did not refuse, so a request \
+         that could not be honoured reads as a pass. It printed:\n{text}"
+    );
+    assert!(
+        text.contains(&outside) && text.contains("smoke"),
+        "the runner refused without naming what was asked for, so a reader cannot tell which \
+         of the two was wrong:\n{text}"
+    );
+}
+
+/// A filter that matches no test is refused, and the report agrees with it.
+///
+/// `--filter` takes free text, so a typo in a test name reaches it on the first
+/// try. Every selected binary really ran, libtest matched nothing, and the
+/// summary read `0 test(s), 0 failed, 0 undetermined` under the word `ok`.
+///
+/// The second assertion is not decoration. `report`'s own comment - written
+/// when `--strict` was printing `ok` over a run about to exit 1 - says the
+/// report and the exit status have to agree or one of the two stops being read,
+/// so a refusal printed under `ok` would be half the defect still shipping.
+#[test]
+fn testrun_refuses_a_filter_that_matches_no_test() {
+    let Some(gate) = built(TESTRUN, BUILDS_TESTRUN) else {
+        return;
+    };
+    let output = run(
+        gate,
+        &[
+            "--no-build",
+            "--tier",
+            "smoke",
+            "--filter",
+            "no_test_is_called_this_task_2047",
+        ],
+    );
+    let text = said(&output);
+    if cargo_could_not_replace_a_running_binary(&text) {
+        skip_a_contended_run("a filter that matches no test");
+        return;
+    }
+    assert_eq!(
+        code(&output),
+        2,
+        "a run that graded no test has to refuse: every binary started and nothing was \
+         measured. It printed:\n{text}"
+    );
+    assert!(
+        !text.lines().any(|line| line.trim() == "ok"),
+        "the report said `ok` over a run that exited 2, so the report and the exit status \
+         disagree:\n{text}"
+    );
+}
+
+/// A run that really ran and really passed exits 0.
+///
+/// The falsifier for the three refusals above: without it they all pass against
+/// a runner that refuses everything, which is the failure this change could
+/// plausibly introduce and the one a reviewer would not see.
+///
+/// `--tier smoke` is the tier that exists to be the cheap real answer: one
+/// target, a file opened, written, reopened and read.
+///
+/// `--no-build` because this test is itself inside a run that has already built
+/// the workspace, and the build step is nearly all of the cost - 38 seconds
+/// against 4.9 measured on a warm tree. It is not a way of skipping the
+/// compiler: `locate` asks cargo what it built and cargo answers by building,
+/// so a test binary that is missing is still compiled before it runs.
+#[test]
+fn testrun_passes_a_real_run_with_code_zero() {
+    let Some(gate) = built(TESTRUN, BUILDS_TESTRUN) else {
+        return;
+    };
+    let output = run(gate, &["--no-build", "--tier", "smoke"]);
+    let text = said(&output);
+    if cargo_could_not_replace_a_running_binary(&text) {
+        skip_a_contended_run("a real run that passes");
+        return;
+    }
+    assert_eq!(
+        code(&output),
+        0,
+        "the smoke tier did not pass, so every refusal asserted above could be a runner that \
+         refuses everything. It printed:\n{text}"
+    );
+    assert!(
+        graded_tests(&text).is_some_and(|ran| ran > 0),
+        "the smoke tier exited 0 having graded no test, which is the pass this file exists to \
+         disbelieve:\n{text}"
+    );
+}
+
+/// A run that happened and went red exits 1, so it is not a run that did not happen.
+///
+/// The falsifier for the other direction: a runner that answered 2 for
+/// everything red would satisfy every case above, and it would be the same
+/// defect pointing the other way - a real failing suite reported as a build
+/// that never started.
+///
+/// `--strict` over the two suites that need a database server is a red run
+/// already in the tree. They run, their tests execute and report nothing, and
+/// `--strict` turns that into a failure. A machine with both servers running
+/// gets a green and the case skips, because a prerequisite that is present is
+/// not a reason to assert the opposite.
+#[test]
+fn testrun_exits_one_when_the_run_went_red() {
+    let Some(gate) = built(TESTRUN, BUILDS_TESTRUN) else {
+        return;
+    };
+    let output = run(
+        gate,
+        &[
+            "--no-build",
+            "--strict",
+            "--target",
+            "inillucent-remote::live_postgres",
+            "--target",
+            "inillucent-remote::live_mysql",
+        ],
+    );
+    let text = said(&output);
+    if cargo_could_not_replace_a_running_binary(&text) {
+        skip_a_contended_run("a real run that goes red");
+        return;
+    }
+    if !text.contains("ran without a prerequisite") {
+        inillucent_compat::differential::skipping(
+            "both database servers answered, so neither suite went without its prerequisite \
+             and there is no red run here to measure",
+        );
+        return;
+    }
+    assert_eq!(
+        code(&output),
+        1,
+        "a run whose suites started and evidenced nothing has to exit 1: 2 is reserved for a \
+         run that did not happen. It printed:\n{text}"
+    );
+}
+
+/// The contention guard matches the failure it was written for, and nothing else.
+///
+/// **A guard nobody has ever seen fire is the defect this file is about**, one
+/// level down: three cases skip on it, so if it matched nothing they would look
+/// like they were running and would assert nothing, and if it matched
+/// everything they would skip forever. Both texts below are verbatim from runs
+/// on 2026-09-21 - the first from the collision that found this, the second
+/// from the deliberate compile error used to check the exit code.
+#[test]
+fn the_contention_guard_tells_a_held_binary_from_a_build_that_failed() {
+    let held = "error: failed to remove file \
+                `D:/agent-worktrees/cargo-target/inillucent-task-2047\\debug\\\
+                inillucent-scorecard.exe`\n\nCaused by:\n  Access is denied. (os error 5)\n\
+                inillucent-testrun: cargo could not list the built targets\n";
+    assert!(
+        cargo_could_not_replace_a_running_binary(held),
+        "the guard did not recognise the collision it was written for, so the three cases \
+         that skip on it would assert an exit code from a run that never started"
+    );
+
+    let did_not_compile = "error: could not compile `inillucent-compat` (test \"escapes\") \
+                           due to 1 previous error\n\
+                           inillucent-testrun: the build failed\n";
+    assert!(
+        !cargo_could_not_replace_a_running_binary(did_not_compile),
+        "the guard swallowed a build that failed to compile, which is the case this ticket \
+         exists for - `testrun_exits_two_when_the_build_does_not_complete` would skip \
+         instead of asserting"
+    );
+}
+
+/// Returns whether a nested run was stopped by cargo, rather than by the runner.
+///
+/// **The signature of a sibling in this same binary holding an artifact open
+/// (task-2047).** cargo relinks a stale target, Windows refuses to replace a
+/// running image, and the runner reports that it could not be told what was
+/// built. Every string here comes from the observed failure, quoted in the
+/// section comment above.
+///
+/// This is deliberately narrow. It matches cargo failing to *replace a file*,
+/// not a build that failed to compile - `the build failed` is the sentence
+/// `testrun_exits_two_when_the_build_does_not_complete` asserts on, and a guard
+/// that swallowed it would turn this ticket's own case into a skip.
+///
+/// @param text - everything the nested run printed
+fn cargo_could_not_replace_a_running_binary(text: &str) -> bool {
+    text.contains("cargo could not list the built targets")
+        || text.contains("failed to remove file")
+        || text.contains("Access is denied")
+}
+
+/// Announces the skip for a nested run cargo stopped, and says how to avoid it.
+///
+/// @param case - what the case was trying to measure
+fn skip_a_contended_run(case: &str) {
+    inillucent_compat::differential::skipping(&format!(
+        "{case}: cargo was relinking a binary that a case in this same file is running, so \
+         the nested run never started. Build the workspace first - through \
+         `inillucent-testrun` this cannot happen, because its own build runs before any test",
+    ));
+}
+
+/// Runs a gate with `CARGO` pointed somewhere else.
+///
+/// @param gate - the built binary
+/// @param arguments - the command line
+/// @param cargo - what the gate should invoke as cargo
+fn run_with_cargo(gate: &str, arguments: &[&str], cargo: &str) -> Output {
+    Command::new(gate)
+        .args(arguments)
+        .env("CARGO", cargo)
+        .output()
+        .unwrap_or_else(|error| panic!("{gate} did not start: {error}"))
+}
+
+/// Returns a target `--list` named in some tier other than smoke.
+///
+/// @param listed - what `--list` printed
+fn a_target_outside_the_smoke_tier(listed: &str) -> Option<String> {
+    listed.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        let tier = fields.next()?;
+        let label = fields.next()?;
+        (tier != "smoke" && label.contains("::")).then(|| label.to_string())
+    })
+}
+
+/// Returns how many tests a run's summary line says were graded.
+///
+/// @param text - what the run printed
+fn graded_tests(text: &str) -> Option<usize> {
+    let line = text.lines().find(|line| line.contains(" test(s), "))?;
+    let (before, _) = line.split_once(" test(s), ")?;
+    before.rsplit(", ").next()?.trim().parse().ok()
+}
+
 /// Every program `docs/repository.md` tells a reader to run is one that exists.
 ///
 /// **Forty-one bin targets sit outside `tests/selection.toml` by design, and
