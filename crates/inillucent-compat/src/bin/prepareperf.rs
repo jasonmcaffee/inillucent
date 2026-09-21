@@ -244,14 +244,35 @@ fn preflight(options: &Options) -> Result<Preflight, String> {
         .join(std::process::id().to_string());
     let _ = std::fs::remove_dir_all(&scratch);
     std::fs::create_dir_all(&scratch).map_err(|error| format!("scratch: {error}"))?;
-    let imported = import_for_the_native_arm(&options.fixture, &scratch)?;
+    // A preflight that does not finish takes its own directory with it. The
+    // import is kept for reading only when a *run* fails, which is when there
+    // is something in it worth reading; a failure here leaves an empty
+    // directory named after a process that has gone, and one a run would
+    // accumulate.
+    let gathered = gather(options, bench, &scratch);
+    if gathered.is_err() {
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+    gathered
+}
+
+/// Imports the fixture, counts its rows and writes the plan file.
+///
+/// Split out of `preflight` so that one `?` can undo the directory all three
+/// steps write into.
+///
+/// @param options - what the command line asked for
+/// @param bench - the benchmark driver already found
+/// @param scratch - the directory this run owns
+fn gather(options: &Options, bench: PathBuf, scratch: &Path) -> Result<Preflight, String> {
+    let imported = import_for_the_native_arm(&options.fixture, scratch)?;
     let rows = main_table_rows(&imported)?;
     let plan = scratch.join("open.prepare.plan");
     std::fs::write(&plan, plan_file(rows, options.repeat))
         .map_err(|error| format!("plan: {error}"))?;
     Ok(Preflight {
         bench,
-        scratch,
+        scratch: scratch.to_path_buf(),
         imported,
         plan,
         rows,
@@ -276,8 +297,8 @@ fn import_for_the_native_arm(fixture: &Path, scratch: &Path) -> Result<PathBuf, 
     Database::import_into(fixture.to_path_buf(), target.clone(), DEFAULT_FRAMES).map_err(
         |error| {
             format!(
-                "importing {} failed: {}
-  this program takes the SQLite fixture, not a                  database this engine already wrote",
+                "importing {} failed: {}\n  this program takes the SQLite fixture, not a \
+                 database this engine already wrote",
                 fixture.display(),
                 error.message()
             )
