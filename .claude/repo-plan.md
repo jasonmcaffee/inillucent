@@ -334,3 +334,17 @@ they are touching do not collide; two that have not, do.
 - **`inillucent-testrun --changed` takes no diff once you have committed**, and answers "nothing
   has changed against HEAD / nothing selected" with exit code 0 - which reads exactly like a clean
   run. Pass the base: `--changed origin/main` selects the branch's whole diff. (task-2055)
+
+- **`inillucent-migrate`'s SQLite digest folds only the columns the source file stores.** A
+  `VIRTUAL` generated column is declared and stored by neither engine, so `TableInventory::digested`
+  leaves it out and a `columns.<table>` check compares the whole declared list beside the digest.
+  Before that, every database with one in it failed its own verification with correct rows in the
+  staging file. If you add another check to `verify_against`, push it for every table rather than
+  only the one that failed - the report is read as a list, and a check that appears once reads as a
+  defect in that table. (task-2050)
+- **`crates/inillucent-compat/tests/migrate_realistic.rs` is a merge point now.** task-2036 wrote it
+  and task-2050 added three cases to the end of it, which is the same shape as the conflicts on
+  `semantics.rs`'s `CASES`. Keep both sides. (task-2050)
+- **`sh tools/build-realistic-fixtures.sh --check` says whether each checked-in `.db` is what the
+  `.sql` beside it builds.** Run it after editing a fixture's SQL. The `.db` is checked in and
+  nothing else in the suite notices the two drifting apart. (task-2050)

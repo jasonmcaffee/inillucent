@@ -19,7 +19,7 @@
 //!
 //! | fixture | modelled on | what it carries |
 //! |---|---|---|
-//! | `browser-history.db` | Firefox's `places.sqlite` | NOCASE on a column and on an index, a DESC index, a partial index, two triggers keeping a count, a view, `WITHOUT ROWID`, URLs outside ASCII |
+//! | `browser-history.db` | Firefox's `places.sqlite` | NOCASE on a column and on an index, a DESC index, a partial index, two triggers keeping a count, a view, `WITHOUT ROWID`, an `AUTOINCREMENT` table with deleted high rows, URLs outside ASCII |
 //! | `chat-archive.db` | a messaging application | a 200 column table, blobs from one byte to 200 KB, `VIRTUAL` and `STORED` generated columns, cascading foreign keys |
 //! | `warehouse.db` | Nikaya's schema | FTS5 with external content and the triggers that keep it, an `INTEGER PRIMARY KEY` table of eight thousand rows, a wide composite key |
 //!
@@ -49,10 +49,10 @@ use inillucent_tree::datum::OwnedDatum;
 
 /// What a fixture's migration is expected to do.
 ///
-/// **Two of the three are refused, and both refusals are the answer rather than
-/// a gap in this file.** Rule 1.1: a case the tool is allowed to decline
-/// asserts *which* refusal it declines with, so a change in either direction is
-/// a failure here.
+/// **One of the three is refused, and the refusal is the answer rather than a
+/// gap in this file.** Rule 1.1: a case the tool is allowed to decline asserts
+/// *which* refusal it declines with, so a change in either direction is a
+/// failure here.
 enum Expect {
     /// It migrates, and every column of every row is compared to the source.
     Publishes,
@@ -64,21 +64,22 @@ enum Expect {
 const FIXTURES: [(&str, &str, Expect); 3] = [
     (
         "browser-history",
-        "NOCASE, a DESC index, a partial index, triggers, a view, WITHOUT ROWID, unicode",
+        "NOCASE, a DESC index, a partial index, triggers, a view, WITHOUT ROWID, \
+         AUTOINCREMENT, unicode",
         Expect::Publishes,
     ),
     (
         "chat-archive",
         "200 columns, blobs from 1 B to 200 KB, generated columns, cascading keys",
-        // **task-2050.** The rows and the schema come across correctly - the
-        // staging file holds exactly the source's values - and the digest
-        // check refuses them anyway, so a database that migrated perfectly is
-        // deleted. Reproduced in four lines on the ticket. Only the two tables
-        // with generated columns fail; `conversation` and `reaction` pass.
-        //
-        // When task-2050 lands this goes red, and the fixture moves to
-        // `Publishes` beside the other one.
-        Expect::Refused("digest"),
+        // **Refused until task-2050, over a `VIRTUAL` generated column.** The
+        // rows and the schema came across correctly and the digest check
+        // refused them anyway, so a database that had migrated perfectly was
+        // deleted. The source side folded `NULL` for a `VIRTUAL` generated
+        // column, because the tree does not carry one, while the destination
+        // side read `SELECT *` and folded the value the expression produced.
+        // The digest now folds the stored columns on both sides and
+        // `columns.<table>` compares the whole declared list beside it.
+        Expect::Publishes,
     ),
     (
         "warehouse",
@@ -303,18 +304,17 @@ fn every_realistic_fixture_migrates_value_for_value() {
     // Rule 1.2: a run that compared no rows would satisfy every assertion in
     // the loop above, because none of them would have run.
     //
-    // The floor is what the one published fixture holds rather than what all
-    // three do: `chat-archive` is refused by task-2050 and `warehouse` by its
-    // external content index, so only `browser-history`'s three tables get
-    // compared value for value today. **Raise both numbers when task-2050
-    // lands and `chat-archive` moves to `Expect::Publishes`.**
+    // The floor is what the two published fixtures hold: `browser-history`'s
+    // four tables and `chat-archive`'s four, 15,018 rows and 5,409 of them.
+    // `warehouse` is refused by its external content index and contributes
+    // none. Raise both numbers when a fixture grows a table.
     assert!(
-        tables_checked >= 3,
+        tables_checked >= 8,
         "only {tables_checked} tables were compared across {migrated} fixtures, so the \
          inventory is not being read"
     );
     assert!(
-        rows_checked >= 10_000,
+        rows_checked >= 20_000,
         "only {rows_checked} rows were compared, so the fixtures are not the ones this file \
          describes"
     );
@@ -395,6 +395,11 @@ fn the_schema_crosses_with_the_rows() {
             "WITHOUT ROWID",
             "the keyed table came across with a rowid, which is a different table",
         ),
+        (
+            "AUTOINCREMENT",
+            "the download table lost its AUTOINCREMENT, so the next key is one a deleted row \
+             already had",
+        ),
     ] {
         assert!(
             schema.contains(wanted),
@@ -436,6 +441,299 @@ fn the_schema_crosses_with_the_rows() {
             .unwrap_or_default(),
         "8004",
         "the denormalised count the triggers kept did not come across"
+    );
+}
+
+/// A generated column crosses as its expression, not as the value it had.
+///
+/// **A `VIRTUAL` generated column is what task-2050 was**: the migration copied
+/// it correctly and the verifier refused the database anyway, so no realistic
+/// fixture with one in it could be published at all. The two assertions below
+/// are the two halves of carrying one.
+///
+/// *The value*, which `every_realistic_fixture_migrates_value_for_value` already
+/// compares against the pinned SQLite for every row - so what is left here is
+/// *the expression*: the migrated table has to compute the column rather than
+/// hold a copy of what it computed on the day of the migration. The way to tell
+/// those apart is to change the column it is generated from and look again,
+/// which is what this does to both a `VIRTUAL` column and a `STORED` one.
+#[test]
+fn a_generated_column_crosses_as_an_expression_and_not_as_a_value() {
+    let Some(_shell) = reference() else {
+        inillucent_compat::differential::skipping(
+            "the pinned SQLite oracle is not built; run tools/sqlite-reference.{ps1,sh}",
+        );
+        return;
+    };
+    let Some(source) = fixture("chat-archive") else {
+        inillucent_compat::differential::skipping(
+            "compat/fixtures/realistic/chat-archive.db is not built; run \
+             tools/build-realistic-fixtures.sh",
+        );
+        return;
+    };
+    let area = scratch("generated");
+    let destination = area.join("chat-archive.rdb");
+    let report = sqlite::migrate(&source, &destination).unwrap_or_else(|why| {
+        panic!(
+            "the migration could not be run at all: {}",
+            why.detail().unwrap_or_default()
+        )
+    });
+    let said = report
+        .checks
+        .iter()
+        .map(|check| format!("{} {}", check.name, check.detail))
+        .collect::<Vec<String>>()
+        .join("\n  ");
+    assert!(
+        report.passed(),
+        "a database with a VIRTUAL generated column did not verify:\n  {said}"
+    );
+
+    let database = inillucent_engine::connect::Database::open(&destination)
+        .unwrap_or_else(|why| panic!("the migration did not open: {why:?}"));
+    let connection = database.session();
+    let ask = |sql: &str| -> Vec<String> {
+        connection
+            .query(sql)
+            .unwrap_or_else(|why| panic!("{sql}: {why:?}"))
+            .iter()
+            .map(|row| quote_row(row))
+            .collect()
+    };
+
+    // The declarations came across as declarations. A plain column holding the
+    // same number would read identically until somebody wrote to the row.
+    //
+    // Read as the text it is rather than through `ask`, which renders a value
+    // the way SQL writes one: `'unixepoch'` would come back wrapped in quotes
+    // with its own doubled to `''unixepoch''`, and the search below would then
+    // fail on a declaration that had crossed perfectly.
+    let schema = connection
+        .query("SELECT sql FROM sqlite_master WHERE name = 'message'")
+        .unwrap_or_else(|why| panic!("the migrated schema could not be read: {why:?}"))
+        .iter()
+        .filter_map(|row| match row.first() {
+            Some(OwnedDatum::Text(bytes)) => Some(String::from_utf8_lossy(bytes).into_owned()),
+            _ => None,
+        })
+        .collect::<Vec<String>>()
+        .join("\n");
+    for wanted in [
+        "length(body)",
+        "VIRTUAL",
+        "date(sent_at, 'unixepoch')",
+        "STORED",
+    ] {
+        assert!(
+            schema.contains(wanted),
+            "the migrated `message` does not declare `{wanted}`, so its generated columns came \
+             across as values:\n{schema}"
+        );
+    }
+
+    // And they are computed. `body_length` is VIRTUAL and `sent_day` is STORED,
+    // and an UPDATE to what each is generated from has to move both.
+    assert_eq!(
+        ask("SELECT body_length, sent_day FROM message WHERE id = 1"),
+        vec!["33,'2023-11-14'".to_string()],
+        "the generated columns did not read back as the source's own values"
+    );
+    connection
+        .execute_batch("UPDATE message SET body = 'four', sent_at = 1800000000 WHERE id = 1")
+        .expect("the update runs");
+    assert_eq!(
+        ask("SELECT body_length, sent_day FROM message WHERE id = 1"),
+        vec!["4,'2027-01-15'".to_string()],
+        "a generated column did not follow the column it is generated from, so the migration \
+         carried the value rather than the expression"
+    );
+}
+
+/// A digest that does not match names the rows, on a database of three thousand.
+///
+/// **The second half of task-2050.** The refusal used to read
+/// `digest.message 1c267ce8... migrated, 075d249b... in the source`, which tells
+/// a person nothing about what to do next; `carried.document_fts` in the same
+/// tool says `document_fts keeps no content table, so its text is not in this
+/// file to carry`, and that is the standard the digest failure is held to here.
+///
+/// The mismatch is made the way the defect made it, which is why this case is
+/// on `chat-archive.db` rather than on two rows built for the purpose: the
+/// inventory is widened to fold the `VIRTUAL` generated column, exactly as the
+/// code did before the fix. The source side then folds `NULL` for it - no tree
+/// carries one - and the migrated side folds what the expression computes, so
+/// all 3,001 rows differ and the refusal has to say so readably.
+#[test]
+fn a_digest_that_does_not_match_names_the_rows_and_the_columns() {
+    let Some(source) = fixture("chat-archive") else {
+        inillucent_compat::differential::skipping(
+            "compat/fixtures/realistic/chat-archive.db is not built; run              tools/build-realistic-fixtures.sh",
+        );
+        return;
+    };
+    let area = scratch("digest-difference");
+    let destination = area.join("chat-archive.rdb");
+    sqlite::migrate(&source, &destination)
+        .unwrap_or_else(|why| panic!("the migration failed: {}", why.detail().unwrap_or_default()));
+
+    let mut inventory = sqlite::inventory(&source).expect("the source inventories");
+    let table = inventory
+        .tables
+        .iter_mut()
+        .find(|table| table.name == "message")
+        .expect("chat-archive.db has a `message` table");
+    // Rule 1.2: the widening has to actually change the comparison. `message`
+    // declares eight columns and seven of them are stored, so a fixture that
+    // had lost its `VIRTUAL` column would make these two equal and the case
+    // below would pass without comparing anything.
+    assert_eq!(
+        (table.columns.len(), table.digested.len()),
+        (8, 7),
+        "`message` no longer has exactly one column that is declared and not stored"
+    );
+    table.digested = (0..table.columns.len()).collect();
+
+    let built = ImportedDatabase::open(destination.clone(), sqlite::PAGE_SIZE, sqlite::FRAMES)
+        .unwrap_or_else(|why| panic!("the migrated database did not open: {why:?}"));
+    let checks = sqlite::verify_against(&inventory, &built);
+    let said = checks
+        .iter()
+        .find(|check| check.name == "digest.message")
+        .unwrap_or_else(|| panic!("no `digest.message` check was made"));
+    assert!(
+        !said.passed,
+        "folding a VIRTUAL generated column on one side only did not fail the digest"
+    );
+
+    for wanted in [
+        // How many rows each side holds, and which columns were compared.
+        "3001 rows in the source and 3001 in the migration",
+        "compared over (id, conversation_id, sender, sent_at, body, body_length, sent_day, edited)",
+        // Both directions, counted.
+        "3001 in the source and not in the migration",
+        "3001 in the migration and not in the source",
+        // Three rows from each side and a count of the rest.
+        "and 2998 more",
+        // And the column the two sides disagree about, named, with the source's
+        // value being the `NULL` that no `SELECT *` ever produces.
+        "body_length=NULL",
+    ] {
+        assert!(
+            said.detail.contains(wanted),
+            "the digest refusal does not say `{wanted}`:
+{}",
+            said.detail
+        );
+    }
+    // The column list is what the narrowed digest hands over, so it has to have
+    // been checked too, and to have passed: nothing about the columns changed.
+    let columns = checks
+        .iter()
+        .find(|check| check.name == "columns.message")
+        .unwrap_or_else(|| panic!("no `columns.message` check was made"));
+    assert!(
+        columns.passed,
+        "the column list disagreed as well, so this case is not testing what it says: {}",
+        columns.detail
+    );
+}
+
+/// A partial index keeps its predicate and `sqlite_sequence` keeps its number.
+///
+/// **Both were claimed by `docs/feature-comparison.md` and checked only on a
+/// synthetic database** - `migrate_sqlite.rs`'s `rich` case, three tables and
+/// six rows. Neither had ever been asked of a database with four thousand rows,
+/// two triggers, a view and a `WITHOUT ROWID` table in it, which is what
+/// task-2050 added the `download` table to `browser-history.db` for.
+///
+/// The two defects being excluded are the ones where the migration still reads
+/// correctly on the day it runs:
+///
+///   * a partial index that lost its `WHERE` covers every row, so a query
+///     answered from it returns rows the predicate excluded - and the query
+///     below *is* answered from it, as a covering scan, in both engines;
+///   * a `sqlite_sequence` row that was not carried leaves the next insert
+///     taking a key a deleted row already had, which collides with whatever
+///     else in the application still remembers that key.
+#[test]
+fn a_partial_index_and_a_sequence_survive_a_realistic_migration() {
+    let Some(shell) = reference() else {
+        inillucent_compat::differential::skipping(
+            "the pinned SQLite oracle is not built; run tools/sqlite-reference.{ps1,sh}",
+        );
+        return;
+    };
+    let Some(source) = fixture("browser-history") else {
+        inillucent_compat::differential::skipping(
+            "compat/fixtures/realistic/browser-history.db is not built; run \
+             tools/build-realistic-fixtures.sh",
+        );
+        return;
+    };
+    let area = scratch("partial-and-sequence");
+    let destination = area.join("browser-history.rdb");
+    sqlite::migrate(&source, &destination)
+        .unwrap_or_else(|why| panic!("the migration failed: {}", why.detail().unwrap_or_default()));
+
+    let database = inillucent_engine::connect::Database::open(&destination)
+        .unwrap_or_else(|why| panic!("the migration did not open: {why:?}"));
+    let connection = database.session();
+    let ask = |sql: &str| -> Vec<String> {
+        connection
+            .query(sql)
+            .unwrap_or_else(|why| panic!("{sql}: {why:?}"))
+            .iter()
+            .map(|row| quote_row(row))
+            .collect()
+    };
+
+    // The predicate. The pinned SQLite answers this from the partial index and
+    // so does this engine, so an index that had lost its `WHERE` would answer
+    // with every row in the table rather than with the bookmarked ones.
+    let question = "SELECT count(*), min(id), max(id) FROM place WHERE is_bookmarked = 1";
+    let theirs = ask_sqlite(&shell, &source, &format!("{question};"));
+    assert_eq!(
+        ask(question),
+        theirs,
+        "the partial index answers a different set after the migration"
+    );
+    // Rule 1.2: the question has to be one a lost predicate answers differently.
+    // An index over every row would answer 4,006 here, so the two numbers being
+    // different is what makes the comparison above mean anything.
+    assert_eq!(
+        theirs,
+        vec!["365,1,4093".to_string()],
+        "the fixture's bookmarked rows are not the ones this case describes"
+    );
+    assert_eq!(
+        ask("SELECT count(*) FROM place"),
+        vec!["4006".to_string()],
+        "a partial index that lost its WHERE would answer 4006 rather than 365"
+    );
+
+    // The high-water mark. `max(id)` is 3 after the fixture's DELETE and the
+    // sequence says 9, so the key the next insert is given says which of the
+    // two the migration carried.
+    assert_eq!(
+        ask("SELECT seq FROM sqlite_sequence WHERE name = 'download'"),
+        vec!["9".to_string()],
+        "sqlite_sequence did not come across"
+    );
+    assert_eq!(
+        ask("SELECT max(id) FROM download"),
+        vec!["3".to_string()],
+        "the fixture's DELETE is what makes the sequence and the rows disagree"
+    );
+    connection
+        .execute_batch("INSERT INTO download (place_id, filename) VALUES (101, 'after.zip')")
+        .expect("the insert runs");
+    assert_eq!(
+        ask("SELECT id FROM download WHERE filename = 'after.zip'"),
+        vec!["10".to_string()],
+        "AUTOINCREMENT handed out a key a deleted row already had, so sqlite_sequence was not \
+         carried"
     );
 }
 

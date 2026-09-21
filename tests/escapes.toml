@@ -258,10 +258,13 @@ held_by = [
 [[escape]]
 ref = "task-2050"
 surface = "the migration tool, generated columns"
-what = "a SQLite database with a generated column cannot be migrated: the staging file holds exactly the source's rows and exactly its schema, the digest check refuses them anyway, and a database that migrated correctly is deleted - while `docs/feature-comparison.md` line 1237 says generated columns are carried, verified by count and by digest"
+what = "a SQLite database with a `VIRTUAL` generated column could not be migrated at all: the staging file held exactly the source's rows and exactly its schema, the digest check refused them anyway, and a database that had migrated correctly was deleted - the source side folded `NULL` for a `VIRTUAL` column because no tree carries one, and the destination side read `SELECT *`, which evaluates the expression"
 found_by = "building compat/fixtures/realistic/chat-archive.db, which is the first fixture in the tree with a generated column"
 held_by = [
   "inillucent-compat::migrate_realistic::every_realistic_fixture_migrates_value_for_value",
+  "inillucent-compat::migrate_realistic::a_generated_column_crosses_as_an_expression_and_not_as_a_value",
+  "inillucent-migrate::lib::a_virtual_generated_column_is_not_one_of_the_digested_positions",
+  "inillucent-migrate::lib::the_column_check_fails_when_a_generated_column_is_missing_from_the_migration",
 ]
 
 [[escape]]

@@ -1235,7 +1235,18 @@ These cannot be probed with SQL. They are read from the tree and from the design
 
 The supported route from an existing SQLite application is `inillucent-migrate --sqlite-file`, and it
 works for tables, `WITHOUT ROWID` tables, generated columns, partial indexes, foreign keys, views,
-triggers, FTS5 indexes and `sqlite_sequence` - verified by count and by digest.
+triggers, FTS5 indexes and `sqlite_sequence`.
+
+Each table is verified three ways before the database is published: its row count, its column list,
+and a digest over every column the source file stores. A `VIRTUAL` generated column is stored by
+neither engine - both compute it on read - so the digest leaves it out and the column list is what
+says it crossed. `crates/inillucent-compat/tests/migrate_realistic.rs` compares those columns value
+for value against the pinned SQLite build, and checks that the migrated table recomputes them after
+an `UPDATE` rather than holding the value they had on the day of the migration.
+
+The one refusal is an FTS5 index declared with `content=` pointing somewhere else. It keeps no copy
+of the text, so there is nothing in the file to rebuild the index from, and the tool says so by name
+rather than publishing a database whose search returns nothing.
 
 ---
 

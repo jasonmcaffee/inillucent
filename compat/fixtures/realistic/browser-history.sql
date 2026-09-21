@@ -23,6 +23,9 @@
 --   * `WITHOUT ROWID` with a composite primary key
 --   * URLs and titles outside ASCII, including a decomposed form
 --   * a partial index, which is what Nikaya's queue uses
+--   * an `AUTOINCREMENT` table whose high rows have been deleted, so the
+--     `sqlite_sequence` row says a larger number than `max(id)` does and a
+--     migration that dropped it can be told from one that carried it
 
 PRAGMA foreign_keys = ON;
 
@@ -72,6 +75,20 @@ CREATE TABLE place_tag (
   PRIMARY KEY (place_id, tag)
 ) WITHOUT ROWID;
 
+-- A downloaded file. `AUTOINCREMENT` rather than a plain `INTEGER PRIMARY KEY`
+-- because the two differ in exactly one place: SQLite keeps the high-water mark
+-- in `sqlite_sequence`, and a migration that did not carry that row would hand
+-- the next insert a key a deleted row already had. The deletes below are what
+-- make the two answers different - after them `max(id)` is 3 and the sequence
+-- says 9 - so a test can tell which happened.
+CREATE TABLE download (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  place_id   INTEGER REFERENCES place (id) ON DELETE SET NULL,
+  filename   TEXT NOT NULL,
+  bytes      INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX download_place_idx ON download (place_id);
+
 CREATE VIEW most_visited AS
   SELECT p.url, p.title, p.visit_count, count(t.tag) AS tags
     FROM place p
@@ -118,5 +135,13 @@ INSERT INTO place_tag (place_id, tag) VALUES
 INSERT INTO place_tag (place_id, tag)
   SELECT (value % 4000) + 101, 'tag-' || (value % 37)
     FROM generate_series(1, 3000);
+
+INSERT INTO download (place_id, filename, bytes)
+  SELECT (value % 4000) + 101, 'file-' || value || '.zip', value * 1024
+    FROM generate_series(1, 9);
+
+-- The rows that raised the high-water mark are removed, so `sqlite_sequence`
+-- is the only thing left that remembers them.
+DELETE FROM download WHERE id > 3;
 
 ANALYZE;

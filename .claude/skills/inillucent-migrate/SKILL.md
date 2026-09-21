@@ -18,6 +18,9 @@ than a script:
    passes a count check on its own. A failure publishes nothing and leaves the staging file and a
    written report, because the thing you need after a failed migration is the evidence.
 
+   A SQLite source is checked a third way, by its column list, because the digest deliberately
+   leaves one kind of column out - see **Generated columns** below.
+
 ## From a SQLite file
 
 ```sh
@@ -28,6 +31,18 @@ Tables, indexes, views and triggers come across. FTS5 tables are **rebuilt** rat
 their storage is SQLite's own, so the text is re-indexed through this engine's fts5 and the docids
 are preserved. A virtual table using any other module is reported as not carried, with its module
 named.
+
+### Generated columns
+
+A `STORED` generated column occupies a field in SQLite's record, so it is copied and digested like
+any other column. A `VIRTUAL` one occupies nothing: SQLite computes it on read and so does this
+engine. The digest therefore folds only the stored columns, and `columns.<table>` compares the whole
+declared list beside it, so a `VIRTUAL` column that was dropped or moved is still a failure.
+
+Folding it would compare two engines evaluating an expression rather than comparing a copy, which is
+not a check this tool can make - it has no SQLite evaluator and does not require a SQLite install.
+Before it was left out, **every** database holding a `VIRTUAL` generated column failed its own
+verification and was deleted with its rows correct (task-2050).
 
 ## From a running PostgreSQL or MySQL
 
@@ -159,5 +174,7 @@ remote migration from an unconfined command line.
   which is the evidence. Read the report beside it, then move the staging file aside and re-run.
 - **`postgres 28P01: …` / `mysql 1045 (28000): …`** — the server refused the login, and the code in
   front is its own SQLSTATE. Match on that, not on the sentence.
-- **Verification failed** — nothing was published; the report names which table and whether it was
-  the count or the digest that disagreed.
+- **Verification failed** - nothing was published; the report names which table and whether it was
+  the count, the column list or the digest that disagreed. A digest failure on a SQLite source also
+  names the rows: how many each side holds, which columns were compared, and up to three rows each
+  side holds alone, rendered as `name=value`.
