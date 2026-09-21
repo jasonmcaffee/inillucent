@@ -40,10 +40,14 @@ impl ImportedDatabase {
         let level = i32::try_from(self.writing.marks().borrow().len()).unwrap_or(i32::MAX);
         self.savepoint_modules(level)?;
         let held = self.writing.undo().borrow().len();
+        // The second length is the pending-free list's. Both records are
+        // append-only within a transaction, and rolling back to this savepoint
+        // cuts both to where they stand now.
+        let dropped = self.writing.pending_frees().borrow().len();
         self.writing
             .marks()
             .borrow_mut()
-            .push((name.to_ascii_lowercase(), held));
+            .push((name.to_ascii_lowercase(), held, dropped));
         Ok(())
     }
 
@@ -68,7 +72,7 @@ impl ImportedDatabase {
             .marks()
             .borrow()
             .iter()
-            .rposition(|(held, _)| *held == folded);
+            .rposition(|(held, _, _)| *held == folded);
         let Some(position) = found else {
             // **A name no savepoint holds changes nothing, modules included.**
             // Defaulting the level to zero and telling the modules anyway made
@@ -102,7 +106,7 @@ impl ImportedDatabase {
             .marks()
             .borrow()
             .iter()
-            .rposition(|(held, _)| *held == folded);
+            .rposition(|(held, _, _)| *held == folded);
         let Some(position) = found else {
             return Err(refusal(format!(
                 "no such savepoint: {}",

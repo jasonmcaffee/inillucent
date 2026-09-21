@@ -737,6 +737,38 @@ pub(crate) struct Storage {
 /// flags that say whether one is open and who opened it. A1 step 3 lifts this into
 /// `Writer`, which is the type that makes "one transaction at a time" something the
 /// compiler knows rather than a sentence in a doc comment.
+/// Where a statement's writes begin, in both of a transaction's records.
+///
+/// **One value because they are taken together and used together.** A statement
+/// that fails is rolled back to the undo buffer's length *and* to the
+/// pending-free list's length, and passing them as two integers grew
+/// `ImportedDatabase::write` past the length it is recorded at - which is the
+/// ratchet doing its job: the second one belongs with the first, not beside it.
+#[derive(Clone, Copy)]
+pub(crate) struct StatementMark {
+    /// How long the undo buffer was.
+    pub(crate) undo: usize,
+    /// How long the pending-free list was.
+    pub(crate) dropped: usize,
+}
+
+/// One page a transaction has dropped and has not yet committed.
+///
+/// See [`Writing::pending_frees`] for why a drop waits: the free map is durable
+/// state, so giving a page back before the transaction that dropped it has
+/// committed is a change that a rollback would have to take back, and nothing in
+/// this engine's row-level undo buffer can.
+///
+/// The schema travels with the page because one transaction may drop tables in
+/// more than one attached database, and a page number alone does not say which
+/// file's free map it belongs to.
+pub(crate) struct PendingFree {
+    /// Which attached database the page belongs to.
+    pub(crate) schema: usize,
+    /// The page itself.
+    pub(crate) page: inillucent_pool::PageId,
+}
+
 pub(crate) struct Writing {
     /// The transaction every statement joins, when one has been opened.
     ///
@@ -775,13 +807,44 @@ pub(crate) struct Writing {
     /// reachable through a shared reference, which is what lets a connection
     /// hold the writer without borrowing the engine.
     touched: std::cell::Cell<u16>,
-    /// Named savepoints, and where each one sits in `undo`.
+    /// Named savepoints, and where each one sits in `undo` and in
+    /// `pending_frees`.
     ///
     /// Behind a cell for the reason `touched` is, and it is a `RefCell` rather
     /// than a `Cell` because the list is read in place - `release` finds a name
     /// in it - and copying it to read one entry would allocate per savepoint
     /// statement.
-    marks: std::cell::RefCell<Vec<(Vec<u8>, usize)>>,
+    ///
+    /// **Two lengths, because a transaction has two append-only records of what
+    /// it has done** and rolling back to a savepoint has to cut both to where
+    /// they stood when the savepoint was taken. Carrying only the `undo` length
+    /// and deriving the other from it is what a first version did, and it is
+    /// wrong at the boundary: a `DROP` and a `SAVEPOINT` taken immediately after
+    /// it sit at the same `undo` length, so nothing in that number says which
+    /// came first.
+    marks: std::cell::RefCell<Vec<(Vec<u8>, usize, usize)>>,
+    /// Pages the open transaction has dropped, waiting for its commit.
+    ///
+    /// **A page is given back to the free map at commit, not at the statement
+    /// that dropped it (task-2043).** The free map is shared, durable state, and
+    /// `inillucent_pool::FreeMap::free` rewinds the allocator's hint down to the
+    /// page it just freed - so a `DROP TABLE` that freed a page mid transaction
+    /// had it handed straight back to the next `CREATE TABLE`, which wrote an
+    /// empty root over it. Rolling back then restored the dropped table's
+    /// catalog row, `reattach_entries` attached its tree at the root page that
+    /// row still names, and the table came back empty. Durably, because the
+    /// rows really were gone.
+    ///
+    /// The undo buffer cannot repair that: it holds row before-images, not page
+    /// images, so there is nothing in it that says what page P used to contain.
+    /// Holding the frees until the commit means the question never arises - a
+    /// transaction that is abandoned never gave the page away.
+    ///
+    /// It is also what makes a `DROP` that is rolled back leave the free map
+    /// alone. Before this, `BEGIN; DROP TABLE p; ROLLBACK` answered `3` and left
+    /// page P marked free while p still pointed at it, so the *next* statement
+    /// to allocate anything overwrote p's rows.
+    pending_frees: std::cell::RefCell<Vec<PendingFree>>,
     /// How many schemas the last commit was decided over.
     ///
     /// **The instrument for the one claim about this protocol that is otherwise
@@ -1063,8 +1126,16 @@ impl Writing {
     ///
     /// The cell rather than a borrow of it, because a caller that hands this to
     /// another type needs the cell itself.
-    pub(crate) fn marks(&self) -> &std::cell::RefCell<Vec<(Vec<u8>, usize)>> {
+    pub(crate) fn marks(&self) -> &std::cell::RefCell<Vec<(Vec<u8>, usize, usize)>> {
         &self.marks
+    }
+
+    /// Returns the cell holding the pages waiting to be freed at commit.
+    ///
+    /// The cell rather than a borrow of it, for the reason [`Writing::marks`]
+    /// hands back the cell.
+    pub(crate) fn pending_frees(&self) -> &std::cell::RefCell<Vec<PendingFree>> {
+        &self.pending_frees
     }
 
     /// Returns the cell holding undo.
@@ -1092,6 +1163,7 @@ impl Writing {
             touched: std::cell::Cell::new(0),
             decided_over: std::cell::Cell::new(0),
             marks: std::cell::RefCell::new(Vec::new()),
+            pending_frees: std::cell::RefCell::new(Vec::new()),
             implicit_transaction: std::cell::Cell::new(false),
             running: std::cell::Cell::new(0),
             settling: std::cell::Cell::new(false),

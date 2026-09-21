@@ -119,7 +119,39 @@ impl crate::ImportedDatabase {
             .set_touched(self.writing.touched() | crate::schema_bit(at));
         Ok(page)
     }
-    /// Gives one tree's pages back to the free map and forgets it.
+    /// Forgets one tree and puts its pages on the list the commit frees.
+    ///
+    /// **The pages are not given back here, and that is the fix for task-2043.**
+    /// This used to call `database.release` for every page as it ran. The free
+    /// map rewinds its allocator hint to the lowest page it is given back
+    /// (`inillucent_pool::FreeMap::free`), so inside one transaction
+    ///
+    /// ```sql
+    /// BEGIN; DROP TABLE p; CREATE TABLE p (...); ROLLBACK;
+    /// ```
+    ///
+    /// handed p's own root page straight to the `CREATE`, which wrote an empty
+    /// tree over it. The rollback then restored p's catalog row - a row is a
+    /// row, and the undo buffer holds it - and `reattach_entries` attached p at
+    /// the root page that row names, which by then was the empty tree. p came
+    /// back with no rows, durably, and `PRAGMA integrity_check` said `ok`
+    /// because an empty tree is a valid tree.
+    ///
+    /// A row-level undo buffer cannot repair that: it has no image of page P to
+    /// put back. Holding the frees until the commit means it never has to - a
+    /// transaction that is abandoned never gave the page away, so the pages are
+    /// still exactly what the restored catalog row says they are.
+    ///
+    /// It also fixes the drop-alone case, which only looked correct. The
+    /// rollback never put the page back in the free map, so
+    /// `BEGIN; DROP TABLE p; ROLLBACK` answered `3` and left P marked free while
+    /// p still pointed at it - and the next statement to allocate anything
+    /// overwrote p's rows.
+    ///
+    /// The cost is that a transaction which drops a table and then creates one
+    /// grows the file rather than reusing the space until it commits. That is
+    /// the right trade: the space comes back at the commit, and the alternative
+    /// is the lost rows above.
     ///
     /// @param root - the identifier it is registered under
     pub(crate) fn release_tree(&mut self, root: u32) -> DbResult<()> {
@@ -131,24 +163,14 @@ impl crate::ImportedDatabase {
             Some(tree) => tree.pages(owner.pool())?,
             None => Vec::new(),
         };
-        let txn = self.current_txn();
-        let wal = self
-            .log_of(at)
-            .ok_or_else(|| refusal("a statement names a database that is not attached"))?;
-        for page in &pages {
-            wal.append(txn, inillucent_wal::record::Body::FreePage { page: page.0 })?;
-        }
+        // The `FreePage` records go in with the release, at commit, for the same
+        // reason: the log is redo-only, so a record that says a page is free is
+        // only true of a transaction that committed, and appending it here would
+        // describe a free that the rollback then did not do.
         {
-            let session = self.session_state.session.get();
-            let database = crate::file_of(
-                &mut self.storage.database,
-                &mut self.session_state.attached,
-                &mut self.session_state.temps,
-                session,
-                at,
-            )?;
+            let mut waiting = self.writing.pending_frees().borrow_mut();
             for page in pages {
-                database.release(page, 1)?;
+                waiting.push(crate::engine::state::PendingFree { schema: at, page });
             }
         }
         self.session_state.owner.remove(&root);

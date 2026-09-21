@@ -516,7 +516,30 @@ impl crate::ImportedDatabase {
         // answer, and only a connected module can give it. Deriving them from
         // the statement would be a second implementation of every module's
         // argument grammar, agreeing with the module until the day it did not.
+        //
+        // **But whether a table is virtual at all is the catalog's answer, not
+        // the module map's (task-2043).** This loop used to convert any table
+        // whose name was in `virtual_tables`, and the map is this connection's
+        // memory rather than a record of the file. So
+        //
+        // ```sql
+        // BEGIN; DROP TABLE p; CREATE VIRTUAL TABLE p USING fts5(body); ROLLBACK;
+        // ```
+        //
+        // left the fts5 connection under the name `p`, and the rollback - which
+        // had put p's own `CREATE TABLE` row back correctly, and its rows with
+        // it - was overwritten here: `PRAGMA table_info(p)` answered `body`, and
+        // `SELECT * FROM p` was planned as a scan of a module whose shadow
+        // tables no longer existed and returned nothing. Reopening the file gave
+        // the three rows, because the file had them all along.
+        //
+        // `tables_from_entries` sets `kind` to `Virtual` for a row whose text is
+        // a `CREATE VIRTUAL TABLE`, so requiring it here is requiring that the
+        // catalog and the module map agree before the module is believed.
         for table in &mut rebuilt {
+            if table.kind != inillucent_sql::catalog_view::TableKind::Virtual {
+                continue;
+            }
             let Some(connected) = self.session_state.virtual_tables.get(&table.folded) else {
                 continue;
             };

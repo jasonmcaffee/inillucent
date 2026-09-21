@@ -659,13 +659,9 @@ impl crate::ImportedDatabase {
         // the one buffer, because a rollback undoes one *transaction* rather
         // than one file - and each record carries the schema it came out of.
         let undo = Some(self.writing.undo());
-        // **Where this statement's writes begin.** The success path does
-        // nothing with it; the failure path rolls back to it. That asymmetry is
-        // the whole cost of statement atomicity inside a transaction - one
-        // integer read off a `Vec`'s length - which is why there is no
-        // per-statement savepoint here and `txn.large`'s two thousand
-        // statements do not pay for two thousand of them.
-        let mark = self.writing.undo().borrow().len();
+        // Where this statement's writes begin, in both of the transaction's
+        // records. See `statement_mark` for why it costs nothing.
+        let mark = self.statement_mark();
         let main_log = WalLog {
             wal: std::rc::Rc::clone(&self.storage.wal),
             txn,
@@ -857,14 +853,14 @@ impl crate::ImportedDatabase {
     /// intended is worse than saying so.
     ///
     /// @param error - what the statement failed with
-    /// @param mark - the undo buffer's length before the statement wrote
+    /// @param mark - where the statement's writes began, in both records
     /// @param autocommit - whether the statement was its own transaction
     /// @param wrote - the schemas the statement wrote, as a participant set
     /// @param txn - the transaction the statement wrote under
     fn abandon(
         &mut self,
         error: DbError,
-        mark: usize,
+        mark: crate::engine::state::StatementMark,
         autocommit: bool,
         wrote: u16,
         txn: u64,
@@ -872,18 +868,19 @@ impl crate::ImportedDatabase {
         let unwind = error.unwind();
         let undone = match unwind {
             Unwind::Nothing => Ok(()),
-            Unwind::Statement => self.undo_to_floor(mark, false, txn),
+            Unwind::Statement => self.undo_to_floor(mark.undo, mark.dropped, false, txn),
             // **In autocommit the two are the same thing**: the statement is
             // the transaction, so `ROLLBACK` is `ABORT` with a floor of zero,
             // and there is no batch to close. Inside one it is the existing
             // `rollback` in full - the savepoints gone, the batch closed, the
             // schema refreshed.
-            Unwind::Transaction if autocommit => self.undo_to_floor(0, false, txn),
+            Unwind::Transaction if autocommit => self.undo_to_floor(0, 0, false, txn),
             Unwind::Transaction => self.rollback(),
         };
         if autocommit {
             self.writing.undo().borrow_mut().clear();
             self.writing.marks().borrow_mut().clear();
+            self.writing.pending_frees().borrow_mut().clear();
             if matches!(unwind, Unwind::Nothing) && undone.is_ok() {
                 // **`OR FAIL` outside a transaction commits.** The rows written
                 // before the failure are kept, and keeping them only in the

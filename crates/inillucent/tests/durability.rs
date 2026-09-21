@@ -439,3 +439,313 @@ fn a_checkpoint_changes_nothing_a_reader_can_see() {
         .expect("read after the reopen");
     assert_eq!(before, after_reopen);
 }
+
+// --- A page a transaction dropped, and what happens when it is not committed
+//
+// All six of these are task-2043. The engine freed a dropped tree's pages as
+// the `DROP` statement ran rather than at the commit, and the free map hands
+// the lowest free page to the next allocation - so a `CREATE` in the same
+// transaction was given the dropped table's own root page and wrote an empty
+// tree over it. The rollback restored the dropped table's catalog row, which
+// still named that page, and the table came back empty. Durably: the rows were
+// really gone from the file.
+//
+// The undo buffer could not have repaired it. It holds row before-images, not
+// page images, so nothing in it says what the page used to contain. What these
+// tests hold in place is the fix's actual claim - **an abandoned transaction
+// frees nothing** - which is why four of them look at a table the transaction
+// never mentioned, or at a statement that runs after the rollback.
+
+/// Returns the rows of `p` through a freshly opened handle, and checks the file.
+///
+/// Separate from [`rows_after_reopen`] because these tests care *which* rows
+/// came back, not how many: a table that was overwritten by a different table's
+/// tree can have the right count and the wrong contents.
+///
+/// @param path - the database file
+fn values_after_reopen(path: &PathBuf) -> Vec<Vec<OwnedDatum>> {
+    let database = Database::open(path).expect("the database reopens");
+    database.check().expect("the file is sound");
+    let connection = database.session();
+    connection
+        .query("SELECT id, n FROM p ORDER BY id")
+        .expect("read after the reopen")
+}
+
+/// Creates `p` with three rows, through a handle that is then dropped.
+///
+/// @param path - the database file
+fn three_rows(path: &PathBuf) {
+    let database = Database::open(path).expect("the database opens");
+    let connection = database.session();
+    connection
+        .execute_batch(
+            "CREATE TABLE p (id INTEGER PRIMARY KEY, n INTEGER); \
+             INSERT INTO p VALUES (1, 10), (2, 20), (3, 30)",
+        )
+        .expect("the table is created with three rows");
+}
+
+/// Returns the three rows `p` is made with, as a query returns them.
+fn the_three_rows() -> Vec<Vec<OwnedDatum>> {
+    vec![
+        vec![OwnedDatum::Int(1), OwnedDatum::Int(10)],
+        vec![OwnedDatum::Int(2), OwnedDatum::Int(20)],
+        vec![OwnedDatum::Int(3), OwnedDatum::Int(30)],
+    ]
+}
+
+/// A `DROP` and a `CREATE` of the same name, rolled back, keep every row.
+///
+/// The ticket's own reproduction. Before the fix this answered zero rows, here
+/// and after the reopen, and `PRAGMA integrity_check` said `ok` about it -
+/// because the tree the catalog pointed at was a perfectly valid empty tree.
+#[test]
+fn a_dropped_and_recreated_table_rolls_back() {
+    let directory = scratch("drop-recreate");
+    let path = directory.join("d.rdb");
+    three_rows(&path);
+    {
+        let database = Database::open(&path).expect("the database opens");
+        let connection = database.session();
+        connection
+            .execute_batch(
+                "BEGIN; \
+                 DROP TABLE p; \
+                 CREATE TABLE p (id INTEGER PRIMARY KEY, n INTEGER); \
+                 ROLLBACK",
+            )
+            .expect("the transaction is abandoned");
+        assert_eq!(
+            connection
+                .query("SELECT id, n FROM p ORDER BY id")
+                .expect("read in the same session"),
+            the_three_rows(),
+            "the rows were lost to the handle that abandoned the transaction"
+        );
+    }
+    assert_eq!(values_after_reopen(&path), the_three_rows());
+}
+
+/// The name never mattered: a `CREATE` of a different table lost them too.
+///
+/// This is what says the defect is the page being handed back and not the
+/// catalog row being repointed, which is what the ticket first supposed. It
+/// fails for the same reason the test above does and reads as a different bug,
+/// so both are held.
+#[test]
+fn a_drop_then_an_unrelated_create_rolls_back() {
+    let directory = scratch("drop-other-create");
+    let path = directory.join("d.rdb");
+    three_rows(&path);
+    {
+        let database = Database::open(&path).expect("the database opens");
+        let connection = database.session();
+        connection
+            .execute_batch("BEGIN; DROP TABLE p; CREATE TABLE q (a TEXT); ROLLBACK")
+            .expect("the transaction is abandoned");
+    }
+    assert_eq!(values_after_reopen(&path), the_three_rows());
+}
+
+/// A `DROP` alone, rolled back, leaves the free map alone.
+///
+/// **The case the ticket recorded as passing.** It did pass, in the sense that
+/// the count immediately after the `ROLLBACK` was three - but the page was
+/// still marked free while `p` still pointed at it, so the next statement to
+/// allocate anything overwrote `p`'s rows. The `CREATE TABLE` and `INSERT`
+/// after the rollback are the whole test; without them it passes against the
+/// bug it is here to catch.
+#[test]
+fn a_dropped_table_rolled_back_keeps_its_pages() {
+    let directory = scratch("drop-alone");
+    let path = directory.join("d.rdb");
+    three_rows(&path);
+    {
+        let database = Database::open(&path).expect("the database opens");
+        let connection = database.session();
+        connection
+            .execute_batch("BEGIN; DROP TABLE p; ROLLBACK")
+            .expect("the transaction is abandoned");
+        connection
+            .execute_batch(
+                "CREATE TABLE later (a TEXT); \
+                 INSERT INTO later VALUES ('one'), ('two')",
+            )
+            .expect("a later statement allocates");
+        assert_eq!(
+            connection
+                .query("SELECT id, n FROM p ORDER BY id")
+                .expect("read in the same session"),
+            the_three_rows(),
+            "a later allocation was given a page p still points at"
+        );
+    }
+    assert_eq!(values_after_reopen(&path), the_three_rows());
+}
+
+/// The same for an index: its tree is released by the same call.
+///
+/// Read through the index rather than through the table, because a table scan
+/// would answer correctly from the table's own tree and say nothing about the
+/// index's. Before the fix this returned no rows and `PRAGMA integrity_check`
+/// reported `row 1 missing from index ix` - the one shape of this defect the
+/// check did catch, because it cross-checks an index against its table.
+#[test]
+fn a_dropped_index_rolled_back_keeps_its_pages() {
+    let directory = scratch("drop-index");
+    let path = directory.join("d.rdb");
+    three_rows(&path);
+    {
+        let database = Database::open(&path).expect("the database opens");
+        let connection = database.session();
+        connection
+            .execute_batch("CREATE INDEX ix ON p(n)")
+            .expect("the index is created");
+        connection
+            .execute_batch("BEGIN; DROP INDEX ix; ROLLBACK")
+            .expect("the transaction is abandoned");
+        connection
+            .execute_batch("CREATE TABLE later (a TEXT); INSERT INTO later VALUES ('one')")
+            .expect("a later statement allocates");
+        assert_eq!(
+            count(
+                &connection
+                    .query("SELECT count(*) FROM p WHERE n > 5")
+                    .expect("read through the index")
+            ),
+            3,
+            "a later allocation was given a page the index still points at"
+        );
+    }
+    let database = Database::open(&path).expect("the database reopens");
+    database.check().expect("the file is sound");
+}
+
+/// A `ROLLBACK TO` undoes only the drops taken after the savepoint.
+///
+/// Both directions in one test, because the two are easy to get wrong in
+/// opposite ways and a fix for either alone passes half of it. `p` is dropped
+/// *before* the savepoint, so its pages must still be freed by the `COMMIT`;
+/// `q` is dropped after it, so `q` must come back whole - including after a
+/// later statement has allocated.
+///
+/// **`PRAGMA freelist_count` is what holds the `p` direction up, and without it
+/// this test is satisfied by a fix that leaks.** A savepoint records how long
+/// the pending-free list was when it was taken; a first version of the fix
+/// derived that from the undo buffer's length instead, and `DROP TABLE p;
+/// SAVEPOINT here` leaves both at the same length - so nothing in that number
+/// said which came first, and `ROLLBACK TO here` discarded `p`'s pages along
+/// with `q`'s. Every visible answer below is the same either way: `p` really is
+/// gone from the catalog and `q` really does come back. The only thing that
+/// differs is whether `p`'s pages ever return to the free map.
+#[test]
+fn rolling_back_to_a_savepoint_keeps_the_drops_before_it() {
+    let directory = scratch("savepoint-drop");
+    let path = directory.join("d.rdb");
+    {
+        let database = Database::open(&path).expect("the database opens");
+        let connection = database.session();
+        connection
+            .execute_batch(
+                "CREATE TABLE p (id INTEGER PRIMARY KEY, n INTEGER); \
+                 INSERT INTO p VALUES (1, 10), (2, 20), (3, 30); \
+                 CREATE TABLE q (id INTEGER PRIMARY KEY, n INTEGER); \
+                 INSERT INTO q VALUES (7, 70), (8, 80)",
+            )
+            .expect("two tables");
+        connection
+            .execute_batch(
+                "BEGIN; \
+                 DROP TABLE p; \
+                 SAVEPOINT here; \
+                 DROP TABLE q; \
+                 ROLLBACK TO here; \
+                 COMMIT",
+            )
+            .expect("the savepoint unwinds and the rest commits");
+        // Read before anything else allocates, which would spend them again.
+        assert!(
+            count(
+                &connection
+                    .query("PRAGMA freelist_count")
+                    .expect("read the free map")
+            ) > 0,
+            "the commit did not give p's pages back: they are leaked"
+        );
+        connection
+            .execute_batch("CREATE TABLE later (a TEXT); INSERT INTO later VALUES ('one')")
+            .expect("a later statement allocates");
+        assert_eq!(
+            count(
+                &connection
+                    .query("SELECT count(*) FROM sqlite_master WHERE name = 'p'")
+                    .expect("read the catalog")
+            ),
+            0,
+            "the drop taken before the savepoint did not stick"
+        );
+        assert_eq!(
+            connection
+                .query("SELECT id, n FROM q ORDER BY id")
+                .expect("read the table whose drop was unwound"),
+            vec![
+                vec![OwnedDatum::Int(7), OwnedDatum::Int(70)],
+                vec![OwnedDatum::Int(8), OwnedDatum::Int(80)],
+            ],
+            "the drop taken after the savepoint was not unwound"
+        );
+    }
+    let database = Database::open(&path).expect("the database reopens");
+    database.check().expect("the file is sound");
+    let connection = database.session();
+    assert_eq!(
+        count(
+            &connection
+                .query("SELECT count(*) FROM q")
+                .expect("counted after the reopen")
+        ),
+        2,
+    );
+}
+
+/// A rolled-back `CREATE VIRTUAL TABLE` leaves no module behind.
+///
+/// The fourth shape the ticket asked about, and it needed a second fix.
+/// `rebuild_tables` turned any table whose name was in this connection's module
+/// map into a virtual table, whatever the catalog said - so after the rollback
+/// had correctly restored `p`'s `CREATE TABLE` row and its rows,
+/// `PRAGMA table_info(p)` still answered with the fts5 declaration and
+/// `SELECT * FROM p` was planned as a scan of a module whose shadow tables no
+/// longer existed. It returned nothing, while a reopen of the same file
+/// returned all three rows - which is the tell that the schema, not the
+/// storage, was what was wrong.
+///
+/// Asserted in the session that did it, because a reopen has an empty module
+/// map and cannot see this.
+#[test]
+fn a_rolled_back_virtual_table_leaves_no_module_behind() {
+    let directory = scratch("drop-virtual");
+    let path = directory.join("d.rdb");
+    three_rows(&path);
+    {
+        let database = Database::open(&path).expect("the database opens");
+        let connection = database.session();
+        connection
+            .execute_batch(
+                "BEGIN; \
+                 DROP TABLE p; \
+                 CREATE VIRTUAL TABLE p USING fts5(body); \
+                 ROLLBACK",
+            )
+            .expect("the transaction is abandoned");
+        assert_eq!(
+            connection
+                .query("SELECT id, n FROM p ORDER BY id")
+                .expect("p is an ordinary table again"),
+            the_three_rows(),
+            "the connection still reads p through the module it rolled back"
+        );
+    }
+    assert_eq!(values_after_reopen(&path), the_three_rows());
+}

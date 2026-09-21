@@ -46,6 +46,7 @@ impl crate::ImportedDatabase {
         self.writing.set_batch(Some(txn));
         self.writing.undo().borrow_mut().clear();
         self.writing.marks().borrow_mut().clear();
+        self.writing.pending_frees().borrow_mut().clear();
         self.writing.set_touched(0);
     }
 
@@ -64,7 +65,7 @@ impl crate::ImportedDatabase {
     ///
     /// @param to - the savepoint to stop at, or `None` for the whole transaction
     pub(crate) fn undo_to(&mut self, to: Option<&[u8]>) -> DbResult<()> {
-        let floor = match to {
+        let (floor, dropped_floor) = match to {
             Some(name) => {
                 let folded = name.to_ascii_lowercase();
                 // One borrow, held only long enough to find the savepoint:
@@ -73,8 +74,8 @@ impl crate::ImportedDatabase {
                     let marks = self.writing.marks().borrow();
                     marks
                         .iter()
-                        .rposition(|(held, _)| *held == folded)
-                        .and_then(|index| marks.get(index).map(|(_, at)| *at))
+                        .rposition(|(held, _, _)| *held == folded)
+                        .and_then(|index| marks.get(index).map(|(_, at, dropped)| (*at, *dropped)))
                 };
                 let Some(position) = found else {
                     return Err(refusal(format!(
@@ -84,9 +85,9 @@ impl crate::ImportedDatabase {
                 };
                 position
             }
-            None => 0,
+            None => (0, 0),
         };
-        self.undo_to_floor(floor, true, self.current_txn())
+        self.undo_to_floor(floor, dropped_floor, true, self.current_txn())
     }
 
     /// Undoes back to a position in the undo buffer, newest first.
@@ -97,11 +98,20 @@ impl crate::ImportedDatabase {
     /// the statement wrote anything, and there is nothing to look up.
     ///
     /// @param floor - the buffer length to stop at
+    /// @param dropped_floor - the pending-free list's length to cut back to,
+    ///   which undoes the `DROP`s taken after the same point: a page a
+    ///   rolled-back statement dropped is one this transaction never dropped
     /// @param reload - whether to rebuild the schema from the catalog tree
     /// @param txn - the transaction the restores are logged under, which is the
     ///   statement's own rather than `current_txn`: outside a batch `write` has
     ///   already taken a number and moved `next_txn` past it
-    pub(crate) fn undo_to_floor(&mut self, floor: usize, reload: bool, txn: u64) -> DbResult<()> {
+    pub(crate) fn undo_to_floor(
+        &mut self,
+        floor: usize,
+        dropped_floor: usize,
+        reload: bool,
+        txn: u64,
+    ) -> DbResult<()> {
         while self.writing.undo().borrow().len() > floor {
             let Some(entry) = self.writing.undo().borrow_mut().pop() else {
                 break;
@@ -161,11 +171,20 @@ impl crate::ImportedDatabase {
                 }
             }
         }
+        // **Cut before the schema is rebuilt below.** `reload_entries` attaches
+        // a restored object's tree at the root page its catalog row names, and
+        // a page still on this list is a page the commit would hand back to the
+        // free map - so a list that still held a rolled-back `DROP`'s pages
+        // would free the pages of a table that is once again in the schema.
+        self.writing
+            .pending_frees()
+            .borrow_mut()
+            .truncate(dropped_floor);
         let held = self.writing.undo().borrow().len();
         self.writing
             .marks()
             .borrow_mut()
-            .retain(|(_, at)| *at <= held);
+            .retain(|(_, at, _)| *at <= held);
         // **A DML statement cannot have changed the catalog, so undoing one has
         // nothing to rebuild from it.** `CREATE`, `DROP` and `ALTER` do not go
         // through `write`, and reloading here would cost a catalog read on
@@ -256,6 +275,25 @@ impl crate::ImportedDatabase {
             }
         }
         self.rebuild_tables()?;
+        // **A rolled back `CREATE VIRTUAL TABLE` leaves its module connected,
+        // and the connection outlives the rows it was made from (task-2043).**
+        // `virtual_tables` is this connection's memory; the catalog tree is the
+        // file. A module left in the map after its catalog row was undone points
+        // at shadow trees that no longer exist, and `is_shadow_table` then
+        // reports an ordinary table of that name as a shadow of it.
+        //
+        // `rebuild_tables` has just derived `tables` from the catalog, so a name
+        // that is not a virtual table there is not one in the file either.
+        let still_virtual: std::collections::HashSet<Vec<u8>> = self
+            .schema
+            .tables
+            .iter()
+            .filter(|table| table.kind == inillucent_sql::catalog_view::TableKind::Virtual)
+            .map(|table| table.folded.clone())
+            .collect();
+        self.session_state
+            .virtual_tables
+            .retain(|name, _| still_virtual.contains(name));
         self.refresh_catalog();
         Ok(missing)
     }
@@ -432,6 +470,10 @@ impl crate::ImportedDatabase {
         let told = self.rollback_modules(None);
         let undone = self.undo_to(None);
         self.writing.marks().borrow_mut().clear();
+        // `undo_to(None)` has already cut it to zero; clearing it again is what
+        // makes that true even when the undo above failed part-way. An
+        // abandoned transaction frees nothing.
+        self.writing.pending_frees().borrow_mut().clear();
         self.writing.set_batch(None);
         self.writing.set_implicit_transaction(false);
         // Rolled back, so no-steal has nothing left to hold back on any
@@ -501,8 +543,83 @@ impl crate::ImportedDatabase {
             self.writing.set_touched(0);
             return Ok(());
         };
+        // Before `touched` is read, because freeing a page is a write to that
+        // schema and the participant set has to say so.
+        self.flush_pending_frees(txn)?;
         let participants = self.writing.replace_touched(0);
         self.commit_across(txn, participants)
+    }
+
+    /// Returns where a statement's writes begin, in both records.
+    ///
+    /// Taken before the statement writes anything; the success path does
+    /// nothing with it and the failure path rolls back to it. That asymmetry is
+    /// the whole cost of statement atomicity inside a transaction - two integers
+    /// read off a `Vec`'s length - which is why there is no per-statement
+    /// savepoint and `txn.large`'s two thousand statements do not pay for two
+    /// thousand of them.
+    ///
+    /// The second length is the pending-free list's, so a statement that dropped
+    /// a tree and then failed drops nothing. A DML statement never adds to that
+    /// list; the statement this protects is the one that runs a module's `DROP`.
+    pub(crate) fn statement_mark(&self) -> crate::engine::state::StatementMark {
+        crate::engine::state::StatementMark {
+            undo: self.writing.undo().borrow().len(),
+            dropped: self.writing.pending_frees().borrow().len(),
+        }
+    }
+
+    /// Gives every page this transaction dropped back to the free map.
+    ///
+    /// **The last thing a transaction does before its commit record, and the
+    /// only place a dropped page is freed (task-2043).** `release_tree` records
+    /// the pages and does not free them; see its doc comment for what freeing
+    /// them as the statement ran cost. By the time this runs the transaction is
+    /// going to commit, so a page it frees is a page nothing can point at again.
+    ///
+    /// The `FreePage` records go in here too. The log is redo-only: a record is
+    /// replayed only for a transaction whose `Commit` follows it, so writing
+    /// them at the drop would have described a free that a rollback then did not
+    /// do, and recovery would have replayed a free of pages the recovered
+    /// database still uses.
+    ///
+    /// Each schema it frees in is marked as written, because a free map is part
+    /// of that file and a commit is decided over the files it changed.
+    ///
+    /// @param txn - the transaction the frees are logged under
+    pub(crate) fn flush_pending_frees(&mut self, txn: u64) -> DbResult<()> {
+        let waiting: Vec<crate::engine::state::PendingFree> =
+            std::mem::take(&mut *self.writing.pending_frees().borrow_mut());
+        if waiting.is_empty() {
+            return Ok(());
+        }
+        let mut touched = self.writing.touched();
+        for dropped in &waiting {
+            let at = dropped.schema;
+            let wal = self
+                .log_of(at)
+                .ok_or_else(|| refusal("a commit names a database that is not attached"))?;
+            wal.append(
+                txn,
+                inillucent_wal::record::Body::FreePage {
+                    page: dropped.page.0,
+                },
+            )?;
+            touched |= crate::schema_bit(at);
+        }
+        for dropped in waiting {
+            let session = self.session_state.session.get();
+            let database = file_of(
+                &mut self.storage.database,
+                &mut self.session_state.attached,
+                &mut self.session_state.temps,
+                session,
+                dropped.schema,
+            )?;
+            database.release(dropped.page, 1)?;
+        }
+        self.writing.set_touched(touched);
+        Ok(())
     }
 
     /// Commits one transaction across every file it wrote.

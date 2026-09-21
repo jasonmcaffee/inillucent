@@ -714,6 +714,10 @@ impl crate::ImportedDatabase {
         // statement would find a schema in it that it had not written: a
         // one-file insert paying for a two-file protocol, and a `Commit` record
         // in a log for a transaction that never touched it.
+        // Before `touched` is read: a schema change that dropped a tree has its
+        // pages waiting on the commit, and freeing them is a write to the file
+        // the participant set has to name.
+        self.flush_pending_frees(txn)?;
         let participants = self.writing.replace_touched(0) | crate::schema_bit(at);
         self.commit_across(txn, participants)
     }
