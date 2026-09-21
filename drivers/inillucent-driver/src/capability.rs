@@ -471,11 +471,36 @@ pub static CAPABILITIES: &[Capability] = &[
     },
     Capability {
         name: "window_in_compound_arm",
-        support: Support::No,
-        note: "A window function inside an arm of a UNION, EXCEPT or INTERSECT is refused.",
+        support: Support::Yes,
+        note: "A window function inside an arm of a UNION, EXCEPT or INTERSECT runs. It                used to be refused, because the binder threw away the arm's window calls                when it left the arm's block and the physical pass was then handed a                WindowRef in a statement that claimed to have no windows (task-2042).",
         probe: Probe::Runs {
             setup: &["CREATE TABLE t (a INTEGER)"],
             sql: "SELECT a FROM t UNION ALL SELECT row_number() OVER () FROM t",
+        },
+    },
+    Capability {
+        name: "aggregate_in_compound_arm",
+        support: Support::Yes,
+        // **Probed by its value, not by whether the statement runs.** The
+        // refusal this row records had a second shape that answered: an arm
+        // with a GROUP BY planned a grouped aggregate with no accumulators in
+        // it and projected one column past the end of the group key, so
+        // `SELECT 1 UNION ALL SELECT count(*) FROM t GROUP BY a` came back
+        // with a blank where the count belongs. A `Probe::Runs` row would
+        // have called that supported.
+        note: "An aggregate inside an arm of a UNION, EXCEPT or INTERSECT that is not the                first runs and returns its value. It used to be refused - and, with a GROUP                BY on that arm, to answer one blank row per group instead (task-2042).",
+        probe: Probe::Answers {
+            setup: &[
+                "CREATE TABLE cap_compound_agg (a INTEGER)",
+                "INSERT INTO cap_compound_agg VALUES (1), (2), (3)",
+            ],
+            // The sum of the whole compound rather than its first cell,
+            // because the first cell is the head arm's 9 and the head arm was
+            // never the broken one. 9 + 1 + 1 + 1; the grouped arm answering
+            // blanks gives 9, and `sum` ignores a NULL rather than reporting
+            // it, which is what makes the two numbers different.
+            sql: "SELECT sum(v) FROM                   (SELECT 9 AS v UNION ALL SELECT count(*) FROM cap_compound_agg GROUP BY a)",
+            expect: "12",
         },
     },
     Capability {

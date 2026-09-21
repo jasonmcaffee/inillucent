@@ -1776,20 +1776,24 @@ impl<'a> Binder<'a> {
     }
 
     /// Binds the compound arms and the tail clauses onto a first arm.
+    ///
+    /// **An arm goes through [`Binder::bind_isolated_arm`] (task-2042).** A
+    /// bare `enter_block` / `bind_arm` / `leave_block` threw the arm's
+    /// aggregates and windows away, because `leave_block` restores the
+    /// enclosing block's lists, so every arm but the head reached the planner
+    /// claiming to compute nothing: refused, or - with a `GROUP BY` on that
+    /// arm - one blank row per group. `compound.arm.aggregate` and
+    /// `compound.arm.grouped` in `tests/semantics.rs` name both shapes.
+    ///
+    /// @param select - the statement as written
+    /// @param bound - the head arm the arms and clauses are added to
     fn finish_select(
         &mut self,
         select: &'a ast::Select,
         bound: &mut BoundSelect,
     ) -> Result<(), ParseError> {
         for (op, arm) in &select.compounds {
-            let arm_frame = self.enter_block();
-            let armed = self.bind_arm(*arm);
-            let arm_ids = self.leave_block(arm_frame);
-            let mut armed = armed?;
-            armed.sources = arm_ids
-                .iter()
-                .filter_map(|id| self.sources.get(*id).cloned())
-                .collect();
+            let armed = self.bind_isolated_arm(*arm)?;
             if armed.columns.len() != bound.columns.len() {
                 return Err(ParseError::new(
                     ParseErrorKind::Unsupported(

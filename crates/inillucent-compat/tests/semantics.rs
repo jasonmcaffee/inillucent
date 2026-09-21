@@ -1808,6 +1808,69 @@ SELECT b AS x FROM t WHERE a = 2;
 SELECT b AS x, x + 1 FROM t WHERE a = 2;",
         expect: Agrees,
     },
+    // The three shapes task-2042 fixed: an aggregate, a grouped aggregate and
+    // a window function, each in a compound arm that is not the first.
+    //
+    // The binder bound every arm after the head in a block whose `aggregates`
+    // and `windows` were thrown away when the block was left, so the arm
+    // reached the planner claiming to compute nothing while its result column
+    // was still a `BoundExpr::Aggregate` or a `BoundExpr::WindowRef`. The last
+    // statement of `compound.arm.aggregate` is the one that narrows it: with
+    // the aggregate in the *head* arm the same query always answered, because
+    // the head's aggregates are copied off the binder and the arms' were not.
+    //
+    // `compound.arm.grouped` is the half that answered rather than refusing,
+    // and it is the reason these cases compare the whole script. A `GROUP BY`
+    // on such
+    // an arm survived into the plan when the aggregates did not, so
+    // `AggregationMode::Grouped` was chosen, an aggregate operator was built
+    // with no accumulators in it, and the projection read one column past the
+    // end of the group key: `SELECT 1 UNION ALL SELECT count(*) FROM t GROUP
+    // BY a` answered `1` and then one **blank** row per group where SQLite
+    // answers `1` four times. A harness comparing only whether the statement
+    // failed would call that agreement.
+    Case {
+        name: "compound.arm.aggregate",
+        kind: "read",
+        script: "CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER);
+INSERT INTO t VALUES (1,10),(2,20),(3,30);
+SELECT 1 UNION ALL SELECT count(*) FROM t;
+SELECT 1 UNION SELECT count(*) FROM t;
+SELECT 1 EXCEPT SELECT count(*) FROM t;
+SELECT 3 INTERSECT SELECT count(*) FROM t;
+SELECT 1 UNION ALL SELECT sum(a) FROM t;
+SELECT 1 UNION ALL SELECT max(a) FROM t UNION ALL SELECT min(a) FROM t;
+SELECT 1 UNION ALL SELECT count(DISTINCT a) FROM t;
+SELECT 1 UNION ALL SELECT group_concat(a) FROM t;
+SELECT 1 UNION ALL SELECT count(*) FILTER (WHERE a > 15) FROM t;
+SELECT count(*) FROM t UNION ALL SELECT 2;",
+        expect: Agrees,
+    },
+    Case {
+        name: "compound.arm.grouped",
+        kind: "read",
+        script: "CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER, g TEXT);
+INSERT INTO t VALUES (1,10,'x'),(2,20,'y'),(3,30,'x'),(4,20,'z');
+SELECT 1 UNION ALL SELECT count(*) FROM t GROUP BY a;
+SELECT 1 UNION ALL SELECT count(*) FROM t GROUP BY g ORDER BY 1;
+SELECT 0 UNION ALL SELECT count(*) FROM t GROUP BY g HAVING count(*) > 1;
+SELECT g, count(*) FROM t GROUP BY g UNION ALL SELECT g, sum(a) FROM t GROUP BY g ORDER BY 1, 2;",
+        expect: Agrees,
+    },
+    // `windows` is taken off the binder in the same place `aggregates` is, so
+    // a window function in a later arm was refused by the same root cause and
+    // in the same release - `the expression a WindowRef expression` on 0.1.2 -
+    // and is fixed by the same line. Without this case the next change to that
+    // line could restore the aggregates and lose the windows again.
+    Case {
+        name: "compound.arm.window",
+        kind: "read",
+        script: "CREATE TABLE t(id INTEGER PRIMARY KEY, a INTEGER);
+INSERT INTO t VALUES (1,10),(2,20),(3,30);
+SELECT 1 UNION ALL SELECT row_number() OVER (ORDER BY a) FROM t;
+SELECT 1 UNION ALL SELECT sum(a) OVER (ORDER BY a) FROM t;",
+        expect: Agrees,
+    },
 ];
 
 /// Returns the pinned SQLite shell, if it has been downloaded.

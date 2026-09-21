@@ -132,6 +132,94 @@ fn an_aggregate_overflow_refuses_with_the_references_code() {
     );
 }
 
+/// An aggregate in a compound arm after the first answers, and names its
+/// column the way the reference names it.
+///
+/// **This is the code half of task-2042; `semantics.rs` holds the rows.** The
+/// binder threw away the `aggregates` of every arm but the head, so the
+/// physical pass was handed a result column that was still a
+/// `BoundExpr::Aggregate` in a plan that claimed to aggregate nothing, and
+/// refused it: `the new engine's physical pass does not handle the expression
+/// an aggregate yet`, reported as primary code 21 where SQLite answers rows.
+/// All four compound operators did it and every aggregate function did it,
+/// while the same aggregate in the *head* arm answered - which is what named
+/// the binder rather than the executor.
+///
+/// The column name is compared for the same reason the rest of this file
+/// compares it: a compound's result columns are named by its **first** arm, so
+/// `SELECT 1 UNION ALL SELECT count(*) FROM t` has a column called `1` and not
+/// one called `count(*)`. A driver binding by name reads that.
+#[test]
+fn an_aggregate_in_a_later_compound_arm_answers_the_way_the_reference_does() {
+    check(
+        "compound-arm-aggregate",
+        &[
+            Step::Exec("CREATE TABLE t (id INTEGER PRIMARY KEY, a INTEGER)"),
+            Step::Exec("INSERT INTO t VALUES (1, 10), (2, 20), (3, 30)"),
+            Step::Query("SELECT 1 UNION ALL SELECT count(*) FROM t"),
+            Step::Query("SELECT 1 UNION SELECT count(*) FROM t"),
+            Step::Query("SELECT 1 EXCEPT SELECT count(*) FROM t"),
+            Step::Query("SELECT 3 INTERSECT SELECT count(*) FROM t"),
+            Step::Query("SELECT 1 UNION ALL SELECT sum(a) FROM t"),
+            Step::Query("SELECT count(*) FROM t UNION ALL SELECT 2"),
+        ],
+    );
+}
+
+/// A grouped aggregate in a later compound arm answers its counts, not blanks.
+///
+/// **The half that answered rather than refusing, which is why it is here and
+/// not only in the acceptance suites.** `plan_select_with` reads
+/// `AggregationMode::Grouped` whenever `group_by` has a term in it and
+/// nothing else, so an arm whose aggregates the binder had discarded still
+/// planned and built a grouped aggregate - one with no accumulators in it. The
+/// projection then read column `group_width + 0`, which is one past the end of
+/// a grouped row that carries only the key,
+/// and reading past the end of a row is this engine's NULL. `SELECT 1 UNION
+/// ALL SELECT count(*) FROM t GROUP BY a` answered `1` and then three empty
+/// values, exit code 0, with nothing for a caller to branch on.
+///
+/// It is also why the steps below ask for the counts of groups of different
+/// sizes rather than one group: every accumulator being absent gives the same
+/// NULL whatever the data, so a single group would pass against an engine that
+/// had lost the aggregate again and simply agreed by accident.
+#[test]
+fn a_grouped_aggregate_in_a_later_compound_arm_answers_its_counts() {
+    check(
+        "compound-arm-grouped",
+        &[
+            Step::Exec("CREATE TABLE t (id INTEGER PRIMARY KEY, a INTEGER, g TEXT)"),
+            Step::Exec("INSERT INTO t VALUES (1, 10, 'x'), (2, 20, 'y'), (3, 30, 'x'), (4, 20, 'z')"),
+            Step::Query("SELECT 1 UNION ALL SELECT count(*) FROM t GROUP BY a"),
+            Step::Query("SELECT 1 UNION ALL SELECT count(*) FROM t GROUP BY g ORDER BY 1"),
+            Step::Query("SELECT 0 UNION ALL SELECT count(*) FROM t GROUP BY g HAVING count(*) > 1"),
+            Step::Query(
+                "SELECT g, count(*) FROM t GROUP BY g                  UNION ALL SELECT g, sum(a) FROM t GROUP BY g ORDER BY 1, 2",
+            ),
+        ],
+    );
+}
+
+/// A window function in a later compound arm answers too.
+///
+/// The binder takes `windows` off itself in the same place it takes
+/// `aggregates`, so this was refused by the same root cause - `the expression
+/// a WindowRef expression` - and is fixed by the same line. It is asserted
+/// separately because a change that restored one list and not the other would
+/// leave every aggregate case green.
+#[test]
+fn a_window_function_in_a_later_compound_arm_answers() {
+    check(
+        "compound-arm-window",
+        &[
+            Step::Exec("CREATE TABLE t (id INTEGER PRIMARY KEY, a INTEGER)"),
+            Step::Exec("INSERT INTO t VALUES (1, 10), (2, 20), (3, 30)"),
+            Step::Query("SELECT 1 UNION ALL SELECT row_number() OVER (ORDER BY a) FROM t"),
+            Step::Query("SELECT 1 UNION ALL SELECT sum(a) OVER (ORDER BY a) FROM t"),
+        ],
+    );
+}
+
 /// A statement that fails part way through leaves the counters the reference
 /// leaves.
 ///
