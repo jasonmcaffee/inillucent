@@ -222,3 +222,13 @@ they are touching do not collide; two that have not, do.
 - **`crates/inillucent-engine/src/engine/compiled.rs::write` is 4 lines under its recorded ceiling
   of 220.** Adding one line and a comment to it fails `policy`. Put what you need in a helper on
   `ImportedDatabase` instead; `statement_mark` is there as the precedent. (task-2043)
+- **`inillucent-testrun` builds the workspace twice, and a number measured by hand can be wrong in
+  the binary it actually runs.** After the default `cargo test --workspace --no-run --lib --tests`
+  it builds again with every feature the selected suites ask for - for any ordinary selection that
+  includes `inillucent-engine/embed` - and runs the second binary. Both are left in
+  `target/debug/deps`, so two `budget-*.exe` sit side by side and disagree. `embed` costs three
+  allocations on every compile, which put `crates/inillucent/tests/budget.rs`'s allocation guard
+  three over a bound that was right every way it had been checked by hand. If an absolute number
+  you measured with `cargo test -p <crate>` fails under the runner and you cannot reproduce it,
+  build it with the features the run printed before you look anywhere else. The guard asks the
+  engine which build it is in rather than carrying two numbers. (task-2039)
