@@ -149,19 +149,35 @@ impl<'p> LeafMut<'p> {
     /// was the most expensive phase of a put, ahead of the descent that found
     /// the page.
     ///
-    /// Both halves have to hold: the row needs room in the delta area, and the
-    /// write may also have to tombstone whatever was under the key, which needs
-    /// the bitmap to exist or to have room to.
+    /// **The row and the bitmap are costed together, and costing them apart is
+    /// what made an ordinary insert answer `SQLITE_CORRUPT` (task-2033).** Both
+    /// grow downwards into the same gap: the delta area starts at
+    /// `delta_start - encoded_len - 2` afterwards, and the tombstone bitmap
+    /// sits immediately below wherever the delta area starts. This used to ask
+    /// two separate questions of a leaf that had no bitmap yet - does the row
+    /// fit above the floor, and would a bitmap fit at the *current*
+    /// `delta_start` - and a leaf with room for either one alone answered yes
+    /// to both. [`LeafMut::set_tombstone`] then created the bitmap, and
+    /// [`LeafMut::plan_encoded`], which asks the page as it now stands, found
+    /// there was no longer room for the row. Two hundred FTS5 documents refused
+    /// on row 42 at a 4,096-byte page for that reason, and on row 14, 37, 89
+    /// and 182 at 1,024, 2,048, 8,192 and 16,384; only the 32,768 the engine
+    /// defaults to was large enough that two hundred documents never reached a
+    /// leaf that tight.
+    ///
+    /// The bitmap is charged whether or not the page has one, because the write
+    /// this answers for may displace a row in the sorted region and creating
+    /// the bitmap is how that row is displaced. That is exact for such a write
+    /// and it over-charges an insert of an absent key by the bitmap's size -
+    /// eight bytes on a leaf under 64 rows, 224 on the 1,782-row leaves an
+    /// index holds - which buys a compaction marginally sooner and is the same
+    /// reservation the second question above was already making.
     ///
     /// @param encoded_len - how many bytes the row's tagged form occupies
     pub fn room_for(&self, encoded_len: usize) -> DbResult<bool> {
         let leaf = LeafRef::parse(self.page)?;
-        let (delta_count, delta_start, row_count, has_tombstones) = (
-            leaf.delta_count(),
-            leaf.delta_start(),
-            leaf.row_count(),
-            leaf.has_tombstones(),
-        );
+        let (delta_count, delta_start, row_count) =
+            (leaf.delta_count(), leaf.delta_start(), leaf.row_count());
         // `LeafRef` is `Copy` and borrows the guard, so this ends the borrow
         // rather than releasing anything.
         let _ = leaf;
@@ -169,21 +185,11 @@ impl<'p> LeafMut<'p> {
             return Ok(false);
         }
         let floor = self.columns_end()?;
-        let bitmap = if has_tombstones {
-            tombstone_bytes(row_count)
-        } else {
-            0
-        };
+        let bitmap = tombstone_bytes(row_count);
         let Some(new_delta_start) = delta_start.checked_sub(encoded_len.saturating_add(2)) else {
             return Ok(false);
         };
-        if new_delta_start.saturating_sub(bitmap) < floor {
-            return Ok(false);
-        }
-        if !has_tombstones && delta_start.saturating_sub(tombstone_bytes(row_count)) < floor {
-            return Ok(false);
-        }
-        Ok(true)
+        Ok(new_delta_start.saturating_sub(bitmap) >= floor)
     }
 
     fn columns_end(&self) -> DbResult<usize> {
@@ -1551,5 +1557,68 @@ mod tests {
                 "page {page_size}, value {length}: costed {costed} but applied {applied:?}"
             );
         }
+    }
+
+    /// A write the room check passed can always place its row, even when the
+    /// same write has to create the tombstone bitmap first.
+    ///
+    /// **The exact arithmetic that answered `SQLITE_CORRUPT` for an ordinary
+    /// `INSERT` (task-2033).** The two grow downwards into the same gap, and
+    /// [`LeafMut::room_for`] used to cost them one at a time: the row against a
+    /// page with no bitmap, and the bitmap against a page with no row. A leaf
+    /// with room for either alone answered yes, [`LeafMut::set_tombstone`]
+    /// created the bitmap, and [`LeafMut::plan_encoded`] then found nowhere to
+    /// put the row.
+    ///
+    /// The loop walks the row length across the boundary rather than asserting
+    /// at one length, because the window that was wrong is exactly the size of
+    /// the bitmap - eight bytes on these leaves - and a single length is as
+    /// likely to miss it as to land in it.
+    #[test]
+    fn a_row_the_room_check_passed_fits_beside_the_tombstone_it_creates() {
+        let mut agreed = 0usize;
+        for length in 1..1_000usize {
+            let mut page = leaf_of(1_024, 8);
+            let value = vec![b'x'; length];
+            let mut encoded = Vec::new();
+            for value in [Datum::Int(3), Datum::Text(&value), Datum::Int(30)] {
+                value.encode_tagged(&mut encoded);
+            }
+            let mut leaf = LeafMut::new(&mut page).expect("a leaf");
+            if !leaf.room_for(encoded.len()).expect("a room check") {
+                continue;
+            }
+            agreed = agreed.saturating_add(1);
+            // What `Tree::apply_row` does to displace the row under the key: a
+            // key already in the sorted region is tombstoned, and on a leaf
+            // that has no bitmap yet that is what creates one.
+            assert_eq!(
+                leaf.set_tombstone(3).expect("a tombstone"),
+                Applied::Yes,
+                "a {length}-byte value: the room check passed and the tombstone did not fit"
+            );
+            let plan = leaf
+                .plan_encoded(encoded.clone())
+                .expect("a plan")
+                .unwrap_or_else(|| {
+                    panic!(
+                        "a {length}-byte value: `room_for` passed a {}-byte row and                          `plan_encoded` then had nowhere to put it",
+                        encoded.len()
+                    )
+                });
+            leaf.apply_delta(&plan).expect("the plan applies");
+            leaf.view()
+                .expect("the page parses")
+                .integrity()
+                .expect("the page is sound");
+        }
+        // §1.2 of the testing standard: a loop whose body never ran asserts
+        // nothing. Most lengths fit a 1,024-byte leaf holding eight rows, so a
+        // count near zero means the leaf was built wrong rather than that the
+        // check is strict.
+        assert!(
+            agreed > 100,
+            "the room check accepted only {agreed} of 999 row lengths, so this case is no              longer exercising the boundary it was written for"
+        );
     }
 }

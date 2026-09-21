@@ -81,6 +81,42 @@ fn is_above(
     false
 }
 
+/// Returns how many of a split's rows go to the left half.
+///
+/// **`fill` is how full to *prefer* the left half, not what a row has to fit
+/// inside (task-2033).** The left half takes at least one row whatever the
+/// measure said, so a fill that holds none is not the question being asked;
+/// the question is whether a whole page holds one. Measuring only against
+/// [`SPLIT_FILL`] refused every row whose fixed part is over half a page, and
+/// on a small page that is an ordinary row: a ten-column leaf spends 384 bytes
+/// on its directory and mini-columns before any value, so at a 512-byte page
+/// the schema catalog's own rows are "larger than half a page" and the third
+/// `CREATE TABLE` in such a database could not be written.
+///
+/// The refusal that is left is a row no page can hold, which is a statement
+/// this engine will not run rather than a damaged file - see the sentence
+/// [`PagedTree::split_carrying`] answers a single row with.
+///
+/// @param builder - the packer, at this tree's page size and columns
+/// @param rows - the rows being split, sorted by key
+/// @param fill - how full to prefer the left half
+fn rows_for_the_left_half(
+    builder: &LeafBuilder,
+    rows: &[Vec<Datum<'_>>],
+    fill: f64,
+) -> DbResult<usize> {
+    let most = rows.len().saturating_sub(1);
+    match builder.pack_with(rows, fill, Some(&mut Measuring))? {
+        Packed::Filled { rows: packed, .. } => Ok(packed.max(1).min(most)),
+        Packed::RowTooLarge => match builder.pack_with(rows, 1.0, Some(&mut Measuring))? {
+            Packed::Filled { .. } => Ok(1.min(most)),
+            Packed::RowTooLarge => Err(misuse(
+                "a row's keys and fixed-width columns alone are larger than a page",
+            )),
+        },
+    }
+}
+
 /// What a leaf that has run out of room turns out to need.
 ///
 /// Decided while the page is still borrowed, and acted on after the borrow ends
@@ -95,6 +131,12 @@ enum Fit {
     /// They do not, so the leaf splits and the rows have to outlive the borrow.
     /// The flag says whether the rows are arriving in key order.
     Split(Vec<Vec<OwnedDatum>>, bool),
+    /// Neither will help, because the leaf holds fewer than two live rows: a
+    /// compaction of one row produces the page that is already there, and a
+    /// split needs two rows to have something to put on each side. The caller
+    /// packs the arriving row into the leaf itself rather than making room for
+    /// it in the delta area - see [`Tree::pack_row_into_leaf`].
+    Stuck,
 }
 
 /// Reports whether a leaf holds fewer than half the rows it was packed with.
@@ -567,23 +609,35 @@ impl PagedTree {
     /// retry after a compaction must reuse the run rather than write a second
     /// and leak the first.
     ///
+    /// The run each value went into is reported alongside the bytes, because
+    /// [`Tree::pack_row_into_leaf`] hands the row to the builder a second time
+    /// and the builder's spiller has to be told to reuse those runs rather than
+    /// write them again. The two agree about which values are out of line
+    /// because they use the same threshold and both leave a key column alone:
+    /// see [`Tree::out_of_line`] and `LeafBuilder::threshold`.
+    ///
     /// @param database - the open database
     /// @param log - where the extent's own record goes
     /// @param row - the values, in tree-column order
-    /// @returns the encoded row, and whether anything was spilled
+    /// @returns the encoded row, whether anything was spilled, and the run each
+    /// spilled value is in, one entry per column
     fn encode_row_spilling_wide_values(
         &mut self,
         database: &mut Database,
         log: &mut dyn TreeLog,
         row: &[Datum<'_>],
-    ) -> DbResult<(Vec<u8>, bool)> {
+    ) -> DbResult<(Vec<u8>, bool, Vec<Option<ExtentRef>>)> {
         let mut spilled = false;
         let mut encoded_row = Vec::new();
+        let mut runs: Vec<Option<ExtentRef>> = vec![None; row.len()];
         for (column, value) in row.iter().enumerate() {
             match self.out_of_line(column, value) {
                 Some(bytes) => {
                     let reference =
                         crate::paged::write_extent(database, log, self.tree_id(), bytes)?;
+                    if let Some(slot) = runs.get_mut(column) {
+                        *slot = Some(reference);
+                    }
                     // The reference says what the bytes are whenever the column
                     // would say something else, which is what lets a column
                     // declared `BLOB` - or declared nothing - hold a text out
@@ -602,7 +656,7 @@ impl PagedTree {
                 None => value.encode_tagged(&mut encoded_row),
             }
         }
-        Ok((encoded_row, spilled))
+        Ok((encoded_row, spilled, runs))
     }
 
     /// Finds the key in a leaf and reads the row that was there.
@@ -778,6 +832,17 @@ impl PagedTree {
                 // Taken rather than cloned: the loop only retries above the call
                 // to this function, and the attempt that reaches it returns.
                 .plan_encoded(std::mem::take(encoded_row))?
+                // **Unreachable from a full leaf, and that took a fix to be true
+                // (task-2033).** `LeafMut::room_for` costs the row and the
+                // tombstone bitmap together, so the bitmap `set_tombstone`
+                // creates two lines above is already paid for by the check that
+                // let this write through. It used to cost them separately - the
+                // row against a page with no bitmap, and the bitmap against a
+                // page with no row - and a leaf with room for either one alone
+                // answered yes and then had room for neither. Two hundred FTS5
+                // documents refused on row 42 at a 4 KiB page for that reason,
+                // and at every page size under the default. What is left here is
+                // a page whose header says something the page does not hold.
                 .ok_or_else(|| corrupt("a leaf that had room lost it before the write"))?;
             leaf.apply_delta(&plan)?;
             if spilled {
@@ -831,7 +896,7 @@ impl PagedTree {
         //
         // Spilled once, outside the loop, because a retry after a compaction
         // must reuse the run rather than write a second and leak the first.
-        let (mut encoded_row, spilled) =
+        let (mut encoded_row, spilled, arriving_runs) =
             self.encode_row_spilling_wide_values(database, log, row)?;
         // **Where this transaction's time goes, measured once rather than timed on every
         // write** (task-2006). Timers here read the clock and copy the whole `WriteStats`
@@ -844,9 +909,9 @@ impl PagedTree {
         let mut from_hint = false;
 
         // Two attempts at most: the first may find the leaf full, and the
-        // compaction or split that follows leaves a page that has room for one
-        // row by construction. A third attempt would mean the second did not,
-        // which is a bug rather than a case to loop on.
+        // compaction or split that follows leaves a page with room for a row.
+        // When it cannot - a leaf with fewer than two live rows, or a row the
+        // delta area will not hold at any fill - the write is packed instead.
         for attempt in 0..2 {
             // **The hint on the first attempt, a descent on the second.** See
             // `PagedTree::leaf_hint`: an append at the right edge - a rowid insert,
@@ -890,18 +955,24 @@ impl PagedTree {
                 })?
             };
             if !planned {
-                if attempt == 1 {
-                    return Err(corrupt(
-                        "a leaf had no room for one row after being compacted and split",
-                    ));
+                // Attempt 1 has already had room made for it and a `Stuck`
+                // leaf never will: the delta area is not how this row gets in.
+                let stuck = attempt == 1 || {
+                    if path.is_empty() {
+                        path = self.leaf_for(database.pool(), &encoded_key)?.1;
+                    }
+                    !self.make_room(database, log, page, &path, Some(&key), encoded_row.len())?
+                };
+                if stuck {
+                    return self.place_row_outside_the_delta_area(
+                        database,
+                        log,
+                        row,
+                        &arriving_runs,
+                        previous,
+                        caller_wants_previous,
+                    );
                 }
-                // The path the hint did not produce. A split needs to rewrite
-                // the parent, so this is the one point a hinted write pays for a
-                // descent - once per split rather than once per row.
-                if path.is_empty() {
-                    path = self.leaf_for(database.pool(), &encoded_key)?.1;
-                }
-                self.make_room(database, log, page, &path, Some(&key), encoded_row.len())?;
                 continue;
             }
             self.record_undo(log, &key, &mut previous, caller_wants_previous)?;
@@ -975,7 +1046,17 @@ impl PagedTree {
                 LeafMut::new(bytes)?.has_room_for_a_tombstone()
             })?;
             if !room {
-                self.make_room(database, log, page, &path, None, 0)?;
+                // A leaf too full for a tombstone that no compaction or split
+                // can help is a leaf whose header disagrees with its own
+                // contents: the bitmap is `row_count / 8` bytes and a
+                // compaction hands back the whole delta area. Said here rather
+                // than recursed on, because `make_room` answering `false`
+                // twice is what an infinite recursion looks like from outside.
+                if !self.make_room(database, log, page, &path, None, 0)? {
+                    return Err(corrupt(
+                        "a leaf has no room for a tombstone and cannot be split",
+                    ));
+                }
                 return self.delete(database, log, key);
             }
         }
@@ -1286,6 +1367,16 @@ impl PagedTree {
                 }
                 _ => false,
             };
+        // **Fewer than two live rows is stuck, whichever route it would take
+        // (task-2033).** Every way of making room here moves rows between
+        // pages, and a leaf holding one row has nothing to move: a compaction
+        // rebuilds the page it already is, and a split has no second row to
+        // give the right half. Saying so is what lets the caller take the one
+        // route that does work, which is packing the arriving row into the
+        // leaf beside the row already there.
+        if source.len() < 2 {
+            return Ok(Fit::Stuck);
+        }
         if spilled {
             // The rows are *not* copied out here. Reading them through the
             // guard would resolve every out-of-line value, which is the read
@@ -1342,12 +1433,19 @@ impl PagedTree {
     /// of the three this is; this drops the guard and does it. They were one
     /// function of 166 lines until task-1946's M12.
     ///
+    /// **`false` means nothing was done and nothing can be**, which is a leaf
+    /// holding fewer than two live rows: see [`Fit::Stuck`]. A caller that
+    /// retries after this has to have another way in, or it is a loop that
+    /// cannot end - `write_row` packs the row into the leaf and `delete`
+    /// refuses.
+    ///
     /// @param database - the file
     /// @param log - where the record goes
     /// @param page - the leaf
     /// @param path - the interior pages above it, for a split
     /// @param arriving - the key about to be written, when there is one
     /// @param needed - how many bytes the arriving row needs
+    /// @returns whether room was made
     pub fn make_room(
         &mut self,
         database: &mut Database,
@@ -1356,7 +1454,7 @@ impl PagedTree {
         path: &[PageId],
         arriving: Option<&[Datum<'_>]>,
         needed: usize,
-    ) -> DbResult<()> {
+    ) -> DbResult<bool> {
         let before = self.stats.get();
         let started = std::time::Instant::now();
         let outcome = self.make_room_timed(database, log, page, path, arriving, needed);
@@ -1384,6 +1482,7 @@ impl PagedTree {
     /// @param path - the interior pages above it, for a split
     /// @param arriving - the key about to be written, when there is one
     /// @param needed - how many bytes the arriving row needs
+    /// @returns whether room was made
     fn make_room_timed(
         &mut self,
         database: &mut Database,
@@ -1392,7 +1491,7 @@ impl PagedTree {
         path: &[PageId],
         arriving: Option<&[Datum<'_>]>,
         needed: usize,
-    ) -> DbResult<()> {
+    ) -> DbResult<bool> {
         let choosing = std::time::Instant::now();
         let fit = self.choose_fit(database, page, arriving, needed)?;
         let mut stats = self.stats.get();
@@ -1401,8 +1500,10 @@ impl PagedTree {
             .saturating_add(choosing.elapsed().as_nanos());
         self.stats.set(stats);
         match fit {
+            Fit::Stuck => Ok(false),
             Fit::Compact(image, right, max_cts) => {
-                self.compact_into(database, log, page, image, right, max_cts, true)
+                self.compact_into(database, log, page, image, right, max_cts, true)?;
+                Ok(true)
             }
             Fit::Split(rows, appending) => {
                 let borrowed: Vec<Vec<Datum<'_>>> = rows
@@ -1418,15 +1519,24 @@ impl PagedTree {
                 // page ends up holding. Filling the left and leaving the room
                 // on the right is what the rows are actually going to need.
                 let fill = if appending { APPEND_FILL } else { SPLIT_FILL };
-                self.split(database, log, page, path, &borrowed, fill)
+                self.split(database, log, page, path, &borrowed, fill)?;
+                Ok(true)
             }
             Fit::Repack(appending) => {
                 let (rows, carried) = self.rows_to_repack(database.pool(), page)?;
+                // The same reasoning as `Fit::Stuck`, asked again because this
+                // route reads the leaf's rows a second way and a leaf whose
+                // only live rows were shadowed can turn out to hold fewer than
+                // the borrowed read counted.
+                if rows.len() < 2 {
+                    return Ok(false);
+                }
                 let borrowed: Vec<Vec<Datum<'_>>> = rows
                     .iter()
                     .map(|row| row.iter().map(OwnedDatum::borrow).collect())
                     .collect();
-                self.repack(database, log, page, path, &borrowed, &carried, appending)
+                self.repack(database, log, page, path, &borrowed, &carried, appending)?;
+                Ok(true)
             }
         }
     }
@@ -1652,14 +1762,7 @@ impl PagedTree {
         // runs for values the encode is about to write again. The two agree
         // about the count because they use the same threshold; what differs is
         // only whether the bytes are moved.
-        let taken = match builder.pack_with(rows, fill, Some(&mut Measuring))? {
-            Packed::Filled { rows: packed, .. } => packed.max(1).min(rows.len().saturating_sub(1)),
-            Packed::RowTooLarge => {
-                return Err(misuse(
-                    "a row's keys and fixed-width columns alone are larger than half a page",
-                ))
-            }
-        };
+        let taken = rows_for_the_left_half(&builder, rows, fill)?;
         let left_rows = rows.get(..taken).unwrap_or(&[]);
         let right_rows = rows.get(taken..).unwrap_or(&[]);
         // The two halves are encoded with their own slices of the carried table,
@@ -2469,6 +2572,151 @@ impl PagedTree {
         // `wide` ended a write campaign with 791 rows where SQLite had 500.
         self.in_key_order(&mut rows, &mut carried);
         Ok((rows, carried))
+    }
+
+    /// Writes a row the delta area cannot take, and reports the row it replaced.
+    ///
+    /// **The route a write takes when making room cannot help it (task-2033).**
+    /// An ordinary write appends the row's tagged bytes to the delta area, and
+    /// on a small page that area is a fraction of what the page holds: a leaf
+    /// spends `64 + 16 * columns` on its directory and eight bytes plus a slot
+    /// per row on each column's mini-column before it holds anything, so the
+    /// ten-column schema catalog has spent 384 of a 512-byte page once it holds
+    /// a single row, against its own rows of 107 to 153 bytes tagged. Making
+    /// room does not help, because a split leaves both halves holding a row and
+    /// the gap is the same size in each - so the third `CREATE TABLE` in a
+    /// 512-byte database answered `SQLITE_CORRUPT`.
+    ///
+    /// Packed into the sorted region the same row is one slot per column and
+    /// its text in the heap rather than a tagged copy of every value, which is
+    /// what makes it fit. This is the expensive route - it rewrites the page
+    /// and logs the image - and nothing reaches it that had a cheaper way
+    /// through: the caller has already had an ordinary compaction or split
+    /// decline to make room.
+    ///
+    /// **The page and the path come from one descent.** A split rewrites the
+    /// parent, so the path has to be the one above the leaf being packed;
+    /// pairing a hinted page with a descended path would hold only while the
+    /// hint's window and the descent agree, which is not an invariant this
+    /// path has any reason to rest on.
+    ///
+    /// @param database - the file
+    /// @param log - where the records go
+    /// @param row - the arriving row's values, in tree-column order
+    /// @param arriving - the run each of its spilled values is already in
+    /// @param previous - the row that was under the key, for the undo record
+    /// @param caller_wants_previous - whether the caller asked for that row
+    /// @returns the row that was under the key, when the caller asked for it
+    fn place_row_outside_the_delta_area(
+        &mut self,
+        database: &mut Database,
+        log: &mut dyn TreeLog,
+        row: &[Datum<'_>],
+        arriving: &[Option<ExtentRef>],
+        mut previous: Option<Vec<OwnedDatum>>,
+        caller_wants_previous: bool,
+    ) -> DbResult<Option<Vec<OwnedDatum>>> {
+        let key: Vec<Datum<'_>> = row.iter().copied().take(self.key_columns()).collect();
+        self.record_undo(log, &key, &mut previous, caller_wants_previous)?;
+        // Encoded again rather than carried in: this is a page rewrite and a
+        // descent, and one key encoding beside those is not worth a parameter.
+        let encoded_key = self.encode_key(&key);
+        let (page, path) = self.leaf_for(database.pool(), &encoded_key)?;
+        self.pack_row_into_leaf(database, log, page, &path, row, &key, arriving)?;
+        let mut stats = self.stats.get();
+        stats.inserted = stats.inserted.saturating_add(1);
+        stats.descended = stats.descended.saturating_add(1);
+        self.stats.set(stats);
+        if previous.is_none() {
+            self.note_rows(1);
+        }
+        Ok(previous)
+    }
+
+    /// Rebuilds a leaf with the arriving row packed into its sorted region.
+    ///
+    /// **The one way into a leaf that is not the delta area.** An ordinary
+    /// write appends the row's tagged bytes below `delta_start`, which is the
+    /// cheap placement and the only one the write path had. It needs the whole
+    /// row to fit the gap between the mini-columns and the heap, and that gap
+    /// is small on a small page: a ten-column leaf holding one row has spent
+    /// 384 of a 512-byte page before the gap starts. Packed into the sorted
+    /// region the same row is one slot per column plus its text in the heap,
+    /// and the builder is what packs it - so the route to placing such a row is
+    /// to hand the leaf's own rows and the new one to the builder together.
+    ///
+    /// The row under this key goes out before the new one goes in. Two rows
+    /// under one key in a packed leaf is not a duplicate a later write would
+    /// clean up: the sorted region is searched by comparison, so a descent
+    /// finds whichever of the two the search lands on and the other is
+    /// unreachable and never freed.
+    ///
+    /// **`repack` carries its image into the log rather than re-running.** A
+    /// compaction is normally replayed by packing the page's own live rows
+    /// again, which is deterministic; this one packs a row the page did not
+    /// hold, so it is not derivable from the page and `repack` logs the bytes.
+    ///
+    /// @param database - the file
+    /// @param log - where the records go
+    /// @param page - the leaf
+    /// @param path - the interior pages above it, root first, for a split
+    /// @param row - the arriving row's values, in tree-column order
+    /// @param key - its key columns, for finding the row it replaces
+    /// @param arriving - the run each of its spilled values is already in
+    fn pack_row_into_leaf(
+        &mut self,
+        database: &mut Database,
+        log: &mut dyn TreeLog,
+        page: PageId,
+        path: &[PageId],
+        row: &[Datum<'_>],
+        key: &[Datum<'_>],
+        arriving: &[Option<ExtentRef>],
+    ) -> DbResult<()> {
+        let (mut rows, mut carried) = self.rows_to_repack(database.pool(), page)?;
+        // **Under the tree's own ordering, because `previous` was decided under
+        // it.** `locate` compares with the tree's collations, so on a `NOCASE`
+        // index it can answer that `'BLUE'` is already there when a `BINARY`
+        // comparison says it is not. Asking the two questions differently
+        // would pack both rows into the leaf, and a descent then finds
+        // whichever of them its search lands on while the other is unreachable
+        // and never freed.
+        let replaced = rows.iter().position(|held| {
+            let other: Vec<Datum<'_>> = held
+                .iter()
+                .take(self.key_columns())
+                .map(OwnedDatum::borrow)
+                .collect();
+            crate::leaf::compare_rows_under(
+                &other,
+                key,
+                self.key_columns(),
+                self.collations(),
+                self.directions(),
+            ) == std::cmp::Ordering::Equal
+        });
+        if let Some(at) = replaced {
+            if at < rows.len() {
+                rows.remove(at);
+            }
+            if at < carried.len() {
+                carried.remove(at);
+            }
+        }
+        rows.push(row.iter().map(OwnedDatum::from_datum).collect());
+        carried.push(arriving.to_vec());
+        // The builder packs and does not sort, and the arriving row was pushed
+        // onto the end whatever its key is.
+        self.in_key_order(&mut rows, &mut carried);
+        let borrowed: Vec<Vec<Datum<'_>>> = rows
+            .iter()
+            .map(|row| row.iter().map(OwnedDatum::borrow).collect())
+            .collect();
+        // Not `appending`: that fill exists to leave the room on the right for
+        // rows still arriving in key order, and this call is here because a
+        // row did not fit, so the fill that packs both halves evenly is the one
+        // that gives it somewhere to go.
+        self.repack(database, log, page, path, &borrowed, &carried, false)
     }
 
     /// Sorts rows and their carried references together, by key.

@@ -884,6 +884,12 @@ struct LearningRows {
     rows: TreeRows,
     /// The catalog as it now stands: at most one entry per object.
     seen: Vec<SchemaEntry>,
+    /// The trees a fresh read of the catalog has already been made for.
+    ///
+    /// See [`LearningRows::refresh_from_the_file`]: the read is a walk of the
+    /// schema tree and its answer is the same for every record naming the same
+    /// tree, so it is made once each.
+    refreshed_for: Vec<u64>,
     /// Whether a record naming a tree this pass has no shape for is skipped
     /// rather than refused.
     ///
@@ -930,6 +936,7 @@ impl LearningRows {
                 1,
             ),
             seen: checkpointed.to_vec(),
+            refreshed_for: Vec::new(),
             tolerant,
         };
         learning.derive_every_shape();
@@ -1022,7 +1029,9 @@ impl RowRedo for LearningRows {
             self.learn(row);
         }
         let result = self.rows.insert_row(database, tree, page, row, lsn);
-        self.tolerate_unknown_tree(tree, result)
+        self.retry_after_reading_the_catalog(database, tree, result, |rows, database| {
+            rows.insert_row(database, tree, page, row, lsn)
+        })
     }
 
     fn delete_row(
@@ -1034,7 +1043,9 @@ impl RowRedo for LearningRows {
         lsn: u64,
     ) -> DbResult<()> {
         let result = self.rows.delete_row(database, tree, page, key, lsn);
-        self.tolerate_unknown_tree(tree, result)
+        self.retry_after_reading_the_catalog(database, tree, result, |rows, database| {
+            rows.delete_row(database, tree, page, key, lsn)
+        })
     }
 
     fn update_in_place(
@@ -1050,7 +1061,9 @@ impl RowRedo for LearningRows {
         let result = self
             .rows
             .update_in_place(database, tree, page, key, column, value, lsn);
-        self.tolerate_unknown_tree(tree, result)
+        self.retry_after_reading_the_catalog(database, tree, result, |rows, database| {
+            rows.update_in_place(database, tree, page, key, column, value, lsn)
+        })
     }
 
     fn compact_leaf(
@@ -1062,7 +1075,9 @@ impl RowRedo for LearningRows {
         from_lsn: u64,
     ) -> DbResult<()> {
         let result = self.rows.compact_leaf(database, tree, page, lsn, from_lsn);
-        self.tolerate_unknown_tree(tree, result)
+        self.retry_after_reading_the_catalog(database, tree, result, |rows, database| {
+            rows.compact_leaf(database, tree, page, lsn, from_lsn)
+        })
     }
 }
 
@@ -1113,16 +1128,110 @@ impl LearningRows {
             return result;
         }
         match result {
-            Err(error)
-                if error.detail().is_some_and(|detail| {
-                    detail.ends_with("which this recovery was not told the shape of")
-                }) =>
-            {
-                Ok(())
-            }
+            Err(error) if is_an_unknown_tree(&error) => Ok(()),
             other => other,
         }
     }
+
+    /// Reads the catalog off the file's own pages and learns whatever it says.
+    ///
+    /// **Because a catalog row does not always go past as a row (task-2033).**
+    /// Everything this type knows, it learned from the `InsertRow` records
+    /// naming the schema tree, and that is only every catalog row while every
+    /// `CREATE TABLE`'s row reaches the log as one. It does not: the write path
+    /// can place a row by rebuilding the leaf around it, which reaches the log
+    /// as a page image, and a bulk build writes its pages to the file before
+    /// the record that names them, which puts nothing in the log at all. A row
+    /// that arrived either way left this type not knowing the table existed, so
+    /// the rows written into it afterwards named a tree with no shape and
+    /// `tolerate_unknown_tree` dropped them - silently, with
+    /// `PRAGMA integrity_check` answering `ok` on the result. At a 512-byte
+    /// page, three `CREATE TABLE`s and an `INSERT` in one transaction lost the
+    /// inserted row, and an FTS5 index lost 487 of its records.
+    ///
+    /// Reading the file is what covers all of those at once, because the
+    /// question is what the catalog *says*, not how each row got there. It is
+    /// asked only when a record names a tree with no shape - never on an
+    /// ordinary write - and a catalog that will not read yet is not an error
+    /// here: the pages the log carries whole may not have been put back, and
+    /// the caller's existing answer for an unknown tree still applies.
+    ///
+    /// **Asked at most once per tree**, because the answer does not change
+    /// between two records naming the same one and reading the catalog is a
+    /// walk of the schema tree. A recovery that spans a `REINDEX` holds many
+    /// records for the tree the rebuild dropped, and re-reading the catalog
+    /// for each of them would turn a scan into a scan per record.
+    ///
+    /// @param database - the file being replayed into
+    /// @param tree - the tree the record named
+    /// @returns whether the catalog now names a tree it did not name before
+    fn refresh_from_the_file(&mut self, database: &Database, tree: u64) -> bool {
+        if self.refreshed_for.contains(&tree) {
+            return false;
+        }
+        self.refreshed_for.push(tree);
+        let Ok(schema) =
+            inillucent_catalog::paged::attach_catalog(database.pool(), database.catalog_root())
+        else {
+            return false;
+        };
+        let Ok(entries) = inillucent_catalog::paged::read_catalog(database.pool(), &schema) else {
+            return false;
+        };
+        let mut fresh = false;
+        for entry in entries {
+            fresh = fresh || !self.seen.iter().any(|held| held.tree_id == entry.tree_id);
+            self.remember(entry);
+        }
+        if fresh {
+            self.derive_every_shape();
+        }
+        fresh
+    }
+
+    /// Runs a record's redo again once the file's own catalog has been read.
+    ///
+    /// The first attempt is the cheap one: almost every record names a tree
+    /// whose `CREATE TABLE` went past as a row, and those never reach this.
+    ///
+    /// @param database - the file being replayed into
+    /// @param tree - the tree the record named
+    /// @param first - what the first attempt answered
+    /// @param again - runs the record's redo a second time
+    fn retry_after_reading_the_catalog(
+        &mut self,
+        database: &mut Database,
+        tree: u64,
+        first: DbResult<()>,
+        again: impl FnOnce(&mut TreeRows, &mut Database) -> DbResult<()>,
+    ) -> DbResult<()> {
+        match first {
+            Err(error) if is_an_unknown_tree(&error) => {
+                if self.refresh_from_the_file(database, tree) {
+                    let mut rows = std::mem::take(&mut self.rows);
+                    let second = again(&mut rows, database);
+                    self.rows = rows;
+                    return self.tolerate_unknown_tree(tree, second);
+                }
+                self.tolerate_unknown_tree(tree, Err(error))
+            }
+            other => self.tolerate_unknown_tree(tree, other),
+        }
+    }
+}
+
+/// Reports whether a redo failed only because this pass has no shape for the
+/// tree the record named.
+///
+/// Matched on the sentence `TreeRows` raises, which is the one failure a fresh
+/// read of the catalog can answer. Every other failure - a bad key, a page that
+/// is not a leaf - names a real defect and is never retried or tolerated.
+///
+/// @param error - what the redo answered
+fn is_an_unknown_tree(error: &inillucent_base::error::DbError) -> bool {
+    error
+        .detail()
+        .is_some_and(|detail| detail.ends_with("which this recovery was not told the shape of"))
 }
 
 /// Returns a catalog entry's tree shape, for the recovery applier.

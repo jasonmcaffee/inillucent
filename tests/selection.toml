@@ -502,6 +502,13 @@ covers = ["inillucent-engine"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
+name = "page_sizes"
+tier = "engine"
+covers = ["inillucent-engine"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
 name = "new_engine_connect"
 tier = "engine"
 covers = ["inillucent-engine"]
