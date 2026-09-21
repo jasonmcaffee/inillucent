@@ -418,6 +418,21 @@ layer = 10
 may_depend_on = [
   "inillucent-driver",
 ]
+# **The stories in `crates/inillucent/tests/` run across a configuration matrix,
+# and the matrix is in a test-only crate (task-2036).** Every story in this
+# repository ran at one page size until then, which is why task-2033 - FTS5
+# refusing on row 42 at SQLite's own 4,096 byte page - could not be seen by
+# 3,169 tests. `inillucent_compat::matrix` holds the arms and the `scenario!`
+# macro that expands one test per arm, and the same macro is used by the story
+# suites in `inillucent-compat/tests/`, so there is one list of arms rather than
+# two that agree today.
+#
+# It is a dev-dependency and nothing else: no production code in this crate
+# names it, and `inillucent-compat` is `publish = false` with no version
+# requirement in the workspace table, so cargo strips the edge when this crate
+# is packaged - the arrangement `inillucent-sim` already has with
+# `inillucent-pool`, `-txn` and `-wal`.
+may_test_with = ["inillucent-compat"]
 
 # `inillucent-migrate` is the one production crate that names both engines, and it
 # has to: it reads a legacy generation directory through `inillucent-core`'s own

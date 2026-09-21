@@ -1,0 +1,11 @@
+# Statements in Nikaya's source that this engine will not run yet.
+#
+# One per line: the statement's source - the `-- statement:` key in
+# `statements.sql`, which is the file and line it came from - a tab, and the
+# ticket that will make it run.
+#
+# `story_workload_replay.rs` fails when a statement here now runs, so a fixed
+# defect cannot stay listed: a list that only grows is a list of things nobody
+# will take off it, and a fixed defect left listed reads as coverage and is not.
+# That is the rule from task-1969 section 4, and it is the same arrangement
+# `crates/inillucent-compat/tests/corpora/differential-part8/allow.list` has.

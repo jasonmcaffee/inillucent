@@ -165,7 +165,36 @@ impl Database {
     /// @param path - the database file
     /// @param frames - how many frames the buffer pool holds
     pub fn open_with(path: impl AsRef<Path>, frames: usize) -> DbResult<Database> {
-        Database::open_as(path, frames, false)
+        Database::open_as(path, PAGE_SIZE, frames, false)
+    }
+
+    /// Opens a database with the page size and the pool size stated.
+    ///
+    /// **The page size a connection is built at was not reachable from here,
+    /// and that is why every published number and every story ran at 32,768
+    /// bytes.** `ImportedDatabase::create` has taken a page size since Phase 1
+    /// and `Database::open` passed the constant, so the only way to get a file
+    /// with 4,096 byte pages was to go under the connection surface - which
+    /// `new_engine_vtab_stream.rs` does and no application can. The
+    /// configuration matrix in `inillucent_compat::matrix` needs a database
+    /// that is *actually* built at the arm's page size and is still driven
+    /// through the surface an application binds to, so this is that call.
+    ///
+    /// It is not a second open path. `open` and `open_with` are this function
+    /// with [`PAGE_SIZE`] written in, and every step below is the one they
+    /// already took.
+    ///
+    /// The page size decides the file's geometry when this call creates the
+    /// file, and names the geometry the file already has when it opens an
+    /// existing one - so a caller that opens a 4,096 byte file at 32,768 gets
+    /// a connection whose `PRAGMA page_size` and whose `VACUUM` disagree with
+    /// the file. Pass the size the file was built at.
+    ///
+    /// @param path - the database file
+    /// @param page_size - the page size to build at, or the one the file has
+    /// @param frames - how many frames the buffer pool holds
+    pub fn open_at(path: impl AsRef<Path>, page_size: usize, frames: usize) -> DbResult<Database> {
+        Database::open_as(path, page_size, frames, false)
     }
 
     /// Opens a database this connection will never write.
@@ -178,16 +207,22 @@ impl Database {
     /// @param path - the database file
     /// @param frames - how many frames the buffer pool holds
     pub fn open_read_only(path: impl AsRef<Path>, frames: usize) -> DbResult<Database> {
-        Database::open_as(path, frames, true)
+        Database::open_as(path, PAGE_SIZE, frames, true)
     }
 
     /// [`Database::open_with`], with the caller saying whether this connection
     /// may write.
     ///
     /// @param path - the database file
+    /// @param page_size - the page size to build at, or the one the file has
     /// @param frames - how many frames the buffer pool holds
     /// @param read_only - whether this connection may write the file
-    fn open_as(path: impl AsRef<Path>, frames: usize, read_only: bool) -> DbResult<Database> {
+    fn open_as(
+        path: impl AsRef<Path>,
+        page_size: usize,
+        frames: usize,
+        read_only: bool,
+    ) -> DbResult<Database> {
         let path = path.as_ref().to_path_buf();
         // **`:memory:` is a database, not a filename.** The operating system
         // refuses it as a path - on Windows with `the filename, directory name,
@@ -201,7 +236,7 @@ impl Database {
         if is_memory(&path) {
             let vfs: std::sync::Arc<dyn inillucent_vfs::Vfs> =
                 std::sync::Arc::new(inillucent_vfs::MemoryVfs::new());
-            let engine = ImportedDatabase::create_on(vfs, path.clone(), PAGE_SIZE, frames)?;
+            let engine = ImportedDatabase::create_on(vfs, path.clone(), page_size, frames)?;
             return Ok(Database {
                 writer: std::rc::Rc::clone(&engine.writing),
                 settings: std::rc::Rc::clone(&engine.pragmas),
@@ -214,8 +249,8 @@ impl Database {
             });
         }
         let engine = match (path.is_file(), read_only) {
-            (true, false) => ImportedDatabase::open(path.clone(), PAGE_SIZE, frames)?,
-            (true, true) => ImportedDatabase::open_read_only(path.clone(), PAGE_SIZE, frames)?,
+            (true, false) => ImportedDatabase::open(path.clone(), page_size, frames)?,
+            (true, true) => ImportedDatabase::open_read_only(path.clone(), page_size, frames)?,
             // **A read only connection does not create the file it was given.**
             // Creating one would answer a caller who asked to read an existing
             // database with an empty one, and would write - see task-1979's E2,
@@ -226,7 +261,7 @@ impl Database {
                      create one",
                 ))
             }
-            (false, false) => ImportedDatabase::create(path.clone(), PAGE_SIZE, frames)?,
+            (false, false) => ImportedDatabase::create(path.clone(), page_size, frames)?,
         };
         Ok(Database {
             writer: std::rc::Rc::clone(&engine.writing),

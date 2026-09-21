@@ -145,6 +145,11 @@ inillucent-cli = { path = "crates/inillucent-cli", version = "0.1.0" }
 inillucent-search = { path = "crates/inillucent-search", version = "0.1.0" }
 inillucent-migrate = { path = "crates/inillucent-migrate", version = "0.1.0" }
 inillucent-remote = { path = "crates/inillucent-remote", version = "0.1.0" }
+# **No version, for the reason `inillucent-sim` above has none.** `inillucent-compat` is
+# `publish = false` and is now a dev-dependency of `inillucent`, which is published: cargo
+# strips a dev-dependency with no version requirement when it packages a crate, and with one
+# it would look this crate up on crates.io and stop.
+inillucent-compat = { path = "crates/inillucent-compat" }
 inillucent-driver = { path = "drivers/inillucent-driver", version = "0.1.0" }
 inillucent-driver-capi = { path = "drivers/inillucent-driver-capi", version = "0.1.0" }
 

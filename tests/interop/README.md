@@ -1,0 +1,90 @@
+# `tests/interop/` — a database from every release we have shipped
+
+Each subdirectory holds a database **written by that release's own binary**, the log segment it
+left, and the answers it gave. `crates/inillucent-compat/tests/release_format.rs` opens them with
+the build under test and asks the same questions again.
+
+This is the only check in the tree that can answer *"can today's engine still read what we shipped
+last month"*, and it can only answer it because the file was written by that release rather than
+described by one.
+
+## The releases
+
+| version | published | signature | log segment | note |
+|---|---|---|---|---|
+| 0.1.1 | 2026-09-12 | none | 456 B | the oldest fixture. Releases were not signed until 0.1.3, so only the `SHA256SUMS` digest is checked for this one. **It cannot read an FTS5 index written by a later build** — see below. |
+| 0.1.2 | 2026-09-14 | none | 33,792 B | |
+| 0.1.3 | 2026-09-19 | minisign | 33,792 B | the first signed release |
+| 0.1.5 | 2026-09-20 | minisign | 512 B | |
+| 0.1.6 | 2026-09-20 | minisign | 512 B | |
+| 0.1.7 | 2026-09-20 | minisign | 512 B | |
+
+There is no 0.1.4. It was never published: the npm packages `inillucent@0.1.3` and `@0.1.4` shipped
+broken and an npm version number can never be reused, so the release after 0.1.3 was 0.1.5.
+
+Every `app.rdb` is **622,592 bytes**, which is 19 pages of 32,768. Git stores each one at about
+6.6 KB. Every `expected.tsv` is 3,812 bytes, LF, and all six are byte for byte identical — which is
+the point of keeping one per release rather than one shared file: a release that answered
+differently would be the finding, and a shared file could not say which release it was.
+
+## Building one
+
+```powershell
+pwsh tools/build-interop-fixture.ps1 -Version 0.1.6
+```
+
+It downloads that release's Windows archive and `SHA256SUMS` into `tools/cross/bin/releases/`,
+which is gitignored and shared with the main checkout the way the cross toolchain is. It verifies
+the archive against `SHA256SUMS`, and `SHA256SUMS` against `packaging/inillucent.pub` with minisign
+when the release published a signature. Then it runs `build.sql` with that release's
+`inillucent.exe`, checkpoints, writes one more row, and records the answers to `verify.sql`.
+
+`packaging/ship.ps1` calls it in the publish phase for the version being shipped, in a commit of
+its own after the tag — the fixture is built from the *published* archive, so it cannot exist
+before the release does. `release_format.rs::the_release_script_builds_the_shipped_versions_fixture`
+is what stops that call being quietly removed.
+
+## Two things the design asked for that are not here, and why
+
+**Both page sizes.** The design asked for a fixture at 4,096 bytes and one at 32,768. A released
+binary cannot choose a page size: it is an argument to `Database::open_at`, the command line has no
+flag for it, and `PRAGMA page_size` reports the page size rather than setting one. So every fixture
+is at the engine's own 32,768, and the smaller page is covered where it can be — by `matrix.rs`'s
+`sqlite_page` arm, which drives the library directly.
+
+**Files under 300 KB.** 19 pages of 32,768 is 622,592 bytes and the rows are a small part of it:
+each tree root costs a page whether it holds five rows or five thousand. The fixture holds one of
+each kind of storage rather than a lot of any of them, and what it costs in the repository is the
+6.6 KB git stores it as.
+
+## The row that only the log holds
+
+Each fixture was written, checkpointed, and then written to once more. That last row — `note` 9001,
+`the row that only the log holds` — is in `app.rdb-wal.*` and nowhere else. A build that opened the
+database and ignored the log would answer 120 rows where `expected.tsv` says 121. Replaying an
+older release's log is the part of the format most likely to move and the part an ordinary read
+would never reach.
+
+This is also why nothing ever opens a fixture in place: opening a database replays its log and
+writes the row into the file, which would leave the checked-in fixture different from the one the
+release produced. Every reader stages a copy first, and `inillucent_compat::interop::stage` is what
+they all call.
+
+## What 0.1.1 cannot read
+
+`release_format_history.rs`, in the `nightly` tier, asks the other direction: an older binary
+reading a file **this** build wrote. Every release answers every question identically except one.
+
+```
+0.1.1  SELECT rowid FROM note_fts WHERE note_fts MATCH 'segment'   ->  (no rows)
+0.1.2 and later                                                    ->  1;4
+```
+
+The FTS5 index layout changed in 0.1.2. 0.1.1 reads everything else in the same file — the tables,
+the `WITHOUT ROWID` entries, the blob over a page, the `inillucent_search` rows, the row that only
+the log holds — and it reads `count(*)` and `SELECT rowid, title` out of `note_fts` itself. Only
+the `MATCH` comes back empty, and it comes back **empty rather than refused**, because nothing in
+the index says which layout wrote it. That silence is **task-2053**. The 0.1.1 half is history: a
+published binary's answer can never be fixed, so it is recorded in `KNOWN_GAPS` as a difference
+that is asserted to *still happen*, and a change that made 0.1.1 read the new index turns that
+suite red and gets the row deleted.

@@ -1,0 +1,282 @@
+# The escape ledger: every defect that reached a user, and the test that holds it now.
+#
+# Read by `crates/inillucent-compat/tests/escapes.rs`, which fails when a
+# `held_by` entry names a test that does not exist, when a row holds nothing and
+# does not say why, and when an escape named in
+# `tests/inillucent-e2e-scenarios-tdd.md` §3.2 has no row here at all.
+#
+# ## Why a file rather than a paragraph
+#
+# Because "we added a test for that" is a claim, and a claim in prose cannot
+# fail a build. Every serious defect in this repository's history was found by a
+# real use the suite did not model, and after each one somebody wrote a test and
+# said so in a commit message. Nothing checked that the test still existed, that
+# it still ran, or that it was the test the message named. This file is that
+# check: a row per escape, the test that holds it, and a guard that resolves
+# every name.
+#
+# ## The fields
+#
+# `ref`      the commit, ticket or release the escape belongs to
+# `surface`  where it lives, in this repository's own words
+# `what`     one sentence: what a user saw
+# `found_by` how it was found, which is the thing the suite was not doing
+# `held_by`  the tests that now fail if it comes back, as
+#            `<package>::<target>::<test>`; a scenario is
+#            `<package>::<target>::<story>::<arm>`
+# `open`     required when `held_by` is empty, and forbidden when it is not:
+#            why nothing holds this yet
+#
+# ## Adding a row
+#
+# A ticket that fixes a defect adds its row in the same commit as the fix. That
+# is the documentation rule; `escapes.rs` is what makes it more than a rule.
+# When a ticket closes an `open` row, the `open` line goes and `held_by` names
+# the test - the guard refuses a row that carries both.
+
+# ---------------------------------------------------------------------------
+# A configuration nobody varied.
+# ---------------------------------------------------------------------------
+
+[[escape]]
+ref = "task-2033"
+surface = "fts5, page geometry"
+what = "200 FTS5 documents at a 4,096 byte page refuse with SQLITE_CORRUPT on row 42"
+found_by = "writing another test"
+held_by = [
+  "inillucent::story_rag::an_ordinary_fts5_ingest::sqlite_page",
+  "inillucent::story_rag::an_ordinary_fts5_ingest::small_pool",
+  "inillucent::story_rag::an_ordinary_fts5_ingest::default",
+  "inillucent::story_rag::ingest_and_search::sqlite_page",
+]
+
+[[escape]]
+ref = "2fa10c4"
+surface = "buffer pool, eviction"
+what = "a 64 frame pool wrote an uncommitted page to the file instead of throwing it away, so a rolled back transaction's pages reached the disk"
+found_by = "a missing fixture made two tests skip, and somebody looked at why"
+held_by = [
+  "inillucent::story_rag::ingest_and_search::small_pool",
+  "inillucent::story_edges::a_blob_that_shrinks_gives_its_pages_back::small_pool",
+  "inillucent::story_nikaya::a_startup_migration_leaves_every_neighbour_readable::small_pool",
+]
+
+[[escape]]
+ref = "task-1911"
+surface = "rollback journal, checkpoint"
+what = "three defects in the rollback journal survived every crash campaign, because DELETE mode's workload never crashed inside a checkpoint"
+found_by = "TRUNCATE and PERSIST covering the checkpoint by accident"
+held_by = [
+  "inillucent-compat::durability::power_loss_at_every_cut_point_of_a_checkpoint",
+]
+
+# ---------------------------------------------------------------------------
+# A consumer nobody modelled.
+# ---------------------------------------------------------------------------
+
+[[escape]]
+ref = "93c7261"
+surface = "DDL, catalog"
+what = "a startup migration's CREATE TABLE corrupted a populated table beside it, and count(*) still answered correctly"
+found_by = "Nikaya's production startup"
+held_by = [
+  "inillucent::story_nikaya::a_startup_migration_leaves_every_neighbour_readable::default",
+  "inillucent::story_nikaya::a_startup_migration_leaves_every_neighbour_readable::sqlite_page",
+  "inillucent::story_nikaya::a_migration_that_fails_leaves_no_half_of_itself::default",
+  "inillucent-compat::story_nikaya_crash::a_kill_inside_the_migration_leaves_it_finishable::default",
+]
+
+[[escape]]
+ref = "2f820f3"
+surface = "planner, derived tables"
+what = "a compound SELECT used as a derived table was refused, so a document view answered HTTP 500"
+found_by = "an HTTP request in production"
+held_by = [
+  "inillucent::story_workload_replay::every_statement_the_consumer_prepares_runs::default",
+  "inillucent::story_workload_replay::every_statement_the_consumer_prepares_runs::sqlite_page",
+  "inillucent-compat::workload_freshness::the_workload_matches_the_consumers_source",
+]
+
+[[escape]]
+ref = "bd16a3e"
+surface = "ANALYZE, log segments"
+what = "ANALYZE on a migrated 6.9 GB database wrote a page stamped by an abandoned log stream, and the file could never be opened again"
+found_by = "a real corpus"
+held_by = [
+  "inillucent-compat::analyze_reopen::a_page_stamped_above_the_logs_end_refuses_the_open",
+  "inillucent-compat::analyze_reopen::analyze_survives_a_reopen_with_the_log_unfolded",
+  "inillucent::story_nikaya::maintenance_after_a_migration_leaves_the_file_openable::default",
+  "inillucent-compat::story_nikaya_crash::a_kill_after_analyze_leaves_the_file_openable::default",
+]
+
+[[escape]]
+ref = "dc9988b"
+surface = "two processes, one file"
+what = "43% of acknowledged commits were lost when two processes wrote one file"
+found_by = "a reviewer's own script"
+held_by = [
+  "inillucent-compat::process_concurrency::two_writer_processes_lose_nothing_long_lived",
+  "inillucent-compat::process_concurrency::two_processes_alternate_with_folds_and_lose_nothing",
+]
+
+[[escape]]
+ref = "0.1.2"
+surface = "MCP handshake"
+what = "the release scripts sent a handshake the server refused, so the release's own smoke test could not talk to it"
+found_by = "running the release"
+held_by = [
+  "inillucent-compat::mcp_replay::the_release_smoke_tests_client_still_works",
+  "inillucent-compat::mcp_replay::the_fixture_is_the_handshake_the_release_script_sends",
+  "inillucent-compat::mcp_session::a_call_before_the_handshake_is_refused",
+]
+
+[[escape]]
+ref = "ad14898"
+surface = "MCP, safe mode"
+what = "safe mode did not refuse `.output` over MCP when the path named was inside the root, so a dot command wrote a file the server was meant to prevent"
+found_by = "a real MCP client script"
+held_by = [
+  "inillucent-compat::mcp_wire::a_server_refuses_the_dot_commands_that_reach_outside_it",
+  "inillucent-compat::dot_commands::the_unsafe_dot_commands_are_refused_in_safe_mode",
+]
+
+# ---------------------------------------------------------------------------
+# A prerequisite that skipped silently, or a surface nothing had ever run.
+# ---------------------------------------------------------------------------
+
+[[escape]]
+ref = "0.1.4"
+surface = "the command line, as a process"
+what = "`--db` was ignored and `restore` of a missing file exited 0, so a script could not tell a restore that ran from one that did not"
+found_by = "the first time the shipped binary was spawned as a process"
+held_by = [
+  "inillucent-compat::cli_commands::every_registry_command_has_a_subprocess_test",
+  "inillucent-compat::cli_commands::a_read_verb_on_a_missing_path_refuses_and_creates_nothing",
+]
+
+[[escape]]
+ref = "066b484"
+surface = "VFS, paths"
+what = "every delete of a file named without a directory failed on Linux, because a bare name has no parent to contain it"
+found_by = "the first Linux run with a working oracle"
+held_by = [
+  "inillucent-vfs::lib::a_name_with_no_directory_in_it_is_contained_by_the_current_one",
+]
+
+# ---------------------------------------------------------------------------
+# The defects the testing standard itself found, and the three it found in the
+# machinery that decides whether a run proved anything. `tests/inillucent-testing-tdd.md`
+# §7 is the account; these are the rows.
+# ---------------------------------------------------------------------------
+
+[[escape]]
+ref = "task-1876"
+surface = "virtual tables, transactions"
+what = "a rolled back insert into an fts5 table stayed and a rolled back delete was gone, because the virtual table write path recorded no undo image"
+found_by = "a story that reopened the file and asked the same question twice"
+held_by = [
+  "inillucent::application::a_virtual_table_rolls_back_with_its_transaction::default",
+  "inillucent::application::an_ordinary_table_rolls_back_beside_a_virtual_one::default",
+]
+
+[[escape]]
+ref = "task-1857"
+surface = "savepoints, virtual tables"
+what = "a ROLLBACK TO that named no open savepoint told every module to discard and then reported the error, so a typo threw away a buffered index's pending writes"
+found_by = "a review of the fix for task-1876"
+held_by = [
+  "inillucent::application::a_rollback_to_an_unknown_savepoint_changes_nothing::default",
+  "inillucent::application::rolling_back_to_an_outer_savepoint_discards_the_inner_one::default",
+]
+
+[[escape]]
+ref = "task-1970"
+surface = "the runner, --strict"
+what = "the runner matched on three phrases the suites never print, so on a machine with no oracle thirty differential suites skipped every case and --strict still printed ok"
+found_by = "reading the standard against the code it describes"
+held_by = [
+  "inillucent-compat::policy::every_skip_site_goes_through_the_one_helper",
+  "inillucent-compat::gates_fail_closed::readgate_refuses_a_fixture_that_is_not_there",
+]
+
+# ---------------------------------------------------------------------------
+# What the ledger does not hold yet, and why. A row here is a promise with a
+# reason, which is the only kind the guard accepts.
+# ---------------------------------------------------------------------------
+
+[[escape]]
+ref = "task-1987"
+surface = "two processes, checkpoints"
+what = "one insert in 600 was lost when a checkpoint ran under a reader, which a single kill point could not find"
+found_by = "a campaign that killed at many points rather than one"
+held_by = [
+  "inillucent-compat::process_campaign::a_campaign_of_kills_loses_nothing_at_the_default_page_size",
+  "inillucent-compat::process_campaign::a_campaign_of_kills_loses_nothing_at_sqlites_page_size",
+  "inillucent-compat::process_readers::readers_see_only_prefixes_at_the_default_page_size",
+  "inillucent-compat::process_readers::readers_see_only_prefixes_at_sqlites_page_size",
+]
+
+# ---------------------------------------------------------------------------
+# Found by this ticket's own scenarios. A story that finds a defect on the day
+# it is written is the argument for the layer: none of these is a construct the
+# per-construct suites do not cover, and every one of them is a sequence.
+# ---------------------------------------------------------------------------
+
+[[escape]]
+ref = "task-2043"
+surface = "DDL, rollback, catalog"
+what = "a DROP TABLE followed by a CREATE TABLE of the same name, inside a transaction that is then rolled back, loses every row of the original table - durably, and PRAGMA integrity_check answers ok over it"
+found_by = "writing story_edges.rs against section 6 of the design"
+held_by = [
+  "inillucent::story_edges::a_dropped_and_recreated_table_rolls_back::default",
+  "inillucent::story_edges::a_dropped_and_recreated_table_rolls_back::sqlite_page",
+]
+
+[[escape]]
+ref = "task-2044"
+surface = "the command line, export"
+what = "`export --out` reports success with the path it wrote, creates the file and writes nothing into it, in all eight formats - because `verbs.rs::export` puts a `.once` redirection at the top of a script and then runs it through `collect_output`, and the two both claim the shell's output stream"
+found_by = "writing the agent session in mcp_session.rs"
+held_by = []
+open = "the MCP half is correct and is held by mcp_session::an_agent_session_runs_end_to_end, which asserts the safe-mode refusal; nothing holds the command line half until task-2044 adds the subprocess test that reads the file back"
+
+[[escape]]
+ref = "busy_timeout"
+surface = "two processes, locking"
+what = "`PRAGMA busy_timeout`'s waiting half had a test in process, it was deleted when the connection stopped being `Send`, and nothing replaced it - so the pragma that decides whether a busy application blocks or fails had half its behaviour untested"
+found_by = "reading the suite against the pragma register"
+held_by = [
+  "inillucent-compat::busy_timeout::a_writer_with_a_timeout_waits_and_then_succeeds",
+  "inillucent-compat::busy_timeout::a_writer_with_no_timeout_is_refused_and_writes_nothing",
+  "inillucent-compat::busy_timeout::a_timeout_shorter_than_the_hold_gives_up_and_names_its_budget",
+]
+
+[[escape]]
+ref = "task-2050"
+surface = "the migration tool, generated columns"
+what = "a SQLite database with a generated column cannot be migrated: the staging file holds exactly the source's rows and exactly its schema, the digest check refuses them anyway, and a database that migrated correctly is deleted - while `docs/feature-comparison.md` line 1237 says generated columns are carried, verified by count and by digest"
+found_by = "building compat/fixtures/realistic/chat-archive.db, which is the first fixture in the tree with a generated column"
+held_by = [
+  "inillucent-compat::migrate_realistic::every_realistic_fixture_migrates_value_for_value",
+]
+
+[[escape]]
+ref = "interop"
+surface = "the file format, across releases"
+what = "nothing in the tree had ever opened a database written by a released binary, so a change to the page format, the log format or an index layout could only be found by a person whose database stopped opening - and the suite would have stayed green through it"
+found_by = "reading the suite against the question 'what does a user of 0.1.1 see when they upgrade'"
+held_by = [
+  "inillucent-compat::release_format::the_current_build_reads_what_an_earlier_release_wrote",
+  "inillucent-compat::release_format::a_database_an_earlier_release_wrote_still_takes_a_write",
+  "inillucent-compat::release_format_history::the_current_build_reads_every_published_format",
+  "inillucent-compat::release_format_history::every_released_binary_reads_what_this_build_writes",
+]
+
+[[escape]]
+ref = "task-2053"
+surface = "fts5, the file format, upgrades"
+what = "0.1.1 answers `SELECT rowid FROM note_fts WHERE note_fts MATCH 'segment'` with no rows at all against a file a later build wrote - the FTS5 index layout changed in 0.1.2 and nothing in the index says which layout wrote it, so an older build answers an empty result set rather than refusing by name; every other question about the same file, including `count(*)` over the same FTS5 table, it answers correctly"
+found_by = "running each downloaded release against a database the current build wrote, in release_format_history.rs"
+held_by = [
+  "inillucent-compat::release_format_history::every_released_binary_reads_what_this_build_writes",
+]

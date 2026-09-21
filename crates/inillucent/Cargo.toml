@@ -17,6 +17,14 @@ inillucent-driver = { workspace = true }
 # expose. They live here because that is where they have always lived and every
 # comment in the tree that cites them cites this path.
 [dev-dependencies]
+# The configuration matrix and the `scenario!` macro (task-2036). Every story in
+# `tests/application.rs` runs once per arm - 32,768 and 4,096 byte pages, a 64
+# frame pool, two journal modes and a busy timeout - and the arms live in
+# `inillucent-compat` because `inillucent-compat/tests/` runs them too. The
+# layering contract names this edge in `inillucent`'s `may_test_with`: a
+# production crate reaching a test-only crate even as a dev-dependency is
+# refused unless it is written down.
+inillucent-compat = { workspace = true }
 inillucent-engine = { workspace = true }
 inillucent-sql = { workspace = true }
 inillucent-tree = { workspace = true }

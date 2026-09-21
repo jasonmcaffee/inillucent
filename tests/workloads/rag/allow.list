@@ -1,0 +1,11 @@
+# The retrieval lifecycle's known failures, and the ticket that owns each.
+#
+# One per line: what fails, a tab, and the ticket. `story_rag.rs` reads it when
+# an ingest is refused, and **an entry that no longer describes a failure is
+# itself a failure** - so when the ticket lands, this story goes red until the
+# line is removed. That is the rule from task-1969 section 4: a list that only
+# grows is a list of things nobody will take off it.
+an_ordinary_fts5_ingest::sqlite_page	task-2033: an ordinary FTS5 insert refuses with SQLITE_CORRUPT on row 42 at a 4,096 byte page
+an_ordinary_fts5_ingest::small_pool	task-2033: the same refusal, with a 64 frame pool
+an_ordinary_fts5_ingest::persist_journal	task-2033: the same refusal, under PERSIST journalling
+an_ordinary_fts5_ingest::waiting	task-2033: the same refusal, with a busy timeout set

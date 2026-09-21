@@ -125,13 +125,24 @@
 //! caret art, and a span here would have made the two transcripts differ on two
 //! lines of drawing rather than on an answer.
 //!
-//! ## All of them agree
+//! ## Every construct agrees; seven measured differences do not, and say so
 //!
 //! `index.partial`, `index.expr` and `without.rowid.index` - the three
-//! `CREATE INDEX` forms that were once left refused - are now built, and
-//! their rows moved from `Differs` to `Agrees`. There is no `Differs` row left,
-//! and the check below that a case which starts agreeing fails until its row is
-//! moved is what will report the next one either way.
+//! `CREATE INDEX` forms that were once left refused - are now built, and their
+//! rows moved from `Differs` to `Agrees`. No *construct* differs.
+//!
+//! The seven `Differs` rows at the end of the table are a different thing, and
+//! they arrived in task-2036. `docs/feature-comparison.md` measured them, gave
+//! each a reason and published them as "the seven rows that are not the same",
+//! and nothing in this suite asserted any of them - so `Expect::Differs` was
+//! constructed zero times while seven known differences went unchecked. Each of
+//! the seven is this engine's page size, a number that describes SQLite's own C
+//! structures, or the two pinned reference artifacts disagreeing with one
+//! another; none of them is a defect, and every one of them is a thing a change
+//! could close or widen with nothing going red.
+//!
+//! The check below that a case which starts agreeing fails until its row is
+//! moved is what reports the next one either way.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -143,14 +154,21 @@ use inillucent_compat::workspace_root;
 enum Expect {
     /// Byte-for-byte the same output.
     Agrees,
-    /// Still different, and named in this file's own header.
+    /// Still different, and the row says what the difference measures.
     ///
-    /// It was constructed by no case for a while, and kept because the header
-    /// this file carries is a list of the constructs that once differed: a
-    /// variant that went when the last of them was fixed would take the
-    /// vocabulary with it, and the next divergence would be recorded as a
-    /// comment instead. `alias.having` and `alias.limit` are the two that use
-    /// it now.
+    /// **Constructed by nine cases: two of the engine's own and the seven
+    /// `docs/feature-comparison.md` measured.** For a long stretch it was
+    /// constructed by none - the constructs that once differed were fixed one by
+    /// one and their rows moved to `Agrees` - and the variant was kept anyway,
+    /// because the header this file carries is a list of the constructs that once
+    /// differed and a variant that went with the last of them would take the
+    /// vocabulary too. `alias.having` and `alias.limit` are the engine's two.
+    ///
+    /// The other seven arrived with task-2036. Rule 1.3 says a known difference is
+    /// recorded as a test that asserts it, and the comparison document carried
+    /// seven measured, argued differences that nothing in the suite asserted - a
+    /// difference only a document knows about can be closed, or widened, with
+    /// nothing going red.
     Differs,
 }
 
@@ -1871,6 +1889,102 @@ SELECT 1 UNION ALL SELECT row_number() OVER (ORDER BY a) FROM t;
 SELECT 1 UNION ALL SELECT sum(a) OVER (ORDER BY a) FROM t;",
         expect: Agrees,
     },
+    // -----------------------------------------------------------------------
+    // The seven rows `docs/feature-comparison.md` records as answering
+    // differently, as cases that assert the difference (task-2036, TDD 5.8).
+    //
+    // **`Expect::Differs` existed and was constructed by nothing.** The variant
+    // was kept so the vocabulary would survive the last construct being fixed,
+    // and it left rule 1.3 - "a known difference is recorded as a test that
+    // asserts it" - applying to nothing at all, while the comparison document
+    // carried seven differences it had measured and argued for. A difference
+    // that only a document knows about is one a change can close, or widen,
+    // with nothing going red either way.
+    //
+    // Each of these is a difference with a reason, not a defect: this engine's
+    // page size, a number that describes SQLite's own C structures, or the two
+    // pinned reference artifacts disagreeing with one another. The reason is on
+    // the row. `every_probed_construct_answers_as_the_table_says` fails if one
+    // of them starts agreeing, which is what would happen if somebody changed
+    // the default page size without reading the measurement behind it.
+    Case {
+        name: "pragma.page.size",
+        kind: "differs",
+        script: "PRAGMA page_size;",
+        // 4096 there, 32768 here. Measured both ways on the medium gate: 4096
+        // with a cache-matched pool put the `schema` family at 0.94x, under the
+        // 1.00x floor the performance contract requires.
+        expect: Differs,
+    },
+    Case {
+        name: "shell.recover.page.size",
+        kind: "differs",
+        script: "CREATE TABLE t(a INTEGER PRIMARY KEY, b TEXT);
+INSERT INTO t VALUES(1,'x');
+.recover",
+        // Nineteen statements, identical but for `PRAGMA page_size = '4096'`
+        // against `'32768'` - which is the row above, seen from the shell.
+        expect: Differs,
+    },
+    Case {
+        name: "shell.limit.trigger.depth",
+        kind: "differs",
+        script: ".limit",
+        // Twelve of the thirteen lines agree. `trigger_depth` is 100 in the
+        // downloaded `sqlite3.exe`, which was built with
+        // SQLITE_MAX_TRIGGER_DEPTH=100 and says so in its own
+        // `PRAGMA compile_options`, and 1000 in the amalgamation this engine
+        // matches - which `compat/limits.toml` names as authoritative. No value
+        // closes this row: whichever artifact is agreed with, the other one
+        // disagrees.
+        expect: Differs,
+    },
+    Case {
+        name: "explain.bytecode",
+        kind: "differs",
+        script: "EXPLAIN SELECT 1;",
+        // The same eight columns under the same widths and the same header
+        // rule, holding this engine's operator chain. SQLite lists the opcodes
+        // of a bytecode program and this engine compiles none, so the rows are
+        // what the statement actually runs.
+        expect: Differs,
+    },
+    Case {
+        name: "shell.vfslist",
+        kind: "differs",
+        script: ".vfslist",
+        // Four lines per file system in the reference's format, over the two
+        // this build has rather than the six SQLite's registry holds.
+        // `szOsFile` is the size of a C struct in a library that is not linked
+        // here.
+        expect: Differs,
+    },
+    Case {
+        name: "shell.stats",
+        kind: "differs",
+        script: ".stats on
+SELECT 1;",
+        // The same two-column shape over the counters this engine keeps - page
+        // cache fetches, hits, misses and rewarms, frames cooled and evicted.
+        // Lookaside slots and pcache overflow bytes are facts about SQLite's
+        // allocator rather than about the query.
+        expect: Differs,
+    },
+    Case {
+        name: "functions.sqlite.offset",
+        kind: "differs",
+        script: "CREATE TABLE t(a);
+INSERT INTO t VALUES(1),(2),(3);
+SELECT sqlite_offset(a) FROM t;",
+        // The offset of the *page* the row is read from rather than of the
+        // record, because a PAX leaf stores each column as its own run of bytes
+        // and one row therefore occupies several places on its page. SQLite's
+        // own documentation says its value may name the table or an index
+        // depending on the plan, so it is opaque to a caller either way; what
+        // both engines agree on is that a column of a real table has an offset
+        // and a literal does not.
+        expect: Differs,
+    },
 ];
 
 /// Returns the pinned SQLite shell, if it has been downloaded.
@@ -1998,6 +2112,20 @@ fn every_probed_construct_answers_as_the_table_says() {
     // known difference is recorded as a test that asserts it - was the one
     // thing it could not do, and the two differences below would have had to
     // be left out of the table and written down somewhere nobody runs.
+    // **And the differences are counted as well (task-2036).** Seven of them are
+    // what `docs/feature-comparison.md` measured and argued for; a table that
+    // lost those rows would agree with itself and say nothing.
+    let declared_differences = CASES
+        .iter()
+        .filter(|case| matches!(case.expect, Differs))
+        .count();
+    assert!(
+        declared_differences >= 7,
+        "this file declares {declared_differences} differences and \
+         docs/feature-comparison.md records seven, so the table has lost rows rather than \
+         the engine having closed them - a difference that is closed is moved to `Agrees` \
+         and its row in the comparison document goes with it"
+    );
     let declared_to_agree = CASES
         .iter()
         .filter(|case| matches!(case.expect, Agrees))

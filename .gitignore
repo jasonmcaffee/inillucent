@@ -50,6 +50,21 @@ corpus.jsonl
 # the log segment beside it is still output.
 !/examples/rag-agent/greek-philosophy.rdb
 
+# And `tests/interop/`, where a database IS the evidence (task-2036). Each
+# subdirectory holds a file written by one published release's own binary,
+# together with the log segment that release left and the answers it gave, so
+# `crates/inillucent-compat/tests/release_format.rs` can ask whether this build
+# still reads what was shipped. They are built by
+# `pwsh tools/build-interop-fixture.ps1 -Version <version>` and nothing else
+# ever writes one - a suite that reads them stages a copy first, because opening
+# a database replays its log and would change the thing being measured.
+#
+# 622,592 bytes each, which is 19 pages of 32,768. The design asked for 300 KB
+# and a released binary cannot choose a page size, so the floor is the page each
+# tree root takes rather than the rows. Git stores each one at about 6.6 KB.
+!/tests/interop/*/app.rdb
+!/tests/interop/*/app.rdb-wal.*
+
 # The same for `.db`, but only inside a crate, because `.db` is also SQLite's
 # own extension and `compat/fixtures/` holds a hundred tracked files that are
 # genuinely source - the files a reader is meant to open with SQLite to check a

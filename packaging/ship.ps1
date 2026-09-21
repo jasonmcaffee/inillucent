@@ -606,6 +606,18 @@ function Get-Routes {
             Run    = { Publish-GitHubRelease -Version $Version }
             Verify = { Test-GitHubRelease -Version $Version }
         },
+        # **After the GitHub release, because the fixture is built from the published archive.**
+        # `tools/build-interop-fixture.ps1` downloads this version's Windows zip, verifies it
+        # against SHA256SUMS and the minisign signature, runs `tests/interop/build.sql` with it and
+        # checks in what it produced. Without this route the directory lags by one release for
+        # ever, and `release_format.rs` grades a format nobody is shipping.
+        @{
+            Name   = 'interop'
+            What   = 'tests/interop/<version>, written by the binary this release publishes'
+            Needs  = { $null }
+            Run    = { Publish-InteropFixture -Version $Version }
+            Verify = { Test-InteropFixture -Version $Version }
+        },
         @{
             Name   = 'site'
             What   = 'inillucent.com: the artifacts, then the links'
@@ -836,6 +848,68 @@ function Publish-Tag {
     if ($LASTEXITCODE -ne 0) { throw "pushing HEAD to origin/$branch failed" }
     & git -C $root push origin "v$Version"
     if ($LASTEXITCODE -ne 0) { throw "pushing v$Version failed" }
+}
+
+function Publish-InteropFixture {
+    <#
+    .SYNOPSIS
+        Builds this version's interop fixture and commits it.
+
+    .DESCRIPTION
+        `tests/interop/<version>/` holds a database written by that release's
+        own binary, and `crates/inillucent-compat/tests/release_format.rs` opens
+        every one of them with the build under test. It is the only check that
+        answers "can today's engine still read what we shipped two releases
+        ago", and it can only answer it if the directory has a row for every
+        release.
+
+        **It runs here rather than in the version phase because the fixture is
+        built from the published archive.** The binary is downloaded from the
+        GitHub release, verified against `SHA256SUMS` and its minisign
+        signature, and run - so the release has to exist first. That is also why
+        the fixture cannot be part of the version commit the tag points at: it
+        does not exist until after the tag is pushed. It goes in a commit of its
+        own, on the same branch, immediately afterwards.
+
+    .PARAMETER Version
+        The version being released.
+    #>
+    param([string] $Version)
+    & (Join-Path $root 'tools/build-interop-fixture.ps1') -Version $Version
+    if ($LASTEXITCODE -ne 0) { throw "building the interop fixture for $Version failed" }
+    $fixture = "tests/interop/$Version"
+    & git -C $root add -- $fixture
+    $staged = & git -C $root diff --cached --name-only
+    if (-not $staged) {
+        Write-Host "  tests/interop/$Version was already committed"
+        return
+    }
+    & git -C $root commit -m "inillucent $Version interop fixture"
+    if ($LASTEXITCODE -ne 0) { throw 'the interop fixture commit failed' }
+    $default = (& git -C $root symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>$null)
+    $branch = if ($default) { $default -replace '^origin/', '' } else { 'main' }
+    & git -C $root push origin "HEAD:$branch"
+    if ($LASTEXITCODE -ne 0) { throw "pushing the interop fixture to origin/$branch failed" }
+}
+
+function Test-InteropFixture {
+    <#
+    .SYNOPSIS
+        Reports what this version's interop fixture holds.
+
+    .PARAMETER Version
+        The version being released.
+    #>
+    param([string] $Version)
+    $directory = Join-Path $root "tests/interop/$Version"
+    $database = Join-Path $directory 'app.rdb'
+    $answers = Join-Path $directory 'expected.tsv'
+    if (-not (Test-Path -LiteralPath $database)) { return "tests/interop/$Version/app.rdb was not written" }
+    if (-not (Test-Path -LiteralPath $answers)) { return "tests/interop/$Version/expected.tsv was not written" }
+    $recorded = @(Get-Content -LiteralPath $answers).Count
+    $segments = @(Get-ChildItem -Path $directory -Filter 'app.rdb-wal.*').Count
+    if ($segments -lt 1) { return "tests/interop/$Version holds no log segment" }
+    return "ok: $recorded answers, $segments log segment(s)"
 }
 
 function Get-MirrorRepo {

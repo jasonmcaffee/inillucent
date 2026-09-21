@@ -13,3 +13,12 @@
 # one alone, so the one script whose CRLF would have been noticed immediately is
 # the one that was never converted. Seventeen others were.
 *.sh text eol=lf
+
+# The interop fixtures are bytes, not text (task-2036). `tests/interop/<version>/`
+# holds a database one published release wrote, the log segment it left, and the
+# answers it gave. The databases must never be converted, and `expected.tsv` is
+# compared byte for byte between releases - so it is LF everywhere, whatever
+# `core.autocrlf` says on the machine that checked it out.
+/tests/interop/*/app.rdb binary
+/tests/interop/*/app.rdb-wal.* binary
+/tests/interop/*/expected.tsv text eol=lf

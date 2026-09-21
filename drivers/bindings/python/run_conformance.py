@@ -153,6 +153,31 @@ def scratch(name):
     )
 
 
+def record(ran, failures):
+    """Writes what this runner ran, for the tooling guard to read.
+
+    **Four runners, one specification, and until task-2036 no way to tell which
+    of them had actually run it.** npm, Go and PHP each had a round trip of
+    their own; this binding and the Rust driver read the suite.
+    ``tooling::every_binding_runs_the_whole_suite`` reads these records and
+    fails when a runner ran fewer cases than its declared capabilities allow.
+
+    This binding links the C ABI and holds a connection, so it skips nothing:
+    ``lacks`` is empty and every case is in ``ran``.
+
+    @param ran - the cases this run graded
+    @param failures - what did not hold
+    """
+    root = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))))
+    directory = os.path.join(root, "_agent_output", "conformance")
+    os.makedirs(directory, exist_ok=True)
+    with open(os.path.join(directory, "python.json"), "w", encoding="utf-8") as handle:
+        json.dump({"language": "python", "lacks": [], "ran": ran, "skipped": [],
+                   "failures": failures}, handle, indent=2)
+        handle.write("\n")
+
+
 def main():
     """Run every case and report."""
     here = os.path.dirname(os.path.abspath(__file__))
@@ -204,6 +229,7 @@ def main():
             failures.append(f"{name}: {problem}")
 
     print(f"\n{len(suite['cases'])} cases, {ran} steps, {len(failures)} failures")
+    record([case["name"] for case in suite["cases"]], failures)
     if failures:
         return 1
 

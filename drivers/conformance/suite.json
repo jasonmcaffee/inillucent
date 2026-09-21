@@ -1,5 +1,5 @@
 {
-  "version": 1,
+  "version": 2,
   "about": [
     "The driver's behaviour, as data rather than as prose.",
     "",
@@ -39,56 +39,238 @@
     "  more              whether the limit cut anything off",
     "  status            the failure's status name; absent means it must succeed",
     "  message_contains  a substring of the failure's message",
-    "  feature_contains  a substring of the construct named by an unsupported refusal"
+    "  feature_contains  a substring of the construct named by an unsupported refusal",
+    "",
+    "VERSION 2 (task-2036) adds the fts, hybrid, transaction_failure, values, status and",
+    "identifiers groups, and with them the two fields that say who can run what.",
+    "",
+    "A case may declare NEEDS, a list of capabilities out of `capabilities` above. A",
+    "runner that does not have one skips those cases and says so in `skipped_by`,",
+    "naming what it lacks and why. `tooling::every_binding_runs_the_whole_suite` reads",
+    "both: a runner has to run every case whose needs it satisfies, and a runner that",
+    "ran fewer has to have said in this file which capability it is missing.",
+    "",
+    "The three command line wrappers - npm, Go and PHP - lack `session`, and the",
+    "reason is the shape rather than an omission: each call is a process, so a",
+    "transaction, a savepoint or a temporary table cannot outlive one step. Rows do,",
+    "because they are in the file. Bytes do too: the command line binds a blob as",
+    "{\"blob\":\"<hex>\"} and renders one back as the text x'<hex>', so a process",
+    "runner carries them once it knows that rendering.",
+    "",
+    "Each runner writes _agent_output/conformance/<language>.json naming the cases it",
+    "ran, which is what the guard reads."
   ],
   "cases": [
     {
       "name": "insert_then_select",
       "about": "The shape everything else rests on: a write reports what it changed, and a read gives it back.",
-      "setup": ["CREATE TABLE t (a INTEGER PRIMARY KEY, b TEXT)"],
+      "setup": [
+        "CREATE TABLE t (a INTEGER PRIMARY KEY, b TEXT)"
+      ],
       "steps": [
-        { "sql": "INSERT INTO t VALUES (1, 'one')", "affected": 1 },
-        { "sql": "INSERT INTO t VALUES (2, 'two')", "affected": 1 },
+        {
+          "sql": "INSERT INTO t VALUES (1, 'one')",
+          "affected": 1
+        },
+        {
+          "sql": "INSERT INTO t VALUES (2, 'two')",
+          "affected": 1
+        },
         {
           "sql": "SELECT a, b FROM t ORDER BY a",
-          "columns": ["a", "b"],
+          "columns": [
+            "a",
+            "b"
+          ],
           "rows": [
-            [{ "int": 1 }, { "text": "one" }],
-            [{ "int": 2 }, { "text": "two" }]
+            [
+              {
+                "int": 1
+              },
+              {
+                "text": "one"
+              }
+            ],
+            [
+              {
+                "int": 2
+              },
+              {
+                "text": "two"
+              }
+            ]
           ],
           "affected": null,
           "total": 2,
           "more": false
         }
-      ]
+      ],
+      "group": "core"
     },
     {
       "name": "every_value_kind_round_trips",
       "about": "All five kinds, including the two that are easy to get wrong: a blob holding a NUL byte, and text that is not ASCII. A driver that renders values as text loses the first; one that uses C strings truncates it.",
-      "setup": ["CREATE TABLE v (k TEXT PRIMARY KEY, value BLOB)"],
+      "setup": [
+        "CREATE TABLE v (k TEXT PRIMARY KEY, value BLOB)"
+      ],
       "steps": [
-        { "sql": "INSERT INTO v VALUES ('null', ?1)", "params": [{ "null": true }], "affected": 1 },
-        { "sql": "INSERT INTO v VALUES ('int', ?1)", "params": [{ "int": -9223372036854775808 }], "affected": 1 },
-        { "sql": "INSERT INTO v VALUES ('real', ?1)", "params": [{ "real": 0.5 }], "affected": 1 },
-        { "sql": "INSERT INTO v VALUES ('text', ?1)", "params": [{ "text": "héllo wörld" }], "affected": 1 },
-        { "sql": "INSERT INTO v VALUES ('blob', ?1)", "params": [{ "blob": [0, 255, 0, 1, 127] }], "affected": 1 },
-        { "sql": "SELECT value FROM v WHERE k = 'null'", "rows": [[{ "null": true }]] },
-        { "sql": "SELECT value FROM v WHERE k = 'int'", "rows": [[{ "int": -9223372036854775808 }]] },
-        { "sql": "SELECT value FROM v WHERE k = 'real'", "rows": [[{ "real": 0.5 }]] },
-        { "sql": "SELECT value FROM v WHERE k = 'text'", "rows": [[{ "text": "héllo wörld" }]] },
-        { "sql": "SELECT value FROM v WHERE k = 'blob'", "rows": [[{ "blob": [0, 255, 0, 1, 127] }]] }
-      ]
+        {
+          "sql": "INSERT INTO v VALUES ('null', ?1)",
+          "params": [
+            {
+              "null": true
+            }
+          ],
+          "affected": 1
+        },
+        {
+          "sql": "INSERT INTO v VALUES ('int', ?1)",
+          "params": [
+            {
+              "int": -9223372036854775808
+            }
+          ],
+          "affected": 1
+        },
+        {
+          "sql": "INSERT INTO v VALUES ('real', ?1)",
+          "params": [
+            {
+              "real": 0.5
+            }
+          ],
+          "affected": 1
+        },
+        {
+          "sql": "INSERT INTO v VALUES ('text', ?1)",
+          "params": [
+            {
+              "text": "héllo wörld"
+            }
+          ],
+          "affected": 1
+        },
+        {
+          "sql": "INSERT INTO v VALUES ('blob', ?1)",
+          "params": [
+            {
+              "blob": [
+                0,
+                255,
+                0,
+                1,
+                127
+              ]
+            }
+          ],
+          "affected": 1
+        },
+        {
+          "sql": "SELECT value FROM v WHERE k = 'null'",
+          "rows": [
+            [
+              {
+                "null": true
+              }
+            ]
+          ]
+        },
+        {
+          "sql": "SELECT value FROM v WHERE k = 'int'",
+          "rows": [
+            [
+              {
+                "int": -9223372036854775808
+              }
+            ]
+          ]
+        },
+        {
+          "sql": "SELECT value FROM v WHERE k = 'real'",
+          "rows": [
+            [
+              {
+                "real": 0.5
+              }
+            ]
+          ]
+        },
+        {
+          "sql": "SELECT value FROM v WHERE k = 'text'",
+          "rows": [
+            [
+              {
+                "text": "héllo wörld"
+              }
+            ]
+          ]
+        },
+        {
+          "sql": "SELECT value FROM v WHERE k = 'blob'",
+          "rows": [
+            [
+              {
+                "blob": [
+                  0,
+                  255,
+                  0,
+                  1,
+                  127
+                ]
+              }
+            ]
+          ]
+        }
+      ],
+      "group": "values"
     },
     {
       "name": "null_is_not_the_empty_string",
       "about": "The fault a grid drawing both as nothing would hide: a column never filled in and one filled in with nothing are not the same fact about a row.",
-      "setup": ["CREATE TABLE n (a INTEGER PRIMARY KEY, b TEXT)"],
+      "setup": [
+        "CREATE TABLE n (a INTEGER PRIMARY KEY, b TEXT)"
+      ],
       "steps": [
-        { "sql": "INSERT INTO n VALUES (1, ?1)", "params": [{ "null": true }], "affected": 1 },
-        { "sql": "INSERT INTO n VALUES (2, ?1)", "params": [{ "text": "" }], "affected": 1 },
-        { "sql": "SELECT b FROM n WHERE a = 1", "rows": [[{ "null": true }]] },
-        { "sql": "SELECT b FROM n WHERE a = 2", "rows": [[{ "text": "" }]] }
-      ]
+        {
+          "sql": "INSERT INTO n VALUES (1, ?1)",
+          "params": [
+            {
+              "null": true
+            }
+          ],
+          "affected": 1
+        },
+        {
+          "sql": "INSERT INTO n VALUES (2, ?1)",
+          "params": [
+            {
+              "text": ""
+            }
+          ],
+          "affected": 1
+        },
+        {
+          "sql": "SELECT b FROM n WHERE a = 1",
+          "rows": [
+            [
+              {
+                "null": true
+              }
+            ]
+          ]
+        },
+        {
+          "sql": "SELECT b FROM n WHERE a = 2",
+          "rows": [
+            [
+              {
+                "text": ""
+              }
+            ]
+          ]
+        }
+      ],
+      "group": "values"
     },
     {
       "name": "a_limit_cuts_the_rows_handed_back_and_total_stays_exact",
@@ -105,7 +287,18 @@
         {
           "sql": "SELECT a FROM many ORDER BY a",
           "limit": 2,
-          "rows": [[{ "int": 1 }], [{ "int": 2 }]],
+          "rows": [
+            [
+              {
+                "int": 1
+              }
+            ],
+            [
+              {
+                "int": 2
+              }
+            ]
+          ],
           "total": 5,
           "more": true
         },
@@ -115,50 +308,86 @@
           "total": 5,
           "more": false
         }
-      ]
+      ],
+      "group": "core"
     },
     {
       "name": "parameters_are_bound_not_pasted",
       "about": "A value that would be syntax if it were pasted into the statement.",
-      "setup": ["CREATE TABLE p (a INTEGER PRIMARY KEY, b TEXT)"],
+      "setup": [
+        "CREATE TABLE p (a INTEGER PRIMARY KEY, b TEXT)"
+      ],
       "steps": [
         {
           "sql": "INSERT INTO p VALUES (1, ?1)",
-          "params": [{ "text": "'); DROP TABLE p; --" }],
+          "params": [
+            {
+              "text": "'); DROP TABLE p; --"
+            }
+          ],
           "affected": 1
         },
         {
           "sql": "SELECT b FROM p WHERE a = ?1",
-          "params": [{ "int": 1 }],
-          "rows": [[{ "text": "'); DROP TABLE p; --" }]]
+          "params": [
+            {
+              "int": 1
+            }
+          ],
+          "rows": [
+            [
+              {
+                "text": "'); DROP TABLE p; --"
+              }
+            ]
+          ]
         },
-        { "sql": "SELECT count(*) FROM p", "rows": [[{ "int": 1 }]] }
-      ]
+        {
+          "sql": "SELECT count(*) FROM p",
+          "rows": [
+            [
+              {
+                "int": 1
+              }
+            ]
+          ]
+        }
+      ],
+      "group": "core"
     },
     {
       "name": "a_missing_table_is_not_found_and_a_typo_is_syntax",
       "about": "The three refusals a caller has to be able to tell apart. This case and the next are the whole point of the driver.",
-      "setup": ["CREATE TABLE people (a INTEGER PRIMARY KEY)"],
+      "setup": [
+        "CREATE TABLE people (a INTEGER PRIMARY KEY)"
+      ],
       "steps": [
         {
           "sql": "SELECT a FROM peple",
           "status": "not_found",
           "message_contains": "no such table"
         },
-        { "sql": "SELECT a FORM people", "status": "syntax" }
-      ]
+        {
+          "sql": "SELECT a FORM people",
+          "status": "syntax"
+        }
+      ],
+      "group": "status"
     },
     {
       "name": "an_unimplemented_construct_refuses_by_name",
       "about": "A construct the engine has not built reports `unsupported` and names itself, which is a different thing from a statement that is wrong. A binding that folds this into its general error type has thrown the design away. The example moves as the engine grows: it was VACUUM before that was built, a second ON CONFLICT clause before that was built, and is now an encryption key on ATTACH. When that is built, repoint this at whatever still is rather than deleting the case.",
-      "setup": ["CREATE TABLE conflicts (a INTEGER PRIMARY KEY, b TEXT UNIQUE)"],
+      "setup": [
+        "CREATE TABLE conflicts (a INTEGER PRIMARY KEY, b TEXT UNIQUE)"
+      ],
       "steps": [
         {
           "sql": "ATTACH DATABASE 'vault.db' AS vault KEY 'secret'",
           "status": "unsupported",
           "feature_contains": "ATTACH"
         }
-      ]
+      ],
+      "group": "status"
     },
     {
       "name": "a_constraint_refuses_a_write",
@@ -168,83 +397,228 @@
         "INSERT INTO u VALUES (1, 'one')"
       ],
       "steps": [
-        { "sql": "INSERT INTO u VALUES (2, 'one')", "status": "constraint" },
-        { "sql": "SELECT count(*) FROM u", "rows": [[{ "int": 1 }]] }
-      ]
+        {
+          "sql": "INSERT INTO u VALUES (2, 'one')",
+          "status": "constraint"
+        },
+        {
+          "sql": "SELECT count(*) FROM u",
+          "rows": [
+            [
+              {
+                "int": 1
+              }
+            ]
+          ]
+        }
+      ],
+      "group": "status"
     },
     {
       "name": "a_transaction_commits_all_of_it",
-      "setup": ["CREATE TABLE c (a INTEGER PRIMARY KEY)"],
+      "setup": [
+        "CREATE TABLE c (a INTEGER PRIMARY KEY)"
+      ],
       "steps": [
-        { "sql": "BEGIN" },
-        { "sql": "INSERT INTO c VALUES (1)", "affected": 1 },
-        { "sql": "INSERT INTO c VALUES (2)", "affected": 1 },
-        { "sql": "COMMIT" },
-        { "sql": "SELECT count(*) FROM c", "rows": [[{ "int": 2 }]] }
+        {
+          "sql": "BEGIN"
+        },
+        {
+          "sql": "INSERT INTO c VALUES (1)",
+          "affected": 1
+        },
+        {
+          "sql": "INSERT INTO c VALUES (2)",
+          "affected": 1
+        },
+        {
+          "sql": "COMMIT"
+        },
+        {
+          "sql": "SELECT count(*) FROM c",
+          "rows": [
+            [
+              {
+                "int": 2
+              }
+            ]
+          ]
+        }
+      ],
+      "group": "transaction_failure",
+      "needs": [
+        "session"
       ]
     },
     {
       "name": "a_rollback_undoes_all_of_it",
       "about": "Including the row written before the one that failed, which is the half a driver that stopped at the first error but did not roll back would leave behind.",
-      "setup": ["CREATE TABLE r (a INTEGER PRIMARY KEY)", "INSERT INTO r VALUES (1)"],
+      "setup": [
+        "CREATE TABLE r (a INTEGER PRIMARY KEY)",
+        "INSERT INTO r VALUES (1)"
+      ],
       "steps": [
-        { "sql": "BEGIN" },
-        { "sql": "INSERT INTO r VALUES (2)", "affected": 1 },
-        { "sql": "INSERT INTO r VALUES (3)", "affected": 1 },
-        { "sql": "ROLLBACK" },
-        { "sql": "SELECT count(*) FROM r", "rows": [[{ "int": 1 }]] }
+        {
+          "sql": "BEGIN"
+        },
+        {
+          "sql": "INSERT INTO r VALUES (2)",
+          "affected": 1
+        },
+        {
+          "sql": "INSERT INTO r VALUES (3)",
+          "affected": 1
+        },
+        {
+          "sql": "ROLLBACK"
+        },
+        {
+          "sql": "SELECT count(*) FROM r",
+          "rows": [
+            [
+              {
+                "int": 1
+              }
+            ]
+          ]
+        }
+      ],
+      "group": "transaction_failure",
+      "needs": [
+        "session"
       ]
     },
     {
       "name": "a_savepoint_rolls_back_to_itself",
-      "setup": ["CREATE TABLE s (a INTEGER PRIMARY KEY)"],
+      "setup": [
+        "CREATE TABLE s (a INTEGER PRIMARY KEY)"
+      ],
       "steps": [
-        { "sql": "BEGIN" },
-        { "sql": "INSERT INTO s VALUES (1)", "affected": 1 },
-        { "sql": "SAVEPOINT half" },
-        { "sql": "INSERT INTO s VALUES (2)", "affected": 1 },
-        { "sql": "ROLLBACK TO half" },
-        { "sql": "COMMIT" },
-        { "sql": "SELECT a FROM s", "rows": [[{ "int": 1 }]] }
+        {
+          "sql": "BEGIN"
+        },
+        {
+          "sql": "INSERT INTO s VALUES (1)",
+          "affected": 1
+        },
+        {
+          "sql": "SAVEPOINT half"
+        },
+        {
+          "sql": "INSERT INTO s VALUES (2)",
+          "affected": 1
+        },
+        {
+          "sql": "ROLLBACK TO half"
+        },
+        {
+          "sql": "COMMIT"
+        },
+        {
+          "sql": "SELECT a FROM s",
+          "rows": [
+            [
+              {
+                "int": 1
+              }
+            ]
+          ]
+        }
+      ],
+      "group": "transaction_failure",
+      "needs": [
+        "session"
       ]
     },
     {
       "name": "a_delete_that_matched_nothing_says_zero_rather_than_failing",
       "about": "Zero changed rows is an answer, not an error. A row editor's rule that every statement must change exactly one row is built on being told the difference.",
-      "setup": ["CREATE TABLE d (a INTEGER PRIMARY KEY)", "INSERT INTO d VALUES (1)"],
+      "setup": [
+        "CREATE TABLE d (a INTEGER PRIMARY KEY)",
+        "INSERT INTO d VALUES (1)"
+      ],
       "steps": [
-        { "sql": "DELETE FROM d WHERE a = 99", "affected": 0 },
-        { "sql": "DELETE FROM d WHERE a = 1", "affected": 1 },
-        { "sql": "SELECT count(*) FROM d", "rows": [[{ "int": 0 }]] }
-      ]
+        {
+          "sql": "DELETE FROM d WHERE a = 99",
+          "affected": 0
+        },
+        {
+          "sql": "DELETE FROM d WHERE a = 1",
+          "affected": 1
+        },
+        {
+          "sql": "SELECT count(*) FROM d",
+          "rows": [
+            [
+              {
+                "int": 0
+              }
+            ]
+          ]
+        }
+      ],
+      "group": "core"
     },
     {
       "name": "returning_gives_rows_and_a_count",
       "about": "The one statement that fills both, which is why `affected` is decided by the count rather than by whether there were columns.",
-      "setup": ["CREATE TABLE ret (a INTEGER PRIMARY KEY, b TEXT)"],
+      "setup": [
+        "CREATE TABLE ret (a INTEGER PRIMARY KEY, b TEXT)"
+      ],
       "steps": [
         {
           "sql": "INSERT INTO ret VALUES (1, 'one') RETURNING a, b",
-          "columns": ["a", "b"],
-          "rows": [[{ "int": 1 }, { "text": "one" }]],
+          "columns": [
+            "a",
+            "b"
+          ],
+          "rows": [
+            [
+              {
+                "int": 1
+              },
+              {
+                "text": "one"
+              }
+            ]
+          ],
           "affected": 1
         }
-      ]
+      ],
+      "group": "core"
     },
     {
       "name": "the_schema_can_be_read_back",
       "about": "`sqlite_schema` is a readable table and it holds the CREATE statement as it was typed, which is what lets a consumer show a person what they wrote rather than something composed from a catalogue.",
-      "setup": ["CREATE TABLE shown (a INTEGER PRIMARY KEY, b TEXT)"],
+      "setup": [
+        "CREATE TABLE shown (a INTEGER PRIMARY KEY, b TEXT)"
+      ],
       "steps": [
         {
           "sql": "SELECT type, name FROM sqlite_schema WHERE name = 'shown'",
-          "rows": [[{ "text": "table" }, { "text": "shown" }]]
+          "rows": [
+            [
+              {
+                "text": "table"
+              },
+              {
+                "text": "shown"
+              }
+            ]
+          ]
         },
         {
           "sql": "SELECT sql FROM sqlite_schema WHERE name = 'shown'",
-          "rows": [[{ "text": "CREATE TABLE shown (a INTEGER PRIMARY KEY, b TEXT)" }]]
+          "rows": [
+            [
+              {
+                "text": "CREATE TABLE shown (a INTEGER PRIMARY KEY, b TEXT)"
+              }
+            ]
+          ]
         }
-      ]
+      ],
+      "group": "identifiers"
     },
     {
       "name": "reserved_word_column_names",
@@ -257,29 +631,83 @@
       "steps": [
         {
           "sql": "SELECT left, right FROM pairs ORDER BY left",
-          "columns": ["left", "right"],
+          "columns": [
+            "left",
+            "right"
+          ],
           "rows": [
-            [{ "text": "a" }, { "text": "b" }],
-            [{ "text": "c" }, { "text": "d" }]
+            [
+              {
+                "text": "a"
+              },
+              {
+                "text": "b"
+              }
+            ],
+            [
+              {
+                "text": "c"
+              },
+              {
+                "text": "d"
+              }
+            ]
           ],
           "affected": null,
           "total": 2
         },
         {
           "sql": "SELECT pairs.inner, pairs.outer, pairs.cross, pairs.indexed FROM pairs WHERE left = 'a'",
-          "rows": [[{ "text": "i" }, { "text": "o" }, { "text": "c" }, { "text": "x" }]]
+          "rows": [
+            [
+              {
+                "text": "i"
+              },
+              {
+                "text": "o"
+              },
+              {
+                "text": "c"
+              },
+              {
+                "text": "x"
+              }
+            ]
+          ]
         },
         {
           "sql": "SELECT left AS right, right AS left FROM pairs WHERE left = 'a'",
-          "columns": ["right", "left"],
-          "rows": [[{ "text": "a" }, { "text": "b" }]]
+          "columns": [
+            "right",
+            "left"
+          ],
+          "rows": [
+            [
+              {
+                "text": "a"
+              },
+              {
+                "text": "b"
+              }
+            ]
+          ]
         },
         {
           "sql": "SELECT sql FROM sqlite_schema WHERE name = 'pairs'",
-          "rows": [[{ "text": "CREATE TABLE pairs (left TEXT, right TEXT, inner TEXT, outer TEXT, cross TEXT, indexed TEXT)" }]]
+          "rows": [
+            [
+              {
+                "text": "CREATE TABLE pairs (left TEXT, right TEXT, inner TEXT, outer TEXT, cross TEXT, indexed TEXT)"
+              }
+            ]
+          ]
         },
-        { "sql": "SELECT left right FROM pairs", "status": "syntax" }
-      ]
+        {
+          "sql": "SELECT left right FROM pairs",
+          "status": "syntax"
+        }
+      ],
+      "group": "identifiers"
     },
     {
       "name": "a_temp_table_survives_a_connection_per_call",
@@ -290,73 +718,895 @@
         "INSERT INTO kept VALUES (1, 'permanent')"
       ],
       "steps": [
-        { "sql": "CREATE TEMP TABLE scratch (a INTEGER PRIMARY KEY, b TEXT)", "affected": 0 },
-        { "sql": "INSERT INTO scratch VALUES (1, 'one')", "affected": 1 },
+        {
+          "sql": "CREATE TEMP TABLE scratch (a INTEGER PRIMARY KEY, b TEXT)",
+          "affected": 0
+        },
+        {
+          "sql": "INSERT INTO scratch VALUES (1, 'one')",
+          "affected": 1
+        },
         {
           "sql": "SELECT a, b FROM scratch ORDER BY a",
-          "columns": ["a", "b"],
-          "rows": [[{ "int": 1 }, { "text": "one" }]],
+          "columns": [
+            "a",
+            "b"
+          ],
+          "rows": [
+            [
+              {
+                "int": 1
+              },
+              {
+                "text": "one"
+              }
+            ]
+          ],
           "affected": null,
           "total": 1
         },
         {
           "sql": "SELECT b FROM temp.scratch",
-          "rows": [[{ "text": "one" }]]
+          "rows": [
+            [
+              {
+                "text": "one"
+              }
+            ]
+          ]
         },
         {
           "sql": "SELECT b FROM kept",
-          "rows": [[{ "text": "permanent" }]]
+          "rows": [
+            [
+              {
+                "text": "permanent"
+              }
+            ]
+          ]
         },
-        { "sql": "CREATE TEMP TABLE kept (a INTEGER PRIMARY KEY, b TEXT)", "affected": 0 },
-        { "sql": "INSERT INTO kept VALUES (2, 'temporary')", "affected": 1 },
+        {
+          "sql": "CREATE TEMP TABLE kept (a INTEGER PRIMARY KEY, b TEXT)",
+          "affected": 0
+        },
+        {
+          "sql": "INSERT INTO kept VALUES (2, 'temporary')",
+          "affected": 1
+        },
         {
           "sql": "SELECT b FROM kept",
-          "rows": [[{ "text": "temporary" }]]
+          "rows": [
+            [
+              {
+                "text": "temporary"
+              }
+            ]
+          ]
         },
         {
           "sql": "SELECT b FROM main.kept",
-          "rows": [[{ "text": "permanent" }]]
+          "rows": [
+            [
+              {
+                "text": "permanent"
+              }
+            ]
+          ]
         }
+      ],
+      "group": "core",
+      "needs": [
+        "session"
       ]
     },
     {
       "name": "a_columns_declared_type_is_reported_and_an_expression_has_none",
       "about": "An expression genuinely has no declared type, and the empty string is the honest answer rather than a guess taken from the first row - which would be a different answer on a different page of the same query.",
-      "setup": ["CREATE TABLE typed (a INTEGER PRIMARY KEY, b TEXT)", "INSERT INTO typed VALUES (1, 'one')"],
+      "setup": [
+        "CREATE TABLE typed (a INTEGER PRIMARY KEY, b TEXT)",
+        "INSERT INTO typed VALUES (1, 'one')"
+      ],
       "steps": [
         {
           "sql": "PRAGMA table_info(typed)",
           "rows": [
-            [{ "int": 0 }, { "text": "a" }, { "text": "INTEGER" }, { "int": 0 }, { "null": true }, { "int": 1 }],
-            [{ "int": 1 }, { "text": "b" }, { "text": "TEXT" }, { "int": 0 }, { "null": true }, { "int": 0 }]
+            [
+              {
+                "int": 0
+              },
+              {
+                "text": "a"
+              },
+              {
+                "text": "INTEGER"
+              },
+              {
+                "int": 0
+              },
+              {
+                "null": true
+              },
+              {
+                "int": 1
+              }
+            ],
+            [
+              {
+                "int": 1
+              },
+              {
+                "text": "b"
+              },
+              {
+                "text": "TEXT"
+              },
+              {
+                "int": 0
+              },
+              {
+                "null": true
+              },
+              {
+                "int": 0
+              }
+            ]
+          ]
+        }
+      ],
+      "group": "core"
+    },
+    {
+      "name": "a_vector_column_binds_and_reads_back_as_a_blob",
+      "about": "A VECTOR(N) column is N little-endian f32s and the driver carries it as a blob, so a binding that renders values as text or that uses C strings loses it: the first float of [1,0,0] is 0x0000803f and its first byte is a NUL. No case here named a vector before, so nothing proved that one bound as a parameter or read back as a blob survives the driver, the C ABI or any binding.",
+      "setup": [
+        "CREATE TABLE point (id INTEGER PRIMARY KEY, at VECTOR(3))"
+      ],
+      "steps": [
+        {
+          "sql": "INSERT INTO point VALUES (1, ?1)",
+          "params": [
+            {
+              "blob": [
+                0,
+                0,
+                128,
+                63,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          ],
+          "affected": 1
+        },
+        {
+          "sql": "INSERT INTO point VALUES (2, ?1)",
+          "params": [
+            {
+              "blob": [
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                128,
+                63,
+                0,
+                0,
+                0,
+                0
+              ]
+            }
+          ],
+          "affected": 1
+        },
+        {
+          "sql": "SELECT at FROM point WHERE id = 1",
+          "rows": [
+            [
+              {
+                "blob": [
+                  0,
+                  0,
+                  128,
+                  63,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0,
+                  0
+                ]
+              }
+            ]
+          ]
+        },
+        {
+          "sql": "SELECT vector_dims(at) FROM point ORDER BY id",
+          "rows": [
+            [
+              {
+                "int": 3
+              }
+            ],
+            [
+              {
+                "int": 3
+              }
+            ]
+          ]
+        }
+      ],
+      "group": "hybrid"
+    },
+    {
+      "name": "fts5_matches_and_ranks",
+      "group": "fts",
+      "about": "An FTS5 index answers a term, a phrase and a prefix, ranks by bm25(), and forgets a document that was deleted. Nothing in this file named FTS5 before, so a binding could ship unable to reach the half of this engine that is not ordinary SQL.",
+      "setup": [
+        "CREATE VIRTUAL TABLE docs USING fts5(title, body)",
+        "INSERT INTO docs(rowid, title, body) VALUES (1, 'alpha note', 'the quick brown fox jumps')",
+        "INSERT INTO docs(rowid, title, body) VALUES (2, 'beta note', 'the lazy brown dog sleeps')",
+        "INSERT INTO docs(rowid, title, body) VALUES (3, 'gamma note', 'quick foxes and lazy dogs')"
+      ],
+      "steps": [
+        {
+          "sql": "SELECT rowid FROM docs WHERE docs MATCH 'brown' ORDER BY rowid",
+          "columns": [
+            "rowid"
+          ],
+          "rows": [
+            [
+              {
+                "int": 1
+              }
+            ],
+            [
+              {
+                "int": 2
+              }
+            ]
+          ],
+          "total": 2
+        },
+        {
+          "sql": "SELECT rowid FROM docs WHERE docs MATCH '\"brown fox\"' ORDER BY rowid",
+          "rows": [
+            [
+              {
+                "int": 1
+              }
+            ]
+          ],
+          "total": 1
+        },
+        {
+          "sql": "SELECT rowid FROM docs WHERE docs MATCH 'fox*' ORDER BY rowid",
+          "rows": [
+            [
+              {
+                "int": 1
+              }
+            ],
+            [
+              {
+                "int": 3
+              }
+            ]
+          ],
+          "total": 2
+        },
+        {
+          "sql": "SELECT rowid FROM docs WHERE docs MATCH 'lazy' ORDER BY bm25(docs), rowid",
+          "rows": [
+            [
+              {
+                "int": 2
+              }
+            ],
+            [
+              {
+                "int": 3
+              }
+            ]
+          ],
+          "total": 2
+        }
+      ]
+    },
+    {
+      "name": "fts5_forgets_a_deleted_document",
+      "group": "fts",
+      "about": "A delete has to reach the index as well as the content table. An index that kept the doclist would answer a MATCH with a rowid that is not there, which a caller reads as a row it can fetch.",
+      "setup": [
+        "CREATE VIRTUAL TABLE docs USING fts5(title, body)",
+        "INSERT INTO docs(rowid, title, body) VALUES (1, 'alpha', 'the quick brown fox')",
+        "INSERT INTO docs(rowid, title, body) VALUES (2, 'beta', 'the lazy brown dog')"
+      ],
+      "steps": [
+        {
+          "sql": "SELECT count(*) FROM docs WHERE docs MATCH 'brown'",
+          "rows": [
+            [
+              {
+                "int": 2
+              }
+            ]
+          ]
+        },
+        {
+          "sql": "DELETE FROM docs WHERE rowid = 1",
+          "affected": 1
+        },
+        {
+          "sql": "SELECT rowid FROM docs WHERE docs MATCH 'brown' ORDER BY rowid",
+          "rows": [
+            [
+              {
+                "int": 2
+              }
+            ]
+          ],
+          "total": 1
+        }
+      ]
+    },
+    {
+      "name": "hybrid_search_answers_and_ranks",
+      "group": "hybrid",
+      "about": "`inillucent_search` is this engine's own hybrid index and the reason a caller would choose it over SQLite. A binding that cannot reach it can carry an application's rows and not its retrieval.",
+      "setup": [
+        "CREATE VIRTUAL TABLE hy USING inillucent_search(title, body)",
+        "INSERT INTO hy(rowid, title, body) VALUES (1, 'alpha', 'ledger pages and trees')",
+        "INSERT INTO hy(rowid, title, body) VALUES (2, 'beta', 'ledger commits and segments')",
+        "INSERT INTO hy(rowid, title, body) VALUES (3, 'gamma', 'nothing in common here')"
+      ],
+      "steps": [
+        {
+          "sql": "SELECT rowid FROM hy('ledger', 5) ORDER BY rank",
+          "rows": [
+            [
+              {
+                "int": 1
+              }
+            ],
+            [
+              {
+                "int": 2
+              }
+            ]
+          ],
+          "total": 2
+        },
+        {
+          "sql": "SELECT count(*) FROM hy('nothing', 5)",
+          "rows": [
+            [
+              {
+                "int": 1
+              }
+            ]
+          ]
+        },
+        {
+          "sql": "SELECT count(*) FROM hy('absent', 5)",
+          "rows": [
+            [
+              {
+                "int": 0
+              }
+            ]
           ]
         }
       ]
     },
     {
-      "name": "a_vector_column_binds_and_reads_back_as_a_blob",
-      "about": "A VECTOR(N) column is N little-endian f32s and the driver carries it as a blob, so a binding that renders values as text or that uses C strings loses it: the first float of [1,0,0] is 0x0000803f and its first byte is a NUL. No case here named a vector before, so nothing proved that one bound as a parameter or read back as a blob survives the driver, the C ABI or any binding.",
-      "setup": ["CREATE TABLE point (id INTEGER PRIMARY KEY, at VECTOR(3))"],
+      "name": "a_multi_row_insert_that_collides_keeps_nothing",
+      "group": "transaction_failure",
+      "about": "Four rows in one INSERT, colliding on the third. A statement is atomic whether or not it is inside a transaction, so the answer is zero rows either way - and a binding that reported the affected count of the rows that went in before the collision would be telling a caller two rows were written.",
+      "setup": [
+        "CREATE TABLE u (a INTEGER PRIMARY KEY)"
+      ],
       "steps": [
         {
-          "sql": "INSERT INTO point VALUES (1, ?1)",
-          "params": [{ "blob": [0, 0, 128, 63, 0, 0, 0, 0, 0, 0, 0, 0] }],
+          "sql": "INSERT INTO u VALUES (1), (2), (2), (4)",
+          "status": "constraint"
+        },
+        {
+          "sql": "SELECT count(*) FROM u",
+          "rows": [
+            [
+              {
+                "int": 0
+              }
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "the_same_collision_inside_a_transaction_keeps_nothing",
+      "group": "transaction_failure",
+      "about": "The same statement inside an explicit transaction that is then committed. The failed statement leaves nothing and the transaction is still usable, which is the property an application relies on when it retries.",
+      "setup": [
+        "CREATE TABLE u (a INTEGER PRIMARY KEY)"
+      ],
+      "steps": [
+        {
+          "sql": "BEGIN"
+        },
+        {
+          "sql": "INSERT INTO u VALUES (9)",
           "affected": 1
         },
         {
-          "sql": "INSERT INTO point VALUES (2, ?1)",
-          "params": [{ "blob": [0, 0, 0, 0, 0, 0, 128, 63, 0, 0, 0, 0] }],
+          "sql": "INSERT INTO u VALUES (1), (2), (2), (4)",
+          "status": "constraint"
+        },
+        {
+          "sql": "COMMIT"
+        },
+        {
+          "sql": "SELECT a FROM u ORDER BY a",
+          "rows": [
+            [
+              {
+                "int": 9
+              }
+            ]
+          ],
+          "total": 1
+        }
+      ],
+      "needs": [
+        "session"
+      ]
+    },
+    {
+      "name": "a_forty_kilobyte_value_round_trips",
+      "group": "values",
+      "about": "Larger than a 32,768 byte page and ten times larger than a 4,096 byte one, so the value crosses the extent threshold at every page size the engine builds at. A binding with a fixed buffer somewhere truncates here and nowhere else.",
+      "setup": [
+        "CREATE TABLE big (id INTEGER PRIMARY KEY, v TEXT)"
+      ],
+      "steps": [
+        {
+          "sql": "INSERT INTO big VALUES (1, replace(hex(zeroblob(20000)), '0', 'x'))",
           "affected": 1
         },
         {
-          "sql": "SELECT at FROM point WHERE id = 1",
-          "rows": [[{ "blob": [0, 0, 128, 63, 0, 0, 0, 0, 0, 0, 0, 0] }]]
+          "sql": "SELECT length(v) FROM big",
+          "rows": [
+            [
+              {
+                "int": 40000
+              }
+            ]
+          ]
         },
         {
-          "sql": "SELECT vector_dims(at) FROM point ORDER BY id",
-          "rows": [[{ "int": 3 }], [{ "int": 3 }]]
+          "sql": "SELECT substr(v, 1, 3), substr(v, -3) FROM big",
+          "rows": [
+            [
+              {
+                "text": "xxx"
+              },
+              {
+                "text": "xxx"
+              }
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "the_empty_and_the_absent_are_three_different_values",
+      "group": "values",
+      "about": "An empty string, an empty blob and a NULL are three values, and a layer that renders them the same has already lost the difference.",
+      "setup": [
+        "CREATE TABLE e (id INTEGER PRIMARY KEY, t TEXT, b BLOB, n)"
+      ],
+      "steps": [
+        {
+          "sql": "INSERT INTO e VALUES (1, '', x'', NULL)",
+          "affected": 1
+        },
+        {
+          "sql": "SELECT typeof(t), typeof(b), typeof(n) FROM e",
+          "rows": [
+            [
+              {
+                "text": "text"
+              },
+              {
+                "text": "blob"
+              },
+              {
+                "text": "null"
+              }
+            ]
+          ]
+        },
+        {
+          "sql": "SELECT length(t), length(b) FROM e",
+          "rows": [
+            [
+              {
+                "int": 0
+              },
+              {
+                "int": 0
+              }
+            ]
+          ]
+        },
+        {
+          "sql": "SELECT count(*) FROM e WHERE t = ''",
+          "rows": [
+            [
+              {
+                "int": 1
+              }
+            ]
+          ]
+        },
+        {
+          "sql": "SELECT count(*) FROM e WHERE n IS NULL",
+          "rows": [
+            [
+              {
+                "int": 1
+              }
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "integers_at_the_edges_of_i64",
+      "group": "values",
+      "about": "The smallest integer, the largest, and the odd one above 2^53 that a double cannot hold. A binding that carried values through a language's own number type loses the last of these silently, which is how an identifier becomes a different identifier. The last step records something worth knowing: an integer overflow at run time is reported with the status `syntax`, which is the status a caller reads as `reword your SQL`. Asserted as what it is rather than as what it should be, which is rule 1.3.",
+      "setup": [
+        "CREATE TABLE n (id INTEGER PRIMARY KEY, v)"
+      ],
+      "steps": [
+        {
+          "sql": "INSERT INTO n VALUES (1, -9223372036854775808)",
+          "affected": 1
+        },
+        {
+          "sql": "INSERT INTO n VALUES (2, 9223372036854775807)",
+          "affected": 1
+        },
+        {
+          "sql": "INSERT INTO n VALUES (3, 9007199254740993)",
+          "affected": 1
+        },
+        {
+          "sql": "SELECT v, typeof(v) FROM n ORDER BY id",
+          "rows": [
+            [
+              {
+                "int": -9223372036854775808
+              },
+              {
+                "text": "integer"
+              }
+            ],
+            [
+              {
+                "int": 9223372036854775807
+              },
+              {
+                "text": "integer"
+              }
+            ],
+            [
+              {
+                "int": 9007199254740993
+              },
+              {
+                "text": "integer"
+              }
+            ]
+          ]
+        },
+        {
+          "sql": "SELECT 9007199254740993 = 9007199254740992.0",
+          "rows": [
+            [
+              {
+                "int": 0
+              }
+            ]
+          ]
+        },
+        {
+          "sql": "SELECT abs(-9223372036854775808)",
+          "status": "syntax",
+          "message_contains": "overflow"
+        }
+      ]
+    },
+    {
+      "name": "a_negative_zero_and_a_value_that_is_not_a_number",
+      "group": "values",
+      "about": "`-0.0` is a real that equals zero, and `0.0/0.0` is NULL rather than a float nothing can compare - which is SQLite's rule and is what a binding has to carry rather than its language's own NaN.",
+      "setup": [
+        "CREATE TABLE f (id INTEGER PRIMARY KEY, v)"
+      ],
+      "steps": [
+        {
+          "sql": "INSERT INTO f VALUES (1, -0.0)",
+          "affected": 1
+        },
+        {
+          "sql": "INSERT INTO f VALUES (2, 0.0/0.0)",
+          "affected": 1
+        },
+        {
+          "sql": "SELECT typeof(v), v = 0.0 FROM f WHERE id = 1",
+          "rows": [
+            [
+              {
+                "text": "real"
+              },
+              {
+                "int": 1
+              }
+            ]
+          ]
+        },
+        {
+          "sql": "SELECT typeof(v) FROM f WHERE id = 2",
+          "rows": [
+            [
+              {
+                "text": "null"
+              }
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "a_nul_byte_inside_text_is_stored_and_shortens_length",
+      "group": "values",
+      "about": "`length()` counts to the NUL and the stored bytes go past it, which is what a binding that hands values to C as NUL-terminated strings gets wrong - it would read `a` where the row holds three bytes. Asserted as the hex, because that is the only rendering that carries the byte after the NUL.",
+      "setup": [
+        "CREATE TABLE z (id INTEGER PRIMARY KEY, t TEXT)"
+      ],
+      "steps": [
+        {
+          "sql": "INSERT INTO z VALUES (1, 'a' || char(0) || 'b')",
+          "affected": 1
+        },
+        {
+          "sql": "SELECT hex(t) FROM z",
+          "rows": [
+            [
+              {
+                "text": "610062"
+              }
+            ]
+          ]
+        },
+        {
+          "sql": "SELECT length(t) FROM z",
+          "rows": [
+            [
+              {
+                "int": 1
+              }
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "composed_and_decomposed_text_stay_two_values",
+      "group": "values",
+      "about": "The same word in NFC and in NFD is two different strings and has to stay two. A binding that normalised on the way in or out would make two rows one, and nothing would say so.",
+      "setup": [
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)"
+      ],
+      "steps": [
+        {
+          "sql": "INSERT INTO t VALUES (1, char(99,97,102,233))",
+          "affected": 1
+        },
+        {
+          "sql": "INSERT INTO t VALUES (2, 'cafe' || char(769))",
+          "affected": 1
+        },
+        {
+          "sql": "SELECT id, hex(v), length(v) FROM t ORDER BY id",
+          "rows": [
+            [
+              {
+                "int": 1
+              },
+              {
+                "text": "636166C3A9"
+              },
+              {
+                "int": 4
+              }
+            ],
+            [
+              {
+                "int": 2
+              },
+              {
+                "text": "63616665CC81"
+              },
+              {
+                "int": 5
+              }
+            ]
+          ]
+        },
+        {
+          "sql": "SELECT count(*) FROM t WHERE v = char(99,97,102,233)",
+          "rows": [
+            [
+              {
+                "int": 1
+              }
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "identifiers_that_need_quoting",
+      "group": "identifiers",
+      "about": "A table name with an accent and a space, a column called `select`, and a column name with a space in it. A binding that builds SQL by concatenation rather than quoting fails here and reads correctly everywhere else.",
+      "setup": [
+        "CREATE TABLE \"ordér 1\" (\"a column\" INTEGER PRIMARY KEY, \"select\" TEXT)",
+        "INSERT INTO \"ordér 1\" VALUES (1, 'x')"
+      ],
+      "steps": [
+        {
+          "sql": "SELECT \"a column\", \"select\" FROM \"ordér 1\"",
+          "columns": [
+            "a column",
+            "select"
+          ],
+          "rows": [
+            [
+              {
+                "int": 1
+              },
+              {
+                "text": "x"
+              }
+            ]
+          ]
+        },
+        {
+          "sql": "SELECT count(*) FROM sqlite_master WHERE name = 'ordér 1'",
+          "rows": [
+            [
+              {
+                "int": 1
+              }
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "two_hundred_columns",
+      "group": "identifiers",
+      "about": "A wide table, because a binding with a fixed column array somewhere fails at its own limit and nowhere before it. Two hundred is the shape Nikaya's attachments table has.",
+      "setup": [
+        "CREATE TABLE wide (c0 INTEGER, c1 INTEGER, c2 INTEGER, c3 INTEGER, c4 INTEGER, c5 INTEGER, c6 INTEGER, c7 INTEGER, c8 INTEGER, c9 INTEGER, c10 INTEGER, c11 INTEGER, c12 INTEGER, c13 INTEGER, c14 INTEGER, c15 INTEGER, c16 INTEGER, c17 INTEGER, c18 INTEGER, c19 INTEGER, c20 INTEGER, c21 INTEGER, c22 INTEGER, c23 INTEGER, c24 INTEGER, c25 INTEGER, c26 INTEGER, c27 INTEGER, c28 INTEGER, c29 INTEGER, c30 INTEGER, c31 INTEGER, c32 INTEGER, c33 INTEGER, c34 INTEGER, c35 INTEGER, c36 INTEGER, c37 INTEGER, c38 INTEGER, c39 INTEGER, c40 INTEGER, c41 INTEGER, c42 INTEGER, c43 INTEGER, c44 INTEGER, c45 INTEGER, c46 INTEGER, c47 INTEGER, c48 INTEGER, c49 INTEGER, c50 INTEGER, c51 INTEGER, c52 INTEGER, c53 INTEGER, c54 INTEGER, c55 INTEGER, c56 INTEGER, c57 INTEGER, c58 INTEGER, c59 INTEGER, c60 INTEGER, c61 INTEGER, c62 INTEGER, c63 INTEGER, c64 INTEGER, c65 INTEGER, c66 INTEGER, c67 INTEGER, c68 INTEGER, c69 INTEGER, c70 INTEGER, c71 INTEGER, c72 INTEGER, c73 INTEGER, c74 INTEGER, c75 INTEGER, c76 INTEGER, c77 INTEGER, c78 INTEGER, c79 INTEGER, c80 INTEGER, c81 INTEGER, c82 INTEGER, c83 INTEGER, c84 INTEGER, c85 INTEGER, c86 INTEGER, c87 INTEGER, c88 INTEGER, c89 INTEGER, c90 INTEGER, c91 INTEGER, c92 INTEGER, c93 INTEGER, c94 INTEGER, c95 INTEGER, c96 INTEGER, c97 INTEGER, c98 INTEGER, c99 INTEGER, c100 INTEGER, c101 INTEGER, c102 INTEGER, c103 INTEGER, c104 INTEGER, c105 INTEGER, c106 INTEGER, c107 INTEGER, c108 INTEGER, c109 INTEGER, c110 INTEGER, c111 INTEGER, c112 INTEGER, c113 INTEGER, c114 INTEGER, c115 INTEGER, c116 INTEGER, c117 INTEGER, c118 INTEGER, c119 INTEGER, c120 INTEGER, c121 INTEGER, c122 INTEGER, c123 INTEGER, c124 INTEGER, c125 INTEGER, c126 INTEGER, c127 INTEGER, c128 INTEGER, c129 INTEGER, c130 INTEGER, c131 INTEGER, c132 INTEGER, c133 INTEGER, c134 INTEGER, c135 INTEGER, c136 INTEGER, c137 INTEGER, c138 INTEGER, c139 INTEGER, c140 INTEGER, c141 INTEGER, c142 INTEGER, c143 INTEGER, c144 INTEGER, c145 INTEGER, c146 INTEGER, c147 INTEGER, c148 INTEGER, c149 INTEGER, c150 INTEGER, c151 INTEGER, c152 INTEGER, c153 INTEGER, c154 INTEGER, c155 INTEGER, c156 INTEGER, c157 INTEGER, c158 INTEGER, c159 INTEGER, c160 INTEGER, c161 INTEGER, c162 INTEGER, c163 INTEGER, c164 INTEGER, c165 INTEGER, c166 INTEGER, c167 INTEGER, c168 INTEGER, c169 INTEGER, c170 INTEGER, c171 INTEGER, c172 INTEGER, c173 INTEGER, c174 INTEGER, c175 INTEGER, c176 INTEGER, c177 INTEGER, c178 INTEGER, c179 INTEGER, c180 INTEGER, c181 INTEGER, c182 INTEGER, c183 INTEGER, c184 INTEGER, c185 INTEGER, c186 INTEGER, c187 INTEGER, c188 INTEGER, c189 INTEGER, c190 INTEGER, c191 INTEGER, c192 INTEGER, c193 INTEGER, c194 INTEGER, c195 INTEGER, c196 INTEGER, c197 INTEGER, c198 INTEGER, c199 INTEGER)"
+      ],
+      "steps": [
+        {
+          "sql": "SELECT count(*) FROM pragma_table_info('wide')",
+          "rows": [
+            [
+              {
+                "int": 200
+              }
+            ]
+          ]
+        },
+        {
+          "sql": "INSERT INTO wide (c0, c199) VALUES (1, 199)",
+          "affected": 1
+        },
+        {
+          "sql": "SELECT c0, c199 FROM wide",
+          "rows": [
+            [
+              {
+                "int": 1
+              },
+              {
+                "int": 199
+              }
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "name": "every_status_a_caller_branches_on",
+      "group": "status",
+      "about": "Four refusals in one case, each asserting the status name rather than the message. A binding that folds them into one error type has thrown away the thing this driver has that a string does not.",
+      "setup": [
+        "CREATE TABLE s (a INTEGER PRIMARY KEY, b TEXT UNIQUE)",
+        "INSERT INTO s VALUES (1, 'one')"
+      ],
+      "steps": [
+        {
+          "sql": "SELECT * FORM s",
+          "status": "syntax"
+        },
+        {
+          "sql": "SELECT * FROM absent",
+          "status": "not_found"
+        },
+        {
+          "sql": "INSERT INTO s VALUES (1, 'again')",
+          "status": "constraint"
+        },
+        {
+          "sql": "SELECT a FROM s WHERE (a, b) IN (SELECT a, b FROM s)",
+          "status": "unsupported"
         }
       ]
     }
-  ]
+  ],
+  "groups": {
+    "core": "the shape everything else rests on: a write reports what it changed, a read gives it back, a parameter binds",
+    "values": "values at their edges - the empty, the absent, the enormous, the ones a language's own number type loses",
+    "status": "the failure statuses a caller branches on, asserted by name",
+    "transaction_failure": "a statement that fails part way, inside a transaction and outside one",
+    "identifiers": "names that need quoting, and a table wide enough to find a fixed array",
+    "fts": "the FTS5 index: a term, a phrase, a prefix, a ranking, and a delete the index has to hear about",
+    "hybrid": "`inillucent_search`, which is the reason a caller would choose this engine over SQLite"
+  },
+  "capabilities": {
+    "session": "the runner can hold one connection across a case's steps, so a transaction, a savepoint or a temporary table survives from one step to the next"
+  },
+  "skipped_by": {
+    "npm": {
+      "lacks": [
+        "session"
+      ],
+      "why": "the npm package wraps the command line: every call is a process, so a transaction, a savepoint or a temporary table cannot outlive one step. Rows do outlive it - they are in the file - so only the five cases that hold one of those are skipped. Held-transaction and two-connection behaviour is graded by crates/inillucent-compat/tests/process_concurrency.rs and busy_timeout.rs, over real processes, which is stronger than a runner could be."
+    },
+    "go": {
+      "lacks": [
+        "session"
+      ],
+      "why": "the same: packages/go wraps the command line, one process per call."
+    },
+    "php": {
+      "lacks": [
+        "session"
+      ],
+      "why": "the same: packages/php wraps the command line, one process per call."
+    },
+    "python": {
+      "lacks": [],
+      "why": "the Python binding links the C ABI and holds a connection."
+    },
+    "rust": {
+      "lacks": [],
+      "why": "the reference implementation."
+    }
+  }
 }

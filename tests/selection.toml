@@ -68,6 +68,17 @@ purpose = "the embedding and retrieval engine, and its graded harness"
 name = "tooling"
 purpose = "the checks that keep the repository's own rules true"
 
+# The long forms, run on a schedule rather than on a change (task-2036). Every
+# target here has a short form in another tier that runs on every change: the
+# nightly one is the same question asked at a size nobody waits for - a ledger
+# day of 100,000 transactions, every published release read with a downloaded
+# binary. Not `exclusive`, because none of them measures a duration; they are
+# long because they do more, and two of them running at once changes nothing
+# about what either concludes.
+[[tier]]
+name = "nightly"
+purpose = "the long forms: a full day's workload, every released format, both directions"
+
 # ---------------------------------------------------------------------------
 # What a change outside every crate selects.
 #
@@ -95,6 +106,25 @@ reason = "the pinned manifest, the source register and the fixtures every differ
 prefix = "tests/"
 packages = ["*"]
 reason = "the shared corpora, schedules and this map itself; a change here can move any suite"
+
+# The language wrappers and their conformance runners (task-2036). A change to
+# one of them changes what `bindings` grades, and nothing else: the wrappers
+# spawn the shipped programs rather than linking anything, so a change here
+# cannot reach the engine. `sh tools/run-package-tests.sh` is what runs them,
+# and `packages/package-tests.toml` is what says a file under here has no way
+# to be run.
+[[path]]
+prefix = "packages/"
+packages = ["inillucent-compat"]
+reason = "the language wrappers; `bindings` reads what their runners produced"
+
+# The conformance suite itself, which is the specification five runners read.
+# A change to it selects both the reference implementation that runs it and the
+# guard that checks the others did.
+[[path]]
+prefix = "drivers/conformance/"
+packages = ["inillucent-driver", "inillucent-compat"]
+reason = "the shared conformance suite, read by the Rust driver and by `bindings`"
 
 [[path]]
 prefix = "tools/"
@@ -990,6 +1020,46 @@ tier = "differential"
 covers = ["inillucent-engine"]
 requires = ["oracle"]
 
+# Migrating a database that looks like one somebody uses (task-2036).
+# `migrate_sqlite` beside it migrates fifteen small synthetic fixtures; not one
+# of them has a NOCASE collation, a DESC index, a trigger, a view, a generated
+# column or an FTS5 index with external content, and the corpus that broke the
+# migration had all of them at once.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "migrate_realistic"
+tier = "e2e"
+covers = ["inillucent-migrate"]
+requires = ["oracle", "tracked-fixtures"]
+
+# A database from every release we have shipped, read by the build under test
+# (task-2036). `tests/interop/<version>/` holds a file that release's own binary
+# wrote, and this is the only check that can answer "does today's engine still
+# read what we shipped". The quick form reads the newest fixture, which is the
+# one a storage change breaks first; `INILLUCENT_SCENARIO=full` reads all six.
+#
+# No `requires`: the fixtures are checked in, so this runs in a fresh clone.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "release_format"
+tier = "e2e"
+covers = ["inillucent-engine"]
+
+# The same question asked of every release at once, and asked backwards
+# (task-2036). The backward direction needs the released binaries, which are
+# downloaded into the gitignored `tools/cross/bin/releases/` by
+# `pwsh tools/build-interop-fixture.ps1` - so in a fresh clone the backward case
+# skips, `--strict` counts it, and `requires` is what names it.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "release_format_history"
+tier = "nightly"
+covers = ["inillucent-engine"]
+requires = ["previous-release", "tracked-fixtures"]
+
 [[target]]
 package = "inillucent-compat"
 kind = "test"
@@ -1401,6 +1471,69 @@ kind = "test"
 name = "edges"
 tier = "e2e"
 
+# Nikaya's startup, against populated tables, at every arm (task-2036). The
+# escape it is shaped around answered `count(*)` correctly while the table it
+# corrupted was unreadable, so the story reads every column of every row back
+# after a reopen.
+[[target]]
+package = "inillucent"
+kind = "test"
+name = "story_nikaya"
+tier = "e2e"
+
+# Nikaya's own statement corpus, run at every arm (task-2036). The escape it is
+# shaped around was a refusal - a compound SELECT as a derived table - so what
+# it asserts is that every statement the consumer prepares compiles and runs,
+# with `tests/workloads/nikaya/allow.list` naming the ones that do not yet.
+[[target]]
+package = "inillucent"
+kind = "test"
+name = "story_workload_replay"
+tier = "e2e"
+
+# A retrieval application's whole lifecycle, at every arm (task-2036). Ingest,
+# query, update a third, delete a third, roll a batch back, checkpoint, reopen -
+# with the index compared to a brute force over the test's own model after every
+# phase. This is where task-2033 first fails at SQLite's page size.
+# A day of an application's transactions against a model (task-2036). Eight
+# hundred of them at two page sizes: every statement in it has its own test and
+# every one of those passes, and what this asks is what a sequence of them does
+# to a tree that has already split. The comparison comes from a `BTreeMap` in
+# the test rather than from a second query, because a corrupted index is usually
+# consistent with itself.
+[[target]]
+package = "inillucent"
+kind = "test"
+name = "story_ledger_day"
+tier = "e2e"
+
+# The same day at a hundred thousand transactions, replayed through the pinned
+# SQLite shell (task-2036). A third answer rather than a second: a divergence
+# between the engine and the model says the engine is wrong, and one between the
+# model and SQLite would say the model is.
+[[target]]
+package = "inillucent"
+kind = "test"
+name = "story_ledger_day_nightly"
+tier = "nightly"
+requires = ["oracle"]
+
+[[target]]
+package = "inillucent"
+kind = "test"
+name = "story_rag"
+tier = "e2e"
+
+# The edge catalogue of the task-2035 TDD section 6, at every arm (task-2036).
+# `edges.rs` beside it covers the value and statement corners at one page size;
+# this covers the rows that are about geometry, about a consumer's statement
+# shapes, and about what happens after a maintenance command and a reopen.
+[[target]]
+package = "inillucent"
+kind = "test"
+name = "story_edges"
+tier = "e2e"
+
 [[target]]
 package = "inillucent-driver"
 kind = "test"
@@ -1439,6 +1572,29 @@ covers = ["inillucent-cli"]
 # this row existed, and `--output json` was read from one for two of them.
 requires = ["programs"]
 
+# Two recorded clients, replayed against the server that is built now
+# (task-2036). 0.1.2 shipped a handshake the release scripts refused, and
+# running the release was what found it; the transcripts are what those clients
+# actually sent.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "mcp_replay"
+tier = "e2e"
+covers = ["inillucent-cli"]
+requires = ["programs"]
+
+# One agent session over MCP, and the protocol edges a client can produce
+# (task-2036). `mcp_wire` beside it calls every tool once with a well formed
+# request; nothing in this repository ever sent a malformed one until this.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "mcp_session"
+tier = "e2e"
+covers = ["inillucent-cli"]
+requires = ["programs"]
+
 [[target]]
 package = "inillucent-compat"
 kind = "test"
@@ -1472,6 +1628,17 @@ covers = ["inillucent-engine"]
 # cuts at a fault the simulated file system injects.
 requires = ["programs"]
 
+# Nikaya's startup migration with the process killed inside it (task-2036). The
+# in-process half is `inillucent::story_nikaya`; this one spawns the shipped
+# shell, so it is its own target and declares what it needs.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "story_nikaya_crash"
+tier = "durability"
+covers = ["inillucent-cli"]
+requires = ["programs"]
+
 [[target]]
 package = "inillucent-compat"
 kind = "test"
@@ -1492,6 +1659,41 @@ covers = ["inillucent-engine", "inillucent-sql"]
 # The two lists a read only connection decides a pragma by have to cover the
 # pragma register exactly: one in neither is decided by whichever branch the
 # filter falls through to (task-1979, section 5.2).
+
+# One writer, four readers and a checkpoint under them (task-2036). Nothing in
+# the tree ran a reader *while* a writer was working, and a checkpoint under a
+# reader is the second cause task-1987 had.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "process_readers"
+tier = "durability"
+covers = ["inillucent-cli"]
+requires = ["programs"]
+
+# A kill campaign across forty seeded cut points, at two page sizes (task-2036).
+# `process_crash` beside it kills at twenty evenly spaced points at one page
+# size; the shape that found task-1987's loss of one insert in six hundred was
+# a campaign that killed in many kinds of moment and reopened after each.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "process_campaign"
+tier = "durability"
+covers = ["inillucent-cli"]
+requires = ["programs"]
+
+# `PRAGMA busy_timeout`'s waiting half, across two real processes (task-2036).
+# The in-process version was deleted when the connection stopped being `Send`
+# and nothing replaced it, so the pragma that decides whether a busy
+# application blocks or fails had half its behaviour under test.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "busy_timeout"
+tier = "durability"
+covers = ["inillucent-cli"]
+requires = ["programs"]
 
 [[target]]
 package = "inillucent-compat"
@@ -1796,6 +1998,55 @@ covers = ["inillucent-compat"]
 package = "inillucent-compat"
 kind = "test"
 name = "policy"
+tier = "tooling"
+covers = ["inillucent-compat"]
+
+# The Nikaya workload's freshness (task-2036). It runs
+# `tools/extract-nikaya-workload.py --check`, so there is one extractor rather
+# than two that agree on the day they are written. Nikaya is not part of this
+# repository, so a machine without it skips rather than passing.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "workload_freshness"
+tier = "tooling"
+covers = ["inillucent-compat"]
+requires = ["nikaya", "python"]
+
+# The binding guard (task-2036). It reads the record each conformance runner
+# writes into `_agent_output/conformance/` and fails when a runner ran fewer
+# cases than its declared capabilities allow. Before it, "all the bindings pass
+# the suite" was three-fifths untrue: npm, Go and PHP each had a round trip of
+# their own and read the suite not at all.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "bindings"
+tier = "tooling"
+covers = ["inillucent-compat"]
+requires = ["conformance-records"]
+
+# The escape ledger's guard (task-2036). It resolves every `held_by` entry in
+# `tests/escapes.toml` against the tree, so a row that claims a test holds a
+# defect fails when that test is renamed or deleted, and it fails when an escape
+# analysed in the design document has no row at all.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "escapes"
+tier = "tooling"
+covers = ["inillucent-compat"]
+
+# The matrix guard (task-2036). It reads `crates/inillucent/tests/*.rs` and
+# `crates/inillucent-compat/tests/*.rs` as text and fails when a scenario suite
+# holds a test the matrix did not expand, or when `scenario!` has stopped
+# expanding one of the quick arms. Every story in this repository ran at 32,768
+# byte pages until it existed, which is why task-2033 - FTS5 refusing on row 42
+# at SQLite's own 4,096 - was invisible to 3,169 tests.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "scenarios"
 tier = "tooling"
 covers = ["inillucent-compat"]
 

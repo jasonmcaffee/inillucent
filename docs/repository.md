@@ -128,25 +128,28 @@ table.
 
 | prerequisite | rows | what provides it |
 |---|---:|---|
-| `oracle` | 29 | the pinned SQLite 3.53.4 comparison process: `pwsh tools/sqlite-reference.ps1`, `bash tools/sqlite-reference.sh` |
-| `programs` | 16 | the command surface built into this profile's target directory: `cargo build -p inillucent-cli` |
+| `oracle` | 31 | the pinned SQLite 3.53.4 comparison process: `pwsh tools/sqlite-reference.ps1`, `bash tools/sqlite-reference.sh` |
+| `programs` | 22 | the command surface built into this profile's target directory: `cargo build -p inillucent-cli` |
 | `shell` | 7 | the pinned `sqlite3` 3.53.4 shell, from the same two scripts as the oracle |
-| `fixtures` | 2 | the gate fixtures, which are 1.2 MB and 120 MB and are not tracked: `bash tools/build-gate-fixtures.sh _agent_output/fixtures` |
+| `tracked-fixtures` | 5 | the files under `compat/fixtures/`, which are in the repository - declared for a checkout that has lost them, not for a fresh clone |
 | `onnx` | 3 | ONNX Runtime and the embedding weights: `inillucent setup-embeddings all` |
-| `tracked-fixtures` | 3 | the 35 files under `compat/fixtures/`, which are in the repository - declared for a checkout that has lost them, not for a fresh clone |
+| `python` | 3 | a Python interpreter with `ssl`, for the TLS server, the `ctypes` conformance runner and the Nikaya workload extractor |
+| `fixtures` | 2 | the gate fixtures, which are 1.2 MB and 120 MB and are not tracked: `bash tools/build-gate-fixtures.sh _agent_output/fixtures` |
 | `asan` | 1 | a toolchain with the address sanitizer, which is nightly on every platform and absent on Windows |
 | `baseline` | 1 | a recorded performance baseline: `cargo run -p inillucent-compat --bin inillucent-baseline -- capture` |
 | `btree-corpus` | 1 | the retained sequences under `compat/corpus/btree/`, which are tracked |
 | `capi` | 1 | the C ABI shared library, built by `cargo build -p inillucent-driver-capi` into this run's own target directory |
 | `cc` | 1 | a C compiler on `PATH`, for the program that links the C ABI |
+| `conformance-records` | 1 | what the five conformance runners recorded under `_agent_output/conformance/`: `sh tools/run-package-tests.sh` |
 | `directory-link` | 1 | permission to create a directory link, which Windows gives an elevated shell or a machine in developer mode |
 | `local-timezone` | 1 | a configured local time zone the operating system will convert an instant through: `localtime_r` on Unix, `SystemTimeToTzSpecificLocalTime` on Windows |
 | `mysql` | 1 | a live MySQL server, named by `INILLUCENT_TEST_MYSQL_URL` |
 | `narrow-slots` | 1 | the narrow integer slots compiled in, which is a constant in `crates/inillucent-tree/src/leaf.rs` |
 | `network` | 1 | outbound network access, turned on by setting `INILLUCENT_NETWORK_TESTS` |
+| `nikaya` | 1 | the Nikaya checkout at `C:/jason/dev/nikaya`, which the workload file is extracted from - the extract is tracked, so this is only needed to check it for staleness |
 | `openssl` | 1 | the `openssl` command, which generates the certificates the TLS suite serves |
 | `postgres` | 1 | a live PostgreSQL server, named by `INILLUCENT_TEST_POSTGRES_URL` |
-| `python` | 2 | a Python interpreter with `ssl`, for the TLS server and the `ctypes` conformance runner |
+| `previous-release` | 1 | a published release's binary, downloaded and verified by `pwsh tools/build-interop-fixture.ps1 -Version <version>` into the gitignored `tools/cross/bin/releases/` |
 | `sqlite-bench` | 1 | the pinned benchmark driver, built by the same two reference scripts |
 | `testrun` | 1 | the runner itself: `cargo build -p inillucent-compat --bin inillucent-testrun --features testrun`, which a plain `cargo test` does not build |
 

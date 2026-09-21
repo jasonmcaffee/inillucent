@@ -1,0 +1,108 @@
+# Every test the language packages own, and the command that runs it.
+#
+# Read by `crates/inillucent-compat/tests/bindings.rs`, which fails when a test
+# file under `packages/` or `drivers/bindings/` has no row here, and when a row
+# names a file that is not there. It is `tests/selection.toml`'s
+# `no_test_hides_outside_the_map` for the parts of this repository that cargo
+# does not build.
+#
+# ## Why these are not rows in tests/selection.toml
+#
+# `inillucent-testrun` is cargo-shaped end to end: it builds with
+# `cargo test --workspace --no-run`, finds the executables in cargo's own JSON
+# output, runs them with libtest's arguments and reads libtest's summary. A
+# fourth target kind for "run this shell command" is a change to the runner's
+# core, and task-2036, which wrote this file, is a ticket about tests.
+#
+# What the map gets instead is this file plus two guards that are in the map:
+# `bindings::every_package_test_is_named_here`, which is the rot check, and
+# `bindings::every_binding_runs_the_whole_suite`, which reads what the
+# conformance runners produced and fails when one of them stopped running or
+# ran against an older suite. A run where the bindings did not run is loud
+# either way.
+#
+# ## Running them
+#
+#     sh tools/run-package-tests.sh
+#
+# It needs `INILLUCENT_BIN` pointing at a built command line, and
+# `INILLUCENT_DRIVER_LIB` at the built C ABI for the Python rows. Each row says
+# what else it needs; a row whose interpreter is absent prints a `; skipping`
+# line and the script reports how many skipped.
+
+[[test]]
+language = "python"
+path = "drivers/bindings/python/run_conformance.py"
+command = "python drivers/bindings/python/run_conformance.py"
+requires = ["python", "capi"]
+about = "the shared conformance suite through the C ABI, which is the reference binding"
+
+[[test]]
+language = "python"
+path = "packages/python/tests/test_wheel.py"
+command = "python packages/python/tests/test_wheel.py"
+requires = ["python", "programs"]
+about = "what is inside the wheel, and a round trip against the binary that is in it. It was referenced by nothing at all until task-2036 - not by a selection row, not by a script, not by the release - so a wheel could ship with its native half missing and this file would sit there passing on nobody's machine."
+
+[[test]]
+language = "npm"
+path = "packages/npm/inillucent/conformance.test.mjs"
+command = "node --test packages/npm/inillucent/conformance.test.mjs"
+requires = ["node", "programs"]
+about = "the shared conformance suite through the npm wrapper"
+
+[[test]]
+language = "npm"
+path = "packages/npm/inillucent/roundtrip.test.mjs"
+command = "node --test packages/npm/inillucent/roundtrip.test.mjs"
+requires = ["node", "programs"]
+about = "the wrapper against a real binary: write, read back, bind, classify"
+
+[[test]]
+language = "npm"
+path = "packages/npm/inillucent/resolve.test.mjs"
+command = "node --test packages/npm/inillucent/resolve.test.mjs"
+requires = ["node"]
+about = "the platform table and the shape of the error messages, read as text"
+
+[[test]]
+language = "go"
+path = "packages/go/conformance_test.go"
+command = "go test -C packages/go -run TestConformanceSuite ./..."
+requires = ["go", "programs"]
+about = "the shared conformance suite through the Go wrapper"
+
+[[test]]
+language = "go"
+path = "packages/go/inillucent_test.go"
+command = "go test -C packages/go -run 'TestRoundTrip|TestBinding|TestStatus|TestDescribe|TestReadOnly' ./..."
+requires = ["go", "programs"]
+about = "the Go wrapper's own round trip, which predates the conformance runner"
+
+[[test]]
+language = "php"
+path = "packages/php/tests/conformance.php"
+command = "php packages/php/tests/conformance.php"
+requires = ["php", "programs"]
+about = "the shared conformance suite through the PHP wrapper"
+
+[[test]]
+language = "php"
+path = "packages/php/tests/roundtrip.php"
+command = "php packages/php/tests/roundtrip.php"
+requires = ["php", "programs"]
+about = "the PHP wrapper against a real binary. Its skip used to be a bare exit(0), so a machine with no binary reported success having run nothing; it now exits non-zero under INILLUCENT_STRICT=1."
+
+[[test]]
+language = "php"
+path = "packages/php/tests/target.php"
+command = "php packages/php/tests/target.php"
+requires = ["php"]
+about = "the platform target table, read without needing a binary"
+
+[[test]]
+language = "go"
+path = "packages/go/cmd/inillucent-install/main_test.go"
+command = "go test -C packages/go ./cmd/..."
+requires = ["go"]
+about = "the installer's platform table and its archive names, checked without downloading one"

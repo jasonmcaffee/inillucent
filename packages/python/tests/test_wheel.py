@@ -92,8 +92,32 @@ def test_a_statement_round_trips_through_the_driver() -> None:
             assert rows.rows[0][1] == "Ada", f"the row came back as {rows.rows[0]!r}"
 
 
+def staged() -> bool:
+    """Whether ``build.py`` has staged the wheel's native half.
+
+    ``_bin`` and ``_lib`` are gitignored: they are filled by
+    ``packages/python/build.py`` from the archives a release builds, so on an
+    ordinary checkout they are not there at all.
+
+    **Every test in this file failed on every machine that had not staged a
+    wheel**, which is every development machine - and a test that always fails
+    is as useless as one that always passes, which is why nothing referenced
+    this file. It skips now, the way the standard says a suite with a missing
+    prerequisite skips, and `INILLUCENT_STRICT=1` turns that skip into a
+    non-zero exit so a release run cannot read a skip as a pass.
+    """
+    return (package() / "_bin").is_dir() and (package() / "_lib").is_dir()
+
+
 def main() -> int:
     """Runs every test in this file, for a machine with no pytest."""
+    if not staged():
+        print(
+            "the wheel's native half is not staged: run `python packages/python/build.py` "
+            "against a dist/ the release filled; skipping",
+            file=sys.stderr,
+        )
+        return 1 if os.environ.get("INILLUCENT_STRICT") == "1" else 0
     failures = []
     for name, test in sorted(globals().items()):
         if not name.startswith("test_") or not callable(test):

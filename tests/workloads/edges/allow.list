@@ -1,0 +1,16 @@
+# The edge catalogue's known failures, and the ticket that owns each.
+#
+# One per line: `<story>::<arm>`, a tab, and the ticket. `story_edges.rs` reads
+# it when a case answers something other than what the pinned SQLite answers.
+#
+# **An entry that no longer describes a failure is itself a failure**, so when
+# the ticket lands the story goes red until the line is removed. That is the
+# rule from task-1969 section 4: a list that only grows is a list of things
+# nobody will take off it, and a fixed defect left listed reads as coverage and
+# is not.
+a_dropped_and_recreated_table_rolls_back::default	task-2043: a rolled back DROP then CREATE of the same table loses every row, durably
+a_dropped_and_recreated_table_rolls_back::sqlite_page	task-2043: a rolled back DROP then CREATE of the same table loses every row, durably
+a_dropped_and_recreated_table_rolls_back::small_pool	task-2043: a rolled back DROP then CREATE of the same table loses every row, durably
+a_dropped_and_recreated_table_rolls_back::truncate_journal	task-2043: a rolled back DROP then CREATE of the same table loses every row, durably
+a_dropped_and_recreated_table_rolls_back::persist_journal	task-2043: a rolled back DROP then CREATE of the same table loses every row, durably
+a_dropped_and_recreated_table_rolls_back::waiting	task-2043: a rolled back DROP then CREATE of the same table loses every row, durably

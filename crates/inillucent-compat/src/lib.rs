@@ -36,9 +36,14 @@ pub mod fixtures;
 pub mod hash;
 pub mod history;
 pub mod interchange;
+pub mod interop;
 pub mod layering;
+pub mod ledger;
 pub mod manifest;
+pub mod matrix;
+pub mod mcpclient;
 pub mod model;
+pub mod nikaya;
 /// The rearchitected engine, which now lives in `inillucent-engine`.
 ///
 /// **Moved rather than copied.** Phases 1 to 4 built the new
@@ -57,6 +62,7 @@ pub mod report;
 pub mod results;
 pub mod selection;
 pub mod slt;
+pub mod stories;
 pub mod syntax;
 pub mod toml_lite;
 pub mod verdict;

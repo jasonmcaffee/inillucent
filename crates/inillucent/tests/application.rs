@@ -1,9 +1,12 @@
-//! Whole applications, in miniature, against a file on disk.
+//! Whole applications, in miniature, against a file on disk, at every
+//! configuration in the matrix.
 //!
 //! Invariant: **each test here is a story an application actually tells, run
-//! end to end through `inillucent_engine::connect::Database`, and it reopens the file part way
-//! through.** Not a feature exercised in isolation - a schema built, written
-//! to, queried the way a screen would query it, closed, and opened again.
+//! end to end through `inillucent_engine::connect::Database`, it reopens the
+//! file part way through, and it runs once per arm of
+//! `inillucent_compat::matrix`.** Not a feature exercised in isolation - a
+//! schema built, written to, queried the way a screen would query it, closed,
+//! and opened again.
 //!
 //! ## Why stories rather than features
 //!
@@ -16,7 +19,7 @@
 //! that survives a good unit suite lives in a seam like that, and the cheapest
 //! way to walk a seam is to write the program somebody would have written.
 //!
-//! The four stories are chosen to be different shapes rather than four
+//! The stories are chosen to be different shapes rather than several
 //! spellings of the same one:
 //!
 //! - **an order book**, which is referential integrity and aggregation: the
@@ -29,31 +32,40 @@
 //! - **a catalogue with full-text search**, which is a virtual table and its
 //!   shadow tables committing and rolling back with ordinary ones.
 //!
+//! ## Why every story runs six times
+//!
+//! Because until task-2036 every one of them ran at one page size. `scenario!`
+//! expands one test per arm of the matrix, so
+//! `an_order_book_keeps_its_references::sqlite_page` is its own test with its
+//! own verdict at SQLite's 4,096 byte page size, and
+//! `::small_pool` is the same story over a 64 frame buffer pool. The arms and
+//! the reason each one is in the list are in
+//! `crates/inillucent-compat/src/matrix.rs`.
+//!
+//! A story is therefore written as `fn story(arm: &Arm, area: &Path)`: the
+//! configuration it is running at, and a scratch directory of its own whose
+//! path carries the arm's name. It opens through `arm.open()` rather than
+//! `Database::open`, because that is what carries the arm's page size into the
+//! file, and it reopens through `reopen_and_check(arm, path)` for the same
+//! reason - a reopen at the wrong geometry would be testing a different file
+//! from the one the story wrote.
+//!
 //! ## What every story asserts that a feature test would not
 //!
 //! That the file is still right *afterwards*. Each story ends by reopening the
-//! database and running `PRAGMA integrity_check` as well as re-reading its own
-//! data, because a write path that leaves a correct answer in the pool and a
-//! damaged page on disk passes every test that does not look.
+//! database from the path and asking the same questions again, so an answer
+//! that lives only in the page pool fails here. That is rule 1.4 of
+//! `tests/inillucent-testing-tdd.md`, and it is the rule that caught the
+//! virtual-table rollback defect this file's fourth story records: the *file*
+//! was correct throughout and only the live connection was wrong, so every
+//! test that did not reopen agreed with the damage.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use inillucent_compat::matrix::Arm;
+use inillucent_compat::scenario;
 use inillucent_engine::connect::Database;
 use inillucent_tree::datum::OwnedDatum;
-
-/// Returns a fresh, empty directory for one test's files.
-///
-/// @param tag - what to name the directory after
-fn scratch(tag: &str) -> PathBuf {
-    let directory = std::env::temp_dir().join(format!(
-        "inillucent-app-{}-{tag}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ));
-    let _ = std::fs::remove_dir_all(&directory);
-    std::fs::create_dir_all(&directory).expect("a scratch directory");
-    directory
-}
 
 /// Renders one row as a comma-separated line, so an expectation can be written
 /// as the text a person would read off a screen.
@@ -93,17 +105,35 @@ fn ask(connection: &inillucent_engine::connect::Connection<'_>, sql: &str) -> St
     }
 }
 
-/// Reopens a database and checks it, which is what every story ends with.
+/// Opens a story's database at the arm's geometry.
 ///
+/// @param arm - the configuration this run is at
 /// @param path - the database file
-fn reopen_and_check(path: &PathBuf) -> Database {
-    let database = Database::open(path).expect("the database reopens");
+fn open(arm: &Arm, path: &Path) -> Database {
+    match arm.open(path) {
+        Ok(database) => database,
+        Err(why) => panic!(
+            "the database does not open at the {} arm: {}",
+            arm.name,
+            why.message()
+        ),
+    }
+}
+
+/// Reopens a database at the arm's geometry and checks it, which is what every
+/// story ends with.
+///
+/// @param arm - the configuration this run is at
+/// @param path - the database file
+fn reopen_and_check(arm: &Arm, path: &PathBuf) -> Database {
+    let database = open(arm, path);
     database.check().expect("the file is sound after a reopen");
     let connection = database.session();
     assert_eq!(
         ask(&connection, "PRAGMA integrity_check"),
         "ok",
-        "the engine's own check disagrees with `Database::check`"
+        "the engine's own check disagrees with `Database::check` at the {} arm",
+        arm.name
     );
     // Ends the borrow of `database`, which is what lets it be returned.
     let _ = connection;
@@ -116,12 +146,10 @@ fn reopen_and_check(path: &PathBuf) -> Database {
 /// The referential integrity is the point. Every write below is one a real
 /// application makes, and two of them are writes that *must* be refused - a
 /// line pointing at no order, and a customer deleted out from under one.
-#[test]
-fn an_order_book_keeps_its_references() {
-    let directory = scratch("orders");
-    let path = directory.join("shop.rdb");
+fn an_order_book_keeps_its_references(arm: &Arm, area: &Path) {
+    let path = area.join("shop.rdb");
     {
-        let database = Database::open(&path).expect("the database opens");
+        let database = open(arm, &path);
         let connection = database.session();
         connection
             .execute_batch(
@@ -192,7 +220,7 @@ fn an_order_book_keeps_its_references() {
         );
     }
 
-    let database = reopen_and_check(&path);
+    let database = reopen_and_check(arm, &path);
     let connection = database.session();
     connection
         .execute_batch("PRAGMA foreign_keys = ON")
@@ -241,6 +269,11 @@ fn an_order_book_keeps_its_references() {
     );
 }
 
+scenario!(
+    an_order_book_keeps_its_references,
+    an_order_book_keeps_its_references
+);
+
 /// The running balance, expressed as a correlated subquery rather than a
 /// window function.
 ///
@@ -265,13 +298,11 @@ const RUNNING_BALANCE: &str = "SELECT account, seq, pence, \
 
 /// An append-only ledger: entries with a running balance, ordered by a sequence
 /// that has to mean the same thing after a reopen.
-#[test]
-fn a_ledger_reads_the_same_after_a_reopen() {
-    let directory = scratch("ledger");
-    let path = directory.join("ledger.rdb");
+fn a_ledger_reads_the_same_after_a_reopen(arm: &Arm, area: &Path) {
+    let path = area.join("ledger.rdb");
     let before;
     {
-        let database = Database::open(&path).expect("the database opens");
+        let database = open(arm, &path);
         let connection = database.session();
         connection
             .execute_batch(
@@ -307,7 +338,7 @@ fn a_ledger_reads_the_same_after_a_reopen() {
         before = ask(&connection, RUNNING_BALANCE);
     }
 
-    let database = reopen_and_check(&path);
+    let database = reopen_and_check(arm, &path);
     let connection = database.session();
     let after = ask(&connection, RUNNING_BALANCE);
     assert_eq!(before, after, "the running balance changed across a reopen");
@@ -334,14 +365,17 @@ fn a_ledger_reads_the_same_after_a_reopen() {
     );
 }
 
+scenario!(
+    a_ledger_reads_the_same_after_a_reopen,
+    a_ledger_reads_the_same_after_a_reopen
+);
+
 /// A document store: JSON in a text column, queried by an extracted field, with
 /// an index on the extraction.
-#[test]
-fn a_document_store_indexes_an_extracted_field() {
-    let directory = scratch("documents");
-    let path = directory.join("documents.rdb");
+fn a_document_store_indexes_an_extracted_field(arm: &Arm, area: &Path) {
+    let path = area.join("documents.rdb");
     {
-        let database = Database::open(&path).expect("the database opens");
+        let database = open(arm, &path);
         let connection = database.session();
         connection
             .execute_batch(
@@ -368,7 +402,7 @@ fn a_document_store_indexes_an_extracted_field() {
         assert_eq!(malformed.code(), inillucent_base::PrimaryCode::Constraint);
     }
 
-    let database = reopen_and_check(&path);
+    let database = reopen_and_check(arm, &path);
     let connection = database.session();
     assert_eq!(
         ask(
@@ -397,10 +431,15 @@ fn a_document_store_indexes_an_extracted_field() {
     );
 }
 
+scenario!(
+    a_document_store_indexes_an_extracted_field,
+    a_document_store_indexes_an_extracted_field
+);
+
 /// A virtual table rolls back with the transaction around it, and the
 /// connection agrees with the file afterwards.
 ///
-/// **This did not work, and this ticket fixed it.** A rolled-back insert into
+/// **This did not work, and task-1876 fixed it.** A rolled-back insert into
 /// an `fts5` table stayed, a rolled-back delete was gone, and `ROLLBACK TO` did
 /// nothing at all - so one query answered differently before and after a reopen
 /// with nothing written in between, wrong in whichever direction the abandoned
@@ -430,12 +469,10 @@ fn a_document_store_indexes_an_extracted_field() {
 ///
 /// The probe those numbers came from now returns the same bytes from both
 /// shells.
-#[test]
-fn a_virtual_table_rolls_back_with_its_transaction() {
-    let directory = scratch("catalogue");
-    let path = directory.join("catalogue.rdb");
+fn a_virtual_table_rolls_back_with_its_transaction(arm: &Arm, area: &Path) {
+    let path = area.join("catalogue.rdb");
     {
-        let database = Database::open(&path).expect("the database opens");
+        let database = open(arm, &path);
         let connection = database.session();
         connection
             .execute_batch(
@@ -531,7 +568,7 @@ fn a_virtual_table_rolls_back_with_its_transaction() {
 
     // And the file agrees with what the connection was saying, which is the
     // half that used to be false.
-    let database = reopen_and_check(&path);
+    let database = reopen_and_check(arm, &path);
     let connection = database.session();
     assert_eq!(
         ask(&connection, "SELECT title FROM pages ORDER BY rowid"),
@@ -548,14 +585,19 @@ fn a_virtual_table_rolls_back_with_its_transaction() {
     );
 }
 
+scenario!(
+    a_virtual_table_rolls_back_with_its_transaction,
+    a_virtual_table_rolls_back_with_its_transaction
+);
+
 /// Rolling back to an *outer* savepoint discards the inner one's rows too.
 ///
 /// **What this test does and does not prove.** It pins the observable answer:
 /// two levels of savepoint, a rollback to the outer one, and the inner one's
 /// rows gone - through a virtual table, across a reopen.
 ///
-/// It does **not** discriminate the savepoint-level defect a review of this
-/// ticket found, and saying so is the point. The engine used to tell each
+/// It does **not** discriminate the savepoint-level defect a review of
+/// task-1876 found, and saying so is the point. The engine used to tell each
 /// module the current nesting depth rather than the level of the savepoint
 /// being returned to, so `SAVEPOINT a; SAVEPOINT b; ROLLBACK TO a` said "two"
 /// where the answer was "zero". The fix is real and it is in `rollback_to`, but
@@ -567,12 +609,10 @@ fn a_virtual_table_rolls_back_with_its_transaction() {
 /// So this is a regression test for the behaviour and a note about the rest.
 /// The alternative - a comment claiming the test proves the fix - is the thing
 /// section 1.1 of the standard is against.
-#[test]
-fn rolling_back_to_an_outer_savepoint_discards_the_inner_one() {
-    let directory = scratch("nested-savepoint");
-    let path = directory.join("nested.rdb");
+fn rolling_back_to_an_outer_savepoint_discards_the_inner_one(arm: &Arm, area: &Path) {
+    let path = area.join("nested.rdb");
     {
-        let database = Database::open(&path).expect("the database opens");
+        let database = open(arm, &path);
         let connection = database.session();
         connection
             .execute_batch(
@@ -615,7 +655,7 @@ fn rolling_back_to_an_outer_savepoint_discards_the_inner_one() {
             .execute_batch("COMMIT")
             .expect("the transaction commits");
     }
-    let database = reopen_and_check(&path);
+    let database = reopen_and_check(arm, &path);
     let connection = database.session();
     assert_eq!(
         ask(&connection, "SELECT title FROM pages ORDER BY rowid"),
@@ -632,6 +672,11 @@ fn rolling_back_to_an_outer_savepoint_discards_the_inner_one() {
     );
 }
 
+scenario!(
+    rolling_back_to_an_outer_savepoint_discards_the_inner_one,
+    rolling_back_to_an_outer_savepoint_discards_the_inner_one
+);
+
 /// A `ROLLBACK TO` that names no open savepoint fails and changes nothing.
 ///
 /// **A failed statement may not have a side effect**, and this one nearly did.
@@ -642,12 +687,10 @@ fn rolling_back_to_an_outer_savepoint_discards_the_inner_one() {
 /// writes and reported an error, leaving the transaction quietly short of rows
 /// it had accepted.
 ///
-/// Found by a review of this ticket's own fix, which is why the case is here:
+/// Found by a review of task-1876's own fix, which is why the case is here:
 /// nothing else in the suite asks what a *failed* rollback does to a module.
-#[test]
-fn a_rollback_to_an_unknown_savepoint_changes_nothing() {
-    let directory = scratch("unknown-savepoint");
-    let database = Database::open(directory.join("unknown.rdb")).expect("the database opens");
+fn a_rollback_to_an_unknown_savepoint_changes_nothing(arm: &Arm, area: &Path) {
+    let database = open(arm, &area.join("unknown.rdb"));
     let connection = database.session();
     connection
         .execute_batch(
@@ -686,16 +729,19 @@ fn a_rollback_to_an_unknown_savepoint_changes_nothing() {
     assert_eq!(ask(&connection, "SELECT count(*) FROM pages"), "2");
 }
 
+scenario!(
+    a_rollback_to_an_unknown_savepoint_changes_nothing,
+    a_rollback_to_an_unknown_savepoint_changes_nothing
+);
+
 /// The ordinary half of the same story: a normal table in a transaction that a
 /// virtual table also wrote to still rolls back correctly.
 ///
 /// This is what bounds the defect above. Without it, "virtual tables do not
 /// roll back" and "nothing rolls back once a virtual table is involved" look
 /// the same from the outside, and they are very different sizes of problem.
-#[test]
-fn an_ordinary_table_rolls_back_beside_a_virtual_one() {
-    let directory = scratch("mixed");
-    let database = Database::open(directory.join("mixed.rdb")).expect("the database opens");
+fn an_ordinary_table_rolls_back_beside_a_virtual_one(arm: &Arm, area: &Path) {
+    let database = open(arm, &area.join("mixed.rdb"));
     let connection = database.session();
     connection
         .execute_batch(
@@ -725,12 +771,15 @@ fn an_ordinary_table_rolls_back_beside_a_virtual_one() {
     );
 }
 
+scenario!(
+    an_ordinary_table_rolls_back_beside_a_virtual_one,
+    an_ordinary_table_rolls_back_beside_a_virtual_one
+);
+
 /// Two connections to one file see one another's committed writes, and a
 /// snapshot does not change under a reader that opened before the write.
-#[test]
-fn two_connections_share_one_file() {
-    let directory = scratch("connections");
-    let database = Database::open(directory.join("shared.rdb")).expect("the database opens");
+fn two_connections_share_one_file(arm: &Arm, area: &Path) {
+    let database = open(arm, &area.join("shared.rdb"));
     let writer = database.session();
     writer
         .execute_batch("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
@@ -757,14 +806,17 @@ fn two_connections_share_one_file() {
     );
 }
 
+scenario!(
+    two_connections_share_one_file,
+    two_connections_share_one_file
+);
+
 /// A view and a trigger, which is how an application puts a rule in the
 /// database rather than in every caller.
-#[test]
-fn a_trigger_and_a_view_survive_a_reopen() {
-    let directory = scratch("rules");
-    let path = directory.join("rules.rdb");
+fn a_trigger_and_a_view_survive_a_reopen(arm: &Arm, area: &Path) {
+    let path = area.join("rules.rdb");
     {
-        let database = Database::open(&path).expect("the database opens");
+        let database = open(arm, &path);
         let connection = database.session();
         connection
             .execute_batch(
@@ -792,7 +844,7 @@ fn a_trigger_and_a_view_survive_a_reopen() {
         );
     }
 
-    let database = reopen_and_check(&path);
+    let database = reopen_and_check(arm, &path);
     let connection = database.session();
     assert_eq!(
         ask(
@@ -814,3 +866,8 @@ fn a_trigger_and_a_view_survive_a_reopen() {
         "the trigger did not fire after the reopen"
     );
 }
+
+scenario!(
+    a_trigger_and_a_view_survive_a_reopen,
+    a_trigger_and_a_view_survive_a_reopen
+);

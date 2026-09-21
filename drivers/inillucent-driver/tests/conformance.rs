@@ -523,8 +523,10 @@ fn the_conformance_suite_passes() {
 
     let mut failures: Vec<String> = Vec::new();
     let mut ran = 0usize;
+    let mut names: Vec<String> = Vec::new();
     for case in cases {
         let name = case.get("name").and_then(Json::text).unwrap_or("(unnamed)");
+        names.push(name.to_owned());
         let file = scratch(name);
         let database = Database::open(&file).expect("the scratch database opens");
         // **A case may ask to be run a connection per call**, which is the shape
@@ -606,6 +608,8 @@ fn the_conformance_suite_passes() {
         }
     }
 
+    record(&names, &failures);
+
     assert!(
         failures.is_empty(),
         "{} of the conformance suite's assertions did not hold:\n  - {}",
@@ -616,6 +620,41 @@ fn the_conformance_suite_passes() {
         ran >= 40,
         "only {ran} steps ran, which means the suite was misread rather than being small"
     );
+}
+
+/// Writes what this runner ran, for `tooling::every_binding_runs_the_whole_suite`.
+///
+/// **Four runners, one specification, and until task-2036 no way to tell which
+/// of them had actually run it.** npm, Go and PHP each had a round trip of
+/// their own; this file and the Python binding read the suite. The guard reads
+/// these records and fails when a runner ran fewer cases than its declared
+/// capabilities allow, which is what makes "all four bindings pass the suite"
+/// a fact rather than an intention.
+///
+/// The reference implementation skips nothing: it holds a connection and it
+/// carries bytes, so `lacks` is empty and every case is in `ran`.
+///
+/// @param ran - the cases this run graded
+/// @param failures - what did not hold, so the record says whether it passed
+fn record(ran: &[String], failures: &[String]) {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let directory = root.join("_agent_output/conformance");
+    if std::fs::create_dir_all(&directory).is_err() {
+        return;
+    }
+    let quoted = |items: &[String]| -> String {
+        items
+            .iter()
+            .map(|item| format!("\"{}\"", item.replace('\\', "\\\\").replace('"', "\\\"")))
+            .collect::<Vec<String>>()
+            .join(", ")
+    };
+    let body = format!(
+        "{{\n  \"language\": \"rust\",\n  \"lacks\": [],\n  \"ran\": [{}],\n  \"skipped\": [],\n  \"failures\": [{}]\n}}\n",
+        quoted(ran),
+        quoted(failures)
+    );
+    let _ = std::fs::write(directory.join("rust.json"), body);
 }
 
 #[cfg(test)]

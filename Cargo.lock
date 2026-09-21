@@ -567,6 +567,7 @@ name = "inillucent"
 version = "0.1.7"
 dependencies = [
  "inillucent-base",
+ "inillucent-compat",
  "inillucent-driver",
  "inillucent-engine",
  "inillucent-sql",

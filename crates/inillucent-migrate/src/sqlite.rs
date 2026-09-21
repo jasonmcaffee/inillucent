@@ -730,3 +730,329 @@ fn sql_literal(value: Option<&OwnedDatum>) -> String {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use inillucent_catalog::load::index_from_create_sql;
+    use inillucent_value::Affinity;
+
+    /// The rowid the reader hands back for a row it read out of a table page.
+    const ROWID: i64 = 7;
+
+    /// Every declared type maps to the affinity SQLite's substring rules give.
+    ///
+    /// **A migration that got this wrong would publish a file that compares
+    /// differently rather than one that reads differently**, which is the worse
+    /// half: `WHERE price = '10'` is true in a NUMERIC column and false in a
+    /// TEXT one, so the rows all arrive and the answers change. The affinity is
+    /// what `logical_row` reads to decide the physical type a value is stored
+    /// as, so it is decided here, once, for the inventory and for the import
+    /// both.
+    ///
+    /// The last three rows are the ones a lookup table of known type names gets
+    /// wrong: `POINT` is an integer column because it contains `INT`, `STRING`
+    /// is numeric because it contains none of the five substrings, and
+    /// `VARCHAR(20)` is text because it contains `CHAR`.
+    #[test]
+    fn every_declared_type_maps_to_the_affinity_sqlites_substring_rules_give() {
+        let sql = "CREATE TABLE t (
+            a INTEGER, b INT, c VARCHAR(20), d TEXT, e BLOB, f,
+            g REAL, h DOUBLE PRECISION, i FLOAT, j NUMERIC,
+            k DECIMAL(10,5), l BOOLEAN, m DATETIME, n POINT, o STRING
+        )";
+        let info = table_from_create_sql(sql.as_bytes(), 0, 2).expect("the declaration parses");
+        let wanted = [
+            ("a", Affinity::Integer),
+            ("b", Affinity::Integer),
+            ("c", Affinity::Text),
+            ("d", Affinity::Text),
+            ("e", Affinity::Blob),
+            ("f", Affinity::Blob),
+            ("g", Affinity::Real),
+            ("h", Affinity::Real),
+            ("i", Affinity::Real),
+            ("j", Affinity::Numeric),
+            ("k", Affinity::Numeric),
+            ("l", Affinity::Numeric),
+            ("m", Affinity::Numeric),
+            ("n", Affinity::Integer),
+            ("o", Affinity::Numeric),
+        ];
+        assert_eq!(
+            info.columns.len(),
+            wanted.len(),
+            "the table declares {} columns and this case names {}",
+            info.columns.len(),
+            wanted.len()
+        );
+        for (column, (name, affinity)) in info.columns.iter().zip(wanted.iter()) {
+            assert_eq!(column.name, name.as_bytes(), "the columns are out of order");
+            assert_eq!(
+                column.affinity,
+                *affinity,
+                "{name} is declared {} and came out {:?}",
+                String::from_utf8_lossy(&column.declared_type),
+                column.affinity
+            );
+        }
+    }
+
+    /// The declared type is carried across as it was written, not normalised.
+    ///
+    /// The affinity above is what the engine *uses*; the text is what
+    /// `PRAGMA table_info` and a reconstructed `CREATE TABLE` show. An
+    /// application that reads its own schema back to build a form or a
+    /// migration of its own sees `VARCHAR(20)`, so a migration that rewrote it
+    /// as `TEXT` would be a lossy copy of something nobody asked it to change.
+    #[test]
+    fn a_declared_type_is_carried_across_exactly_as_it_was_written() {
+        let sql = "CREATE TABLE t (a VARCHAR(20), b DECIMAL(10,5), c DOUBLE PRECISION, d)";
+        let info = table_from_create_sql(sql.as_bytes(), 0, 2).expect("the declaration parses");
+        let written: Vec<String> = info
+            .columns
+            .iter()
+            .map(|column| String::from_utf8_lossy(&column.declared_type).to_string())
+            .collect();
+        assert_eq!(
+            written,
+            vec![
+                "VARCHAR(20)".to_string(),
+                "DECIMAL(10,5)".to_string(),
+                "DOUBLE PRECISION".to_string(),
+                String::new(),
+            ]
+        );
+    }
+
+    /// `INTEGER PRIMARY KEY` is the rowid alias; `INT PRIMARY KEY` is not.
+    ///
+    /// **The one-word difference decides where the value is stored**, and a
+    /// migration that read it wrong writes NULL into every row of the column
+    /// people join on. An alias column's value is the cell key and its record
+    /// field is empty; an `INT PRIMARY KEY` is an ordinary column with a unique
+    /// index over it, and its value is in the record like any other.
+    #[test]
+    fn an_integer_primary_key_is_the_rowid_alias_and_an_int_one_is_not() {
+        let alias =
+            table_from_create_sql(b"CREATE TABLE t (id INTEGER PRIMARY KEY, body TEXT)", 0, 2)
+                .expect("the declaration parses");
+        assert_eq!(alias.rowid_alias, Some(0));
+
+        let ordinary =
+            table_from_create_sql(b"CREATE TABLE u (id INT PRIMARY KEY, body TEXT)", 0, 3)
+                .expect("the declaration parses");
+        assert_eq!(ordinary.rowid_alias, None);
+        assert_eq!(
+            ordinary.columns.first().map(|column| column.affinity),
+            Some(Affinity::Integer),
+            "an INT PRIMARY KEY is still an integer column; it is only not the rowid"
+        );
+    }
+
+    /// The rowid alias comes back in the position it was declared in.
+    ///
+    /// This is the transform `inventory` digests through, and it is the reason
+    /// the digest is comparable at all: the reader hands back
+    /// `[rowid] ++ record fields` with the alias field empty, and a `SELECT *`
+    /// against the migrated database produces the declared order with the rowid
+    /// in the middle. Digesting the storage shape would compare a row of four
+    /// values against a row of three and call a correct migration wrong.
+    #[test]
+    fn the_rowid_alias_comes_back_in_the_position_it_was_declared_in() {
+        let info = table_from_create_sql(
+            b"CREATE TABLE t (body TEXT, id INTEGER PRIMARY KEY, tag TEXT)",
+            0,
+            2,
+        )
+        .expect("the declaration parses");
+        let layout = source_layout_of(&info).expect("the shape derives");
+        let stored = vec![
+            OwnedDatum::Int(ROWID),
+            OwnedDatum::Text(b"a body".to_vec()),
+            OwnedDatum::Null,
+            OwnedDatum::Text(b"a tag".to_vec()),
+        ];
+        assert_eq!(
+            logical_row(&info, &layout, &stored),
+            vec![
+                OwnedDatum::Text(b"a body".to_vec()),
+                OwnedDatum::Int(ROWID),
+                OwnedDatum::Text(b"a tag".to_vec()),
+            ]
+        );
+    }
+
+    /// An integer stored in a REAL column is read back as a real.
+    ///
+    /// SQLite stores 7 in a REAL column as 7.0, and the digest is taken over
+    /// what a query sees rather than over what the page holds - so the
+    /// conversion has to happen on this side too. Without it the source digests
+    /// an integer, the migrated database digests a real, and the migration is
+    /// refused for carrying the value it was given.
+    #[test]
+    fn an_integer_in_a_real_column_is_read_back_as_a_real() {
+        let info = table_from_create_sql(
+            b"CREATE TABLE t (id INTEGER PRIMARY KEY, weight REAL, label TEXT)",
+            0,
+            2,
+        )
+        .expect("the declaration parses");
+        let layout = source_layout_of(&info).expect("the shape derives");
+        let stored = vec![
+            OwnedDatum::Int(ROWID),
+            OwnedDatum::Null,
+            OwnedDatum::Int(7),
+            OwnedDatum::Text(b"kg".to_vec()),
+        ];
+        assert_eq!(
+            logical_row(&info, &layout, &stored),
+            vec![
+                OwnedDatum::Int(ROWID),
+                OwnedDatum::Real(7.0),
+                OwnedDatum::Text(b"kg".to_vec()),
+            ]
+        );
+    }
+
+    /// An index key carries the direction it was declared with, on both flags.
+    ///
+    /// **Two flags, because two different pieces of code ask the question.**
+    /// `descending` is what the tree is built with - `rowshape.rs` turns it
+    /// into a descending key column - and `declared_descending` is what
+    /// `PRAGMA index_xinfo` reports, which is how an application reconstructs
+    /// its own `CREATE INDEX` after a migration. The parse sets both from the
+    /// declaration; they only differ where a later pass flattens the storage
+    /// side, and this is the pass a migration reads.
+    ///
+    /// A migration that dropped the `DESC` would publish an index a keyset read
+    /// walks backwards. `compat/fixtures/realistic/browser-history.sql` carries
+    /// such an index, and `migrate_realistic.rs` asks the same question of a
+    /// published database.
+    #[test]
+    fn an_index_key_carries_the_direction_it_was_declared_with() {
+        let table = table_from_create_sql(
+            b"CREATE TABLE visit (id INTEGER PRIMARY KEY, place_id INTEGER, at INTEGER, note TEXT)",
+            0,
+            2,
+        )
+        .expect("the declaration parses");
+        let index = index_from_create_sql(
+            b"CREATE INDEX visit_when_idx ON visit (place_id, at DESC, note ASC)",
+            &table,
+            3,
+        )
+        .expect("the index parses");
+        let declared: Vec<bool> = index
+            .columns
+            .iter()
+            .map(|key| key.declared_descending)
+            .collect();
+        assert_eq!(declared, vec![false, true, false]);
+        let stored: Vec<bool> = index.columns.iter().map(|key| key.descending).collect();
+        assert_eq!(
+            stored, declared,
+            "the storage flag and the reported flag come out of one declaration"
+        );
+    }
+
+    /// A column's collation is carried, and an index key inherits it.
+    ///
+    /// A migration that dropped `COLLATE NOCASE` would publish a database whose
+    /// unique index accepts a row the source refused, and whose `ORDER BY` puts
+    /// `Zebra` before `apple`. The collation is on the column, so an index over
+    /// that column takes it without naming it.
+    ///
+    /// A column that declares none is `binary`, written out rather than left
+    /// empty, so every key has a collation name and nothing downstream has to
+    /// decide what an absent one means.
+    #[test]
+    fn a_column_collation_is_carried_and_an_index_key_inherits_it() {
+        let table = table_from_create_sql(
+            b"CREATE TABLE place (id INTEGER PRIMARY KEY, host TEXT COLLATE NOCASE, title TEXT)",
+            0,
+            2,
+        )
+        .expect("the declaration parses");
+        let collations: Vec<String> = table
+            .columns
+            .iter()
+            .map(|column| String::from_utf8_lossy(&column.collation).to_string())
+            .collect();
+        assert_eq!(
+            collations,
+            vec![
+                "binary".to_string(),
+                "nocase".to_string(),
+                "binary".to_string(),
+            ],
+            "a column that declares no collation is BINARY, written out rather than left empty"
+        );
+
+        let index =
+            index_from_create_sql(b"CREATE INDEX place_host_idx ON place (host)", &table, 3)
+                .expect("the index parses");
+        let key = index.columns.first().expect("one key column");
+        assert_eq!(
+            String::from_utf8_lossy(&key.collation),
+            "nocase",
+            "an index over a NOCASE column is ordered by NOCASE without saying so"
+        );
+    }
+
+    /// An index key may name a collation of its own, and it wins.
+    ///
+    /// The other half of the question above: `CREATE INDEX ... (host COLLATE
+    /// BINARY)` over a `COLLATE NOCASE` column is an index ordered by BINARY,
+    /// and it is a different index from the one that inherits. Carrying the
+    /// column's collation into every key would silently merge the two.
+    #[test]
+    fn an_index_key_may_name_a_collation_of_its_own() {
+        let table = table_from_create_sql(
+            b"CREATE TABLE place (id INTEGER PRIMARY KEY, host TEXT COLLATE NOCASE)",
+            0,
+            2,
+        )
+        .expect("the declaration parses");
+        let index = index_from_create_sql(
+            b"CREATE INDEX place_host_binary ON place (host COLLATE BINARY)",
+            &table,
+            3,
+        )
+        .expect("the index parses");
+        let key = index.columns.first().expect("one key column");
+        assert_eq!(String::from_utf8_lossy(&key.collation), "binary");
+    }
+
+    /// A unique partial index keeps both halves of what it was declared with.
+    ///
+    /// `browser-history` carries one, and the two properties fail differently:
+    /// dropping `UNIQUE` publishes a database that accepts a duplicate the
+    /// source refused, and dropping the `WHERE` publishes one that refuses a
+    /// duplicate the source accepted.
+    #[test]
+    fn a_unique_partial_index_keeps_both_halves_of_its_declaration() {
+        let table = table_from_create_sql(
+            b"CREATE TABLE place (id INTEGER PRIMARY KEY, url TEXT, archived INTEGER)",
+            0,
+            2,
+        )
+        .expect("the declaration parses");
+        let index = index_from_create_sql(
+            b"CREATE UNIQUE INDEX place_live_url ON place (url) WHERE archived = 0",
+            &table,
+            3,
+        )
+        .expect("the index parses");
+        assert!(index.unique, "the declaration said UNIQUE");
+        let predicate = index
+            .partial_sql
+            .as_ref()
+            .map(|bytes| String::from_utf8_lossy(bytes).to_string())
+            .unwrap_or_default();
+        assert!(
+            predicate.contains("archived") && predicate.contains('0'),
+            "the partial predicate came back as {predicate:?}"
+        );
+    }
+}

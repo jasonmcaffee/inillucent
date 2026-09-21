@@ -101,12 +101,19 @@ $binary = null;
 try {
     $binary = Locator::find();
 } catch (Error $why) {
+    // **A skip exits 0 on a fresh clone and non-zero under INILLUCENT_STRICT
+    // (task-2036).** This used to be a bare `exit(0)`, so a machine with no
+    // binary printed that it was skipping and then reported success having run
+    // nothing at all - and because this file had no row in
+    // `tests/selection.toml` either, `inillucent-testrun --strict` could not
+    // count it. That is rule 1.2's exact shape: a test that cannot fail is
+    // worse than no test.
     fwrite(
         STDERR,
         "no inillucent binary: set INILLUCENT_BIN or install one "
             . "(`cargo build --release -p inillucent-cli`); skipping\n"
     );
-    exit(0);
+    exit(getenv('INILLUCENT_STRICT') === '1' ? 1 : 0);
 }
 
 $directory = scratch();
