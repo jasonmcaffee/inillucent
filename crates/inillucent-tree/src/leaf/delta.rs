@@ -7,10 +7,10 @@
 //! reach column `k` is to walk past columns `0..k` first. [`LeafRef::delta_value`]
 //! pays that walk once per call, which is fine for the one caller who wants a
 //! single column; the two callers who want the whole row -
-//! [`LeafRef::delta_row_values`] and [`LeafRef::delta_key_matches`] - both go
+//! [`LeafRef::delta_row_values`] and [`LeafRef::row_key_matches`] - both go
 //! through [`LeafRef::delta_column_at`] instead, carrying the cursor forward
 //! themselves so the row is walked once rather than once per column asked for.
-//! [`LeafRef::delta_key_matches`]'s own doc comment carries the measurement
+//! [`LeafRef::row_key_matches`]'s own doc comment carries the measurement
 //! this was worth.
 //!
 //! What lives here is the delta area on its own: its directory
@@ -150,6 +150,14 @@ impl<'p> LeafRef<'p> {
 
     /// Returns the bytes of one delta row.
     ///
+    /// **Finding row `index` costs a walk from the first row**, because the
+    /// area is a run of rows, each with its length in front of it, and it has
+    /// no directory of its own. A caller that
+    /// wants one row pays that walk once and it is what this is for; a caller
+    /// that wants every row in turn must use [`LeafRef::delta_row_from`]
+    /// instead, or the area is walked `index` times to visit row `index` and
+    /// the loop is quadratic in the delta count - see that function.
+    ///
     /// @param index - the row's position in the delta area
     pub fn delta_row(&self, index: usize) -> DbResult<&'p [u8]> {
         if index >= self.delta_count {
@@ -160,11 +168,39 @@ impl<'p> LeafRef<'p> {
             let length = page::read_u16(self.page, at)? as usize;
             at = at.saturating_add(2).saturating_add(length);
         }
+        let (row, _) = self.delta_row_from(at)?;
+        Ok(row)
+    }
+
+    /// Returns the delta row that starts at an offset, and where the next one starts.
+    ///
+    /// **How a caller visits every delta row without walking the area once per
+    /// row** (task-2034). The area has no directory of its own, so
+    /// [`LeafRef::delta_row`]
+    /// reaches row `index` by reading and skipping the `index` rows ahead of
+    /// it; a loop over every row built out of that call reads
+    /// `delta_count`squared over two lengths to visit `delta_count` rows. In
+    /// [`LeafRef::locate`] that loop is on the write path, and it is run on
+    /// every write and every delete, against a delta area holding up to
+    /// [`crate::leaf::DELTA_LIMIT`] rows. Measured on `extension.fts.build`, the
+    /// delta scan was 0.63 of the 3.3 microseconds a write with no compaction
+    /// costs - the largest single stage of that write.
+    ///
+    /// The first offset is [`LeafRef::delta_start`]. The caller stops after
+    /// `delta_count` rows rather than at a sentinel, which is what the count in
+    /// the header is for.
+    ///
+    /// @param at - the offset of the row's length, which is the two bytes in front of it
+    /// @returns the row's bytes, and the offset of the next row's prefix
+    pub fn delta_row_from(&self, at: usize) -> DbResult<(&'p [u8], usize)> {
         let length = page::read_u16(self.page, at)? as usize;
         let start = at.saturating_add(2);
-        self.page
-            .get(start..start.saturating_add(length))
-            .ok_or_else(|| corrupt("delta row runs past the page"))
+        let next = start.saturating_add(length);
+        let row = self
+            .page
+            .get(start..next)
+            .ok_or_else(|| corrupt("delta row runs past the page"))?;
+        Ok((row, next))
     }
 
     /// Decodes the value that starts at `cursor` inside an already-fetched delta row.
@@ -172,7 +208,7 @@ impl<'p> LeafRef<'p> {
     /// **The one place a delta value's bytes are turned into a `Datum`, shared
     /// by every reader that walks a delta row** - one column at a time in
     /// [`LeafRef::delta_value`], or left to right in [`LeafRef::delta_row_values`]
-    /// and [`LeafRef::delta_key_matches`]. What a tagged value at an offset
+    /// and [`LeafRef::row_key_matches`]. What a tagged value at an offset
     /// means does not depend on how the caller reached that offset, and the one
     /// case that is not a plain decode - an out-of-line value, answered from the
     /// resolved extents rather than the seventeen placeholder bytes on the page,
@@ -220,7 +256,7 @@ impl<'p> LeafRef<'p> {
     /// it, so a caller after one column pays for the columns ahead of it and
     /// nothing else. A caller after several - `locate` used to be one, calling
     /// this once per key column - pays for that skip again on every call; see
-    /// `LeafRef::delta_key_matches` and `LeafRef::delta_row_values` for the
+    /// `LeafRef::row_key_matches` and `LeafRef::delta_row_values` for the
     /// left-to-right walk that avoids it.
     ///
     /// @param index - the row's position in the delta area
@@ -273,16 +309,23 @@ impl<'p> LeafRef<'p> {
     /// row that fails on its first column, the common case in an unsorted
     /// delta area, never pays to decode the rest of its key at all.
     ///
-    /// @param index - the row's position in the delta area
+    /// The row's bytes are the parameter rather than its index, because the one
+    /// caller - [`LeafRef::delta_index_of`] - is walking the area in one pass
+    /// and already has them. Taking the index instead would make that caller
+    /// walk the area again for every row, which is the defect that function
+    /// exists to remove.
+    ///
+    /// @param row - the delta row's bytes, from [`LeafRef::delta_row_from`]
+    /// @param index - the row's position in the delta area, for the extents lookup
     /// @param key - the probe key, one value per key column
     /// @param key_columns - how many leading columns form the key
-    pub(super) fn delta_key_matches(
+    pub(super) fn row_key_matches(
         &self,
+        row: &'p [u8],
         index: usize,
         key: &[Datum<'_>],
         key_columns: usize,
     ) -> DbResult<bool> {
-        let row = self.delta_row(index)?;
         let mut cursor = 0usize;
         for column in 0..key_columns {
             let (held, next) = self.delta_column_at(row, cursor, index, column)?;
@@ -295,5 +338,35 @@ impl<'p> LeafRef<'p> {
             }
         }
         Ok(true)
+    }
+
+    /// Returns where a key sits in the delta area, walking the area once.
+    ///
+    /// **One pass, not one per row** (task-2034). The same search written as
+    /// `for index in 0..delta_count { .. delta_row(index) .. }` reaches
+    /// row `index` by walking past the `index` rows ahead of it, so finding
+    /// nothing in a full delta area reads about five hundred lengths to compare
+    /// 32 keys. This carries the offset forward instead, and the
+    /// comparison it does per row is the same one.
+    ///
+    /// The newest entry for a key is the one with the lowest index, and this
+    /// returns the first match, so the answer is unchanged.
+    ///
+    /// @param key - the probe key, one value per key column
+    /// @param key_columns - how many leading columns form the key
+    pub(super) fn delta_index_of(
+        &self,
+        key: &[Datum<'_>],
+        key_columns: usize,
+    ) -> DbResult<Option<usize>> {
+        let mut at = self.delta_start;
+        for index in 0..self.delta_count {
+            let (row, next) = self.delta_row_from(at)?;
+            if self.row_key_matches(row, index, key, key_columns)? {
+                return Ok(Some(index));
+            }
+            at = next;
+        }
+        Ok(None)
     }
 }

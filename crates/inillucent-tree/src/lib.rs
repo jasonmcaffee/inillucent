@@ -57,6 +57,7 @@ pub mod leaf;
 pub mod mutate;
 pub mod page;
 pub mod paged;
+pub mod stages;
 pub mod tree;
 pub mod types;
 pub mod write;

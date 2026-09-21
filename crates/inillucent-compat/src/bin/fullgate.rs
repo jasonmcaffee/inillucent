@@ -41,7 +41,19 @@
 //! Usage:
 //!   inillucent-fullgate `<sqlite fixture>` [--rounds N] [--page-size N]
 //!                       [--scale S] [--frames N] [--families a,b] [--repeat N]
-//!                       [--module-split]
+//!                       [--module-split] [--put-split]
+//!
+//! `--put-split` prints, under every workload that writes rows, where one row's
+//! write into a leaf went: encoding the row, finding the leaf, locating the key
+//! in it, the room check, the undo record, and then `apply_row` split into the
+//! extent question, the log record and the page write. It answers the question
+//! `--module-split` left: that split ended at `PagedTree::put` costing 1.8 to
+//! 2.2 us for a write that descends nothing and compacts nothing, and said
+//! nothing about what is inside it. It is off for the same reason
+//! `--module-split` is, and it applies to every family rather than to
+//! `extension` alone, because `write_row` is the path an ordinary `INSERT`
+//! reaches too and whether the cost is the write path's or virtual tables' is
+//! the question it exists to answer.
 //!
 //! `--module-split` prints, under each `extension` workload that writes to a
 //! module, where the write went: the module's own `update`, the arm above it,
@@ -115,6 +127,8 @@ struct Settings {
     locking: String,
     /// Whether to time and print where a virtual table write's time goes.
     module_split: bool,
+    /// Whether to time and print where one row's write into a leaf goes.
+    put_split: bool,
 }
 
 fn main() -> ExitCode {
@@ -138,7 +152,7 @@ fn main() -> ExitCode {
         eprintln!(
             "usage: inillucent-fullgate <sqlite fixture> [--rounds N] [--page-size N] \
              [--scale S] [--frames N] [--families a,b] [--repeat N] [--locking normal|exclusive] \
-             [--module-split]"
+             [--module-split] [--put-split]"
         );
         return ExitCode::from(2);
     };
@@ -203,6 +217,15 @@ fn settings_from(arguments: &[String]) -> Settings {
         // 1.10x. A gate run that decides whether a bar is met must be the code
         // an application runs, so the breakdown is asked for by name.
         module_split: arguments.iter().any(|value| value == "--module-split"),
+        // **Off for the same reason, and measured rather than assumed
+        // (task-2034).** Fifteen clock reads a row against a write that costs
+        // two microseconds is the same arithmetic `--module-split` failed, so
+        // the split is asked for by name and a run that decides a bar does not
+        // ask. Measured on the same binary, three runs each: with it on,
+        // `extension.fts.build` reads 0.37x, 0.41x, 0.42x and
+        // `extension.rtree.insert` 1.04x, 1.01x, 1.08x; with it off they read
+        // 0.46x, 0.45x, 0.42x and 1.37x, 1.14x, 1.28x.
+        put_split: arguments.iter().any(|value| value == "--put-split"),
     }
 }
 
@@ -220,7 +243,7 @@ fn memory_round(database: &Path, settings: &Settings) -> Result<(), String> {
     let mut opened =
         ImportedDatabase::open(database.to_path_buf(), settings.page_size, settings.frames)
             .map_err(|error| format!("open failed: {}", why(&error)))?;
-    let (_, _, cost) = round_on(&mut opened, &plan, settings.module_split)?;
+    let (_, _, cost) = round_on(&mut opened, &plan, splits_of(settings))?;
     // **The only place a per-workload peak means anything.** This process runs
     // the plan once and nothing else, so its high-water mark is the engine's;
     // the parent's is the harness's. The parent reads these lines back off the
@@ -885,7 +908,31 @@ fn time_new_engine(
     let copy = restore(fixture, scratch, "ours")?;
     let mut database = ImportedDatabase::import_with(copy, settings.page_size, settings.frames)
         .map_err(|error| format!("import failed: {}", why(&error)))?;
-    round_on(&mut database, plan, settings.module_split)
+    round_on(&mut database, plan, splits_of(settings))
+}
+
+/// Returns which breakdowns a command line asked for.
+///
+/// @param settings - what the gate was asked to measure
+fn splits_of(settings: &Settings) -> Splits {
+    Splits {
+        module: settings.module_split,
+        put: settings.put_split,
+    }
+}
+
+/// Which breakdowns this run was asked for.
+///
+/// **Two flags rather than two bare booleans at three call sites**, because
+/// they are passed together through `time_new_engine`, `round_on` and
+/// `time_write` and a pair of `bool` arguments in that order is the kind of
+/// thing that gets swapped once and reads plausibly afterwards.
+#[derive(Clone, Copy, Default)]
+struct Splits {
+    /// Where a write into a virtual table goes, above the tree.
+    module: bool,
+    /// Where one row's write into a leaf goes, inside the tree.
+    put: bool,
 }
 
 /// Runs one round of the plan against an open database.
@@ -897,11 +944,11 @@ fn time_new_engine(
 ///
 /// @param database - the engine to run against
 /// @param plan - the workloads
-/// @param module_split - whether to time where a virtual table write's time goes
+/// @param splits - which breakdowns to time and print
 fn round_on(
     database: &mut ImportedDatabase,
     plan: &inillucent_compat::perf::Plan,
-    module_split: bool,
+    splits: Splits,
 ) -> Result<(Vec<Sample>, Vec<String>, RoundCost), String> {
     // **The pool is filled before the clock starts, which is what the read gate
     // does and what makes these numbers comparable to Phase 2's and Phase 3's.**
@@ -943,7 +990,7 @@ fn round_on(
         let log_before = database.wal().stats();
         let pool_before = database.pool_stats();
         let timed = if workload.mutates {
-            time_write(database, workload, plan.rows, module_split)
+            time_write(database, workload, plan.rows, splits)
         } else {
             time_read(database, workload, plan.rows)
         };
@@ -1500,6 +1547,15 @@ thread_local! {
     /// what it costs is charged to every module and not only to fts5.
     static MODULE_STAGES: std::cell::RefCell<std::collections::BTreeMap<String, String>> =
         const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
+
+    /// Where the last round of each writing workload's leaf writes spent their time.
+    ///
+    /// Keyed by workload for the reason `MODULE_STAGES` is, and holding every
+    /// family rather than `extension` alone: the question the split exists to
+    /// answer is whether an ordinary `INSERT` pays what a shadow row write
+    /// pays, and that is two rows of the same table.
+    static PUT_STAGES: std::cell::RefCell<std::collections::BTreeMap<String, String>> =
+        const { std::cell::RefCell::new(std::collections::BTreeMap::new()) };
 }
 
 /// Prints whatever breakdown the last round of one workload recorded.
@@ -1523,6 +1579,10 @@ fn print_stage_lines(workload: &str) {
     let split = MODULE_STAGES.with(|held| held.borrow().get(workload).cloned());
     if let Some(split) = split {
         println!("  {:<24} {split}", "  engine path");
+    }
+    let split = PUT_STAGES.with(|held| held.borrow().get(workload).cloned());
+    if let Some(split) = split {
+        println!("  {:<24} {split}", "  leaf writes");
     }
 }
 
@@ -1660,6 +1720,100 @@ fn module_stage_line(
     line
 }
 
+/// Renders where one row's write into a leaf went, as two lines.
+///
+/// **Microseconds a row, and the writes that made room reported apart from the
+/// rest.** task-2025 ended at `PagedTree::put` costing 1.8 to 2.2 us for a
+/// write that descends nothing, compacts nothing and splits nothing, and an
+/// average over every write hides exactly that: 46 of its 1,508 shadow row
+/// writes compacted or split and they were the whole of the making of room.
+/// The second line is the class the ticket is about.
+///
+/// `rest` is `whole` minus every stage named, which is the key vector, the key
+/// encoding, the two counter updates and the calls themselves. `page write` is
+/// the `modify` that writes the row, and `plan` and `place` are inside it, so
+/// `page write` minus those two is resolving the frame, marking it dirty and
+/// parsing the leaf header.
+///
+/// @param stages - what the tree measured
+/// @param before - the tree counters when the clock started
+/// @param after - the tree counters when it stopped
+fn put_stage_line(
+    stages: inillucent_tree::stages::PutStages,
+    before: inillucent_tree::write::WriteStats,
+    after: inillucent_tree::write::WriteStats,
+) -> String {
+    if stages.rows == 0 {
+        return String::new();
+    }
+    let rows = stages.rows as f64;
+    let per = |nanos: u128| nanos as f64 / rows / 1e3;
+    let ms = |nanos: u128| nanos as f64 / 1e6;
+    let named = stages.encode
+        + stages.find
+        + stages.locate
+        + stages.room
+        + stages.undo
+        + stages.apply
+        + stages.making;
+    let inside_modify = stages.modify.saturating_sub(stages.plan + stages.delta);
+    let mut line = format!(
+        "{} writes, {:.2} ms, {:.2} us a write",
+        stages.rows,
+        ms(stages.whole),
+        per(stages.whole),
+    );
+    line.push_str(&format!(
+        "\n  {:<24} us/write: encode {:.2}, find the leaf {:.2}, locate {:.2}, \
+         room {:.2}, undo {:.2}, apply {:.2}, make room {:.2}, rest {:.2}",
+        "",
+        per(stages.encode),
+        per(stages.find),
+        per(stages.locate),
+        per(stages.room),
+        per(stages.undo),
+        per(stages.apply),
+        per(stages.making),
+        per(stages.whole.saturating_sub(named)),
+    ));
+    line.push_str(&format!(
+        "\n  {:<24} of locate: pin and parse {:.2}, delta scan {:.2}, binary search {:.2}; \
+         of room: the arithmetic {:.2}, the modify around it {:.2}",
+        "",
+        per(stages.fetch),
+        per(stages.deltas),
+        per(stages.search),
+        per(stages.roomwork),
+        per(stages.room.saturating_sub(stages.roomwork)),
+    ));
+    line.push_str(&format!(
+        "\n  {:<24} of apply: extents {:.2}, log record {:.2}, page write {:.2} \
+         (plan {:.2}, place {:.2}, the modify itself {:.2})",
+        "",
+        per(stages.orphans),
+        per(stages.logging),
+        per(stages.modify),
+        per(stages.plan),
+        per(stages.delta),
+        per(inside_modify),
+    ));
+    let plain = stages.rows.saturating_sub(stages.remade);
+    let plain_nanos = stages.whole.saturating_sub(stages.remade_whole);
+    line.push_str(&format!(
+        "\n  {:<24} {} made room ({} compactions, {} splits) costing {:.2} ms; \
+         the other {} cost {:.2} ms, {:.2} us each",
+        "",
+        stages.remade,
+        after.compactions.saturating_sub(before.compactions),
+        after.splits.saturating_sub(before.splits),
+        ms(stages.remade_whole),
+        plain,
+        ms(plain_nanos),
+        plain_nanos as f64 / plain.max(1) as f64 / 1e3,
+    ));
+    line
+}
+
 /// Renders where an FTS5 build spent its time, as one line.
 ///
 /// Empty when nothing was indexed, so the caller prints nothing rather than a
@@ -1697,12 +1851,12 @@ fn fts_stage_line(stages: inillucent_ext::vtab::fts5::BuildStages) -> String {
 /// @param database - the imported fixture, opened for writing
 /// @param workload - what to run
 /// @param rows - how many rows the base table holds
-/// @param module_split - whether to time where a virtual table write's time goes
+/// @param splits - which breakdowns to time and print
 fn time_write(
     database: &mut ImportedDatabase,
     workload: &Workload,
     rows: u32,
-    module_split: bool,
+    splits: Splits,
 ) -> Result<Sample, String> {
     if workload.prepare_each {
         // A DDL statement, or any other the plan marks `prepare: each`. The
@@ -1741,9 +1895,18 @@ fn time_write(
     // to a module pays for the arm above the module as well as for the module,
     // and the two are fixed in different crates, so both are reset here and both
     // are printed below.
-    let splits = module_split && workload.family == "extension" && workload.mutates;
-    if splits {
+    let module_split = splits.module && workload.family == "extension" && workload.mutates;
+    if module_split {
         database.record_module_stages(true);
+    }
+    // **Every family, not only `extension`.** `PagedTree::write_row` is the
+    // path an ordinary `INSERT` reaches as well as a shadow row, and whether
+    // the two microseconds task-2025 left inside it are the write path's or
+    // virtual tables' is answered by running the same timer over
+    // `write.insert.batch` as over `extension.fts.build`.
+    let put_split = splits.put && workload.mutates;
+    if put_split {
+        inillucent_tree::stages::record_put_stages(true);
     }
     let mut outside = OutsideStatements::default();
     let trees_before = database.write_stats();
@@ -1757,7 +1920,7 @@ fn time_write(
         // calls a row is nothing against 16 us and something against the 1 us a
         // point read costs - and a timer that moves the number it is measuring
         // is how a family gets attributed to the wrong stage.
-        let bound = splits.then(Instant::now);
+        let bound = module_split.then(Instant::now);
         let params = params_for(workload, iteration, rows);
         let entered = match bound {
             Some(bound) => {
@@ -1794,7 +1957,7 @@ fn time_write(
         let line = fts_stage_line(inillucent_ext::vtab::fts5::build_stages());
         FTS_STAGES.with(|held| *held.borrow_mut() = line);
     }
-    if splits {
+    if module_split {
         let stages = database.module_stage_nanos();
         let line = module_stage_line(stages, outside, nanos);
         let trees = tree_work_line(trees_before, database.write_stats(), stages.rows);
@@ -1803,6 +1966,16 @@ fn time_write(
             let whole = format!("{line}\n  {:<24} {trees}", "  tree work");
             MODULE_STAGES.with(|held| {
                 held.borrow_mut().insert(workload.name.clone(), whole);
+            });
+        }
+    }
+    if put_split {
+        let stages = inillucent_tree::stages::taken();
+        inillucent_tree::stages::record_put_stages(false);
+        let line = put_stage_line(stages, trees_before, database.write_stats());
+        if !line.is_empty() {
+            PUT_STAGES.with(|held| {
+                held.borrow_mut().insert(workload.name.clone(), line);
             });
         }
     }

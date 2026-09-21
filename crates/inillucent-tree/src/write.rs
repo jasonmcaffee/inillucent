@@ -46,7 +46,7 @@ use inillucent_wal::record::{Body, Structural};
 
 use crate::datum::{Datum, OwnedDatum};
 use crate::leaf::{ImageTiming, LeafBuilder, LeafRef, Packed, Rows};
-use crate::mutate::LeafMut;
+use crate::mutate::{DeltaOffsets, DeltaPlan, LeafMut};
 use crate::paged::PagedTree;
 
 /// Reports whether a key sorts after a row's key.
@@ -680,6 +680,7 @@ impl PagedTree {
     /// @param page - the leaf the key belongs on
     /// @param key - the key columns of the row being written
     /// @param want_previous - whether the row that was there has to be read
+    /// @param timing - where this write's nanoseconds are collected, all zero unless a harness asked
     /// @returns where the key sits, and the row that was there
     fn locate_and_read_previous(
         &self,
@@ -687,11 +688,16 @@ impl PagedTree {
         page: PageId,
         key: &[Datum<'_>],
         want_previous: bool,
+        timing: &mut crate::stages::PutStages,
     ) -> DbResult<(Located, Option<Vec<OwnedDatum>>)> {
+        let fetching = crate::stages::clock();
         let guard = database.pool().fetch(page)?;
         let leaf = LeafRef::parse(&guard)?
             .with_collations(self.collations())
             .with_directions(self.directions());
+        timing.fetch = timing
+            .fetch
+            .saturating_add(crate::stages::elapsed(fetching));
         let located = leaf.locate(key, self.key_columns())?;
         // One row's out-of-line values, and only when the caller wants
         // the row it is replacing. Locating reads key columns, which are
@@ -804,6 +810,8 @@ impl PagedTree {
     /// @param located - where the key sits in it, which decides what is displaced
     /// @param encoded_row - the row's bytes, taken by the write
     /// @param spilled - whether any of its values went out of line
+    /// @param costed - where the room check found the row would land
+    /// @param timing - where this write's nanoseconds are collected, all zero unless a harness asked
     fn apply_row(
         &self,
         database: &mut Database,
@@ -812,13 +820,20 @@ impl PagedTree {
         located: Located,
         encoded_row: &mut Vec<u8>,
         spilled: bool,
+        costed: DeltaOffsets,
+        timing: &mut crate::stages::PutStages,
     ) -> DbResult<()> {
+        let asking = crate::stages::clock();
         let orphaned = self.orphaned_extents(database, page, located)?;
+        timing.orphans = crate::stages::elapsed(asking);
+        let logging = crate::stages::clock();
         let lsn = log.log(Body::InsertRow {
             tree: self.tree_id(),
             page: page.0,
             row: encoded_row,
         })?;
+        timing.logging = crate::stages::elapsed(logging);
+        let writing = crate::stages::clock();
         database.pool().modify(page, |bytes| {
             let mut leaf = LeafMut::new(bytes)?;
             match located {
@@ -828,12 +843,28 @@ impl PagedTree {
                 Located::Delta(index) => leaf.remove_delta(index)?,
                 Located::Absent => {}
             }
-            let plan = leaf
-                // Taken rather than cloned: the loop only retries above the call
-                // to this function, and the attempt that reaches it returns.
-                .plan_encoded(std::mem::take(encoded_row))?
-                // **Unreachable from a full leaf, and that took a fix to be true
-                // (task-2033).** `LeafMut::room_for` costs the row and the
+            let planning = crate::stages::clock();
+            // Taken rather than cloned: the loop only retries above the call to
+            // this function, and the attempt that reaches it returns.
+            let encoded = std::mem::take(encoded_row);
+            let plan = match located {
+                // **The room check's own answer, carried here rather than
+                // computed again** (task-2034). Nothing above displaced a row,
+                // so the delta area starts where the check found it and the
+                // bitmap is the size it was. This is the ordinary write: 1,505
+                // of task-2025's 1,508 shadow row writes were an append over a
+                // key that was not there, and recomputing cost 0.40 of the 3.3
+                // microseconds such a write takes.
+                Located::Absent => DeltaPlan::at(costed, encoded),
+                // A tombstone may have created the bitmap and a delta removal
+                // rebuilt the area, and either moves the offsets the check
+                // found. So these are the two cases the check cannot answer
+                // for, and the arithmetic runs again on the page as it now
+                // stands.
+                //
+                // **`None` here is unreachable from a full leaf, and that took
+                // a fix to be true (task-2033).**
+                // `LeafMut::room_for_row_and_tombstone` costs the row and the
                 // tombstone bitmap together, so the bitmap `set_tombstone`
                 // creates two lines above is already paid for by the check that
                 // let this write through. It used to cost them separately - the
@@ -841,19 +872,158 @@ impl PagedTree {
                 // page with no row - and a leaf with room for either one alone
                 // answered yes and then had room for neither. Two hundred FTS5
                 // documents refused on row 42 at a 4 KiB page for that reason,
-                // and at every page size under the default. What is left here is
-                // a page whose header says something the page does not hold.
-                .ok_or_else(|| corrupt("a leaf that had room lost it before the write"))?;
+                // and at every page size under the default. What is left here
+                // is a page whose header says something the page does not hold.
+                Located::Sorted(_) | Located::Delta(_) => leaf
+                    .plan_encoded(encoded)?
+                    .ok_or_else(|| corrupt("a leaf that had room lost it before the write"))?,
+            };
+            timing.plan = crate::stages::elapsed(planning);
+            let placing = crate::stages::clock();
             leaf.apply_delta(&plan)?;
             if spilled {
                 leaf.mark_extents()?;
             }
-            leaf.set_lsn(lsn)
+            let outcome = leaf.set_lsn(lsn);
+            timing.delta = crate::stages::elapsed(placing);
+            outcome
         })?;
+        timing.modify = crate::stages::elapsed(writing);
         for reference in orphaned {
             crate::paged::free_extent(database, log, reference)?;
         }
         Ok(())
+    }
+
+    /// Returns the leaf a write should try, and whether the hint answered.
+    ///
+    /// **The hint on the first attempt, a descent on the second.** See
+    /// [`PagedTree::leaf_hint`]: an append at the right edge - a rowid insert,
+    /// FTS5's ordered dictionary flush - lands in the leaf the last one did, and
+    /// the descent answers a question it has already answered. The path comes
+    /// back empty when the hint answered, because a path is only wanted when the
+    /// leaf turns out to be full, and the caller descends again for one then.
+    ///
+    /// @param pool - the buffer pool
+    /// @param encoded_key - the key in its comparison encoding
+    /// @param attempt - which pass of the write's loop this is
+    /// @param timing - where the nanoseconds go, all zero unless a harness asked
+    /// @returns the leaf, the path to it when one was built, and whether the hint answered
+    fn leaf_for_attempt(
+        &self,
+        pool: &Pool,
+        encoded_key: &[u8],
+        attempt: usize,
+        timing: &mut crate::stages::PutStages,
+    ) -> DbResult<(PageId, Vec<PageId>, bool)> {
+        let finding = crate::stages::clock();
+        let found = match attempt {
+            0 => match self.leaf_for_hinted(pool, encoded_key) {
+                Some(page) => (page, Vec::new(), true),
+                None => {
+                    let (page, path) = self.leaf_for(pool, encoded_key)?;
+                    (page, path, false)
+                }
+            },
+            _ => {
+                let (page, path) = self.leaf_for(pool, encoded_key)?;
+                (page, path, false)
+            }
+        };
+        timing.find = timing.find.saturating_add(crate::stages::elapsed(finding));
+        Ok(found)
+    }
+
+    /// Returns where a row of this size would land in a leaf, or nothing when it would not.
+    ///
+    /// **The offsets rather than a yes or no, because the write needs them and
+    /// was computing them again** (task-2034). See
+    /// [`crate::mutate::LeafMut::room_for_row_and_tombstone`], which carries the
+    /// measurement.
+    ///
+    /// @param database - the open database
+    /// @param page - the leaf
+    /// @param encoded_len - how many bytes the row's tagged form occupies
+    /// @param timing - where the nanoseconds go, all zero unless a harness asked
+    fn room_for_write(
+        &self,
+        database: &mut Database,
+        page: PageId,
+        encoded_len: usize,
+        timing: &mut crate::stages::PutStages,
+    ) -> DbResult<Option<crate::mutate::DeltaOffsets>> {
+        let asking = crate::stages::clock();
+        let mut working = 0u128;
+        let costed = database.pool().modify(page, |bytes| {
+            let started = crate::stages::clock();
+            let costed = LeafMut::new(bytes)?.room_for_row_and_tombstone(encoded_len);
+            working = crate::stages::elapsed(started);
+            costed
+        })?;
+        timing.roomwork = timing.roomwork.saturating_add(working);
+        timing.room = timing.room.saturating_add(crate::stages::elapsed(asking));
+        Ok(costed)
+    }
+
+    /// Compacts or splits a full leaf so the write's next attempt will fit.
+    ///
+    /// The path is descended for here when the hint produced none, because a
+    /// split has to rewrite the parent. That is the one point a hinted write
+    /// pays for a descent, and it is once per split rather than once per row.
+    ///
+    /// `false` means neither a compaction nor a split can help this leaf, and
+    /// the caller packs the row into the sorted region instead - see
+    /// `PagedTree::place_row_outside_the_delta_area` (task-2033).
+    ///
+    /// @param database - the open database
+    /// @param log - where the records go
+    /// @param page - the full leaf
+    /// @param path - the path to it, filled in here when the hint left it empty
+    /// @param key - the key arriving, which decides where a split divides
+    /// @param encoded_len - how many bytes the row's tagged form occupies
+    /// @param timing - where the nanoseconds go, all zero unless a harness asked
+    /// @returns whether room was made, which is `false` for a leaf no compaction or split can help
+    fn make_room_for_row(
+        &mut self,
+        database: &mut Database,
+        log: &mut dyn TreeLog,
+        page: PageId,
+        path: &mut Vec<PageId>,
+        key: &[Datum<'_>],
+        encoded_len: usize,
+        timing: &mut crate::stages::PutStages,
+    ) -> DbResult<bool> {
+        if path.is_empty() {
+            let encoded_key = self.encode_key(key);
+            *path = self.leaf_for(database.pool(), &encoded_key)?.1;
+        }
+        let remaking = crate::stages::clock();
+        let made = self.make_room(database, log, page, path, Some(key), encoded_len);
+        timing.making = timing
+            .making
+            .saturating_add(crate::stages::elapsed(remaking));
+        timing.remade = 1;
+        made
+    }
+
+    /// Counts one write that reached the page.
+    ///
+    /// One read and one write of [`WriteStats`], because a `Cell` of it copies
+    /// the whole struct each way and it is nineteen counters wide.
+    ///
+    /// @param from_hint - whether the leaf came from the hint rather than a descent
+    /// @param is_new_key - whether the key was absent, so the tree holds one row more
+    fn note_one_write(&mut self, from_hint: bool, is_new_key: bool) {
+        let mut stats = self.stats.get();
+        stats.inserted = stats.inserted.saturating_add(1);
+        match from_hint {
+            true => stats.hinted = stats.hinted.saturating_add(1),
+            false => stats.descended = stats.descended.saturating_add(1),
+        }
+        self.stats.set(stats);
+        if is_new_key {
+            self.note_rows(1);
+        }
     }
 
     fn write_row(
@@ -864,6 +1034,18 @@ impl PagedTree {
         want_previous: bool,
         replace: bool,
     ) -> DbResult<Option<Vec<OwnedDatum>>> {
+        // **Where one write's time goes, behind a switch** (task-2034). The
+        // stage above this one has been measured twice and each time the
+        // remainder landed here: task-2025 put the engine's virtual table arm
+        // at 0.44 to 0.55 us a document and left 1.8 to 2.2 us inside this
+        // function for a write that descends nothing, compacts nothing and
+        // splits nothing. `crate::stages` reads no clock unless a harness asked
+        // for the split, and the numbers are added up in locals and handed over
+        // once at the end - a `Cell` of them copies seventeen counters each
+        // way, which is the cost that took the timers that were always on out
+        // of this path in task-2006.
+        let entered = crate::stages::clock();
+        let mut timing = crate::stages::PutStages::default();
         // A log collecting before-images needs the row that was there, so the
         // read the caller did not ask for happens anyway. That is the whole
         // cost of being able to abandon a transaction, and it is paid only
@@ -879,25 +1061,15 @@ impl PagedTree {
         }
         let key: Vec<Datum<'_>> = row.iter().copied().take(self.key_columns()).collect();
         let encoded_key = self.encode_key(&key);
-        // **A value too large for a leaf is written out of line before the row
-        // is placed, not instead of placing it.**
-        //
-        // The first version repacked the whole leaf around such a row, because
-        // the builder is where the spiller is. That made a two-kilobyte value
-        // cost a page rewrite and a full-page log record: on the gate's
-        // `extension.fts.build`, three thousand of FTS5's segment blocks fall
-        // between the threshold and what a leaf holds, and the repacks were
-        // 111 ms of a 250 ms workload - more than half of it.
-        //
-        // Spilling first turns the row into one a delta area can hold: the
-        // seventeen tagged bytes of a reference in place of the value. From
-        // there it is an ordinary write, with an ordinary short log record, and
-        // the leaf is repacked when it fills rather than once per wide row.
-        //
-        // Spilled once, outside the loop, because a retry after a compaction
-        // must reuse the run rather than write a second and leak the first.
+        // Outside the loop, because a retry after a compaction must reuse the
+        // run rather than write a second and leak the first. Why a wide value
+        // is spilled before the row is placed rather than instead of placing it
+        // is on `encode_row_spilling_wide_values`, with what it was measured to
+        // be worth.
+        let encoding = crate::stages::clock();
         let (mut encoded_row, spilled, arriving_runs) =
             self.encode_row_spilling_wide_values(database, log, row)?;
+        timing.encode = crate::stages::elapsed(encoding);
         // **Where this transaction's time goes, measured once rather than timed on every
         // write** (task-2006). Timers here read the clock and copy the whole `WriteStats`
         // through its `Cell` twice a block, which is why they are not in this path any
@@ -913,22 +1085,9 @@ impl PagedTree {
         // When it cannot - a leaf with fewer than two live rows, or a row the
         // delta area will not hold at any fill - the write is packed instead.
         for attempt in 0..2 {
-            // **The hint on the first attempt, a descent on the second.** See
-            // `PagedTree::leaf_hint`: an append at the right edge - a rowid insert,
-            // FTS5's ordered dictionary flush - lands in the leaf the last one did,
-            // and the descent answers a question it has already answered. The path
-            // is empty when the hint answered, because a path is only wanted when
-            // the leaf turns out to be full, and this loop re-descends for one then.
-            let (page, mut path) = match attempt {
-                0 => match self.leaf_for_hinted(database.pool(), &encoded_key) {
-                    Some(page) => {
-                        from_hint = true;
-                        (page, Vec::new())
-                    }
-                    None => self.leaf_for(database.pool(), &encoded_key)?,
-                },
-                _ => self.leaf_for(database.pool(), &encoded_key)?,
-            };
+            let (page, mut path, hinted) =
+                self.leaf_for_attempt(database.pool(), &encoded_key, attempt, &mut timing)?;
+            from_hint = from_hint || hinted;
             // **The key is found once.** Where it sits decides three things -
             // whether it was there, what the caller gets back, and what the
             // mutation below has to displace - and the first version asked the
@@ -941,28 +1100,31 @@ impl PagedTree {
             // Nothing between here and the mutation changes the page: the
             // room check only reads, and the log append does not touch pages
             // at all. A `make_room` restarts the attempt, which re-locates.
+            let locating = crate::stages::clock();
             let (located, mut previous) =
-                self.locate_and_read_previous(database, page, &key, want_previous)?;
+                self.locate_and_read_previous(database, page, &key, want_previous, &mut timing)?;
+            timing.locate = timing
+                .locate
+                .saturating_add(crate::stages::elapsed(locating));
             // A caller that refuses a duplicate is told so before anything is
             // written, which is the whole point of asking.
             if !replace && previous.is_some() {
                 return Ok(previous);
             }
-            let planned = {
-                let pool = database.pool();
-                pool.modify(page, |bytes| {
-                    LeafMut::new(bytes)?.room_for(encoded_row.len())
-                })?
-            };
-            if !planned {
+            let costed = self.room_for_write(database, page, encoded_row.len(), &mut timing)?;
+            let Some(costed) = costed else {
                 // Attempt 1 has already had room made for it and a `Stuck`
                 // leaf never will: the delta area is not how this row gets in.
-                let stuck = attempt == 1 || {
-                    if path.is_empty() {
-                        path = self.leaf_for(database.pool(), &encoded_key)?.1;
-                    }
-                    !self.make_room(database, log, page, &path, Some(&key), encoded_row.len())?
-                };
+                let stuck = attempt == 1
+                    || !self.make_room_for_row(
+                        database,
+                        log,
+                        page,
+                        &mut path,
+                        &key,
+                        encoded_row.len(),
+                        &mut timing,
+                    )?;
                 if stuck {
                     return self.place_row_outside_the_delta_area(
                         database,
@@ -974,21 +1136,26 @@ impl PagedTree {
                     );
                 }
                 continue;
-            }
+            };
+            let undoing = crate::stages::clock();
             self.record_undo(log, &key, &mut previous, caller_wants_previous)?;
-            self.apply_row(database, log, page, located, &mut encoded_row, spilled)?;
-            // One read and one write of `WriteStats`, because a `Cell` of it copies the
-            // whole struct each way and it is nineteen counters wide.
-            let mut stats = self.stats.get();
-            stats.inserted = stats.inserted.saturating_add(1);
-            match from_hint {
-                true => stats.hinted = stats.hinted.saturating_add(1),
-                false => stats.descended = stats.descended.saturating_add(1),
-            }
-            self.stats.set(stats);
-            if previous.is_none() {
-                self.note_rows(1);
-            }
+            timing.undo = crate::stages::elapsed(undoing);
+            let applying = crate::stages::clock();
+            self.apply_row(
+                database,
+                log,
+                page,
+                located,
+                &mut encoded_row,
+                spilled,
+                costed,
+                &mut timing,
+            )?;
+            timing.apply = crate::stages::elapsed(applying);
+            self.note_one_write(from_hint, previous.is_none());
+            timing.rows = 1;
+            timing.whole = crate::stages::elapsed(entered);
+            crate::stages::record(timing);
             return Ok(previous);
         }
         Err(corrupt("an insert did not converge"))

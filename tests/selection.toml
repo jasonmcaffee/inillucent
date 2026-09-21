@@ -512,6 +512,17 @@ name = "module_stages"
 tier = "engine"
 covers = ["inillucent-engine"]
 
+# Where one row's write into a leaf goes, and the switch that stops the measuring
+# from moving the measurement - `module_stages` one layer down, and off by default
+# for the same reason (task-2034). The path is the one an ordinary `INSERT` and a
+# virtual table's shadow row both reach, which is why a case here writes both.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "put_stages"
+tier = "engine"
+covers = ["inillucent-tree"]
+
 [[target]]
 package = "inillucent-compat"
 kind = "test"

@@ -88,6 +88,62 @@ impl DeltaPlan {
     pub fn encoded(&self) -> &[u8] {
         &self.encoded
     }
+
+    /// Returns the plan for a row of the size these offsets were computed for.
+    ///
+    /// **What lets the write path cost the insert once instead of twice**
+    /// (task-2034). The offsets and the row's bytes are found in different
+    /// places - the offsets by the room check, before the log record, and the
+    /// bytes by the encoder, before either - and the only reason they were not
+    /// joined until after the log record is that displacing the row under the
+    /// key moves them. A write that displaces nothing does not move them, and
+    /// that is the ordinary write: 1,505 of task-2025's 1,508 shadow row writes
+    /// were an append at the right edge over a key that was not there.
+    ///
+    /// The caller is what knows whether anything was displaced. See
+    /// `PagedTree::apply_row`, which recomputes rather than calling this when
+    /// the write tombstoned a sorted row or removed a delta one.
+    ///
+    /// @param offsets - where a row of `encoded.len()` bytes lands
+    /// @param encoded - the row's tagged bytes, of exactly that length
+    pub fn at(offsets: DeltaOffsets, encoded: Vec<u8>) -> DeltaPlan {
+        DeltaPlan {
+            encoded,
+            new_delta_start: offsets.new_delta_start,
+            old_delta_start: offsets.old_delta_start,
+            bitmap: offsets.bitmap,
+            delta_count: offsets.delta_count,
+        }
+    }
+}
+
+/// The four header fields every delta arithmetic reads.
+#[derive(Clone, Copy, Debug)]
+struct DeltaShape {
+    /// How many rows the delta area holds.
+    delta_count: usize,
+    /// Where the delta area starts.
+    delta_start: usize,
+    /// How many rows the sorted region holds, which sizes the tombstone bitmap.
+    row_count: usize,
+    /// Whether the page already carries a tombstone bitmap.
+    has_tombstones: bool,
+}
+
+/// Where a row of a given size would land in a leaf's delta area.
+///
+/// A [`DeltaPlan`] without the row, so the arithmetic can be done before the
+/// bytes are handed over and carried to where they are. See [`DeltaPlan::at`].
+#[derive(Clone, Copy, Debug)]
+pub struct DeltaOffsets {
+    /// Where the delta area will start afterwards.
+    new_delta_start: usize,
+    /// Where it starts now.
+    old_delta_start: usize,
+    /// How many bytes of tombstone bitmap have to move with it.
+    bitmap: usize,
+    /// How many delta rows the page holds now.
+    delta_count: usize,
 }
 
 /// A leaf page being changed.
@@ -138,9 +194,18 @@ impl<'p> LeafMut<'p> {
         page::write_u64(self.page, leaf_header::MAX_CTS, current.max(cts))
     }
 
-    /// Returns where the mini-columns end, which is the floor for everything
-    /// that grows downwards.
     /// Reports whether a row of this size and a tombstone would both fit.
+    ///
+    /// For a caller that wants the answer and not the offsets - a compaction
+    /// checking the image it just packed. The write path wants the offsets and
+    /// calls [`LeafMut::room_for_row_and_tombstone`] directly.
+    ///
+    /// @param encoded_len - how many bytes the row's tagged form occupies
+    pub fn room_for(&self, encoded_len: usize) -> DbResult<bool> {
+        Ok(self.room_for_row_and_tombstone(encoded_len)?.is_some())
+    }
+
+    /// Returns where a row of this size would land, if it and a tombstone both fit.
     ///
     /// **One question, one page parse, one walk of the column directory.** The
     /// two halves used to be asked separately and each of them recomputed where
@@ -173,23 +238,36 @@ impl<'p> LeafMut<'p> {
     /// index holds - which buys a compaction marginally sooner and is the same
     /// reservation the second question above was already making.
     ///
+    /// **The offsets are returned rather than discarded, because the caller was
+    /// computing them again** (task-2034). The write path asked this, logged
+    /// the row, and then called [`LeafMut::plan_encoded`], which is the same
+    /// parse, the same `columns_end` walk and the same arithmetic a second
+    /// time. Measured on `extension.fts.build`, those two were 0.61 and 0.40 of
+    /// the 3.3 microseconds a write with no compaction costs - together the
+    /// largest thing in it. The offsets this returns are the stricter of the
+    /// two answers, since a row that leaves room for a tombstone as well fits
+    /// wherever a row that does not would have.
+    ///
     /// @param encoded_len - how many bytes the row's tagged form occupies
-    pub fn room_for(&self, encoded_len: usize) -> DbResult<bool> {
-        let leaf = LeafRef::parse(self.page)?;
-        let (delta_count, delta_start, row_count) =
-            (leaf.delta_count(), leaf.delta_start(), leaf.row_count());
-        // `LeafRef` is `Copy` and borrows the guard, so this ends the borrow
-        // rather than releasing anything.
-        let _ = leaf;
-        if delta_count >= DELTA_LIMIT || encoded_len > u16::MAX as usize {
-            return Ok(false);
-        }
+    pub fn room_for_row_and_tombstone(&self, encoded_len: usize) -> DbResult<Option<DeltaOffsets>> {
+        let shape = self.delta_shape()?;
         let floor = self.columns_end()?;
-        let bitmap = tombstone_bytes(row_count);
-        let Some(new_delta_start) = delta_start.checked_sub(encoded_len.saturating_add(2)) else {
-            return Ok(false);
+        let Some(offsets) = self.offsets_within(shape, floor, encoded_len)? else {
+            return Ok(None);
         };
-        Ok(new_delta_start.saturating_sub(bitmap) >= floor)
+        // The bitmap charged whether or not the page has one, which is the
+        // paragraph above and task-2033's fix. `offsets_within` charges the
+        // bitmap the page actually carries, because it describes where the row
+        // lands rather than what the write has to reserve; this is the
+        // reservation, and it is the stricter of the two.
+        if offsets
+            .new_delta_start
+            .saturating_sub(tombstone_bytes(shape.row_count))
+            < floor
+        {
+            return Ok(None);
+        }
+        Ok(Some(offsets))
     }
 
     fn columns_end(&self) -> DbResult<usize> {
@@ -278,51 +356,77 @@ impl<'p> LeafMut<'p> {
         let Some(offsets) = self.delta_offsets(encoded.len())? else {
             return Ok(None);
         };
-        Ok(Some(DeltaPlan {
-            encoded,
-            new_delta_start: offsets.0,
-            old_delta_start: offsets.1,
-            bitmap: offsets.2,
-            delta_count: offsets.3,
-        }))
+        Ok(Some(DeltaPlan::at(offsets, encoded)))
     }
 
     /// Returns where a row of this size would land, or `None` if it would not.
     ///
     /// @param encoded_len - how many bytes the row's tagged form occupies
-    fn delta_offsets(&self, encoded_len: usize) -> DbResult<Option<(usize, usize, usize, usize)>> {
-        // Every field this needs is copied out and the view is dropped, because
-        // the writes below take a mutable borrow of the same bytes. Keeping the
-        // view alive and reaching around it is what the borrow checker is for.
-        let (delta_count, delta_start, row_count, has_tombstones) = {
-            let leaf = LeafRef::parse(self.page)?;
-            (
-                leaf.delta_count(),
-                leaf.delta_start(),
-                leaf.row_count(),
-                leaf.has_tombstones(),
-            )
-        };
-        if delta_count >= DELTA_LIMIT {
+    fn delta_offsets(&self, encoded_len: usize) -> DbResult<Option<DeltaOffsets>> {
+        let shape = self.delta_shape()?;
+        self.offsets_within(shape, self.columns_end()?, encoded_len)
+    }
+
+    /// Returns the four header fields every delta arithmetic reads.
+    ///
+    /// **One parse, named, because three functions were each doing their own**
+    /// (task-2034). The view is copied out and dropped rather than held,
+    /// because the writes that follow take a mutable borrow of the same bytes.
+    fn delta_shape(&self) -> DbResult<DeltaShape> {
+        let leaf = LeafRef::parse(self.page)?;
+        Ok(DeltaShape {
+            delta_count: leaf.delta_count(),
+            delta_start: leaf.delta_start(),
+            row_count: leaf.row_count(),
+            has_tombstones: leaf.has_tombstones(),
+        })
+    }
+
+    /// Returns where a row of this size lands in a leaf of this shape.
+    ///
+    /// Pure arithmetic over what has already been read, so a caller that needs
+    /// the answer twice - the room check, which also asks about the tombstone
+    /// bitmap - parses the page once.
+    ///
+    /// The floor arrives already computed, which means a caller pays the column
+    /// directory walk even when the delta area is full and the answer was going
+    /// to be `None`. That is the write that is about to compact the leaf, and a
+    /// compaction is forty microseconds against the tenth of one this costs;
+    /// paying it there is what lets the common write parse the page once.
+    ///
+    /// @param shape - the header fields, from [`LeafMut::delta_shape`]
+    /// @param floor - where the mini-columns end, from `columns_end`
+    /// @param encoded_len - how many bytes the row's tagged form occupies
+    fn offsets_within(
+        &self,
+        shape: DeltaShape,
+        floor: usize,
+        encoded_len: usize,
+    ) -> DbResult<Option<DeltaOffsets>> {
+        if shape.delta_count >= DELTA_LIMIT {
             return Ok(None);
         }
         if encoded_len > u16::MAX as usize {
             return Ok(None);
         }
-        let bitmap = if has_tombstones {
-            tombstone_bytes(row_count)
+        let bitmap = if shape.has_tombstones {
+            tombstone_bytes(shape.row_count)
         } else {
             0
         };
         let entry = encoded_len.saturating_add(2);
-        let Some(new_delta_start) = delta_start.checked_sub(entry) else {
+        let Some(new_delta_start) = shape.delta_start.checked_sub(entry) else {
             return Ok(None);
         };
-        let floor = self.columns_end()?;
         if new_delta_start.saturating_sub(bitmap) < floor {
             return Ok(None);
         }
-        Ok(Some((new_delta_start, delta_start, bitmap, delta_count)))
+        Ok(Some(DeltaOffsets {
+            new_delta_start,
+            old_delta_start: shape.delta_start,
+            bitmap,
+            delta_count: shape.delta_count,
+        }))
     }
 
     /// Performs a delta insert that [`LeafMut::plan_delta`] costed.

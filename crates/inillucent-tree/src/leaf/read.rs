@@ -313,15 +313,30 @@ impl<'p> LeafRef<'p> {
     /// @param key - the key, one value per key column
     /// @param key_columns - how many leading columns form the key
     pub fn locate(&self, key: &[Datum<'_>], key_columns: usize) -> DbResult<crate::write::Located> {
-        for index in 0..self.delta_count() {
-            if self.delta_key_matches(index, key, key_columns)? {
-                return Ok(crate::write::Located::Delta(index));
-            }
+        // **The two halves are timed apart because they answer to different
+        // changes** (task-2034). The delta scan compares up to `DELTA_LIMIT`
+        // rows one at a time and the search is a binary search over thousands,
+        // and a write path that costs 1.2 to 1.8 microseconds here cannot be
+        // aimed at until it is known which of the two is paying. Both clocks
+        // are `None` unless a harness asked - see `crate::stages`.
+        let scanning = crate::stages::clock();
+        let held = self.delta_index_of(key, key_columns)?;
+        if let Some(index) = held {
+            crate::stages::add_locate(crate::stages::elapsed(scanning), 0);
+            return Ok(crate::write::Located::Delta(index));
         }
-        if let Ok(row) = self.search(key)? {
-            if !self.is_tombstoned(row)? {
-                return Ok(crate::write::Located::Sorted(row));
-            }
+        let deltas = crate::stages::elapsed(scanning);
+        let searching = crate::stages::clock();
+        // The tombstone is read inside the timed region because it is part of
+        // deciding where the key sits: a tombstoned row reads as absent from
+        // the sorted region, and the delta area has already been searched.
+        let in_sorted_region = match self.search(key)? {
+            Ok(row) => Some((row, self.is_tombstoned(row)?)),
+            Err(_) => None,
+        };
+        crate::stages::add_locate(deltas, crate::stages::elapsed(searching));
+        if let Some((row, false)) = in_sorted_region {
+            return Ok(crate::write::Located::Sorted(row));
         }
         Ok(crate::write::Located::Absent)
     }

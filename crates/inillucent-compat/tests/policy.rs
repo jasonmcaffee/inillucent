@@ -997,7 +997,7 @@ fn no_new_crate_reaches_into_the_retired_engine() {
 /// `leaf.rs`: `locate` used to ask [`LeafRef::delta_value`] once per key
 /// column, redecoding a delta row from its first byte every time, and
 /// moved to walking the row's cursor forward once instead - which is what
-/// `delta_column_at`, `delta_key_matches` and `delta_row_values` are. The
+/// `delta_column_at`, `row_key_matches` and `delta_row_values` are. The
 /// delta area is one idea, *rows a write staged since the page was last
 /// packed*, and it moved whole into `crates/inillucent-tree/src/leaf/delta.rs`:
 /// the directory (`delta_count`, `delta_start`), one row's bytes
@@ -1007,7 +1007,7 @@ fn no_new_crate_reaches_into_the_retired_engine() {
 /// meant picking one of the two an arbitrary home. That left four
 /// functions the sorted-region code still calls - `validate_delta` from
 /// `parse`, `any_delta_extent_unchecked` from `integrity`,
-/// `delta_row_values` from `live` and `live_source`, `delta_key_matches`
+/// `delta_row_values` from `live` and `live_source`, `row_key_matches`
 /// from `locate` - which is the `pub(super)` this extraction cost; every
 /// other moved item was already `pub`, since a method's visibility does
 /// not depend on which file its `impl` block sits in, only a free
