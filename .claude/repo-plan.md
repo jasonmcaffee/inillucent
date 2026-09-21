@@ -168,3 +168,31 @@ they are touching do not collide; two that have not, do.
   have had more than one ticket in them at once; task-2026 and task-2040 were both inside
   `bind_select_core` on the same evening. Say on the other ticket which functions you are in before
   you start. (task-2026)
+- **A fix that widens what the engine accepts fails `inillucent-driver::capability`, by design.**
+  `drivers/inillucent-driver/src/capability.rs` declares rows `Support::No`, and the suite runs
+  every row in both directions - a denied capability that starts working turns the build red.
+  task-2042 made a window function in a compound arm run, and the suite went red naming
+  `window_in_compound_arm`. It is not a flake and it is not another agent's: grep that file for a
+  row describing what you just fixed and move it to `Support::Yes` in the same commit. When you add
+  a row, prefer `Probe::Answers` over `Probe::Runs` wherever the old behaviour *ran* and answered
+  something wrong - a `Probe::Runs` row would have called the broken engine supported. (task-2042)
+- **Twenty-four targets at a time on a busy box produces failures that are not real.** task-2042's
+  `inillucent-testrun --changed` reported `schema_forms`, `analyze_reopen` and
+  `multi_database_commit` red with seven agents on the machine; all three pass in seconds when run
+  alone, and none of them contains a `UNION` that ticket could have touched. Run a suspect target
+  by itself before you spend anything on it. (task-2042)
+- **`main` moved four times in the hour it took to finish one ticket.** task-2042 rebased onto
+  task-2040, task-2026, task-2034 and task-2041 in turn, and `git merge --ff-only` refused twice
+  between the rebase and the merge. Do the rebase and the fast-forward in one command so nothing
+  lands in between, and expect the merge, not the work, to be what takes the retries. Both conflicts
+  were the same shape: two tickets appending a `Case` to the end of `CASES` in
+  `crates/inillucent-compat/tests/semantics.rs`. Keep both sides and close the earlier one's last
+  case - that file is the busiest merge point in the repository right now. (task-2042)
+- **Do not run two copies of a compat test binary in the same worktree at once.**
+  `crates/inillucent-compat/tests/cli_commands.rs::area` does `remove_dir_all` on a per case
+  directory and then recreates it, so a second run of that binary deletes the first run's fixture
+  while it is being used. task-2044 started `inillucent-testrun` in the background and then ran
+  `cargo test --test cli_commands` beside it, and got nine failures that all pointed at the fixture
+  builder and none of which were real. Worktrees do **not** collide with each other over this -
+  `workspace_root()` is built from `CARGO_MANIFEST_DIR`, which is baked per worktree, so each
+  ticket has its own `_agent_output/`. It is only your own two runs. (task-2044)
