@@ -501,6 +501,73 @@ fn fullgate_measures_the_small_fixture() {
     });
 }
 
+// --- prepareperf ------------------------------------------------------------
+
+/// The prepare report refuses a fixture that is not there.
+#[test]
+fn prepareperf_refuses_a_fixture_that_is_not_there() {
+    let missing = std::env::temp_dir().join("inillucent-gates-no-such-prepare-fixture.db");
+    let _ = std::fs::remove_file(&missing);
+    let output = run(
+        env!("CARGO_BIN_EXE_inillucent-prepareperf"),
+        &[&missing.to_string_lossy(), "1", "--repeat", "8"],
+    );
+    refused(
+        "prepareperf",
+        &output,
+        &["fixture", "sqlite-bench", "no such file"],
+    );
+}
+
+/// The prepare report runs to completion on the smallest real fixture.
+///
+/// **It could not run on any file at all until task-2041.** It handed one path
+/// to both arms: `Database::open` refuses a SQLite `.db`, because this engine
+/// writes its own format, and `sqlite-bench` cannot read a `.rdb`. So a `.db`
+/// failed the native arm and a `.rdb` failed the reference, no argument
+/// satisfied both, and nothing in `tests/selection.toml` ran the binary - which
+/// is how it stayed that way. It now imports the fixture for the native arms
+/// and gives the original to `sqlite-bench`, and this case is what says so.
+///
+/// The measurement asserted on is `prepare.point`, because that is the workload
+/// that reads a row: `prepare.trivial` is `SELECT 1` and would time on a fixture
+/// with nothing in it.
+#[test]
+fn prepareperf_measures_the_small_fixture() {
+    if !sqlite_bench_built() {
+        inillucent_compat::differential::skipping(
+            "sqlite-bench is not built; run tools/sqlite-reference.{ps1,sh}",
+        );
+        return;
+    }
+    let Some(fixture) = fixture_copy("prepareperf-small") else {
+        inillucent_compat::differential::skipping(
+            "the small gate fixture is not built; run tools/build-gate-fixtures.sh",
+        );
+        return;
+    };
+    // One round of fifty prepares rather than the thirty rounds of four
+    // thousand the published number is taken over: this case is asking whether
+    // the program runs to completion and reports, and a debug build of the
+    // engine misses the bars either way.
+    let output = run(
+        env!("CARGO_BIN_EXE_inillucent-prepareperf"),
+        &[&fixture.to_string_lossy(), "1", "--repeat", "50"],
+    );
+    measured("prepareperf", &output, &|text| {
+        a_positive_number_on_a_line_with(text, "prepare.point")
+    });
+    // The three arms agree on what the query answered, or `record` stops the
+    // run. A report that reached the table has already passed that check, so
+    // the assertion here is that the table is the thing that was printed.
+    let text = said(&output);
+    assert!(
+        text.contains("open.prepare with the cache:"),
+        "prepareperf measured prepare.point and then did not report a family ratio, so it \
+         stopped between the two. It printed:\n{text}"
+    );
+}
+
 // --- searchgate -------------------------------------------------------------
 
 /// The search gate refuses a corpus of no documents.
@@ -911,6 +978,7 @@ fn every_gate_under_test_is_a_binary_that_exists() {
         "inillucent-readgate",
         "inillucent-writegate",
         "inillucent-fullgate",
+        "inillucent-prepareperf",
         "inillucent-searchgate",
         "inillucent-walperf",
         "inillucent-scorecard",

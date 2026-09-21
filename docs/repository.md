@@ -324,6 +324,10 @@ target/release/inillucent-vectorprobe --rows 20000 --dims 256
 # deleted and no recorded floor exists to gate against in its place, so it
 # reports rather than passing or failing.
 target/release/inillucent-searchgate  --documents 500 --rounds 30
+# the open.prepare family on its own, without a whole scorecard. It takes the
+# SQLite fixture and imports its own copy for the native arms, so one file is
+# all it is given.
+target/release/inillucent-prepareperf <dir>/medium-prepare.db 30
 
 # the parity manifest and the dependency contract
 cargo run -p inillucent-compat --bin inillucent-manifest -- check
