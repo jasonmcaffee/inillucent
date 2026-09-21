@@ -453,20 +453,28 @@ impl<'a> Parser<'a> {
     }
 
     /// Interns an identifier token into the arena.
+    ///
+    /// **The `Cow` is passed on rather than owned (task-2039).** Both of these
+    /// borrow the source for a bare word, which is nearly every identifier in
+    /// nearly every statement; `into_owned` copied it anyway so that
+    /// `Ast::intern` would have a `Vec<u8>` to take, and a name the arena had
+    /// already interned - the same column written twice - paid for that copy
+    /// and threw it away. `Ast::intern_bytes` looks the name up from the bytes
+    /// where they are.
     fn intern_token(&mut self, token: Token) -> NameId {
         // A string standing in for a name is interned as the name it spells,
         // with its own quoting undone - and remembered as double-quoted, which
         // is how it is written back out when the declaration is rendered.
         if token.kind == TokenKind::String {
-            let text = lexer::string_text(self.source, token).into_owned();
-            return self.ast.intern(text, QuoteForm::Double, token.span);
+            let text = lexer::string_text(self.source, token);
+            return self.ast.intern_bytes(&text, QuoteForm::Double, token.span);
         }
         let quote = match token.kind {
             TokenKind::Identifier { quote, .. } => quote,
             _ => QuoteForm::Bare,
         };
-        let text = lexer::identifier_text(self.source, token).into_owned();
-        self.ast.intern(text, quote, token.span)
+        let text = lexer::identifier_text(self.source, token);
+        self.ast.intern_bytes(&text, quote, token.span)
     }
 
     /// Parses an optional `schema.` qualifier followed by a name.
@@ -559,9 +567,11 @@ impl<'a> Parser<'a> {
             self.parameters.count = index;
             return Ok((index, None));
         }
-        let name = text.to_vec();
-        if let Some(index) = self.parameters.index_of(&name) {
-            let id = self.ast.intern(name, QuoteForm::Bare, token.span);
+        // The named forms only. `text` borrows the source, so a `:name` seen a
+        // second time costs nothing at all now: it used to copy the name to
+        // look the index up with, and copy it again for `intern` to take.
+        if let Some(index) = self.parameters.index_of(text) {
+            let id = self.ast.intern_bytes(text, QuoteForm::Bare, token.span);
             return Ok((index, Some(id)));
         }
         let index = self.parameters.count.saturating_add(1);
@@ -572,8 +582,8 @@ impl<'a> Parser<'a> {
             ));
         }
         self.parameters.count = index;
-        self.parameters.names.push((name.clone(), index));
-        let id = self.ast.intern(name, QuoteForm::Bare, token.span);
+        self.parameters.names.push((text.to_vec(), index));
+        let id = self.ast.intern_bytes(text, QuoteForm::Bare, token.span);
         Ok((index, Some(id)))
     }
 

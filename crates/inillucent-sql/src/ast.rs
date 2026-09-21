@@ -1209,21 +1209,80 @@ pub enum TransactionBehaviour {
     Exclusive,
 }
 
+/// How many name buffers [`Ast::clear`] keeps for the next parse to fill.
+///
+/// **Because `clear` empties `names`, which drops each `Name`'s two `Vec<u8>`
+/// (task-2039).** The arena keeps its *vectors'* capacity across a clear and
+/// not its *entries'*, so a connection re-compiling the same statement paid
+/// two allocations per distinct name for ever. A statement names a handful of
+/// things, so a short list of buffers covers the repeating case; a statement
+/// that names hundreds gives the surplus back to the allocator rather than
+/// holding it on a connection that will never name that many again.
+const SPARE_NAME_BUFFERS: usize = 64;
+
+/// The largest name buffer [`Ast::clear`] keeps, in bytes of capacity.
+///
+/// A held buffer is memory the connection does not give back, so a long name -
+/// a generated column alias, a quoted sentence - is dropped rather than kept.
+/// With [`SPARE_NAME_BUFFERS`] this bounds what one arena holds between parses
+/// at about 8 KiB.
+const SPARE_NAME_CAPACITY: usize = 128;
+
+/// Which names share one hash of their spelling and quote form.
+///
+/// **A collision must not hand back the wrong `NameId`.** `NameId` equality is
+/// read as "the same name" - the binder resolves a column reference by
+/// comparing ids - so storing one index per hash and overwriting on collision
+/// would silently make two different identifiers the same name. Every
+/// candidate is compared against `Ast::names` before it is returned, and a
+/// hash shared by two different spellings keeps both.
+///
+/// The single case is inline rather than a one-element `Vec` because that
+/// `Vec` would be an allocation per distinct name, which is most of what
+/// task-2039 removed. `Several` allocates, and needs a 64-bit collision to be
+/// reached at all.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Interned {
+    /// The only name whose spelling and quote form hash to this value.
+    One(u32),
+    /// Two or more names that hashed the same, in the order they were interned.
+    Several(Vec<u32>),
+}
+
 /// The arena every node of one parse lives in.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Eq)]
 pub struct Ast {
     names: Vec<Name>,
-    /// Where a folded name already is, so `intern` is a lookup rather than a
-    /// scan.
+    /// Where a name already is, so `intern` is a lookup rather than a scan.
     ///
     /// **`intern` was a linear scan of every name interned so far, so N
     /// distinct identifiers cost N-squared comparisons (task-1932, H8).** The
     /// `SqlLength` default is 1 GiB, so a statement naming two hundred thousand
     /// distinct columns is well inside what the parser accepts and was
-    /// quadratic to parse. The key is the whole of what the scan compared -
-    /// the folded text, the quote form, and the written spelling - so an entry
-    /// found here is an entry the scan would have found.
-    interned: std::collections::HashMap<(Vec<u8>, QuoteForm, Vec<u8>), u32>,
+    /// quadratic to parse.
+    ///
+    /// **The key is a hash of the name and not the name itself (task-2039).**
+    /// Owning `(folded, quote, text)` meant every lookup had to build an owned
+    /// key to look up *with*, and finding the name already there still cost the
+    /// folded copy plus two more from `key.clone()` on the way in - four
+    /// allocations per distinct name, twelve of the ninety-three a compile of
+    /// `SELECT a FROM t WHERE id = ?1` made. Hashing the bytes where they are
+    /// and comparing the candidates against `names`, which already holds the
+    /// spelling and the quote form, makes a hit free and leaves a miss paying
+    /// only for what it stores.
+    ///
+    /// The hash comes from the map's own [`std::collections::hash_map::RandomState`],
+    /// which is seeded per arena. That matters rather than being tidy: the
+    /// parser accepts `Limit::Column * 64` distinct identifiers - 128,000 under
+    /// the defaults - so a fixed hash an attacker could invert would let a
+    /// statement drive every name into one `Several` and restore the quadratic
+    /// parse this map exists to prevent.
+    interned: std::collections::HashMap<u64, Interned>,
+    /// Name byte buffers a previous parse used, waiting to be filled again.
+    ///
+    /// See [`SPARE_NAME_BUFFERS`]. Empty on a fresh arena, so the first parse
+    /// pays what it always did and every parse after it does not.
+    spare: Vec<Vec<u8>>,
     exprs: Vec<Expr>,
     expr_spans: Vec<Span>,
     /// How deep each expression's own subtree is, one entry per node.
@@ -1252,6 +1311,46 @@ pub struct Ast {
     bytes: usize,
 }
 
+/// Two arenas are equal when they hold the same nodes.
+///
+/// **Hand-written rather than derived, because `interned` and `spare` are not
+/// content (task-2039).** `interned` is an index over `names` keyed by a hash
+/// the arena seeds for itself, so two arenas parsed from the same text hold
+/// the same names under different keys; `spare` is buffers the allocator has
+/// not been given back yet, which the next parse may or may not use. Comparing
+/// either would report two identical parses as different. The fields are
+/// destructured by name and none is skipped with `..`, so a field added later
+/// fails to compile here rather than being silently left out of equality.
+impl PartialEq for Ast {
+    /// @param other - the arena to compare against
+    fn eq(&self, other: &Ast) -> bool {
+        let Ast {
+            names,
+            interned: _,
+            spare: _,
+            exprs,
+            expr_spans,
+            expr_depths,
+            max_expr_depth,
+            selects,
+            cores,
+            from_terms,
+            windows,
+            bytes,
+        } = self;
+        *names == other.names
+            && *exprs == other.exprs
+            && *expr_spans == other.expr_spans
+            && *expr_depths == other.expr_depths
+            && *max_expr_depth == other.max_expr_depth
+            && *selects == other.selects
+            && *cores == other.cores
+            && *from_terms == other.from_terms
+            && *windows == other.windows
+            && *bytes == other.bytes
+    }
+}
+
 impl Ast {
     /// Returns an empty arena.
     pub fn new() -> Ast {
@@ -1270,8 +1369,16 @@ impl Ast {
     /// names are cleared with everything else: `intern` returns an existing id
     /// for equal text, so a name left behind from the previous statement would
     /// be a live id in the next one's arena.
+    ///
+    /// **The names keep their byte buffers even though the names go
+    /// (task-2039).** Clearing `names` drops every `Name`, and a `Name` owns
+    /// two `Vec<u8>` - so the vector's capacity survived a clear and the two
+    /// allocations behind each entry in it did not, and a connection
+    /// re-compiling one statement went back to the allocator twice per
+    /// distinct name for ever. The buffers go on `spare` instead and `intern`
+    /// fills them again. [`SPARE_NAME_BUFFERS`] is what bounds the list.
     pub fn clear(&mut self) {
-        self.names.clear();
+        self.recycle_names();
         self.interned.clear();
         self.exprs.clear();
         self.expr_spans.clear();
@@ -1310,24 +1417,158 @@ impl Ast {
     /// is a ceiling on an arena that has to fit in memory rather than a
     /// statement about the schema.
     pub fn intern(&mut self, text: Vec<u8>, quote: QuoteForm, span: Span) -> NameId {
-        let folded: Vec<u8> = text.iter().map(|byte| byte.to_ascii_lowercase()).collect();
-        let key = (folded, quote, text);
-        if let Some(index) = self.interned.get(&key) {
-            return NameId(*index);
+        let id = self.intern_bytes(&text, quote, span);
+        Ast::keep_buffer(&mut self.spare, text);
+        id
+    }
+
+    /// Interns an identifier the caller does not own, returning the id of an
+    /// equal existing entry when there is one.
+    ///
+    /// **The entry point that allocates nothing on a hit (task-2039).** The
+    /// owned form above had to exist before the lookup could happen, so the
+    /// parser called `identifier_text(..).into_owned()` on every identifier
+    /// token whether or not the name was already interned - and `intern` then
+    /// folded a copy and cloned the key, four allocations for a name the arena
+    /// already held. This hashes the bytes where the source already has them.
+    ///
+    /// A miss allocates what it stores and nothing else: the spelling and the
+    /// folded key, each taken from `spare` when a previous parse left one
+    /// there.
+    ///
+    /// @param text - the identifier as written, with quoting already undone
+    /// @param quote - how it was quoted, which decides whether it may become a
+    ///   string
+    /// @param span - where this occurrence came from
+    pub fn intern_bytes(&mut self, text: &[u8], quote: QuoteForm, span: Span) -> NameId {
+        let hash = self.hash_of(text, quote);
+        if let Some(index) = self.find_interned(hash, text, quote) {
+            return NameId(index);
         }
-        let (folded, quote, text) = key.clone();
-        self.bytes = self
-            .bytes
-            .saturating_add(text.len().saturating_add(folded.len()).saturating_add(32));
+        let mut folded = Ast::take_buffer(&mut self.spare);
+        folded.extend(text.iter().map(|byte| byte.to_ascii_lowercase()));
+        let mut spelling = Ast::take_buffer(&mut self.spare);
+        spelling.extend_from_slice(text);
+        self.bytes = self.bytes.saturating_add(
+            spelling
+                .len()
+                .saturating_add(folded.len())
+                .saturating_add(32),
+        );
         let index = self.names.len() as u32;
         self.names.push(Name {
-            text,
+            text: spelling,
             folded,
             quote,
             span,
         });
-        self.interned.insert(key, index);
+        self.remember_interned(hash, index);
         NameId(index)
+    }
+
+    /// Returns the hash an identifier is filed under.
+    ///
+    /// The map's own hasher, so the seed belongs to this arena and no caller
+    /// can choose names that collide. The folded key is not part of the hash:
+    /// folding is a function of the spelling, so two identifiers written the
+    /// same way and quoted the same way always fold the same, and no name is
+    /// ever filed apart from itself.
+    ///
+    /// @param text - the identifier as written
+    /// @param quote - how it was quoted
+    fn hash_of(&self, text: &[u8], quote: QuoteForm) -> u64 {
+        use std::hash::BuildHasher;
+        self.interned.hasher().hash_one((text, quote))
+    }
+
+    /// Returns the index of an interned name equal to this one, when there is
+    /// one.
+    ///
+    /// Every candidate filed under the hash is compared against what `names`
+    /// already holds, so a hash two different identifiers share returns the
+    /// right one rather than whichever was stored last.
+    ///
+    /// @param hash - what [`Ast::hash_of`] returned for the identifier
+    /// @param text - the identifier as written
+    /// @param quote - how it was quoted
+    fn find_interned(&self, hash: u64, text: &[u8], quote: QuoteForm) -> Option<u32> {
+        let candidates: &[u32] = match self.interned.get(&hash)? {
+            Interned::One(index) => core::slice::from_ref(index),
+            Interned::Several(indexes) => indexes.as_slice(),
+        };
+        candidates.iter().copied().find(|index| {
+            self.names
+                .get(*index as usize)
+                .is_some_and(|name| name.quote == quote && name.text == text)
+        })
+    }
+
+    /// Files a newly interned name under its hash.
+    ///
+    /// @param hash - what [`Ast::hash_of`] returned for the identifier
+    /// @param index - where the name was pushed in `names`
+    fn remember_interned(&mut self, hash: u64, index: u32) {
+        use std::collections::hash_map::Entry;
+        match self.interned.entry(hash) {
+            Entry::Vacant(slot) => {
+                slot.insert(Interned::One(index));
+            }
+            Entry::Occupied(mut slot) => match slot.get_mut() {
+                Interned::Several(indexes) => indexes.push(index),
+                Interned::One(first) => {
+                    let first = *first;
+                    slot.insert(Interned::Several(vec![first, index]));
+                }
+            },
+        }
+    }
+
+    /// Moves every name's byte buffers onto the free list and empties `names`.
+    ///
+    /// [`Ast::clear`] is the only caller, and its comment carries the argument.
+    ///
+    /// **Drained rather than taken.** `core::mem::take` on `self.names` leaves
+    /// a `Vec` with no capacity behind, which hands the allocator back the one
+    /// thing `clear` exists to keep - and cost a 256-byte `RawVec<Name>` regrow
+    /// on every warm compile while this function was written that way. The
+    /// free list and the names are separate fields, so the drain and the pushes
+    /// borrow disjointly and neither has to be given up.
+    fn recycle_names(&mut self) {
+        let spare = &mut self.spare;
+        for name in self.names.drain(..) {
+            Ast::keep_buffer(spare, name.text);
+            Ast::keep_buffer(spare, name.folded);
+        }
+    }
+
+    /// Keeps one byte buffer for the next parse, or gives it back.
+    ///
+    /// A buffer with no capacity never allocated, so keeping it would fill the
+    /// list with entries that save nothing.
+    ///
+    /// @param spare - the free list to put it on
+    /// @param buffer - the buffer nothing holds any more
+    fn keep_buffer(spare: &mut Vec<Vec<u8>>, mut buffer: Vec<u8>) {
+        if spare.len() >= SPARE_NAME_BUFFERS
+            || buffer.capacity() == 0
+            || buffer.capacity() > SPARE_NAME_CAPACITY
+        {
+            return;
+        }
+        buffer.clear();
+        spare.push(buffer);
+    }
+
+    /// Returns an empty byte buffer, reusing one a previous parse left.
+    ///
+    /// The buffer may be shorter than what is about to go into it, in which
+    /// case filling it reallocates - which is the one allocation a fresh `Vec`
+    /// would have made anyway, so a spare that is too small costs nothing over
+    /// having no spare at all.
+    ///
+    /// @param spare - the free list to take from
+    fn take_buffer(spare: &mut Vec<Vec<u8>>) -> Vec<u8> {
+        spare.pop().unwrap_or_default()
     }
 
     /// Returns how many distinct identifiers have been interned.
@@ -1579,5 +1820,184 @@ mod tests {
         let before = ast.charged_bytes();
         ast.add_expr(Expr::Literal(Literal::Null), Span::default());
         assert!(ast.charged_bytes() > before);
+    }
+
+    /// The same name written twice is one entry however it arrives, so the
+    /// borrowed entry point and the owned one agree.
+    #[test]
+    fn the_borrowed_and_owned_entry_points_intern_the_same_name() {
+        let mut ast = Ast::new();
+        let owned = ast.intern(b"col".to_vec(), QuoteForm::Bare, Span::default());
+        let borrowed = ast.intern_bytes(b"col", QuoteForm::Bare, Span::default());
+        assert_eq!(owned, borrowed);
+        assert_eq!(ast.name_count(), 1);
+        assert_eq!(ast.text(owned), b"col");
+        assert_eq!(ast.folded(owned), b"col");
+    }
+
+    /// The quote form is part of what makes a name, so `x` and `"x"` are two
+    /// entries even though they spell the same word.
+    #[test]
+    fn the_quote_form_separates_two_names_that_spell_the_same_word() {
+        let mut ast = Ast::new();
+        let bare = ast.intern_bytes(b"x", QuoteForm::Bare, Span::default());
+        let quoted = ast.intern_bytes(b"x", QuoteForm::Double, Span::default());
+        assert_ne!(bare, quoted);
+        assert_eq!(ast.name_count(), 2);
+        assert_eq!(
+            ast.intern_bytes(b"x", QuoteForm::Bare, Span::default()),
+            bare
+        );
+        assert_eq!(
+            ast.intern_bytes(b"x", QuoteForm::Double, Span::default()),
+            quoted
+        );
+    }
+
+    /// A name filed under another name's hash gets its own id.
+    ///
+    /// **The failure the map is keyed on a hash to avoid (task-2039).** A map
+    /// that stored one index per hash and trusted it would answer `gamma` with
+    /// `alpha`'s id here, and `NameId` equality is read as "the same name" -
+    /// the binder resolves a column reference by comparing ids - so two
+    /// different identifiers becoming one id is a wrong query rather than a
+    /// slow one. A 64-bit collision cannot be produced by interning names, so
+    /// the collision is filed by hand: `remember_interned` is exactly what
+    /// `intern_bytes` calls, with the hash of a different name.
+    #[test]
+    fn a_name_filed_under_another_names_hash_gets_its_own_id() {
+        let mut ast = Ast::new();
+        let alpha = ast.intern_bytes(b"alpha", QuoteForm::Bare, Span::default());
+        let stolen = ast.hash_of(b"gamma", QuoteForm::Bare);
+        ast.remember_interned(stolen, alpha.0);
+
+        let gamma = ast.intern_bytes(b"gamma", QuoteForm::Bare, Span::default());
+        assert_ne!(gamma, alpha);
+        assert_eq!(ast.text(gamma), b"gamma");
+        assert_eq!(ast.text(alpha), b"alpha");
+
+        // And both are still found, from the one slot that now holds both.
+        assert_eq!(
+            ast.intern_bytes(b"gamma", QuoteForm::Bare, Span::default()),
+            gamma
+        );
+        assert_eq!(
+            ast.intern_bytes(b"alpha", QuoteForm::Bare, Span::default()),
+            alpha
+        );
+        assert_eq!(ast.name_count(), 2);
+    }
+
+    /// Two hundred names all reach their own id and find it again.
+    ///
+    /// The map is keyed on a hash now, so "every name is distinct" is a claim
+    /// about the candidate comparison rather than about the map, and a scan of
+    /// a real number of names is what checks it.
+    #[test]
+    fn many_names_each_keep_their_own_id() {
+        let mut ast = Ast::new();
+        let spellings: Vec<Vec<u8>> = (0..200)
+            .map(|nth| format!("column_{nth}").into_bytes())
+            .collect();
+        let ids: Vec<NameId> = spellings
+            .iter()
+            .map(|text| ast.intern_bytes(text, QuoteForm::Bare, Span::default()))
+            .collect();
+        assert_eq!(ast.name_count(), 200);
+        for (text, id) in spellings.iter().zip(&ids) {
+            assert_eq!(
+                ast.intern_bytes(text, QuoteForm::Bare, Span::default()),
+                *id
+            );
+            assert_eq!(ast.text(*id), text.as_slice());
+        }
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 200);
+    }
+
+    /// `clear` keeps the names' byte buffers and the names vector's capacity.
+    ///
+    /// **Both halves, because losing either one costs an allocation per warm
+    /// compile (task-2039).** The buffers are what a second parse of the same
+    /// statement fills instead of asking the allocator; the vector's capacity
+    /// is what `clear` existed to keep in the first place, and a `clear` that
+    /// moved the names out by `core::mem::take` silently gave it back.
+    #[test]
+    fn clearing_keeps_the_name_buffers_and_the_names_capacity() {
+        let mut ast = Ast::new();
+        for nth in 0..4u32 {
+            ast.intern_bytes(
+                format!("c{nth}").as_bytes(),
+                QuoteForm::Bare,
+                Span::default(),
+            );
+        }
+        let capacity = ast.names.capacity();
+        assert!(capacity >= 4);
+
+        ast.clear();
+        assert_eq!(ast.name_count(), 0);
+        assert_eq!(ast.names.capacity(), capacity);
+        // Two buffers a name: the spelling and the folded key.
+        assert_eq!(ast.spare.len(), 8);
+        assert!(ast.spare.iter().all(|buffer| buffer.is_empty()));
+
+        // And the next parse takes them back rather than allocating.
+        for nth in 0..4u32 {
+            ast.intern_bytes(
+                format!("c{nth}").as_bytes(),
+                QuoteForm::Bare,
+                Span::default(),
+            );
+        }
+        assert_eq!(ast.spare.len(), 0);
+        assert_eq!(ast.name_count(), 4);
+        assert_eq!(ast.text(NameId(2)), b"c2");
+    }
+
+    /// The free list is bounded, so a statement naming thousands of things
+    /// does not leave the connection holding them.
+    #[test]
+    fn the_free_list_does_not_grow_without_bound() {
+        let mut ast = Ast::new();
+        for nth in 0..2_000u32 {
+            ast.intern_bytes(
+                format!("column_{nth}").as_bytes(),
+                QuoteForm::Bare,
+                Span::default(),
+            );
+        }
+        ast.clear();
+        assert_eq!(ast.spare.len(), SPARE_NAME_BUFFERS);
+
+        // A name longer than a buffer worth keeping is dropped rather than
+        // held, so one enormous alias does not pin its bytes for ever.
+        let mut ast = Ast::new();
+        let long = vec![b'z'; SPARE_NAME_CAPACITY.saturating_add(1)];
+        ast.intern_bytes(&long, QuoteForm::Bare, Span::default());
+        ast.clear();
+        assert_eq!(ast.spare.len(), 0);
+    }
+
+    /// Two arenas holding the same nodes are equal, and the index behind them
+    /// is not part of that.
+    ///
+    /// `Ast` compares by hand because `interned` is keyed on a hash each arena
+    /// seeds for itself, so a derived comparison would report two identical
+    /// parses as different (task-2039).
+    #[test]
+    fn two_arenas_holding_the_same_names_are_equal() {
+        let mut one = Ast::new();
+        let mut two = Ast::new();
+        for text in [b"alpha".as_slice(), b"beta".as_slice()] {
+            one.intern_bytes(text, QuoteForm::Bare, Span::default());
+            two.intern_bytes(text, QuoteForm::Bare, Span::default());
+        }
+        assert_eq!(one, two);
+
+        two.intern_bytes(b"gamma", QuoteForm::Bare, Span::default());
+        assert_ne!(one, two);
     }
 }

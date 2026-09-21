@@ -258,22 +258,28 @@ impl Parser<'_> {
         // `TRUE` and `FALSE` are not keywords in SQLite; they are identifiers
         // the expression layer recognises, which is why `SELECT true` works and
         // `CREATE TABLE t(true)` also works.
-        let folded = token.text(self.source()).to_ascii_lowercase();
+        //
+        // **Compared where it is rather than lowercased into a copy
+        // (task-2039).** This runs for every word that begins an expression,
+        // so an owned lowercase copy was an allocation per column reference in
+        // every statement, made to answer a question about two five-letter
+        // words.
+        let word = token.text(self.source());
+        let is_true = word.eq_ignore_ascii_case(b"true");
         if matches!(
             token.kind,
             TokenKind::Identifier {
                 quote: crate::lexer::QuoteForm::Bare,
                 ..
             }
-        ) && (folded == b"true" || folded == b"false")
+        ) && (is_true || word.eq_ignore_ascii_case(b"false"))
             && !self.peek_at(1)?.is(Punctuator::Dot)
             && !self.peek_at(1)?.is(Punctuator::LeftParen)
         {
             self.bump()?;
-            return Ok(self.ast.add_expr(
-                Expr::Literal(Literal::Boolean(folded == b"true")),
-                token.span,
-            ));
+            return Ok(self
+                .ast
+                .add_expr(Expr::Literal(Literal::Boolean(is_true)), token.span));
         }
         // `like(X, Y)` is a function call even though LIKE is a hard keyword,
         // and so are `glob`, `regexp` and `match`. SQLite's grammar has a rule
@@ -483,7 +489,7 @@ impl Parser<'_> {
         let declared = if self.at(Punctuator::RightParen)? {
             let span = crate::lexer::Span::at(self.cursor());
             self.ast
-                .intern(Vec::new(), crate::lexer::QuoteForm::Bare, span)
+                .intern_bytes(&[], crate::lexer::QuoteForm::Bare, span)
         } else {
             self.parse_type_name()?
         };
@@ -574,8 +580,10 @@ impl Parser<'_> {
             end = self.expect(Punctuator::RightParen)?.span;
         }
         let span = first.span.to(end);
-        let text = span.slice(self.source()).to_vec();
-        Ok(self.ast.intern(text, crate::lexer::QuoteForm::Bare, span))
+        let text = span.slice(self.source());
+        Ok(self
+            .ast
+            .intern_bytes(text, crate::lexer::QuoteForm::Bare, span))
     }
 
     /// Returns whether the next word begins a column constraint.
