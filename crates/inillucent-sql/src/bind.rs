@@ -15,11 +15,13 @@
 mod cte;
 mod having;
 mod literal;
+mod scratch;
 
 use literal::integer_literal;
 
 pub use cte::CteBinding;
 use cte::RecursiveTarget;
+pub use scratch::BinderScratch;
 
 use inillucent_value::{Affinity, Collation};
 
@@ -1284,76 +1286,6 @@ pub struct Dependencies {
     pub generation: u64,
 }
 
-/// The vectors a binder works in, kept by the connection rather than made for
-/// every statement.
-///
-/// **The parse arena's counterpart, for the stage after the parse
-/// (task-2026).** `Compiled::scratch_ast` exists because every vector in an
-/// `Ast` is empty at construction and grows on its first push, so a parse that
-/// is thrown away a microsecond later pays the allocator for capacity it
-/// already had last time. The binder has exactly that shape and was not getting
-/// that treatment: binding `SELECT 1` took the scope stack's buffer and the
-/// result-alias buffer - 96 and 320 bytes - out of the allocator on every
-/// compile, and `prepare.trivial` is a workload the gate compiles on every
-/// iteration.
-///
-/// What is here is the binder's own working state. What the binder *returns* is
-/// not: a `BoundStatement`'s vectors leave with it and belong to whoever asked
-/// for the bind, so recycling them would mean handing back memory something
-/// else is still reading.
-///
-/// Like the arena, it is cleared on the way in rather than on the way out, and
-/// it keeps whatever capacity the largest statement so far needed - a
-/// connection that once bound a statement with ten thousand FROM terms holds
-/// that much `sources` until it closes. That is the trade [`crate::ast::Ast`]
-/// already makes, made once more here rather than differently.
-#[derive(Default)]
-pub struct BinderScratch {
-    sources: Vec<BoundSource>,
-    scopes: Vec<Vec<usize>>,
-    aggregates: Vec<BoundAggregate>,
-    result_aliases: Vec<(Vec<u8>, BoundExpr)>,
-    schemas: Vec<(usize, u32)>,
-    ctes: Vec<Vec<CteBinding>>,
-    recursing: Vec<RecursiveTarget>,
-    binding_ctes: Vec<ast::SelectId>,
-    correlations: Vec<usize>,
-    windows: Vec<BoundWindow>,
-    named_windows: Vec<(Vec<u8>, ast::WindowId)>,
-    firing: Vec<Vec<u8>>,
-    firing_foreign_keys: Vec<Vec<u8>>,
-    pending_constraints: Vec<BoundExpr>,
-}
-
-impl BinderScratch {
-    /// Returns a scratch with nothing in it and nothing allocated.
-    pub fn new() -> BinderScratch {
-        BinderScratch::default()
-    }
-
-    /// Empties every vector, keeping the memory each has already taken.
-    ///
-    /// A `clear` rather than a `new` for the reason [`crate::ast::Ast::clear`]
-    /// gives: the capacity is the point, and dropping it would leave a scratch
-    /// that costs an allocation to refill.
-    fn clear(&mut self) {
-        self.sources.clear();
-        self.scopes.clear();
-        self.aggregates.clear();
-        self.result_aliases.clear();
-        self.schemas.clear();
-        self.ctes.clear();
-        self.recursing.clear();
-        self.binding_ctes.clear();
-        self.correlations.clear();
-        self.windows.clear();
-        self.named_windows.clear();
-        self.firing.clear();
-        self.firing_foreign_keys.clear();
-        self.pending_constraints.clear();
-    }
-}
-
 /// A bound statement.
 #[derive(Clone, Debug, PartialEq)]
 pub enum BoundStatement {
@@ -1369,22 +1301,6 @@ pub enum BoundStatement {
     Directive(Box<crate::directive::Directive>),
     /// A statement that compiles to no program.
     Empty,
-}
-
-/// The per-block binder state saved while a nested block is bound.
-///
-/// Aggregates, result aliases and the correlation list all belong to one query
-/// block. Without a frame, an aggregate written inside a subquery would be
-/// added to the enclosing block's accumulator list and finalised at the wrong
-/// level - which is a wrong answer rather than an error.
-struct BlockFrame {
-    windows: Vec<BoundWindow>,
-    named_windows: Vec<(Vec<u8>, ast::WindowId)>,
-    aggregates: Vec<BoundAggregate>,
-    result_aliases: Vec<(Vec<u8>, BoundExpr)>,
-    allow_aggregates: bool,
-    inside_aggregate: bool,
-    correlations: Vec<usize>,
 }
 
 /// The binder's working state for one statement.
@@ -1440,6 +1356,26 @@ pub struct Binder<'a> {
     pub(crate) scopes: Vec<Vec<usize>>,
     aggregates: Vec<BoundAggregate>,
     result_aliases: Vec<(Vec<u8>, BoundExpr)>,
+    /// Whether anything bound after this block's result columns can name one of
+    /// them by its alias.
+    ///
+    /// **Recording an alias costs an allocation per result column, and almost
+    /// no statement reads one (task-2026).** `result_aliases` is consulted in
+    /// exactly one place - `bind_column_reference`, after a real column has
+    /// failed to match - and the only clauses that reach it are `GROUP BY`,
+    /// `HAVING` and the statement's `ORDER BY`, `LIMIT` and `OFFSET`, all of
+    /// which are bound after the result columns and inside the same block. A
+    /// `SELECT` with none of them fills the list and never reads it, which on
+    /// `SELECT 1` was a lowercased copy of the name `1`, and on a wider select
+    /// is that plus a clone of every result expression.
+    ///
+    /// It is per block and restored by [`BlockFrame`] for the reason the alias
+    /// list itself is: a subquery's tail clauses are its own, and an outer
+    /// `ORDER BY` cannot name an inner block's alias.
+    ///
+    /// It starts `true`, so a binder reached by a path that does not set it
+    /// records aliases exactly as it did before.
+    tail_may_name_an_alias: bool,
     dependencies: Dependencies,
     inside_aggregate: bool,
     allow_aggregates: bool,
@@ -1671,6 +1607,7 @@ impl<'a> Binder<'a> {
             scopes: Vec::new(),
             aggregates: Vec::new(),
             result_aliases: Vec::new(),
+            tail_may_name_an_alias: true,
             dependencies: Dependencies {
                 schemas: Vec::new(),
                 generation: catalog.generation(),
@@ -1697,57 +1634,6 @@ impl<'a> Binder<'a> {
             firing_foreign_keys: Vec::new(),
             foreign_key_depth: 0,
             foreign_key_budget: crate::dml::MAX_FOREIGN_KEY_STATEMENTS,
-        }
-    }
-
-    /// Binds into vectors the caller keeps, rather than into fresh ones.
-    ///
-    /// **For a caller that binds one statement after another**, which is every
-    /// connection: the scratch is cleared on the way in, so the second bind
-    /// pushes into capacity the first one took. See [`BinderScratch`] for what
-    /// is in it and what is deliberately not.
-    ///
-    /// @param scratch - the vectors to fill, cleared first
-    pub fn with_scratch(mut self, mut scratch: BinderScratch) -> Binder<'a> {
-        scratch.clear();
-        self.sources = scratch.sources;
-        self.scopes = scratch.scopes;
-        self.aggregates = scratch.aggregates;
-        self.result_aliases = scratch.result_aliases;
-        self.dependencies.schemas = scratch.schemas;
-        self.ctes = scratch.ctes;
-        self.recursing = scratch.recursing;
-        self.binding_ctes = scratch.binding_ctes;
-        self.correlations = scratch.correlations;
-        self.windows = scratch.windows;
-        self.named_windows = scratch.named_windows;
-        self.firing = scratch.firing;
-        self.firing_foreign_keys = scratch.firing_foreign_keys;
-        self.pending_constraints = scratch.pending_constraints;
-        self
-    }
-
-    /// Returns the vectors this bind filled, for the next bind to reuse.
-    ///
-    /// The binder is consumed, so nothing can still be reading what is handed
-    /// back. The bound statement is not in here - it was returned by
-    /// [`Binder::bind_statement`] and owns its own vectors.
-    pub fn into_scratch(self) -> BinderScratch {
-        BinderScratch {
-            sources: self.sources,
-            scopes: self.scopes,
-            aggregates: self.aggregates,
-            result_aliases: self.result_aliases,
-            schemas: self.dependencies.schemas,
-            ctes: self.ctes,
-            recursing: self.recursing,
-            binding_ctes: self.binding_ctes,
-            correlations: self.correlations,
-            windows: self.windows,
-            named_windows: self.named_windows,
-            firing: self.firing,
-            firing_foreign_keys: self.firing_foreign_keys,
-            pending_constraints: self.pending_constraints,
         }
     }
 
@@ -1863,6 +1749,14 @@ impl<'a> Binder<'a> {
             ));
         }
         let frame = self.enter_block();
+        // Decided here because this is the only place that holds both the block
+        // and the tail clauses bound into it. A compound arm opens its own
+        // frame inside `finish_select` and inherits this, which is right: the
+        // statement's `ORDER BY` is resolved against the compound's columns
+        // rather than through any one arm's aliases, so an arm that inherits a
+        // `true` records aliases it will not read, and never the other way.
+        self.tail_may_name_an_alias =
+            !select.order_by.is_empty() || select.limit.is_some() || select.offset.is_some();
         let bound = self.bind_arm(select.first);
         let mut bound = match bound {
             Ok(bound) => bound,
@@ -2037,46 +1931,6 @@ impl<'a> Binder<'a> {
         };
         Ok((*operand, Some(named)))
     }
-    /// Opens a query block: a fresh scope, and fresh per-block state.
-    fn enter_block(&mut self) -> BlockFrame {
-        self.scopes.push(Vec::new());
-        BlockFrame {
-            windows: core::mem::take(&mut self.windows),
-            named_windows: core::mem::take(&mut self.named_windows),
-            aggregates: core::mem::take(&mut self.aggregates),
-            result_aliases: core::mem::take(&mut self.result_aliases),
-            allow_aggregates: core::mem::replace(&mut self.allow_aggregates, false),
-            inside_aggregate: core::mem::replace(&mut self.inside_aggregate, false),
-            correlations: core::mem::take(&mut self.correlations),
-        }
-    }
-
-    /// Closes a query block, returning the FROM terms it owned.
-    ///
-    /// A correlation the closing block recorded is passed outward when the
-    /// block that is now innermost does not own the term either, which is what
-    /// makes correlation transitive through two levels of nesting.
-    fn leave_block(&mut self, frame: BlockFrame) -> Vec<usize> {
-        let ids = self.scopes.pop().unwrap_or_default();
-        let inner = core::mem::replace(&mut self.correlations, frame.correlations);
-        for id in inner {
-            if ids.contains(&id) {
-                continue;
-            }
-            let owned = self.scopes.last().is_some_and(|scope| scope.contains(&id));
-            if !owned && !self.correlations.contains(&id) {
-                self.correlations.push(id);
-            }
-        }
-        self.windows = frame.windows;
-        self.named_windows = frame.named_windows;
-        self.aggregates = frame.aggregates;
-        self.result_aliases = frame.result_aliases;
-        self.allow_aggregates = frame.allow_aggregates;
-        self.inside_aggregate = frame.inside_aggregate;
-        ids
-    }
-
     /// Returns the FROM-term ids the innermost block owns.
     pub(crate) fn scope(&self) -> &[usize] {
         self.scopes.last().map_or(&[], |scope| scope.as_slice())
@@ -2182,10 +2036,15 @@ impl<'a> Binder<'a> {
         // holds the ones the `HAVING` itself introduced. `bind::having` says
         // why that distinction is the whole rule.
         let aggregates_in_columns = self.aggregates.len();
-        for column in &bound_columns {
-            if !column.name.is_empty() {
-                self.result_aliases
-                    .push((column.name.to_ascii_lowercase(), column.expr.clone()));
+        // See `tail_may_name_an_alias`. This core's own `GROUP BY` and `HAVING`
+        // are read here rather than from the flag because they belong to the
+        // core and the flag belongs to the statement around it.
+        if self.tail_may_name_an_alias || !group_by.is_empty() || having.is_some() {
+            for column in &bound_columns {
+                if !column.name.is_empty() {
+                    self.result_aliases
+                        .push((column.name.to_ascii_lowercase(), column.expr.clone()));
+                }
             }
         }
         let mut bound_group = Vec::with_capacity(group_by.len());
@@ -3033,7 +2892,12 @@ impl<'a> Binder<'a> {
         &mut self,
         columns: &[ast::ResultColumn],
     ) -> Result<Vec<BoundResultColumn>, ParseError> {
-        let mut bound = Vec::new();
+        // One column of the AST is usually one bound column, so this is the
+        // right answer rather than a guess; `*` expands to more and the vector
+        // grows from here, which is still fewer growths than starting empty.
+        // `Vec::new` grew to four for a one-column select, which is 704 bytes
+        // asked for to hold 176 (task-2026).
+        let mut bound = Vec::with_capacity(columns.len());
         for column in columns {
             match self.ast.expr(column.expr) {
                 Some(Expr::Star { table }) => {

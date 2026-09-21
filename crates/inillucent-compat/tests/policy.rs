@@ -95,19 +95,22 @@ const UNSAFE_CRATES: [&str; 1] = ["inillucent-driver-capi"];
 /// safe Rust. Everything else in the engine is safe code, and the crate-level
 /// `forbid(unsafe_code)` in `inillucent-base` says so to the compiler as well.
 ///
-/// The last two are measurement binaries, not the engine: a global allocator is
-/// the only way to count heap allocations, and `GlobalAlloc` is an unsafe
-/// trait. They are admitted here rather than quietly because the charter is
-/// about what the engine is made of, and a baseline tool that never ships is
+/// Most of the rest are measurement binaries, not the engine: a global
+/// allocator is the only way to count heap allocations, and `GlobalAlloc` is an
+/// unsafe trait. They are admitted here rather than quietly because the charter
+/// is about what the engine is made of, and a baseline tool that never ships is
 /// not part of it - but a file with `unsafe` in it should still have to say
 /// why, in writing, in a list somebody reads.
+///
+/// The last entry is the first one that is a `cargo test` rather than a
+/// binary, and it carries its own argument for why that is the same ground.
 // The one file in the shell that says `unsafe`, added in task-1932 (H11).
 // Ctrl+C has no representation in the standard library, so being told about
 // it is `SetConsoleCtrlHandler` on Windows and `signal` on Unix, and both
 // are FFI. Each call installs a handler and reads nothing back; each handler
 // stores `true` into an already-allocated `AtomicBool` and returns, which is
 // the whole of what a handler is allowed to do.
-const UNSAFE_ALLOWED: [&str; 16] = [
+const UNSAFE_ALLOWED: [&str; 17] = [
     // **The AVX2 dot product, added by task-2000's design 9.** It is the one place
     // in the engine where safe Rust cannot express the thing that has to happen: a
     // 256-bit fused multiply-add is an intrinsic, every intrinsic in
@@ -189,6 +192,27 @@ const UNSAFE_ALLOWED: [&str; 16] = [
     // the stack runs out. Every method still forwards to the system allocator
     // unchanged and each one carries its own SAFETY note.
     "crates/inillucent-compat/src/bin/execprofile.rs",
+    // **The first counting allocator in a `cargo test`, rather than in a
+    // measurement binary (task-2026).** `budget.rs` guards what a compile
+    // costs in allocations - the number the binder's scratch, the operator
+    // listing and the result-column clone all move - and counting an
+    // allocation needs a `GlobalAlloc`, which is an unsafe trait. Every method
+    // forwards to the system allocator unchanged and carries its own SAFETY
+    // note; the only addition is a counter.
+    //
+    // It differs from the five above in one way: the counter is
+    // a `thread_local!`, not a global, because a `#[global_allocator]` in a
+    // test binary sees every test in that binary and this file would otherwise
+    // read whatever a parallel `cargo test` happened to be doing. The local is
+    // `const`-initialised and holds a type with no destructor, so reading it
+    // from inside the allocator cannot itself allocate and cannot recurse.
+    //
+    // This is a test rather than a binary, so the "a baseline tool that never
+    // ships is not part of the engine" argument above does not quite cover it.
+    // The narrower one does: a `tests/` file is not linked into anything an
+    // application receives, and what it is measuring is precisely a cost that
+    // has no safe instrument.
+    "crates/inillucent/tests/budget.rs",
 ];
 
 /// Returns every `.rs` file under a directory.

@@ -111,6 +111,8 @@
 //! the test binaries and runs it with one test thread, so its own guards do not
 //! contend with each other either.
 
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -118,12 +120,100 @@ use inillucent_engine::connect::{Connection, Database};
 use inillucent_sql::plan::Levers;
 use inillucent_tree::datum::OwnedDatum;
 
+thread_local! {
+    /// How many allocations the calling thread has made.
+    ///
+    /// **Per thread rather than per process, so another test cannot move it.**
+    /// A `#[global_allocator]` sees every allocation in the binary, and this
+    /// file's guards run one at a time only because the runner asks for one
+    /// test thread. A counter that depended on that would read whatever a
+    /// parallel `cargo test --test budget` happened to be doing, which is the
+    /// class of number this file exists to refuse.
+    ///
+    /// `const`-initialised and holding a type with no destructor, so reading it
+    /// from inside the allocator cannot itself allocate.
+    static ALLOCATIONS: Cell<u64> = const { Cell::new(0) };
+}
+
+/// An allocator that counts per thread, and otherwise delegates to the system one.
+struct CountingAllocator;
+
+// SAFETY: every method forwards to the system allocator with the same
+// arguments; the counter is the only addition and it touches no memory the
+// allocator owns.
+unsafe impl GlobalAlloc for CountingAllocator {
+    // SAFETY: the layout is the caller's, forwarded unchanged.
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        count_one();
+        // SAFETY: forwarded unchanged to the system allocator.
+        unsafe { System.alloc(layout) }
+    }
+
+    // SAFETY: the pointer and layout are the ones this allocator handed out.
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        // SAFETY: forwarded unchanged to the allocator that made the pointer.
+        unsafe { System.dealloc(pointer, layout) }
+    }
+
+    // SAFETY: the pointer and layout are the ones this allocator handed out.
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        count_one();
+        // SAFETY: forwarded unchanged to the allocator that made the pointer.
+        unsafe { System.realloc(pointer, layout, size) }
+    }
+}
+
+/// Adds one to the calling thread's count, if the thread still has one.
+///
+/// `try_with` rather than `with`, because a thread being torn down has already
+/// dropped its locals and an allocation made after that must not panic inside
+/// the allocator.
+fn count_one() {
+    let _ = ALLOCATIONS.try_with(|count| count.set(count.get().saturating_add(1)));
+}
+
+#[global_allocator]
+static ALLOCATOR: CountingAllocator = CountingAllocator;
+
+/// Returns how many allocations the calling thread made while running a closure.
+///
+/// @param body - the work to count
+fn allocations(body: impl FnOnce()) -> u64 {
+    let before = ALLOCATIONS.with(Cell::get);
+    body();
+    ALLOCATIONS.with(Cell::get).saturating_sub(before)
+}
+
 /// How many rows the guards build their table from.
 ///
 /// Large enough that a scan and a seek are different orders of work, small
 /// enough that the whole file stays in the page pool and the guard is measuring
 /// the engine rather than the disk.
 const ROWS: i64 = 20_000;
+
+/// How many allocations compiling `SELECT 1` may make on a warm connection.
+///
+/// **Exactly what this reads, with no margin, and that is deliberate.** Three
+/// runs of the guard taken while four agents were building this repository
+/// returned 15 every time - an allocation count is a property of the code path
+/// rather than of the machine, so there is no run-to-run movement for a margin
+/// to absorb. A margin would only buy room for a regression to hide in: each of
+/// the four changes task-2026 made is worth between one and three allocations
+/// here, so a bound of 18 would let two of them be undone silently.
+///
+/// The standard library decides how a vector grows, and `rust-toolchain.toml`
+/// pins the toolchain, so an upgrade is the one thing that can move this
+/// number without the engine changing. It is a deliberate edit when it
+/// happens, and the assertion prints what it read.
+const TRIVIAL_COMPILE_ALLOCATIONS: u64 = 15;
+
+/// How many allocations compiling `SELECT id FROM t WHERE email = ?1` may make
+/// on a warm connection.
+///
+/// Higher than [`TRIVIAL_COMPILE_ALLOCATIONS`] because this statement names
+/// three things, and interning a name is four allocations of its own - the
+/// largest single item left on the compile path, and task-2039's subject.
+const POINT_COMPILE_ALLOCATIONS: u64 = 120;
 
 /// Returns a fresh, empty directory for one test's files.
 ///
@@ -754,5 +844,83 @@ fn a_keyset_page_costs_the_same_wherever_it_starts() {
          {start} page(s) and one near the end fetched {end}, against \
          {materialised} for the whole range; the guard asks the start for at \
          most four times the end"
+    );
+}
+
+/// Compiling a statement again does not re-allocate the scratch the last
+/// compile filled, and one compile's allocations are a small fixed number.
+///
+/// **An allocation count is the one absolute number this file is allowed to
+/// assert.** Everything else here is a ratio, because a duration is a reading
+/// of the machine. This is not: the same code compiling the same statement
+/// makes the same allocations on an idle box and on a saturated one, so the
+/// bound below is tight on purpose rather than loose on principle. When it
+/// fails, something changed what a compile does - and the new number belongs in
+/// this test rather than the bound being widened to admit it.
+///
+/// What it guards, all of which were paid on every compile before task-2026:
+/// the binder re-allocating its scope stack and its alias list instead of
+/// taking the connection's `BinderScratch`; `finish_select` cloning the result
+/// columns to hand `bind_order_by` a copy of something it only reads;
+/// `Shape::operators` rendering the operator chain as text for a caller that
+/// drops it; and the alias list being filled for a statement with no `GROUP
+/// BY`, `HAVING`, `ORDER BY`, `LIMIT` or `OFFSET` to read one.
+///
+/// The plan cache is switched off, because a cached prepare is a hash lookup
+/// and would report a compile as costing nothing. `prepare.trivial` on the
+/// scorecard compiles on every iteration for the same reason.
+#[test]
+fn compiling_again_reuses_the_scratch_rather_than_allocating_it_afresh() {
+    let directory = scratch("compile-allocations");
+    let database = build(&directory.join("b.rdb"));
+    let connection = database.session();
+    connection
+        .disable_optimizations(Levers::without(Levers::PLAN_CACHE))
+        .expect("the engine is free");
+
+    // The two shapes `open.prepare` is made of: a statement that names nothing,
+    // and one that reads a table through a parameter.
+    let trivial = "SELECT 1";
+    let point = "SELECT id FROM t WHERE email = ?1";
+
+    let compile = |sql: &str| {
+        let statement = connection.prepare(sql).expect("the statement prepares");
+        drop(statement);
+    };
+
+    // The first compile on a connection fills the parse arena and the binder's
+    // scratch as well as doing the work, so it is read here rather than
+    // described: the run that asserts the guard contains the number the guard
+    // is against.
+    let cold = allocations(|| compile(trivial));
+    for _ in 0..20 {
+        compile(trivial);
+        compile(point);
+    }
+    let warm_trivial = allocations(|| compile(trivial));
+    let warm_point = allocations(|| compile(point));
+
+    // The runner gives this tier `--show-output`, so the numbers the guard was
+    // measured at are in the log of every run rather than only in this comment.
+    println!("compile allocations, warm connection, plan cache off:");
+    println!("  {trivial:<34} cold {cold:>4}, warm {warm_trivial:>4} (bound {TRIVIAL_COMPILE_ALLOCATIONS})");
+    println!("  {point:<34}             warm {warm_point:>4} (bound {POINT_COMPILE_ALLOCATIONS})");
+
+    assert!(
+        warm_trivial < cold,
+        "the first compile of `{trivial}` on a fresh connection made {cold} \
+         allocation(s) and a later one made {warm_trivial}; the guard asks the \
+         later one for fewer, which is what reusing the arena and the binder's \
+         scratch means"
+    );
+    assert!(
+        warm_trivial <= TRIVIAL_COMPILE_ALLOCATIONS,
+        "compiling `{trivial}` made {warm_trivial} allocation(s) against a bound \
+         of {TRIVIAL_COMPILE_ALLOCATIONS}"
+    );
+    assert!(
+        warm_point <= POINT_COMPILE_ALLOCATIONS,
+        "compiling `{point}` made {warm_point} allocation(s) against a bound of \
+         {POINT_COMPILE_ALLOCATIONS}"
     );
 }

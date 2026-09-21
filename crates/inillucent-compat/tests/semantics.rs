@@ -1,12 +1,33 @@
 //! Every construct the second review probed, answered by both shells.
 //!
 //! Invariant: **each case declares whether it agrees with SQLite, and a case
-//! that changes its mind fails.** A construct that starts agreeing fails this
-//! test until its row is moved to `Agrees`, which is the same discipline
-//! `new_engine_surface.rs` applies to *acceptance* applied here to *answers*.
-//! Without it, a fix is invisible: the probe was a one-off script, so the nine
-//! wrong answers the review found could each have been repaired and then
-//! silently regressed with nothing to notice.
+//! that changes its mind fails** - in either direction, so a construct that
+//! starts agreeing fails until its row is moved, and the recorded difference
+//! below fails if it is ever fixed without the table being told.
+//!
+//! ## The one construct that still differs
+//!
+//! **`alias.limit`**: `... LIMIT x` where `x` is a result alias. Both refuse it
+//! and each says something different: SQLite does not resolve a result alias in
+//! a `LIMIT` at all and reports `no such column`, while this engine resolves it
+//! and then refuses the statement for having a `LIMIT` that is not a constant.
+//! A caller gets a refusal either way and a sentence about the wrong thing
+//! here.
+//!
+//! There were two. `alias.having` was the other: `SELECT count(*) AS n FROM t
+//! HAVING n > 0` was a syntax error here and an answer in SQLite. task-2026
+//! found it and recorded it as a difference, task-2040 fixed it, and its row
+//! moved to `Agrees` in the same change - which is the whole of what this
+//! table is for.
+//!
+//! ## Why a case that starts agreeing is a failure too
+//!
+//! It is the same discipline `new_engine_surface.rs` applies to *acceptance*,
+//! applied here to *answers*. Without it, a fix is invisible: the probe was a
+//! one-off script, so the nine wrong answers the review found could each have
+//! been repaired and then silently regressed with nothing to notice. A row has
+//! to move for the file to go green again, which is where the next reader
+//! learns that the construct changed.
 //!
 //! ## Why whole scripts through the shells
 //!
@@ -124,11 +145,12 @@ enum Expect {
     Agrees,
     /// Still different, and named in this file's own header.
     ///
-    /// **Constructed by no case today**, and kept because the header this file
-    /// carries is a list of the constructs that once differed: a variant that
-    /// went when the last of them was fixed would take the vocabulary with it,
-    /// and the next divergence would be recorded as a comment instead.
-    #[allow(dead_code)]
+    /// It was constructed by no case for a while, and kept because the header
+    /// this file carries is a list of the constructs that once differed: a
+    /// variant that went when the last of them was fixed would take the
+    /// vocabulary with it, and the next divergence would be recorded as a
+    /// comment instead. `alias.having` and `alias.limit` are the two that use
+    /// it now.
     Differs,
 }
 
@@ -1666,6 +1688,45 @@ SELECT * FROM im2;
 SELECT * FROM im;",
         expect: Agrees,
     },
+    // **The five clauses that may name a result column by its alias
+    // (task-2026).** The binder keeps a list of `(alias, expression)` for the
+    // block it is binding and consults it in exactly one place, after a real
+    // column has failed to match. Filling that list costs an allocation per
+    // result column, so it is filled only when one of these clauses is present
+    // - and the argument that made that safe is the claim that these are all of
+    // them.
+    //
+    // Four of the five had no case anywhere in the suite. `ORDER BY` naming an
+    // alias was covered, through a view and through a compound; `GROUP BY`,
+    // `HAVING` and `LIMIT` were not, and neither was the statement with none of
+    // them, which is the one the change actually alters. A wrong enumeration
+    // would have answered `no such column` on a query SQLite answers, and
+    // nothing in the suite would have said so.
+    //
+    // `alias.having` was one of them and is now task-2040's: it was a syntax
+    // error here and an answer in SQLite, this file recorded that, and that
+    // ticket fixed it. The three `HAVING` cases below are its.
+    //
+    // Each case is a single row or an explicit order, so neither shell is being
+    // asked about an ordering that is unspecified.
+    Case {
+        name: "alias.order.by",
+        kind: "read",
+        script: "CREATE TABLE t(a INTEGER PRIMARY KEY, b INTEGER);
+INSERT INTO t VALUES(1,30),(2,10),(3,20);
+SELECT b AS x FROM t ORDER BY x;",
+        expect: Agrees,
+    },
+    Case {
+        // No `ORDER BY`, so the alias list is reached through the `GROUP BY`
+        // alone. One group, so there is no order to disagree about.
+        name: "alias.group.by",
+        kind: "read",
+        script: "CREATE TABLE t(a INTEGER PRIMARY KEY, b INTEGER);
+INSERT INTO t VALUES(1,30),(2,10),(3,20);
+SELECT b AS x, count(*) FROM t WHERE a = 1 GROUP BY x;",
+        expect: Agrees,
+    },
     // The three `HAVING` with no `GROUP BY` cases (task-2040). This file's
     // header says what each one is for.
     Case {
@@ -1713,6 +1774,38 @@ SELECT 1 HAVING 1;
 SELECT a FROM t GROUP BY a HAVING a > 15;
 SELECT 1 FROM t GROUP BY a HAVING count(*) > 1;
 SELECT count(*) FROM t;",
+        expect: Agrees,
+    },
+    Case {
+        // **Both refuse an alias in a `LIMIT`, and they refuse it for different
+        // reasons.** SQLite does not resolve a result alias there at all and
+        // says `no such column: x`. This engine resolves it, and then the
+        // physical pass refuses the statement because the `LIMIT` is not a
+        // constant. A caller gets a refusal either way, and gets a sentence
+        // about the wrong thing here.
+        //
+        // The alias list is filled when a `LIMIT` is present for exactly this
+        // reason: whatever the refusal turns out to be, it has to come from
+        // resolving the name rather than from never having recorded it.
+        name: "alias.limit",
+        kind: "read",
+        script: "CREATE TABLE t(a INTEGER PRIMARY KEY, b INTEGER);
+INSERT INTO t VALUES(1,30),(2,10),(3,20);
+SELECT b AS x FROM t ORDER BY a LIMIT x;",
+        expect: Differs,
+    },
+    Case {
+        // The case the change alters: nothing here can name an alias, so the
+        // list is not filled at all. The alias must still name the column in
+        // the answer, and a reference to it must still fail the way it always
+        // did.
+        name: "alias.unread",
+        kind: "read",
+        script: "CREATE TABLE t(a INTEGER PRIMARY KEY, b INTEGER);
+INSERT INTO t VALUES(1,30),(2,10),(3,20);
+.headers on
+SELECT b AS x FROM t WHERE a = 2;
+SELECT b AS x, x + 1 FROM t WHERE a = 2;",
         expect: Agrees,
     },
 ];
@@ -1834,10 +1927,22 @@ fn every_probed_construct_answers_as_the_table_says() {
 "
         )
     );
+    // **Counted against what the table declares, not against every case
+    // (task-2026).** This used to assert that all of them agreed, which made
+    // the `Differs` variant impossible to use: a case recorded as a known
+    // difference failed here even though the match above was satisfied. So the
+    // one discipline the file exists for - §1.3 of the testing standard, a
+    // known difference is recorded as a test that asserts it - was the one
+    // thing it could not do, and the two differences below would have had to
+    // be left out of the table and written down somewhere nobody runs.
+    let declared_to_agree = CASES
+        .iter()
+        .filter(|case| matches!(case.expect, Agrees))
+        .count();
     assert_eq!(
         agreed,
-        CASES.len(),
-        "only {agreed} of {} agreed, and this file names none that should not",
+        declared_to_agree,
+        "{agreed} of {} agreed, and the table declares {declared_to_agree} that should",
         CASES.len()
     );
 }

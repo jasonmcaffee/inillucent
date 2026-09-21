@@ -249,6 +249,51 @@ fn per(iterations: u32, mut body: impl FnMut() -> Result<(), String>) -> Result<
     Ok(start.elapsed().as_nanos() as f64 / f64::from(iterations.max(1)))
 }
 
+/// Returns the nanoseconds one call took in the quietest batch of calls.
+///
+/// **Because a mean is a reading of the machine and a minimum is not
+/// (task-2026).** `prepare.trivial` is a compile of under a microsecond, and on
+/// a box running three other agents' test suites the mean of twenty thousand of
+/// them moved between 1,389 and 2,435 ns across three runs of one binary. Load
+/// can only ever *add* time to a sample, so the quietest batch is close to what
+/// the work costs with nothing in the way, and it is the same number on a busy
+/// box and an idle one.
+///
+/// Batches rather than single calls because `Instant::now` costs tens of
+/// nanoseconds, which is a tenth of what is being measured; a batch of a
+/// hundred amortises the clock to a rounding error while still being short
+/// enough that many batches land in a gap between other processes' work.
+///
+/// It is reported beside the mean rather than instead of it. The mean is what
+/// an application waiting on a loaded machine actually experiences; the minimum
+/// is what the code costs, and a change to the code should move the second.
+///
+/// @param iterations - how many calls in total
+/// @param batch - how many calls in each batch
+/// @param body - the work to time
+fn per_quietest(
+    iterations: u32,
+    batch: u32,
+    mut body: impl FnMut() -> Result<(), String>,
+) -> Result<f64, String> {
+    for _ in 0..batch.min(200) {
+        body()?;
+    }
+    let batch = batch.max(1);
+    let mut quietest = f64::MAX;
+    for _ in 0..iterations.div_euclid(batch).max(1) {
+        let start = Instant::now();
+        for _ in 0..batch {
+            body()?;
+        }
+        let each = start.elapsed().as_nanos() as f64 / f64::from(batch);
+        if each < quietest {
+            quietest = each;
+        }
+    }
+    Ok(quietest)
+}
+
 /// Builds an empty database to compile against, in a scratch directory.
 ///
 /// A table is created so the profile can be pointed at a statement that reads
@@ -321,13 +366,14 @@ fn main() -> ExitCode {
     TRACE_UPTO.store(trace_upto, Ordering::Relaxed);
     println!("## compiling a statement, stage by stage   (nanoseconds)");
     println!(
-        "  {:<34} {:>8} {:>8} {:>8} {:>10} {:>9} {:>9} {:>7} {:>7} {:>7}",
+        "  {:<34} {:>8} {:>8} {:>8} {:>10} {:>9} {:>9} {:>9} {:>7} {:>7} {:>7}",
         "statement",
         "parse",
         "+bind",
         "+plan",
         "+physical",
         "+pipeline",
+        "quietest",
         "compile",
         "a/parse",
         "a/plan",
@@ -399,6 +445,18 @@ fn profile(
             .map(|_| ())
             .map_err(|e| format!("{e:?}"))
     })?;
+    // The same path again, reported as the quietest batch rather than the mean.
+    // See `per_quietest`: on a shared box the mean of this moved by 75% between
+    // two runs of one binary, and the minimum is what the code costs.
+    let built_quietest = per_quietest(iterations, 100, || {
+        let plan = database.plan(sql).map_err(|e| format!("{e:?}"))?;
+        let choice = database.prepare(&plan).map_err(|e| format!("{e:?}"))?;
+        let sink = Box::new(inillucent_exec::ops::Collect::default());
+        database
+            .pipeline(&plan, &choice, &params, sink)
+            .map(|_| ())
+            .map_err(|e| format!("{e:?}"))
+    })?;
     // The whole compile the engine performs when a caller asks it by text,
     // which is a different path and is what `execute_any` pays.
     let prepared = per(iterations, || {
@@ -447,7 +505,7 @@ fn profile(
     }
     let shown: String = sql.chars().take(34).collect();
     println!(
-        "  {shown:<34} {parse:>8.1} {bind:>8.1} {plan:>8.1} {physical:>10.1} {built:>9.1} {prepared:>9.1} {parse_allocs:>7.1} {plan_allocs:>7.1} {built_allocs:>7.1}"
+        "  {shown:<34} {parse:>8.1} {bind:>8.1} {plan:>8.1} {physical:>10.1} {built:>9.1} {built_quietest:>9.1} {prepared:>9.1} {parse_allocs:>7.1} {plan_allocs:>7.1} {built_allocs:>7.1}"
     );
     Ok(())
 }

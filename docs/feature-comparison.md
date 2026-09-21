@@ -1572,9 +1572,15 @@ the arithmetic says so rather than an opinion.
   0.49x, whose geometric mean is 1.46x. For the family to reach 5.00x, `prepare.trivial` would have
   to reach **5.78x** - and SQLite compiles, binds, steps and resets `SELECT 1` in **460 ns** here, so
   that is a demand for **80 ns**. No SQL front end does that; SQLite's own number is five times it.
-  What is reachable is parity: ours is **837 ns over 24 allocations**, measured by
-  `inillucent-prepareprofile`, of which 8 are in the parse, 6 more by the end of planning and 10 in
-  the physical and pipeline stages.
+  What is reachable is parity, and the allocations are most of the way there: ours is **13**,
+  measured by `inillucent-prepareprofile`, where it was 24 when this paragraph was written -
+  task-2006 removed three and task-2026 eight more. **Nine of the thirteen leave with the compiled
+  statement** and cannot go without changing what a compile returns, so the remaining scratch is
+  four allocations: the parser's lookahead buffer, its result-column vector, the literal's own
+  text, and one the profiler cannot attribute. Removing the eight measured **25% off a compile on
+  the platform heap** - 1,470 ns to 1,176, eight passes an arm against the tree before the change -
+  and about **6% on the gate**, which runs the pooled allocator where an allocation costs a third
+  as much.
 - **`schema`, bar 3.00x.** One workload. Ours is 25.84 ms against SQLite's 35.9, and its stages are
   `scan 3.2 ms, sort 4.7, pack 15.2, catalog 0.2, seal 1.3`. `pack` is where the pages are written,
   and it is 4 MB of file at a 32 KiB page; a packer that cost **nothing at all** leaves 9.4 ms, which
@@ -1603,7 +1609,7 @@ Thirty workloads, median of four runs. Twenty-three are faster; these seven are 
 
 | workload | family | ratio | how much slower | per operation | why |
 |---|---|---|---|---|---|
-| `prepare.trivial` | `open.prepare` | 0.49x | **104% slower** | 837 ns against 460 | `SELECT 1` compiled per iteration, in **24 allocations** |
+| `prepare.trivial` | `open.prepare` | 0.49x | **104% slower** | 837 ns against 460 | `SELECT 1` compiled per iteration, in **13 allocations** since task-2026, where this sitting measured 24 |
 | `extension.fts.build` | `extension` | 0.69x | **45% slower** | 16.2 µs a document against 11.5 | **52% of it is not the index.** Building the index for one document is 7.8 µs; everything between the `INSERT` and the index is 8.4 µs |
 | `write.insert.batch` | `write` | 0.72x | **39% slower** | 14.6 µs a row against 10.8 | 2,000 inserts in one transaction. The two secondary indexes are **69%** of it, and split records are **55%** of the log it writes |
 | `join.range` | `read.join` | 0.87x | **15% slower** | 54.9 µs against 48.1 | an index range and a probe per entry, about 210 ns a probe, where SQLite amortises one statement's overhead over two hundred rows |
@@ -1903,7 +1909,7 @@ of - which is no longer the leaf format, because review 7 fixed that.
 | 5 | **FTS5's build accumulates** | **open** | 1.6 MiB above the baseline in isolation, and 0.28-0.48x on time. Both have one cause: **2,000 tree row writes per 500 documents** - `%_content`, `%_docsize`, then 507 dictionary rows and 507 doclists at the flush - where SQLite writes about 1,000 rows and one segment blob. The fix is the segment format, and it is the same change for the time bar |
 | 6 | **The page pool's default was not a decision anybody made** | **decided, and left where it was** | seven budgets, twelve rounds each, both numbers read off every one - the table in [Where the memory goes](#where-the-memory-goes). The ratio is worst at both ends and best at 20 MiB (1.28x), and 20 MiB costs the headline 3.91x → 3.45x while 16 MiB puts it **under the 3.00x bound**. Trading a met headline for a missed memory bar is not a trade; `PRAGMA cache_size` remains the switch |
 | 7 | **The memory bar itself is missed** | **open, and the file half of it is closed** | **1.15x against a 0.95x bar**, down from 1.43x. Review 6 said the remaining gap was the file rather than a buffer, and review 7 acted on it across six changes: an integer mini-column is as wide as its own values, a per-column frame of reference makes that width a function of the column's *range*, and a heap slot is `(u16, u16)` on a page of 64 KiB or less. The `.rdb` went **22.66 → 16.62 MiB** (1.41x the `.db` → **1.036x**) and the pool fell with it, so the attribution was right. Of the 7.3 MiB left, **4.1 is what a 110 KB Rust binary in this workspace already costs** - `sqlite-bench` costs 4.2, so almost none of it is this engine - and the rest is `schema.index`'s own pages and arena. The pool budget was re-walked on the smaller file and still cannot reach the bar |
-| 8 | **`open.prepare` straddles the floor** and misses its bar on every run | **open** | `prepare.trivial` - `SELECT 1`, compiled per iteration - takes 1,258 ns against SQLite's 420, in 25 allocations. `inillucent-prepareprofile` breaks it down: 320 ns to parse, 476 to bind, 608 to build the pipeline |
+| 8 | **`open.prepare` straddles the floor** and misses its bar on every run | **open, and the allocations are down by half** | `prepare.trivial` - `SELECT 1`, compiled per iteration - took 1,258 ns against SQLite's 420, in 25 allocations when this row was written. The count is **13** now: task-2006 removed three and task-2026 eight, and nine of the thirteen left leave with the compiled statement. The nanoseconds here are this sitting's and have not been re-measured; `docs/performance.md` carries the current ratio |
 | 9 | **`schema` misses its elapsed-time bar by an order of magnitude** | **open** | 1.29-1.34x against a bar of 3.00x. The stage breakdown says where: `scan 3.6 ms, sort 5.6, flatten 0.0, pack 11.5, catalog 0.2, seal 5.6` of 27 ms. `flatten` was 1.0 ms before this ticket and is now free; `pack` absorbed 4.5 ms of it, which is what the second sizing pass costs |
 | 10 | **`txn.large` and `write.insert.batch` are the two slowest workloads on the board** | **open** | 0.18-0.23x and 0.52-0.62x. Both are 2,000 statements in one transaction, where SQLite's per-statement cost is tiny and this engine's is a log record and a page touch |
 | 10a | **A compaction costs one pass over a leaf, and a leaf now holds twice as many rows** | **open, with a measured cause and a rejected fix** | Review 7's narrow integer slot took the `write` family from 2.03x to **1.52x**: `write.insert.batch` 39.8 → 69.4 ms, `write.update.indexed` 48.6 → 95.6, `write.delete` 15.4 → 22.4. All three write `main_table` and its two indexes in one transaction; `write.upsert`, on the one table that did not narrow, is unchanged. **`DELTA_LIMIT = 64` does not buy it back** - measured on both arms, it costs `large.values` half and `transaction` its floor and moves `write` not at all |
