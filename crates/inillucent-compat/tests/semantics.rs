@@ -143,6 +143,49 @@
 //!
 //! The check below that a case which starts agreeing fails until its row is
 //! moved is what reports the next one either way.
+//!
+//! ## The seven `DROP COLUMN` cases, and why one of them is the control
+//!
+//! `ALTER TABLE t(a,b,c,d) DROP COLUMN b` left `c` holding `b`'s numbers and
+//! `d` holding `c`'s, and `d`'s numbers were gone (task-2057). The rebuild that
+//! fills the new tree indexed the *old* layout with a position from the *new*
+//! declaration, and those agree only while nothing moved - so dropping the last
+//! column was right and dropping any other column was not. The statement
+//! committed, so the file held the wrong rows.
+//!
+//! `alter.drop.last` is the case that passed before the fix and has to go on
+//! passing. It is the control the other six are read against: a mapping that
+//! shifted every position rather than only those at and after the dropped one
+//! would answer the first six and fail this one, and without it a run could
+//! report the family green while the arithmetic was wrong in the other
+//! direction. It is the shape task-2051's own reproduction had, which is why
+//! nothing caught the defect for as long as it existed.
+//!
+//! `alter.drop.reopen` reads the table back through a second connection over
+//! the same file. That is what separates a connection holding a wrong derived
+//! view from a file holding wrong rows, and this one was the file.
+//!
+//! `alter.drop.index` is the second defect, found by the check task-2057 asked
+//! for and fixed in the same change. An index's layout is derived once and
+//! `refresh_catalog` never derives it again, so after the drop an index on `d`
+//! still recorded `d` at the position it had in the old declaration: the
+//! planner offered the index, the physical pass then asked it for a column its
+//! layout said it did not carry, and `SELECT d FROM t WHERE d = 40` failed with
+//! `the tree read for FROM term 0 does not carry column 2` where SQLite answers
+//! `40`. Reopening answered it, because the layouts are derived afresh on open
+//! - the mirror image of `alter.drop.reopen`, and the reason both are here.
+//!
+//! `alter.drop.withoutrowid` drops a middle column of a table whose primary key
+//! *is* the tree. It grades the rebuild over a keyed layout, where a column's
+//! tree position is not its declared position at all, and it is also what
+//! caught the index refresh replacing that table's own layout with an index's:
+//! such a primary key is listed among the table's indexes and carries the
+//! table's root, so re-deriving it broke reads that had been correct.
+//!
+//! `alter.add.default.wide` is item 4 of the same ticket. `ADD COLUMN` fills
+//! from the same loop, and its added column is the one thing in that loop with
+//! no old column behind it, so a mapping written without a case for it would
+//! fill the new column from the last old one instead of from its `DEFAULT`.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -1255,6 +1298,48 @@ SELECT a, row_number() OVER (ORDER BY a) FROM t ORDER BY a;",
         name: "alter.addcolumn",
         kind: "surface",
         script: "CREATE TABLE t(a);\nINSERT INTO t VALUES (1);\nALTER TABLE t ADD COLUMN b DEFAULT 7;\nSELECT a, b FROM t;",
+        expect: Agrees,
+    },
+    Case {
+        name: "alter.drop.middle",
+        kind: "surface",
+        script: "CREATE TABLE t (a INTEGER, b INTEGER, c INTEGER, d INTEGER);\nINSERT INTO t VALUES (1,2,3,4),(10,20,30,40);\nALTER TABLE t DROP COLUMN b;\nSELECT a, c, d FROM t ORDER BY a;",
+        expect: Agrees,
+    },
+    Case {
+        name: "alter.drop.first",
+        kind: "surface",
+        script: "CREATE TABLE t (a INTEGER, b INTEGER, c INTEGER, d INTEGER);\nINSERT INTO t VALUES (1,2,3,4),(10,20,30,40);\nALTER TABLE t DROP COLUMN a;\nSELECT b, c, d FROM t ORDER BY b;",
+        expect: Agrees,
+    },
+    Case {
+        name: "alter.drop.last",
+        kind: "surface",
+        script: "CREATE TABLE t (a INTEGER, b INTEGER, c INTEGER, d INTEGER);\nINSERT INTO t VALUES (1,2,3,4),(10,20,30,40);\nALTER TABLE t DROP COLUMN d;\nSELECT a, b, c FROM t ORDER BY a;",
+        expect: Agrees,
+    },
+    Case {
+        name: "alter.drop.reopen",
+        kind: "surface",
+        script: "CREATE TABLE t (a INTEGER, b TEXT, c REAL, d BLOB);\nINSERT INTO t VALUES (1,'two',3.5,x'04'),(10,'twenty',30.5,x'28');\nALTER TABLE t DROP COLUMN b;\n.open probe.db\nSELECT a, c, d FROM t ORDER BY a;\nSELECT typeof(a), typeof(c), typeof(d) FROM t ORDER BY a;",
+        expect: Agrees,
+    },
+    Case {
+        name: "alter.drop.index",
+        kind: "surface",
+        script: "CREATE TABLE t (a INTEGER, b INTEGER, c INTEGER, d INTEGER);\nCREATE INDEX ixd ON t(d);\nCREATE INDEX ixca ON t(c,a);\nINSERT INTO t VALUES (1,2,3,4),(10,20,30,40),(100,200,300,400);\nALTER TABLE t DROP COLUMN b;\nSELECT d FROM t WHERE d = 40;\nSELECT c, a FROM t WHERE c = 300;\nSELECT a, c, d FROM t WHERE d > 4 ORDER BY d;\nPRAGMA integrity_check;",
+        expect: Agrees,
+    },
+    Case {
+        name: "alter.drop.withoutrowid",
+        kind: "surface",
+        script: "CREATE TABLE t (k TEXT PRIMARY KEY, a INTEGER, b INTEGER, c INTEGER) WITHOUT ROWID;\nINSERT INTO t VALUES ('x',10,20,30),('y',100,200,300);\nALTER TABLE t DROP COLUMN b;\nSELECT k, a, c FROM t ORDER BY k;\nSELECT * FROM t ORDER BY k;",
+        expect: Agrees,
+    },
+    Case {
+        name: "alter.add.default.wide",
+        kind: "surface",
+        script: "CREATE TABLE t (a INTEGER, b INTEGER, c INTEGER);\nINSERT INTO t VALUES (1,2,3),(10,20,30);\nALTER TABLE t ADD COLUMN d INTEGER DEFAULT 9;\nALTER TABLE t ADD COLUMN e TEXT DEFAULT 'x';\nSELECT a, b, c, d, e FROM t ORDER BY a;\nALTER TABLE t DROP COLUMN b;\nSELECT * FROM t ORDER BY a;",
         expect: Agrees,
     },
     Case {

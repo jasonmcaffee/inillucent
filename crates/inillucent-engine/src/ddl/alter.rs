@@ -10,6 +10,7 @@ use inillucent_base::DbResult;
 use inillucent_catalog::ddl::canonical_sql;
 use inillucent_catalog::paged::{tables_from_entries, ObjectKind, SchemaEntry};
 use inillucent_catalog::rename;
+use inillucent_exec::physical::SourceLayout;
 use inillucent_pool::PageId;
 use inillucent_sql::catalog_view::TableInfo;
 use inillucent_sql::directive::AlterKind;
@@ -431,11 +432,17 @@ impl crate::ImportedDatabase {
         // A `DROP COLUMN` changes the *rows*, not only the text, and the tree is
         // rebuilt rather than edited in place: every leaf's column directory
         // would otherwise still describe a column the catalog no longer has.
-        if let AlterKind::DropColumn { .. } = action {
-            self.rebuild_table_tree(&folded)?;
+        if let AlterKind::DropColumn { position, .. } = action {
+            self.rebuild_table_tree(&folded, Some(usize::from(*position)))?;
         }
         if let AlterKind::AddColumn { .. } = action {
-            self.rebuild_table_tree(&folded)?;
+            self.rebuild_table_tree(&folded, None)?;
+        }
+        if matches!(
+            action,
+            AlterKind::DropColumn { .. } | AlterKind::AddColumn { .. }
+        ) {
+            self.refresh_index_layouts(&folded);
         }
         self.refresh_catalog();
         self.seal()?;
@@ -556,15 +563,6 @@ impl crate::ImportedDatabase {
         self.schema.tables = rebuilt;
         Ok(())
     }
-    /// Rebuilds one table's tree so its leaves carry the columns the catalog
-    /// now says it has.
-    ///
-    /// `ADD COLUMN` and `DROP COLUMN` both change the column directory, and a
-    /// leaf's directory is written into the page - so the rows are read out
-    /// through the old layout, re-shaped, and packed into a fresh tree. The old
-    /// tree's pages go back to the free map.
-    ///
-    /// @param folded - the table's folded name
     /// Returns whether a table holds at least one row.
     ///
     /// `ADD COLUMN` is the only caller: three of the five things it may not add
@@ -588,7 +586,18 @@ impl crate::ImportedDatabase {
         };
         Ok(!tree.rows(self.pool_of(root)?)?.is_empty())
     }
-    fn rebuild_table_tree(&mut self, folded: &[u8]) -> DbResult<()> {
+    /// Rebuilds one table's tree so its leaves carry the columns the catalog
+    /// now says it has.
+    ///
+    /// `ADD COLUMN` and `DROP COLUMN` both change the column directory, and a
+    /// leaf's directory is written into the page - so the rows are read out
+    /// through the old layout, re-shaped, and packed into a fresh tree. The old
+    /// tree's pages go back to the free map.
+    ///
+    /// @param folded - the table's folded name
+    /// @param dropped - the declared position `DROP COLUMN` removed, when that
+    ///   is what is being rebuilt
+    fn rebuild_table_tree(&mut self, folded: &[u8], dropped: Option<usize>) -> DbResult<()> {
         let Some(info) = self
             .schema
             .tables
@@ -619,73 +628,13 @@ impl crate::ImportedDatabase {
             let (columns, layout) = table_shape(&info);
             (columns, 1, layout)
         };
-        // Each new tree column is filled from the old tree column that held the
-        // same *declared* column. A column the declaration did not have takes
-        // its `DEFAULT`, which is SQLite's rule and is what makes
-        // `ALTER TABLE t ADD COLUMN c INTEGER DEFAULT 9` answer 9 for the rows
-        // that were already there. Filling NULL instead was a wrong answer
-        // rather than a refusal, and only visible to a statement that read the
-        // new column on an old row.
-        let mut from: Vec<Fill> = vec![Fill::Absent; layout.width];
-        for (declared, slot) in layout.slots.iter().enumerate() {
-            let Some(slot) = slot else { continue };
-            if let Some(Some(source)) = old_layout.slots.get(declared) {
-                if let Some(cell) = from.get_mut(*slot) {
-                    *cell = Fill::From(*source);
-                }
-                continue;
-            }
-            // **Nothing to fill, so nothing to evaluate (task-1932, H3).**
-            // This ran whether or not the table had a row, and
-            // `constant_default` evaluates the default by running
-            // `SELECT <the default text>` through the ordinary execute path -
-            // so `ALTER TABLE t ADD COLUMN b INTEGER DEFAULT
-            // (no_such_function())` on an empty table failed here, three
-            // writes after the catalog already said the column was there, and
-            // `PRAGMA table_info(t)` then listed a column the tree had no slot
-            // for.
-            //
-            // An empty table is the only way to reach it:
-            // `AddedColumnRisk::refusal` refuses a default that is not a
-            // literal, and `alter_table` applies that refusal only when
-            // `table_has_a_row`. So on a populated table the statement never
-            // gets here, and on an empty one there is no row to give a value
-            // to. SQLite behaves the same way - it accepts the `ALTER`,
-            // records `DEFAULT (no_such_function())` in the schema text, and
-            // reports `unknown function` at the first `INSERT` that needs the
-            // value - so skipping the evaluation is what matches the reference
-            // rather than merely what avoids the failure.
-            if old_rows.is_empty() {
-                continue;
-            }
-            let Some(default) = info
-                .columns
-                .get(declared)
-                .and_then(|column| column.default_sql.clone())
-            else {
-                continue;
-            };
-            // **The new column's affinity applies to its default (task-1979,
-            // F4).** `ADD COLUMN c INTEGER DEFAULT '5'` filled every existing
-            // row with the *text* `'5'` while an `INSERT` after it stored the
-            // integer 5, so one column of one table held two storage classes
-            // and `typeof(c)` answered differently per row. SQLite applies the
-            // column's affinity to a default wherever it is used, which is what
-            // makes the two halves agree.
-            let value = self.constant_default(&default)?;
-            let value = with_column_affinity(
-                value,
-                info.columns.get(declared).map(|column| column.affinity),
-            );
-            if let Some(cell) = from.get_mut(*slot) {
-                *cell = Fill::Constant(value);
-            }
-        }
-        if let (Some(new_rowid), Some(old_rowid)) = (layout.rowid, old_layout.rowid) {
-            if let Some(cell) = from.get_mut(new_rowid) {
-                *cell = Fill::From(old_rowid);
-            }
-        }
+        let from = self.fills_for_the_new_shape(
+            &info,
+            &layout,
+            &old_layout,
+            dropped,
+            !old_rows.is_empty(),
+        )?;
         let rows = rows_in_the_new_shape(&old_rows, &from);
         let rows = in_key_order(rows, &columns, key_columns);
         // The rebuild holds owned rows, so it does its own borrow. It runs once
@@ -731,6 +680,175 @@ impl crate::ImportedDatabase {
             self.rewrite(rowid, entry)?;
         }
         Ok(())
+    }
+
+    /// Returns where each column of the rebuilt tree takes its values from.
+    ///
+    /// Split out of [`Self::rebuild_table_tree`] because it is the half of the
+    /// rebuild that is about *columns* rather than about trees, and because
+    /// `policy.rs` refuses a function over 150 lines - which the argument below
+    /// took it past.
+    ///
+    /// @param info - the table as the catalog now declares it
+    /// @param layout - the layout the new tree is being built with
+    /// @param old_layout - the layout the old rows were read through
+    /// @param dropped - the declared position `DROP COLUMN` removed, when that
+    ///   is what is being rebuilt
+    /// @param populated - whether there is a row for a `DEFAULT` to fill
+    fn fills_for_the_new_shape(
+        &mut self,
+        info: &TableInfo,
+        layout: &SourceLayout,
+        old_layout: &SourceLayout,
+        dropped: Option<usize>,
+        populated: bool,
+    ) -> DbResult<Vec<Fill>> {
+        // Each new tree column is filled from the old tree column that held the
+        // same *declared* column. A column the declaration did not have takes
+        // its `DEFAULT`, which is SQLite's rule and is what makes
+        // `ALTER TABLE t ADD COLUMN c INTEGER DEFAULT 9` answer 9 for the rows
+        // that were already there. Filling NULL instead was a wrong answer
+        // rather than a refusal, and only visible to a statement that read the
+        // new column on an old row.
+        //
+        // **`declared` is a position in the new declaration and `old_layout` is
+        // indexed by the old one, so the two only line up when nothing moved
+        // (task-2057).** `DROP COLUMN` at position p moved every column after p
+        // down one place, and the loop read `old_layout.slots[declared]`
+        // regardless: after `ALTER TABLE t(a,b,c,d) DROP COLUMN b`, new
+        // position 1 is `c` and it was filled from `b`, position 2 is `d` and
+        // it was filled from `c`, and `d`'s own values were dropped with `b`'s.
+        // It committed and it survived a reopen, so the file held the wrong
+        // rows rather than a connection showing them wrongly. Dropping the
+        // *last* column is the one shape it got right - every surviving
+        // position is where it already was - which is why a `(id, n)` table
+        // dropping `n` never caught it.
+        //
+        // The caller knows the mapping and nothing here can recover it: once
+        // the declaration has been rewritten, `a, c, d` says nothing about
+        // which of the four is gone.
+        let was_declared = |declared: usize| match dropped {
+            Some(position) if declared >= position => declared.saturating_add(1),
+            _ => declared,
+        };
+        let mut from: Vec<Fill> = vec![Fill::Absent; layout.width];
+        for (declared, slot) in layout.slots.iter().enumerate() {
+            let Some(slot) = slot else { continue };
+            if let Some(Some(source)) = old_layout.slots.get(was_declared(declared)) {
+                if let Some(cell) = from.get_mut(*slot) {
+                    *cell = Fill::From(*source);
+                }
+                continue;
+            }
+            // **Nothing to fill, so nothing to evaluate (task-1932, H3).**
+            // This ran whether or not the table had a row, and
+            // `constant_default` evaluates the default by running
+            // `SELECT <the default text>` through the ordinary execute path -
+            // so `ALTER TABLE t ADD COLUMN b INTEGER DEFAULT
+            // (no_such_function())` on an empty table failed here, three
+            // writes after the catalog already said the column was there, and
+            // `PRAGMA table_info(t)` then listed a column the tree had no slot
+            // for.
+            //
+            // An empty table is the only way to reach it:
+            // `AddedColumnRisk::refusal` refuses a default that is not a
+            // literal, and `alter_table` applies that refusal only when
+            // `table_has_a_row`. So on a populated table the statement never
+            // gets here, and on an empty one there is no row to give a value
+            // to. SQLite behaves the same way - it accepts the `ALTER`,
+            // records `DEFAULT (no_such_function())` in the schema text, and
+            // reports `unknown function` at the first `INSERT` that needs the
+            // value - so skipping the evaluation is what matches the reference
+            // rather than merely what avoids the failure.
+            if !populated {
+                continue;
+            }
+            let Some(default) = info
+                .columns
+                .get(declared)
+                .and_then(|column| column.default_sql.clone())
+            else {
+                continue;
+            };
+            // **The new column's affinity applies to its default (task-1979,
+            // F4).** `ADD COLUMN c INTEGER DEFAULT '5'` filled every existing
+            // row with the *text* `'5'` while an `INSERT` after it stored the
+            // integer 5, so one column of one table held two storage classes
+            // and `typeof(c)` answered differently per row. SQLite applies the
+            // column's affinity to a default wherever it is used, which is what
+            // makes the two halves agree.
+            let value = self.constant_default(&default)?;
+            let value = with_column_affinity(
+                value,
+                info.columns.get(declared).map(|column| column.affinity),
+            );
+            if let Some(cell) = from.get_mut(*slot) {
+                *cell = Fill::Constant(value);
+            }
+        }
+        if let (Some(new_rowid), Some(old_rowid)) = (layout.rowid, old_layout.rowid) {
+            if let Some(cell) = from.get_mut(new_rowid) {
+                *cell = Fill::From(old_rowid);
+            }
+        }
+        Ok(from)
+    }
+
+    /// Re-derives the layout of every index on a table whose columns moved.
+    ///
+    /// **An index layout is derived once and `refresh_catalog` does not derive
+    /// it again (task-2057).** `SourceLayout::slots` is indexed by *declared*
+    /// position, and `DROP COLUMN` renumbers the declaration - so after
+    /// `ALTER TABLE t(a,b,c,d) DROP COLUMN b`, an index on `d` still had `d`
+    /// recorded at declared position 3 while the binder now asks for position
+    /// 2. The planner offered the index, the physical pass asked it for a
+    /// column its layout said it did not carry, and the statement failed with
+    /// `the tree read for FROM term 0 does not carry column 2`. Reopening the
+    /// file answered it, because the layouts are derived afresh from the
+    /// catalog on open - which is what says the file was right and only this
+    /// connection's derived view was stale.
+    ///
+    /// The *entries* are untouched: an entry is its key columns followed by
+    /// what identifies the table row, and dropping some other column changes
+    /// neither. Only the mapping from a declared position onto a tree column
+    /// moved, so the tree is left alone and its layout is replaced.
+    ///
+    /// Two indexes are left alone, and both would be wrong to touch.
+    ///
+    /// **A `WITHOUT ROWID` table's primary key is the table**, so it is listed
+    /// among the table's indexes with no tree of its own and carries the
+    /// *table's* root - which `create_table` states in the same words where it
+    /// declines to build a second tree for it. Re-deriving that one replaces
+    /// the table's own layout with an index's, and the reads that were correct
+    /// before this function existed start failing: `SELECT k, b, c` over
+    /// `t(k PRIMARY KEY, a, b, c) WITHOUT ROWID` after dropping `a` reported
+    /// that the tree did not carry column 1.
+    ///
+    /// **An index with no registered layout** is the other: a vector index's
+    /// store and an imposter are published by `refresh_catalog` itself, and
+    /// describing either with `index_shape` would call it an ordinary B-tree
+    /// index.
+    ///
+    /// @param folded - the table's folded name
+    fn refresh_index_layouts(&mut self, folded: &[u8]) {
+        let Some(info) = self
+            .schema
+            .tables
+            .iter()
+            .find(|table| table.folded == folded)
+            .cloned()
+        else {
+            return;
+        };
+        for index in &info.indexes {
+            if index.root == info.root || !self.schema.layouts.contains_key(&index.root) {
+                continue;
+            }
+            let (_, layout) = index_shape(&info, index, index.root);
+            self.schema
+                .layouts
+                .insert(index.root, std::rc::Rc::new(layout));
+        }
     }
 
     /// Deletes every row of a table that is about to be dropped.

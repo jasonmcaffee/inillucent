@@ -276,12 +276,40 @@ they are touching do not collide; two that have not, do.
   and covers `medium.db` and `large.db` too:
   `New-Item -ItemType Junction -Path <worktree>\_agent_output\fixtures -Target C:\jason\dev\inillucent\_agent_output\fixtures`.
   Remove both junctions before retiring the worktree. (task-2051)
-- **`ddl/alter.rs::rebuild_table` has a second, unrelated defect in it - see task-2057.**
-  `ALTER TABLE ... DROP COLUMN` on a column that is not the last one fills each surviving column
-  from `old_layout.slots[declared]`, where `declared` is the position in the **new** declaration, so
-  every column after the dropped one takes its left neighbour's values. It is on `main`, it needs no
-  transaction, and dropping the last column is correct - which is why task-2051's own reproduction
-  on `(id, n)` did not show it. If you are in that function, the two tickets will collide. (task-2051)
+- **A position in the new declaration is not a position in the old one, and `DROP COLUMN` is where
+  they part.** `rebuild_table_tree` filled each surviving column from `old_layout.slots[declared]`
+  with `declared` taken from the **new** declaration, so every column after the dropped one took
+  its left neighbour's values and the last column's values were lost. `alter_table` now passes the
+  position it removed and the loop maps a new position at or after it back to one higher. Dropping
+  the *last* column was always correct, which is why task-2051's reproduction on `(id, n)` did not
+  show it, and why `alter.drop.last` in `semantics.rs` is kept as the control against a mapping
+  that shifts unconditionally. Anything else deriving a column's identity from its position across
+  an `ALTER` owes the same mapping. (found by task-2051, fixed by task-2057)
+- **A `SourceLayout` is derived once and `refresh_catalog` does not derive it again.** It rebuilds
+  the catalog *snapshot* and the `TableInfo` list; `schema.layouts` is written by whatever created
+  the tree and is otherwise left alone. So a `DROP COLUMN` renumbered the declaration while every
+  index on the table went on recording its columns at their old positions, the planner offered such
+  an index, and the read failed with `the tree read for FROM term 0 does not carry column N`.
+  Reopening the file answered it, because `open` derives every layout afresh - so "it works after a
+  reopen" is the signature of a stale derived view rather than of a wrong file, and the two
+  `semantics.rs` cases `alter.drop.reopen` and `alter.drop.index` are deliberately one of each.
+  `refresh_index_layouts` re-derives them. If you add a schema change that moves a declared
+  position, the index layouts are yours to refresh too. (task-2057)
+- **`rebuild_table_tree` finds its table by folded name with no schema filter, and so does
+  `refresh_index_layouts` beside it.** `alter_table` reads the schema into `at` and filters its own
+  existence check by it, then does not pass it down - so `ALTER TABLE side.t DROP COLUMN b` with a
+  `t` in `main` as well rebuilt the wrong one, and `SELECT * FROM t` on `main` came back with
+  side's row. `ALTER TABLE ... RENAME` is correct on an attached database because it rewrites
+  catalog text and never reaches the rebuild, which is how to tell the two apart. Every
+  `ALTER TABLE` on a `TEMP` table is `no such table` for the related reason that `rebuild_tables`
+  deliberately keeps temporary tables out of `schema.tables`. Being fixed by task-2061; if you are
+  in either function before that lands, take the schema as a parameter rather than adding a second
+  unfiltered lookup. (found by task-2057)
+- **A `WITHOUT ROWID` table's primary key is listed among its indexes and carries the *table's*
+  root**, because there is one tree and the key is it. Any loop over `TableInfo::indexes` that
+  writes something keyed by `index.root` will write over the table's own entry: re-deriving layouts
+  that way replaced a keyed table's layout with an index's and broke reads that had been correct.
+  Skip the index whose root is the table's. (task-2057)
 - **A page written straight into the data file has to carry an LSN, and the rollback journal has
   to be asked before it is written at all.** `Pool::write_built_page` is the only write in the
   engine that skips the buffer pool and the log both, which is what makes `CREATE INDEX` write its
