@@ -233,6 +233,54 @@ const TRIVIAL_COMPILE_ALLOCATIONS: u64 = 15;
 /// [`TRIVIAL_COMPILE_ALLOCATIONS`] gives.
 const POINT_COMPILE_ALLOCATIONS: u64 = 92;
 
+/// How many more allocations a compile makes when the in-process embedder is
+/// compiled in.
+///
+/// **The two bounds above are not one number, they are two, and which one
+/// applies is decided by a cargo feature (task-2039).** `inillucent-engine/embed`
+/// registers the retrieval engine's embedder so `embed(TEXT)` answers, and a
+/// compile then costs three allocations more - the same three whatever the
+/// statement is, so `SELECT 1` reads 15 without it and 18 with it, the point
+/// statement reads 92 and 95, and even the cold first compile reads 674 and
+/// 677.
+///
+/// It is not academic and it is why this is here rather than in a comment.
+/// `inillucent-testrun` builds the workspace twice: once with default features,
+/// and once more with every feature the selected suites ask for, which for any
+/// ordinary selection includes `inillucent-engine/embed`. The binary it then
+/// runs this guard from is the second one. So the numbers a developer sees from
+/// `cargo test -p inillucent --test budget` and the numbers the runner sees are
+/// three apart, and a bound written from either one alone is wrong in the other
+/// - which is how this guard came to fail in a 158-target run while passing
+/// every way it was checked by hand.
+///
+/// Widening the bounds by three to cover both was the other option and is worse:
+/// it would leave three allocations of room for a regression to hide in on the
+/// build most people run, which is the argument
+/// [`TRIVIAL_COMPILE_ALLOCATIONS`] already makes against a margin. So the guard
+/// asks the engine which build it is in and stays exact in both.
+const EMBEDDER_COMPILE_ALLOCATIONS: u64 = 3;
+
+/// Reports whether this build has the in-process embedder compiled in.
+///
+/// Asked of the running engine rather than read from a `cfg`, because the
+/// feature belongs to `inillucent-engine` and this crate's tests are compiled
+/// without it being named on *this* package - `--features inillucent-engine/embed`
+/// turns the engine's embedder on and sets no `cfg` here at all, so
+/// `#[cfg(feature = "embed")]` would read false in exactly the build that needs
+/// it to read true.
+///
+/// `embed(TEXT)` is the function the feature registers, so a statement that
+/// calls it binds in one build and fails to bind in the other. It is asked on
+/// its own connection so that the arena this warms is not the one the guard is
+/// about to measure a cold compile on.
+///
+/// @param database - the database the guard is running against
+fn embedder_is_compiled_in(database: &Database) -> bool {
+    let connection = database.session();
+    connection.prepare("SELECT embed('probe')").is_ok()
+}
+
 /// Returns a fresh, empty directory for one test's files.
 ///
 /// @param tag - what to name the directory after
@@ -918,11 +966,22 @@ fn compiling_again_reuses_the_scratch_rather_than_allocating_it_afresh() {
     let warm_trivial = allocations(|| compile(trivial));
     let warm_point = allocations(|| compile(point));
 
+    // Asked after the measurements, on a connection of its own: the probe
+    // compiles a statement, and doing that first would warm the arena the cold
+    // reading above depends on being cold.
+    let embedder = match embedder_is_compiled_in(&database) {
+        true => EMBEDDER_COMPILE_ALLOCATIONS,
+        false => 0,
+    };
+    let trivial_bound = TRIVIAL_COMPILE_ALLOCATIONS.saturating_add(embedder);
+    let point_bound = POINT_COMPILE_ALLOCATIONS.saturating_add(embedder);
+
     // The runner gives this tier `--show-output`, so the numbers the guard was
     // measured at are in the log of every run rather than only in this comment.
     println!("compile allocations, warm connection, plan cache off:");
-    println!("  {trivial:<34} cold {cold:>4}, warm {warm_trivial:>4} (bound {TRIVIAL_COMPILE_ALLOCATIONS})");
-    println!("  {point:<34}             warm {warm_point:>4} (bound {POINT_COMPILE_ALLOCATIONS})");
+    println!("  embedder compiled in: {}", embedder > 0);
+    println!("  {trivial:<34} cold {cold:>4}, warm {warm_trivial:>4} (bound {trivial_bound})");
+    println!("  {point:<34}             warm {warm_point:>4} (bound {point_bound})");
 
     assert!(
         warm_trivial < cold,
@@ -932,13 +991,13 @@ fn compiling_again_reuses_the_scratch_rather_than_allocating_it_afresh() {
          scratch means"
     );
     assert!(
-        warm_trivial <= TRIVIAL_COMPILE_ALLOCATIONS,
+        warm_trivial <= trivial_bound,
         "compiling `{trivial}` made {warm_trivial} allocation(s) against a bound \
-         of {TRIVIAL_COMPILE_ALLOCATIONS}"
+         of {trivial_bound}"
     );
     assert!(
-        warm_point <= POINT_COMPILE_ALLOCATIONS,
+        warm_point <= point_bound,
         "compiling `{point}` made {warm_point} allocation(s) against a bound of \
-         {POINT_COMPILE_ALLOCATIONS}"
+         {point_bound}"
     );
 }
