@@ -216,6 +216,19 @@ fn a_flat_chain_is_charged_against_the_expression_depth_limit() {
 /// work does not quadruple says exactly what "quadratic" means. The bound is
 /// deliberately loose - four times the smaller run, where the defect would give
 /// sixteen - so that this fails on the algorithm rather than on the scheduler.
+///
+/// **Each size is timed three times and the fastest is kept, and the bound is
+/// the four its own sentence above already named (task-2039).** It asserted
+/// three, and it timed each size once. Both halves of that were wrong on a
+/// shared machine: a single reading carries whatever the scheduler was doing
+/// during it, and the two readings are taken at different moments, so the load
+/// does not cancel between them. It failed in a 158-target run at 3.27 -
+/// 143.5 ms against 43.9 ms - on a change that made interning *faster*. Timed
+/// nine times each on an idle box the real figure is 2.0 on both sides of that
+/// change: 8,000 identifiers in 1.98 ms and 16,000 in 4.34 ms before it, 1.89
+/// and 4.05 after. The fastest of three runs is the reading least contaminated
+/// by everything else on the box, and a defect that made this quadratic would
+/// be at sixteen, where no amount of load matters.
 #[test]
 fn interning_distinct_identifiers_is_not_quadratic() {
     let names = |count: usize| -> String {
@@ -233,15 +246,17 @@ fn interning_distinct_identifiers_is_not_quadratic() {
         parser::parse_next_statement(sql.as_bytes(), 0, &limits).expect("it parses");
         started.elapsed()
     };
+    let fastest_of_three =
+        |sql: &str| -> std::time::Duration { (0..3).map(|_| time(sql)).min().unwrap_or_default() };
     // Warm the allocator and the branch predictors so the first run is not the
     // one that pays for them.
     let _ = time(&names(2_000));
-    let small = time(&names(8_000));
-    let large = time(&names(16_000));
+    let small = fastest_of_three(&names(8_000));
+    let large = fastest_of_three(&names(16_000));
     assert!(
         large
             < small
-                .saturating_mul(3)
+                .saturating_mul(4)
                 .max(std::time::Duration::from_millis(50)),
         "doubling the identifiers took {large:?} against {small:?} for half as \
          many, which is the quadratic scan rather than the map"
