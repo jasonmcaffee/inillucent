@@ -196,3 +196,29 @@ they are touching do not collide; two that have not, do.
   builder and none of which were real. Worktrees do **not** collide with each other over this -
   `workspace_root()` is built from `CARGO_MANIFEST_DIR`, which is baked per worktree, so each
   ticket has its own `_agent_output/`. It is only your own two runs. (task-2044)
+- **A page a transaction drops is now freed at its commit, not by the statement that dropped it.**
+  `release_tree` puts the pages on `Writing::pending_frees` and `flush_pending_frees` releases them
+  from `commit_batch` and `seal`. If you write anything that frees a page mid transaction, do the
+  same: the free map is durable shared state and this engine's undo buffer holds *row* before
+  images, so a rollback has nothing to put a page back with. Freeing as the statement ran let a
+  `CREATE` in the same transaction be handed the dropped table's own root page, which is how a
+  rolled back `DROP TABLE p; CREATE TABLE p` lost every row durably. The same rule is why the
+  `FreePage` log records are written at the commit: the log is redo only. (task-2043)
+- **A savepoint records two lengths — `undo` and `pending_frees` — and both are needed.** `marks` is
+  `Vec<(name, usize, usize)>`. `DROP TABLE p; SAVEPOINT here` leaves both records at the same undo
+  length, so deriving the second from the first cannot say which came first, and `ROLLBACK TO here`
+  then leaks the pages of a table that really was dropped. If you add a third append-only per
+  transaction record, it needs its own length in `marks` too. (task-2043)
+- **The catalog decides what is a virtual table, not `session_state.virtual_tables`.**
+  `rebuild_tables` asks a connected module only for the *columns* of a table the catalog already
+  calls virtual. It used to convert any table whose name was in that map, so a rolled back
+  `CREATE VIRTUAL TABLE` left the connection reading an ordinary table through a dead fts5
+  connection — the file had the rows and the session could not see them. (task-2043)
+- **`PRAGMA integrity_check` does not look at page ownership or the free map.** `check_trees` walks
+  each registered tree in isolation and then checks indexes against tables, so it answers `ok` about
+  a database where two tables reach the same page, or where the catalog names a tree that is not the
+  one holding the rows. Do not treat a green check as evidence that a storage change is sound —
+  assert the values. (task-2043)
+- **`crates/inillucent-engine/src/engine/compiled.rs::write` is 4 lines under its recorded ceiling
+  of 220.** Adding one line and a comment to it fails `policy`. Put what you need in a helper on
+  `ImportedDatabase` instead; `statement_mark` is there as the precedent. (task-2043)
