@@ -81,6 +81,19 @@ they are touching do not collide; two that have not, do.
   before you read any result:
   `New-Item -ItemType Junction -Path <worktree>\.sqlite-ref -Target C:\jason\dev\inillucent\.sqlite-ref`.
   Remove the junction before you retire the worktree. (task-2039)
+- **There is one copy of that oracle and every worktree junctions to it, so a recursive delete of
+  your own junction empties it for everybody.** `Remove-Item -Recurse` and `rm -rf` both follow a
+  junction and delete what is on the other side, which is the main checkout's `.sqlite-ref/`. It
+  happened on 2026-09-21: the directory was emptied at 09:43, nothing put it back, and the three
+  worktrees open at the time were all left pointing at an empty directory. Remove the link without
+  touching the target - `cmd /c rmdir "<worktree>\.sqlite-ref"`, or in PowerShell
+  `[System.IO.Directory]::Delete($path, $false)`. Both delete the link alone.
+  **Run with `INILLUCENT_STRICT=1` or you will not find out.** Without it about twenty differential
+  targets report `needs oracle`, run nothing and report success, so a suite that compared nothing
+  reads exactly like a suite that passed. To put the oracle back, run
+  `pwsh tools/sqlite-reference.ps1`: it downloads the 3.53.4 amalgamation and tools, checks both
+  against the SHA3-256 sums SQLite publishes, and compiles the oracle and the benchmark driver. It
+  took about a minute, and it needs the MSVC environment imported first. (task-2048)
 - **`inillucent-testrun` cannot build from an agent terminal until the MSVC environment is
   imported.** `onig_sys` compiles oniguruma with `cl.exe` and an agent terminal has no `INCLUDE`,
   so a `--changed` run dies at `regenc.h(39): fatal error C1083: Cannot open include file:
