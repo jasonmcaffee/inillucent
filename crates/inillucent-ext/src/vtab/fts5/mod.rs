@@ -22,8 +22,11 @@
 //! - `%_docsize(id, sz)` holds one varint per column: how many tokens it had.
 //!   `bm25` needs it and nothing else does.
 //! - `%_data(id, block)` holds row 1, the totals - the document count and the
-//!   token count per column - and nothing else that this build writes. A file
-//!   written before task-1911 also has one row per term here; see below.
+//!   token count per column - and row 2, the layout record, and nothing else
+//!   that this build writes. A file written before task-1911 also has one row
+//!   per term here; see below. The layout record is `layout.rs`'s, and it is
+//!   what lets a *later* build refuse this one's index by name instead of
+//!   answering no rows for it.
 //! - `%_idx(segid, term, doclist)` is the term dictionary **and** the term's
 //!   whole doclist, in one row: `segid` is always zero, `term` is the term's
 //!   bytes, and `doclist` is the postings this build used to keep in a
@@ -41,18 +44,28 @@
 //! already identifies removes one of the two writes and, for the common path
 //! of a term already open this transaction, one of the two reads.
 //!
-//! **A row is self-describing, not the table.** `%_idx`'s third column holds
-//! an `Integer` for a page number when an older build wrote the row and this
-//! build has not touched it since, or a `Blob` for the doclist inline when
-//! this build wrote it. `term_value` is where that is decided, and it is
-//! decided per row rather than by a schema version in `%_config`, because the
-//! truth is per row: a file can hold both kinds side by side while it is being
-//! written to gradually, and every write from this build replaces whatever it
-//! touches with the inline form. A term that is never written again keeps
-//! answering through the old indirection for as long as the file exists; the
-//! `rebuild` command converts every row at once, on request, because it
-//! already reads every row out of `%_content` and writes the index from
-//! scratch.
+//! **A row is self-describing, and the table says which layout it is in.**
+//! Those answer two different questions and both are needed. The per-row rule
+//! below decides how *this* build reads a row it finds, and it has to, because
+//! a file can hold both kinds side by side. The record in `layout.rs` is for a
+//! reader that is not this build: it names the layout and the release that
+//! wrote it, so a future build meeting an index it does not understand refuses
+//! by name rather than answering an empty result set - which is what 0.1.1 does
+//! against a file 0.1.2 wrote, and what task-2053 exists to stop happening
+//! again.
+//!
+//! `%_idx`'s third column holds an `Integer` for a page number when an older
+//! build wrote the row and this build has not touched it since, or a `Blob`
+//! for the doclist inline when this build wrote it. `term_value` is where that
+//! is decided, and it is decided per row rather than from the layout record,
+//! because the truth is per row: a file can hold both kinds side by side while
+//! it is being written to gradually, and every write from this build replaces
+//! whatever it touches with the inline form. That is also why the record is
+//! stamped only where the whole index is written at once. A term that is never
+//! written again keeps answering through the old indirection for as long as
+//! the file exists; the `rebuild` command converts every row at once, on
+//! request, because it already reads every row out of `%_content` and writes
+//! the index from scratch.
 //!
 //! A doclist is a run of entries, each: the rowid as a delta from the previous
 //! one, then per column that has a position, the column number, how many
@@ -76,6 +89,7 @@ pub use index::{build_stages, decode_sizes, reset_build_stages, Buffer, BuildSta
 pub mod bm25;
 mod doclist;
 pub mod expr;
+mod layout;
 pub mod options;
 pub mod tokenize;
 pub mod vocab;
@@ -313,6 +327,7 @@ fn connect_with(
                 without_rowid: false,
             },
             creating,
+            layout_checked: false,
             pending: Buffer::default(),
             offsets: Vec::new(),
         }))
@@ -337,6 +352,16 @@ struct Fts5Table {
     shadows: ShadowTables,
     declaration: Declaration,
     creating: bool,
+    /// Whether this connection has already checked that the index's layout is
+    /// one this build reads.
+    ///
+    /// **A bool rather than the buffer's own answer, because `update` runs per
+    /// row.** `layout::readable` answers from a cached number, but it takes the
+    /// buffer's lock to read it, and a bulk load pays that once per document
+    /// for a question about the file that cannot change while this connection
+    /// holds it open. False until the first write, so a table nothing writes to
+    /// pays nothing.
+    layout_checked: bool,
     /// The doclists this transaction has changed, shared with its cursors.
     pending: Buffer,
     /// The table's own name, which its refusals name.
@@ -541,6 +566,7 @@ impl VirtualTable for Fts5Table {
         Ok(Box::new(Fts5Cursor {
             dialect: self.dialect,
             unsupported: self.options.unsupported.clone(),
+            table: self.name.clone(),
             content: self.content.clone(),
             contentless: self.contentless,
             offsets: content_offsets(self.external.as_deref(), &self.options.columns, None),
@@ -581,6 +607,7 @@ impl VirtualTable for Fts5Table {
             1,
             &[Value::owned_text(b"version")?, Value::Integer(4)],
         )?;
+        layout::stamp(context, &self.shadows)?;
         // `version` is the only row FTS5 writes. The tokenizer is *not* kept
         // here: it is re-read from the module arguments in `sqlite_master`
         // every time the table is connected, and a `tokenize` row would be a
@@ -594,7 +621,25 @@ impl VirtualTable for Fts5Table {
     }
 
     /// Applies one insert, update or delete.
+    ///
+    /// **Refuses first, for an index in a layout this build does not read.** A
+    /// build that cannot read a layout must not append to it either: the append
+    /// writes this build's rows into a dictionary whose other rows it does not
+    /// understand, and leaves an index half in each layout that neither build
+    /// can read afterwards.
+    ///
+    /// Here and not in `begin`, which is the other place every write passes
+    /// through. The engine tells **every** connected module that a write
+    /// transaction has started, on the first write to any one of them - so a
+    /// check there would refuse a write to `note_fts` because some other
+    /// full-text table in the same database was written by a newer build. The
+    /// refusal is about one index, so it belongs where one index is written.
+    /// See `layout.rs`.
     fn update(&mut self, context: &mut Context<'_>, change: &Change) -> DbResult<Option<i64>> {
+        if !self.layout_checked {
+            layout::readable(context, &self.shadows, &self.pending, &self.name)?;
+            self.layout_checked = true;
+        }
         match change {
             Change::Delete(rowid) => {
                 let Some(rowid) = rowid.as_integer() else {

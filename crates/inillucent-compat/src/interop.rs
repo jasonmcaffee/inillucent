@@ -46,6 +46,25 @@ pub fn build_sql() -> PathBuf {
     directory().join("build.sql")
 }
 
+/// Returns the statements that build the searchable graph an older binary is
+/// asked to query.
+///
+/// Run after [`build_sql`] by the backward direction of
+/// `release_format_history.rs`, and by nothing else - see the file's own
+/// comment for why it is not part of a checked-in fixture.
+pub fn retrieval_build_sql() -> PathBuf {
+    directory().join("retrieval-build.sql")
+}
+
+/// Returns the retrieval questions, in file order.
+///
+/// These have no `expected.tsv`: they are asked of one database, written by the
+/// current build, and the reference answer is the current build's own. See
+/// `tests/interop/retrieval.sql`.
+pub fn retrieval_questions() -> Vec<Question> {
+    parse_questions(&directory().join("retrieval.sql"))
+}
+
 /// Returns the questions in `verify.sql`, in file order.
 ///
 /// **One list, and this is the only parse of it in Rust.**
@@ -54,8 +73,14 @@ pub fn build_sql() -> PathBuf {
 /// the file is asked by both, and a question worded differently is asked by
 /// neither.
 pub fn questions() -> Vec<Question> {
-    let path = directory().join("verify.sql");
-    let text = fs::read_to_string(&path).unwrap_or_default();
+    parse_questions(&directory().join("verify.sql"))
+}
+
+/// Reads a question file: a `-- name: <label>` line, then one statement.
+///
+/// @param path - the file to read
+fn parse_questions(path: &Path) -> Vec<Question> {
+    let text = fs::read_to_string(path).unwrap_or_default();
     let mut questions = Vec::new();
     let mut name: Option<String> = None;
     for line in text.lines() {

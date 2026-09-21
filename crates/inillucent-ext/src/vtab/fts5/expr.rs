@@ -983,9 +983,12 @@ fn term_doclists(
             Ok(true)
         })?;
         for row in rows {
-            if let Some(bytes) = super::resolve_doclist(context, shadows, &row)? {
-                doclists.push(bytes);
-            }
+            let candidate = row
+                .get(1)
+                .and_then(Value::as_blob)
+                .map(|blob| blob.raw().to_vec())
+                .unwrap_or_default();
+            doclists.push(super::require_doclist(context, shadows, &candidate, &row)?);
         }
     } else if let Some(bytes) = super::read_doclist(context, shadows, buffer, &term.token)? {
         doclists.push(bytes);

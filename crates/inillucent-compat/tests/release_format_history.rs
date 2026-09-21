@@ -48,8 +48,11 @@ const KNOWN_GAPS: [(&str, &str, &str); 1] = [(
     // that exists only in the log - and it reads `count(*)` and `SELECT rowid,
     // title` out of `note_fts` itself. Only the `MATCH` comes back empty, and
     // it comes back empty rather than refused, because nothing in the index
-    // says which layout wrote it. That silence is what task-2053 is about; the
-    // 0.1.1 half of it is history.
+    // said which layout wrote it. That silence is what task-2053 is about, and
+    // the 0.1.1 half of it is history: an index written from that ticket on
+    // carries a layout record and a reader that meets a layout it has not got
+    // refuses by name, but 0.1.1 shipped before the record existed and will
+    // never look for it.
     "the FTS5 index layout changed in 0.1.2, and 0.1.1 answers no rows rather than refusing \
      (task-2053)",
 )];
@@ -135,6 +138,27 @@ fn write_the_current_format(into: &Path) -> PathBuf {
          log holds', 'written after the checkpoint, so a reader that ignores the log cannot see \
          it', 9.5, 'Ledger')",
     );
+    drop(database);
+    path
+}
+
+/// Writes `build.sql` and then the searchable graph, and returns the database.
+///
+/// The same file as [`write_the_current_format`], plus the `vectors` table
+/// `retrieval-build.sql` creates - which is why the two are separate functions
+/// rather than one: `verify.sql`'s recorded answers count the rows of the
+/// tables `build.sql` makes, and a case that asks those questions has to be
+/// handed a file holding exactly those tables.
+///
+/// @param into - a scratch directory
+fn write_the_current_format_with_a_graph(into: &Path) -> PathBuf {
+    let path = write_the_current_format(into);
+    let sql = std::fs::read_to_string(interop::retrieval_build_sql())
+        .unwrap_or_else(|why| panic!("tests/interop/retrieval-build.sql could not be read: {why}"));
+    let arm = default_arm();
+    let database = open(&arm, &path);
+    let connection = database.session();
+    run(&connection, &sql);
     drop(database);
     path
 }
@@ -298,5 +322,145 @@ fn every_released_binary_reads_what_this_build_writes() {
         gaps_seen, expected_gaps,
         "KNOWN_GAPS names {expected_gaps} differences for the releases on disk and {gaps_seen} \
          happened"
+    );
+}
+
+/// What an older release cannot ask of a search index this build wrote.
+///
+/// The retrieval half's own version of [`KNOWN_GAPS`], and kept separate
+/// because the two answer different questions: that one is about `verify.sql`'s
+/// recorded answers, this one about the graph `retrieval-build.sql` writes.
+/// The rule is the same. A published binary's answer can never be fixed, so a
+/// row asserts the difference **still happens**, and a change that made the
+/// release answer correctly turns this suite red and gets the row deleted.
+///
+/// Each row is the release, the question in `retrieval.sql`, and why.
+const KNOWN_RETRIEVAL_GAPS: [(&str, &str, &str); 0] = [];
+
+/// Returns the recorded retrieval gap for a release and a question.
+///
+/// @param version - the release being asked
+/// @param question - the label in `retrieval.sql`
+fn known_retrieval_gap(
+    version: &str,
+    question: &str,
+) -> Option<&'static (&'static str, &'static str, &'static str)> {
+    KNOWN_RETRIEVAL_GAPS
+        .iter()
+        .find(|(release, name, _)| *release == version && *name == question)
+}
+
+/// Every released binary still searches a graph this build wrote.
+///
+/// **The question nothing in the suite asked** (task-2053). `verify.sql` asks
+/// an `inillucent_search` table for its rows and its content, which is a read
+/// of `%_content`; it never asks it to *search*, so no term query, no ranked
+/// query and no nearest-neighbour query had ever been run by an older binary
+/// against a graph a newer build wrote. The half of the file SQLite has no
+/// equivalent of is the half a format change is most likely to move, and it was
+/// the half nothing was checking.
+///
+/// A release that cannot search the graph must **refuse**. That is the whole of
+/// what task-2053 is about: an empty result set is a legitimate answer to a
+/// search, so a build that answers one for an index it cannot read has told the
+/// application the documents do not exist.
+#[test]
+fn every_released_binary_searches_what_this_build_writes() {
+    let versions = interop::versions();
+    let available: Vec<(String, PathBuf)> = versions
+        .iter()
+        .filter_map(|version| interop::release_binary(version).map(|exe| (version.clone(), exe)))
+        .collect();
+    if available.is_empty() {
+        skipping(
+            "no released binary is on disk; run `pwsh tools/build-interop-fixture.ps1 -Version \
+             <version>` for a published release",
+        );
+        return;
+    }
+
+    let area = scratch("retrieval");
+    let database = write_the_current_format_with_a_graph(&area);
+    let questions = interop::retrieval_questions();
+    assert!(
+        !questions.is_empty(),
+        "tests/interop/retrieval.sql asks nothing, so this case would compare nothing"
+    );
+
+    // **This build's own answers are the reference.** There is no recorded one:
+    // the graph is written here rather than checked in, for the reason
+    // `retrieval.sql` gives. So the comparison is between two builds reading
+    // one file, which is what the case is about.
+    let reference: Vec<String> = {
+        let arm = default_arm();
+        let handle = open(&arm, &database);
+        let connection = handle.session();
+        questions
+            .iter()
+            .map(|question| inillucent_compat::stories::ask(&connection, &question.sql))
+            .collect()
+    };
+    for (question, answer) in questions.iter().zip(reference.iter()) {
+        assert!(
+            !answer.is_empty(),
+            "this build answered `{}` with nothing, so the file handed to the older binaries \
+             does not hold the graph this case is about",
+            question.name
+        );
+    }
+
+    let mut checked = 0usize;
+    let mut gaps_seen = 0usize;
+    for (version, exe) in &available {
+        for (question, wanted) in questions.iter().zip(reference.iter()) {
+            let asked = ask_release(exe, &database, &question.sql);
+            checked = checked.saturating_add(1);
+
+            if let Some((_, _, why)) = known_retrieval_gap(version, &question.name) {
+                assert!(
+                    asked.as_ref().is_ok_and(|got| got != wanted) || asked.is_err(),
+                    "{version} now answers `{}` the way this build does, and \
+                     KNOWN_RETRIEVAL_GAPS still says it cannot. Delete that row: {why}",
+                    question.name
+                );
+                gaps_seen = gaps_seen.saturating_add(1);
+                continue;
+            }
+
+            let got = match asked {
+                Ok(got) => got,
+                Err(complaint) => panic!(
+                    "{version} could not answer `{}` against a graph this build wrote:\n  \
+                     {complaint}",
+                    question.name
+                ),
+            };
+            assert_eq!(
+                &got, wanted,
+                "{version} answers `{}` as `{got}` where this build answers `{wanted}` on the \
+                 same file. If this is a format change that cannot be undone it belongs in \
+                 KNOWN_RETRIEVAL_GAPS with the ticket that records it - and the release has to \
+                 *refuse*, because an empty answer to a search is one an application cannot \
+                 tell from a correct one.",
+                question.name
+            );
+        }
+    }
+
+    assert_eq!(
+        checked,
+        available.len().saturating_mul(questions.len()),
+        "{} releases were on disk and {checked} of {} questions were asked",
+        available.len(),
+        available.len().saturating_mul(questions.len())
+    );
+    let expected_gaps = KNOWN_RETRIEVAL_GAPS
+        .iter()
+        .filter(|(version, _, _)| available.iter().any(|(had, _)| had == version))
+        .count();
+    assert_eq!(
+        gaps_seen, expected_gaps,
+        "KNOWN_RETRIEVAL_GAPS names {expected_gaps} differences for the releases on disk and \
+         {gaps_seen} happened"
     );
 }

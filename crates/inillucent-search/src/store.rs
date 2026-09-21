@@ -13,7 +13,10 @@
 //!
 //! - `%_config(k, v)` - the definition. Written once when the table is created
 //!   and read every time it is connected: columns, vector width, distance,
-//!   tokenizer identity, exact-or-approximate, format version.
+//!   tokenizer identity, exact or approximate, the format number, and the
+//!   release that wrote it. The last two are what let a later build refuse this
+//!   table by name instead of answering out of a store it does not understand -
+//!   see `crate::options::readable`.
 //! - `%_content(id, c0..cN, v)` - the indexed row versions. This is the
 //!   authoritative copy of every row: the base generation and the delta log are
 //!   both derivable from it, which is what makes `rebuild` a real operation and

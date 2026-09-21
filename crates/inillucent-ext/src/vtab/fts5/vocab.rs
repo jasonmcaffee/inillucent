@@ -258,6 +258,10 @@ impl VirtualCursor for VocabCursor {
     fn filter(&mut self, context: &mut Context<'_>, _plan: &FilterPlan) -> DbResult<()> {
         self.rows.clear();
         self.at = 0;
+        // The vocabulary is the dictionary, so an index in a layout this build
+        // does not read has nothing to report and says so - rather than
+        // reporting an empty vocabulary for an index full of terms.
+        super::layout::readable_once(context, &self.shadows, &self.target)?;
         self.columns = column_names(context, &self.target);
         // `%_idx(segid, term, doclist)`, keyed on the first two - or, for a
         // row an older build wrote and nothing has rewritten since, `doclist`
@@ -274,9 +278,11 @@ impl VirtualCursor for VocabCursor {
             Ok(true)
         })?;
         for (term, row) in dictionary {
-            let Some(doclist) = super::resolve_doclist(context, &self.shadows, &row)? else {
-                continue;
-            };
+            // **Refused rather than skipped** (task-2053). A term whose doclist
+            // does not resolve was dropped from the vocabulary silently, so a
+            // table whose whole job is to report what the index holds under-
+            // reported it and said nothing.
+            let doclist = super::require_doclist(context, &self.shadows, &term, &row)?;
             self.expand(&term, &doclist);
         }
         Ok(())

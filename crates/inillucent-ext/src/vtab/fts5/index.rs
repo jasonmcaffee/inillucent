@@ -244,6 +244,18 @@ pub struct Pending {
     totals: Option<Totals>,
     /// Whether the buffered totals differ from what `%_data` holds.
     totals_dirty: bool,
+    /// Which layout the index on disk is in, once something has asked.
+    ///
+    /// `None` means "not read yet on this connection". It is read once and
+    /// never cleared, unlike [`Pending::totals`], because it is a property of
+    /// the file rather than of the transaction: the layout an index is in
+    /// cannot change while this connection holds it open, and asking again per
+    /// query would put a tree descent in front of every search. See
+    /// `layout.rs` for what the number means and what a missing record
+    /// reads as.
+    pub(crate) layout: Option<u32>,
+    /// The release the layout record names, empty when there is no record.
+    pub(crate) layout_writer: String,
     /// The highest `%_content` rowid this transaction has handed out.
     ///
     /// **Two tree descents per document, for a number the module already
@@ -348,10 +360,49 @@ pub(crate) fn term_value(values: &[Value<'static>]) -> Option<TermValue> {
         _ => None,
     }
 }
+/// Returns a `%_idx` row's doclist, refusing when the row does not resolve.
+///
+/// **A dictionary row whose doclist cannot be found is not a term with no
+/// documents** (task-2053). [`resolve_doclist`] answers `None` for two states -
+/// a third column that is neither a doclist nor a page number, and a page
+/// number naming a `%_data` row that is not there - and both are damage rather
+/// than an answer. Every caller but `integrity-check` was treating that `None`
+/// as "this term matches nothing", which is the same silence the layout record
+/// exists to end: a search over an index full of documents returned an empty
+/// result set, and one path did worse and wrote the term's postings back as if
+/// they had been empty.
+///
+/// `integrity-check` keeps the `Option`, because reporting the state is what it
+/// is for.
+///
+/// @param context - the host
+/// @param shadows - the table's shadow tables
+/// @param term - the term, so the refusal can name it
+/// @param values - the `%_idx` row
+pub(crate) fn require_doclist(
+    context: &mut Context<'_>,
+    shadows: &ShadowTables,
+    term: &[u8],
+    values: &[Value<'static>],
+) -> DbResult<Vec<u8>> {
+    match resolve_doclist(context, shadows, values)? {
+        Some(bytes) => Ok(bytes),
+        None => Err(inillucent_base::error::corrupt(format!(
+            "the full-text term {} has a dictionary row whose doclist cannot be read",
+            String::from_utf8_lossy(term)
+        ))
+        .with_message(
+            "the full-text index has a dictionary row whose doclist cannot be read".to_string(),
+        )),
+    }
+}
 /// Returns a `%_idx` row's doclist, wherever it actually lives.
 ///
 /// One read for a row this build wrote; one read plus the `%_data` row an
 /// older build's indirection still names, for a row it has not touched yet.
+///
+/// `None` is damage, not an answer; [`require_doclist`] is what every caller
+/// but `integrity-check` uses, and its doc comment says why.
 ///
 /// @param context - the host
 /// @param shadows - the table's shadow tables
@@ -398,7 +449,9 @@ pub(crate) fn read_doclist(
     }
     let key = [Value::Integer(SEGMENT), Value::owned_blob(term)?];
     match shadows.read_keyed(context, b"idx", &key, 3)? {
-        Some(row) => resolve_doclist(context, shadows, &row),
+        Some(row) => require_doclist(context, shadows, term, &row).map(Some),
+        // The one legitimate `None`: the dictionary holds no row for this term,
+        // so the term really is in no documents.
         None => Ok(None),
     }
 }
@@ -699,7 +752,11 @@ pub(crate) fn term_row(
     let Some(row) = found else {
         return Ok(create.then_some(Term { fresh: true }));
     };
-    let bytes = resolve_doclist(context, shadows, &row)?.unwrap_or_default();
+    // **Not `unwrap_or_default()`** (task-2053). A row whose doclist does not
+    // resolve was staged here as an empty one, and the flush then wrote that
+    // empty doclist back over the term's row - so a term whose postings could
+    // not be read lost the postings as well as the answer.
+    let bytes = require_doclist(context, shadows, term, &row)?;
     stage_doclist(buffer, term, bytes);
     Ok(Some(Term { fresh: false }))
 }

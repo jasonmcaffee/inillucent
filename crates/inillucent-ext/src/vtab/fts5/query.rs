@@ -41,6 +41,8 @@ pub(crate) struct Fts5Cursor {
     /// for why the refusal is here rather than at open.
     pub(crate) unsupported: Option<String>,
     pub(crate) columns: usize,
+    /// The table's own name, so a refusal about its index can say which one.
+    pub(crate) table: Vec<u8>,
     /// The shadow suffix the rows are reached under.
     pub(crate) content: Vec<u8>,
     /// Whether the table stores no document text at all.
@@ -507,6 +509,13 @@ impl VirtualCursor for Fts5Cursor {
             })?;
             return Ok(());
         }
+        // **Here rather than at the top of `filter`, because this is where the
+        // index is read.** The two plans above answer out of `%_content` and
+        // `%_docsize`, which every layout holds the same way - which is why
+        // 0.1.1 answered `count(*)` over a newer index correctly and answered
+        // the `MATCH` with nothing. The refusal belongs on the one query whose
+        // answer depends on the dictionary. See `layout.rs`.
+        super::layout::readable(context, &self.shadows, &self.pending, &self.table)?;
         let Some(pattern) = plan.arguments.first().and_then(text_of) else {
             return Ok(());
         };

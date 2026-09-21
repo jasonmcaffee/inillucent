@@ -125,7 +125,7 @@ the two numbers and what was expected of them.
 
 ## 2. The shape of the suite
 
-**216 test targets, 3,298 tests, in ten tiers.** A target is one binary
+**221 test targets, 3,493 tests, in ten tiers.** A target is one binary
 `cargo test` builds; a tier is a band you can ask for by name. Every target is
 in exactly one tier, so the tiers partition the suite rather than overlapping
 it. (Was 129 targets, 2,336 tests when this document was written; task-1911's
@@ -151,15 +151,15 @@ of a run rather than of the map and is not checked here.
 | tier | targets | tests | what it is for |
 |---|---:|---:|---|
 | `smoke` | 1 | 8 | the ten-second answer: a real file opened, written, reopened, read |
-| `unit` | 31 | 1,388 | every crate's own `#[cfg(test)]` modules |
-| `engine` | 65 | 364 | SQL and storage behaviour over real database files |
+| `unit` | 31 | 1,395 | every crate's own `#[cfg(test)]` modules |
+| `engine` | 66 | 376 | SQL and storage behaviour over real database files |
 | `differential` | 33 | 309 | graded against the pinned SQLite 3.53.4 |
 | `durability` | 31 | 216 | crashes, injected faults, corruption and concurrency |
 | `e2e` | 36 | 412 | the public surfaces an application binds to, end to end |
 | `perf` | 1 | 6 | the cost guards — **runs alone**, see §5 |
 | `retrieval` | 7 | 519 | the embedding and retrieval engine, and its graded harness |
 | `tooling` | 13 | 122 | the checks that keep the repository's own rules true |
-| `nightly` | 2 | 3 | the long forms, run on a schedule rather than on a change |
+| `nightly` | 2 | 4 | the long forms, run on a schedule rather than on a change |
 
 The map that assigns them is `tests/selection.toml`, and it is data rather than
 code so that a person can read the whole arrangement in one file.

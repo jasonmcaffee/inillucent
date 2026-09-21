@@ -149,7 +149,12 @@ impl Fts5Table {
         let width = self.options.columns.len();
         let mut doclists = Vec::new();
         self.shadows.scan(context, b"data", |rowid, _| {
-            if rowid != TOTALS {
+            // The totals row and the layout record are the index's own; every
+            // other `%_data` row is a doclist an older build left behind, and
+            // those are what a wipe is for. The layout record survives because
+            // the index it describes is about to be written again by this
+            // build, in this build's layout - see `super::layout`.
+            if rowid != TOTALS && !layout::is_layout_row(rowid) {
                 doclists.push(rowid);
             }
             Ok(true)
@@ -183,6 +188,14 @@ impl Fts5Table {
         for rowid in sizes {
             self.shadows.delete_row(context, b"docsize", rowid)?;
         }
+        // **Stamped here as well as at `CREATE`, because this is the other
+        // place the whole index is written from scratch.** An index an older
+        // build wrote has no layout record; `rebuild` reads every row out of
+        // `%_content` and writes the dictionary again from nothing, so after
+        // it the claim the record makes is true of every row - which is
+        // exactly the claim an ordinary insert cannot make. It is also how an
+        // application gets the record onto a file that predates it.
+        layout::stamp(context, &self.shadows)?;
         put_totals(context, &self.shadows, &Totals::empty(width))
     }
 
@@ -468,9 +481,7 @@ impl Fts5Table {
                         Some(TermValue::Page(page)) => Some(page),
                         _ => None,
                     };
-                    let Some(bytes) = resolve_doclist(context, &self.shadows, &row)? else {
-                        continue;
-                    };
+                    let bytes = require_doclist(context, &self.shadows, term, &row)?;
                     (bytes, legacy_page)
                 }
             };

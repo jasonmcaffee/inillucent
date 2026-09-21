@@ -1011,6 +1011,23 @@ name = "fts5_legacy_layout"
 tier = "engine"
 covers = ["inillucent-ext"]
 
+# An index this build cannot read refuses by name rather than answering no rows
+# (task-2053). It covers `inillucent-search` as well as `inillucent-ext`,
+# because the FTS5 layout record and the search index's format number are the
+# same question asked of the two halves of the file, and a change to either has
+# to run both. No `requires`: one case spawns the command line, which the
+# workspace builds, and the rest drive the library.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "format_refusal"
+tier = "engine"
+covers = ["inillucent-ext", "inillucent-search", "inillucent-cli"]
+# One of the eleven cases spawns `inillucent query` and reads its exit code,
+# because exit 3 for a layout this build has not got is the part of the refusal
+# an application actually has - the other ten drive the library.
+requires = ["programs"]
+
 [[target]]
 package = "inillucent-compat"
 kind = "test"

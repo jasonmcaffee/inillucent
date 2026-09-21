@@ -97,6 +97,52 @@ would have noticed it moving. `inillucent-prepareperf` prints both columns, and
 `crates/inillucent/tests/budget.rs` now counts what a statement outside a transaction reads so the
 cost cannot come back unnoticed.
 
+**An index a build cannot read is refused by name rather than answered with no rows.** The FTS5
+index layout changed in 0.1.2, and 0.1.1 reads a file a later build wrote almost perfectly: the
+tables, the `WITHOUT ROWID` entries, a blob stored over a page, the row that exists only in the log,
+`SELECT count(*) FROM note_fts` as 5 and `SELECT rowid, title FROM note_fts` as all five rows. The
+one thing it gets wrong is `WHERE note_fts MATCH 'segment'`, which comes back as no rows at all -
+because it read the new doclist blob as a page number, found no such page, and a term with no
+doclist is a term in no documents. That is the worst answer a compatibility break can give: an empty
+result set is a legitimate answer to a search, so an application has nothing to tell it apart from
+"there are no matching documents".
+
+0.1.1 is published and its answer can never be fixed. What changes is the next one. An FTS5 index
+written from this release on carries a layout record - one `%_data` row holding a magic, the layout
+number and the release that wrote it - and a reader that meets a layout it has not got refuses with
+the status `unsupported`, naming both, on `MATCH`, on any write, and on `fts5vocab`. The record is
+stamped at `CREATE VIRTUAL TABLE` and by `rebuild` and `delete-all`, the two places the whole index
+is written from scratch, and deliberately not by an ordinary insert: a file 0.1.2 through 0.1.7 wrote
+has no record and may hold rows in both layouts at once, so a record stamped on the next write would
+claim something the file cannot support. A missing record means "some layout up to and including
+this build's" and is read exactly as it was, so no existing database changes behaviour.
+
+An `inillucent_search` table's `%_config` gains a `writer` row beside the format number it already
+carried, and its refusal now carries `unsupported` and names that release. The format was also
+checked only in `begin`, which is the start of a write transaction, so an ordinary `SELECT` against a
+table a later build wrote was answered out of a store whose format had never been checked; the read
+path asks now. The database file's own format version already answered this way and is what the two
+were made to match.
+
+Two quieter instances of the same defect went with it. A `%_idx` row naming a `%_data` row that is
+not there, or holding a third column that is neither a doclist nor a page number, resolved to "no
+doclist", and every reader but `integrity-check` read that as "this term is in no documents" - so a
+search over an index full of documents answered nothing, with no error anywhere. `term_row` was
+worse: it staged the unreadable doclist as an empty one and the flush wrote it back, so a write to
+the table destroyed the postings it could not read. Both refuse now.
+
+`docs/relational-architecture.md` §5a states the promise for all three layouts in one table.
+`crates/inillucent-compat/tests/format_refusal.rs` manufactures a record from a build that does not
+exist and checks each refusal, including the command line's exit code.
+
+**Every published release can search a graph this release wrote, and nothing was asking.**
+`tests/interop/verify.sql` asks an `inillucent_search` table for its rows and its content, which is a
+read of `%_content`; it never asked it to search, so no term query, no ranked query and no
+nearest-neighbour query had been run by an older binary against a graph a newer build wrote - the
+half of the file SQLite has no equivalent of, and the half a format change is most likely to move.
+`tests/interop/retrieval.sql` asks it now, of an `approximate` table over twelve vectors compacted
+into a stored generation, and 0.1.1 through 0.1.7 answer every question identically to this build.
+
 **Known not to do.** Seven of the thirty measured workloads are still slower
 than SQLite: compiling `SELECT 1` on every call, building an FTS5 index, a
 2,000 row insert batch, a join over an index range, an autocommit `UPDATE` of

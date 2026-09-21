@@ -36,7 +36,7 @@
 //! FTS5's convention and there is no reason to have two.
 
 use std::collections::BTreeSet;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use inillucent_base::DbResult;
 use inillucent_value::Value;
@@ -99,12 +99,32 @@ impl Module for SearchModule {
             options: declared,
             store,
             cache: Arc::new(Cache::new()),
+            stored_config: Arc::new(OnceLock::new()),
             creating,
             pending: None,
             marks: Vec::new(),
             touched: false,
         }))
     }
+}
+
+/// Refuses when the stored configuration names a format this build does not
+/// read, reading it the first time and remembering it after.
+///
+/// @param context - the running statement
+/// @param store - the table's shadow tables
+/// @param stored - where this connection keeps what `%_config` said
+fn readable_here(
+    context: &mut Context<'_>,
+    store: &Store,
+    stored: &OnceLock<Vec<(String, String)>>,
+) -> DbResult<()> {
+    if let Some(rows) = stored.get() {
+        return options::readable(rows);
+    }
+    let rows = store.read_config(context)?;
+    let held = stored.get_or_init(|| rows);
+    options::readable(held)
 }
 
 /// Returns the columns a declaration produces, visible ones first.
@@ -131,6 +151,16 @@ struct SearchTable {
     store: Store,
     declaration: Declaration,
     cache: Arc<Cache>,
+    /// The rows `%_config` holds, read the first time anything asks.
+    ///
+    /// **Read once per connection rather than once per query** (task-2053).
+    /// The question it answers - which format this table is in - is a property
+    /// of the file, and it cannot change under a connection without another
+    /// build writing to the same file at the same time. Reading it per query
+    /// would put a scan of `%_config` in front of every search. It is shared
+    /// with the cursors the table opens, which is why it is an `Arc`: the read
+    /// path is the one that was not asking.
+    stored_config: Arc<OnceLock<Vec<(String, String)>>>,
     creating: bool,
     /// The commit sequence this transaction is publishing under, once it has
     /// written anything.
@@ -1002,6 +1032,7 @@ impl VirtualTable for SearchTable {
             options: self.options.clone(),
             store: self.store.clone(),
             cache: Arc::clone(&self.cache),
+            stored_config: Arc::clone(&self.stored_config),
             query_column: self.query_column(),
             limit_column: self.limit_column(),
             vector_column: self.vector_column(),
@@ -1246,6 +1277,8 @@ struct SearchCursor {
     options: Options,
     store: Store,
     cache: Arc<Cache>,
+    /// The rows `%_config` holds, shared with the table that opened this.
+    stored_config: Arc<OnceLock<Vec<(String, String)>>>,
     query_column: i32,
     limit_column: i32,
     vector_column: i32,
@@ -1276,6 +1309,11 @@ impl SearchCursor {
 impl VirtualCursor for SearchCursor {
     /// Positions the cursor on the first row of a plan.
     fn filter(&mut self, context: &mut Context<'_>, plan: &FilterPlan) -> DbResult<()> {
+        // **A read asks which format the table is in, and it did not**
+        // (task-2053). `from_config` runs in `begin`, which only a write
+        // reaches, so every `SELECT` against a table a later build wrote was
+        // answered out of a store whose layout had not been checked.
+        readable_here(context, &self.store, &self.stored_config)?;
         self.rows.clear();
         self.at = 0;
         self.current = None;

@@ -307,6 +307,32 @@ The word index and the compressed embeddings are not stored, because both can be
 
 Measured: saving takes 0.3 seconds, and reopening a saved index takes **5.3 seconds** against 175 seconds to rebuild from scratch.
 
+### Inside a database, and what a newer build's index does to an older one
+
+An `inillucent_search` table is not that directory. It lives in five shadow tables in the `.rdb`
+itself - `%_config`, `%_content`, `%_delta`, `%_gen` and `%_state` - and it carries its own format
+number in the `format` row of `%_config`, beside a `writer` row naming the release that wrote it.
+
+A build that meets a format it does not read **refuses the table by name**, on every read and every
+write, with the status `unsupported`: `the table is in format N, written by inillucent X.Y.Z, and
+this build reads format 1`. The command line exits 3 and a driver reports `unsupported`, which is
+the same answer every other "this engine has not built that" gives. It refuses the table rather than
+the database, because a database has to open before the table in it can be dropped.
+
+**Refusing is the requirement, not a nicety.** A retrieval engine that cannot read its index and
+answers an empty result set has told the application the documents do not exist, and an empty result
+is a legitimate answer to a search - so there is nothing for the application to tell the two apart
+by. That is exactly what happened to the full-text half between 0.1.1 and 0.1.2;
+`docs/relational-architecture.md` §5a records it and states the promise for every layout in the
+file.
+
+`crates/inillucent-compat/tests/release_format_history.rs` is what holds it. It writes a database
+with the current build, builds an `inillucent_search` table over twelve vectors and compacts it into
+a stored generation, and then runs every published release's own downloaded binary against that file
+- a term query, a ranked query and a nearest-neighbour query each time - and compares what each
+release answers with what this build answers on the same file. Every release from 0.1.1 on answers
+all three identically, so the retrieval format has not moved.
+
 ## 12. How any of this is known to work
 
 Every number in this document was measured by a test suite built alongside the engine, in a second program called `inillucent-bench`. It drives inillucent and PostgreSQL through one shared interface, so no measurement can accidentally be taken of only one of them.

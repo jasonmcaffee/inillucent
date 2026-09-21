@@ -468,3 +468,29 @@ they are touching do not collide; two that have not, do.
   `Copy-Item -Recurse C:\jason\dev\inillucent\.sqlite-ref <worktree>\.sqlite-ref` costs about four
   seconds and 40 MB and cannot do that, and the directory goes when the worktree is retired.
   (task-2061)
+- **What `--strict` counts as a prerequisite failure on this box, in one place.** The list above is
+  the same one task-2053 met, plus `inillucent-bench` (`onnx`). To see what one of them actually
+  needs, run that target's own binary with `INILLUCENT_STRICT=1` - each prints the command that
+  would fix it. (task-2053)
+- **The crash campaigns rewrite `tests/crash/*.txt` and `*.tsv` with different line endings.**
+  Eighteen tracked files show as modified after any run that reaches `wal_crash`, `vacuum_crash`
+  and their kin, with zero content change - `git diff --numstat` on them prints nothing. Restore
+  them by name before committing rather than carrying them into a ticket. (task-2053)
+- **A new `tests/*.rs` target that can skip needs `requires` in the same commit.**
+  `selection::every_target_that_can_skip_declares_it_and_vice_versa` reads the source for a call to
+  the skip helper - which includes `let Some(binary) = program("inillucent") else { return; }` -
+  and fails if the row declares no prerequisite. Adding one then moves the count in
+  `docs/repository.md`'s `<!-- requires:begin -->` table, which
+  `documentation::the_prerequisite_table_names_every_value_in_the_map` checks, and a new row in the
+  `engine` tier moves the per-tier table in `tests/inillucent-testing-tdd.md`. Three files, and the
+  build tells you about them one at a time. (task-2053)
+- **`node tools/doc-facts/check.mjs` needs no release build for the two counts about the suite.**
+  It reports `test targets` and `selection map rows` from `tests/selection.toml` alone, and both
+  were stale by 3 and 24 before task-2053. Run it after touching `selection.toml`; the seven
+  `instrument could not answer` lines about verbs and MCP tools need
+  `cargo build --release -p inillucent-cli` and are not about your change. (task-2053)
+- **An FTS5 index carries a layout record now, in `%_data` row 2.** `fts5/layout.rs` writes it at
+  `CREATE VIRTUAL TABLE` and in `wipe_index`, and nowhere else on purpose - an ordinary insert must
+  not stamp one, because a file 0.1.2 through 0.1.7 wrote may hold rows in both layouts at once. If
+  you change the dictionary layout again, raise `LAYOUT` in the same commit, or a build that cannot
+  read what you wrote will answer no rows for it rather than refusing. (task-2053)

@@ -282,10 +282,34 @@ held_by = [
 [[escape]]
 ref = "task-2053"
 surface = "fts5, the file format, upgrades"
-what = "0.1.1 answers `SELECT rowid FROM note_fts WHERE note_fts MATCH 'segment'` with no rows at all against a file a later build wrote - the FTS5 index layout changed in 0.1.2 and nothing in the index says which layout wrote it, so an older build answers an empty result set rather than refusing by name; every other question about the same file, including `count(*)` over the same FTS5 table, it answers correctly"
+what = "0.1.1 answers `SELECT rowid FROM note_fts WHERE note_fts MATCH 'segment'` with no rows at all against a file a later build wrote - the FTS5 index layout changed in 0.1.2 and nothing in the index says which layout wrote it, so an older build answers an empty result set rather than refusing by name; every other question about the same file, including `count(*)` over the same FTS5 table, it answers correctly. 0.1.1 is published and its answer can never be fixed; what the ticket changed is the next one - an index carries a layout record now, and a reader that meets a layout it has not got refuses as `unsupported` naming the layout and the release"
 found_by = "running each downloaded release against a database the current build wrote, in release_format_history.rs"
 held_by = [
   "inillucent-compat::release_format_history::every_released_binary_reads_what_this_build_writes",
+  "inillucent-compat::format_refusal::a_search_over_a_later_layout_refuses_rather_than_answering_no_rows",
+  "inillucent-compat::format_refusal::the_command_line_exits_three_for_a_later_layout",
+]
+
+# ---------------------------------------------------------------------------
+# The same silence, one layer in.
+# ---------------------------------------------------------------------------
+
+[[escape]]
+ref = "task-2053"
+surface = "fts5, the term dictionary"
+what = "a `%_idx` row naming a `%_data` row that is not there, or holding a third column that is neither a doclist nor a page number, resolved to `no doclist` - and every reader but `integrity-check` read that as `this term is in no documents`, so a search over an index full of documents answered nothing with no error anywhere. `term_row` was worse: it staged the unreadable doclist as an empty one and the flush wrote it back, so a write to the table destroyed the postings it could not read"
+found_by = "asking, while fixing the layout silence above, where else this engine answers `no rows` for an index it cannot read"
+held_by = [
+  "inillucent-compat::format_refusal::a_dictionary_row_pointing_at_nothing_refuses",
+]
+
+[[escape]]
+ref = "task-2053"
+surface = "inillucent_search, the stored configuration"
+what = "the format number in an `inillucent_search` table's `%_config` was checked only in `begin`, which is the start of a write transaction - so an ordinary `SELECT` against a table a later build wrote was answered out of a store whose format had never been checked. The refusal it did make carried no status, so a driver reported `upgrade inillucent` the same way it reports a syntax mistake, and named no release to install"
+found_by = "writing a case that opened a search table whose stored format had been raised, and watching it answer rows"
+held_by = [
+  "inillucent-compat::format_refusal::a_search_index_in_a_later_format_refuses_as_unsupported",
 ]
 
 [[escape]]

@@ -333,6 +333,13 @@ impl Options {
             .collect();
         vec![
             ("format".to_string(), FORMAT.to_string()),
+            // **The release that wrote the table, beside the format number it
+            // wrote** (task-2053). The number alone tells a reader that it
+            // cannot read the table; it does not tell anybody what to install.
+            // An older build reads this row as one of the options it does not
+            // understand and ignores it, which is what every `%_config` key
+            // added after a table was created has always done here.
+            ("writer".to_string(), env!("CARGO_PKG_VERSION").to_string()),
             ("columns".to_string(), names.join(",")),
             ("dims".to_string(), self.dims.to_string()),
             ("metric".to_string(), self.metric.name().to_string()),
@@ -520,6 +527,71 @@ fn positive(value: &str, name: &str) -> DbResult<usize> {
     Ok(held)
 }
 
+/// Refuses when the stored configuration names a format this build does not
+/// read.
+///
+/// **Its own function because the read path has to ask it too** (task-2053).
+/// [`from_config`] is called from `begin`, which is the start of a write
+/// transaction - so an ordinary `SELECT` against a table written by a later
+/// build never asked the question at all, and answered out of an index whose
+/// layout it had not checked. That is the same silence the FTS5 layout record
+/// exists to end, and it is worse here, because the answer would have looked
+/// like rows rather than like none.
+///
+/// @param rows - the key/value pairs read from `%_config`
+pub fn readable(rows: &[(String, String)]) -> DbResult<()> {
+    let find = |key: &str| {
+        rows.iter()
+            .find(|(name, _)| name == key)
+            .map(|(_, value)| value.as_str())
+    };
+    let Some(format) = find("format") else {
+        return Ok(());
+    };
+    if format.trim() == FORMAT.to_string() {
+        return Ok(());
+    }
+    Err(wrong_format(format.trim(), find("writer")))
+}
+
+/// Returns the refusal a table written in another format reports.
+///
+/// **`unsupported` when the table is newer, and it names the release that wrote
+/// it** (task-2053). It used to be a plain statement error with no status, so a
+/// driver reported it the same way it reports a syntax mistake and a caller had
+/// to match on the sentence to tell "upgrade inillucent" from "your SQL is
+/// wrong". This is the answer `crates/inillucent-pool/src/meta.rs` gives
+/// for the database file itself, in the same words, because a caller meeting
+/// one of them should not have to learn a second shape to meet the other.
+///
+/// A *lower* number is a format this build has dropped, and there is none:
+/// format 1 is the first. It is named separately rather than folded in, because
+/// a zero there is a `%_config` row that has been overwritten rather than a
+/// table from the future.
+///
+/// @param found - the format the table's `%_config` carries
+/// @param writer - the release the table's `%_config` names, when it names one
+fn wrong_format(found: &str, writer: Option<&str>) -> inillucent_base::DbError {
+    let by = match writer.filter(|named| !named.is_empty()) {
+        Some(named) => format!(", written by inillucent {named}"),
+        None => String::new(),
+    };
+    let newer = found.parse::<i64>().is_ok_and(|number| number > FORMAT);
+    if !newer {
+        return failure(format!(
+            "inillucent_search: the table is in format {found}{by} and this build reads format \
+             {FORMAT}, and there is no earlier format: the configuration has been overwritten"
+        ));
+    }
+    let said = format!(
+        "inillucent_search: the table is in format {found}{by} and this build reads format \
+         {FORMAT}"
+    );
+    failure(format!("{said}; upgrade inillucent to open it"))
+        .with_message(said)
+        .with_unsupported(format!("a search index in format {found}"))
+}
+
 /// Reads the options back out of the rows `%_config` holds.
 ///
 /// The stored rows win over the `CREATE` text where the two disagree, because
@@ -532,13 +604,7 @@ pub fn from_config(rows: &[(String, String)], fallback: &Options) -> DbResult<Op
             .find(|(name, _)| name == key)
             .map(|(_, value)| value.clone())
     };
-    if let Some(format) = find("format") {
-        if format.trim() != FORMAT.to_string() {
-            return Err(failure(format!(
-                "inillucent_search: the table was written in format {format}, this build reads format {FORMAT}"
-            )));
-        }
-    }
+    readable(rows)?;
     let columns = match find("columns") {
         Some(list) if !list.is_empty() => list
             .split(',')
@@ -743,6 +809,67 @@ mod tests {
         let fallback = parse(&[b"body".to_vec()]).expect("parsed");
         let stored = vec![("format".to_string(), "99".to_string())];
         assert!(from_config(&stored, &fallback).is_err());
+    }
+
+    /// A table from a later format refuses as `unsupported` and names the
+    /// release that wrote it.
+    ///
+    /// **The status is the claim, not the sentence** (task-2053). A caller
+    /// telling "upgrade inillucent" from "your SQL is wrong" reads
+    /// `DbError::unsupported()`; before this the refusal carried none, so the
+    /// only way to tell was to match on the words.
+    #[test]
+    fn a_later_format_refuses_as_unsupported_and_names_the_release() {
+        let fallback = parse(&[b"body".to_vec()]).expect("parsed");
+        let stored = vec![
+            ("format".to_string(), "2".to_string()),
+            ("writer".to_string(), "9.9.9".to_string()),
+        ];
+        let refused = from_config(&stored, &fallback).expect_err("a later format is refused");
+        assert_eq!(
+            refused.unsupported(),
+            Some("a search index in format 2"),
+            "the refusal carries the status, so the command line exits 3"
+        );
+        let message = refused.message();
+        assert!(message.contains("format 2"), "{message}");
+        assert!(
+            message.contains("9.9.9"),
+            "the refusal names the release to install: {message}"
+        );
+    }
+
+    /// A format below this build's is corruption, not a newer table.
+    ///
+    /// Format 1 is the first there is, so a zero or a negative number in
+    /// `%_config` is a row that has been overwritten - and answering
+    /// `unsupported` there would send somebody looking for a release that does
+    /// not exist.
+    #[test]
+    fn a_format_below_this_one_is_not_reported_as_newer() {
+        let fallback = parse(&[b"body".to_vec()]).expect("parsed");
+        let stored = vec![("format".to_string(), "0".to_string())];
+        let refused = from_config(&stored, &fallback).expect_err("format zero is refused");
+        assert_eq!(
+            refused.unsupported(),
+            None,
+            "a lower number is not a build to upgrade to"
+        );
+    }
+
+    /// The configuration a table is created with records which release wrote
+    /// it, so the refusal above has a release to name.
+    #[test]
+    fn the_configuration_records_the_release_that_wrote_it() {
+        let options = parse(&[b"body".to_vec()]).expect("parsed");
+        assert_eq!(
+            options
+                .config_rows()
+                .iter()
+                .find(|(key, _)| key == "writer")
+                .map(|(_, value)| value.as_str()),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
     }
 
     /// The default compaction trigger is the constant floor, at any corpus

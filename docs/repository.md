@@ -106,7 +106,7 @@ If you do use `cargo test --workspace`, pass `--no-fail-fast`. Without it the ru
 failing binary, and has reported about a quarter of the suite.
 
 **One test fails today, and it is a pinned checksum rather than a behaviour.**
-`inillucent-testrun --strict` reports 1 failed over the 196 rows in `tests/selection.toml`:
+`inillucent-testrun --strict` reports 1 failed over the 221 rows in `tests/selection.toml`:
 `harness::the_retrieval_baseline_is_unchanged`, which pins the retrieval engine's source files by
 checksum so that work on the relational engine cannot disturb them. task-2000's design 9 changed three
 of those files deliberately - the distance kernel, the graph build and the index - and the amendment
@@ -129,7 +129,7 @@ table.
 | prerequisite | rows | what provides it |
 |---|---:|---|
 | `oracle` | 31 | the pinned SQLite 3.53.4 comparison process: `pwsh tools/sqlite-reference.ps1`, `bash tools/sqlite-reference.sh` |
-| `programs` | 22 | the command surface built into this profile's target directory: `cargo build -p inillucent-cli` |
+| `programs` | 23 | the command surface built into this profile's target directory: `cargo build -p inillucent-cli` |
 | `shell` | 7 | the pinned `sqlite3` 3.53.4 shell, from the same two scripts as the oracle |
 | `tracked-fixtures` | 5 | the files under `compat/fixtures/`, which are in the repository - declared for a checkout that has lost them, not for a fresh clone |
 | `onnx` | 3 | ONNX Runtime and the embedding weights: `inillucent setup-embeddings all` |
@@ -170,9 +170,9 @@ already removed the cause and nobody re-ran it, which is recorded in
 
 ## What the tests cover
 
-3,298 tests across 216 test targets in the workspace, in these classes:
+3,493 tests across 221 test targets in the workspace, in these classes:
 
-The 216 is the `[[target]]` row count in `tests/selection.toml`, which is what
+The 221 is the `[[target]]` row count in `tests/selection.toml`, which is what
 `tools/doc-facts/check.mjs` compares this sentence against and what the runner is asked to run.
 The number of `#[test]` attributes in the tree is 3,240, and it differs from the run's count in
 both directions. `scenario!` writes six tests from one line, so a story file holds no attribute at

@@ -310,6 +310,80 @@ have written it, and refused rather than misread everywhere it could not. `Exten
 `crates/inillucent-tree/src/leaf/layout.rs` are the writer's and the reader's halves of the rule,
 written beside each other because a disagreement between them is a wrong value rather than an error.
 
+### The layouts inside the file, and what they promise separately
+
+The format version at byte 8 covers the pages, the records and the header. It does **not** cover
+what a virtual table keeps inside its own shadow tables, and treating it as though it did is what
+made the one compatibility break this project has had invisible.
+
+The break: the FTS5 index layout changed in 0.1.2. `%_idx`'s third column used to hold an integer
+naming the `%_data` row a term's doclist lived in, and now it holds the doclist itself. Nothing
+about the page format moved, so the format version correctly stayed at 1 - and 0.1.1 opens a file a
+later build wrote, reads its tables, reads its `WITHOUT ROWID` entries, reads a blob stored over a
+page, reads the row that exists only in the log, reads `SELECT count(*) FROM note_fts` as 5 and
+`SELECT rowid, title FROM note_fts` as all five rows. The only thing it gets wrong is
+`WHERE note_fts MATCH 'segment'`, which comes back as **no rows at all**: it read the doclist blob
+as a page number, found no such page, and a term with no doclist is a term in no documents.
+
+That is the worst answer a compatibility break can give. An empty result set is a legitimate answer
+to a search, so an application has nothing to tell it apart from "there are no matching documents".
+0.1.1 is published and its answer can never be fixed. What task-2053 changed is the next one.
+
+**Every durable layout in the file now names itself, and a reader that meets one it has not got
+refuses with the status `unsupported` and names the release that wrote it.** Three places, three
+records:
+
+| what | where the number is | what a newer number does |
+|---|---|---|
+| the pages, records and header | byte 8 of the meta page, `crates/inillucent-pool/src/meta.rs` | the database will not open: `this database is format version N and this build reads version 1; upgrade inillucent to open it` |
+| an FTS5 index | a `%_data` row, `crates/inillucent-ext/src/vtab/fts5/layout.rs` | the database opens and the table's rows read; `MATCH`, any write, and `fts5vocab` refuse with `the full-text index on T is in layout N, written by inillucent X.Y.Z, and this build reads layouts up to 2` |
+| an `inillucent_search` index | the `format` row of `%_config`, `crates/inillucent-search/src/options.rs` | the database opens; every read and every write of the table refuses with `the table is in format N, written by inillucent X.Y.Z, and this build reads format 1` |
+
+All three carry `unsupported`, so the command line exits 3 and a driver reports the status
+`unsupported` - the same answer every other "this engine has not built that" gives, and the reason
+an application can tell "upgrade and try again" from "your query is wrong", and either of those from
+"there are no matching rows".
+
+The two virtual table records refuse the *table* rather than the *file*, and that is deliberate: a
+database has to open before the table in it can be dropped, and a database holding one index a
+reader cannot use is still a database whose other tables it can read perfectly well.
+
+**A missing record means "some layout up to and including this build's", and is read rather than
+refused.** Every file published before task-2053 has no FTS5 layout record, and a reader that
+refused them would refuse every database in existence. The FTS5 record is written at
+`CREATE VIRTUAL TABLE` and again by `rebuild` and `delete-all` - the two places the whole index is
+written from scratch - and deliberately **not** by an ordinary insert, because a file 0.1.2 through
+0.1.7 wrote may hold rows in both layouts at once and a record stamped on the next write would be
+claiming something the file cannot support. Those mixed files are read by the per-row rule in
+`fts5/index.rs::term_value`, which decides from the value's own type.
+
+### The promise, in four sentences
+
+- **A point release reads every file an earlier point release of the same minor version wrote**, and
+  every layout inside it.
+- **A build reads a file written by any earlier build, or refuses it by name.** There is no version
+  this project has dropped: the file format version has been 1 since the first release. How far
+  back that is *checked* is 0.1.1, the oldest release with a fixture in `tests/interop/` - 0.1.0 was
+  withdrawn the day after it was published and nobody is running it.
+- **A build reads a file written by a later build where the later build changed nothing, and refuses
+  it by name where it did.** That is the direction the records above exist for, and it is the
+  direction that costs somebody their afternoon: an application that upgrades one machine and not
+  another has both builds pointed at the same file.
+- **A layout change is a minor version with a documented migration**, and the migration is
+  `inillucent-migrate` reading the older file and writing a new one, rather than an upgrade in place
+  that a crash can catch halfway.
+
+### What holds the promise
+
+`crates/inillucent-compat/tests/release_format_history.rs` runs every published release's own
+downloaded binary against a database this build just wrote, and asks it `tests/interop/verify.sql`
+and `tests/interop/retrieval.sql`. `tests/interop/<version>/` holds a database each release's own
+binary wrote, which the current build is asked the same questions of. The 0.1.1 `MATCH` difference
+is a row in that file's `KNOWN_GAPS`, asserted to **still happen** - a published binary's answer can
+never be fixed, so a change that made 0.1.1 read the new index turns the suite red and gets the row
+deleted. `crates/inillucent-compat/tests/format_refusal.rs` manufactures a record from a build that
+does not exist and checks each refusal, including through the command line's exit code.
+
 ---
 
 ## 6. Backup, restore and copies
