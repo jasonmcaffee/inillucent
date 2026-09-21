@@ -72,7 +72,9 @@ inillucent --db app.rdb backup app-backup.rdb     # a copy of the file
 ```
 
 `export` takes csv, json, tabs, markdown, insert, quote, line or html. With no `--out` the rows come
-back in the result instead of going to a file.
+back in the result instead of going to a file. With `--out` they are in the file and not in the
+result as well, and the result says where it wrote, how many rows went in and how many bytes the
+file holds — so `total` against the row count you expected is the check worth making.
 
 ## Writing, when you have to
 

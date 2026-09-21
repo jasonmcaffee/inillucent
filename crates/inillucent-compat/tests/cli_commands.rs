@@ -247,6 +247,57 @@ fn run_drives_the_shell_including_dot_commands() {
     assert_eq!(text_field(&ran.stdout, "command"), "run", "{}", ran.stdout);
 }
 
+/// A `.once` in a script handed to `run` writes its file.
+///
+/// **The defect `export --out` was reported for was the shell's, not the
+/// export verb's (task-2044), and this is where the rest of it showed.**
+/// `run` collects what the script printed, `.once` opens a file, and `say`
+/// preferred the collecting caller - so the file was created, stayed empty,
+/// and the rows came back in `text` instead, with nothing reporting that the
+/// redirect the script asked for had not happened. Any command that collects
+/// output from a script a caller wrote has the same shape, which is why this
+/// case is on `run` rather than only on `export`.
+#[test]
+fn run_writes_the_file_a_once_in_the_script_names() {
+    let Some(binary) = program("inillucent") else {
+        return;
+    };
+    let database = populated(&binary, "run-once");
+    let file = database
+        .parent()
+        .map(|directory| directory.join("redirected.txt"))
+        .expect("the fixture is in a directory");
+    let script = format!(
+        ".once \"{}\"\nSELECT body FROM note ORDER BY id;\n.print done",
+        file.to_string_lossy()
+    );
+    let ran = run(
+        &binary,
+        &[
+            "--db",
+            &database.to_string_lossy(),
+            "run",
+            &script,
+            "--output",
+            "json",
+        ],
+    );
+    succeeded("run", &ran);
+    let found = std::fs::read_to_string(&file)
+        .unwrap_or_else(|error| panic!("`.once` through `run` wrote no file: {error}"));
+    assert!(
+        found.contains("hello") && found.contains("goodbye"),
+        "`.once` through `run` left the file without the rows in it: {found:?}"
+    );
+    // `.once` covers the next statement only, so what the caller collected is
+    // the line printed after it and not the rows.
+    let printed = text_field(&ran.stdout, "text");
+    assert!(
+        printed.contains("done") && !printed.contains("goodbye"),
+        "the redirected rows came back in the report as well:\n{printed}"
+    );
+}
+
 // --- the verbs that describe the database -----------------------------------
 
 /// `create` makes a file, and says which one.
@@ -598,7 +649,16 @@ fn import_loads_a_csv_file() {
     );
 }
 
-/// `export` writes the rows it was asked for, in the format it was asked for.
+/// `export` with no file answers the rows it was asked for, in the format it
+/// was asked for.
+///
+/// **This case passed the whole time `export --out` wrote nothing
+/// (task-2044).** It reads the `text` field, and `text` was where the rows
+/// went whether or not a file had been named - the shell's `.once` opened the
+/// file and the collecting caller took every line - so the one assertion here
+/// was true in exactly the arrangement that was broken. A file is asserted on
+/// by reading the file, which is what
+/// `export_to_a_file_writes_the_rows_in_every_format` below does.
 #[test]
 fn export_writes_the_rows_in_the_format_asked_for() {
     let Some(binary) = program("inillucent") else {
@@ -624,6 +684,197 @@ fn export_writes_the_rows_in_the_format_asked_for() {
     assert!(
         written.contains("id,body") && written.contains("hello"),
         "`export` did not produce the table as CSV:\n{written}"
+    );
+}
+
+/// `export --out` puts the rows in the file, in every format it offers.
+///
+/// **Read back off the disk, never out of the command's own report.** The
+/// report said `"ok": true` with `"wrote": "<path>"` over a zero byte file in
+/// all eight formats, so a case that believes what the command says about
+/// itself is the case that cannot see this defect. What each format is checked
+/// for is a value from the row - `goodbye` is in the table and in no header,
+/// no rule and no column name - and the file's size, because an empty file
+/// contains every substring nobody looked for.
+#[test]
+fn export_to_a_file_writes_the_rows_in_every_format() {
+    let Some(binary) = program("inillucent") else {
+        return;
+    };
+    let database = populated(&binary, "export-out");
+    // The database's own directory, not a second `area` call: `area` empties
+    // what it returns, and asking for this one again would delete the fixture
+    // that was just built in it.
+    let directory = database
+        .parent()
+        .map(Path::to_path_buf)
+        .expect("the fixture is in a directory");
+    // Every format the verb accepts, and for each one something that is only
+    // in the rows. `line` writes `body = goodbye`, `insert` writes it as a
+    // quoted literal, and the drawn modes pad it, so the value alone is what
+    // they have in common.
+    for format in [
+        "csv", "json", "tabs", "markdown", "insert", "quote", "line", "html",
+    ] {
+        let file = directory.join(format!("rows.{format}"));
+        let named = file.to_string_lossy().into_owned();
+        let ran = run(
+            &binary,
+            &[
+                "--db",
+                &database.to_string_lossy(),
+                "export",
+                "--table",
+                "note",
+                "--out",
+                &named,
+                "--format",
+                format,
+                "--output",
+                "json",
+            ],
+        );
+        succeeded("export", &ran);
+        let found = std::fs::read_to_string(&file)
+            .unwrap_or_else(|error| panic!("`export --format {format}` wrote no file: {error}"));
+        assert!(
+            !found.is_empty(),
+            "`export --format {format}` created the file and left it empty, while reporting:\n{}",
+            ran.stdout
+        );
+        assert!(
+            found.contains("goodbye") && found.contains("hello"),
+            "`export --format {format}` wrote a file without the rows in it:\n{found}"
+        );
+        // The count in the report is the count of rows, not of lines: `line`
+        // mode writes two lines to the row and `markdown` writes a rule.
+        assert_eq!(
+            number_field(&ran.stdout, "total"),
+            2.0,
+            "`export --format {format}` did not report the two rows it wrote:\n{}",
+            ran.stdout
+        );
+        assert_eq!(
+            number_field(&ran.stdout, "bytes"),
+            found.len() as f64,
+            "`export --format {format}` reported a size the file does not have:\n{}",
+            ran.stdout
+        );
+        // And the rows are in the file rather than in both places. A million
+        // row export that also carried a million rows back through the report
+        // is a copy of the table nobody asked for.
+        let reported = text_field(&ran.stdout, "text");
+        assert!(
+            !reported.contains("goodbye"),
+            "`export --format {format}` repeated the rows in its report as well as writing \
+             them:\n{reported}"
+        );
+        assert!(
+            reported.contains(&named),
+            "`export --format {format}` did not say where it wrote:\n{reported}"
+        );
+    }
+}
+
+/// `export --out` of a table with no rows reports no rows, over a file that
+/// is not empty.
+///
+/// **The one case that separates a count of rows from a count of lines.** A
+/// header is written whatever the table holds, so an implementation that read
+/// its number back out of the file would say one row here, and the caller
+/// checking whether the export found anything would be told it had.
+#[test]
+fn export_to_a_file_of_an_empty_table_reports_no_rows() {
+    let Some(binary) = program("inillucent") else {
+        return;
+    };
+    let database = populated(&binary, "export-empty");
+    let file = database
+        .parent()
+        .map(|directory| directory.join("none.csv"))
+        .expect("the fixture is in a directory");
+    // A query that matches nothing rather than a second table, so the case
+    // needs no fixture of its own and the columns are the ones above.
+    let ran = run(
+        &binary,
+        &[
+            "--db",
+            &database.to_string_lossy(),
+            "export",
+            "--sql",
+            "SELECT id, body FROM note WHERE id < 0",
+            "--out",
+            &file.to_string_lossy(),
+            "--output",
+            "json",
+        ],
+    );
+    succeeded("export", &ran);
+    let found = std::fs::read_to_string(&file).expect("the export wrote a file");
+    assert_eq!(
+        found, "id,body\r\n",
+        "a query matching nothing wrote something other than its header: {found:?}"
+    );
+    assert_eq!(
+        number_field(&ran.stdout, "total"),
+        0.0,
+        "the header was counted as a row:\n{}",
+        ran.stdout
+    );
+    assert_eq!(
+        number_field(&ran.stdout, "bytes"),
+        found.len() as f64,
+        "the reported size is not the file's:\n{}",
+        ran.stdout
+    );
+}
+
+/// A CSV file `export --out` writes ends its records the way the reference
+/// does, with one carriage return.
+///
+/// **Measured against the pinned 3.53.4 shell rather than assumed.** Its CSV
+/// mode ends a record with CR LF and it writes that through a text-mode C
+/// stream, so what arrives on standard output on Windows is CR CR LF - and
+/// this shell reproduces that, deliberately. Its *file* is not such a stream,
+/// so `.once out.csv` on the reference holds plain CR LF. This wrote the
+/// standard-output form into the file and into the text an agent reads back,
+/// which matched neither destination of the thing it replaces.
+#[test]
+fn export_to_a_csv_file_ends_records_the_way_the_reference_does() {
+    let Some(binary) = program("inillucent") else {
+        return;
+    };
+    let database = populated(&binary, "export-crlf");
+    let file = database
+        .parent()
+        .map(|directory| directory.join("rows.csv"))
+        .expect("the fixture is in a directory");
+    let ran = run(
+        &binary,
+        &[
+            "--db",
+            &database.to_string_lossy(),
+            "export",
+            // Ordered, because the record separator is what this case is
+            // about and the order rows come back in is not: `SELECT * FROM
+            // note` is free to walk the index on `body`, and does.
+            "--sql",
+            "SELECT id, body FROM note ORDER BY id",
+            "--out",
+            &file.to_string_lossy(),
+            "--format",
+            "csv",
+            "--output",
+            "json",
+        ],
+    );
+    succeeded("export", &ran);
+    let bytes = std::fs::read(&file).expect("the export wrote a file");
+    let found = String::from_utf8_lossy(&bytes).into_owned();
+    assert_eq!(
+        found, "id,body\r\n1,hello\r\n2,goodbye\r\n",
+        "the CSV file does not hold RFC 4180 records: {:?}",
+        found
     );
 }
 

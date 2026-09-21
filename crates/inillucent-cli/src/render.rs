@@ -111,6 +111,17 @@ pub struct Layout {
     pub table: String,
     /// The column widths `.width` fixed, if any.
     pub widths: Vec<usize>,
+    /// Whether these lines are going to standard output.
+    ///
+    /// **Only `csv` reads it, and only on Windows**, where standard output is
+    /// the one destination that translates a line feed on the way out. The
+    /// bytes are in the comment at the end of [`csv`]. A file and a collecting
+    /// caller both receive exactly what is written to them, so the second
+    /// carriage return that makes standard output match the reference is wrong
+    /// for both. The shell sets this from where its own output is currently
+    /// going; the default is standard output, because that is where a `Layout`
+    /// built by hand is printed.
+    pub to_stdout: bool,
 }
 
 impl Default for Layout {
@@ -126,6 +137,7 @@ impl Default for Layout {
             // a keyword, so the statements it writes can be pasted back.
             table: "tab".to_string(),
             widths: Vec::new(),
+            to_stdout: true,
         }
     }
 }
@@ -266,18 +278,29 @@ fn csv(layout: &Layout, columns: &[String], rows: &[Vec<Value<'static>>]) -> Vec
     // The caller writes a newline after each line, so a row separator of
     // CR LF is a carriage return on the end of the line itself.
     //
-    // **And a second one on Windows**, which looks wrong and is not. The
-    // reference's row separator is CR LF, and it writes it through a text-mode
-    // C stream that translates the LF into CR LF on the way out - so the bytes
-    // a caller actually receives from `sqlite3 -csv` on this platform are
-    // **CR CR LF**, and a shell that emitted the two-byte sequence would not be
-    // byte-compatible with the thing it is replacing. Rust's `println!` does no
-    // such translation, so the translation is done here, where it can be
-    // labelled. Elsewhere the reference's own stream emits CR LF and so do we.
+    // **And a second one, but only on standard output, and only on Windows.**
+    // The reference writes its CR LF through a text-mode C stream, which
+    // translates the LF into CR LF again on the way out, and Rust's `write!`
+    // does no such translation - so emitting two bytes where the reference
+    // emits three would not be byte-compatible with the thing this replaces.
+    //
+    // The destination decides, because the reference's destinations differ.
+    // Measured against the pinned 3.53.4 shell on Windows, one row of one
+    // table, `.mode csv` with headers on:
+    //
+    // | what the reference was asked for | bytes at the end of a record |
+    // |---|---|
+    // | `sqlite3 -csv -header db "SELECT..."`, standard output | CR CR LF |
+    // | the same rows through `.once out.csv`, in the file | CR LF |
+    //
+    // Its output file is not a text-mode stream, so the file gets RFC 4180's
+    // CR LF and nothing more. This shell wrote CR CR LF into the file and into
+    // the text a collecting caller reads, which matched neither. That is what
+    // `to_stdout` is for.
     if layout.row_separator.ends_with(CRLF) {
         for line in &mut out {
             line.push(CR);
-            if cfg!(windows) {
+            if cfg!(windows) && layout.to_stdout {
                 line.push(CR);
             }
         }
@@ -697,6 +720,38 @@ mod tests {
         };
         let out = render(&layout, &columns, &rows);
         assert_eq!(out, vec!["a|b", "1|two"]);
+    }
+
+    /// A CSV record ends with one carriage return unless it is going to
+    /// standard output on Windows, where it ends with two.
+    ///
+    /// The two counts are the reference's, measured at 3.53.4: `sqlite3 -csv`
+    /// emits CR CR LF on standard output on this platform, because its row
+    /// separator is CR LF and the C stream translates the LF again; the same
+    /// rows through `.once out.csv` hold CR LF, because the file is not such a
+    /// stream. Both destinations are checked here so that a change to either
+    /// one has to be a deliberate change to this case.
+    #[test]
+    fn a_csv_record_ends_the_way_its_destination_expects() {
+        let (columns, rows) = sample();
+        let to_a_file = Layout {
+            mode: Mode::Csv,
+            separator: ",".to_string(),
+            row_separator: "\r\n".to_string(),
+            to_stdout: false,
+            ..Layout::default()
+        };
+        assert_eq!(render(&to_a_file, &columns, &rows), vec!["1,two\r"]);
+        let to_the_terminal = Layout {
+            to_stdout: true,
+            ..to_a_file
+        };
+        let expected = if cfg!(windows) {
+            "1,two\r\r"
+        } else {
+            "1,two\r"
+        };
+        assert_eq!(render(&to_the_terminal, &columns, &rows), vec![expected]);
     }
 
     /// A CSV field is quoted only when it has to be.

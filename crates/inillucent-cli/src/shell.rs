@@ -187,13 +187,29 @@ pub struct Shell {
     /// against an expected digest; this belongs to a caller running the shell
     /// as a subroutine - the `run` command and the MCP server behind it
     /// - and has to still be collecting while a `.testcase` inside the script it
-    /// was given is doing its own thing. So `say` checks the testcase first and
-    /// this second, and a script that uses both nests the way it reads.
+    /// was given is doing its own thing. So `say` checks the testcase first,
+    /// and a script that uses both nests the way it reads.
     ///
-    /// `complain` writes here too, because a caller collecting output wants the
-    /// error in the same stream a person would have seen it in. It still sets
+    /// **A `.once` or `.output` redirect is checked before this** and takes the
+    /// rows, which is what makes `export --out` write its file - see the
+    /// comment in `say`. So a collected script that redirects hands its caller
+    /// whatever was not redirected, which for an export is nothing.
+    ///
+    /// `complain` writes here whatever a redirect is doing, because a caller
+    /// collecting output wants the error in the same stream a person would have
+    /// seen it in rather than appended to the rows in the file. It still sets
     /// `failed`.
     pub sink: Option<String>,
+    /// How many result rows have been rendered since output was last sent
+    /// somewhere with `redirect`.
+    ///
+    /// **So a command that redirects can say what it wrote.** `export --out`
+    /// sends its rows to a file, which leaves it nothing to report from the
+    /// text it collected; counting the lines back out of the file would have
+    /// to know which of the eight formats writes a header, a separator rule or
+    /// several lines to the row. The number the renderer was handed is the
+    /// answer, and it costs one addition.
+    pub rows_since_redirect: usize,
     /// The values `.parameter set` bound, by the name they were given.
     ///
     /// **The shell's own table, not the engine's.** SQLite keeps them in a
@@ -367,6 +383,7 @@ impl Shell {
             readonly: false,
             safe: false,
             sink: None,
+            rows_since_redirect: 0,
             line: 1,
         })
     }
@@ -571,6 +588,18 @@ impl Shell {
         Ok(())
     }
 
+    /// Returns the layout to render with, told where its lines are going.
+    ///
+    /// The only caller is `run`, and it is a method rather than two lines
+    /// there because the three destinations `say` chooses between are the
+    /// three this has to agree with. They disagreeing is how `csv` came to
+    /// write a carriage return too many into a file.
+    fn rendering_layout(&self) -> crate::render::Layout {
+        let mut layout = self.layout.clone();
+        layout.to_stdout = self.output.is_none() && self.sink.is_none() && self.testcase.is_none();
+        layout
+    }
+
     /// Prints one line to wherever output is currently going.
     pub fn say(&mut self, line: &str) {
         // **A `.testcase` captures instead of printing.** `.check` compares the
@@ -582,21 +611,34 @@ impl Shell {
             self.captured.push('\n');
             return;
         }
+        // **A redirect outranks a collecting caller, and used to lose to one
+        // (task-2044).** `.once` and `.output` open their file and every line
+        // then went into the sink instead, so the file existed and was zero
+        // bytes while the rows came back in the caller's report. It was not a
+        // corner: `export --out` built a `.once` and ran it through
+        // `collect_output`, so the shipped command reported `"ok": true` with
+        // `"wrote": "<path>"` over an empty file in all eight formats, and a
+        // `.once` inside a script handed to `run` did the same. `export` asks
+        // for its redirect directly now, but `run` still hands the shell a
+        // script somebody else wrote, so this order is what makes that work.
+        //
+        // This order is what the two mean. A redirect is the caller of the
+        // shell saying where output goes; a sink is a caller collecting what
+        // was not redirected. `complain` is deliberately the other way round -
+        // an error goes to the sink even while a redirect is open, because an
+        // error belongs in the report rather than in the middle of the rows.
+        let ending = if self.crlf { "\r\n" } else { "\n" };
+        if let Some(file) = self.output.as_mut() {
+            let _ = write!(file, "{line}{ending}");
+            return;
+        }
         if let Some(sink) = self.sink.as_mut() {
             sink.push_str(line);
             sink.push('\n');
             return;
         }
-        let ending = if self.crlf { "\r\n" } else { "\n" };
-        match self.output.as_mut() {
-            Some(file) => {
-                let _ = write!(file, "{line}{ending}");
-            }
-            None => {
-                let mut out = std::io::stdout();
-                let _ = write!(out, "{line}{ending}");
-            }
-        }
+        let mut out = std::io::stdout();
+        let _ = write!(out, "{line}{ending}");
     }
 
     /// Prints an error, which always goes to standard error.
@@ -632,7 +674,11 @@ impl Shell {
     }
 
     /// Sends output to a file, or back to standard output when `path` is none.
+    ///
+    /// @param path - the file to write, or none to go back to standard output
+    /// @param once - whether the redirect ends after the next SQL statement
     pub fn redirect(&mut self, path: Option<&str>, once: bool) -> Result<(), String> {
+        self.rows_since_redirect = 0;
         let Some(path) = path else {
             self.output = None;
             self.output_is_once = false;
@@ -698,6 +744,12 @@ impl Shell {
                 self.report(sql, &failure);
             }
             Ok((columns, rows)) => {
+                // Counted here rather than beside the one `render` call below,
+                // because the two branches that follow print rows and return
+                // without reaching it - and a count that is right for six of
+                // the eight formats and silently zero for a plan is the kind
+                // of number a caller stops checking.
+                self.rows_since_redirect = self.rows_since_redirect.saturating_add(rows.len());
                 // **`EXPLAIN QUERY PLAN` is drawn, not listed.** Its four
                 // columns are a tree, and the reference's shell renders them as
                 // one; printing `0|0|0|SCAN t` is the raw result of a statement
@@ -726,7 +778,7 @@ impl Shell {
                     self.finish_once();
                     return;
                 }
-                let layout = self.layout.clone();
+                let layout = self.rendering_layout();
                 for line in render(&layout, &columns, &rows) {
                     self.say(&line);
                 }

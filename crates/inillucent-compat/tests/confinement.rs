@@ -615,3 +615,150 @@ fn the_mcp_server_refuses_a_path_outside_the_root() {
         "the MCP server read a database outside the root: {answered}"
     );
 }
+
+/// Runs a confined MCP server over one pipe and returns everything it answered.
+///
+/// The handshake is the whole of it: `initialize` carrying `protocolVersion`,
+/// then `notifications/initialized`, and only then the calls. A server that is
+/// sent a tool call before that answers `initialization must complete`, which
+/// is a sentence that contains none of the words a case is looking for - so a
+/// test that skips the handshake fails or passes for a reason that has nothing
+/// to do with what it is about.
+///
+/// @param program - the built `inillucent-mcp`
+/// @param root - the directory to confine the server to
+/// @param calls - the `tools/call` bodies, in order, each already JSON
+fn ask_the_server(program: &Path, root: &Path, calls: &[String]) -> String {
+    let mut request = String::from(
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"confinement"}}}"#,
+    );
+    request.push('\n');
+    request.push_str(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
+    request.push('\n');
+    for call in calls {
+        request.push_str(call);
+        request.push('\n');
+    }
+    let mut child = match Command::new(program)
+        .arg("--root")
+        .arg(root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(error) => panic!("could not start the MCP server: {error}"),
+    };
+    {
+        use std::io::Write;
+        let mut stdin = child.stdin.take().expect("the server takes standard input");
+        let _ = stdin.write_all(request.as_bytes());
+    }
+    let produced = child.wait_with_output().expect("the server ends");
+    String::from_utf8_lossy(&produced.stdout).into_owned()
+}
+
+/// `export` over MCP writes its rows into a file inside the root.
+///
+/// **The confinement is the control, and the file is the point (task-2044).**
+/// `export --out` assembled a `.once` and ran it through the collecting
+/// caller, so over MCP it answered `.once is prohibited in safe mode` - which
+/// is accurate about the dot command it had built and says nothing a caller
+/// could act on, since the caller never asked for a dot command. It is also
+/// inconsistent with the three commands beside it: `backup`, `import` and
+/// `restore` all reach a file through `Context::confine` and all work on a
+/// confined server, for the reason `verbs.rs::dot` sets out - the path was
+/// admitted before the shell ever saw it.
+///
+/// A typed `.once` is still refused, which the case below asserts, because
+/// that one is a caller asking the shell to open a path the command surface
+/// never checked.
+#[test]
+fn the_mcp_server_exports_into_a_file_inside_the_root() {
+    let Some(server) = binary("inillucent-mcp") else {
+        return;
+    };
+    let Some(program) = binary("inillucent") else {
+        return;
+    };
+    let base = area("mcp-export");
+    let root = base.join("root");
+    let _ = std::fs::create_dir_all(&root);
+    for statement in [
+        "CREATE TABLE note (id INTEGER PRIMARY KEY, body TEXT)",
+        "INSERT INTO note (body) VALUES ('hello'), ('goodbye')",
+    ] {
+        let made = run(&program, &root, &["--db", "app.rdb", "exec", statement]);
+        assert!(made.ok, "setup failed at `{statement}`: {}", made.text());
+    }
+
+    let answered = ask_the_server(
+        &server,
+        &root,
+        &[
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"inillucent_export","arguments":{"db":"app.rdb","sql":"SELECT id, body FROM note ORDER BY id","out":"note.csv","format":"csv"}}}"#.to_string(),
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"inillucent_export","arguments":{"db":"app.rdb","table":"note","out":"../escaped.csv","format":"csv"}}}"#.to_string(),
+        ],
+    );
+    let written = root.join("note.csv");
+    let found = std::fs::read_to_string(&written).unwrap_or_else(|error| {
+        panic!("the MCP export wrote no file: {error}\nthe server answered: {answered}")
+    });
+    assert_eq!(
+        found, "id,body\r\n1,hello\r\n2,goodbye\r\n",
+        "the MCP export did not write the rows: {found:?}\nthe server answered: {answered}"
+    );
+    // The same call with a path that leaves the root is still refused, and
+    // refused by the confinement rather than by safe mode - so the message
+    // names the root, which is the thing the caller has to change.
+    assert!(
+        answered.to_lowercase().contains("confined") || answered.to_lowercase().contains("outside"),
+        "an export to a path outside the root was not refused: {answered}"
+    );
+    assert!(
+        !base.join("escaped.csv").exists(),
+        "the refused export still created the file outside the root"
+    );
+}
+
+/// A `.once` typed into a script is still refused on a confined server.
+///
+/// The reference refuses `.once` under `-safe` and so does this shell; the
+/// change that made `export --out` work over MCP must not have lifted it,
+/// because that path is one a caller names and the command surface never
+/// checks.
+#[test]
+fn a_typed_once_is_still_refused_on_a_confined_server() {
+    let Some(server) = binary("inillucent-mcp") else {
+        return;
+    };
+    let Some(program) = binary("inillucent") else {
+        return;
+    };
+    let base = area("mcp-once");
+    let root = base.join("root");
+    let _ = std::fs::create_dir_all(&root);
+    let made = run(
+        &program,
+        &root,
+        &["--db", "app.rdb", "exec", "CREATE TABLE note (a INTEGER)"],
+    );
+    assert!(made.ok, "setup failed: {}", made.text());
+
+    let answered = ask_the_server(
+        &server,
+        &root,
+        &[
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"inillucent_run","arguments":{"db":"app.rdb","input":".once typed.txt\nSELECT 1;"}}}"#.to_string(),
+        ],
+    );
+    assert!(
+        answered.contains("safe mode"),
+        "a typed `.once` was not refused on a confined server: {answered}"
+    );
+    assert!(
+        !root.join("typed.txt").exists(),
+        "the refused `.once` created its file anyway"
+    );
+}

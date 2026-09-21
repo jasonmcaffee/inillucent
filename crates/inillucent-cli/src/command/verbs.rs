@@ -889,24 +889,85 @@ pub fn export(context: &mut Context, arguments: &Arguments) -> Result<Outcome, F
         }
     };
     context.refuse_if_it_writes(&sql)?;
-    let mut script = format!(".mode {mode}\n.headers on\n");
-    if let Some(out) = arguments.text("out") {
-        let confined = context.confine(out)?;
-        script.push_str(&format!(".once \"{}\"\n", confined.to_string_lossy()));
+    // **The redirect is taken here rather than written into the script
+    // (task-2044).** This built `.once "<path>"` at the top of the script and
+    // then ran the script through `collect_output`, which is two callers
+    // claiming the shell's output stream; `say` gave it to the collecting one,
+    // so the file was created, stayed empty, and the rows came back in the
+    // report while `"ok": true` said the export had happened. `say` now gives
+    // a redirect the rows, and asking for it directly is what the command
+    // meant in the first place - it removes a path assembled into a quoted
+    // argument, it makes a file that will not open an `io` failure instead of
+    // a syntax one, and it is what `backup` beside this already does.
+    //
+    // It also settles the question safe mode was answering by accident. A
+    // typed `.once` is still refused on a server started `--root`, which is
+    // the reference's behaviour and is kept; this is not a typed `.once`, it
+    // is a command whose path `confine` has already admitted, exactly as for
+    // `backup`, `import` and `restore` - see the argument in `dot` above.
+    let destination = match arguments.text("out") {
+        None => None,
+        Some(out) => Some(context.confine(out)?),
+    };
+    if let Some(path) = destination.as_ref() {
+        let named = path.to_string_lossy().into_owned();
+        context
+            .shell()
+            .redirect(Some(&named), true)
+            .map_err(|message| {
+                Failed::said(Status::Io, format!("cannot open \"{named}\": {message}"))
+            })?;
     }
-    script.push_str(&sql);
-    script.push(';');
+    let script = format!(".mode {mode}\n.headers on\n{sql};");
     let printed = context.collect_output(&script);
+    let rows = context.shell().rows_since_redirect;
+    // The `.once` releases itself after the statement, and this releases it
+    // after a statement that never ran - an empty `sql`, or one the parser
+    // refused before the shell reached it. A redirect left open on a server
+    // that stays up would send the next command's rows into this file.
+    if destination.is_some() {
+        let _ = context.shell().redirect(None, false);
+    }
     let failed = context.shell().failed;
     context.shell().failed = false;
     if failed {
         return Err(Failed::said(Status::Syntax, printed.trim_end().to_string()));
     }
-    let produced = Outcome::said("export", printed.trim_end());
-    Ok(match arguments.text("out") {
-        Some(out) => produced.with("wrote", json::text(out)),
-        None => produced,
-    })
+    let Some(path) = destination else {
+        return Ok(Outcome::said("export", printed.trim_end()));
+    };
+    wrote_a_file(&path, rows)
+}
+
+/// Reports an export that went to a file rather than into the answer.
+///
+/// **The rows are not repeated here.** They are in the file, and a caller that
+/// asked for a file asked for them to be there; an export of a million rows
+/// that also carried a million rows back through the report would cost a copy
+/// of the whole table in memory and a second one in the JSON, for something
+/// nobody reads. What the report carries instead is the three things a caller
+/// checks: where it went, how many rows went into it, and how large it is -
+/// the last of which is read back off the file rather than counted up, so a
+/// short write is visible in the report that claims the write happened.
+///
+/// @param path - the file that was written
+/// @param rows - how many result rows the renderer was handed
+fn wrote_a_file(path: &std::path::Path, rows: usize) -> Result<Outcome, Failed> {
+    let named = path.to_string_lossy().into_owned();
+    let bytes = std::fs::metadata(path)
+        .map(|found| found.len())
+        .unwrap_or(0);
+    let mut produced = Outcome::said(
+        "export",
+        format!(
+            "wrote {rows} row{} ({bytes} bytes) to {named}",
+            if rows == 1 { "" } else { "s" }
+        ),
+    );
+    produced.total = rows;
+    Ok(produced
+        .with("wrote", json::text(&named))
+        .with("bytes", Json::Int(bytes as i64)))
 }
 
 /// `backup`: copies the database to a file.
