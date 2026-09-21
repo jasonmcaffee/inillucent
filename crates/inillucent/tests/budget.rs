@@ -116,7 +116,7 @@ use std::cell::Cell;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use inillucent_engine::connect::{Connection, Database};
+use inillucent_engine::connect::{Connection, Database, Statement};
 use inillucent_sql::plan::Levers;
 use inillucent_tree::datum::OwnedDatum;
 
@@ -183,6 +183,38 @@ fn allocations(body: impl FnOnce()) -> u64 {
     body();
     ALLOCATIONS.with(Cell::get).saturating_sub(before)
 }
+
+/// How many times a statement run outside a transaction may read both meta
+/// slots in full.
+///
+/// **Zero, and the margin is deliberately absent.** A statement outside a
+/// transaction takes the file lock, asks whether another process has folded
+/// since this connection last held it, and gives the lock back. Asking that
+/// question by reading both slots in full allocates and zeroes a buffer one
+/// page long for each slot, reads a whole page into each, and checksums both,
+/// and nothing
+/// about a file that has not changed needs any of it - the record's own 116
+/// bytes, compared against the ones this connection last read and verified,
+/// answer it. One is not a rounding of zero here: one means a caller went back
+/// to the full read, and the only reason to is that the file moved.
+const META_READS_PER_UNCHANGED_STATEMENT: u64 = 0;
+
+/// How many times a statement run outside a transaction may read the record's
+/// own bytes.
+///
+/// One per statement, because one lock acquisition is one chance for another
+/// process to have written. Two means the two callers that ask - the pool's
+/// `begin_read` and the engine's `the_meta_moved` - have stopped sharing the
+/// answer they both make under the same SHARED lock, which no writer can hold
+/// at the same time.
+const META_PROBES_PER_UNCHANGED_STATEMENT: u64 = 1;
+
+/// How many statements each arm of
+/// [`a_statement_outside_a_transaction_rereads_nothing`] runs.
+///
+/// Enough that one stray read would be visible against a bound of zero, and
+/// small enough that the guard costs nothing.
+const RUNS: u64 = 200;
 
 /// How many rows the guards build their table from.
 ///
@@ -343,6 +375,14 @@ fn build(path: &PathBuf) -> Database {
 fn fetches(database: &Database) -> u64 {
     let stats = database.cache_stats();
     stats.hits.saturating_add(stats.misses)
+}
+
+/// Runs a statement from the beginning and reads its row.
+///
+/// @param statement - the prepared statement
+fn step_once(statement: &mut Statement<'_>) {
+    statement.reset();
+    assert!(statement.step().expect("the statement steps"));
 }
 
 /// Inserts `count` rows of one integer column, one statement per row.
@@ -999,5 +1039,126 @@ fn compiling_again_reuses_the_scratch_rather_than_allocating_it_afresh() {
         warm_point <= point_bound,
         "compiling `{point}` made {warm_point} allocation(s) against a bound of \
          {point_bound}"
+    );
+}
+
+/// A statement outside a transaction rereads nothing the file has not changed.
+///
+/// **The guard task-2046 exists to leave behind.** `SELECT 1` through
+/// `Connection` cost 132,884 nanoseconds outside a transaction and 1,126 inside
+/// one, on the same connection over the same file, with nothing differing
+/// between the two but an open `BEGIN` - 118 times, and about 132 microseconds
+/// in absolute terms. Every application that uses the shipped API without
+/// wrapping its reads in an explicit transaction paid it, per statement, and
+/// nothing measured it: `inillucent-fullgate`, which is what the scorecard and
+/// the performance contract are graded with, drives the engine's own `plan`,
+/// `prepare` and `pipeline` calls and never opens a connection, so the cost was
+/// invisible to every number this project publishes.
+///
+/// Eighty-nine of those microseconds were the meta record being read twice a
+/// statement, a whole page at a time, to compare 116 bytes. The rest was the
+/// Windows lock release unlocking two byte ranges a handle at SHARED does not
+/// hold.
+///
+/// **It is a count and not a ratio of two clocks**, for the reason this file's
+/// own header gives at length: the ratio it would assert reads between 1.18 and
+/// 59.22 for one unchanged commit depending on what else is on the box, and a
+/// threshold that survives that is a threshold that guards nothing. These two
+/// counts read the same on an idle machine and on a saturated one, and each
+/// names one thing the fix removed rather than the sum of both.
+///
+/// **What it does not see:** a cost that is neither of these counts. A future
+/// change that reads the slots into a buffer it keeps, or that adds a third
+/// syscall to the take, moves neither number. `inillucent-prepareperf`'s
+/// breakdown table is where the whole per-statement cost is still visible, and
+/// its `+step` and `+step in txn` columns are the measurement this guard is
+/// derived from rather than a second copy of.
+#[test]
+fn a_statement_outside_a_transaction_rereads_nothing() {
+    let directory = scratch("implicit-transaction");
+    let database = build(&directory.join("b.rdb"));
+    let connection = database.session();
+    let mut statement = connection
+        .prepare("SELECT 1")
+        .expect("the statement prepares");
+
+    // The first run of a fresh statement reads the slots in full, because this
+    // connection has not yet written down the bytes it is going to compare
+    // against. That is once per connection and it is not what the guard is
+    // about, so it happens before the counters are read.
+    step_once(&mut statement);
+
+    let before = database.cache_stats();
+    let outside_allocations = allocations(|| step_once(&mut statement));
+    for _ in 0..(RUNS - 1) {
+        step_once(&mut statement);
+    }
+    let after = database.cache_stats();
+    let meta_reads = after.meta_reads.saturating_sub(before.meta_reads);
+    let meta_probes = after.meta_probes.saturating_sub(before.meta_probes);
+
+    connection
+        .execute_batch("BEGIN")
+        .expect("the transaction opens");
+    let inside_allocations = allocations(|| step_once(&mut statement));
+    let inside_before = database.cache_stats();
+    for _ in 0..RUNS {
+        step_once(&mut statement);
+    }
+    let inside_after = database.cache_stats();
+    connection
+        .execute_batch("COMMIT")
+        .expect("the transaction commits");
+    let inside_reads = inside_after
+        .meta_reads
+        .saturating_sub(inside_before.meta_reads);
+    let inside_probes = inside_after
+        .meta_probes
+        .saturating_sub(inside_before.meta_probes);
+
+    // The runner gives this tier `--show-output`, so the numbers are in the log
+    // of every run and not only in the comment above.
+    println!("`SELECT 1` stepped {RUNS} times through a connection:");
+    println!(
+        "  outside a transaction: {meta_reads} full meta read(s), \
+         {meta_probes} record read(s), {outside_allocations} allocation(s) \
+         for one step"
+    );
+    println!(
+        "  inside one:            {inside_reads} full meta read(s), \
+         {inside_probes} record read(s), {inside_allocations} allocation(s) \
+         for one step"
+    );
+
+    assert_eq!(
+        inside_reads, 0,
+        "a statement inside a transaction read both meta slots in full \
+         {inside_reads} time(s) over {RUNS} statements; a transaction holds \
+         the file from its first statement to its commit, so there is no lock \
+         acquisition for a staleness check to belong to"
+    );
+    assert_eq!(
+        inside_probes, 0,
+        "a statement inside a transaction read the meta record \
+         {inside_probes} time(s) over {RUNS} statements, against none"
+    );
+    assert!(
+        meta_reads <= META_READS_PER_UNCHANGED_STATEMENT.saturating_mul(RUNS),
+        "{RUNS} statements outside a transaction read both meta slots in \
+         full {meta_reads} time(s), against \
+         {META_READS_PER_UNCHANGED_STATEMENT} per statement; nothing wrote the \
+         file between them"
+    );
+    assert!(
+        meta_probes <= META_PROBES_PER_UNCHANGED_STATEMENT.saturating_mul(RUNS),
+        "{RUNS} statements outside a transaction read the meta record \
+         {meta_probes} time(s), against \
+         {META_PROBES_PER_UNCHANGED_STATEMENT} per statement"
+    );
+    assert!(
+        outside_allocations <= inside_allocations,
+        "one step outside a transaction made {outside_allocations} \
+         allocation(s) and one inside a transaction made {inside_allocations}; \
+         taking and giving back the file lock is not work that allocates"
     );
 }

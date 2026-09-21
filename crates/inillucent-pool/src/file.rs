@@ -18,7 +18,7 @@ use inillucent_base::DbResult;
 use inillucent_vfs::{DbPath, FileLock, OpenOptions, Vfs};
 
 use crate::freemap::FreeMap;
-use crate::meta::{Meta, FIRST_DATA_PAGE, META_PAGE, SHADOW_PAGE};
+use crate::meta::{Meta, FIRST_DATA_PAGE, META_PAGE, META_RECORD_BYTES, SHADOW_PAGE};
 use crate::pool::Pool;
 use crate::PageId;
 
@@ -29,6 +29,90 @@ use crate::PageId;
 /// fairness section of a measurement states the pool size it ran at, and the
 /// gate harness sets it explicitly on both engines.
 pub const DEFAULT_FRAMES: usize = 4_096;
+
+/// What the two meta slots held when this connection last read them in full.
+///
+/// See [`Database::slots`] for what it is for, and
+/// [`Database::disk_record_is_as_last_read`] for the check it makes possible.
+#[derive(Clone, Copy, Debug, Default)]
+struct LastReadSlots {
+    /// The record bytes of slot 0 and slot 1, or `None` before either has been
+    /// read in full.
+    ///
+    /// **The bytes rather than the decoded record**, because the question is
+    /// whether the file changed and not what it now says. Two encodings of the
+    /// same record are the same bytes - [`Meta::encode`] writes the fields at
+    /// fixed offsets and zeroes everything else - so comparing bytes answers it
+    /// without decoding, and decoding is what costs a crc32 pass over a whole
+    /// page.
+    read: Option<[[u8; META_RECORD_BYTES]; 2]>,
+    /// What the cheap check answered under the lock this connection holds, or
+    /// `None` when it has not been asked since the file was last let go.
+    ///
+    /// Remembered because `begin_read` and the engine's `the_meta_moved` ask
+    /// the same question of the same bytes moments apart, inside one lock
+    /// acquisition. A writer takes EXCLUSIVE, which excludes the SHARED this
+    /// connection holds between them, so the second read could not see anything
+    /// the first did not - and this is cleared everywhere `trusted` is, which
+    /// is the two places the file is let go.
+    ///
+    /// **`Some(true)` is the only value that short circuits anything**, and
+    /// only [`LastReadSlots`]'s own comparison ever sets it. A full read sets
+    /// this to `Some(false)` rather than to `Some(true)`, for the reason
+    /// [`LastReadSlots::record`] gives: after a full read the caller that
+    /// follows has a *different* comparison to make, against `disk_meta`, and
+    /// it has to make it.
+    checked: Option<bool>,
+}
+
+impl LastReadSlots {
+    /// Writes down the record bytes of two slots just read in full.
+    ///
+    /// **Only bytes that decoded, and never a short circuit.** Two rules, and
+    /// each one is there so that the cheap check cannot answer a question the
+    /// full read would have answered differently:
+    ///
+    /// - a page pair that did not decode is not written down, because
+    ///   `the_meta_moved` answers "moved" for an unreadable record and a cheap
+    ///   check that matched those bytes would answer "unchanged" about a file
+    ///   nobody could read;
+    /// - `checked` is left saying no. A full read has just happened, so the
+    ///   next caller in the same statement is the one that compares the record
+    ///   against `disk_meta` - and that comparison is not the one the cheap
+    ///   check makes. Letting it short circuit here would have
+    ///   `the_meta_moved` report "not moved" on the statement that had just
+    ///   found the file moved.
+    ///
+    /// A page shorter than a record cannot carry one, and is not written down
+    /// for the same reason as a page that did not decode.
+    ///
+    /// @param primary - slot 0's page
+    /// @param shadow - slot 1's page
+    /// @param decoded - whether one of the two slots yielded a record
+    fn record(&mut self, primary: &[u8], shadow: &[u8], decoded: bool) {
+        self.checked = Some(false);
+        let (Some(first), Some(second)) = (
+            primary.get(..META_RECORD_BYTES),
+            shadow.get(..META_RECORD_BYTES),
+        ) else {
+            self.read = None;
+            return;
+        };
+        if !decoded {
+            self.read = None;
+            return;
+        }
+        let mut records = [[0u8; META_RECORD_BYTES]; 2];
+        let (head, rest) = records.split_at_mut(1);
+        let (Some(slot), Some(other)) = (head.first_mut(), rest.first_mut()) else {
+            self.read = None;
+            return;
+        };
+        slot.copy_from_slice(first);
+        other.copy_from_slice(second);
+        self.read = Some(records);
+    }
+}
 
 /// How a database is opened.
 #[derive(Clone, Copy, Debug)]
@@ -102,6 +186,29 @@ pub struct Database {
     /// The whole record is still compared - see `the_meta_moved` for why one field
     /// is not enough.
     disk_meta: Meta,
+    /// The record bytes both slots held the last time this connection read them
+    /// in full, and whether they were still those bytes when it last looked.
+    ///
+    /// **The per-statement staleness check, made cheap** (task-2046).
+    /// [`Database::meta_on_disk`] allocates and zeroes a buffer one page long
+    /// for each of the two slots, reads a whole page into each and checksums
+    /// both, and the engine reached it twice for every statement run outside a
+    /// transaction - once through [`Database::begin_read`] and once through
+    /// `the_meta_moved`. At the 32 KiB default page size that was four 32 KiB
+    /// allocations, four 32 KiB reads and four crc32 passes over 32 KiB, to
+    /// compare a record 116 bytes long, and it was 89 of the 132 microseconds
+    /// `SELECT 1` cost through `Connection` against 1.1 microseconds for the
+    /// same statement inside a transaction.
+    ///
+    /// The bytes are what [`Database::disk_record_is_as_last_read`] compares
+    /// against; `checked` is that comparison's answer, remembered for as long
+    /// as the lock it was made under is held, because the two callers ask
+    /// moments apart under one SHARED lock and no writer can hold the file at
+    /// the same time. Both are only ever a *fast* answer: a difference, an
+    /// unreadable file and an empty memo all fall through to the full read and
+    /// its checksum, which is still the only thing that says what the record
+    /// is.
+    slots: LastReadSlots,
     /// The free map, held resident because it is consulted on every allocation.
     free: FreeMap,
     /// The shared extent page a small out-of-line value goes on next.
@@ -202,6 +309,7 @@ impl Database {
             pool,
             meta,
             disk_meta: meta,
+            slots: LastReadSlots::default(),
             free: FreeMap::new(options.page_size),
             shared_extent: None,
             busy_millis: DEFAULT_BUSY_MILLIS,
@@ -245,6 +353,7 @@ impl Database {
             pool,
             meta,
             disk_meta: meta,
+            slots: LastReadSlots::default(),
             free,
             shared_extent: None,
             busy_millis: DEFAULT_BUSY_MILLIS,
@@ -275,6 +384,7 @@ impl Database {
             pool,
             meta,
             disk_meta: meta,
+            slots: LastReadSlots::default(),
             free,
             shared_extent: None,
             busy_millis: DEFAULT_BUSY_MILLIS,
@@ -318,6 +428,7 @@ impl Database {
             pool,
             meta,
             disk_meta: meta,
+            slots: LastReadSlots::default(),
             free,
             shared_extent: None,
             busy_millis: DEFAULT_BUSY_MILLIS,
@@ -842,6 +953,9 @@ impl Database {
     /// on some earlier round the writer then lost.
     fn attempt_write(&mut self) -> DbResult<bool> {
         self.trusted = false;
+        // The file is let go on the next line, so the staleness check made
+        // under the lock this attempt is giving up no longer says anything.
+        self.slots.checked = None;
         self.pool.unlock(FileLock::None)?;
         self.pool.lock_within(FileLock::Shared, 0)?;
         self.pool.lock_within(FileLock::Reserved, 0)?;
@@ -870,6 +984,9 @@ impl Database {
     /// file before this connection takes it again.
     pub fn end_access(&mut self) -> DbResult<()> {
         self.trusted = false;
+        // The check is only true for as long as the lock it was made under is
+        // held. See [`Database::slots`].
+        self.slots.checked = None;
         self.pool.unlock(FileLock::None)
     }
 
@@ -935,10 +1052,62 @@ impl Database {
     /// `None` when neither slot decodes, which is not this function's to
     /// report: the read that follows says so, with the message the open path
     /// uses.
-    pub fn meta_on_disk(&self) -> DbResult<Option<Meta>> {
+    pub fn meta_on_disk(&mut self) -> DbResult<Option<Meta>> {
         let page_size = self.pool.page_size();
         let (primary, shadow) = self.pool.read_meta_slots(page_size)?;
-        Ok(Meta::choose(&primary, &shadow).ok())
+        let chosen = Meta::choose(&primary, &shadow).ok();
+        // **What the cheap check compares against, recorded by the expensive
+        // one** (task-2046). Every path that reads the slots in full comes
+        // through here, so there is one place where the bytes this connection
+        // has verified are written down, and no way to read the file in full
+        // without them being brought up to date.
+        self.slots.record(&primary, &shadow, chosen.is_some());
+        Ok(chosen)
+    }
+
+    /// Reports whether the file's meta record is byte for byte the one this
+    /// connection last read from it in full.
+    ///
+    /// **The per-statement staleness check, and why it stopped costing 89 of
+    /// the 132 microseconds a `SELECT 1` cost** (task-2046). The question both
+    /// callers ask - the engine's `the_meta_moved`, and
+    /// [`Database::reload_if_moved`] underneath [`Database::begin_read`] - is
+    /// whether another process has folded since this connection last held the
+    /// lock. Answering it through [`Database::meta_on_disk`] read a whole page
+    /// into a freshly zeroed buffer one page long for each of the two slots and
+    /// checksummed both, twice per statement; at the 32 KiB default page size
+    /// that is four 32 KiB allocations, four 32 KiB reads and four crc32 passes
+    /// over 32 KiB, to compare a record 116 bytes long.
+    ///
+    /// This reads those 116 bytes from each slot and compares them, and
+    /// remembers the answer for as long as the lock is held, so the second
+    /// caller reads nothing at all.
+    ///
+    /// **`false` is always safe and `true` is the claim.** A difference, a file
+    /// too short to read, and a connection that has not yet read the slots in
+    /// full all answer `false`, which sends the caller to the full read and its
+    /// checksum - still the only path that decides what the record is. `true`
+    /// says the bytes are the ones this connection already decoded and verified
+    /// under a lock, which is the reasoning [`Database::begin_read`]'s own
+    /// short circuit already rests on: a writer takes EXCLUSIVE, so nothing can
+    /// have changed while this connection held SHARED.
+    pub fn disk_record_is_as_last_read(&mut self) -> DbResult<bool> {
+        if let Some(checked) = self.slots.checked {
+            return Ok(checked);
+        }
+        let Some(last) = self.slots.read else {
+            self.slots.checked = Some(false);
+            return Ok(false);
+        };
+        let unchanged = match self.pool.read_meta_records(self.pool.page_size()) {
+            Ok(found) => found == last,
+            // A file too short to hold two slots, or one the operating system
+            // refused: the full read that follows reports it with the message
+            // the open path uses, which is where a caller can act on it.
+            Err(_) => false,
+        };
+        self.slots.checked = Some(unchanged);
+        Ok(unchanged)
     }
 
     /// Returns the generation this connection's cache describes.
@@ -1020,6 +1189,16 @@ impl Database {
     ///
     /// Returns whether anything was thrown away.
     fn reload_if_moved(&mut self) -> DbResult<bool> {
+        // **The file's own bytes, unchanged, answer this without decoding
+        // anything** (task-2046). What this function tests is whether the
+        // file's generation is above the one this connection's cache
+        // describes; a record byte for byte the one last read in full is the
+        // record whose generation was compared then, and `meta` only ever
+        // moves forward from there - so the answer it gave then is the answer
+        // now.
+        if self.disk_record_is_as_last_read()? {
+            return Ok(false);
+        }
         let Some(found) = self.meta_on_disk()? else {
             return Ok(false);
         };

@@ -140,6 +140,26 @@ pub struct PoolStats {
     pub file_syncs: u64,
     /// Folds: page writes into the data file followed by a meta record.
     pub folds: u64,
+    /// Reads of both meta slots in full: two whole pages, allocated, read and
+    /// checksummed.
+    ///
+    /// **The number task-2046 was about.** The multi-process protocol asks the
+    /// file whether another process has folded on the way into every statement
+    /// run outside a transaction, and it asked by reading both slots in full,
+    /// twice - once through `Database::begin_read` and once through the
+    /// engine's `the_meta_moved`. At the 32 KiB default page size that is four
+    /// allocations of one page each, four reads of a whole page and four crc32 passes
+    /// over a whole page, to compare a record 116 bytes long, and it was 89 of
+    /// the 132 microseconds `SELECT 1` cost through `Connection`. A statement
+    /// that finds the file unchanged now moves this by nothing at all.
+    pub meta_reads: u64,
+    /// Reads of the bytes a meta record occupies, without the page around them.
+    ///
+    /// The cheap half of the same check - see
+    /// `Database::disk_record_is_as_last_read`. One per lock acquisition, and
+    /// none at all for a statement inside a transaction, which never lets the
+    /// file go.
+    pub meta_probes: u64,
 }
 
 /// One frame's bookkeeping, held apart from its bytes.
@@ -560,6 +580,10 @@ struct Counters {
     file_syncs: Cell<u64>,
     /// Folds: page writes into the data file followed by a meta record.
     folds: Cell<u64>,
+    /// Reads of both meta slots in full.
+    meta_reads: Cell<u64>,
+    /// Reads of the record bytes alone.
+    meta_probes: Cell<u64>,
 }
 
 impl Counters {
@@ -844,6 +868,8 @@ impl Pool {
             translated: self.counters.translated.get(),
             file_syncs: self.counters.file_syncs.get(),
             folds: self.counters.folds.get(),
+            meta_reads: self.counters.meta_reads.get(),
+            meta_probes: self.counters.meta_probes.get(),
         }
     }
 
@@ -866,6 +892,8 @@ impl Pool {
         self.counters.translated.set(0);
         self.counters.file_syncs.set(0);
         self.counters.folds.set(0);
+        self.counters.meta_reads.set(0);
+        self.counters.meta_probes.set(0);
     }
 
     /// Returns how many frames hold a page right now.

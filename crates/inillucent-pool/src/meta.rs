@@ -153,6 +153,23 @@ mod at {
 /// The smallest a meta page can be and still hold every field.
 pub const META_BYTES: usize = at::RESERVED;
 
+/// How many bytes at the front of a meta page the record itself occupies.
+///
+/// Everything after it is the zero padding [`Meta::encode`] writes over the
+/// rest of the page, so two meta pages whose first `META_RECORD_BYTES` bytes
+/// agree describe the same database. That is what lets a connection ask
+/// "has another process folded since I last looked" by reading 116 bytes
+/// instead of a whole page - see `Database::disk_record_is_as_last_read`,
+/// where it was four 32 KiB reads and four crc32 passes over 32 KiB per
+/// statement (task-2046).
+///
+/// **A field added to the reserved region has to move this.** The region
+/// begins at [`at::RESERVED`] and the last field in it ends here;
+/// `every_field_lives_below_the_record_length` fails when one is added past
+/// it, because a check that read 116 bytes of a record 124 bytes long would
+/// answer "unchanged" about a change it could not see.
+pub const META_RECORD_BYTES: usize = at::HIGH_WATER_LSN + 8;
+
 /// What the meta page says about the database.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Meta {
@@ -453,6 +470,135 @@ mod tests {
         let mut page = vec![0u8; 32_768];
         meta.encode(&mut page).unwrap();
         assert_eq!(Meta::decode(&page).unwrap(), meta);
+    }
+
+    /// Every field a record carries is written below [`META_RECORD_BYTES`],
+    /// so a comparison that reads only that many bytes sees every change.
+    ///
+    /// **Written as a sweep over the fields rather than as a length
+    /// assertion**, because the number this protects is not the constant but
+    /// the claim behind it: a field added to the reserved region past the
+    /// constant would leave a change that a staleness check reading
+    /// `META_RECORD_BYTES` bytes could not see, and would report a database
+    /// another process had folded as unchanged.
+    #[test]
+    fn every_field_lives_below_the_record_length() {
+        let base = Meta {
+            page_size: 8_192,
+            page_count: 4_096,
+            catalog_root: PageId(7),
+            free_map: PageId(2),
+            checkpoint_lsn: 900_001,
+            cts_watermark: 42,
+            wal_sequence: 3,
+            generation: 11,
+            uuid: 0x0123_4567_89ab_cdef_0123_4567_89ab_cdef,
+            user_version: 42,
+            application_id: -7,
+            schema_cookie: 3,
+            wal: true,
+            high_water_lsn: 900_000,
+        };
+        let moved: [(&str, Meta); 14] = [
+            (
+                "page_size",
+                Meta {
+                    page_size: 4_096,
+                    ..base
+                },
+            ),
+            (
+                "page_count",
+                Meta {
+                    page_count: 4_097,
+                    ..base
+                },
+            ),
+            (
+                "catalog_root",
+                Meta {
+                    catalog_root: PageId(8),
+                    ..base
+                },
+            ),
+            (
+                "free_map",
+                Meta {
+                    free_map: PageId(3),
+                    ..base
+                },
+            ),
+            (
+                "checkpoint_lsn",
+                Meta {
+                    checkpoint_lsn: 900_002,
+                    ..base
+                },
+            ),
+            (
+                "cts_watermark",
+                Meta {
+                    cts_watermark: 43,
+                    ..base
+                },
+            ),
+            (
+                "wal_sequence",
+                Meta {
+                    wal_sequence: 4,
+                    ..base
+                },
+            ),
+            (
+                "generation",
+                Meta {
+                    generation: 12,
+                    ..base
+                },
+            ),
+            ("uuid", Meta { uuid: 1, ..base }),
+            (
+                "user_version",
+                Meta {
+                    user_version: 43,
+                    ..base
+                },
+            ),
+            (
+                "application_id",
+                Meta {
+                    application_id: -8,
+                    ..base
+                },
+            ),
+            (
+                "schema_cookie",
+                Meta {
+                    schema_cookie: 4,
+                    ..base
+                },
+            ),
+            ("wal", Meta { wal: false, ..base }),
+            (
+                "high_water_lsn",
+                Meta {
+                    high_water_lsn: 900_001,
+                    ..base
+                },
+            ),
+        ];
+        let mut original = vec![0u8; 8_192];
+        base.encode(&mut original).unwrap();
+        for (field, other) in moved {
+            let mut page = vec![0u8; 8_192];
+            other.encode(&mut page).unwrap();
+            assert_ne!(
+                original.get(..META_RECORD_BYTES),
+                page.get(..META_RECORD_BYTES),
+                "moving {field} changed no byte below META_RECORD_BYTES, so a \
+                 staleness check reading that many bytes cannot see it"
+            );
+        }
     }
 
     /// Corrupting any single byte of any field is detected. This is the

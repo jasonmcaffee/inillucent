@@ -422,6 +422,7 @@ same run:
 | a keyset page costs the same wherever it starts | pages fetched | 502 against 502 | start ≤ 4x end |
 | rewriting the same 5,000 rows ten times does not grow the file | bytes on disk | — | ≤ 3x |
 | a full scan of 20,000 rows stays proportional to the table | pages fetched, **and** the clock | 20 pages, 2.99 ms | ≤ 200 pages, under 10 s |
+| a statement outside a transaction rereads nothing the file has not changed | full meta reads, record reads | 0 and 200 over 200 statements | 0 full reads, ≤ 1 record read a statement |
 
 Every threshold is a fraction of what it measures. That is the trade: these
 catch a change of *kind* — an index dropped, a commit per row, a cache turned

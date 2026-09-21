@@ -324,7 +324,50 @@ impl Pool {
         self.file
             .read_exact_at(page_size as u64, &mut shadow)
             .map_err(|error| error.into_db_error())?;
+        Counters::add(&self.counters.meta_reads, 1);
         Ok((primary, shadow))
+    }
+
+    /// Reads the bytes a meta record occupies from both slots, without the page
+    /// around them.
+    ///
+    /// **The cheap half of the staleness check the multi-process protocol makes
+    /// on every statement** (task-2046). A record ends at
+    /// [`crate::meta::META_RECORD_BYTES`] and [`crate::meta::Meta::encode`]
+    /// zeroes the rest of the page, so two slots whose record bytes agree
+    /// describe the same database - and a connection asking whether another
+    /// process has folded can answer from 232 bytes rather than from two whole
+    /// pages. At the 32 KiB default page size [`Pool::read_meta_slots`] costs
+    /// a buffer one page long allocated and zeroed for each slot, a whole page
+    /// read into each and, through
+    /// `Meta::choose`, two crc32 passes over a whole page; this costs two
+    /// reads of 116 bytes into the stack.
+    ///
+    /// It decides nothing on its own. A caller that finds the bytes changed
+    /// reads the slots in full and checksums them, which is the only path that
+    /// says what the record now is.
+    ///
+    /// @param page_size - the page size, which is where the second slot starts
+    pub fn read_meta_records(
+        &self,
+        page_size: usize,
+    ) -> DbResult<[[u8; crate::meta::META_RECORD_BYTES]; 2]> {
+        let mut records = [[0u8; crate::meta::META_RECORD_BYTES]; 2];
+        let (primary, rest) = records.split_at_mut(1);
+        let Some(primary) = primary.first_mut() else {
+            return Err(misuse("the meta record buffer has no primary slot"));
+        };
+        let Some(shadow) = rest.first_mut() else {
+            return Err(misuse("the meta record buffer has no shadow slot"));
+        };
+        self.file
+            .read_exact_at(0, primary)
+            .map_err(|error| error.into_db_error())?;
+        self.file
+            .read_exact_at(page_size as u64, shadow)
+            .map_err(|error| error.into_db_error())?;
+        Counters::add(&self.counters.meta_probes, 1);
+        Ok(records)
     }
 
     /// Writes one of the two meta pages straight to the file.

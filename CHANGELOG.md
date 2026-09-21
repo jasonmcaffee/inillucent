@@ -49,6 +49,33 @@ equivalent, 1 inconclusive, 0 worse, every correctness gate passing - which is
 the condition the parallel build had to meet, because a parallel build's graph
 is not the serial one.
 
+**A statement run outside a transaction no longer reads the meta record twice on its way in.**
+Under `locking_mode = normal` a statement takes the file lock, asks whether another process has
+folded since this connection last held it, and gives the lock back. Both halves of that question
+read both meta slots in full: a buffer one page long allocated and zeroed for each slot, a page read
+into each, and a crc32 pass over each before a field could be read. At the 32 KiB default page size
+that is four 32 KiB allocations, four 32 KiB reads and four crc32 passes over 32 KiB, per
+statement, to compare a record that occupies 116 bytes. The record's own bytes are compared
+instead, and the two callers share the one answer they both make under the same SHARED lock, which
+a writer cannot hold at the same time. Bytes that differ still go to the full read and its
+checksum, which is what decides.
+
+A release from SHARED also unlocks one byte range rather than three. RESERVED is taken only on the
+way to RESERVED and `take_shared` gives PENDING back before it returns, so two of the six lock and
+unlock calls a statement made were unlocking a range the handle did not hold.
+
+Measured through `Connection` on the medium fixture, `SELECT 1` cost **132,884 nanoseconds outside
+a transaction and 1,126 inside one**, and costs **10,095 against 727** now. The two readings were
+taken minutes apart on a box with two other agents working, so the ratio going from 118 to 13.9 is
+the claim and the nanoseconds are not.
+
+**No published figure moved, which is why this survived.** The scorecard and the performance
+contract are measured with `inillucent-fullgate`, which drives the engine's own `plan`, `prepare`
+and `pipeline` calls and never opens a connection. Nothing that grades this engine paid the cost or
+would have noticed it moving. `inillucent-prepareperf` prints both columns, and
+`crates/inillucent/tests/budget.rs` now counts what a statement outside a transaction reads so the
+cost cannot come back unnoticed.
+
 **Known not to do.** Seven of the thirty measured workloads are still slower
 than SQLite: compiling `SELECT 1` on every call, building an FTS5 index, a
 2,000 row insert batch, a join over an index range, an autocommit `UPDATE` of

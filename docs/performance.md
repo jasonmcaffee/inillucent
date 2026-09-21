@@ -526,6 +526,19 @@ since has been measured on Linux.
   with the couple of gigabytes a sequence writes. That row is published beside every run so a reader
   can tell a slow volume from a slow engine. Twelve runs across three sequences were taken and the
   pattern held in all of them.
+- **What a statement costs through the shipped API.** `inillucent-fullgate` drives the engine's own
+  `plan`, `prepare` and `pipeline` calls. It never calls `Database::open`, never opens a
+  `Connection` and never steps a `Statement`, so none of the figures on this page include what an
+  application pays for taking the file lock, asking whether another process has written, and giving
+  the lock back - which `locking_mode = normal` makes a statement do whenever it is not inside a
+  transaction. task-2046 measured that path and found `SELECT 1` costing 132,884 nanoseconds
+  outside a transaction against 1,126 inside one, on the same connection over the same file. It is
+  10,095 against 727 now. Both readings were taken on a box with two other agents working, minutes
+  apart, so the ratio is the claim and the nanoseconds are not.
+
+  No figure on this page moved when that cost was removed, and none would have moved if it had
+  doubled instead. `inillucent-prepareperf` is the instrument for this path; its breakdown table
+  prints the two columns beside each other on every run.
 - **Per workload processor time**, which the gate reports but which is quantised to the Windows
   scheduler tick of 15.625 ms. Only the per round totals on this page should be quoted.
 

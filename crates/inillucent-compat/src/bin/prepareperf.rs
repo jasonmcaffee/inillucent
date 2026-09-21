@@ -65,9 +65,26 @@
 //! between the two but a `BEGIN`. Everything in that gap is what a statement's
 //! implicit read transaction costs.
 //!
-//! Both figures are ratios on purpose: this box had other agents building at
-//! the time, which moves an absolute nanosecond and leaves a ratio where it
-//! was.
+//! **That 64 times was a defect, and task-2046 fixed it.** The staleness check
+//! a statement makes on its way in read the meta record twice, a whole page per
+//! slot per read, allocated and checksummed, to compare a record 116 bytes
+//! long; and the Windows lock release unlocked two byte ranges a handle at
+//! SHARED does not hold. On an idle box, 2026-09-21, two runs of this program
+//! read `prepare.trivial` at 14,691 ns and 8,549 ns outside a transaction
+//! against 869 ns and 775 ns inside one - **11 to 17 times**. The two runs
+//! disagree by 72% on the outside figure because the first process to run after
+//! the box has been idle pays for a cold file cache on a 16 MB fixture, which
+//! is why the claim is a range rather than a number.
+//!
+//! What is left is seven system calls: three to take the SHARED lock, one to
+//! release it, two reads of 116 bytes, and one `file_size` on the log segment.
+//! That is `locking_mode = normal` costing what it costs on this platform
+//! rather than anything further to remove.
+//!
+//! The numbers above are ratios on purpose: the 2026-09-20 pair was taken with
+//! other agents building, which moves an absolute nanosecond and leaves a ratio
+//! where it was. The 2026-09-21 pair was taken with the box measured at 6% and
+//! 2%, which is what makes those two absolute.
 //!
 //! So a reader comparing this report's family ratio against the scorecard's
 //! `open.prepare` is comparing two measurements of different things. This one

@@ -217,11 +217,15 @@ impl ImportedDatabase {
     /// the same reason.
     ///
     /// @param index - which attachment
-    fn attached_meta_moved(&self, index: usize) -> DbResult<bool> {
-        let Some(held) = self.session_state.attached.get(index) else {
+    fn attached_meta_moved(&mut self, index: usize) -> DbResult<bool> {
+        let Some(held) = self.session_state.attached.get_mut(index) else {
             return Ok(false);
         };
         if held.path.is_none() {
+            return Ok(false);
+        }
+        // The cheap check first, for the reason `the_meta_moved` gives.
+        if held.database.disk_record_is_as_last_read()? {
             return Ok(false);
         }
         // Against the record last seen on the disk, for the reason
@@ -310,8 +314,28 @@ impl ImportedDatabase {
     /// See `Database::disk_meta`.
     ///
     /// A database with no file has no second process and answers no.
-    fn the_meta_moved(&self) -> DbResult<bool> {
+    fn the_meta_moved(&mut self) -> DbResult<bool> {
         if self.storage.path.as_os_str().is_empty() {
+            return Ok(false);
+        }
+        // **The record's own bytes, compared without decoding them, and read
+        // once per lock acquisition rather than once per caller**
+        // (task-2046). `begin_read` has already asked this question of the
+        // same two slots a few instructions ago, under the same SHARED lock,
+        // which a writer cannot hold at the same time - so the answer is
+        // remembered and this costs nothing at all. What it replaced was a
+        // second `meta_on_disk`: a buffer one page long allocated and zeroed
+        // for each of the two slots, a whole page read into each, and a crc32
+        // pass over each, at a 32 KiB default page size, to compare a record
+        // 116 bytes long. Measured through
+        // `Connection` on the medium fixture, `SELECT 1` cost 132.9 us outside
+        // a transaction and 1.1 us inside one, and 89 us of the difference was
+        // the two calls to this and to `begin_read`.
+        //
+        // The comparison decides nothing on its own: bytes that differ send
+        // this straight to the full read and its checksum below, which is
+        // unchanged and is still what says whether the record moved.
+        if self.storage.database.disk_record_is_as_last_read()? {
             return Ok(false);
         }
         Ok(match self.storage.database.meta_on_disk()? {

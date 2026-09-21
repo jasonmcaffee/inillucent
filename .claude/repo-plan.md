@@ -348,3 +348,27 @@ they are touching do not collide; two that have not, do.
 - **`sh tools/build-realistic-fixtures.sh --check` says whether each checked-in `.db` is what the
   `.sql` beside it builds.** Run it after editing a fixture's SQL. The `.db` is checked in and
   nothing else in the suite notices the two drifting apart. (task-2050)
+- **A microsecond measurement of the shipped API is not a measurement `fullgate` makes.**
+  `inillucent-fullgate` drives `database.plan()`, `prepare()` and `pipeline()` and never opens a
+  `Connection`, so nothing the scorecard or the performance contract grades pays what
+  `Database::open` -> `session()` -> `prepare` -> `step` pays. task-2046 found 132 microseconds a
+  statement there that no published number could see. `inillucent-prepareperf`'s breakdown table is
+  the instrument for that path; `--repeat` makes a run take a second. (task-2046)
+- **Timing anything inside `enter`/`leave` means putting timers in them.** There is no profiler
+  wired up here and the primitives measured on their own do not add up to what the path costs -
+  four 32 KiB reads timed standalone read 10 us while the same four inside the engine read 89.
+  A `pub mod` of `AtomicU64` accumulators in `inillucent-engine`, with `Instant::now()` around
+  `begin_read`, `the_meta_moved`, `the_log_moved`, `enter_attached` and `release_if_idle`, answered
+  it in one build and came back out before the change was committed. (task-2046)
+- **A guard about cost goes in `crates/inillucent/tests/budget.rs` and counts something.** That
+  file's header carries the measurement for why a wall-clock ratio cannot be a test here: one
+  unchanged commit read between 1.18 and 59.22 depending on what else was on the box. If the thing
+  you fixed has no count, add one - task-2046 added `meta_reads` and `meta_probes` to `PoolStats`
+  and to the connection's `CacheStats` so the guard could assert what a statement outside a
+  transaction reads. Then take the fix back out and watch the guard fail, or it is not a guard.
+  (task-2046)
+- **`begin_read` and `the_meta_moved` are one question asked twice.** Both ask whether another
+  process has folded, of the same two slots, microseconds apart under one SHARED lock. If you add a
+  third caller on that path, share the answer through `Database::disk_record_is_as_last_read`
+  rather than reading the file again - and read `LastReadSlots::record` first, because a full read
+  deliberately does **not** let the next caller short circuit. (task-2046)

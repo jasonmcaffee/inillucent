@@ -58,6 +58,16 @@ pub struct CacheStats {
     pub reads: u64,
     /// Pages written to the file.
     pub writes: u64,
+    /// Reads of both meta slots in full: two whole pages, allocated, read and
+    /// checksummed.
+    ///
+    /// Here so that a guard can assert what a statement outside a transaction
+    /// costs without reading a clock - see
+    /// `crates/inillucent/tests/budget.rs`'s
+    /// `a_statement_outside_a_transaction_rereads_nothing` (task-2046).
+    pub meta_reads: u64,
+    /// Reads of the bytes a meta record occupies, without the page around them.
+    pub meta_probes: u64,
 }
 
 /// What the write-ahead log has been asked to do.
@@ -516,6 +526,8 @@ impl Database {
             evicted: held.evicted,
             reads: held.reads,
             writes: held.writes,
+            meta_reads: held.meta_reads,
+            meta_probes: held.meta_probes,
         }
     }
 
