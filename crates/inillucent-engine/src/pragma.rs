@@ -109,8 +109,12 @@ impl ImportedDatabase {
             b"journal_mode" => self.pragma_journal_mode(argument),
             b"encoding" => self.pragma_fixed_word(argument, "encoding", b"UTF-8"),
             b"locking_mode" => self.pragma_locking_mode(argument),
-            b"integrity_check" => self.pragma_integrity_check("integrity_check"),
-            b"quick_check" => self.pragma_integrity_check("quick_check"),
+            b"integrity_check" => self.pragma_integrity_check(
+                "integrity_check",
+                crate::engine::integrity::CheckDepth::Full,
+            ),
+            b"quick_check" => self
+                .pragma_integrity_check("quick_check", crate::engine::integrity::CheckDepth::Quick),
             b"wal_checkpoint" => self.pragma_wal_checkpoint(),
             b"page_size" => Ok(named_integer("page_size", self.storage.page_size as i64)),
             b"page_count" => Ok(named_integer(

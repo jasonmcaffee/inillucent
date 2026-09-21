@@ -26,6 +26,7 @@
 //! | [`counters`] | the counters a connection reports, and the random seed |
 //! | [`batch`] | the transaction manager: begin, undo, rollback, commit, vote |
 //! | [`integrity`] | walking every tree and every index |
+//! | [`pages`] | which pages the trees reach, and whether the free map agrees |
 //! | [`functions`] | the function registry, the collations, the authorizer, the levers |
 //! | [`compiled`] | the write path: compiling a statement and applying what it decided |
 //! | [`explain`] | rendering `EXPLAIN` and `EXPLAIN QUERY PLAN` as rows |
@@ -46,6 +47,7 @@ pub mod integrity;
 pub mod keys;
 pub mod locks;
 pub mod open;
+pub mod pages;
 pub mod rowshape;
 pub mod state;
 pub mod statements;

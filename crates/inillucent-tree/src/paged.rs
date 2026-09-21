@@ -47,9 +47,14 @@
 // 3,565 lines, of which 2,124 were one `impl PagedTree` block whose methods
 // answered three different questions. Each module reopens the same `impl`, so
 // no signature changed and nothing outside this directory can tell.
+//
+// `occupancy` joined them for the same reason (task-2052): which pages a tree
+// holds is a fourth question, asked by `DROP` and by the integrity checker and
+// by nothing that reads a row.
 mod bulk;
 mod cursor;
 mod descent;
+mod occupancy;
 mod skip;
 
 use std::cell::RefCell;
@@ -69,6 +74,7 @@ pub use crate::keyenc::KeyEncoding;
 use crate::leaf::{Extents, Hit, LeafBuilder, LeafRef, Spill};
 use crate::tree::BULK_FILL;
 use crate::types::ColumnSpec;
+pub use occupancy::PageShare;
 
 /// How many times a descent retries an optimistic read before giving up.
 ///
@@ -1215,42 +1221,6 @@ impl PagedTree {
             }
         }
         Ok(refs)
-    }
-
-    /// Returns every page the tree occupies, interior pages and leaves.
-    ///
-    /// For `DROP`, which gives them back to the free map. It walks the interior
-    /// levels rather than following the sibling chain, because the chain only
-    /// reaches the leaves and a dropped tree that left its interior pages behind
-    /// would leak a page per fanout for the life of the file.
-    ///
-    /// The walk is level-order from the root, and a page that appears twice -
-    /// which a corrupt file could produce - is returned once, because handing
-    /// the same page to the free map twice is worse than leaking it.
-    ///
-    /// @param pool - the buffer pool the file is open through
-    pub fn pages(&self, pool: &Pool) -> DbResult<Vec<PageId>> {
-        let mut seen: Vec<PageId> = Vec::new();
-        let mut frontier: Vec<PageId> = vec![self.root];
-        while let Some(page) = frontier.pop() {
-            if page.is_none() || seen.contains(&page) {
-                continue;
-            }
-            seen.push(page);
-            let image = {
-                let guard = pool.fetch(page)?;
-                guard.bytes().to_vec()
-            };
-            if page::kind_of(&image)? == PageKind::Leaf {
-                continue;
-            }
-            let interior = InteriorRef::parse(&image)?;
-            for child in 0..interior.children() {
-                let swip = interior.swip(child)?;
-                frontier.push(pool.page_of_swip(swip)?);
-            }
-        }
-        Ok(seen)
     }
 
     /// Checks one subtree's separators against its children's first keys.

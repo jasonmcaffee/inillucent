@@ -591,6 +591,13 @@ covers = ["inillucent-engine"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
+name = "new_engine_page_ownership"
+tier = "engine"
+covers = ["inillucent-engine"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
 name = "new_engine_log_lead"
 # It reads `_agent_output/fixtures/medium.db`, which `tools/build-gate-fixtures.sh`
 # builds and no clone carries.

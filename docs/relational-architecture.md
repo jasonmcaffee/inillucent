@@ -346,9 +346,47 @@ written beside each other because a disagreement between them is a wrong value r
   possible: it runs on `SimVfs` like every other one, and one of its cases cuts the machine inside
   the rename.
 
-`integrity-check` walks every tree. **It is not a proof that a database opens**: the case study
-above records a file that answered `ok` and could not be opened, because the damage was in the log
-rather than in the file. If you are checking a database you are about to rely on, open it.
+`PRAGMA integrity_check` reads the file three times over, and the three find different things:
+
+- **every tree on its own** - each leaf parses, keys increase within a leaf and across the sibling
+  chain, every interior separator is the first key of the child it precedes, and the sibling chain
+  reaches as many leaves as the interior levels do;
+- **every page against every other page, and against the free map** - a page two trees both reach,
+  and a page a tree reaches that the free map calls free;
+- **every index against its table** - a duplicate under one key in a `UNIQUE` index, a row whose
+  entry is missing, an entry naming a row the table does not hold.
+
+**The page pass is there because the other two cannot see a page two tables both own.** Each tree
+is a well formed tree and neither is an index of the other, so both of them pass over a file where
+`SELECT count(*) FROM p` answers with `q`'s rows. That state loses rows durably and without a
+symptom at the time, and `PRAGMA integrity_check` called it `ok` until task-2052.
+
+**What it does not report is a page the free map calls allocated that no tree reaches**, which is
+dead space rather than lost data. The engine leaves that state behind itself in two places, both
+measured in task-2052: a rolled-back `CREATE TABLE` or `CREATE INDEX` keeps its tree's root page,
+and `DROP TABLE` keeps every page the table's out-of-line values sat on - `release_tree` gives back
+the interior pages and the leaves, and `paged::free_extent` is reached only from the tree's own
+write paths. `DELETE FROM t` before the drop gives that space back, and so does `VACUUM`. Both are
+leaks to fix rather than states to live with, and either fix changes *when* the engine hands a page
+back - which is the change task-2043 got subtly wrong and is why this check exists. So the walk that
+finds them is `ImportedDatabase::report_leaked_pages`, tested against a database damaged on purpose
+and not wired to the pragma until the two leaks are closed, which is task-2065.
+
+**`PRAGMA quick_check` reads every tree and accounts for every page, and leaves out the index
+pass.** The two pragmas used to be one pass under two names, because there was no cheaper variant to
+offer. The obvious candidate for the cheaper one was to drop the page pass, and counting it said
+otherwise: over a table of sixty out-of-line values the whole page walk cost 4 page fetches on top
+of 133. It reads a tree's interior pages and its leaves, and it takes an out-of-line value's pages
+from the reference in the leaf it is already holding rather than by reading the value. The index
+pass is the expensive one - it walks each index and the table it is on and merges them - so that is
+what `quick_check` leaves out.
+
+The pinned SQLite draws its line in the same place: its `quick_check` omits index content against
+table content, `UNIQUE`, `CHECK` and `NOT NULL`, and still accounts for every page of the file.
+
+**Neither is a proof that a database opens**: the case study above records a file that answered `ok`
+and could not be opened, because the damage was in the log rather than in the file. If you are
+checking a database you are about to rely on, open it.
 
 ---
 

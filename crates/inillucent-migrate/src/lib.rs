@@ -379,11 +379,14 @@ fn publish(staging: &Path, destination: &Path) -> Result<(), String> {
 /// something the project has decided not to provide.
 ///
 /// What replaces it checks the format that exists, and is not weaker for it:
-/// `check_trees` walks **every** tree in the file and verifies its key order,
-/// which is what `PRAGMA integrity_check` does and is strictly more than a
-/// reader's opinion of the pages it happened to touch. It runs on a **fresh
-/// open of the closed file**, so it sees what a new process sees rather than
-/// what the writer's warm pool saw.
+/// `check_trees` is what `PRAGMA integrity_check` runs, which is strictly more
+/// than a reader's opinion of the pages it happened to touch. It walks
+/// **every** tree in the file and verifies its key order; it accounts for
+/// **every page** of the file, so a migration that gave one page to two tables
+/// is caught here rather than by the reader that later finds one table's rows
+/// under the other's name; and it reads **every index** against the table it is
+/// on. It runs on a **fresh open of the closed file**, so it sees what a new
+/// process sees rather than what the writer's warm pool saw.
 ///
 /// What is honestly lost is *engine independence*: this is no longer a second
 /// implementation reading the bytes, it is a second open. That is the direct

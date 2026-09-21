@@ -10,6 +10,27 @@ fails the build when any copy of it disagrees.
 
 ## Unreleased
 
+**`PRAGMA integrity_check` and `PRAGMA quick_check` account for every page of the file.** They used
+to read one tree at a time and each index against its table, and neither of those can see a page two
+tables both own: each tree is a well formed tree and neither is an index of the other, so a file
+where `SELECT count(*) FROM p` answers with `q`'s rows passed both and was reported `ok`. Two new
+answers: `page N is used by table p and also by table q`, and `page N is used by table t but the
+free map says it is free`, which is the state the first one grows out of at the next allocation.
+
+The two pragmas stop being one pass under two names. `quick_check` reads every tree and accounts for
+every page; `integrity_check` does that and then reads each index against its table. The line is at
+the index pass because that is the expensive one, which was counted rather than assumed: over a
+table of sixty out-of-line values the whole page walk cost 4 page fetches on top of 133, because it
+takes an out-of-line value's pages from the reference in the leaf rather than by reading the value.
+The pinned SQLite 3.53.4 draws it in the same place.
+
+**Two leaks this found are not yet fixed, and neither pragma reports one.** A rolled-back
+`CREATE TABLE` or `CREATE INDEX` keeps its tree's root page, and `DROP TABLE` keeps every page the
+table's out-of-line values sat on; `DELETE FROM t` before the drop gives that space back, and so
+does `VACUUM`. Both are dead space rather than lost data, and closing either changes when the engine
+hands a page back - so they are their own change. The walk that finds them is
+`ImportedDatabase::report_leaked_pages`.
+
 **A commit is one append to the log and one sync of it.** It used to be a
 checkpoint: the log folded into the file, and a rollback journal holding the
 pre-image of every page the fold was about to overwrite, which is six to eight

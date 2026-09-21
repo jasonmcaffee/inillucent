@@ -600,6 +600,19 @@ impl Database {
             .map_err(inillucent_vfs::VfsError::into_db_error)
     }
 
+    /// Reports whether the free map says a page is handed out.
+    ///
+    /// **For the integrity checker, which is the only reader that has a second
+    /// opinion to compare this against.** Everything else asks the map by
+    /// allocating from it. A page past the end of the map answers `true`,
+    /// because a page nothing can describe is a page nothing may hand out -
+    /// see [`crate::freemap::FreeMap::is_allocated`].
+    ///
+    /// @param page - the page to ask about
+    pub fn page_is_allocated(&self, page: PageId) -> bool {
+        self.free.is_allocated(page)
+    }
+
     /// Returns the buffer pool, so a caller that owns the file can grow it.
     ///
     /// Held apart from [`Database::pool`] because everything else about a pool

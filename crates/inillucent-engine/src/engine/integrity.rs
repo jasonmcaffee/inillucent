@@ -12,13 +12,54 @@ use inillucent_tree::datum::{Datum, OwnedDatum};
 
 use crate::*;
 
+/// How much of a file a check reads.
+///
+/// **The distinction `quick_check` exists for, drawn where the measurement put
+/// it.** Until there was a page walk the two pragmas were the same pass, and
+/// the module comment said so because this engine had nothing cheaper to
+/// offer. The obvious guess was that the page walk was the expensive half and
+/// belonged only in `integrity_check`. It is not: it reads a tree's interior
+/// pages and its leaves, and it takes the pages of an out-of-line value from
+/// the reference in the leaf it is already holding rather than by reading the
+/// value. Counted in page fetches off the pool over a table of sixty
+/// out-of-line values, the whole walk cost 4 fetches on top of 133 - three per
+/// cent.
+///
+/// The expensive half is the index pass, which walks each index and the table
+/// it is on and merges them. So the line is drawn there, which is also where
+/// the pinned SQLite draws it: its `quick_check` omits index content against
+/// table content, `UNIQUE`, `CHECK` and `NOT NULL`, and still accounts for
+/// every page.
+///
+/// `the_page_walk_is_not_what_quick_check_is_not_paying_for` counts both halves
+/// off the pool rather than off a clock, so the number is the same on every
+/// machine and a build where the two halves change places fails there.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CheckDepth {
+    /// Every tree's own shape, and who holds every page. `PRAGMA quick_check`.
+    Quick,
+    /// That, and every index against the table it is on.
+    /// `PRAGMA integrity_check`.
+    Full,
+}
+
 impl crate::ImportedDatabase {
     /// Checks every tree in every attached database, and their agreement.
     ///
     /// The campaign tests run this after every statement. A tree that has
     /// drifted structurally still answers a scan correctly for a long time,
     /// which is precisely why the check has to be a check rather than a query.
+    ///
+    /// The whole of it - a caller asking for less says so with
+    /// [`ImportedDatabase::check_trees_to`].
     pub fn check_trees(&self) -> DbResult<()> {
+        self.check_trees_to(CheckDepth::Full)
+    }
+
+    /// Checks every tree, reading as much of the file as the depth asks for.
+    ///
+    /// @param depth - how much of the file to read
+    pub fn check_trees_to(&self, depth: CheckDepth) -> DbResult<()> {
         for (root, tree) in &self.schema.trees {
             let pool = self
                 .schema_file(self.session_state.schema_of(*root))
@@ -26,16 +67,30 @@ impl crate::ImportedDatabase {
                 .pool();
             tree.check(pool)?;
         }
-        // **And then whether the trees agree with each other.** Every check
-        // above is about one tree in isolation - its key order, its sibling
-        // chain, its separators - and every one of them passes over a database
-        // where an index holds two entries under one `UNIQUE` key, or an entry
-        // naming a row the table does not have. That state was reachable when
-        // `UPDATE` skipped a secondary `UNIQUE` index's own check, and
-        // `PRAGMA integrity_check` called it healthy - which is what this
-        // detector exists for: the write path is where such a state is
-        // *created*, and there is more than one way in - an import, a crash
-        // recovery, a future write path, a bug like that one.
+        // **And then whether the trees agree about who owns a page.** Every
+        // check above is about one tree in isolation - its key order, its
+        // sibling chain, its separators - and every one of them passes over a
+        // file where two tables are reachable from the same page, because each
+        // tree is a well formed tree. That state loses rows with no symptom at
+        // the time, which is what `check_page_ownership` is for; see
+        // `crate::engine::pages`.
+        self.check_page_ownership()?;
+        if depth == CheckDepth::Quick {
+            return Ok(());
+        }
+        // **And then whether each index agrees with its table.** Nothing above
+        // can see an index holding two entries under one `UNIQUE` key, or an
+        // entry naming a row the table does not have: the index is a well
+        // formed tree holding well formed entries on pages nothing else owns.
+        // That state was reachable when `UPDATE` skipped a secondary `UNIQUE`
+        // index's own check, and `PRAGMA integrity_check` called it healthy -
+        // which is what this detector exists for: the write path is where such
+        // a state is *created*, and there is more than one way in - an import,
+        // a crash recovery, a future write path, a bug like that one.
+        //
+        // It is the last of the three because it is the one `quick_check`
+        // leaves out, and it is left out because it is the expensive one: two
+        // walks and a merge per index, where the two above read each page once.
         self.check_indexes_agree()
     }
 
@@ -89,6 +144,122 @@ impl crate::ImportedDatabase {
             Ok(Changes::default())
         })?;
         Ok(())
+    }
+
+    /// Points one table's catalog row at another table's tree, past the write
+    /// path.
+    ///
+    /// **The damage `check_page_ownership` looks for, and there is no longer a
+    /// statement that produces it.** It is task-2043's own state: a catalog
+    /// row naming a page that is not the one holding that table's rows. That
+    /// defect is fixed - a dropped tree's pages are freed at commit now - so
+    /// the only way to show the detector the damage it looks for is to write
+    /// the row.
+    ///
+    /// Both trees stay well formed, which is the point: `PagedTree::check`
+    /// passes over each of them and `check_indexes_agree` has nothing to
+    /// compare, because neither is an index of the other. What is wrong is
+    /// only visible by asking who holds a page.
+    ///
+    /// It goes through `rewrite` and `seal`, so the row is logged, committed
+    /// and recoverable like any other catalog change - the damage is a real
+    /// state of a real file rather than an artefact of the test harness. The
+    /// tree identifier is left alone, because what moved is the row's idea of
+    /// where its tree is and not which tree the log's records belong to.
+    ///
+    /// The caller reopens the file afterwards: the handles this connection
+    /// already holds were attached before the row changed, and it is the read
+    /// back from the catalog that produces two handles over one tree.
+    ///
+    /// @param table - the table whose catalog row is moved
+    /// @param onto - the table whose tree it is made to name
+    pub fn point_table_at_unchecked(&mut self, table: &str, onto: &str) -> DbResult<()> {
+        let wanted = table.as_bytes().to_ascii_lowercase();
+        let target = onto.as_bytes().to_ascii_lowercase();
+        let find = |name: &[u8]| {
+            self.schema
+                .entries
+                .iter()
+                .find(|held| held.entry.name.to_ascii_lowercase() == name)
+                .map(|held| (held.rowid, held.entry.clone()))
+        };
+        let (_, onto_entry) =
+            find(&target).ok_or_else(|| refusal(format!("no such table: {onto}")))?;
+        let (rowid, mut entry) =
+            find(&wanted).ok_or_else(|| refusal(format!("no such table: {table}")))?;
+        entry.root = onto_entry.root;
+        entry.stats = onto_entry.stats;
+        self.rewrite(rowid, entry)?;
+        self.seal()
+    }
+
+    /// Takes one page out of the free map and gives it to nothing, past the
+    /// write path.
+    ///
+    /// **The damage `report_leaked_pages` looks for**: a page the free map
+    /// calls allocated that no tree reaches, which is what a write path that
+    /// let go of a page without saying so leaves behind. Neither pragma reports
+    /// it - `crate::engine::pages` says why - so this hook and its test are the
+    /// only thing that runs that arm. Returns the page it stranded, so a test
+    /// can name it in its assertion rather than guess.
+    ///
+    /// The engine produces the same state from a rolled-back `CREATE` and from
+    /// a `DROP TABLE` of a table holding out-of-line values, and the tests use
+    /// those too. This hook is what shows the arm a leak that is neither of
+    /// them, so closing those two does not leave it untested.
+    ///
+    /// The `AllocPage` record is the whole of the change, which is what makes
+    /// the state survive a crash: replaying it claims the page in the map, and
+    /// there is no second record putting anything on it.
+    ///
+    /// Always `main`, because a damage hook has no reason to reach an attached
+    /// file and every caller is a test over one database.
+    pub fn strand_a_page_unchecked(&mut self) -> DbResult<u64> {
+        let at = crate::engine::open::SCHEMA_VIEW_ROOT;
+        let stranded = std::rc::Rc::new(std::cell::Cell::new(0u64));
+        let reported = std::rc::Rc::clone(&stranded);
+        self.write(&Params::new(), Vec::new(), move |target, _| {
+            let (database, _, log) = target.parts_for(at)?;
+            let page = database.allocate(1)?;
+            log.log(inillucent_wal::record::Body::AllocPage { page: page.0 })?;
+            reported.set(page.0);
+            Ok(Changes::default())
+        })?;
+        Ok(stranded.get())
+    }
+
+    /// Tells the free map that one table's root page is free, past the write
+    /// path.
+    ///
+    /// **The second state `check_page_ownership` reports, and the one that
+    /// becomes the first.** A live page the map has handed back is not damage
+    /// anybody can see yet - every tree still reads correctly - and it stops
+    /// being invisible at the next allocation, which gives the page to a second
+    /// owner and loses whatever was on it. That is task-2043's own sequence,
+    /// and this is the state it passes through.
+    ///
+    /// The `FreePage` record is the whole of the change, so a replay reaches
+    /// the same state rather than a healthy one. Returns the page, so a test
+    /// can name it.
+    ///
+    /// @param table - the table whose root page is given back
+    pub fn free_root_page_unchecked(&mut self, table: &str) -> DbResult<u64> {
+        let wanted = table.as_bytes().to_ascii_lowercase();
+        let page = self
+            .schema
+            .entries
+            .iter()
+            .find(|held| held.entry.name.to_ascii_lowercase() == wanted)
+            .map(|held| held.entry.root)
+            .ok_or_else(|| refusal(format!("no such table: {table}")))?;
+        let at = crate::engine::open::SCHEMA_VIEW_ROOT;
+        self.write(&Params::new(), Vec::new(), move |target, _| {
+            let (database, _, log) = target.parts_for(at)?;
+            log.log(inillucent_wal::record::Body::FreePage { page: page.0 })?;
+            database.release(page, 1)?;
+            Ok(Changes::default())
+        })?;
+        Ok(page.0)
     }
 
     /// Reports the first disagreement between an index and the table it is on.

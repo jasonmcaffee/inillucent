@@ -128,6 +128,28 @@ they are touching do not collide; two that have not, do.
   a bulk build that writes before the record that names it - left recovery not knowing the table
   existed, and the rows written into it were dropped on replay by the unknown-tree tolerance. A
   case that did not reopen passed through all of it. (task-2033)
+- **`tests/crash/*.txt` and `*.tsv` show as modified after any run that touched the crash
+  campaigns, and the change is only the line endings.** The suites rewrite their recorded schedules
+  with LF where the checkout holds CRLF, so `git status` lists eighteen files and `git diff` shows
+  nothing in any of them. Do not stage them and do not spend time on them: put them back with
+  `git checkout --` naming each path before you commit. (task-2052)
+- **`PRAGMA integrity_check` and `PRAGMA quick_check` now account for every page of the file**, so
+  a change that gives one page to two trees fails a check rather than losing rows quietly. Two
+  things follow for anybody editing the write path. A page a tree reaches that the free map calls
+  free is reported as corruption, which is the state task-2043 passed through, so a free that
+  happens at the wrong moment now fails the campaign suites at the statement that did it. And
+  `ImportedDatabase::check_trees` is what those suites call after every statement, so it walks the
+  pages too; counted off the pool, the whole walk cost 4 page fetches on top of 133 over a table of
+  sixty out-of-line values, because it takes an out-of-line value's pages from the reference in the
+  leaf rather than by reading the value. (task-2052)
+- **Two ordinary statements leave a page the free map holds and no tree reaches, and that is
+  task-2065 rather than your change.** A rolled-back `CREATE TABLE` or `CREATE INDEX` keeps its
+  tree's root page - invisible until a checkpoint and a reopen - and `DROP TABLE` keeps every page
+  the table's out-of-line values sat on. Neither is reported by either pragma for that reason;
+  `ImportedDatabase::report_leaked_pages` is the walk that finds them and
+  `crates/inillucent-engine/src/engine/pages.rs` carries the measurement. If you close either leak,
+  two tests in `new_engine_page_ownership.rs` fail by design and tell you to wire the arm up.
+  (task-2052)
 - **Adding a row to `tests/selection.toml` fails `documentation` until the tier table moves with
   it.** `tests/inillucent-testing-tdd.md` records a target count per tier and
   `the_per_tier_table_matches_the_map` compares the two. Update the `targets` cell of the tier you

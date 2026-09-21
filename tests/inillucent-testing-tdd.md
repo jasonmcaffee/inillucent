@@ -152,7 +152,7 @@ of a run rather than of the map and is not checked here.
 |---|---:|---:|---|
 | `smoke` | 1 | 8 | the ten-second answer: a real file opened, written, reopened, read |
 | `unit` | 31 | 1,388 | every crate's own `#[cfg(test)]` modules |
-| `engine` | 64 | 357 | SQL and storage behaviour over real database files |
+| `engine` | 65 | 364 | SQL and storage behaviour over real database files |
 | `differential` | 33 | 309 | graded against the pinned SQLite 3.53.4 |
 | `durability` | 31 | 216 | crashes, injected faults, corruption and concurrency |
 | `e2e` | 36 | 412 | the public surfaces an application binds to, end to end |

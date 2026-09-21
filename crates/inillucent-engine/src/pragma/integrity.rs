@@ -9,6 +9,7 @@ use inillucent_sql::declare::argument_text;
 use inillucent_sql::directive::PragmaArgument;
 use inillucent_tree::datum::OwnedDatum;
 
+use crate::engine::integrity::CheckDepth;
 use crate::Outcome;
 
 impl crate::ImportedDatabase {
@@ -54,17 +55,34 @@ impl crate::ImportedDatabase {
     /// `ok` when they all hold, and the first failure otherwise, which is the
     /// shape SQLite's answer has.
     ///
-    /// **One check, two names.** `integrity_check` and `quick_check` are the
-    /// same pass here - this engine has no faster, sampled variant of the
-    /// walk - and SQLite's own two pragmas name their column after whichever
-    /// of the two was asked, not after a shared implementation. Reporting
-    /// `integrity_check` for both told a caller that ran `PRAGMA quick_check`
-    /// it had received the wrong pragma's answer.
+    /// **Two names, and now two amounts of reading.** They used to be the same
+    /// pass, because this engine had no cheaper variant to offer. `quick_check`
+    /// reads every tree's own shape and accounts for every page of the file;
+    /// `integrity_check` does that and then reads each index against the table
+    /// it is on.
+    ///
+    /// **The line is drawn at the index pass because that is the expensive
+    /// one**, which was measured rather than assumed: the index pass walks each
+    /// index and its table and merges them, where the page walk reads a tree's
+    /// interior pages and its leaves and takes an out-of-line value's pages
+    /// from the reference in the leaf it is already holding. Over a table of
+    /// sixty out-of-line values the whole page walk cost 4 page fetches on top
+    /// of 133.
+    ///
+    /// The pinned SQLite 3.53.4 draws it in the same place: its `quick_check`
+    /// omits index content against table content, `UNIQUE`, `CHECK` and
+    /// `NOT NULL`, and still accounts for every page of the file
+    /// (`sqlite3BtreeIntegrityCheck`, which both pragmas reach).
     ///
     /// @param column - which of the two names asked for this, and so which one
     ///   the answer is reported under
-    pub(crate) fn pragma_integrity_check(&mut self, column: &str) -> DbResult<Outcome> {
-        let answer = match self.check_trees() {
+    /// @param depth - how much of the file that name reads
+    pub(crate) fn pragma_integrity_check(
+        &mut self,
+        column: &str,
+        depth: CheckDepth,
+    ) -> DbResult<Outcome> {
+        let answer = match self.check_trees_to(depth) {
             Ok(()) => b"ok".to_vec(),
             Err(error) => error
                 .detail()
