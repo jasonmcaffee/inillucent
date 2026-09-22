@@ -158,8 +158,10 @@ fn an_injected_allocation_failure_never_reaches_the_write_path() {
     record(
         "allocation.txt",
         "points: 0, refused: 0\n\
-         the write path makes no allocation inillucent_base::buffer counts; \
-         see txn.oom-injection in compat/sqlite-3.53.4.toml\n",
+         the write path makes no allocation inillucent_base::buffer counts: the buffer \
+         module hands out byte buffers and a write allocates Vec<OwnedDatum> and String, \
+         which no byte-buffer call covers; see txn.oom-injection in \
+         compat/sqlite-3.53.4.toml\n",
     );
 }
 

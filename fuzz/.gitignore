@@ -1,0 +1,17 @@
+# What a fuzzing run produces, none of which is source.
+#
+# `corpus/` is the inputs libfuzzer has kept because they reached new coverage.
+# It grows every run - 3.7 MB after one twenty-second campaign across sixteen
+# targets - and it is worth keeping on the machine that fuzzes, because a corpus
+# is where the next run starts from. It is not worth keeping in the repository,
+# where it would be a megabyte of churn per run for inputs nobody reads.
+#
+# `artifacts/` is the input that crashed a target. That one *is* worth keeping,
+# and the way to keep it is the rule in README.md: add it as a case in the
+# stable counterpart, written out in the test, so it is checked by every run of
+# the ordinary suite rather than only while somebody is fuzzing. A file sitting
+# here is checked by nobody.
+corpus/
+artifacts/
+coverage/
+target/

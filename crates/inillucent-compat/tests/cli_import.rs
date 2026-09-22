@@ -276,3 +276,52 @@ fn a_file_that_is_not_utf8_is_refused_by_name_and_offset() {
     .expect("the ASCII file loads");
     assert_eq!(loaded.changes, 1, "the control file did not load its row");
 }
+
+/// **A quoted field holding a newline is one field, and CRLF rows are rows.**
+///
+/// Both shapes are tested on the way *out* and neither on the way in
+/// (task-2066 section 4.4.13), and they are the two a real CSV has: a spreadsheet
+/// writes CRLF, and any free-text column eventually holds a line break. A
+/// reader that split on every newline would turn one row into two and put the
+/// tail of a sentence in an `id` column, which is a load that succeeds and is
+/// wrong.
+///
+/// The row count is asserted as well as the values, because a splitter that
+/// broke the quoted field would still load *something* - and the something
+/// would be three rows rather than two.
+#[test]
+fn a_quoted_newline_is_one_field_and_crlf_rows_are_rows() {
+    let path = area().join("newlines.csv");
+    let body = "id,note\r\n1,\"first line\nsecond line\"\r\n2,plain\r\n";
+    std::fs::write(&path, body).expect("the scratch file is written");
+    let named = path.to_string_lossy().replace('\\', "/");
+
+    let mut context =
+        Context::open(":memory:", OpenMode::ReadWrite, None).expect("an in-memory database opens");
+    let loaded = run(
+        &mut context,
+        "import",
+        &[("file", text(named.as_str())), ("table", text("note"))],
+    )
+    .expect("the CSV loads");
+    assert_eq!(
+        loaded.changes, 2,
+        "a quoted newline was read as a row separator: {} rows loaded where 2 were written",
+        loaded.changes
+    );
+    assert_eq!(
+        scalar(&mut context, "SELECT count(*) FROM note"),
+        "2",
+        "the table does not hold the two rows the file held"
+    );
+    assert_eq!(
+        scalar(&mut context, "SELECT note FROM note WHERE id = '1'"),
+        "first line\nsecond line",
+        "the quoted newline did not survive the load"
+    );
+    assert_eq!(
+        scalar(&mut context, "SELECT note FROM note WHERE id = '2'"),
+        "plain",
+        "the carriage return was kept as part of the value"
+    );
+}

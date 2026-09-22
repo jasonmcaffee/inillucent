@@ -1,2 +1,2 @@
 points: 0, refused: 0
-the write path makes no allocation inillucent_base::buffer counts; see txn.oom-injection in compat/sqlite-3.53.4.toml
+the write path makes no allocation inillucent_base::buffer counts: the buffer module hands out byte buffers and a write allocates Vec<OwnedDatum> and String, which no byte-buffer call covers; see txn.oom-injection in compat/sqlite-3.53.4.toml
