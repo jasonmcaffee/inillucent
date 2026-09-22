@@ -23,6 +23,17 @@
 //! kernel has is what survives. That is the behaviour wanted, and it is why
 //! this cannot be done with a cooperative shutdown.
 //!
+//! **A cut has to catch the writer with work still in the log** (task-2072).
+//! Nothing folds the log into the file during this feed - `release_if_idle`
+//! returns early under `PRAGMA locking_mode = exclusive` - so the only fold is
+//! the one `Drop for ImportedDatabase` performs when the writer exits on its
+//! own. A cut placed beside the end of the feed therefore races the writer to
+//! the end of its input, and the race is decided by how long the parent takes
+//! to call `TerminateProcess` after reading a line from a pipe. `MARGIN` is
+//! what keeps every cut clear of it, `Cut::running` is what says so when it is
+//! not, and two `const` assertions beside `MARGIN` stop the ladder growing back
+//! into the end of the feed.
+//!
 //! **What proves it can fail** is `a_cut_with_the_log_moved_aside_loses_the_rows`
 //! below. Recovery here is the log segments beside the file; with them moved
 //! out of the way the same cut loses not only the acknowledged rows but the
@@ -40,7 +51,49 @@ use inillucent_compat::workspace_root;
 ///
 /// More than any cut reads, so the child is always killed with work still to
 /// do: a child that had finished would be testing a clean exit.
-const BATCHES: usize = 600;
+///
+/// **Derived from the ladder rather than chosen.** It was the literal 600 with
+/// the ladder clamped to fit, and the clamp is what made this file
+/// intermittently red - see [`MARGIN`].
+const BATCHES: usize = cut_point(CUTS.saturating_sub(1)).saturating_add(MARGIN);
+
+/// How many batches the writer still has ahead of it at the last cut.
+///
+/// **What task-2072 was about.** The ladder's top cut is `cut_point(19)`, which
+/// is 725, and `BATCHES` was the literal 600 with every cut clamped to
+/// `BATCHES - 1`. So cuts 18 and 19 were both 599: the same cut twice, one
+/// batch from the end of the feed. The case above then failed at cut 19 about
+/// once in three full runs, on the assertion that the reopen reported a
+/// recovery.
+///
+/// **Why the recovery assertion and not one about the rows.** Nothing folds the
+/// log into the file during this feed: `release_if_idle` returns early under
+/// `PRAGMA locking_mode = exclusive`, so the only fold in the run is
+/// `Drop for ImportedDatabase` calling `fold_on_close`, which runs when the
+/// writer exits *on its own*. One batch from the end, the writer sometimes
+/// finished that batch, read the end of its input and exited before the kill
+/// landed, and a writer that exited tidily left nothing for the reopen to
+/// replay. The rows were all there; what was missing was a recovery to report.
+///
+/// **The window, measured.** Driving the same cut from a parent that waits a
+/// set time between reading the last acknowledgement and issuing the kill puts
+/// the edge at roughly 25 ms: at 10 ms the kill caught the writer mid feed in
+/// every run, at 25 ms it sometimes caught it already folded, and at 50 ms the
+/// writer had exited cleanly in every run. The feed runs at about 10 ms a
+/// batch, which is where the 25 ms comes from. So the test was asking the
+/// parent to call `TerminateProcess` within 25 ms of reading a line from a
+/// pipe, and an ordinary scheduling delay on a loaded box is longer than that.
+///
+/// **What 100 buys, measured the same way.** At cut 19 as it now stands, 725 of
+/// 825, a parent that waited 1,800 ms still killed a writer with 11 batches to
+/// go and work to recover; the writer had exited on its own by 2,200 ms. About
+/// 25 ms became about 2,000 ms.
+///
+/// **It is a count of batches and not a duration on purpose.** What has to be
+/// true is that the writer still holds work the log has and the file does not,
+/// and work is what a batch is. A faster build shortens the seconds and changes
+/// nothing about the property.
+const MARGIN: usize = 100;
 
 /// How many rows one transaction writes.
 ///
@@ -51,6 +104,45 @@ const PER_BATCH: usize = 5;
 
 /// How many cuts are taken.
 const CUTS: usize = 20;
+
+/// Returns how many acknowledgements the Nth cut reads before killing.
+///
+/// Spread across the run rather than random, so a failure names a cut somebody
+/// can reproduce. The points are uneven on purpose: the early ones land before
+/// the first checkpoint and the late ones after it.
+///
+/// **It is not clamped.** A clamp is what turned the top two cuts into one cut
+/// beside the end of the feed; `BATCHES` is derived from this function instead,
+/// so the ladder decides the feed's length rather than the feed truncating the
+/// ladder.
+///
+/// @param cut - which cut it is
+const fn cut_point(cut: usize) -> usize {
+    3usize.saturating_add(cut.saturating_mul(cut).saturating_mul(2))
+}
+
+/// **Every cut leaves the writer [`MARGIN`] batches of work.**
+///
+/// A compile error rather than a comment, because the failure the margin
+/// prevents is intermittent: a `BATCHES` written back as a literal, or a `CUTS`
+/// raised past what the feed covers, would not fail a run. It would make one
+/// run in three fail, somewhere else, months later, which is what task-2072
+/// cost to diagnose the first time.
+const _: () = assert!(
+    BATCHES >= cut_point(CUTS.saturating_sub(1)).saturating_add(MARGIN),
+    "the last cut must leave MARGIN batches ahead of the writer, or a kill that lands \
+     after it reaches the end of the feed finds a tidily closed file - see task-2072"
+);
+
+/// **No two cuts are the same cut.**
+///
+/// Cuts 18 and 19 were both 599 before task-2072, so one of the twenty was
+/// spent re-running the other, and a failure naming cut 19 was a failure its
+/// neighbour had just passed on identical inputs.
+const _: () = assert!(
+    cut_point(CUTS.saturating_sub(1)) > cut_point(CUTS.saturating_sub(2)),
+    "the cut ladder must be strictly increasing - see task-2072"
+);
 
 /// Returns a directory of this cut's own, emptied first.
 ///
@@ -130,9 +222,27 @@ fn prepared(binary: &Path, directory: &Path) -> PathBuf {
     database
 }
 
+/// What one kill caught the writer doing.
+struct Cut {
+    /// The highest batch number the writer acknowledged before the kill.
+    acknowledged: u64,
+    /// Whether the writer was still running its feed when the kill landed.
+    ///
+    /// **A cut that caught a writer which had already finished is a cut that
+    /// tested a clean close** (task-2072). `inillucent-shell` answers 0 when it
+    /// reaches the end of its input and closes tidily, and a tidy close folds
+    /// the log into the file - so the reopen has nothing to replay and every
+    /// assertion this file makes about recovery is being asked of the wrong
+    /// state. `Child::kill` is `TerminateProcess(handle, 1)` on Windows and
+    /// `SIGKILL` on Unix, so a writer this parent ended answers 1 or no code at
+    /// all; only a writer that ended itself answers 0.
+    ///
+    /// Both cases assert it. It is returned rather than asserted inside
+    /// `killed_after` so each can say what its own cut was for.
+    running: bool,
+}
+
 /// Starts a writer, reads `wanted` acknowledgements, and kills it.
-///
-/// Returns the highest batch number the writer acknowledged before the kill.
 ///
 /// The acknowledgement is the `SELECT max(batch)` after each `COMMIT`: the
 /// child has to have committed the transaction to answer it, so a number the
@@ -143,7 +253,7 @@ fn prepared(binary: &Path, directory: &Path) -> PathBuf {
 /// @param database - the file to write to
 /// @param feed - the script to read
 /// @param wanted - how many acknowledgements to read before killing
-fn killed_after(shell: &Path, database: &Path, feed: &Path, wanted: usize) -> u64 {
+fn killed_after(shell: &Path, database: &Path, feed: &Path, wanted: usize) -> Cut {
     let input = std::fs::File::open(feed).expect("the script opens");
     let mut child = Command::new(shell)
         .arg(database.to_string_lossy().replace('\\', "/"))
@@ -172,8 +282,15 @@ fn killed_after(shell: &Path, database: &Path, feed: &Path, wanted: usize) -> u6
     // The kill, and nothing before it. No close, no flush, no signal the child
     // could catch: the file on disk is whatever the kernel already had.
     let _ = child.kill();
-    let _ = child.wait();
-    acknowledged
+    // **The status is read rather than discarded**, because it is the one thing
+    // that says whether this cut caught a writer at all - see [`Cut::running`].
+    let status = child
+        .wait()
+        .unwrap_or_else(|error| panic!("waiting for the writer: {error}"));
+    Cut {
+        acknowledged,
+        running: status.code() != Some(0),
+    }
 }
 
 /// Returns one scalar the built binary reads out of a database.
@@ -221,16 +338,27 @@ fn a_killed_writer_leaves_every_acknowledged_transaction_whole() {
         let directory = area(cut);
         let database = prepared(&binary, &directory);
         let feed = script(&directory);
-        // Spread across the run rather than random, so a failure names a cut
-        // somebody can reproduce. The points are uneven on purpose: the early
-        // ones land before the first checkpoint and the late ones after it.
-        let wanted = 3usize
-            .saturating_add(cut.saturating_mul(cut).saturating_mul(2))
-            .min(BATCHES.saturating_sub(1));
-        let acknowledged = killed_after(&shell, &database, &feed, wanted);
+        let wanted = cut_point(cut);
+        let Cut {
+            acknowledged,
+            running,
+        } = killed_after(&shell, &database, &feed, wanted);
         assert!(
             acknowledged > 0,
             "cut {cut}: the writer acknowledged nothing, so this cut tested nothing"
+        );
+        // **The premise, checked before anything is asked of the file**
+        // (task-2072). Every assertion below is about what a kill leaves
+        // behind, and none of them means anything if the writer had already
+        // reached the end of its feed and closed tidily. The margin in
+        // [`MARGIN`] is what makes this hold; this is what says so when it does
+        // not, instead of leaving the recovery assertion below to fail with a
+        // message about the wrong thing.
+        assert!(
+            running,
+            "cut {cut}: the writer read its whole feed and exited on its own before the kill \
+             landed, so this cut tested a tidy close rather than a crash. It read {wanted} of \
+             {BATCHES} batches, which should have left {MARGIN} ahead of it"
         );
 
         // **The first reopen after the kill, and it has to be first.** It is
@@ -259,7 +387,16 @@ fn a_killed_writer_leaves_every_acknowledged_transaction_whole() {
         let object = document(&reported.stdout);
         assert!(
             field(&object, "recovered").is_some(),
-            "cut {cut}: the reopen after a kill did not report that it recovered:\n{}",
+            "cut {cut}: the reopen after a kill did not report that it recovered, although \
+             the writer was still running when the kill landed - so the log held nothing \
+             above the file's own checkpoint at a cut that read {wanted} of {BATCHES} \
+             batches, with {} still ahead of it. Either something folded the log mid feed, \
+             which under `PRAGMA locking_mode = exclusive` nothing should, or the writer \
+             covered those {} batches in the gap between the parent reading an \
+             acknowledgement and the kill landing - see MARGIN, and task-2072 for how that \
+             gap was measured:\n{}",
+            BATCHES.saturating_sub(wanted),
+            BATCHES.saturating_sub(wanted),
             reported.stdout
         );
         let said = field(&object, "text").and_then(text_of).unwrap_or_default();
@@ -386,10 +523,21 @@ fn a_cut_with_the_log_moved_aside_loses_the_rows() {
     let directory = area(CUTS);
     let database = prepared(&binary, &directory);
     let feed = script(&directory);
-    let acknowledged = killed_after(&shell, &database, &feed, 40);
+    let Cut {
+        acknowledged,
+        running,
+    } = killed_after(&shell, &database, &feed, 40);
     assert!(
         acknowledged > 0,
         "the writer acknowledged nothing, so this proves nothing"
+    );
+    // Forty of `BATCHES`, so the writer is nowhere near the end of its feed and
+    // the premise is not in doubt - but it is asserted rather than assumed for
+    // the same reason as in the case above (task-2072).
+    assert!(
+        running,
+        "the writer exited on its own before the kill landed, so there is no crash here to \
+         move the log aside from"
     );
 
     let held = directory.join("held");
