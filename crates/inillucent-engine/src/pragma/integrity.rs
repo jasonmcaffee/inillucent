@@ -41,12 +41,12 @@ impl crate::ImportedDatabase {
         }
         Ok(Outcome {
             rows,
-            names: vec![
+            names: std::rc::Rc::new(vec![
                 "table".into(),
                 "rowid".into(),
                 "parent".into(),
                 "fkid".into(),
-            ],
+            ]),
             changes: Default::default(),
         })
     }
@@ -92,7 +92,7 @@ impl crate::ImportedDatabase {
         };
         Ok(Outcome {
             rows: vec![vec![OwnedDatum::Text(answer)]],
-            names: vec![column.into()],
+            names: std::rc::Rc::new(vec![column.into()]),
             changes: Default::default(),
         })
     }
@@ -139,7 +139,7 @@ impl crate::ImportedDatabase {
                     OwnedDatum::Int(-1),
                     OwnedDatum::Int(-1),
                 ]],
-                names: vec!["busy".into(), "log".into(), "checkpointed".into()],
+                names: std::rc::Rc::new(vec!["busy".into(), "log".into(), "checkpointed".into()]),
                 changes: Default::default(),
             });
         }
@@ -158,7 +158,7 @@ impl crate::ImportedDatabase {
                 OwnedDatum::Int(moved),
                 OwnedDatum::Int(moved),
             ]],
-            names: vec!["busy".into(), "log".into(), "checkpointed".into()],
+            names: std::rc::Rc::new(vec!["busy".into(), "log".into(), "checkpointed".into()]),
             changes: Default::default(),
         })
     }

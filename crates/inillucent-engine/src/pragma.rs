@@ -240,7 +240,7 @@ impl ImportedDatabase {
             b"compile_options" => list_of("compile_options", COMPILE_OPTIONS),
             b"database_list" => Outcome {
                 rows: self.database_list(),
-                names: vec!["seq".into(), "name".into(), "file".into()],
+                names: std::rc::Rc::new(vec!["seq".into(), "name".into(), "file".into()]),
                 changes: Default::default(),
             },
             _ => return Ok(None),
@@ -289,7 +289,7 @@ impl ImportedDatabase {
 fn word_row(name: &str, word: &str) -> Outcome {
     Outcome {
         rows: vec![vec![OwnedDatum::Text(word.as_bytes().to_vec())]],
-        names: vec![name.into()],
+        names: std::rc::Rc::new(vec![name.into()]),
         changes: Default::default(),
     }
 }
@@ -305,7 +305,7 @@ fn word_row(name: &str, word: &str) -> Outcome {
 fn named_integer(name: &str, value: i64) -> Outcome {
     Outcome {
         rows: vec![vec![OwnedDatum::Int(value)]],
-        names: vec![name.into()],
+        names: std::rc::Rc::new(vec![name.into()]),
         changes: Default::default(),
     }
 }
@@ -382,7 +382,7 @@ fn list_of<S: AsRef<str>>(column: &str, values: &[S]) -> Outcome {
             .iter()
             .map(|value| vec![OwnedDatum::Text(value.as_ref().as_bytes().to_vec())])
             .collect(),
-        names: vec![column.to_string()],
+        names: std::rc::Rc::new(vec![column.to_string()]),
         changes: Default::default(),
     }
 }
@@ -572,14 +572,14 @@ fn pragma_function_list(registry: &inillucent_ext::registry::Registry) -> Outcom
     }
     Outcome {
         rows,
-        names: vec![
+        names: std::rc::Rc::new(vec![
             "name".into(),
             "builtin".into(),
             "type".into(),
             "enc".into(),
             "narg".into(),
             "flags".into(),
-        ],
+        ]),
         changes: Default::default(),
     }
 }

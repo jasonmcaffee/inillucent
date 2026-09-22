@@ -208,7 +208,7 @@ impl crate::ImportedDatabase {
         self.seal()?;
         Ok(Outcome {
             rows: Vec::new(),
-            names: Vec::new(),
+            names: std::rc::Rc::new(Vec::new()),
             changes: outcome.changes,
         })
     }

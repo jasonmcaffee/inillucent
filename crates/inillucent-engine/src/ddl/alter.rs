@@ -898,7 +898,9 @@ impl crate::ImportedDatabase {
             ),
             &owner.name,
         );
-        let mut compiled = self.compile(&statement)?;
+        // The parameter count is not of interest here: this is a generated
+        // `DELETE` with no parameters in it.
+        let (mut compiled, _) = self.compile(&statement)?;
         if let Cached::Delete(delete, _) = &mut compiled {
             delete
                 .triggers

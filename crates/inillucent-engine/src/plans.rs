@@ -111,6 +111,12 @@ pub(crate) enum Cached {
         Box<PhysicalPlan>,
         Box<physical::Prepared>,
         std::cell::RefCell<physical::Slot>,
+        /// The result column names, decoded once at compile (task-2066
+        /// §4.3.5). They are `plan.select.columns`'s own names and cannot
+        /// change between executions of one compiled statement, so rebuilding
+        /// them per execution was a `String` allocation per column on every
+        /// `Connection`-driven read.
+        std::rc::Rc<Vec<String>>,
     ),
     /// An insert, with the query for its `SELECT` source when it has one.
     ///
@@ -256,18 +262,43 @@ impl ImportedDatabase {
     ///
     /// @param sql - the statement text
     pub(crate) fn compiled(&self, sql: &str) -> DbResult<std::rc::Rc<Cached>> {
+        self.compiled_with_parameters(sql).map(|(plan, _)| plan)
+    }
+
+    /// Returns one statement compiled, and how many parameters it declares.
+    ///
+    /// **One parse for both** (task-2066 §4.3.3). `Connection::prepare` asked
+    /// `parameter_count` and then `prepare_statement`, which is two parses of
+    /// the same text on a cache miss and - because the plan comes back from
+    /// the cache on a hit - one parse of it on every hit, for a number the
+    /// compilation had already read.
+    ///
+    /// The order those two calls were made in was deliberate and the comment
+    /// at `connect.rs` says why: both go through the recycled parse arena, and
+    /// asking the count *second* reached into the arena the plan had just been
+    /// built out of. The symptom was not a crash - correlated subqueries in an
+    /// `UPDATE` quietly answered against the wrong rows. That hazard is gone
+    /// rather than avoided: there is one parse to read from.
+    ///
+    /// @param sql - the statement text
+    pub(crate) fn compiled_with_parameters(
+        &self,
+        sql: &str,
+    ) -> DbResult<(std::rc::Rc<Cached>, u32)> {
         // **An authorizer that can refuse is asked every time.** A cached plan
         // is a plan whose authorizer already said yes once, and reusing it
         // would skip the callback on every later execution - so a connection
         // with a real authorizer compiles per statement, which is what SQLite
         // does for the same reason.
         if !self.cacheable() {
-            return Ok(std::rc::Rc::new(self.compile(sql)?));
+            let (plan, parameters) = self.compile(sql)?;
+            return Ok((std::rc::Rc::new(plan), parameters));
         }
         if !self.pragmas.levers().has(Levers::PLAN_CACHE) {
             // The lever is off, so nothing is held and every execution
             // compiles. It exists so a measurement can price the compile.
-            return Ok(std::rc::Rc::new(self.compile(sql)?));
+            let (plan, parameters) = self.compile(sql)?;
+            return Ok((std::rc::Rc::new(plan), parameters));
         }
         // **Keyed by the levers as well as the text, and nested rather than
         // paired.** A plan built with the covering-index rule on is that rule's
@@ -289,11 +320,12 @@ impl ImportedDatabase {
         // make free.
         let key = self.plan_key();
         let held = self.compiled.statements.borrow();
-        if let Some(found) = held.get(&key).and_then(|under| under.get(sql)) {
-            return Ok(std::rc::Rc::clone(found));
+        if let Some((found, parameters)) = held.get(&key).and_then(|under| under.get(sql)) {
+            return Ok((std::rc::Rc::clone(found), *parameters));
         }
         drop(held);
-        let compiled = std::rc::Rc::new(self.compile(sql)?);
+        let (plan, parameters) = self.compile(sql)?;
+        let compiled = std::rc::Rc::new(plan);
         // **The cache has a ceiling (task-1932, M1).** It used to be cleared
         // only by a schema change or a function registration, and keyed by the
         // statement's text - so a long-lived connection issuing generated SQL,
@@ -317,9 +349,9 @@ impl ImportedDatabase {
             if under.len() >= ceiling {
                 under.clear();
             }
-            under.insert(sql.to_string(), std::rc::Rc::clone(&compiled));
+            under.insert(sql.to_string(), (std::rc::Rc::clone(&compiled), parameters));
         }
-        Ok(compiled)
+        Ok((compiled, parameters))
     }
 
     /// Runs a `SELECT` through its compiled chain when one is available,
@@ -344,12 +376,13 @@ impl ImportedDatabase {
         plan: &PhysicalPlan,
         prepared: &physical::Prepared,
         slot: &std::cell::RefCell<physical::Slot>,
+        names: &std::rc::Rc<Vec<String>>,
         params: &Params,
     ) -> DbResult<Outcome> {
         let rows = self.run_cached_query(plan, prepared, slot, params)?;
         Ok(Outcome {
             rows,
-            names: column_names(plan),
+            names: std::rc::Rc::clone(names),
             changes: Changes::default(),
         })
     }
@@ -454,6 +487,8 @@ pub(crate) struct CachedQuery {
     /// mutability is what lets one execution build the chain and a later one,
     /// through the same `Rc`, find it already there.
     pub(crate) slot: std::cell::RefCell<physical::Slot>,
+    /// The result column names, decoded once (task-2066 §4.3.5).
+    pub(crate) names: std::rc::Rc<Vec<String>>,
 }
 
 impl CachedQuery {
@@ -462,10 +497,12 @@ impl CachedQuery {
     /// @param plan - the planner's output
     /// @param prepared - the structural choice `prepare` made
     pub(crate) fn new(plan: PhysicalPlan, prepared: physical::Prepared) -> CachedQuery {
+        let names = std::rc::Rc::new(column_names(&plan));
         CachedQuery {
             plan: Box::new(plan),
             prepared: Box::new(prepared),
             slot: std::cell::RefCell::new(physical::Slot::default()),
+            names,
         }
     }
 }
@@ -473,7 +510,7 @@ impl CachedQuery {
 /// Returns a plan's result column names, decoded from UTF-8 lossily.
 ///
 /// @param plan - the planner's output
-fn column_names(plan: &PhysicalPlan) -> Vec<String> {
+pub(crate) fn column_names(plan: &PhysicalPlan) -> Vec<String> {
     plan.select
         .columns
         .iter()

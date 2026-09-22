@@ -998,7 +998,14 @@ pub(crate) struct Compiled {
     ///
     /// Keyed by the statement text, which is what a caller re-issues. Behind an
     /// `Rc` so an entry can be held across the `&mut self` a write needs.
-    pub(crate) statements: std::cell::RefCell<HashMap<u64, HashMap<String, std::rc::Rc<Cached>>>>,
+    /// **And the parameter count beside it** (task-2066 §4.3.3). It is what
+    /// `sqlite3_bind_parameter_count` answers and what a bind is checked
+    /// against, and it comes out of the same parse that produced the plan -
+    /// so a caller wanting both used to ask twice and parse twice. `Cached`
+    /// has thirteen variants and no place to put it, which is why it is here
+    /// rather than on the plan.
+    pub(crate) statements:
+        std::cell::RefCell<HashMap<u64, HashMap<String, (std::rc::Rc<Cached>, u32)>>>,
     /// The plan cache's ceiling; see `plans.rs`, which holds and enforces it.
     pub(crate) statement_cache_limit: std::cell::Cell<usize>,
     /// How many statements this connection has actually compiled.

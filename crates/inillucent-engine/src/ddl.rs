@@ -564,7 +564,7 @@ impl Outcome {
     pub fn empty() -> Outcome {
         Outcome {
             rows: Vec::new(),
-            names: Vec::new(),
+            names: std::rc::Rc::new(Vec::new()),
             changes: Changes::default(),
         }
     }

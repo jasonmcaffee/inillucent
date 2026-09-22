@@ -80,7 +80,7 @@ fn assert_cache_agrees_with_fresh(
         )
     });
     assert_eq!(
-        cached.names, fresh_names,
+        *cached.names, fresh_names,
         "{when}: the cached path and a fresh build named different columns for {select}"
     );
     assert_eq!(

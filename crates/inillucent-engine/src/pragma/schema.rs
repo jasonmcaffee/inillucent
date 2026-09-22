@@ -76,7 +76,7 @@ impl crate::ImportedDatabase {
         let Some(table) = self.named_table(argument) else {
             return Ok(Outcome {
                 rows: Vec::new(),
-                names,
+                names: std::rc::Rc::new(names),
                 changes: Default::default(),
             });
         };
@@ -117,7 +117,7 @@ impl crate::ImportedDatabase {
         }
         Ok(Outcome {
             rows,
-            names,
+            names: std::rc::Rc::new(names),
             changes: Default::default(),
         })
     }
@@ -151,7 +151,7 @@ impl crate::ImportedDatabase {
         let Some(table) = self.named_table(argument) else {
             return Ok(Outcome {
                 rows: Vec::new(),
-                names,
+                names: std::rc::Rc::new(names),
                 changes: Default::default(),
             });
         };
@@ -215,7 +215,7 @@ impl crate::ImportedDatabase {
         }
         Ok(Outcome {
             rows,
-            names,
+            names: std::rc::Rc::new(names),
             changes: Default::default(),
         })
     }
@@ -288,7 +288,7 @@ impl crate::ImportedDatabase {
         let Some(table) = self.named_table(argument) else {
             return Ok(Outcome {
                 rows: Vec::new(),
-                names,
+                names: std::rc::Rc::new(names),
                 changes: Default::default(),
             });
         };
@@ -340,7 +340,7 @@ impl crate::ImportedDatabase {
             .collect();
         Ok(Outcome {
             rows,
-            names,
+            names: std::rc::Rc::new(names),
             changes: Default::default(),
         })
     }
@@ -371,7 +371,7 @@ impl crate::ImportedDatabase {
         }
         let empty = Outcome {
             rows: Vec::new(),
-            names: names.clone(),
+            names: std::rc::Rc::new(names.clone()),
             changes: Default::default(),
         };
         let Some(argument) = argument else {
@@ -422,7 +422,7 @@ impl crate::ImportedDatabase {
         }
         Ok(Outcome {
             rows,
-            names,
+            names: std::rc::Rc::new(names),
             changes: Default::default(),
         })
     }
@@ -503,14 +503,14 @@ impl crate::ImportedDatabase {
         let rows: Vec<Vec<OwnedDatum>> = rows;
         Ok(Outcome {
             rows,
-            names: vec![
+            names: std::rc::Rc::new(vec![
                 "schema".into(),
                 "name".into(),
                 "type".into(),
                 "ncol".into(),
                 "wr".into(),
                 "strict".into(),
-            ],
+            ]),
             changes: Default::default(),
         })
     }
@@ -543,7 +543,7 @@ impl crate::ImportedDatabase {
                     ]
                 })
                 .collect(),
-            names: vec!["seq".into(), "name".into()],
+            names: std::rc::Rc::new(vec!["seq".into(), "name".into()]),
             changes: Default::default(),
         }
     }

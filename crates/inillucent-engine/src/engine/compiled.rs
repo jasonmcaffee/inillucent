@@ -108,7 +108,7 @@ impl crate::ImportedDatabase {
         self.record_changes(changed as i64, changed as i64);
         Ok(Outcome {
             rows: Vec::new(),
-            names: Vec::new(),
+            names: std::rc::Rc::new(Vec::new()),
             changes: Changes {
                 rows: changed,
                 ..Default::default()
@@ -149,8 +149,8 @@ impl crate::ImportedDatabase {
             Cached::Program(rows) => Ok(program_rows(rows)),
             Cached::VirtualInsert(statement) => self.insert_into_module(statement, params),
             Cached::SchemaInsert(statement) => self.insert_into_schema(statement, params),
-            Cached::Select(plan, prepared, slot) => {
-                self.execute_select_cached(plan, prepared, slot, params)
+            Cached::Select(plan, prepared, slot, names) => {
+                self.execute_select_cached(plan, prepared, slot, names, params)
             }
             Cached::Insert(statement, source, values_hold_subquery) => {
                 let rows = match source {
@@ -216,7 +216,7 @@ impl crate::ImportedDatabase {
                 self.record_changes(changed as i64, changed as i64);
                 Ok(Outcome {
                     rows: Vec::new(),
-                    names: Vec::new(),
+                    names: std::rc::Rc::new(Vec::new()),
                     changes: Changes {
                         rows: changed,
                         ..Default::default()
@@ -358,8 +358,12 @@ impl crate::ImportedDatabase {
 
     /// Compiles one statement as far as its parameters allow.
     ///
+    /// Answers the parameter count beside the plan, because the parse that
+    /// produces the plan has already read it (task-2066 §4.3.3). A caller
+    /// that wanted both used to ask twice and parse twice.
+    ///
     /// @param sql - the statement text
-    pub(crate) fn compile(&self, sql: &str) -> DbResult<Cached> {
+    pub(crate) fn compile(&self, sql: &str) -> DbResult<(Cached, u32)> {
         // Counted here rather than at the three call sites, so a fourth path to
         // a compilation cannot be added without moving this number with it.
         self.compiled
@@ -371,19 +375,46 @@ impl crate::ImportedDatabase {
         // there is no program, and that difference is the whole of the
         // `query_plan` split below.
         let parsed = self.parse_once(sql)?;
+        // **Read before the arena goes back**, which is the whole of why
+        // `Connection::prepare` used to parse twice: the count lives in the
+        // recycled parse and asking for it afterwards reads an arena
+        // something else has been built out of.
+        let parameters = parsed.parameters.count;
         if let inillucent_sql::ast::Statement::Explain { query_plan, inner } = &parsed.statement {
-            return self.compile_explain(sql, *query_plan, inner, &parsed);
+            return self
+                .compile_explain(sql, *query_plan, inner, &parsed)
+                .map(|cached| (cached, parameters));
         }
         let bound = self.bind_parsed(sql, &parsed);
         self.compiled.recycle(parsed);
-        match bound? {
+        self.compile_bound(sql, bound?)
+            .map(|cached| (cached, parameters))
+    }
+
+    /// Turns one bound statement into the compiled thing it becomes.
+    ///
+    /// **Split out of [`ImportedDatabase::compile`]** because that function
+    /// was 160 lines and the ratchet in `policy.rs` allows 150 for one that
+    /// is not on its recorded list. The seam was already in the shape:
+    /// everything above this was about getting a bound statement out of some
+    /// text, and this is about which kind of compiled thing that statement
+    /// becomes.
+    ///
+    /// @param sql - the statement text, for the variants that keep it
+    /// @param bound - the binder's output
+    fn compile_bound(&self, sql: &str, bound: BoundStatement) -> DbResult<Cached> {
+        match bound {
             BoundStatement::Select(select) => {
                 let plan = plan_select_with(*select, self.pragmas.levers());
                 let prepared = physical::prepare_any(&plan, self)?;
+                // The names are decoded here, once, rather than on every
+                // execution - see `CachedQuery::names` (task-2066 §4.3.5).
+                let names = std::rc::Rc::new(crate::plans::column_names(&plan));
                 Ok(Cached::Select(
                     Box::new(plan),
                     Box::new(prepared),
                     std::cell::RefCell::new(physical::Slot::default()),
+                    names,
                 ))
             }
             BoundStatement::Insert(statement)
@@ -832,7 +863,7 @@ impl crate::ImportedDatabase {
         committed?;
         Ok(Outcome {
             rows: changes.returned.clone(),
-            names,
+            names: std::rc::Rc::new(names),
             changes,
         })
     }

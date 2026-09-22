@@ -141,7 +141,7 @@ pub(crate) fn program_rows(program: &[(String, i64, i64, String, String)]) -> Ou
                 ]
             })
             .collect(),
-        names: vec![
+        names: std::rc::Rc::new(vec![
             "addr".to_string(),
             "opcode".to_string(),
             "p1".to_string(),
@@ -150,7 +150,7 @@ pub(crate) fn program_rows(program: &[(String, i64, i64, String, String)]) -> Ou
             "p4".to_string(),
             "p5".to_string(),
             "comment".to_string(),
-        ],
+        ]),
         changes: Changes::default(),
     }
 }
@@ -189,12 +189,12 @@ pub(crate) fn query_plan_rows(lines: &[String]) -> Outcome {
                 ]
             })
             .collect(),
-        names: vec![
+        names: std::rc::Rc::new(vec![
             "id".to_string(),
             "parent".to_string(),
             "notused".to_string(),
             "detail".to_string(),
-        ],
+        ]),
         changes: Changes::default(),
     }
 }

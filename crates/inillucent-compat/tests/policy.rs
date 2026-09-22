@@ -1167,7 +1167,7 @@ const CEILINGS: [(&str, usize); 16] = [
     // Added at its post-split size in task-1946 (M12). It was 2,728 lines
     // holding the frame table, eviction, the journal's sync gating and the
     // swip logic together; the last three are child modules now.
-    ("crates/inillucent-pool/src/pool.rs", 1_994),
+    ("crates/inillucent-pool/src/pool.rs", 1_587),
     // Lowered from 7,875 in task-1932. The plan cache's value type
     // (`Cached`) and its ceiling moved to `plans.rs`, which is the module
     // whose header explains when a plan is reused - the two halves of one

@@ -983,13 +983,20 @@ impl<'d> Connection<'d> {
     ///
     /// @param sql - the statement
     pub fn prepare(&self, sql: &str) -> DbResult<Statement<'d>> {
-        // **The count is asked before the plan is compiled, not after.** Both
-        // go through the same recycled parse arena, and a parse clears it - so
-        // asking afterwards reached into the arena the plan had just been built
-        // out of. The symptom was not a crash: correlated subqueries in an
-        // `UPDATE` or a `DELETE` quietly answered against the wrong rows.
-        let declared = self.engine()?.parameter_count(sql)?;
+        // **One parse, because the compilation already read the count**
+        // (task-2066 §4.3.3). This used to call `parameter_count(sql)` and
+        // then `prepare_statement(sql)`, and the order mattered: both go
+        // through the same recycled parse arena, so asking the count second
+        // reached into the arena the plan had just been built out of, and
+        // correlated subqueries in an `UPDATE` or a `DELETE` quietly answered
+        // against the wrong rows.
+        //
+        // The order is no longer load-bearing because there is only one parse.
+        // `prepare_statement` answers the count beside the plan, and on a plan
+        // cache hit it answers it without parsing at all - which is the path
+        // that used to parse every time for a number it already had.
         let compiled = self.engine()?.prepare_statement(sql)?;
+        let declared = compiled.parameters;
         let generation = self.engine()?.schema_generation();
         let mut params = Params::new();
         params.expect(declared);
@@ -1000,7 +1007,7 @@ impl<'d> Connection<'d> {
             generation,
             params,
             rows: Vec::new(),
-            names: Vec::new(),
+            names: std::rc::Rc::new(Vec::new()),
             at: 0,
             run: false,
             changed: 0,
@@ -1223,7 +1230,7 @@ pub struct Statement<'d> {
     /// The rows the last execution produced.
     rows: Vec<Vec<OwnedDatum>>,
     /// The result column names.
-    names: Vec<String>,
+    names: std::rc::Rc<Vec<String>>,
     /// How many rows have been stepped over.
     at: usize,
     /// Whether this binding has been executed yet.

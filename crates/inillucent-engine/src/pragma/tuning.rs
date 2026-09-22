@@ -295,7 +295,7 @@ impl crate::ImportedDatabase {
         }
         Ok(Outcome {
             rows: vec![vec![OwnedDatum::Text(fixed.to_vec())]],
-            names: vec![name.into()],
+            names: std::rc::Rc::new(vec![name.into()]),
             changes: Default::default(),
         })
     }

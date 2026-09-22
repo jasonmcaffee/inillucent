@@ -149,3 +149,55 @@ fn a_prepared_statement_sees_a_column_added_after_it_was_compiled() {
         Some(10)
     );
 }
+
+/// A prepared statement's parameter count is the one a parse of its text reads.
+///
+/// **`Connection::prepare` parsed the same text twice** (task-2066 §4.3.3):
+/// once through `parameter_count`, for the number a bind index is checked
+/// against, and once through `prepare_statement`, for the plan. On a plan
+/// cache hit the second of those did not parse at all, so the only parse left
+/// was for a number the compilation had already read.
+///
+/// The count is carried on the compiled statement now, and this is what says
+/// it is the same number: `parameter_count` still parses the text and answers
+/// from the parse, and the two have to agree for every shape - including the
+/// ones where they could plausibly differ, a statement with no parameters, one
+/// with a gap in its numbering, and one where the same index appears twice.
+///
+/// **It also has to survive a reprepare.** A statement held across a schema
+/// change is compiled again on its next step, and `?1` is `?1` whatever the
+/// catalog says - so the count must not move.
+#[test]
+fn a_prepared_statement_counts_the_parameters_its_text_declares() {
+    let path = scratch("parameter-count");
+    let database =
+        ImportedDatabase::create(path.clone(), PAGE_SIZE, FRAMES).expect("the database is created");
+
+    let shapes = [
+        ("SELECT 1", 0u32),
+        ("SELECT ?1", 1),
+        ("SELECT ?1, ?2", 2),
+        // A gap: SQLite counts to the highest index, not the number written.
+        ("SELECT ?3", 3),
+        // The same index twice is one parameter.
+        ("SELECT ?1, ?1", 1),
+    ];
+    for (sql, expected) in shapes {
+        let parsed = database
+            .parameter_count(sql)
+            .unwrap_or_else(|why| panic!("{sql}: {}", why.message()));
+        assert_eq!(
+            parsed, expected,
+            "`{sql}`: a parse of the text counts {parsed} parameters, and the shape declares {expected}"
+        );
+        let prepared = database
+            .prepare_statement(sql)
+            .unwrap_or_else(|why| panic!("{sql}: {}", why.message()));
+        assert_eq!(
+            prepared.parameter_count(),
+            parsed,
+            "`{sql}`: the prepared statement carries {} and a parse of the same text reads {parsed}",
+            prepared.parameter_count()
+        );
+    }
+}

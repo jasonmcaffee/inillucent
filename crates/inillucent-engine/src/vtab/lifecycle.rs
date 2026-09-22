@@ -434,7 +434,7 @@ impl crate::ImportedDatabase {
         self.record_changes(changed as i64, changed as i64);
         Ok(Outcome {
             rows: Vec::new(),
-            names: Vec::new(),
+            names: std::rc::Rc::new(Vec::new()),
             changes: inillucent_exec::dml::Changes {
                 rows: changed,
                 ..Default::default()

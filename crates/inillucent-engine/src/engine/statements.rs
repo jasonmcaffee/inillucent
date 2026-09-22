@@ -240,7 +240,7 @@ impl crate::ImportedDatabase {
     pub(crate) fn statement_shape(&self, sql: &str) -> (i64, bool) {
         let columns = match self.compiled(sql) {
             Ok(cached) => match &*cached {
-                Cached::Select(plan, _, _) => plan.select.columns.len() as i64,
+                Cached::Select(plan, _, _, _) => plan.select.columns.len() as i64,
                 _ => 0,
             },
             Err(_) => 0,
@@ -264,7 +264,7 @@ impl crate::ImportedDatabase {
     pub fn describe_cached(&self, sql: &str) -> DbResult<Vec<String>> {
         match &*self.compiled(sql)? {
             Cached::Nothing => Ok(vec!["nothing".to_string()]),
-            Cached::Select(_, prepared, _) => Ok(prepared.describe()),
+            Cached::Select(_, prepared, _, _) => Ok(prepared.describe()),
             Cached::Ddl(_) => Ok(vec!["a directive".to_string()]),
             Cached::QueryPlan(_) => Ok(vec!["a query plan".to_string()]),
             Cached::Program(_) => Ok(vec!["a program listing".to_string()]),
@@ -496,10 +496,12 @@ impl ImportedDatabase {
     ///
     /// @param sql - the statement text
     pub fn prepare_statement(&self, sql: &str) -> DbResult<Statement> {
+        let (cached, parameters) = self.compiled_with_parameters(sql)?;
         Ok(Statement {
-            cached: std::cell::RefCell::new(self.compiled(sql)?),
+            cached: std::cell::RefCell::new(cached),
             sql: sql.to_string(),
             generation: std::cell::Cell::new(self.schema_generation()),
+            parameters,
         })
     }
 
@@ -606,7 +608,7 @@ impl ImportedDatabase {
             Cached::SchemaInsert(statement) => {
                 self.insert_into_schema(statement, params)?;
             }
-            Cached::Select(plan, prepared, _) => {
+            Cached::Select(plan, prepared, _, _) => {
                 physical::run_any_prepared(plan, self, prepared, params)?;
             }
             Cached::Insert(statement, ..) => {
@@ -697,6 +699,24 @@ pub struct Statement {
     pub(crate) sql: String,
     /// The schema generation `cached` was compiled against.
     pub(crate) generation: std::cell::Cell<u64>,
+    /// How many parameters the statement declares.
+    ///
+    /// **Carried so that preparing does not parse twice** (task-2066 §4.3.3).
+    /// It is what `sqlite3_bind_parameter_count` answers and what a bind index
+    /// is checked against, and it comes out of the same parse that built the
+    /// plan. It does not move when the schema does: `?1` is `?1` whatever the
+    /// catalog says, so a reprepare leaves it alone.
+    pub(crate) parameters: u32,
+}
+
+impl Statement {
+    /// Returns how many parameters the statement declares.
+    ///
+    /// What `sqlite3_bind_parameter_count` answers: the highest index written,
+    /// so `SELECT ?3` is three and `SELECT ?1, ?1` is one.
+    pub fn parameter_count(&self) -> u32 {
+        self.parameters
+    }
 }
 
 /// What running one statement produced.
@@ -705,7 +725,14 @@ pub struct Outcome {
     /// The rows a `SELECT` answered, or the rows `RETURNING` named.
     pub rows: Vec<Vec<OwnedDatum>>,
     /// The result column names, for a `SELECT`.
-    pub names: Vec<String>,
+    ///
+    /// **Shared rather than copied** (task-2066 §4.3.5). They are
+    /// `plan.select.columns`'s own names decoded from UTF-8 and they cannot
+    /// change between executions of one compiled statement, so building them
+    /// per execution was one `String` allocation per column per execution on
+    /// every `Connection`-driven read. `CachedQuery` builds them at compile
+    /// and this hands out the pointer.
+    pub names: std::rc::Rc<Vec<String>>,
     /// What a write changed.
     pub changes: Changes,
 }
