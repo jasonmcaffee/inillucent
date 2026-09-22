@@ -503,10 +503,10 @@ impl Pool {
             return;
         };
         let mut state = self.state.borrow_mut();
-        if let Some(meta) = state.frames.get_mut(frame as usize) {
+        state.amend(frame, |meta| {
             meta.dirty = false;
             meta.rec_lsn = u64::MAX;
-        }
+        });
     }
 
     /// Syncs the data file, and nothing else.

@@ -266,6 +266,17 @@ type PageHashing = std::hash::BuildHasherDefault<PageHasher>;
 struct State {
     /// One entry per frame.
     frames: Vec<FrameMeta>,
+    /// How many frames are dirty and not free.
+    ///
+    /// **Kept rather than counted** (task-2066 §4.3.2). `Pool::dirty_pages`
+    /// walked all 4,096 frames, and `engine/locks.rs` asks it on the release
+    /// path of every statement - a read included, past a short circuit that
+    /// fires only for writers. That is about four microseconds on statements
+    /// whose whole cost is one to two.
+    ///
+    /// It is the number of frames for which `dirty && state != Free` holds,
+    /// and nothing but [`State::amend`] may move it.
+    dirty: usize,
     /// Which frame holds which page.
     table: HashMap<PageId, u32, PageHashing>,
     /// Frames holding nothing.
@@ -275,6 +286,50 @@ struct State {
     /// The clock's position, so successive sweeps do not resample the same
     /// frames.
     clock: Rng,
+}
+
+impl State {
+    /// Changes one frame's bookkeeping, keeping the dirty count in step.
+    ///
+    /// **The one way the dirty bit moves, and the reason the count can be
+    /// trusted** (task-2066 §4.3.2). The frame's contribution to the count is
+    /// `dirty && state != Free`, and this reads that expression before the
+    /// change and after it and moves the counter by the difference. A site
+    /// that sets the bit, a site that clears it, a site that installs a page
+    /// over a dirty frame and a site that frees one are all the same operation
+    /// here, so none of them can be the one that forgets.
+    ///
+    /// Writing `self.dirty += 1` at each of the seven sites would have been
+    /// the same code and a different property: it would be right about the
+    /// sites somebody checked.
+    ///
+    /// @param frame - which frame to change
+    /// @param change - what to do to it
+    fn amend(&mut self, frame: u32, change: impl FnOnce(&mut FrameMeta)) {
+        let Some(meta) = self.frames.get_mut(frame as usize) else {
+            return;
+        };
+        let before = meta.dirty && meta.state != FrameState::Free;
+        change(meta);
+        let after = meta.dirty && meta.state != FrameState::Free;
+        match (before, after) {
+            (false, true) => self.dirty = self.dirty.saturating_add(1),
+            (true, false) => self.dirty = self.dirty.saturating_sub(1),
+            _ => {}
+        }
+    }
+
+    /// Counts the dirty frames by walking them.
+    ///
+    /// Kept because it is what [`Pool::dirty_pages`] is asserted against in a
+    /// debug build: a counter that replaces a scan is only as good as the
+    /// thing that says the two agree, and the whole test suite runs in debug.
+    fn dirty_by_walking(&self) -> usize {
+        self.frames
+            .iter()
+            .filter(|meta| meta.dirty && meta.state != FrameState::Free)
+            .count()
+    }
 }
 
 /// How long a lock request waits before it reports the file as busy.
@@ -654,6 +709,7 @@ impl Pool {
             pins,
             state: RefCell::new(State {
                 frames: vec![FrameMeta::empty(); frames],
+                dirty: 0,
                 table: HashMap::with_capacity_and_hasher(frames, PageHashing::default()),
                 free: (0..frames as u32).rev().collect(),
                 cooling: VecDeque::new(),
@@ -849,7 +905,10 @@ impl Pool {
                 .free
                 .try_reserve(more)
                 .map_err(|_| no_mem(format!("{more} more entries in the free frame list")))?;
+            // A frame dropped by shrinking takes its contribution with it,
+            // and one added by growing is free and contributes nothing.
             state.frames.resize(frames, FrameMeta::empty());
+            state.dirty = state.dirty_by_walking();
             // Pushed in reverse, the way `new` builds the list, so the next
             // claim takes the lowest new index.
             for index in (held..frames).rev() {
@@ -1015,12 +1074,12 @@ impl Pool {
             return Err(error);
         }
         let mut state = self.state.borrow_mut();
-        if let Some(meta) = state.frames.get_mut(frame as usize) {
+        state.amend(frame, |meta| {
             meta.page = page;
             meta.state = FrameState::Hot;
             meta.dirty = false;
             meta.parent = None;
-        }
+        });
         if let Some(slot) = self.pins.get(frame as usize) {
             slot.set(0);
         }
@@ -1169,10 +1228,10 @@ impl Pool {
             .write_all_at(page.0.saturating_mul(self.page_size as u64), image)
             .map_err(|error| error.into_db_error())?;
         let mut state = self.state.borrow_mut();
-        if let Some(meta) = state.frames.get_mut(frame as usize) {
+        state.amend(frame, |meta| {
             meta.dirty = false;
             meta.rec_lsn = u64::MAX;
-        }
+        });
         drop(state);
         Counters::add(&self.counters.writes, 1);
         Counters::add(&self.counters.translated, translated as u64);
@@ -1270,9 +1329,7 @@ impl Pool {
             bytes.copy_from_slice(image);
         }
         let mut state = self.state.borrow_mut();
-        if let Some(meta) = state.frames.get_mut(frame as usize) {
-            meta.dirty = true;
-        }
+        state.amend(frame, |meta| meta.dirty = true);
         drop(state);
         if page.0 >= self.page_count.get() {
             self.page_count.set(page.0.saturating_add(1));
@@ -1417,9 +1474,7 @@ impl Pool {
             change(bytes.as_mut_slice())?
         };
         let mut state = self.state.borrow_mut();
-        if let Some(meta) = state.frames.get_mut(frame as usize) {
-            meta.dirty = true;
-        }
+        state.amend(frame, |meta| meta.dirty = true);
         Ok(outcome)
     }
 
@@ -1563,6 +1618,50 @@ mod tests {
         }
         assert_eq!(pool.stats().misses, 1, "the second fetch read nothing");
         assert_eq!(pool.stats().hits, 1);
+    }
+
+    /// The dirty count follows the frames through dirtying, writing back and
+    /// eviction.
+    ///
+    /// **`dirty_pages` answers from a counter now and not from a walk**
+    /// (task-2066 §4.3.2), which is worth about 2,265 nanoseconds on every
+    /// statement that ends outside a transaction. A counter is only as good as
+    /// what says it agrees with the thing it replaced: the debug assertion in
+    /// `dirty_pages` grades it on every call the whole suite makes, and this
+    /// grades the numbers themselves against states a reader can check by
+    /// hand.
+    #[test]
+    fn the_dirty_count_follows_the_frames() {
+        let pool = pool_over(512, 8, 10);
+        assert_eq!(pool.dirty_pages(), 0, "a fresh pool holds nothing dirty");
+
+        for page in 1..=3u64 {
+            pool.modify(PageId(page), |_| Ok(())).unwrap();
+        }
+        assert_eq!(pool.dirty_pages(), 3, "three pages were modified");
+
+        // Modifying one of them again does not count it twice.
+        pool.modify(PageId(1), |_| Ok(())).unwrap();
+        assert_eq!(pool.dirty_pages(), 3, "the same page dirtied twice is one");
+
+        // A write-back makes a frame clean without freeing it.
+        pool.flush().unwrap();
+        assert_eq!(pool.dirty_pages(), 0, "every frame was written back");
+
+        // A frame that is evicted while dirty stops counting. Eight frames and
+        // ten pages, so reading every page evicts.
+        for page in 1..=3u64 {
+            pool.modify(PageId(page), |_| Ok(())).unwrap();
+        }
+        assert_eq!(pool.dirty_pages(), 3);
+        for page in 0..10u64 {
+            let _ = pool.fetch(PageId(page));
+        }
+        assert_eq!(
+            pool.dirty_pages(),
+            pool.state.borrow().dirty_by_walking(),
+            "the counter and the frames disagree after eviction"
+        );
     }
 
     /// Two guards on one page coexist, and the pin count returns to zero.

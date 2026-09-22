@@ -290,9 +290,11 @@ impl Pool {
             );
             let mut state = self.state.borrow_mut();
             state.table.remove(&page);
-            if let Some(meta) = state.frames.get_mut(frame as usize) {
-                *meta = FrameMeta::empty();
-            }
+            // Through `amend` like every other change, so a frame that was
+            // dirty and is now free stops counting. That is the condition
+            // `dirty_pages` applies and the easiest one to forget, which is
+            // exactly why no site decides it for itself.
+            state.amend(frame, |meta| *meta = FrameMeta::empty());
             drop(state);
             // The frame no longer holds the page a descent may have observed.
             if let Some(latch) = self.latch(frame) {
@@ -338,11 +340,19 @@ impl Pool {
     /// what turns that into a refusal (task-1979, section 4.4 item 3).
     pub fn dirty_pages(&self) -> usize {
         let state = self.state.borrow();
-        state
-            .frames
-            .iter()
-            .filter(|meta| meta.dirty && meta.state != FrameState::Free)
-            .count()
+        // **The scan stays, behind a debug assertion** (task-2066 §4.3.2). A
+        // counter that replaces a walk is worth exactly what the thing saying
+        // the two agree is worth, and the whole test suite runs in debug - so
+        // every campaign, every crash case and every differential run grades
+        // the counter against the scan it replaced. A release build reads the
+        // field.
+        debug_assert_eq!(
+            state.dirty,
+            state.dirty_by_walking(),
+            "the dirty frame count and the frames disagree, so a site changed a frame's \
+             bookkeeping without going through State::amend"
+        );
+        state.dirty
     }
 
     /// Drops every cached page without writing any of it back.
@@ -368,6 +378,9 @@ impl Pool {
             for meta in state.frames.iter_mut() {
                 meta.dirty = false;
             }
+            // Every frame is clean, so the count is zero by construction
+            // rather than by seven decrements.
+            state.dirty = 0;
         }
         self.discard_all()
     }
