@@ -101,6 +101,17 @@ pub enum Failure {
     Interrupt,
     /// The operation reports that permission was denied.
     Permission,
+    /// A write lands whole, at the wrong offset, and reports success.
+    ///
+    /// **The one damage a checksum per page cannot catch** (task-2066 section
+    /// 4.4.8). Every other corruption this model injects changes bytes, so the
+    /// page that comes back fails its own checksum. A misdirected write moves a
+    /// page the drive computed a correct checksum for to somewhere else in the
+    /// file: both pages read back as well formed pages, and what is wrong is
+    /// which one is where. Consumer drives and container file systems do this,
+    /// and it is the case a format with no page number inside the page has to
+    /// catch some other way.
+    Misdirected,
     /// The simulated machine loses power at this point.
     Crash,
 }
@@ -123,7 +134,7 @@ impl Failure {
                 ),
                 "injected permission failure",
             )),
-            Failure::ShortWrite | Failure::Crash => None,
+            Failure::ShortWrite | Failure::Misdirected | Failure::Crash => None,
         }
     }
 }

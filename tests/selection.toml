@@ -1305,6 +1305,16 @@ covers = ["inillucent-engine"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
+name = "fault_shapes"
+tier = "durability"
+# The two faults that are not a power loss: a misdirected write and a sync that
+# lies (task-2066 section 4.4.8). It drives `inillucent-sim` and the new engine
+# and needs nothing off disk, so it has no `requires` row.
+covers = ["inillucent-engine", "inillucent-sim"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
 name = "multi_database_crash"
 tier = "durability"
 covers = ["inillucent-engine"]

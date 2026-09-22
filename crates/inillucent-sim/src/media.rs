@@ -25,6 +25,17 @@ pub struct MediaModel {
     pub sequential: bool,
     /// The largest write the device performs atomically.
     pub atomic_write_size: u32,
+    /// Whether `sync` returns success without making anything durable.
+    ///
+    /// **A drive that acknowledges a cache flush it did not perform**
+    /// (task-2066 section 4.4.8). Consumer drives have shipped with write
+    /// caching that ignores the flush, and a container file system can sit on
+    /// one. Every durability argument in this engine rests on `sync` meaning
+    /// what it says, so the interesting question is not whether a lying sync
+    /// loses data - it does - but whether the loss is *detected* on the next
+    /// open rather than served as an answer. That is what a campaign with this
+    /// on measures.
+    pub sync_is_a_lie: bool,
 }
 
 impl Default for MediaModel {
@@ -36,6 +47,10 @@ impl Default for MediaModel {
             powersafe_overwrite: false,
             sequential: false,
             atomic_write_size: 0,
+            // Off by default: a lying sync is a broken device rather than a
+            // pessimistic one, and every campaign that does not ask for it is
+            // asking what happens on a device that works.
+            sync_is_a_lie: false,
         }
     }
 }
@@ -189,6 +204,13 @@ impl SimFileImage {
 
     /// Makes every cached byte durable, as a successful sync does.
     pub fn sync(&mut self, model: MediaModel) {
+        // **A lying sync leaves the cache exactly as it was.** See
+        // `MediaModel::sync_is_a_lie`: the call returns, the caller believes
+        // the bytes are durable, and a power loss resolves the cached sectors
+        // the way an unsynced write is resolved - dropped, torn or garbage.
+        if model.sync_is_a_lie {
+            return;
+        }
         if self.truncated_to < self.durable.len() as u64 {
             self.durable.truncate(self.truncated_to as usize);
         }

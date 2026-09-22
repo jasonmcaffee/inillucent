@@ -154,7 +154,7 @@ of a run rather than of the map and is not checked here.
 | `unit` | 31 | 1,430 | every crate's own `#[cfg(test)]` modules |
 | `engine` | 67 | 439 | SQL and storage behaviour over real database files |
 | `differential` | 33 | 334 | graded against the pinned SQLite 3.53.4 |
-| `durability` | 31 | 220 | crashes, injected faults, corruption and concurrency |
+| `durability` | 32 | 220 | crashes, injected faults, corruption and concurrency |
 | `e2e` | 36 | 423 | the public surfaces an application binds to, end to end |
 | `perf` | 1 | 8 | the cost guards — **runs alone**, see §5 |
 | `retrieval` | 7 | 569 | the embedding and retrieval engine, and its graded harness |
