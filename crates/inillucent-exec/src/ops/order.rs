@@ -64,6 +64,15 @@ impl Sink for Sort {
             for column in 0..batch.columns.len() {
                 row.push(OwnedDatum::from_datum(&batch.value(nth, column)?));
             }
+            // **Charged, because this holds every surviving row until
+            // `finish`** (task-2066 §4.3.6). `Distinct` below has charged it
+            // since task-1932; `Sort` and `TopN` were the only buffering
+            // operators a budget could not reach, so a sort larger than memory
+            // was an out-of-memory kill rather than the refusal every other
+            // breaker gives. `materialise` is a no-op when no request armed a
+            // budget, which is the library default, so an embedded caller is
+            // unaffected.
+            inillucent_base::budget::materialise(owned_row_bytes(&row))?;
             self.rows.push(row);
         }
         Ok(Flow::Continue)
@@ -276,6 +285,10 @@ impl Sink for TopN {
             for column in 0..width {
                 row.push(OwnedDatum::from_datum(&batch.value(nth, column)?));
             }
+            // Charged for the same reason `Sort` is, and only for a row that
+            // earns its place: this holds `limit` rows rather than all of
+            // them, so a bounded query stays bounded in the budget too.
+            inillucent_base::budget::materialise(owned_row_bytes(&row))?;
             let at = best.partition_point(|held| compare_by(held, &row, keys) != Ordering::Greater);
             best.insert(at, row);
         }

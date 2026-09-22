@@ -115,7 +115,20 @@ fn answer(connection: &Connection<'_>, sql: &str) -> Result<String, String> {
 ///
 /// The name is what the operator is, so a failure says which of the six is
 /// unbounded rather than which SQL string did not fail.
-const CASES: [(&str, &str); 5] = [
+const CASES: [(&str, &str); 7] = [
+    // **The two that were missing, which is what task-2066 §4.3.6 is about.**
+    // Every other buffering operator has been on this list since task-1932;
+    // `Sort` and `TopN` held every surviving row and `limit` of them and
+    // charged nothing, so a sort larger than memory was an out-of-memory kill
+    // where every shape below gets a refusal naming the byte budget.
+    (
+        "the sort's buffer",
+        "SELECT count(*) FROM (SELECT payload FROM wide ORDER BY payload)",
+    ),
+    (
+        "the bounded sort's heap",
+        "SELECT count(*) FROM (SELECT payload FROM wide ORDER BY payload LIMIT 200)",
+    ),
     (
         "the hash join's build side",
         "SELECT count(*) FROM wide AS a JOIN wide AS b ON a.payload = b.payload",
