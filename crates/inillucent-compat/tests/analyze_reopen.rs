@@ -77,10 +77,11 @@
 //! before the next open and the log is never asked. That search was after the *conditions* that set
 //! the distance between the resumed position and the stale stamps, and it never found what sets it.
 //!
-//! The state is eight bytes. `page_checksum` covers `KIND..`, which begins at byte 12, so a page's
-//! LSN in bytes 0..8 is outside it - which is also why a file in this state passes
-//! `PRAGMA integrity_check`, since the page is byte for byte valid. So the two tests at the bottom
-//! of this file stamp the page directly and the variable disappears:
+//! The state is eight bytes: a page's LSN in bytes 0..8, with a checksum that agrees with it. That
+//! is why a file in this state passes `PRAGMA integrity_check`, since the page is byte for byte
+//! valid. (Format 1's checksum left the LSN out, so the eight bytes alone made the state; since
+//! task-2074 the checksum covers them and `stamp_page` writes it again.) So the two tests at the
+//! bottom of this file stamp the page directly and the variable disappears:
 //! `a_page_stamped_above_the_logs_end_refuses_the_open` and
 //! `a_log_below_the_files_high_water_resumes_above_it`. Both fail with the fix reverted,
 //! the first printing the silent loss in as many words - a committed `CREATE TABLE` reading back as
@@ -376,25 +377,34 @@ fn put_meta(path: &Path, meta: &inillucent_pool::Meta, page_size: usize) {
 
 /// Stamps one page's LSN by hand, leaving the rest of the page alone.
 ///
-/// **The page checksum covers `KIND..`, which begins at byte 12**, so the LSN in
-/// the first eight bytes is outside it. That is not a convenience for this test;
-/// it is why a file in this state passes `PRAGMA integrity_check`. A page
-/// carrying a stamp from a stream nobody has is byte for byte a valid page.
+/// **The checksum is written again with the stamp**, so the page is byte for
+/// byte a valid one. That is the state this file is about: a page carrying a
+/// stamp from a stream nobody has, which passes `PRAGMA integrity_check`
+/// because nothing about it is damaged. Until task-2074 the checksum left the
+/// LSN out and writing the eight bytes alone produced that page; the checksum
+/// covers the LSN now (task-2066 section 4.2, item 17), so a stamp written
+/// without it is a damaged page instead, which is a different test.
 ///
 /// @param path - the database file
 /// @param page - the page to stamp
 /// @param page_size - the file's page size
 /// @param lsn - the stamp to write
 fn stamp_page(path: &Path, page: u64, page_size: usize, lsn: u64) {
-    use std::io::{Seek, SeekFrom, Write};
+    use std::io::{Read, Seek, SeekFrom, Write};
     let mut file = std::fs::OpenOptions::new()
+        .read(true)
         .write(true)
         .open(path)
         .expect("the database file opens for writing");
+    let mut bytes = vec![0u8; page_size];
     file.seek(SeekFrom::Start(page * page_size as u64))
         .expect("the page is seekable");
-    file.write_all(&lsn.to_le_bytes())
-        .expect("the stamp writes");
+    file.read_exact(&mut bytes).expect("the page reads");
+    inillucent_pool::page::set_lsn(&mut bytes, lsn).expect("the stamp fits");
+    inillucent_pool::page::checksum_page(&mut bytes).expect("the checksum fits");
+    file.seek(SeekFrom::Start(page * page_size as u64))
+        .expect("the page is seekable");
+    file.write_all(&bytes).expect("the stamp writes");
 }
 
 /// Builds a schema and closes tidily, so the log holds only the checkpoint.

@@ -129,7 +129,7 @@ table.
 | prerequisite | rows | what provides it |
 |---|---:|---|
 | `oracle` | 31 | the pinned SQLite 3.53.4 comparison process: `pwsh tools/sqlite-reference.ps1`, `bash tools/sqlite-reference.sh` |
-| `programs` | 23 | the command surface built into this profile's target directory: `cargo build -p inillucent-cli` |
+| `programs` | 24 | the command surface built into this profile's target directory: `cargo build -p inillucent-cli` |
 | `shell` | 7 | the pinned `sqlite3` 3.53.4 shell, from the same two scripts as the oracle |
 | `tracked-fixtures` | 5 | the files under `compat/fixtures/`, which are in the repository - declared for a checkout that has lost them, not for a fresh clone |
 | `onnx` | 3 | ONNX Runtime and the embedding weights: `inillucent setup-embeddings all` |

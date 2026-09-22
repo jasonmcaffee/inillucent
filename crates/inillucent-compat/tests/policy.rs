@@ -1269,7 +1269,13 @@ const CEILINGS: [(&str, usize); 16] = [
     // `compare` (ordering two rows, and searching a page with that order).
     // `impl LeafRef` alone was 1,470 lines; `read` and `compare` hold half of
     // it each and reopen it, so no signature changed.
-    ("crates/inillucent-tree/src/leaf.rs", 2_200),
+    //
+    // **Lowered to 1,856 in task-2074.** The delta area gained a directory,
+    // format 1's rules and a reference merge to grade `live_order` against,
+    // and its tests went with it into `leaf/delta/tests.rs`: the delta area was
+    // already its own module, and its hand-built pages and their tests are
+    // about that module rather than about the leaf.
+    ("crates/inillucent-tree/src/leaf.rs", 1_856),
     // **Lowered to 2,450 in task-1962 (A8).** The 2,124 line `impl PagedTree`
     // block became three modules under `paged/`: `descent` (root to leaf),
     // `cursor` (walking leaves between two bounds, in either direction) and

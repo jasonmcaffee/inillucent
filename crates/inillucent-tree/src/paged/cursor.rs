@@ -593,24 +593,20 @@ impl PagedTree {
         // been written since the leaf was packed was never found, and
         // `WHERE score = 99` came back empty after `UPDATE ... SET score = 99`
         // while a scan of the same index showed the row.
-        let compared = probe.len().min(self.key_columns);
-        for entry in 0..leaf.delta_count() {
-            let mut matches = true;
-            for column in 0..compared {
-                let held = leaf.delta_value(entry, column)?;
-                let wanted = probe.get(column).copied().unwrap_or(Datum::Null);
-                if crate::types::compare_under(&held, &wanted, leaf.collation_of(column))
-                    != std::cmp::Ordering::Equal
-                {
-                    matches = false;
-                    break;
-                }
-            }
-            if matches {
-                return Ok(Some(read(leaf, Hit::Delta(entry))?));
-            }
+        //
+        // **A binary search of the delta directory, not a scan** (task-2074).
+        // The directory is in key order and the area is as large as the free
+        // gap, so a probe that missed the sorted region used to compare every
+        // row of it. The prefix rule above is the search's own: it compares the
+        // columns the probe names and no others.
+        if leaf.delta_count() == 0 {
+            return Ok(None);
         }
-        Ok(None)
+        let compared = probe.len().min(self.key_columns);
+        match leaf.delta_search(probe.get(..compared).unwrap_or(probe))? {
+            Ok(entry) => Ok(Some(read(leaf, Hit::Delta(entry))?)),
+            Err(_) => Ok(None),
+        }
     }
     /// Returns one row by key, copying it out.
     ///

@@ -10,6 +10,20 @@ fails the build when any copy of it disagrees.
 
 ## Unreleased
 
+**The file format is 2, and an index costs a write about 40% of what it did.** A leaf's delta area -
+the rows written to it since it was last packed - now opens with a directory kept in key order, so a
+lookup in it is a binary search and the area is as large as the page's free space rather than 32
+rows. A compaction that finds the new rows fit the page's existing column widths splices them in
+rather than packing every row again. On the index count sweep, 5,000 inserts into a 100,000 row
+table, the cost of each secondary index went from 5.2 µs a row to 2.0, and at ten indexes the
+workload went from 0.43x SQLite to 1.28x. A page's checksum also covers its LSN now, which it did
+not (task-2066 section 4.2, item 17).
+
+**This build reads every earlier file**, written by any release from 0.1.1 on, and a file becomes
+format 2 at the first checkpoint after this build writes to it. **No earlier release reads a format
+2 file**: 0.1.5 and later refuse it by name as `unsupported`, and 0.1.1 to 0.1.3 report it as
+malformed. `docs/relational-architecture.md` section 5a has the details (task-2074).
+
 **A search table can filter inside the search: `FACET` columns.** A column of an `inillucent_search`
 table declared `live FACET` is stored and can be constrained in a search - `WHERE docs MATCH ?1 AND
 k = 10 AND live = '1'` - and the constraint is compiled into the filter the scan runs under rather

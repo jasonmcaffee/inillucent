@@ -1489,7 +1489,7 @@ fn declared_page_size(file: &dyn inillucent_vfs::VfsFile) -> Option<usize> {
     }
     let mut format = [0u8; 4];
     format.copy_from_slice(head.get(8..12)?);
-    if u32::from_le_bytes(format) != crate::meta::FORMAT_VERSION {
+    if !crate::meta::reads_format(u32::from_le_bytes(format)) {
         return None;
     }
     let mut size = [0u8; 4];
@@ -1516,10 +1516,10 @@ fn is_a_sqlite_file(file: &dyn inillucent_vfs::VfsFile) -> bool {
     head == *b"SQLite format 3\0"
 }
 
-/// Returns the format version a file carries when it is not this build's.
+/// Returns the format version a file carries when this build does not read it.
 ///
-/// `None` means the file is either this build's format or not an inillucent
-/// database at all - the second is the caller's "neither meta page is
+/// `None` means the file is either a format this build reads or not an
+/// inillucent database at all - the second is the caller's "neither meta page is
 /// readable", which is the right answer for a file whose magic is missing.
 ///
 /// @param file - the open data file
@@ -1532,7 +1532,7 @@ fn foreign_format_version(file: &dyn inillucent_vfs::VfsFile) -> Option<u32> {
     let mut format = [0u8; 4];
     format.copy_from_slice(head.get(8..12)?);
     let found = u32::from_le_bytes(format);
-    (found != crate::meta::FORMAT_VERSION).then_some(found)
+    (!crate::meta::reads_format(found)).then_some(found)
 }
 
 /// Returns the page size the shadow meta page declares, by trying sizes.

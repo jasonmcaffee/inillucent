@@ -225,7 +225,8 @@ same fixture, same geometry:
 | - the encode | 2.22 | 0.35 |
 
 **The merge is the one pass that does not grow with the page size** - it is per delta row and a delta
-area holds at most thirty-two - and the other three roughly double between an 8 KiB page and this
+area held at most thirty-two when this was measured (task-2074 sized it by the free gap instead, and
+took the sweep's compactions from 1,624 to 423; see `docs/roadmap.md` item 2) - and the other three roughly double between an 8 KiB page and this
 one, because a 32 KiB leaf keeps four times as many rows. An attribution of this stage taken at 8 KiB
 understates it by about half, and the gate runs at 32 KiB.
 
@@ -275,6 +276,45 @@ dividing the printed times gives a number close to the printed ratio rather than
 11.70 divide to 4.10 where the paired figure is 3.97. The paired figure is the one the contract grades
 and the one quoted.
 
+### The cost of each secondary index, on the index count sweep
+
+**One number per index count, because the gate's fixture has one index count.** `main_table` carries
+two secondary indexes, so a change aimed at index maintenance measured on `write.insert.batch` is one
+point of a curve. task-2074 added the sweep: `inillucent-writeprofile --sweep` inserts 5,000 rows in
+one transaction into a 100,000 row table carrying 0, 2, 5 and 10 indexes, in process, with the write
+path's own counters; `inillucent-perfhistory --only insert.indexes` inserts 20,000 rows into a 20,000
+row table carrying the same index counts, beside SQLite. The indexes are built after the rows are
+loaded, on both engines, so the inserts meet leaves at the fill an import leaves.
+
+Measured in one quiet window, the fastest of five interleaved rounds, microseconds a row:
+
+| indexes | before | the delta area sized by the free gap | and the compaction splice |
+|---:|---:|---:|---:|
+| 0 | 7.93 | 5.04 | 5.14 |
+| 2 | 18.28 | 10.47 | 9.12 |
+| 5 | 33.45 | 17.16 | 15.50 |
+| 10 | 73.06 | 39.97 | 37.20 |
+| cost per index at 2 | 5.17 | 2.71 | 1.99 |
+| leaf compactions at 10 indexes | 1,624 | 423 | 423, 391 of them spliced |
+| time making room at 10 indexes | 194.03 ms | 66.18 ms | 49.49 ms |
+
+The wall ratio against SQLite, net of process startup, from `tests/performance-history.tsv`:
+
+| indexes | before | the directory | and the splice |
+|---:|---:|---:|---:|
+| 0 | 0.09x | 0.14x | 0.14x |
+| 2 | 0.08x | 0.18x | 0.19x |
+| 5 | 0.08x | 0.25x | 0.19x |
+| 10 | 0.43x | 1.20x | 1.28x |
+
+**The first change is most of it.** The delta area used to compact every 32 rows whatever its leaf
+held, and an index leaf holds thousands, so the indexes paid for a repack of the whole leaf every 32
+entries. With a directory in key order a lookup in the area is a binary search, the area takes the
+whole free gap, and the compactions fall by 3.7x. **The splice is the smaller second half**, 7% to
+15% on top at two indexes and more: most compactions now keep the page's column widths and heap and
+write only the new rows' values. SQLite's own cost jumps at 10 indexes on this table, from 64 ms at
+5 to 525 ms, which is why that ratio moves more than the others.
+
 ### What a statement costs before it reaches a tree
 
 The whole tree write was ablated out of the in-place update path, so the statement found its row,
@@ -307,7 +347,7 @@ bytes it was about to write**: 2,000 updates that changed nothing, under a descr
 
 That was hiding a real defect rather than only mis-measuring. `only_change` answered `None` both when
 *nothing* differed and when *several* columns did, so the caller took the most expensive path it has
-for the cheapest case: a tombstone, a delta insert, and a compaction every `DELTA_LIMIT` writes
+for the cheapest case: a tombstone, a delta insert, and a compaction every 32 writes (the delta limit then)
 there is. Running the same `UPDATE` twice over the same rows:
 
 | pass | ns each | allocations | inserted | in place |

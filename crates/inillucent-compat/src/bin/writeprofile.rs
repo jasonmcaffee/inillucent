@@ -17,7 +17,7 @@
 //! fresh page allocation the way the old one did. `reads`, `hits` and `writes`
 //! below are the three that carried over.
 //!
-//! Usage: `cargo run --release -p inillucent-compat --bin inillucent-writeprofile`
+//! Usage: `cargo run --release -p inillucent-compat --bin inillucent-writeprofile [-- --sweep]`
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -33,9 +33,53 @@ const ROWS: i64 = 5_000;
 /// How many statements each case runs.
 const OPERATIONS: i64 = 500;
 
+/// The secondary index counts the index count sweep runs at.
+///
+/// **Two is one point on a curve, and the gate's fixture only has that one.**
+/// `main_table` carries two secondary indexes, so a change to how an index leaf
+/// absorbs writes measured on it says nothing about whether it gets better or
+/// worse with the index count - and whether the gain grows with the indexes is
+/// what decides if a change to the page format is worth one (task-2066 section
+/// 4.3.9, task-2074).
+const SWEEP_INDEXES: [usize; 4] = [0, 2, 5, 10];
+
+/// How many rows the sweep's table holds before the timed inserts.
+///
+/// A hundred thousand, which is `main_table` at the gate's medium scale, so an
+/// index leaf holds the three to four thousand entries a real one does.
+const SWEEP_SEEDED: i64 = 100_000;
+
+/// How many rows the sweep inserts in its one timed transaction.
+const SWEEP_INSERTS: i64 = 5_000;
+
+/// How many times each arm of the sweep is run.
+///
+/// The arms are interleaved - every index count once, then every index count
+/// again - so a machine that got busy halfway through slows all four.
+const SWEEP_ROUNDS: usize = 5;
+
+/// The multipliers that scatter each indexed column's values.
+///
+/// Distinct primes, so the ten columns are ten different orders over the same
+/// rows and an insert lands in a different leaf of each index.
+const SWEEP_PRIMES: [i64; 10] = [
+    7_919, 104_729, 1_299_709, 15_485_863, 3, 31, 541, 7_907, 65_537, 999_983,
+];
+
 /// Runs every case and prints what each one cost.
+///
+/// `--sweep` runs the index count sweep alone, which is what a before and after
+/// of a leaf format change wants: the other cases take a minute and measure
+/// something else.
 fn main() -> ExitCode {
-    match run() {
+    let sweep_only = std::env::args()
+        .skip(1)
+        .any(|argument| argument == "--sweep");
+    let outcome = match sweep_only {
+        true => index_sweep(),
+        false => run(),
+    };
+    match outcome {
         Ok(()) => ExitCode::SUCCESS,
         Err(reason) => {
             eprintln!("{reason}");
@@ -235,6 +279,243 @@ fn read_case(name: &str, indexes: bool, sql: &str) -> Result<(), String> {
         rows
     );
     Ok(())
+}
+
+/// Returns the value the sweep writes into indexed column `column` of row `seq`.
+///
+/// @param seq - the row's id
+/// @param column - which of the ten columns
+fn sweep_value(seq: i64, column: usize) -> i64 {
+    let prime = SWEEP_PRIMES.get(column).copied().unwrap_or(1);
+    seq.wrapping_mul(prime).rem_euclid(SWEEP_SEEDED)
+}
+
+/// Builds the sweep's table: ten integer columns, `indexes` of them indexed.
+///
+/// The index is created **after** the rows are loaded, so each one is bulk
+/// built the way an imported fixture's is, and the timed inserts meet leaves at
+/// the fill a bulk build leaves rather than the fill a run of inserts does.
+///
+/// @param path - where the database goes
+/// @param indexes - how many secondary indexes to create
+fn build_sweep(path: &std::path::Path, indexes: usize) -> Result<Database, String> {
+    let database = Database::open(path).map_err(|error| error.message().to_string())?;
+    let connection = database.session();
+    let columns: Vec<String> = (0..SWEEP_PRIMES.len())
+        .map(|column| format!("c{column} INTEGER"))
+        .collect();
+    let values: Vec<String> = (0..SWEEP_PRIMES.len())
+        .map(|column| {
+            let prime = SWEEP_PRIMES.get(column).copied().unwrap_or(1);
+            format!("(seq * {prime}) % {SWEEP_SEEDED}")
+        })
+        .collect();
+    let mut script = format!(
+        "PRAGMA journal_mode=delete; PRAGMA synchronous=full;
+         CREATE TABLE digits(n INTEGER PRIMARY KEY);
+         INSERT INTO digits(n) VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9);
+         CREATE TABLE t(id INTEGER PRIMARY KEY, {});
+         INSERT INTO t SELECT seq, {} FROM (SELECT (((a.n*10+b.n)*10+c.n)*10+d.n)*10+e.n+1 AS seq \
+         FROM digits a, digits b, digits c, digits d, digits e) WHERE seq <= {SWEEP_SEEDED};",
+        columns.join(", "),
+        values.join(", "),
+    );
+    for column in 0..indexes {
+        script.push_str(&format!("CREATE INDEX t_c{column} ON t(c{column});"));
+    }
+    connection
+        .execute_batch(&script)
+        .map_err(|error| error.message().to_string())?;
+    Ok(database)
+}
+
+/// What one arm of the sweep cost.
+struct SweepArm {
+    /// Microseconds per inserted row, one entry per round.
+    per_row: Vec<f64>,
+    /// What the write path did, from the last round. Counters do not move
+    /// between rounds, because every round starts from the same fresh table.
+    stats: inillucent_tree::write::WriteStats,
+    /// Log bytes the transaction wrote, from the last round.
+    log_bytes: u64,
+    /// Pages the file holds after the commit, from the last round.
+    pages: i64,
+}
+
+/// Runs one round of one arm: a fresh table, then the timed inserts.
+///
+/// @param indexes - how many secondary indexes the table carries
+/// @param round - which round, for the scratch file's name
+/// @returns microseconds per row, the write counters, log bytes and page count
+fn sweep_round(
+    indexes: usize,
+    round: usize,
+) -> Result<(f64, inillucent_tree::write::WriteStats, u64, i64), String> {
+    let path = scratch(&format!("sweep-{indexes}-{round}"));
+    let database = build_sweep(&path, indexes)?;
+    let connection = database.session();
+    let placeholders: Vec<String> = (1..=SWEEP_PRIMES.len() + 1)
+        .map(|at| format!("?{at}"))
+        .collect();
+    let sql = format!("INSERT INTO t VALUES ({})", placeholders.join(", "));
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|error| format!("{sql}: {}", error.message()))?;
+    let stats_before = database.write_stats();
+    let log_before = database.log_stats();
+    connection
+        .execute_batch("BEGIN")
+        .map_err(|error| error.message().to_string())?;
+    let started = Instant::now();
+    for index in 0..SWEEP_INSERTS {
+        // Ids past the seeded range, so the table's own tree appends at its
+        // right edge the way `write.insert.batch`'s rowid insert does, while
+        // every index takes the row somewhere in the middle.
+        let seq = SWEEP_SEEDED + 1 + index;
+        statement
+            .bind_integer(1, seq)
+            .map_err(|error| error.message().to_string())?;
+        for column in 0..SWEEP_PRIMES.len() {
+            statement
+                .bind_integer(column as u32 + 2, sweep_value(seq, column))
+                .map_err(|error| error.message().to_string())?;
+        }
+        while statement
+            .step()
+            .map_err(|error| format!("{sql}: {}", error.message()))?
+        {}
+        statement.reset();
+    }
+    drop(statement);
+    connection
+        .execute_batch("COMMIT")
+        .map_err(|error| error.message().to_string())?;
+    let elapsed = started.elapsed();
+    let stats = subtract_stats(database.write_stats(), stats_before);
+    let log_bytes = database.log_stats().bytes.saturating_sub(log_before.bytes);
+    let pages = match connection
+        .query("PRAGMA page_count")
+        .ok()
+        .and_then(|rows| rows.first().and_then(|row| row.first().cloned()))
+    {
+        Some(OwnedDatum::Int(count)) => count,
+        _ => 0,
+    };
+    let per_row = elapsed.as_secs_f64() * 1e6 / SWEEP_INSERTS as f64;
+    Ok((per_row, stats, log_bytes, pages))
+}
+
+/// Returns the counters one transaction added.
+///
+/// @param after - the counters after it
+/// @param before - the counters before it
+fn subtract_stats(
+    after: inillucent_tree::write::WriteStats,
+    before: inillucent_tree::write::WriteStats,
+) -> inillucent_tree::write::WriteStats {
+    inillucent_tree::write::WriteStats {
+        inserted: after.inserted.saturating_sub(before.inserted),
+        deleted: after.deleted.saturating_sub(before.deleted),
+        updated_in_place: after
+            .updated_in_place
+            .saturating_sub(before.updated_in_place),
+        compactions: after.compactions.saturating_sub(before.compactions),
+        splits: after.splits.saturating_sub(before.splits),
+        merges: after.merges.saturating_sub(before.merges),
+        compaction_nanos: after
+            .compaction_nanos
+            .saturating_sub(before.compaction_nanos),
+        split_nanos: after.split_nanos.saturating_sub(before.split_nanos),
+        source_nanos: after.source_nanos.saturating_sub(before.source_nanos),
+        image_nanos: after.image_nanos.saturating_sub(before.image_nanos),
+        merge_nanos: after.merge_nanos.saturating_sub(before.merge_nanos),
+        sizing_nanos: after.sizing_nanos.saturating_sub(before.sizing_nanos),
+        encode_nanos: after.encode_nanos.saturating_sub(before.encode_nanos),
+        choose_nanos: after.choose_nanos.saturating_sub(before.choose_nanos),
+        splices: after.splices.saturating_sub(before.splices),
+        splice_nanos: after.splice_nanos.saturating_sub(before.splice_nanos),
+        hinted: after.hinted.saturating_sub(before.hinted),
+        descended: after.descended.saturating_sub(before.descended),
+        room_nanos: after.room_nanos.saturating_sub(before.room_nanos),
+    }
+}
+
+/// Runs the index count sweep and prints one line per arm.
+///
+/// **Graded per index, not per statement.** The column that answers whether a
+/// leaf format change pays is the cost each index adds to a row: the arm's time
+/// less the no-index arm's, divided by the index count. A change that helps the
+/// two-index fixture and is flat at ten, or the other way round, shows up there
+/// and nowhere else.
+///
+/// The fastest round is reported beside the median. Load only ever adds time to
+/// a round, so on a machine other agents are using the minimum is the reading
+/// closest to what the code costs; the median says how far the rounds spread.
+fn index_sweep() -> Result<(), String> {
+    println!(
+        "index count sweep: {SWEEP_INSERTS} inserts in one transaction into a {SWEEP_SEEDED} row \
+         table, {SWEEP_ROUNDS} interleaved rounds, default page size\n"
+    );
+    let mut arms: Vec<SweepArm> = SWEEP_INDEXES
+        .iter()
+        .map(|_| SweepArm {
+            per_row: Vec::new(),
+            stats: inillucent_tree::write::WriteStats::default(),
+            log_bytes: 0,
+            pages: 0,
+        })
+        .collect();
+    for round in 0..SWEEP_ROUNDS {
+        for (arm, indexes) in arms.iter_mut().zip(SWEEP_INDEXES) {
+            let (per_row, stats, log_bytes, pages) = sweep_round(indexes, round)?;
+            arm.per_row.push(per_row);
+            arm.stats = stats;
+            arm.log_bytes = log_bytes;
+            arm.pages = pages;
+        }
+    }
+    let base = arms.first().map(|arm| fastest(&arm.per_row)).unwrap_or(0.0);
+    for (arm, indexes) in arms.iter().zip(SWEEP_INDEXES) {
+        let quickest = fastest(&arm.per_row);
+        let per_index = match indexes {
+            0 => 0.0,
+            count => (quickest - base) / count as f64,
+        };
+        let stats = arm.stats;
+        println!(
+            "indexes {indexes:>2}  fastest {quickest:>7.2} us/row  median {:>7.2}  per index {per_index:>6.2}  \
+             compactions {:>5} (spliced {:>5})  splits {:>4}  room {:>7.2} ms  merge {:>6.2}  splice {:>6.2}  \
+             sizing {:>6.2}  encode {:>6.2}  log {:>7} KiB  pages {:>5}",
+            median(&arm.per_row),
+            stats.compactions,
+            stats.splices,
+            stats.splits,
+            stats.room_nanos as f64 / 1e6,
+            stats.merge_nanos as f64 / 1e6,
+            stats.splice_nanos as f64 / 1e6,
+            stats.sizing_nanos as f64 / 1e6,
+            stats.encode_nanos as f64 / 1e6,
+            arm.log_bytes / 1024,
+            arm.pages,
+        );
+    }
+    Ok(())
+}
+
+/// Returns the smallest of some readings.
+///
+/// @param readings - the readings
+fn fastest(readings: &[f64]) -> f64 {
+    readings.iter().copied().fold(f64::INFINITY, f64::min)
+}
+
+/// Returns the median of some readings.
+///
+/// @param readings - the readings
+fn median(readings: &[f64]) -> f64 {
+    let mut sorted = readings.to_vec();
+    sorted.sort_by(|left, right| left.total_cmp(right));
+    sorted.get(sorted.len() / 2).copied().unwrap_or(0.0)
 }
 
 /// Runs every case.

@@ -257,7 +257,7 @@ at one fixed point rather than at every cut of a commit.
 ## 5a. What a file's format version promises
 
 The first eight bytes of a database are `RDB2` and four zero bytes, and the four bytes after them
-are the **format version**, which this build writes as `1` and is the only one it reads.
+are the **format version**, which this build writes as `2`. It reads `2` and `1`.
 
 The rule it stands for:
 
@@ -265,15 +265,45 @@ The rule it stands for:
   `0.1.4` opens a `0.1.0` file. The version does not move for a bug fix, and a release that changed
   the layout of a page, a record or the header without moving it would be a release that could not
   say which files it can read.
-- **A change to that layout raises the number, and that is a minor version with a documented
-  migration.** The migration is `inillucent-migrate`, which reads the older file and writes a new
-  one; it is not an upgrade in place, because an upgrade in place is a rewrite that a crash can
-  catch halfway.
+- **A change to that layout raises the number, and that is a minor version.** Where the new build
+  can read the old layout it does, as it does format 1 (below); where it cannot, the migration is
+  `inillucent-migrate`, which reads the older file and writes a new one rather than rewriting it in
+  place, because an upgrade in place is a rewrite that a crash can catch halfway.
 - **A build that meets a higher number says so rather than reading the file as damage.** The refusal
-  is `this database is format version N and this build reads version 1; upgrade inillucent to open
+  is `this database is format version N and this build reads version 2; upgrade inillucent to open
   it`, it carries the status `unsupported`, and the command line exits 3 - the same answer every
-  other "this build has not got that" gives. A *lower* number is reported as corruption, because
+  other "this build has not got that" gives. A number below 1 is reported as corruption, because
   there is no earlier format: a zero there is a header that has been overwritten.
+
+### Format 2: what changed, and how a format 1 file still opens (task-2074)
+
+Two things in a page changed, and a build of format 1 can read neither:
+
+- **A leaf's delta area has a directory.** The delta area holds the rows written to a leaf since it
+  was last packed. In format 1 it was a run of rows in arrival order, capped at 32 and scanned on
+  every lookup. In format 2 it opens with a directory of two-byte entries in key order, a lookup is
+  a binary search, and the area is as large as the free gap - which is what stopped an index leaf of
+  thousands of rows compacting after every 32 writes. `crates/inillucent-tree/src/leaf/delta.rs`
+  has the layout.
+- **A page's checksum covers its LSN.** Format 1's covered bytes 12 onward and left the eight-byte
+  LSN out, so a flipped bit there was a page that read as valid while telling recovery the wrong
+  thing about which log records it held. `crates/inillucent-pool/src/page.rs` has the rule.
+
+**This build reads format 1, page by page.** A leaf carries a flag, `LEAF_DELTA_DIRECTORY`, that
+says which layout its delta area is in, and a page's checksum is accepted under either rule. A leaf
+format 1 wrote is read as it is and **written by format 1's rules until a compaction or a split
+rewrites it**, and that rewrite is logged with the page's image. The reason is recovery: it replays
+the log onto the pages the file holds, and for a file an earlier release wrote those are format 1
+pages, so a replay has to follow the rules the log was written under to land on the same bytes. The
+file's own number becomes 2 the next time this build writes the meta record, which a checkpoint
+does. `tests/interop/` holds a file from every release, and `release_format.rs` reads each one,
+writes to it, crashes, and recovers.
+
+**No release before this one reads a format 2 file, and each of them refuses it.** 0.1.5, 0.1.6
+and 0.1.7 answer `Error [unsupported]: this database is format version 2 and this build reads
+version 1; upgrade inillucent to open it`. 0.1.1, 0.1.2 and 0.1.3 predate that refusal and answer
+`database disk image is malformed: neither meta page is readable`. None of them reads the file and
+answers from it. `release_format_history.rs` asserts both, against the released binaries.
 
 The number lives at byte 8 of the meta page, which is covered by the meta record's checksum, so a
 file whose version has been edited by hand fails the checksum rather than opening.
@@ -335,7 +365,7 @@ records:
 
 | what | where the number is | what a newer number does |
 |---|---|---|
-| the pages, records and header | byte 8 of the meta page, `crates/inillucent-pool/src/meta.rs` | the database will not open: `this database is format version N and this build reads version 1; upgrade inillucent to open it` |
+| the pages, records and header | byte 8 of the meta page, `crates/inillucent-pool/src/meta.rs` | the database will not open: `this database is format version N and this build reads version 2; upgrade inillucent to open it` |
 | an FTS5 index | a `%_data` row, `crates/inillucent-ext/src/vtab/fts5/layout.rs` | the database opens and the table's rows read; `MATCH`, any write, and `fts5vocab` refuse with `the full-text index on T is in layout N, written by inillucent X.Y.Z, and this build reads layouts up to 2` |
 | an `inillucent_search` index | the `format` row of `%_config`, `crates/inillucent-search/src/options.rs` | the database opens; every read and every write of the table refuses with `the table is in format N, written by inillucent X.Y.Z, and this build reads formats 1 and 2` |
 
@@ -369,9 +399,10 @@ claiming something the file cannot support. Those mixed files are read by the pe
 - **A point release reads every file an earlier point release of the same minor version wrote**, and
   every layout inside it.
 - **A build reads a file written by any earlier build, or refuses it by name.** There is no version
-  this project has dropped: the file format version has been 1 since the first release. How far
-  back that is *checked* is 0.1.1, the oldest release with a fixture in `tests/interop/` - 0.1.0 was
-  withdrawn the day after it was published and nobody is running it.
+  this project has dropped: the file format version was 1 from the first release until task-2074
+  made it 2, and this build reads both. How far back that is *checked* is 0.1.1, the oldest release
+  with a fixture in `tests/interop/` - 0.1.0 was withdrawn the day after it was published and nobody
+  is running it.
 - **A build reads a file written by a later build where the later build changed nothing, and refuses
   it by name where it did.** That is the direction the records above exist for, and it is the
   direction that costs somebody their afternoon: an application that upgrades one machine and not

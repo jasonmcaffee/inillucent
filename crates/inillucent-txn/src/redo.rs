@@ -378,16 +378,18 @@ impl RowRedo for TreeRows {
             let leaf = LeafRef::parse(&guard)?
                 .with_collations(&collations)
                 .with_directions(&directions);
-            let rows = leaf.live_source()?;
             let builder =
                 LeafBuilder::new(page_size, tree, shape.columns.clone(), shape.key_columns)?;
-            // **The same fill ladder the write path walked**, and for the same
-            // reason it is a shared function: a compaction is logged without its
-            // page when it is deterministic, and "deterministic" means this
-            // replay lands on the same bytes. A leaf packed above `COMPACT_FILL`
-            // by a bulk build compacts at `TIGHT_FILL` rather than splitting, and
-            // a replay that only knew the first fill declared the file corrupt.
-            let Some(mut image) = inillucent_tree::write::compact_image(&builder, &rows)? else {
+            // **The same choice the write path made**, and for the same reason
+            // it is a shared function: a compaction is logged without its page
+            // when it is deterministic, and "deterministic" means this replay
+            // lands on the same bytes. That covers the fill - a leaf packed
+            // above `COMPACT_FILL` by a bulk build compacts at `TIGHT_FILL` - and
+            // since task-2074 it covers whether the leaf is spliced or repacked,
+            // which the page decides and the replay reads off the same page.
+            let Some(mut image) =
+                inillucent_tree::write::replay_compaction(&builder, &leaf, page_size)?
+            else {
                 // The write path only logs a compaction when every live row
                 // fits; a replay that cannot fit them is looking at a different
                 // page than the one the record was written against.
@@ -400,7 +402,7 @@ impl RowRedo for TreeRows {
                 // area that add up to more live rows than the tree can hold in
                 // a page is the first, and an LSN at or above this record's is
                 // the second.
-                let live = rows.len();
+                let live = leaf.live_rows()?;
                 let sorted = leaf.row_count();
                 let delta = leaf.delta_count();
                 let mut tombstoned = 0usize;
@@ -478,11 +480,18 @@ impl RowRedo for TreeRows {
             // **Under the tree's own order.** See `key_order`: without the
             // collations and the directions this searches a leaf that is not
             // sorted the way it thinks it is.
-            let located = leaf
+            //
+            // **And into the directory position the write path chose**, which
+            // is the same search over the same page: the row's place in key
+            // order after whatever the key named has gone. A replay that put it
+            // anywhere else would produce a page whose bytes differ from the
+            // one the write left - valid, readable, and not the page the rest
+            // of the log was written against.
+            let (located, slot) = leaf
                 .view()?
                 .with_collations(&collations)
                 .with_directions(&directions)
-                .locate(&key, shape.key_columns)?;
+                .locate_slot(&key, shape.key_columns)?;
             match located {
                 Located::Sorted(at) => {
                     leaf.set_tombstone(at)?;
@@ -490,7 +499,7 @@ impl RowRedo for TreeRows {
                 Located::Delta(index) => leaf.remove_delta(index)?,
                 Located::Absent => {}
             }
-            if leaf.insert_delta_encoded(row)? == Applied::NoRoom {
+            if leaf.insert_delta_encoded(row, slot)? == Applied::NoRoom {
                 // The leaf had room when the record was written, so it has room
                 // now unless the page in the file is not the page the record was
                 // written against. Reporting it is the only honest answer; the

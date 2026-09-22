@@ -19,10 +19,11 @@
 //!
 //! ## What a `NoRoom` means
 //!
-//! A leaf refuses an insert when its delta area is at [`crate::leaf::DELTA_LIMIT`]
-//! or the row would collide with the mini-columns. The caller **compacts**:
-//! every live row is read, sorted, and re-packed into a fresh page with the
-//! delta area empty again. If they do not all fit, the leaf **splits**. So an
+//! A leaf refuses an insert when the row would collide with the mini-columns:
+//! the delta area is as large as the free gap, and nothing else limits it. The
+//! caller **compacts**: the live rows are merged into key order and packed into
+//! a fresh page with the delta area empty again - or, when they still fit the
+//! page's own slot widths, spliced into the page it has (`leaf/splice.rs`). If they do not all fit, the leaf **splits**. So an
 //! insert can do three things and the third is bounded: a page that has just
 //! been split is at most half full, and half a page always has room for one row
 //! that was small enough to be in the tree at all.
@@ -125,9 +126,19 @@ enum Fit {
     /// The leaf holds out-of-line values and has to be rebuilt with the file in
     /// hand, because moving one needs a run of pages allocated.
     Repack(bool),
-    /// The live rows fit one page: this image, and the two header fields the
-    /// old page carried that a fresh pack does not know about.
-    Compact(Vec<u8>, PageId, u64),
+    /// The live rows fit one page: this image, the two header fields the old
+    /// page carried that a fresh pack does not know about, and whether the log
+    /// record can leave the image out.
+    ///
+    /// **The flag is false in two cases.** A leaf a splice was allowed on,
+    /// whose spliced page had no room for the arriving row, repacked instead:
+    /// recovery re-runs a compaction from the page and does not know the row, so
+    /// it would splice, which is a different page from the one the write
+    /// produced. And any leaf format 1 wrote: recovery re-runs a compaction of
+    /// such a leaf by format 1's rule, which is what a format 1 log needs, and
+    /// this build's compaction of it is not that. In both the record carries
+    /// the page and recovery copies it.
+    Compact(Vec<u8>, PageId, u64, bool),
     /// They do not, so the leaf splits and the rows have to outlive the borrow.
     /// The flag says whether the rows are arriving in key order.
     Split(Vec<Vec<OwnedDatum>>, bool),
@@ -290,6 +301,51 @@ pub fn compact_image_timed<'d>(
     builder.pack_all_rows_timed(rows, TIGHT_FILL, timing)
 }
 
+/// Compacts a leaf the way a replayed `CompactLeaf` record without an image does.
+///
+/// **The rule recovery follows, in one place so the write path cannot drift
+/// from it.** A splice when the page allows one and a repack otherwise, both
+/// decided from the page alone. The write path makes the same choice first and
+/// logs the image only when it had to depart from it - see `Fit::Compact`.
+///
+/// `None` when the live rows do not fit one page at all, which a replay reports
+/// as corruption: the write that logged the record had them fit.
+///
+/// **A leaf format 1 wrote is compacted by format 1's rule**: a repack, and the
+/// result left in format 1's layout. The only compaction of such a leaf that is
+/// logged without its image is one a format 1 build logged - this build logs
+/// the image whenever it compacts one - so a replay here is replaying a format
+/// 1 log, and every later record in that log was written against a page in
+/// format 1's layout.
+///
+/// @param builder - the leaf builder for this tree
+/// @param leaf - the leaf, parsed with its tree's collations and directions
+/// @param page_size - the database's page size
+pub fn replay_compaction(
+    builder: &LeafBuilder,
+    leaf: &LeafRef<'_>,
+    page_size: usize,
+) -> DbResult<Option<Vec<u8>>> {
+    let order = leaf.live_order()?;
+    if !leaf.has_delta_directory() {
+        let Some(mut image) = compact_image(builder, &order.materialise()?)? else {
+            return Ok(None);
+        };
+        // The repack is the same bytes format 1's builder wrote, save the flag
+        // that says which layout the delta area is in; there is no delta area
+        // yet, so clearing it is all that makes this format 1's page.
+        let flags = image
+            .get_mut(page::header::FLAGS)
+            .ok_or_else(|| corrupt("a repacked leaf has no flag byte"))?;
+        *flags &= !crate::leaf::LEAF_DELTA_DIRECTORY;
+        return Ok(Some(image));
+    }
+    if let Some(image) = crate::leaf::splice_image(leaf, &order, page_size, TIGHT_FILL)? {
+        return Ok(Some(image));
+    }
+    compact_image(builder, &order.materialise()?)
+}
+
 /// Where a mutation writes its log records.
 ///
 /// A trait rather than a direct dependency on the transaction manager, because
@@ -404,6 +460,19 @@ pub enum Located {
     Absent,
 }
 
+/// Where a write's key sits in its leaf, and where its row will go.
+///
+/// The two answers one search of the leaf gives, carried together from the
+/// search to the write: what the write displaces, and the delta directory
+/// position its row takes once that is gone.
+#[derive(Clone, Copy, Debug)]
+struct Landing {
+    /// Where the key sits now.
+    located: Located,
+    /// The delta directory position the row takes.
+    slot: usize,
+}
+
 /// What a write did, for the report and for the tests.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct WriteStats {
@@ -452,6 +521,12 @@ pub struct WriteStats {
     /// Nanoseconds spent deciding what will fit and building the image, which for a
     /// compaction is reading every live row of the leaf and encoding it again.
     pub choose_nanos: u128,
+    /// Compactions that spliced their delta rows into the page rather than
+    /// repacking it (task-2074).
+    pub splices: u64,
+    /// Nanoseconds spent building spliced images, including the ones a leaf
+    /// then could not use because the arriving row did not fit.
+    pub splice_nanos: u128,
     /// Writes whose leaf the hint named, costing two key comparisons.
     pub hinted: u64,
     /// Writes that descended the tree from its root to find their leaf.
@@ -497,6 +572,8 @@ impl std::ops::Add for WriteStats {
             sizing_nanos: self.sizing_nanos.saturating_add(other.sizing_nanos),
             encode_nanos: self.encode_nanos.saturating_add(other.encode_nanos),
             choose_nanos: self.choose_nanos.saturating_add(other.choose_nanos),
+            splices: self.splices.saturating_add(other.splices),
+            splice_nanos: self.splice_nanos.saturating_add(other.splice_nanos),
             hinted: self.hinted.saturating_add(other.hinted),
             descended: self.descended.saturating_add(other.descended),
             room_nanos: self.room_nanos.saturating_add(other.room_nanos),
@@ -664,8 +741,9 @@ impl PagedTree {
     /// **The key is found once.** Where it sits decides three things - whether
     /// it was there, what the caller gets back, and what the mutation has to
     /// displace - and the first version asked the page all three times. A locate
-    /// is a page parse, a binary search and a walk of the delta area, and the
-    /// delta area is up to thirty-two rows compared column by column; on the
+    /// is a page parse and two binary searches, one of the delta directory and
+    /// one of the sorted region (the delta area was a walk of up to thirty-two
+    /// rows before task-2074); on the
     /// gate's `write.insert.batch` the two indexes cost 8.4 us of a 19 us insert,
     /// and half of that was asking twice.
     ///
@@ -681,7 +759,8 @@ impl PagedTree {
     /// @param key - the key columns of the row being written
     /// @param want_previous - whether the row that was there has to be read
     /// @param timing - where this write's nanoseconds are collected, all zero unless a harness asked
-    /// @returns where the key sits, and the row that was there
+    /// @returns where the key sits, the delta directory position a row for it
+    ///   takes, and the row that was there
     fn locate_and_read_previous(
         &self,
         database: &mut Database,
@@ -689,7 +768,7 @@ impl PagedTree {
         key: &[Datum<'_>],
         want_previous: bool,
         timing: &mut crate::stages::PutStages,
-    ) -> DbResult<(Located, Option<Vec<OwnedDatum>>)> {
+    ) -> DbResult<(Located, usize, Option<Vec<OwnedDatum>>)> {
         let fetching = crate::stages::clock();
         let guard = database.pool().fetch(page)?;
         let leaf = LeafRef::parse(&guard)?
@@ -698,7 +777,7 @@ impl PagedTree {
         timing.fetch = timing
             .fetch
             .saturating_add(crate::stages::elapsed(fetching));
-        let located = leaf.locate(key, self.key_columns())?;
+        let (located, slot) = leaf.locate_slot(key, self.key_columns())?;
         // One row's out-of-line values, and only when the caller wants
         // the row it is replacing. Locating reads key columns, which are
         // never out of line, so this comes after.
@@ -732,7 +811,7 @@ impl PagedTree {
                 Some(values)
             }
         };
-        Ok((located, previous))
+        Ok((located, slot, previous))
     }
 
     /// Returns the out-of-line pages a delta row about to be removed owns.
@@ -807,7 +886,8 @@ impl PagedTree {
     /// @param database - the file
     /// @param log - where the record goes
     /// @param page - the leaf
-    /// @param located - where the key sits in it, which decides what is displaced
+    /// @param landing - where the key sits, which decides what is displaced, and
+    ///   the delta directory position the row takes once that is done
     /// @param encoded_row - the row's bytes, taken by the write
     /// @param spilled - whether any of its values went out of line
     /// @param costed - where the room check found the row would land
@@ -817,12 +897,13 @@ impl PagedTree {
         database: &mut Database,
         log: &mut dyn TreeLog,
         page: PageId,
-        located: Located,
+        landing: Landing,
         encoded_row: &mut Vec<u8>,
         spilled: bool,
         costed: DeltaOffsets,
         timing: &mut crate::stages::PutStages,
     ) -> DbResult<()> {
+        let Landing { located, slot } = landing;
         let asking = crate::stages::clock();
         let orphaned = self.orphaned_extents(database, page, located)?;
         timing.orphans = crate::stages::elapsed(asking);
@@ -855,7 +936,7 @@ impl PagedTree {
                 // of task-2025's 1,508 shadow row writes were an append over a
                 // key that was not there, and recomputing cost 0.40 of the 3.3
                 // microseconds such a write takes.
-                Located::Absent => DeltaPlan::at(costed, encoded),
+                Located::Absent => DeltaPlan::at(costed, encoded, slot),
                 // A tombstone may have created the bitmap and a delta removal
                 // rebuilt the area, and either moves the offsets the check
                 // found. So these are the two cases the check cannot answer
@@ -875,7 +956,7 @@ impl PagedTree {
                 // and at every page size under the default. What is left here
                 // is a page whose header says something the page does not hold.
                 Located::Sorted(_) | Located::Delta(_) => leaf
-                    .plan_encoded(encoded)?
+                    .plan_encoded(encoded, slot)?
                     .ok_or_else(|| corrupt("a leaf that had room lost it before the write"))?,
             };
             timing.plan = crate::stages::elapsed(planning);
@@ -1088,12 +1169,12 @@ impl PagedTree {
             let (page, mut path, hinted) =
                 self.leaf_for_attempt(database.pool(), &encoded_key, attempt, &mut timing)?;
             from_hint = from_hint || hinted;
-            // **The key is found once.** Where it sits decides three things -
-            // whether it was there, what the caller gets back, and what the
-            // mutation below has to displace - and the first version asked the
-            // page all three times. A locate is a page parse, a binary search
-            // and a walk of the delta area, and the delta area is up to
-            // thirty-two rows compared column by column; on the gate's
+            // **The key is found once.** Where it sits decides four things -
+            // whether it was there, what the caller gets back, what the
+            // mutation below has to displace, and where in the delta directory
+            // the row goes - and the first version asked the page three times.
+            // A locate is a page parse and two binary searches, one of the
+            // delta directory and one of the sorted region; on the gate's
             // `write.insert.batch` the two indexes cost 8.4 us of a 19 us
             // insert, and half of that was asking twice.
             //
@@ -1101,7 +1182,7 @@ impl PagedTree {
             // room check only reads, and the log append does not touch pages
             // at all. A `make_room` restarts the attempt, which re-locates.
             let locating = crate::stages::clock();
-            let (located, mut previous) =
+            let (located, slot, mut previous) =
                 self.locate_and_read_previous(database, page, &key, want_previous, &mut timing)?;
             timing.locate = timing
                 .locate
@@ -1145,7 +1226,7 @@ impl PagedTree {
                 database,
                 log,
                 page,
-                located,
+                Landing { located, slot },
                 &mut encoded_row,
                 spilled,
                 costed,
@@ -1383,29 +1464,65 @@ impl PagedTree {
         Ok(true)
     }
 
-    /// Reads a leaf's live rows, timing the merge apart from the read.
+    /// Decides which rows of a leaf are live and in what order, timed.
     ///
-    /// **In two steps, because only the first of them is work a splice would also
-    /// do.** `live_order` decides which rows are live and in what order, which is
-    /// per delta row and so does not grow with the page size; `materialise` then
-    /// reads every value of every live row into a flat vector, which exists so that
-    /// the builder's two passes each cost an index rather than a slot decode. The
-    /// two were timed together as `source_nanos`, and a single figure for them
-    /// cannot say how much of it a compaction that moved slots would keep.
+    /// **The half of a compaction a splice pays for as well.** `live_order`
+    /// merges the delta directory into the sorted region by position;
+    /// `materialise`, which only a repack needs, then reads every value of every
+    /// live row. `merge_nanos` is this and `source_nanos` is both.
     ///
     /// @param leaf - the leaf being compacted, already parsed
-    fn timed_live_source<'p>(&self, leaf: &LeafRef<'p>) -> DbResult<crate::leaf::LiveSource<'p>> {
-        let sourcing = std::time::Instant::now();
+    fn timed_live_order<'p>(&self, leaf: &LeafRef<'p>) -> DbResult<crate::leaf::LiveOrder<'p>> {
+        let merging = std::time::Instant::now();
         let order = leaf.live_order()?;
-        let merged = sourcing.elapsed().as_nanos();
+        let merged = merging.elapsed().as_nanos();
+        let mut stats = self.stats.get();
+        stats.source_nanos = stats.source_nanos.saturating_add(merged);
+        stats.merge_nanos = stats.merge_nanos.saturating_add(merged);
+        self.stats.set(stats);
+        Ok(order)
+    }
+
+    /// Reads every value of every live row into a flat vector, timed.
+    ///
+    /// @param order - the live rows, from `timed_live_order`
+    fn timed_materialise<'p>(
+        &self,
+        order: crate::leaf::LiveOrder<'p>,
+    ) -> DbResult<crate::leaf::LiveSource<'p>> {
+        let reading = std::time::Instant::now();
         let source = order.materialise()?;
         let mut stats = self.stats.get();
         stats.source_nanos = stats
             .source_nanos
-            .saturating_add(sourcing.elapsed().as_nanos());
-        stats.merge_nanos = stats.merge_nanos.saturating_add(merged);
+            .saturating_add(reading.elapsed().as_nanos());
         self.stats.set(stats);
         Ok(source)
+    }
+
+    /// Splices a leaf's delta rows into its packed region, timed.
+    ///
+    /// `None` when the leaf does not allow a splice; see
+    /// [`crate::leaf::splice_image`].
+    ///
+    /// @param leaf - the leaf being compacted, already parsed
+    /// @param order - its live rows in key order
+    fn timed_splice(
+        &self,
+        leaf: &LeafRef<'_>,
+        order: &crate::leaf::LiveOrder<'_>,
+    ) -> DbResult<Option<Vec<u8>>> {
+        let splicing = std::time::Instant::now();
+        let image = crate::leaf::splice_image(leaf, order, self.page_size(), TIGHT_FILL)?;
+        let mut stats = self.stats.get();
+        stats.splice_nanos = stats
+            .splice_nanos
+            .saturating_add(splicing.elapsed().as_nanos());
+        if image.is_some() {
+            stats.splices = stats.splices.saturating_add(1);
+        }
+        self.stats.set(stats);
+        Ok(image)
     }
 
     /// Packs a leaf's live rows into one page, timing the sizing apart from the encode.
@@ -1480,8 +1597,8 @@ impl PagedTree {
         // three and a half thousand entries that is three and a half
         // thousand allocations per compaction, to produce values that are
         // already on the page. `live_order` is one allocation of four bytes
-        // a row and the builder reads through it.
-        let source = self.timed_live_source(&leaf)?;
+        // a row, and a splice needs nothing more than that.
+        let order = self.timed_live_order(&leaf)?;
         // **A leaf with out-of-line values always takes the owned route.**
         // The fast path below packs straight out of the page, which needs
         // the guard held - and repacking an extent needs the *file*, to
@@ -1489,6 +1606,57 @@ impl PagedTree {
         // once, and a leaf with extents holds few rows, so the copy costs
         // little where it costs anything at all.
         let spilled = leaf.has_extents();
+        let appending = self.is_appending(&leaf, &order, arriving)?;
+        // **Fewer than two live rows is stuck, whichever route it would take
+        // (task-2033).** Every way of making room here moves rows between
+        // pages, and a leaf holding one row has nothing to move: a compaction
+        // rebuilds the page it already is, and a split has no second row to
+        // give the right half. Saying so is what lets the caller take the one
+        // route that does work, which is packing the arriving row into the
+        // leaf beside the row already there.
+        if order.len() < 2 {
+            return Ok(Fit::Stuck);
+        }
+        if spilled {
+            // The rows are *not* copied out here. Reading them through the
+            // guard would resolve every out-of-line value, which is the read
+            // the repack exists to avoid; `rows_to_repack` reads them again
+            // without one.
+            return Ok(Fit::Repack(appending));
+        }
+        // **A splice first, when the page allows one** (task-2074). It keeps
+        // the page's widths and heap and writes only the delta rows' values,
+        // so it skips the sizing pass, the materialising pass and most of the
+        // encode. Whether it is allowed is a question about the page alone -
+        // see `leaf/splice.rs` - which is what lets recovery make the same
+        // choice from the same page.
+        let spliced = self.timed_splice(&leaf, &order)?;
+        let splice_allowed = spliced.is_some();
+        if let Some(mut image) = spliced {
+            if LeafMut::new(&mut image)?.room_for(needed)? {
+                return Ok(Fit::Compact(
+                    image,
+                    leaf.right_sibling(),
+                    leaf.max_cts(),
+                    leaf.has_delta_directory(),
+                ));
+            }
+        }
+        self.pack_or_split(&leaf, order, needed, splice_allowed, appending)
+    }
+
+    /// Reports whether the row a full leaf is making room for arrives in key
+    /// order past everything the leaf holds.
+    ///
+    /// @param leaf - the full leaf
+    /// @param order - its live rows in key order
+    /// @param arriving - the key of the row that needs room, when there is one
+    fn is_appending(
+        &self,
+        leaf: &LeafRef<'_>,
+        order: &crate::leaf::LiveOrder<'_>,
+        arriving: Option<&[Datum<'_>]>,
+    ) -> DbResult<bool> {
         // **An append splits *lopsidedly*; it does not split *early*.**
         //
         // This flag used to force a split instead of a compaction, on the
@@ -1498,8 +1666,8 @@ impl PagedTree {
         // the whole page to the log.
         //
         // The argument does not survive being measured on a page rather
-        // than on a workload. A leaf can only hold
-        // `DELTA_LIMIT` rows before it is full, so forcing a split gave the
+        // than on a workload. A leaf could only hold 32 delta
+        // rows before it was full, so forcing a split gave the
         // left page **thirty-two rows** and the right page none - and the
         // next thirty-two filled the new page and split it again. Every
         // page in an appended tree held thirty-two rows where the same
@@ -1521,36 +1689,44 @@ impl PagedTree {
         // is needed - the page is genuinely full - because rows arriving in
         // order never come back to the page they left behind. See
         // `APPEND_FILL`.
-        let last_row: Option<Vec<Datum<'_>>> = (!source.is_empty()).then(|| {
-            (0..self.key_columns())
-                .map(|column| source.value(source.len().saturating_sub(1), column))
-                .collect()
-        });
-        let appending = leaf.right_sibling().is_none()
-            && source.len() >= 2
+        let last_row: Option<Vec<Datum<'_>>> = match order.len().checked_sub(1) {
+            Some(last) => Some(
+                (0..self.key_columns())
+                    .map(|column| order.value(last, column))
+                    .collect::<DbResult<Vec<Datum<'_>>>>()?,
+            ),
+            None => None,
+        };
+        Ok(leaf.right_sibling().is_none()
+            && order.len() >= 2
             && match (arriving, last_row.as_deref()) {
                 (Some(key), Some(last)) => {
                     is_above(key, last, self.collations(), self.key_columns())
                 }
                 _ => false,
-            };
-        // **Fewer than two live rows is stuck, whichever route it would take
-        // (task-2033).** Every way of making room here moves rows between
-        // pages, and a leaf holding one row has nothing to move: a compaction
-        // rebuilds the page it already is, and a split has no second row to
-        // give the right half. Saying so is what lets the caller take the one
-        // route that does work, which is packing the arriving row into the
-        // leaf beside the row already there.
-        if source.len() < 2 {
-            return Ok(Fit::Stuck);
-        }
-        if spilled {
-            // The rows are *not* copied out here. Reading them through the
-            // guard would resolve every out-of-line value, which is the read
-            // the repack exists to avoid; `rows_to_repack` reads them again
-            // without one.
-            return Ok(Fit::Repack(appending));
-        }
+            })
+    }
+
+    /// Repacks a full leaf from scratch, or splits it when a repack leaves no
+    /// room for the arriving row.
+    ///
+    /// The half of [`Tree::choose_fit`] a splice did not settle.
+    ///
+    /// @param leaf - the full leaf
+    /// @param order - its live rows in key order
+    /// @param needed - how many bytes the arriving row needs
+    /// @param splice_allowed - whether the page allowed a splice, which decides
+    ///   whether the repack has to be logged with its image
+    /// @param appending - whether the rows arrive in key order
+    fn pack_or_split(
+        &self,
+        leaf: &LeafRef<'_>,
+        order: crate::leaf::LiveOrder<'_>,
+        needed: usize,
+        splice_allowed: bool,
+        appending: bool,
+    ) -> DbResult<Fit> {
+        let source = self.timed_materialise(order)?;
         let builder = LeafBuilder::new(
             self.page_size(),
             self.tree_id(),
@@ -1577,7 +1753,14 @@ impl PagedTree {
             }
         }
         Ok(match compacted {
-            Some(image) => Fit::Compact(image, leaf.right_sibling(), leaf.max_cts()),
+            // A repack after a splice that was allowed is logged with its
+            // page, because recovery would splice. See `Fit::Compact`.
+            Some(image) => Fit::Compact(
+                image,
+                leaf.right_sibling(),
+                leaf.max_cts(),
+                leaf.has_delta_directory() && !splice_allowed,
+            ),
             // A split rewrites three pages and needs the rows to outlive the
             // guard, so this is where they are copied - and a split is the
             // rarer half by a wide margin.
@@ -1668,8 +1851,8 @@ impl PagedTree {
         self.stats.set(stats);
         match fit {
             Fit::Stuck => Ok(false),
-            Fit::Compact(image, right, max_cts) => {
-                self.compact_into(database, log, page, image, right, max_cts, true)?;
+            Fit::Compact(image, right, max_cts, logical) => {
+                self.compact_into(database, log, page, image, right, max_cts, logical)?;
                 Ok(true)
             }
             Fit::Split(rows, appending) => {

@@ -115,3 +115,23 @@ answer is the current build's own, which is the point: the comparison is between
 between a build and a recording.
 
 Every release from 0.1.1 on answers all of them identically, so `KNOWN_RETRIEVAL_GAPS` is empty.
+
+## Format 2: every release above refuses a file this build writes
+
+task-2074 moved the file format from 1 to 2: a leaf's delta area has a directory kept in key order,
+and a page's checksum covers its LSN. Every fixture here is format 1, and this build still reads all
+of them - `release_format.rs` reads each one, writes to it, kills the writer and recovers. The other
+direction does not hold any more, and cannot: no release up to 0.1.7 can read a format 2 file.
+
+What each of them does instead is refuse, and none of them answers from the file:
+
+```
+0.1.1, 0.1.2, 0.1.3   ->  database disk image is malformed: neither meta page is readable
+0.1.5, 0.1.6, 0.1.7   ->  Error [unsupported]: this database is format version 2 and this build
+                          reads version 1; upgrade inillucent to open it
+```
+
+The first three predate the refusal by name, which task-1979 added. `release_format_history.rs`
+asserts both answers against the released binaries, and it decides which a release gets by reading
+the format number out of that release's own fixture - so the first release that writes format 2 is
+graded on its answers again with nothing to edit.

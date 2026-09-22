@@ -762,6 +762,7 @@ dependencies = [
  "inillucent-sim",
  "inillucent-tree",
  "inillucent-txn",
+ "inillucent-value",
  "inillucent-vfs",
  "inillucent-wal",
 ]

@@ -1131,24 +1131,16 @@ impl PagedTree {
                 return Ok(Some(Hit::Sorted(row)));
             }
         }
-        let compared = probe.len().min(self.key_columns);
-        for entry in 0..leaf.delta_count() {
-            let mut matches = true;
-            for column in 0..compared {
-                let held = leaf.delta_value(entry, column)?;
-                let wanted = probe.get(column).copied().unwrap_or(Datum::Null);
-                if crate::types::compare_under(&held, &wanted, leaf.collation_of(column))
-                    != std::cmp::Ordering::Equal
-                {
-                    matches = false;
-                    break;
-                }
-            }
-            if matches {
-                return Ok(Some(Hit::Delta(entry)));
-            }
+        // The delta directory is in key order, so this is a binary search over
+        // the columns the probe names - the same rule as `probe_leaf`'s.
+        if leaf.delta_count() == 0 {
+            return Ok(None);
         }
-        Ok(None)
+        let compared = probe.len().min(self.key_columns);
+        match leaf.delta_search(probe.get(..compared).unwrap_or(probe))? {
+            Ok(entry) => Ok(Some(Hit::Delta(entry))),
+            Err(_) => Ok(None),
+        }
     }
 
     /// Reads every out-of-line value one leaf holds.

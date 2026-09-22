@@ -16,8 +16,18 @@
 //!
 //! ## The checksum, and when it is computed
 //!
-//! [`header::CHECKSUM`] is a crc32c over bytes 12..page size, written on
-//! writeback and verified on every read *from disk*. It is deliberately not
+//! [`header::CHECKSUM`] is a crc32 over every byte of the page but its own
+//! four - the LSN in bytes 0..8, then bytes 12..page size - written on
+//! writeback and verified on every read *from disk*.
+//!
+//! **The LSN has been covered since format 2 (task-2074).** Format 1 covered
+//! bytes 12.. only, on the argument that redo rewrites the LSN - but a page is
+//! re-checksummed whenever it is written, so nothing needed the LSN outside,
+//! and a flipped bit in it was a page that read as valid while telling redo
+//! the wrong thing about which records it held (task-2066 section 4.2, item
+//! 17). A page format 1 wrote is still accepted under format 1's rule, because
+//! a file format 1 wrote holds nothing else until this build rewrites its
+//! pages; see [`verify_checksum`]. It is deliberately not
 //! maintained while a page sits dirty in a frame: a page that is modified a
 //! thousand times before it is written would pay a thousand full-page
 //! checksums to protect against nothing, since a frame that is wrong in memory
@@ -292,15 +302,29 @@ pub fn write_common(page: &mut [u8], kind: PageKind, level: u16, tree: u64) -> D
     Ok(())
 }
 
-/// Returns the crc32c a page's header should carry.
+/// Returns the crc32 a page's header should carry.
 ///
-/// Computed over bytes 12..page size: everything except the LSN, which redo
-/// rewrites, and the checksum field itself. A page whose LSN alone changed
-/// still has to be re-checksummed on writeback, and [`checksum_page`] is
-/// called there rather than being inferred from what changed.
+/// Computed over the LSN and then bytes 12..page size: every byte of the page
+/// but the checksum field itself. A page whose LSN alone changed has to be
+/// re-checksummed on writeback, and [`checksum_page`] is called there rather
+/// than being inferred from what changed.
 ///
 /// @param page - the page bytes
 pub fn page_checksum(page: &[u8]) -> DbResult<u32> {
+    let lsn = page
+        .get(header::LSN..header::CHECKSUM)
+        .ok_or_else(|| corrupt("page is too short to checksum"))?;
+    let body = page
+        .get(header::KIND..)
+        .ok_or_else(|| corrupt("page is too short to checksum"))?;
+    let so_far = inillucent_base::checksum::crc32(lsn);
+    Ok(inillucent_base::checksum::crc32_continue(so_far, body))
+}
+
+/// Returns the crc32 format 1 wrote, over bytes 12..page size alone.
+///
+/// @param page - the page bytes
+fn format_one_checksum(page: &[u8]) -> DbResult<u32> {
     let body = page
         .get(header::KIND..)
         .ok_or_else(|| corrupt("page is too short to checksum"))?;
@@ -317,12 +341,20 @@ pub fn checksum_page(page: &mut [u8]) -> DbResult<()> {
 
 /// Verifies a page read from disk, or says it is corrupt.
 ///
+/// **Either rule, and the older one is not a weakness for a page this build
+/// wrote.** A file format 1 wrote holds pages checksummed over bytes 12.. alone
+/// until this build rewrites them, and a file this build has written to holds
+/// both kinds, so a page is accepted when its stored checksum matches either
+/// rule. A page this build wrote stores the checksum over its LSN as well; flip
+/// a bit of that LSN and the current rule fails, and the format 1 rule - which
+/// was never what it stored - matches only by a 1 in 2^32 coincidence.
+///
 /// @param page - the page bytes
 /// @param id - the page id, for the error message
 pub fn verify_checksum(page: &[u8], id: PageId) -> DbResult<()> {
     let stored = read_u32(page, header::CHECKSUM)?;
     let computed = page_checksum(page)?;
-    if stored == computed {
+    if stored == computed || stored == format_one_checksum(page)? {
         return Ok(());
     }
     Err(corrupt(format!(
@@ -447,18 +479,32 @@ mod tests {
         assert!(write_u64(&mut page, 9, 0).is_err());
     }
 
-    /// A checksum written over a page verifies, and any flipped byte after
-    /// the LSN is caught. The LSN itself is deliberately outside the cover.
+    /// A checksum written over a page verifies, and a flipped byte anywhere in
+    /// it is caught - the LSN's included.
+    ///
+    /// **The LSN half is task-2066 section 4.2, item 17, closed by task-2074.**
+    /// Format 1's checksum left bytes 0..8 out, so this assertion was the
+    /// opposite one - `set_lsn` then `verify_checksum(..).expect("the LSN is
+    /// not covered")` - and a page whose LSN had a flipped bit read as valid
+    /// and told redo it held records it did not.
     #[test]
-    fn a_page_checksum_covers_everything_but_the_lsn() {
+    fn a_page_checksum_covers_every_byte_but_itself() {
         let mut page = vec![7u8; 512];
         write_common(&mut page, PageKind::Interior, 1, 5).unwrap();
+        set_lsn(&mut page, 0x0102_0304_0506_0708).unwrap();
         checksum_page(&mut page).unwrap();
         verify_checksum(&page, PageId(3)).unwrap();
 
-        set_lsn(&mut page, 99).unwrap();
-        verify_checksum(&page, PageId(3)).expect("the LSN is not covered");
-
+        for index in [header::LSN, header::LSN + 3, header::CHECKSUM - 1] {
+            for bit in 0..8 {
+                let mut damaged = page.clone();
+                damaged[index] ^= 1 << bit;
+                assert!(
+                    verify_checksum(&damaged, PageId(3)).is_err(),
+                    "bit {bit} of LSN byte {index} went unnoticed"
+                );
+            }
+        }
         for index in [header::KIND, header::FLAGS, header::TREE, 200, 511] {
             let mut damaged = page.clone();
             damaged[index] ^= 0xFF;
@@ -469,6 +515,25 @@ mod tests {
         }
         assert!(page_checksum(&[]).is_err());
         assert!(verify_checksum(&[], PageId(0)).is_err());
+    }
+
+    /// A page checksummed by format 1's rule still verifies, and still catches
+    /// a flipped byte in what that rule covered.
+    ///
+    /// A file format 1 wrote holds nothing but such pages, and a file this
+    /// build has written to holds both kinds until every page is rewritten.
+    #[test]
+    fn a_page_format_one_checksummed_still_verifies() {
+        let mut page = vec![7u8; 512];
+        write_common(&mut page, PageKind::Leaf, 0, 5).unwrap();
+        set_lsn(&mut page, 99).unwrap();
+        let old = format_one_checksum(&page).unwrap();
+        write_u32(&mut page, header::CHECKSUM, old).unwrap();
+        assert_ne!(old, page_checksum(&page).unwrap(), "the two rules agreed");
+        verify_checksum(&page, PageId(4)).expect("a format 1 page verifies");
+        let mut damaged = page.clone();
+        damaged[300] ^= 0x10;
+        assert!(verify_checksum(&damaged, PageId(4)).is_err());
     }
 
     /// The header accessors read back what the writers wrote.

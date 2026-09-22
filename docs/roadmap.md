@@ -86,6 +86,42 @@ designed here.
 **About 0.60x**: 2,000 inserts in one transaction. It was 72% slower, then 43%, and it sits inside a
 family that clears its bar, so it blocks nothing.
 
+**task-2074 took the cost of an index from about 5.2 µs a row to about 2.0, on the index count
+sweep.** The sweep is the measurement this item lacked: the gate's `main_table` has two secondary
+indexes, so a change aimed at index maintenance measured there is one point of a curve.
+`inillucent-writeprofile --sweep` inserts 5,000 rows in one transaction into a 100,000 row table
+carrying 0, 2, 5 and 10 indexes, and `inillucent-perfhistory --only insert.indexes` asks SQLite the
+same of a 20,000 row table. Two changes, measured separately in one quiet window, fastest of five
+interleaved rounds, microseconds a row:
+
+| indexes | before | the delta area sized by the free gap | and the compaction splice |
+|---:|---:|---:|---:|
+| 0 | 7.93 | 5.04 | 5.14 |
+| 2 | 18.28 | 10.47 | **9.12** |
+| 5 | 33.45 | 17.16 | **15.50** |
+| 10 | 73.06 | 39.97 | **37.20** |
+| cost per index at 2 | 5.17 | 2.71 | **1.99** |
+| compactions at 10 indexes | 1,624 | 423 | 423, 391 of them spliced |
+
+Against SQLite, net of process startup, the wall ratio at 2 indexes went from 0.08x to 0.19x and at
+10 indexes from 0.43x to **1.28x** - the first arm of this workload this engine wins. Rows `before`,
+`directory` and `directory-and-splice` in `tests/performance-history.tsv`.
+
+- **The delta area has a directory in key order and no count limit.** It compacted every 32 rows
+  whatever the leaf held, which the audit had priced as "the two indexes are 69% of this workload"
+  (task-2066, C1). With a directory a lookup is a binary search, so the area can take the whole free
+  gap: 1,624 compactions became 423. The audit predicted 18 to 20% of the workload; it was 43% at two
+  indexes, because the compaction count fell by 3.7x rather than the 8x the audit assumed and every
+  compaction became cheaper as well.
+- **A compaction splices its delta rows into the packed page when the rows fit its widths**, instead
+  of reading, pricing and writing every kept row again (task-2066, C2). It is 7% to 15% on top of the
+  first change at two indexes and more, and nothing without an index: a table's own tree appends at
+  its right edge and rarely compacts.
+
+Both are page format changes, so the file format is 2. This build reads format 1;
+`docs/relational-architecture.md` section 5a says how, and what the earlier releases answer for a
+format 2 file.
+
 **The 0.72x this item carried until now was measured by a gate that was not asking both arms the same
 question.** `inillucent-writegate` never ran a workload's own `pre`, and `sqlite_bench.c` runs one
 before it starts its clock - so on `txn.batched` and `txn.large`, which both carry

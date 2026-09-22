@@ -25,6 +25,7 @@ inillucent-wal = { workspace = true }
 inillucent-txn = { workspace = true }
 inillucent-vfs = { workspace = true }
 inillucent-sim = { workspace = true }
+inillucent-value = { workspace = true }
 
 # The workspace's lint table; see the note beside it in the root manifest.
 [lints]

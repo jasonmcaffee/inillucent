@@ -606,8 +606,9 @@ fn place_row(
     // in-place update since the leaf was written - logged, undone and recovered
     // by its own record - and nothing in the write path ever called it: every
     // `UPDATE` went through `put`, which tombstones the row and appends a whole
-    // new one to the delta area, so a leaf compacted every `DELTA_LIMIT`
-    // updates and the log carried a full row each time. It applies when exactly
+    // new one to the delta area, so a leaf compacted every 32 updates (the
+    // delta area's limit until task-2074) and the log carried a full row each
+    // time. It applies when exactly
     // one non-key column differs and the tree can write it where it lies; when
     // it cannot, `put` is still the answer and nothing has been written.
     if let Some(previous) = before {
@@ -615,7 +616,7 @@ fn place_row(
         // `only_change` used to answer `None` both when *nothing* differed and
         // when *several* columns did, and the caller then took the most
         // expensive path it has - a tombstone, a delta insert, and a compaction
-        // every `DELTA_LIMIT` writes - for the cheapest case there is. Measured
+        // whenever the delta area filled - for the cheapest case there is. Measured
         // with `inillucent-execprofile`, running the same `UPDATE` twice over
         // the same rows: the pass that changed a value cost **1,723 ns and 13.3
         // allocations**, and the pass that wrote back what was already there

@@ -28,6 +28,9 @@
 # loop timed again afterwards, divided by the first - a row whose drift is far from
 # 1.000 was taken on a machine that changed under it and should be distrusted.
 #
+# `commit` may end in `+name`: the `--label` a run was given, which says which arm of
+# a before and after it was when two arms were built from one working tree.
+#
 stamp	commit	machine	workload	rounds	ours_wall_ms	ours_cpu_ms	ours_peak_mib	sqlite_wall_ms	sqlite_cpu_ms	sqlite_peak_mib	startup_ours_wall_ms	startup_sqlite_wall_ms	wall_ratio	cpu_ratio	rss_ratio	calibration_ms	drift
 2026-09-08T20:00:09Z	b935dab-dirty	machine-e909e6bf	insert.10k	5	5191.18	5521.88	15.70	35.96	15.62	5.65	25.34	12.26	0.005	0.001	0.360	199.2	0.762
 2026-09-08T20:00:09Z	b935dab-dirty	machine-e909e6bf	index.build	5	57.18	50.00	10.52	74.62	53.12	8.77	25.34	12.26	1.958	1.167	0.834	199.2	0.762
@@ -37,3 +40,27 @@ stamp	commit	machine	workload	rounds	ours_wall_ms	ours_cpu_ms	ours_peak_mib	sqli
 2026-09-08T20:00:09Z	b935dab-dirty	machine-e909e6bf	join.two-tables	5	120.32	118.75	7.37	55.36	50.00	6.83	25.34	12.26	0.454	0.382	0.927	199.2	0.762
 2026-09-08T20:00:09Z	b935dab-dirty	machine-e909e6bf	text.like	5	161.15	159.38	8.17	51.94	43.75	6.39	25.34	12.26	0.292	0.234	0.783	199.2	0.762
 2026-09-08T20:00:09Z	b935dab-dirty	machine-e909e6bf	delete.half	5	659.12	646.88	19.31	55.26	50.00	5.90	25.34	12.26	0.068	0.064	0.305	199.2	0.762
+2026-09-22T21:18:56Z	2477e64-dirty	machine-c9df3d5a	insert.indexes.0	5	187.02	159.38	28.46	20.73	18.75	6.07	19.28	9.98	0.064	0.083	0.213	3.8	1.447
+2026-09-22T21:18:56Z	2477e64-dirty	machine-c9df3d5a	insert.indexes.2	5	393.19	368.75	35.25	37.69	28.12	7.30	19.28	9.98	0.074	0.061	0.207	3.8	1.447
+2026-09-22T21:18:56Z	2477e64-dirty	machine-c9df3d5a	insert.indexes.5	5	760.55	753.12	44.87	59.53	53.12	7.49	19.28	9.98	0.067	0.063	0.167	3.8	1.447
+2026-09-22T21:18:56Z	2477e64-dirty	machine-c9df3d5a	insert.indexes.10	5	1295.22	1237.50	60.57	596.93	578.12	7.36	19.28	9.98	0.460	0.466	0.122	3.8	1.447
+2026-09-22T21:19:21Z	2477e64-dirty	machine-c9df3d5a	insert.indexes.0	5	193.20	181.25	28.68	19.83	12.50	6.07	22.13	9.68	0.059	0.038	0.212	3.8	0.997
+2026-09-22T21:19:21Z	2477e64-dirty	machine-c9df3d5a	insert.indexes.2	5	419.98	393.75	34.87	36.16	28.12	7.30	22.13	9.68	0.067	0.058	0.210	3.8	0.997
+2026-09-22T21:19:21Z	2477e64-dirty	machine-c9df3d5a	insert.indexes.5	5	720.53	706.25	45.12	58.97	53.12	7.49	22.13	9.68	0.071	0.068	0.166	3.8	0.997
+2026-09-22T21:19:21Z	2477e64-dirty	machine-c9df3d5a	insert.indexes.10	5	1320.12	1259.38	60.69	537.93	525.00	7.36	22.13	9.68	0.407	0.417	0.121	3.8	0.997
+2026-09-22T22:12:11Z	2477e64-dirty+before	machine-c9df3d5a	insert.indexes.0	5	190.57	150.00	28.44	24.06	15.62	6.07	23.78	9.38	0.088	0.044	0.214	3.9	0.999
+2026-09-22T22:12:11Z	2477e64-dirty+before	machine-c9df3d5a	insert.indexes.2	5	413.59	365.62	34.95	41.13	37.50	7.30	23.78	9.38	0.081	0.079	0.209	3.9	0.999
+2026-09-22T22:12:11Z	2477e64-dirty+before	machine-c9df3d5a	insert.indexes.5	5	701.63	675.00	44.95	63.93	53.12	7.49	23.78	9.38	0.080	0.066	0.167	3.9	0.999
+2026-09-22T22:12:11Z	2477e64-dirty+before	machine-c9df3d5a	insert.indexes.10	5	1260.61	1187.50	60.67	547.11	512.50	7.36	23.78	9.38	0.435	0.427	0.121	3.9	0.999
+2026-09-22T22:12:39Z	2477e64-dirty+directory	machine-c9df3d5a	insert.indexes.0	5	129.20	90.62	28.69	23.91	12.50	6.07	23.08	9.57	0.135	0.120	0.212	4.5	0.990
+2026-09-22T22:12:39Z	2477e64-dirty+directory	machine-c9df3d5a	insert.indexes.2	5	191.56	143.75	35.11	39.26	31.25	7.30	23.08	9.57	0.176	0.214	0.208	4.5	0.990
+2026-09-22T22:12:39Z	2477e64-dirty+directory	machine-c9df3d5a	insert.indexes.5	5	299.14	243.75	44.93	77.23	50.00	7.49	23.08	9.57	0.245	0.203	0.167	4.5	0.990
+2026-09-22T22:12:39Z	2477e64-dirty+directory	machine-c9df3d5a	insert.indexes.10	5	455.44	400.00	59.88	529.22	500.00	7.36	23.08	9.57	1.202	1.282	0.123	4.5	0.990
+2026-09-22T22:13:01Z	2477e64-dirty+directory-and-splice	machine-c9df3d5a	insert.indexes.0	5	120.66	81.25	28.59	23.72	6.25	6.07	21.20	9.48	0.143	0.100	0.212	5.5	0.865
+2026-09-22T22:13:01Z	2477e64-dirty+directory-and-splice	machine-c9df3d5a	insert.indexes.2	5	195.92	156.25	34.86	43.00	37.50	7.30	21.20	9.48	0.192	0.273	0.210	5.5	0.865
+2026-09-22T22:13:01Z	2477e64-dirty+directory-and-splice	machine-c9df3d5a	insert.indexes.5	5	299.49	243.75	45.07	63.18	40.62	7.49	21.20	9.48	0.193	0.181	0.166	5.5	0.865
+2026-09-22T22:13:01Z	2477e64-dirty+directory-and-splice	machine-c9df3d5a	insert.indexes.10	5	425.57	368.75	60.07	525.07	512.50	7.36	21.20	9.48	1.275	1.464	0.123	5.5	0.865
+2026-09-22T22:13:20Z	2477e64-dirty+directory-and-splice	machine-c9df3d5a	insert.indexes.0	5	119.55	87.50	28.75	24.00	12.50	6.07	23.07	9.23	0.153	0.120	0.211	3.8	1.715
+2026-09-22T22:13:20Z	2477e64-dirty+directory-and-splice	machine-c9df3d5a	insert.indexes.2	5	222.05	159.38	34.94	44.78	34.38	7.30	23.07	9.23	0.179	0.208	0.209	3.8	1.715
+2026-09-22T22:13:20Z	2477e64-dirty+directory-and-splice	machine-c9df3d5a	insert.indexes.5	5	272.09	234.38	45.02	64.78	53.12	7.49	23.07	9.23	0.223	0.222	0.166	3.8	1.715
+2026-09-22T22:13:20Z	2477e64-dirty+directory-and-splice	machine-c9df3d5a	insert.indexes.10	5	425.16	365.62	60.03	514.55	493.75	7.36	23.07	9.23	1.257	1.377	0.123	3.8	1.715

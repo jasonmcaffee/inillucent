@@ -164,7 +164,7 @@ impl<'p> LeafRef<'p> {
     /// @param probe - the key to look for
     /// @param from - the first row of the window
     /// @param to - one past the last row of the window
-    fn search_between(
+    pub(super) fn search_between(
         &self,
         view: &KeyView<'p>,
         probe: &[Datum<'_>],
@@ -464,32 +464,6 @@ impl<'p> LeafRef<'p> {
             base: column.base,
             target: *target,
         }))
-    }
-    /// Compares two live rows by their key columns, reading through the views.
-    ///
-    /// @param columns - the mini-columns, derived once
-    /// @param delta - the delta rows, decoded once
-    /// @param left - one row's position
-    /// @param right - the other's
-    pub(crate) fn compare_live(
-        &self,
-        columns: &[MiniColumn<'p>],
-        delta: &[Vec<Datum<'p>>],
-        left: LiveRow,
-        right: LiveRow,
-    ) -> DbResult<std::cmp::Ordering> {
-        for index in 0..self.key_columns {
-            let a = live_value(columns, delta, left, index)?;
-            let b = live_value(columns, delta, right, index)?;
-            let order = self.directed(
-                crate::types::compare_under(&a, &b, self.collation_of(index)),
-                index,
-            );
-            if order != std::cmp::Ordering::Equal {
-                return Ok(order);
-            }
-        }
-        Ok(std::cmp::Ordering::Equal)
     }
     /// Compares two materialised rows on their key columns, under the leaf's
     /// collations.

@@ -1,10 +1,12 @@
 //! Every released format, in both directions, against downloaded binaries.
 //!
 //! Invariant: **the current build reads every published release's file, and
-//! every published release reads the current build's file.** The forward half
-//! is the one a format change breaks loudly; the backward half is the one that
-//! costs somebody their afternoon, because an application that upgrades one
-//! machine and not another has both builds pointed at the same file.
+//! every published release reads the current build's file or refuses it by
+//! name.** The forward half is the one a format change breaks loudly; the
+//! backward half is the one that costs somebody their afternoon, because an
+//! application that upgrades one machine and not another has both builds
+//! pointed at the same file. Since task-2074 moved the format to 2, every
+//! release up to 0.1.7 refuses - see `assert_refused_by_format`.
 //!
 //! ## Why this is a separate target from `release_format.rs`
 //!
@@ -56,6 +58,83 @@ const KNOWN_GAPS: [(&str, &str, &str); 1] = [(
     "the FTS5 index layout changed in 0.1.2, and 0.1.1 answers no rows rather than refusing \
      (task-2053)",
 )];
+
+/// The releases that report a file of a later format as damage rather than
+/// refusing it by name.
+///
+/// **The named refusal - `this database is format version N and this build
+/// reads version M; upgrade inillucent to open it`, with the status
+/// `unsupported` - was added by task-1979 (E3), and 0.1.5 is the first release
+/// that carries it.** These three answer `database disk image is malformed:
+/// neither meta page is readable` for a file format 2 wrote. They refuse it,
+/// which is the thing that matters - nothing they answer is a wrong value - and
+/// the message is one a published binary can never be taught to say
+/// differently, so it is recorded here rather than asserted away.
+const FORMAT_REFUSED_AS_DAMAGE: [&str; 3] = ["0.1.1", "0.1.2", "0.1.3"];
+
+/// Returns the format version the file a release wrote carries.
+///
+/// Byte 8 of the release's own fixture, which is the release's own answer to
+/// which format it writes - and every release reads the format it writes and
+/// the ones before it. Read from the checked-in file rather than kept in a
+/// table, so a release that moves the number carries its own record of it.
+///
+/// @param version - the release
+fn fixture_format(version: &str) -> u32 {
+    let path = interop::directory().join(version).join("app.rdb");
+    let bytes = std::fs::read(&path)
+        .unwrap_or_else(|why| panic!("{} could not be read: {why}", path.display()));
+    let mut format = [0u8; 4];
+    format.copy_from_slice(
+        bytes
+            .get(8..12)
+            .expect("a fixture is longer than its header"),
+    );
+    u32::from_le_bytes(format)
+}
+
+/// Reports whether a release reads the format this build writes.
+///
+/// @param version - the release
+fn reads_this_format(version: &str) -> bool {
+    fixture_format(version) >= inillucent_pool::meta::FORMAT_VERSION
+}
+
+/// Asserts a release refused a file whose format it does not read, and refused
+/// it the way it can.
+///
+/// **Refused, never answered.** task-2074 moved the format to 2 - a leaf's
+/// delta area and the page checksum both changed - so a release that writes
+/// format 1 cannot read a file this build wrote. What it must not do is read
+/// it anyway and answer, and nothing here accepts an answer.
+///
+/// @param version - the release
+/// @param question - what it was asked
+/// @param asked - what it said
+fn assert_refused_by_format(version: &str, question: &str, asked: &Result<String, String>) {
+    let complaint = match asked {
+        Ok(got) => panic!(
+            "{version} writes format {} and this build writes format {}, and it answered \
+             `{question}` with `{got}` instead of refusing the file",
+            fixture_format(version),
+            inillucent_pool::meta::FORMAT_VERSION
+        ),
+        Err(complaint) => complaint,
+    };
+    let named = format!("format version {}", inillucent_pool::meta::FORMAT_VERSION);
+    if FORMAT_REFUSED_AS_DAMAGE.contains(&version) {
+        assert!(
+            complaint.contains("neither meta page is readable"),
+            "{version} predates the named refusal and was expected to report the file as \
+             unreadable; it said:\n  {complaint}"
+        );
+        return;
+    }
+    assert!(
+        complaint.contains(&named) && complaint.contains("[unsupported]"),
+        "{version} refused a file this build wrote without naming its format:\n  {complaint}"
+    );
+}
 
 /// Returns the recorded gap for a release and a question, when there is one.
 ///
@@ -214,13 +293,20 @@ fn the_current_build_reads_every_published_format() {
     );
 }
 
-/// Every released binary still reads a file this build wrote.
+/// Every released binary reads a file this build wrote, or refuses it by name.
 ///
 /// **The direction that costs an afternoon.** An application on two machines
 /// upgrades one of them; the older build then opens a file the newer one wrote.
 /// A format that only moves forward is one where that loses the database, and
 /// nothing else in the suite asks the question, because nothing else has an
 /// older binary to ask it with.
+///
+/// **Since task-2074 every published release refuses.** This build writes
+/// format 2 and every release before it writes format 1, so for each of them
+/// the case asserts a refusal, and asserts nothing answered. A release that
+/// writes format 2 itself - the first one to ship this change, and every one
+/// after - is graded on its answers as before, with no row to add: which of the
+/// two a release gets is read off the format of the fixture it wrote.
 ///
 /// A release whose binary is not downloaded is skipped by name. When none of
 /// them is, the whole case skips - and `--strict` counts it, so a green with
@@ -274,6 +360,12 @@ fn every_released_binary_reads_what_this_build_writes() {
     for (version, exe) in &available {
         for (question, (name, wanted)) in questions.iter().zip(reference.iter()) {
             assert_eq!(&question.name, name, "expected.tsv is out of order");
+            if !reads_this_format(version) {
+                let asked = ask_release(exe, &database, &question.sql);
+                assert_refused_by_format(version, name, &asked);
+                checked = checked.saturating_add(1);
+                continue;
+            }
             let got = match ask_release(exe, &database, &question.sql) {
                 Ok(got) => got,
                 Err(complaint) => panic!(
@@ -313,10 +405,13 @@ fn every_released_binary_reads_what_this_build_writes() {
 
     // Rule 1.3, the other direction: a recorded difference that no longer
     // happens is a row nobody has deleted, which is how a ledger becomes
-    // decoration. Only gaps whose release is actually on disk are counted.
+    // decoration. Only gaps whose release is actually on disk, and reads the
+    // format this build writes, are counted: a release that refuses the whole
+    // file cannot show a difference in one answer.
     let expected_gaps = KNOWN_GAPS
         .iter()
         .filter(|(version, _, _)| available.iter().any(|(had, _)| had == version))
+        .filter(|(version, _, _)| reads_this_format(version))
         .count();
     assert_eq!(
         gaps_seen, expected_gaps,
@@ -415,6 +510,12 @@ fn every_released_binary_searches_what_this_build_writes() {
         for (question, wanted) in questions.iter().zip(reference.iter()) {
             let asked = ask_release(exe, &database, &question.sql);
             checked = checked.saturating_add(1);
+            // A release of an older format refuses the whole file; see
+            // `assert_refused_by_format`.
+            if !reads_this_format(version) {
+                assert_refused_by_format(version, &question.name, &asked);
+                continue;
+            }
 
             if let Some((_, _, why)) = known_retrieval_gap(version, &question.name) {
                 assert!(
@@ -457,6 +558,7 @@ fn every_released_binary_searches_what_this_build_writes() {
     let expected_gaps = KNOWN_RETRIEVAL_GAPS
         .iter()
         .filter(|(version, _, _)| available.iter().any(|(had, _)| had == version))
+        .filter(|(version, _, _)| reads_this_format(version))
         .count();
     assert_eq!(
         gaps_seen, expected_gaps,

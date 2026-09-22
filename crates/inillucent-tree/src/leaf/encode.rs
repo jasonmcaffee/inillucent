@@ -121,7 +121,7 @@ pub fn encode_extent_tagged(out: &mut Vec<u8>, reference: ExtentRef) {
 /// @param physical - the column's layout
 /// @param value - the value to write
 /// @param heap_end - where the heap currently starts
-fn write_typed_value(
+pub(super) fn write_typed_value(
     page: &mut [u8],
     slot: usize,
     width: usize,
@@ -986,11 +986,16 @@ impl LeafBuilder {
                 )?;
             }
         }
-        if wide_directory {
+        // Every leaf this build writes is in format 2's layout. See
+        // `LEAF_DELTA_DIRECTORY`.
+        {
             let flags = page
                 .get_mut(header::FLAGS)
                 .ok_or_else(|| misuse("the page has no flag byte"))?;
-            *flags |= LEAF_WIDE_DIRECTORY;
+            *flags |= LEAF_DELTA_DIRECTORY;
+            if wide_directory {
+                *flags |= LEAF_WIDE_DIRECTORY;
+            }
         }
         if has_exceptions || has_extents {
             let flags = page

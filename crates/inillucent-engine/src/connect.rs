@@ -587,6 +587,16 @@ impl Database {
         }
     }
 
+    /// Returns what the write path has done to every tree, added up.
+    ///
+    /// For `inillucent-writeprofile`'s index count sweep, which grades a change
+    /// to the leaf page per secondary index. A per-row time says a write got
+    /// slower; the compactions, the splits and the nanoseconds spent making room
+    /// say which tree paid for it and in which stage.
+    pub fn write_stats(&self) -> inillucent_tree::write::WriteStats {
+        self.engine.borrow().write_stats()
+    }
+
     /// Returns how many bytes the page cache is holding.
     pub fn pool_bytes(&self) -> usize {
         self.engine.borrow().pool_bytes()

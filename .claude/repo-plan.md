@@ -597,3 +597,18 @@ they are touching do not collide; two that have not, do.
   measured on 2026-09-22, both times. Anything that draws a bound from that file has to have a floor
   that clears the loaded number, not the idle one: an hour would have missed it by 31 seconds.
   `inillucent-testrun`'s floor is two hours for that reason. (task-2071)
+- **A leaf now comes in two layouts, and the write path has to keep them apart.** Since task-2074
+  the file format is 2: a leaf's delta area opens with a directory in key order, a delta index means
+  a directory position, and the page checksum covers the LSN. A leaf format 1 wrote has no directory
+  (`LeafRef::has_delta_directory` is false) and is still read and written by format 1's rules until
+  a compaction or split rewrites it - and that rewrite has to be logged with its page image, because
+  recovery replays a format 1 log onto format 1 pages by format 1's rules. So a new write path that
+  changes a leaf's delta area either goes through `LeafMut` (which picks the rules from the page) or
+  logs an image. `crates/inillucent-model/tests/redo_bytes.rs` compares every page byte for byte
+  after a crash, and `release_format.rs` crashes a write into every shipped release's file; run both
+  after touching `leaf/`, `mutate.rs`, `write.rs` or `redo.rs`. (task-2074)
+- **`perfhistory --only <prefix> --label <name>` takes one series on its own and says which build it
+  was.** The index count sweep is `--only insert.indexes`; `inillucent-writeprofile --sweep` is the
+  same sweep in process with the write counters. A run whose calibration drift is far from 1.0 is
+  worth taking again after a warm up: the box settles for a minute after the other agents pause, and
+  the calibration loop is only about 4 ms long, so its drift is noisy on its own. (task-2074)

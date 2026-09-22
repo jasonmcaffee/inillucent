@@ -405,6 +405,8 @@ fn subtract(
             .saturating_sub(before.compaction_nanos),
         split_nanos: after.split_nanos.saturating_sub(before.split_nanos),
         choose_nanos: after.choose_nanos.saturating_sub(before.choose_nanos),
+        splices: after.splices.saturating_sub(before.splices),
+        splice_nanos: after.splice_nanos.saturating_sub(before.splice_nanos),
         source_nanos: after.source_nanos.saturating_sub(before.source_nanos),
         image_nanos: after.image_nanos.saturating_sub(before.image_nanos),
         merge_nanos: after.merge_nanos.saturating_sub(before.merge_nanos),

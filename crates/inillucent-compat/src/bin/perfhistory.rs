@@ -49,7 +49,7 @@
 //! accounting methods and calling the difference an engine.
 //!
 //! Usage:
-//!   `cargo run -p inillucent-compat --bin inillucent-perfhistory -- [--rounds N] [--dry-run]`
+//!   `cargo run -p inillucent-compat --bin inillucent-perfhistory -- [--rounds N] [--dry-run] [--only PREFIX] [--label NAME]`
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -116,6 +116,39 @@ const SOURCE: &str = "CREATE TABLE source (i INTEGER PRIMARY KEY);\n\
      INSERT INTO source (i) \
        WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 20000) \
        SELECT i FROM n;\n";
+
+/// The table every arm of the index count sweep starts from.
+///
+/// Twenty thousand rows of ten integer columns, each column the row id times its
+/// own prime, so an insert lands in a different leaf of every index. The
+/// indexes are created after the rows are loaded, so they are bulk built on
+/// both engines.
+///
+/// A macro rather than a `const` because `concat!` takes literals, and each arm
+/// is this text followed by its own `CREATE INDEX` statements.
+macro_rules! sweep_table {
+    () => {
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, c0 INTEGER, c1 INTEGER, c2 INTEGER, c3 INTEGER, \
+         c4 INTEGER, c5 INTEGER, c6 INTEGER, c7 INTEGER, c8 INTEGER, c9 INTEGER);\n\
+         INSERT INTO t SELECT i, (i * 7919) % 20000, (i * 104729) % 20000, (i * 1299709) % 20000, \
+         (i * 15485863) % 20000, (i * 3) % 20000, (i * 31) % 20000, (i * 541) % 20000, \
+         (i * 7907) % 20000, (i * 65537) % 20000, (i * 999983) % 20000 FROM source;\n"
+    };
+}
+
+/// The timed half of every arm of the index count sweep: twenty thousand rows
+/// past the seeded ones, in one transaction.
+///
+/// **Twenty thousand rather than five, because SQLite has to be measurable.**
+/// Five thousand rows into a table with no index cost SQLite about 5 ms, which
+/// is half of what starting its shell costs - and the ratio is taken net of
+/// startup, so it was a ratio of two numbers mostly made of noise.
+const SWEEP_INSERT: &str = "BEGIN;\n\
+     INSERT INTO t SELECT i + 20000, ((i + 20000) * 7919) % 20000, ((i + 20000) * 104729) % 20000, \
+     ((i + 20000) * 1299709) % 20000, ((i + 20000) * 15485863) % 20000, ((i + 20000) * 3) % 20000, \
+     ((i + 20000) * 31) % 20000, ((i + 20000) * 541) % 20000, ((i + 20000) * 7907) % 20000, \
+     ((i + 20000) * 65537) % 20000, ((i + 20000) * 999983) % 20000 FROM source;\n\
+     COMMIT;\n";
 
 /// The workloads, chosen to cost different things.
 ///
@@ -206,6 +239,50 @@ const WORKLOADS: &[Workload] = &[
                  COMMIT;\n",
         repeat: 3,
     },
+    // **The index count sweep** (task-2074). Twenty thousand inserts in one
+    // transaction into a twenty thousand row table that carries 0, 2, 5 and 10
+    // secondary indexes. The gate's `write.insert.batch` measures one point of
+    // this curve - its `main_table` has two - and a change to how an index leaf
+    // absorbs writes has to be graded along the curve, because the cost it
+    // attacks is per index. `inillucent-writeprofile --sweep` is the same sweep
+    // in process, with the write path's own counters beside the time.
+    Workload {
+        name: "insert.indexes.0",
+        setup: sweep_table!(),
+        script: SWEEP_INSERT,
+        repeat: 1,
+    },
+    Workload {
+        name: "insert.indexes.2",
+        setup: concat!(
+            sweep_table!(),
+            "CREATE INDEX t_c0 ON t (c0);\nCREATE INDEX t_c1 ON t (c1);\n"
+        ),
+        script: SWEEP_INSERT,
+        repeat: 1,
+    },
+    Workload {
+        name: "insert.indexes.5",
+        setup: concat!(
+            sweep_table!(),
+            "CREATE INDEX t_c0 ON t (c0);\nCREATE INDEX t_c1 ON t (c1);\n",
+            "CREATE INDEX t_c2 ON t (c2);\nCREATE INDEX t_c3 ON t (c3);\nCREATE INDEX t_c4 ON t (c4);\n"
+        ),
+        script: SWEEP_INSERT,
+        repeat: 1,
+    },
+    Workload {
+        name: "insert.indexes.10",
+        setup: concat!(
+            sweep_table!(),
+            "CREATE INDEX t_c0 ON t (c0);\nCREATE INDEX t_c1 ON t (c1);\n",
+            "CREATE INDEX t_c2 ON t (c2);\nCREATE INDEX t_c3 ON t (c3);\nCREATE INDEX t_c4 ON t (c4);\n",
+            "CREATE INDEX t_c5 ON t (c5);\nCREATE INDEX t_c6 ON t (c6);\nCREATE INDEX t_c7 ON t (c7);\n",
+            "CREATE INDEX t_c8 ON t (c8);\nCREATE INDEX t_c9 ON t (c9);\n"
+        ),
+        script: SWEEP_INSERT,
+        repeat: 1,
+    },
 ];
 
 /// What one arm of one round cost.
@@ -224,6 +301,8 @@ fn main() -> std::process::ExitCode {
     let arguments: Vec<String> = std::env::args().skip(1).collect();
     let mut rounds = DEFAULT_ROUNDS;
     let mut dry_run = false;
+    let mut only: Option<String> = None;
+    let mut label: Option<String> = None;
     let mut index = 0usize;
     while let Some(argument) = arguments.get(index) {
         index += 1;
@@ -243,13 +322,39 @@ fn main() -> std::process::ExitCode {
                 }
             }
             "--dry-run" => dry_run = true,
+            // **A prefix of the workload names, so one series can be taken on
+            // its own.** The index count sweep is graded before and after a
+            // leaf format change, and each reading of it wants a quiet machine;
+            // running the other eight workloads with it doubles how long the
+            // machine has to be kept quiet for.
+            "--only" => {
+                let Some(value) = arguments.get(index) else {
+                    eprintln!("`--only` needs a workload name prefix");
+                    return std::process::ExitCode::FAILURE;
+                };
+                index += 1;
+                only = Some(value.clone());
+            }
+            // **A name for the build, appended to the commit column.** Two arms
+            // of a before and after are often built from one working tree - one
+            // of them with a change switched off - and both would otherwise be
+            // recorded as the same `<commit>-dirty`, which is a history that
+            // cannot say which row measured what.
+            "--label" => {
+                let Some(value) = arguments.get(index) else {
+                    eprintln!("`--label` needs a name");
+                    return std::process::ExitCode::FAILURE;
+                };
+                index += 1;
+                label = Some(value.clone());
+            }
             other => {
                 eprintln!("unknown option `{other}`");
                 return std::process::ExitCode::FAILURE;
             }
         }
     }
-    match run(rounds, dry_run) {
+    match run(rounds, dry_run, only.as_deref(), label.as_deref()) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(reason) => {
             eprintln!("inillucent-perfhistory: {reason}");
@@ -262,7 +367,14 @@ fn main() -> std::process::ExitCode {
 ///
 /// @param rounds - how many times to run each arm
 /// @param dry_run - print the rows instead of appending them
-fn run(rounds: usize, dry_run: bool) -> Result<(), String> {
+/// @param only - a prefix of the workload names to run, or every workload
+/// @param label - a name for the build, recorded after the commit
+fn run(
+    rounds: usize,
+    dry_run: bool,
+    only: Option<&str>,
+    label: Option<&str>,
+) -> Result<(), String> {
     let root = workspace_root();
     let ours = shell_path(&root, "inillucent-shell")
         .ok_or("inillucent-shell is not built; run `cargo build --release -p inillucent-cli`")?;
@@ -273,7 +385,10 @@ fn run(rounds: usize, dry_run: bool) -> Result<(), String> {
         .map_err(|error| format!("cannot make {}: {error}", area.display()))?;
 
     let calibration_before = calibrate();
-    let commit = commit_hash(&root);
+    let commit = match label {
+        Some(name) => format!("{}+{name}", commit_hash(&root)),
+        None => commit_hash(&root),
+    };
     let stamp = timestamp();
     let machine = machine_name();
     let mut rows = Vec::new();
@@ -302,7 +417,10 @@ fn run(rounds: usize, dry_run: bool) -> Result<(), String> {
         theirs_base.wall, theirs_base.cpu, theirs_base.peak,
     );
 
-    for workload in WORKLOADS {
+    for workload in WORKLOADS
+        .iter()
+        .filter(|workload| only.is_none_or(|prefix| workload.name.starts_with(prefix)))
+    {
         let mut ours_readings = Vec::new();
         let mut theirs_readings = Vec::new();
         // Interleaved: each round runs both arms back to back, so anything else
@@ -719,13 +837,24 @@ fn append(path: &Path, text: &str) -> Result<(), String> {
 /// @param root - the workspace root
 /// @param name - the binary's name
 fn shell_path(root: &Path, name: &str) -> Option<PathBuf> {
-    for profile in ["release", "debug"] {
-        let path = root
-            .join("target")
-            .join(profile)
-            .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
-        if path.is_file() {
-            return Some(path);
+    // **`CARGO_TARGET_DIR` first, because a worktree does not build into
+    // `target/`.** Each ticket's worktree builds into its own directory on
+    // another drive, so looking only under the workspace root either found
+    // nothing or found a shell the main checkout built from other source - and
+    // the second is a history row about somebody else's code.
+    let mut targets = Vec::new();
+    if let Some(held) = std::env::var_os("CARGO_TARGET_DIR") {
+        targets.push(PathBuf::from(held));
+    }
+    targets.push(root.join("target"));
+    for target in targets {
+        for profile in ["release", "debug"] {
+            let path = target
+                .join(profile)
+                .join(format!("{name}{}", std::env::consts::EXE_SUFFIX));
+            if path.is_file() {
+                return Some(path);
+            }
         }
     }
     None

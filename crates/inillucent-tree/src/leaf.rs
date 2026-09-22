@@ -20,9 +20,10 @@
 //! 56   i64  low_fence      smallest key hint; rowid trees only
 //! 64        column directory, column_count entries of 8 bytes
 //! ..        mini-columns, in column order, each 8-byte aligned
-//! ..        tombstone bitmap, if the has_tombstones flag is set
-//! ..        delta area
 //! ..        free space
+//! ..        tombstone bitmap, if the has_tombstones flag is set
+//! ..        delta area: a directory of delta_count u16 entries in key order,
+//!           then the rows it names (see `leaf/delta.rs`)
 //! ..        heap, growing down from the page end
 //! ```
 //!
@@ -74,9 +75,12 @@ pub use layout::{
     class_bytes, extent_class_for, extent_datum, fits_frame, from_frame, tombstone_bytes,
     write_frame, Layout,
 };
-pub use read::{LiveRow, LiveSource, MiniColumn};
+pub use read::{LiveOrder, LiveRow, LiveSource, MiniColumn};
 
 mod delta;
+mod splice;
+
+pub use splice::{splice_image, splices_of};
 
 /// Byte offsets inside the leaf header, after the common header.
 pub mod leaf_header {
@@ -131,12 +135,63 @@ pub const LEAF_WIDE_DIRECTORY: u8 = 0b0001_0000;
 /// read to get at bytes that would have been free.
 pub const EXTENT_DIVISOR: usize = 8;
 
-/// The most rows the delta area may hold before a compaction is forced.
+/// The size of one delta directory entry: a `u16` distance back from the heap.
 ///
-/// Thirty-two is the TDD's number and is measured in Phase 3 against 16 and 64.
-/// The reasoning: a merge on read costs at most this many comparisons, and a
-/// compaction's memmove is amortised across this many inserts.
-pub const DELTA_LIMIT: usize = 32;
+/// **The delta area used to be capped at 32 rows, and it is now capped by the
+/// free gap alone** (task-2074). Thirty-two was the TDD's number, measured in
+/// Phase 3 against 16 and 64, and it made sense while a lookup scanned the area
+/// row by row: the cap was what kept that scan short. It was a count and not a
+/// size, so an index leaf of 3,704 packed rows compacted after every 32 writes
+/// just as a table leaf of 241 did, and a compaction re-reads every live row -
+/// which is why task-2066's audit found the two secondary indexes of
+/// `write.insert.batch` were 69% of it. The area now has a directory in key
+/// order, so a lookup is a binary search and nothing depends on it being short.
+pub const DELTA_ENTRY: usize = 2;
+
+/// Bit 5: the leaf is in format 2's layout, with a delta directory.
+///
+/// **Every leaf this build writes has it, and a leaf without it was written by
+/// format 1** (task-2074). The two differ only in the delta area: format 1 has
+/// no directory, holds at most 32 rows in the order they arrived, newest first,
+/// and is walked rather than searched. A page says which it is rather than the
+/// file saying it for every page, because a file format 1 wrote and this build
+/// then writes to holds both kinds until every leaf in it has been rewritten -
+/// the same argument [`LEAF_WIDE_DIRECTORY`] makes for being a flag.
+///
+/// A format 1 leaf is read as it is. It is rewritten in format 2's layout, and
+/// the rewrite logged as a whole page image, the first time this build writes
+/// to it - see `PagedTree::upgrade_format_one`. Recovery replaying a format 1
+/// log onto format 1 pages follows format 1's rules, so it lands on the bytes
+/// the build that wrote the log produced.
+pub const LEAF_DELTA_DIRECTORY: u8 = 0b0010_0000;
+
+/// Bits 6 and 7 of the common flags byte: how many compactions in a row have
+/// spliced this leaf rather than repacking it.
+///
+/// **A splice keeps the page's slot widths and its heap as they are**, which is
+/// what makes it cheap and is also its cost: a width never narrows again, and a
+/// heap value a deleted row left behind is never reclaimed. So the count is
+/// kept on the page, and a compaction that finds it at [`SPLICE_LIMIT`] repacks
+/// the leaf from scratch and sets it back to zero. It is on the page rather than
+/// anywhere else because recovery re-runs a compaction from the page it starts
+/// from and has to make the same choice. See `leaf/splice.rs`.
+pub const LEAF_SPLICES_SHIFT: u8 = 6;
+
+/// The mask of [`LEAF_SPLICES_SHIFT`]'s two bits.
+pub const LEAF_SPLICES_MASK: u8 = 0b1100_0000;
+
+/// How many compactions in a row may splice before one has to repack.
+///
+/// Three, which is what two bits of the flag byte hold once one of the three
+/// spare bits went to [`LEAF_DELTA_DIRECTORY`]. So at most three compactions in
+/// every four are splices.
+pub const SPLICE_LIMIT: u8 = 3;
+
+/// The most rows a format 1 delta area held, which format 1's writer enforced.
+///
+/// Recovery replaying a format 1 log onto a format 1 page enforces it too, so a
+/// replay refuses exactly where the build that wrote the log refused.
+pub const FORMAT_ONE_DELTA_LIMIT: usize = 32;
 
 /// The size of one column directory entry, without a base.
 const DIRECTORY_ENTRY: usize = 8;
@@ -189,8 +244,10 @@ pub const FRAME_OF_REFERENCE: bool = true;
 /// **The reads got faster, not slower**, which is the thing the ticket was
 /// written to find out: the same values through fewer cache lines. The price is
 /// the write families - a compaction is one pass over every live row of a leaf,
-/// and an index leaf now holds twice as many - and `DELTA_LIMIT = 64` was
-/// measured on both arms and **does not buy it back**.
+/// and an index leaf now holds twice as many - and a delta limit of 64 rather
+/// than 32 was measured on both arms and **does not buy it back**. (task-2074
+/// removed the count limit, with a directory that makes a large delta area cheap
+/// to search; see [`DELTA_ENTRY`].)
 pub const NARROW_INT_SLOTS: bool = true;
 
 /// The arm a caller cannot reach, kept because removing it would be a lie.
@@ -282,11 +339,6 @@ impl<'p> LeafRef<'p> {
                 "key_columns {key_columns} is not within 1..={column_count}"
             )));
         }
-        if delta_count > DELTA_LIMIT {
-            return Err(corrupt(format!(
-                "delta_count {delta_count} exceeds the limit of {DELTA_LIMIT}"
-            )));
-        }
         if (delta_count > 0) != (flags & LEAF_HAS_DELTA != 0) {
             return Err(corrupt("the delta flag disagrees with delta_count"));
         }
@@ -308,6 +360,24 @@ impl<'p> LeafRef<'p> {
             return Err(corrupt(
                 "delta_start must lie between the directory and the heap",
             ));
+        }
+        // The delta directory has to fit inside the delta area. Each row it
+        // names is checked when it is read, not here: see `validate_delta`. A
+        // format 1 leaf has no directory and holds at most 32 rows.
+        let directory = match flags & LEAF_DELTA_DIRECTORY != 0 {
+            true => delta_count.saturating_mul(DELTA_ENTRY),
+            false if delta_count > FORMAT_ONE_DELTA_LIMIT => {
+                return Err(corrupt(format!(
+                    "a format 1 leaf holds {delta_count} delta rows, over the limit of \
+                     {FORMAT_ONE_DELTA_LIMIT}"
+                )));
+            }
+            false => 0,
+        };
+        if delta_start.saturating_add(directory) > heap_start {
+            return Err(corrupt(format!(
+                "a delta directory of {delta_count} entries does not fit below the heap at {heap_start}"
+            )));
         }
 
         let leaf = LeafRef {
@@ -342,9 +412,11 @@ impl<'p> LeafRef<'p> {
         // parses a leaf per level, and a skip scan descends once per distinct
         // value. Walking the directory on every parse was most of the cost of
         // a query whose answer is sixty-four rows.
-        // Walking the delta once here means every later delta accessor is
-        // reading bytes that have already been proved to decode.
-        leaf.validate_delta()?;
+        // **The delta rows are not walked here any more** (task-2074). They
+        // were, while the area held at most 32 rows; it now holds as many as
+        // the free gap does, and a parse runs on every level of every descent.
+        // Every delta accessor bounds the row it reads, so the walk moved to
+        // `integrity`, where a check proportional to the page belongs.
         Ok(leaf)
     }
 
@@ -357,7 +429,10 @@ impl<'p> LeafRef<'p> {
     /// 1. The `has_exceptions` flag agrees with the class arrays.
     /// 2. Sorted-region keys strictly increase.
     /// 3. No delta key equals a live sorted-region key.
+    /// 4. The delta area decodes, its rows fill it exactly, and its directory
+    ///    is in key order.
     pub fn integrity(&self) -> DbResult<()> {
+        self.validate_delta()?;
         // The mini-column extents: inside the page, inside the region between
         // the directory and the tombstone bitmap, and 8-byte aligned so the
         // value array a vectorised scan reads is aligned.
@@ -530,7 +605,6 @@ impl<'d, R: AsRef<[Datum<'d>]>> Rows<'d> for RowSlice<'_, R> {
 
 #[cfg(test)]
 mod tests {
-    use super::layout::align8;
     use super::*;
     use crate::types::{ColumnSpec, PhysicalType, COLUMN_NULLABLE};
 
@@ -1077,63 +1151,6 @@ mod tests {
         leaf.integrity().unwrap();
     }
 
-    /// `live_order` names the same rows, in the same order, that `live`
-    /// materialises - over a leaf with tombstones, delta rows and a delta row
-    /// that shadows a sorted one.
-    ///
-    /// A compaction reads through `live_order` now and `live` is what every
-    /// other caller and every property test uses, so the two disagreeing would
-    /// be a compaction that silently changed the leaf's contents.
-    #[test]
-    fn live_order_agrees_with_live() {
-        let columns = vec![
-            ColumnSpec::key(PhysicalType::Int64),
-            ColumnSpec::new(PhysicalType::Text),
-            ColumnSpec::new(PhysicalType::Int64),
-        ];
-        let builder = LeafBuilder::new(4096, 1, columns.clone(), 1).unwrap();
-        let labels: Vec<String> = (0..24).map(|n| format!("row-{n:04}")).collect();
-        let rows: Vec<Vec<Datum<'_>>> = (0..24i64)
-            .map(|n| {
-                vec![
-                    Datum::Int(n * 2),
-                    Datum::Text(labels[n as usize].as_bytes()),
-                    Datum::Int(n * 5),
-                ]
-            })
-            .collect();
-        let page = builder.encode(&rows).unwrap();
-        // A delta row for a key that is not there, one that shadows a sorted
-        // row, and a tombstone over a third.
-        let fresh = vec![Datum::Int(7), Datum::Text(b"inserted"), Datum::Int(70)];
-        let shadow = vec![Datum::Int(10), Datum::Text(b"replaced"), Datum::Int(99)];
-        let mut page = with_delta(&page, &[fresh.clone(), shadow.clone()]);
-        crate::mutate::LeafMut::new(&mut page)
-            .unwrap()
-            .set_tombstone(3)
-            .unwrap();
-        let leaf = LeafRef::parse(&page).unwrap();
-        let materialised = leaf.live().unwrap();
-        let source = leaf.live_source().unwrap();
-        assert_eq!(
-            source.len(),
-            materialised.len(),
-            "live_source named {} rows where live materialised {}",
-            source.len(),
-            materialised.len()
-        );
-        for (row, expected) in materialised.iter().enumerate() {
-            for (column, want) in expected.iter().enumerate() {
-                let got = source.value(row, column);
-                assert_eq!(
-                    format!("{got:?}"),
-                    format!("{want:?}"),
-                    "row {row} column {column}"
-                );
-            }
-        }
-    }
-
     /// Binary search finds every present key and reports the right insertion
     /// point for every absent one.
     #[test]
@@ -1192,293 +1209,6 @@ mod tests {
         let big = vec![0u8; 9000];
         let rows = vec![vec![Datum::Int(1), Datum::Blob(&big)]];
         assert_eq!(builder.pack(&rows, 0.9).unwrap(), Packed::RowTooLarge);
-    }
-
-    /// Writes a delta area into an already-built page.
-    ///
-    /// Nothing in Phase 1 *writes* a delta area - the leaf builder always
-    /// leaves it empty and the tree rewrites a leaf rather than appending to
-    /// one, because the delta path is a Phase 3 write-family item measured
-    /// against the 16/32/64 sweep. The reader exists now, though, and a reader
-    /// of bytes that come off a disk is exactly the code that has to be
-    /// exercised before those bytes are hostile. So the tests build the area by
-    /// hand, byte for byte as the layout describes it.
-    ///
-    /// @param page - a page from `LeafBuilder::encode`
-    /// @param rows - the delta rows, each a list of values in column order
-    fn with_delta(page: &[u8], rows: &[Vec<Datum<'_>>]) -> Vec<u8> {
-        let mut out = page.to_vec();
-        let leaf = LeafRef::parse(&out).unwrap();
-        let count = leaf.row_count();
-        let columns = leaf.column_count();
-        // The delta area goes immediately after the last mini-column, which is
-        // where the free space between the columns and the heap begins.
-        let mut end = leaf_header::DIRECTORY + columns * leaf.directory_entry_size();
-        for index in 0..columns {
-            end = align8(end);
-            end += class_bytes(count) + count * leaf.column_width(index).unwrap();
-        }
-        // Room for a tombstone bitmap between the mini-columns and the delta
-        // area, because that is where the layout puts one and a later
-        // `with_tombstones` has to have somewhere to write it.
-        let delta_start = align8(end + tombstone_bytes(count));
-        let mut bytes = Vec::new();
-        for row in rows {
-            let mut encoded = Vec::new();
-            for value in row {
-                value.encode_tagged(&mut encoded);
-            }
-            bytes.extend_from_slice(&(encoded.len() as u16).to_le_bytes());
-            bytes.extend_from_slice(&encoded);
-        }
-        let heap_start = leaf.heap_start;
-        assert!(
-            delta_start + bytes.len() <= heap_start,
-            "the delta does not fit: {delta_start} + {} > {heap_start}",
-            bytes.len()
-        );
-        out[delta_start..delta_start + bytes.len()].copy_from_slice(&bytes);
-        page::write_u32(&mut out, leaf_header::DELTA_START, delta_start as u32).unwrap();
-        page::write_u16(&mut out, leaf_header::DELTA_COUNT, rows.len() as u16).unwrap();
-        out[header::FLAGS] |= LEAF_HAS_DELTA;
-        out
-    }
-
-    /// Sets a tombstone bit, moving the delta area up to make room for the
-    /// bitmap the way a real delete would.
-    ///
-    /// @param page - a page from `LeafBuilder::encode`
-    /// @param rows - which sorted-region rows to mark deleted
-    fn with_tombstones(page: &[u8], rows: &[usize]) -> Vec<u8> {
-        let mut out = page.to_vec();
-        let leaf = LeafRef::parse(&out).unwrap();
-        let count = leaf.row_count();
-        let delta_start = leaf.delta_start;
-        let bitmap = delta_start - tombstone_bytes(count);
-        for row in rows {
-            out[bitmap + row / 8] |= 1u8 << (row % 8);
-        }
-        out[header::FLAGS] |= LEAF_HAS_TOMBSTONES;
-        out
-    }
-
-    /// A delta area reads back row by row and value by value, and merges into
-    /// the live set in key order.
-    #[test]
-    fn a_delta_area_reads_back_and_merges() {
-        let columns = vec![
-            ColumnSpec::key(PhysicalType::Int64),
-            ColumnSpec::new(PhysicalType::Int64),
-            ColumnSpec::new(PhysicalType::Text),
-        ];
-        let builder = LeafBuilder::new(8192, 1, columns, 1).unwrap();
-        let sorted: Vec<Vec<Datum<'static>>> = [10i64, 20, 30]
-            .iter()
-            .map(|key| {
-                vec![
-                    Datum::Int(*key),
-                    Datum::Int(key * 2),
-                    Datum::Text(b"sorted"),
-                ]
-            })
-            .collect();
-        let page = builder.encode(&sorted).unwrap();
-        let delta = vec![
-            vec![Datum::Int(25), Datum::Int(50), Datum::Text(b"delta-a")],
-            vec![Datum::Int(5), Datum::Null, Datum::Text(b"delta-b")],
-        ];
-        let page = with_delta(&page, &delta);
-        let leaf = LeafRef::parse(&page).unwrap();
-
-        assert_eq!(leaf.delta_count(), 2);
-        assert!(!leaf.is_clean(), "a delta area leaves the fast path");
-        assert_eq!(leaf.live_rows().unwrap(), 5);
-        assert_eq!(leaf.delta_value(0, 0).unwrap().as_int(), Some(25));
-        assert_eq!(
-            leaf.delta_value(0, 2).unwrap().as_bytes(),
-            Some(b"delta-a".as_slice())
-        );
-        assert_eq!(leaf.delta_value(1, 0).unwrap().as_int(), Some(5));
-        assert!(leaf.delta_value(1, 1).unwrap().is_null());
-        assert!(!leaf.delta_row(1).unwrap().is_empty());
-
-        // The merge: sorted region and delta together, in key order.
-        let live = leaf.live().unwrap();
-        let keys: Vec<i64> = live
-            .iter()
-            .map(|row| row[0].as_int().unwrap_or(-1))
-            .collect();
-        assert_eq!(keys, vec![5, 10, 20, 25, 30]);
-        leaf.integrity().unwrap();
-    }
-
-    /// `locate` decodes each delta row once, left to right, and stops at the
-    /// first column that differs - it does not re-measure a column it has
-    /// already read.
-    ///
-    /// Five delta rows share their first two key columns and differ only on
-    /// the third, so a probe that agrees with all five on those first two
-    /// columns forces every row's comparison to walk out to the third before
-    /// it can be ruled out - the shape that made `locate`'s old per-column
-    /// `delta_value` calls cost the square of the key's width: comparing
-    /// column two re-measured column zero's and column one's spans from
-    /// scratch, on every one of the five rows.
-    ///
-    /// `Datum::tagged_span` is the call that measured a span it was not about
-    /// to read - a skip past a column the caller wants no value from - so it
-    /// is what a re-walk shows up as, and it is a test-only counter
-    /// (`datum::probe`) rather than a clock, because a call count reads the
-    /// same on an idle box and a loaded one where a duration would not.
-    /// Reverting the fix and running only this test - with the counter kept -
-    /// reads exactly 15: `1 + 2` re-measured spans on each of the five rows.
-    #[test]
-    fn locate_stops_reading_a_delta_row_at_the_first_mismatched_column() {
-        let columns = vec![
-            ColumnSpec::key(PhysicalType::Int64),
-            ColumnSpec::key(PhysicalType::Int64),
-            ColumnSpec::key(PhysicalType::Text),
-        ];
-        let builder = LeafBuilder::new(8192, 1, columns, 3).unwrap();
-        // Sorted so it never collides with the delta rows' key: `999` sorts
-        // after every probe or delta key this test uses.
-        let sorted = vec![vec![Datum::Int(999), Datum::Int(0), Datum::Text(b"sorted")]];
-        let page = builder.encode(&sorted).unwrap();
-        let delta = vec![
-            vec![Datum::Int(0), Datum::Int(0), Datum::Text(b"row-0")],
-            vec![Datum::Int(0), Datum::Int(0), Datum::Text(b"row-1")],
-            vec![Datum::Int(0), Datum::Int(0), Datum::Text(b"row-2")],
-            vec![Datum::Int(0), Datum::Int(0), Datum::Text(b"row-3")],
-            vec![Datum::Int(0), Datum::Int(0), Datum::Text(b"row-4")],
-        ];
-        let page = with_delta(&page, &delta);
-        let leaf = LeafRef::parse(&page).unwrap();
-
-        // A hit is still found correctly - the walk is reordered, not the answer.
-        crate::datum::probe::reset_tagged_span_calls();
-        let found = leaf
-            .locate(&[Datum::Int(0), Datum::Int(0), Datum::Text(b"row-2")], 3)
-            .unwrap();
-        assert_eq!(found, crate::write::Located::Delta(2));
-
-        // A miss that agrees with every row on the first two columns is the
-        // case that used to pay for the re-walk five times over.
-        crate::datum::probe::reset_tagged_span_calls();
-        let missing = leaf
-            .locate(&[Datum::Int(0), Datum::Int(0), Datum::Text(b"nomatch")], 3)
-            .unwrap();
-        assert_eq!(missing, crate::write::Located::Absent);
-        assert_eq!(
-            crate::datum::probe::tagged_span_calls(),
-            0,
-            "locate should decode each of the 5 delta rows' 3 columns once, left \
-             to right, through decode_tagged - a re-walk that skips a column \
-             it is about to decode anyway would show up here as tagged_span \
-             calls greater than zero"
-        );
-    }
-
-    /// Every way a delta area can be malformed is refused, and none of them
-    /// panics.
-    #[test]
-    fn a_malformed_delta_area_is_refused() {
-        let columns = vec![
-            ColumnSpec::key(PhysicalType::Int64),
-            ColumnSpec::new(PhysicalType::Int64),
-        ];
-        let builder = LeafBuilder::new(8192, 1, columns, 1).unwrap();
-        let sorted = vec![
-            vec![Datum::Int(1), Datum::Int(1)],
-            vec![Datum::Int(2), Datum::Int(2)],
-        ];
-        let base = builder.encode(&sorted).unwrap();
-        let good = with_delta(&base, &[vec![Datum::Int(7), Datum::Int(7)]]);
-        LeafRef::parse(&good).unwrap();
-
-        // A length that says the row is longer than it is: the values stop
-        // decoding before the declared end.
-        let leaf = LeafRef::parse(&good).unwrap();
-        let at = leaf.delta_start;
-        let mut lying_length = good.clone();
-        page::write_u16(&mut lying_length, at, 40).unwrap();
-        assert!(LeafRef::parse(&lying_length).is_err());
-
-        // A length that reaches past the heap.
-        let mut past_the_heap = good.clone();
-        page::write_u16(&mut past_the_heap, at, 60_000).unwrap();
-        assert!(LeafRef::parse(&past_the_heap).is_err());
-
-        // A tag byte that is not a value.
-        let mut bad_tag = good.clone();
-        bad_tag[at + 2] = 200;
-        assert!(LeafRef::parse(&bad_tag).is_err());
-
-        // A row that decodes to fewer bytes than it declared.
-        let mut short_row = good.clone();
-        page::write_u16(&mut short_row, at, 19).unwrap();
-        assert!(LeafRef::parse(&short_row).is_err());
-
-        // Asking for a delta row and a delta column that do not exist.
-        let leaf = LeafRef::parse(&good).unwrap();
-        assert!(leaf.delta_row(1).is_err());
-        assert!(leaf.delta_value(0, 9).is_err());
-    }
-
-    /// A delta row whose key is already live in the sorted region is an
-    /// integrity failure, because a reader would then see the key twice.
-    #[test]
-    fn a_delta_row_may_not_duplicate_a_live_key() {
-        let columns = vec![
-            ColumnSpec::key(PhysicalType::Int64),
-            ColumnSpec::new(PhysicalType::Int64),
-        ];
-        let builder = LeafBuilder::new(8192, 1, columns, 1).unwrap();
-        let sorted = vec![
-            vec![Datum::Int(1), Datum::Int(10)],
-            vec![Datum::Int(2), Datum::Int(20)],
-        ];
-        let base = builder.encode(&sorted).unwrap();
-        let clashing = with_delta(&base, &[vec![Datum::Int(2), Datum::Int(99)]]);
-        let leaf = LeafRef::parse(&clashing).unwrap();
-        assert!(leaf.integrity().is_err());
-
-        // Unless the sorted-region row is tombstoned, in which case the delta
-        // row is the live one and there is no duplicate.
-        let tombstoned = with_tombstones(&clashing, &[1]);
-        let leaf = LeafRef::parse(&tombstoned).unwrap();
-        leaf.integrity().unwrap();
-        assert!(leaf.is_tombstoned(1).unwrap());
-        assert!(!leaf.is_tombstoned(0).unwrap());
-        assert_eq!(leaf.live_rows().unwrap(), 2);
-        let live = leaf.live().unwrap();
-        assert_eq!(live.len(), 2);
-        assert_eq!(live[1][1].as_int(), Some(99));
-    }
-
-    /// The tombstone bitmap is read only when the flag says it is there, and a
-    /// row outside it is refused rather than indexed into.
-    #[test]
-    fn tombstones_are_read_only_when_they_exist() {
-        let columns = vec![ColumnSpec::key(PhysicalType::Int64)];
-        let builder = LeafBuilder::new(8192, 1, columns, 1).unwrap();
-        let rows: Vec<Vec<Datum<'static>>> = (0..20).map(|n| vec![Datum::Int(n as i64)]).collect();
-        let page = builder.encode(&rows).unwrap();
-        let leaf = LeafRef::parse(&page).unwrap();
-        assert!(!leaf.has_tombstones());
-        assert!(leaf.tombstones().unwrap().is_empty());
-        assert!(!leaf.is_tombstoned(0).unwrap());
-        assert!(!leaf.is_tombstoned(9999).unwrap(), "no bitmap, no lookup");
-
-        let marked = with_tombstones(&page, &[0, 3, 19]);
-        let leaf = LeafRef::parse(&marked).unwrap();
-        assert!(leaf.has_tombstones());
-        assert!(!leaf.is_clean());
-        assert!(!leaf.tombstones().unwrap().is_empty());
-        assert!(leaf.is_tombstoned(0).unwrap());
-        assert!(!leaf.is_tombstoned(1).unwrap());
-        assert!(leaf.is_tombstoned(19).unwrap());
-        assert!(leaf.is_tombstoned(20_000).is_err(), "past the bitmap");
-        assert_eq!(leaf.live_rows().unwrap(), 17);
-        assert_eq!(leaf.live().unwrap().len(), 17);
     }
 
     /// Every way a builder can be asked for an impossible leaf is refused.

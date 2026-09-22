@@ -56,7 +56,8 @@ pub struct PutStages {
     pub locate: u128,
     /// Of `locate`: pinning the page and parsing its header, before the key is looked for.
     pub fetch: u128,
-    /// Of `locate`: the scan of the delta area, which compares up to `DELTA_LIMIT` rows.
+    /// Of `locate`: the binary search of the delta directory, or the scan of a
+    /// delta area format 1 wrote.
     pub deltas: u128,
     /// Of `locate`: the binary search of the sorted region.
     pub search: u128,

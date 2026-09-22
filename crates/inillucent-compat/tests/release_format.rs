@@ -180,6 +180,92 @@ fn a_database_an_earlier_release_wrote_still_takes_a_write() {
     );
 }
 
+/// A database an earlier release wrote recovers this build's writes after a
+/// crash, from every release.
+///
+/// **Format 2 changed the leaf's delta area and the page checksum (task-2074),
+/// and every release before it wrote format 1.** This build reads format 1, and
+/// it keeps writing a format 1 leaf by format 1's rules until something repacks
+/// it - a compaction, a split - and logs that repack with the page's image. The
+/// reason is recovery: it replays the log onto the pages the file holds, which
+/// for a file an earlier release wrote are format 1 pages, and a replay that
+/// followed different rules from the write would land on different bytes.
+///
+/// So this writes enough rows into the fixture's table and its index to take a
+/// format 1 delta area past its 32 rows, which makes the first compactions of
+/// format 1 leaves happen inside the log; kills the process with all of it
+/// unfolded; and reopens. The old rows, the new ones, the update and the
+/// deletes all have to be there, and the file has to pass the integrity check.
+#[test]
+fn an_earlier_releases_file_recovers_this_builds_writes_after_a_crash() {
+    let Some(shell) = inillucent_compat::cliproc::program("inillucent-shell") else {
+        panic!("inillucent-shell is not built, and this case is about a crashed process");
+    };
+    let mut sql = String::new();
+    for id in 20_000..20_300 {
+        sql.push_str(&format!(
+            "INSERT INTO note (id, title, body, weight, tag) VALUES ({id}, 'crash {id}', \
+             'written by this build into a file an earlier release wrote', {}, 'Tag{}');\n",
+            id % 17,
+            id % 13
+        ));
+    }
+    sql.push_str("UPDATE note SET weight = weight + 100 WHERE id % 3 = 0 AND id >= 20000;\n");
+    sql.push_str("DELETE FROM note WHERE id BETWEEN 20100 AND 20109;\n");
+    let expected_weight: i64 = (20_000i64..20_300)
+        .filter(|id| !(20_100..=20_109).contains(id))
+        .map(|id| id % 17 + if id % 3 == 0 { 100 } else { 0 })
+        .sum();
+    let arm = default_arm();
+    for version in interop::versions() {
+        let area = scratch(&format!("crashed-{version}"));
+        let database = interop::stage(&version, &area);
+        let said = inillucent_compat::cliproc::write_and_crash(&shell, &database, &sql);
+        assert!(
+            said.contains("written"),
+            "{version}: the statements did not run before the process was killed:\n{said}"
+        );
+        let handle = reopen_and_check(&arm, &database);
+        let connection = handle.session();
+        assert_eq!(
+            ask(&connection, "SELECT count(*) FROM note WHERE id >= 20000"),
+            "290",
+            "{version}: the rows this build wrote before the crash did not all come back"
+        );
+        assert_eq!(
+            ask(
+                &connection,
+                "SELECT sum(weight) FROM note WHERE id >= 20000"
+            ),
+            expected_weight.to_string(),
+            "{version}: the update this build made before the crash did not come back"
+        );
+        assert_eq!(
+            ask(&connection, "SELECT title FROM note WHERE id = 9001"),
+            "the row that only the log holds",
+            "{version}: the row that release left in its own log is gone"
+        );
+        // The index over `title` holds exactly what the table does: a range the
+        // index answers against the same range read off the table.
+        assert_eq!(
+            ask(
+                &connection,
+                "SELECT count(*) FROM note WHERE title >= 'crash' AND title < 'crasi'"
+            ),
+            "290",
+            "{version}: the index over `title` disagrees with the table after recovery"
+        );
+        assert_eq!(
+            ask(
+                &connection,
+                "SELECT count(*) FROM note WHERE +title >= 'crash' AND +title < 'crasi'"
+            ),
+            "290",
+            "{version}: the table's own rows disagree with the count after recovery"
+        );
+    }
+}
+
 /// Every release answered the questions identically.
 ///
 /// `build.sql` is deterministic, so six releases writing it produced six files

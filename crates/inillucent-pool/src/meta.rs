@@ -19,15 +19,41 @@ use crate::PageId;
 /// The eight bytes that begin every inillucent data file.
 pub const MAGIC: [u8; 8] = *b"RDB2\0\0\0\0";
 
-/// The format version this build writes and is the only one it reads.
+/// The format version this build writes.
 ///
 /// **The compatibility rule, which `docs/relational-architecture.md` states in
 /// full.** A point release reads every file an earlier point release of the
 /// same minor version wrote, so this number does not move for a bug fix. A
-/// change to the layout of a page, a record or this header raises it, and that
-/// is a minor version with a documented migration; a build that meets a file
-/// with a higher number says so rather than reading it as damage.
-pub const FORMAT_VERSION: u32 = 1;
+/// change to the layout of a page, a record or this header raises it; a build
+/// that meets a file with a higher number says so rather than reading it as
+/// damage.
+///
+/// **Two, since task-2074, for two changes to the page.** A leaf's delta area
+/// has a directory in key order, and a page's checksum covers its LSN - which
+/// format 1's did not, so a flipped bit in a page's LSN was a page that read as
+/// valid (task-2066 section 4.2, item 17). A build of format 1 cannot read
+/// either, and the number is what makes it say so by name instead of reporting
+/// a checksum failure on the first page it reads.
+///
+/// This build still reads format 1, which is [`OLDEST_FORMAT_VERSION`]: a leaf
+/// says which layout it is in, and a page's checksum is accepted under either
+/// rule. A format 1 file becomes format 2 the first time this build writes its
+/// meta record, which a checkpoint does.
+pub const FORMAT_VERSION: u32 = 2;
+
+/// The oldest format version this build reads.
+///
+/// Every published release before task-2074 wrote format 1, and
+/// `tests/interop/` holds a file from each of them that
+/// `crates/inillucent-compat/tests/release_format.rs` reads with this build.
+pub const OLDEST_FORMAT_VERSION: u32 = 1;
+
+/// Reports whether this build reads a file of this format version.
+///
+/// @param found - the version a file's header carries
+pub fn reads_format(found: u32) -> bool {
+    (OLDEST_FORMAT_VERSION..=FORMAT_VERSION).contains(&found)
+}
 
 /// Returns the refusal a file of another format version reports.
 ///
@@ -39,9 +65,9 @@ pub const FORMAT_VERSION: u32 = 1;
 /// got that" gives - and the message says what to do about it.
 ///
 /// A *lower* number would mean a format this build has dropped, and there is
-/// none: version 1 is the first. It is still named rather than folded into the
-/// newer case, because a zero here is a file whose header was zeroed rather
-/// than a file from the future.
+/// none: this build reads every format from version 1, the first. So a number
+/// below [`OLDEST_FORMAT_VERSION`] is zero, and a zero here is a file whose
+/// header was zeroed rather than a file from the past.
 ///
 /// @param found - the version the file's header carries
 pub(crate) fn wrong_format(found: u32) -> inillucent_base::DbError {
@@ -53,8 +79,8 @@ pub(crate) fn wrong_format(found: u32) -> inillucent_base::DbError {
         .with_unsupported(format!("a database of format version {found}"));
     }
     corrupt(format!(
-        "format version {found} is not {FORMAT_VERSION}, and there is no earlier format: the \
-         header has been overwritten"
+        "format version {found} is not one of {OLDEST_FORMAT_VERSION} to {FORMAT_VERSION}, and \
+         there is no earlier format: the header has been overwritten"
     ))
 }
 
@@ -291,7 +317,7 @@ impl Meta {
             return Err(corrupt("the file does not begin with the inillucent magic"));
         }
         let format = u32(page, at::FORMAT)?;
-        if format != FORMAT_VERSION {
+        if !reads_format(format) {
             return Err(wrong_format(format));
         }
         let stored = u32(page, at::CHECKSUM)?;
@@ -650,9 +676,29 @@ mod tests {
         let slot = page
             .get_mut(at::FORMAT..at::FORMAT + 4)
             .expect("the format field is inside the page");
-        slot.copy_from_slice(&2u32.to_le_bytes());
+        slot.copy_from_slice(&(FORMAT_VERSION + 1).to_le_bytes());
         let error = Meta::decode(&page).unwrap_err();
         assert!(error.detail().unwrap_or("").contains("format"), "{error:?}");
+    }
+
+    /// A meta record format 1 wrote is read, and the next one written says 2.
+    ///
+    /// Every release before task-2074 wrote format 1, and this build reads
+    /// their files; the version moves when this build writes the record, which
+    /// is the first checkpoint.
+    #[test]
+    fn a_format_one_record_is_read_and_rewritten_as_format_two() {
+        let mut page = vec![0u8; 8_192];
+        Meta::fresh(8_192, 1).encode(&mut page).unwrap();
+        put(&mut page, at::FORMAT, &OLDEST_FORMAT_VERSION.to_le_bytes()).unwrap();
+        let sum = checksum(&page).unwrap();
+        put(&mut page, at::CHECKSUM, &sum.to_le_bytes()).unwrap();
+        let read = Meta::decode(&page).expect("a format 1 record reads");
+        let mut again = vec![0u8; 8_192];
+        read.encode(&mut again).unwrap();
+        assert_eq!(u32(&again, at::FORMAT).unwrap(), FORMAT_VERSION);
+        assert!(reads_format(1) && reads_format(2));
+        assert!(!reads_format(0) && !reads_format(3));
     }
 
     /// The newer generation wins, a damaged copy is ignored, and two damaged

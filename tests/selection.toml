@@ -1080,6 +1080,10 @@ kind = "test"
 name = "release_format"
 tier = "e2e"
 covers = ["inillucent-engine"]
+# task-2074: the case that writes into every release's file and crashes kills a
+# real `inillucent-shell`, the way `analyze_reopen` does, so the shell has to be
+# built.
+requires = ["programs"]
 
 # The same question asked of every release at once, and asked backwards
 # (task-2036). The backward direction needs the released binaries, which are
@@ -1889,6 +1893,16 @@ package = "inillucent-model"
 kind = "test"
 name = "minimal"
 tier = "retrieval"
+
+# task-2074: a crash with a write campaign in the log, recovered, and every
+# page compared byte for byte - the delta directory, the splice and the page
+# checksum all have to be reproduced by redo, not only the rows.
+[[target]]
+package = "inillucent-model"
+kind = "test"
+name = "redo_bytes"
+tier = "durability"
+covers = ["inillucent-tree", "inillucent-txn", "inillucent-pool"]
 
 [[target]]
 package = "inillucent-search"
