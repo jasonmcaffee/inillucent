@@ -81,6 +81,10 @@ use std::process::{Command, ExitCode};
 use std::rc::Rc;
 use std::time::Instant;
 
+use inillucent_compat::newengine::connect::{
+    Connection as ConnectedConnection, Database as ConnectedDatabase,
+    Statement as ConnectedStatement,
+};
 use inillucent_compat::newengine::ImportedDatabase;
 use inillucent_compat::perf::{bind_value, eat_borrowed};
 use inillucent_compat::perf::{
@@ -129,6 +133,8 @@ struct Settings {
     module_split: bool,
     /// Whether to time and print where one row's write into a leaf goes.
     put_split: bool,
+    /// Which way into this engine the arm drives (task-2066 section 4.3.10).
+    api: Api,
 }
 
 fn main() -> ExitCode {
@@ -211,6 +217,17 @@ fn settings_from(arguments: &[String]) -> Settings {
             .unwrap_or_else(|| FAMILIES.iter().map(|(name, _)| name.to_string()).collect()),
         repeat_override: flag(arguments, "--repeat").and_then(|value| value.parse().ok()),
         locking: flag(arguments, "--locking").unwrap_or_else(|| "normal".to_string()),
+        // **`pipeline` by default, so no published number moves.** Every
+        // figure in `docs/performance.md` was taken through `plan`, `prepare`
+        // and `pipeline`, and changing what this binary measures by default
+        // would silently restate all of them. `--api connection` measures the
+        // shipped API instead and `--api both` measures the two in one round,
+        // which is the only way to compare them on a machine that moves.
+        api: match flag(arguments, "--api").unwrap_or_default().as_str() {
+            "connection" => Api::Connection,
+            "both" => Api::Both,
+            _ => Api::Pipeline,
+        },
         // **Off by default, because the split is not free (task-2025).** It
         // times every shadow row write and every pass through the insert arm,
         // and measured always-on it took `extension.rtree.insert` from 1.29x to
@@ -358,18 +375,43 @@ fn print_configuration(
     // gate that was describing an older engine.
     println!("  inillucent lock: locking_mode = normal, the shipped default - the file is");
     println!("                taken and released once per statement, exactly as SQLite's arm does");
-    println!("  plan cache  : declared, and NOT used by either arm of this gate");
-    println!(
-        "                inillucent keeps a prepared plan per statement text, and the TDD names"
-    );
-    println!(
-        "                it as the thing a reader is most likely to contest. This harness does"
-    );
-    println!("                not reach it: a prepare-each workload calls plan() and prepare()");
-    println!("                inside the clock, and plan() parses, binds and plans on every call;");
-    println!("                every other workload prepares once, outside the clock, and rebinds.");
-    println!("                So no number here is helped by the cache, and SQLite compiles per");
-    println!("                iteration for a prepare-each workload exactly as this does.");
+    println!("  api         : {}", settings.api.name());
+    if settings.api.drives_a_connection() {
+        println!(
+            "                the connection arm goes through Connection::prepare and Statement::step,"
+        );
+        println!(
+            "                which is the only route an application outside this workspace has"
+        );
+    }
+    // **True of the pipeline arm and false of the connection arm**, so the
+    // line is printed per arm rather than as a fact about the binary. A
+    // `Connection::prepare` looks the statement up in the plan cache, which is
+    // most of the difference section 4.3.10 exists to measure.
+    if settings.api.drives_the_pipeline() {
+        println!("  plan cache  : declared, and NOT used by the pipeline arm of this gate");
+    }
+    if settings.api.drives_a_connection() {
+        println!("  plan cache  : USED by the connection arm - Connection::prepare looks a");
+        println!("                statement up by text, which is part of what that arm costs");
+    }
+    if settings.api.drives_the_pipeline() {
+        println!(
+            "                inillucent keeps a prepared plan per statement text, and the TDD names"
+        );
+        println!(
+            "                it as the thing a reader is most likely to contest. The pipeline arm"
+        );
+        println!("                does not reach it: a prepare-each workload calls plan() and");
+        println!(
+            "                prepare() inside the clock, and plan() parses, binds and plans on"
+        );
+        println!(
+            "                every call; every other workload prepares once, outside the clock,"
+        );
+        println!("                and rebinds. So no pipeline number is helped by the cache, and");
+        println!("                SQLite compiles per iteration for a prepare-each workload too.");
+    }
     println!(
         "  warm state  : inillucent's pool is filled before each round; SQLite's cache fills as the plan runs"
     );
@@ -554,6 +596,8 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
     let started = Instant::now();
     let mut our_rounds: Vec<RoundCost> = Vec::with_capacity(settings.rounds as usize);
     let mut their_rounds: Vec<ProcessCost> = Vec::with_capacity(settings.rounds as usize);
+    let mut api_pairs = api_slots(settings, &plan);
+    let arm_inputs = ArmInputs::new(fixture, &scratch, &plan, settings);
     for round in 0..settings.rounds {
         // The engine order alternates by round so a warm cache or a busy machine
         // does not systematically favour whichever went first.
@@ -569,6 +613,7 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
         };
         our_rounds.push(our_cost);
         their_rounds.push(their_cost);
+        run_the_connection_arm(&mut api_pairs, &arm_inputs, round, &ours, &our_state)?;
         // **The clock is read only after the two engines agree about the data.**
         if our_state != their_state {
             for entry in &mut measured {
@@ -579,36 +624,7 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
             }
             break;
         }
-        for (index, workload) in plan.workloads.iter().enumerate() {
-            let Some(slot) = measured.get_mut(index) else {
-                continue;
-            };
-            let Some(mine) = ours.iter().find(|sample| sample.workload == workload.name) else {
-                slot.agreed = false;
-                slot.disagreement = "the new engine produced no sample".to_string();
-                continue;
-            };
-            let Some(reference) = theirs
-                .iter()
-                .find(|sample| sample.workload == workload.name)
-            else {
-                return Err(format!("{}: sqlite produced no sample", workload.name));
-            };
-            // A row-producing workload is compared by its digest. A write
-            // produces no rows on either arm, so comparing the digests of two
-            // empty result sets proves nothing - what those are compared by is
-            // the state questions above, at the end of the round.
-            if !workload.mutates && (mine.digest != reference.digest || mine.rows != reference.rows)
-            {
-                slot.agreed = false;
-                slot.disagreement = format!(
-                    "inillucent {} rows digest {:016x} against sqlite {} rows digest {:016x}",
-                    mine.rows, mine.digest, reference.rows, reference.digest
-                );
-                continue;
-            }
-            slot.pairs.push((mine.nanos, reference.nanos));
-        }
+        pair_against_the_reference(&mut measured, &plan, &ours, &theirs)?;
         if round == 0 {
             println!(
                 "  round 0 took {:.1}s including both restores",
@@ -629,6 +645,10 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
     );
 
     let mut passed = report_results(&measured);
+
+    // Reported, and it does not decide the gate: the two arms being apart is a
+    // cost to explain on the performance page, not a regression against SQLite.
+    report_the_two_ways_in(&api_pairs);
 
     let (met_every_family, every_family_reported) = report_families(settings, &measured);
     passed = passed && met_every_family;
@@ -905,10 +925,595 @@ fn time_new_engine(
     plan: &inillucent_compat::perf::Plan,
     settings: &Settings,
 ) -> Result<(Vec<Sample>, Vec<String>, RoundCost), String> {
+    // **`--api connection` replaces this arm rather than adding to it**, so a
+    // run asking only for the shipped API compares that against SQLite. With
+    // `--api both` this stays the pipeline and the connection arm runs beside
+    // it in the same round; see `run`.
+    if settings.api == Api::Connection {
+        return time_through_a_connection(fixture, scratch, plan, settings);
+    }
     let copy = restore(fixture, scratch, "ours")?;
     let mut database = ImportedDatabase::import_with(copy, settings.page_size, settings.frames)
         .map_err(|error| format!("import failed: {}", why(&error)))?;
     round_on(&mut database, plan, splits_of(settings))
+}
+
+/// Which of the two ways into this engine an arm drives.
+///
+/// **They are different amounts of code and nothing measured the second**
+/// (task-2066 §4.3.10). `inillucent-fullgate` has always driven `plan`,
+/// `prepare` and `pipeline` directly, which is the shortest path to an answer
+/// and not the one an application has. A `Connection` adds the plan cache
+/// lookup, the parameter count, the per-execution column names and the dirty
+/// frame walk on release - and `docs/performance.md:529` already said this
+/// arm was missing. Every figure on that page is the pipeline's.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Api {
+    /// `plan`, `prepare` and `pipeline`, which is what every published number is.
+    Pipeline,
+    /// `Connection::prepare` and `Statement::step`, which is what a caller has.
+    Connection,
+    /// Both, in the same round, so the difference is paired rather than compared
+    /// across two runs of the binary on a machine that moved in between.
+    Both,
+}
+
+impl Api {
+    /// Whether the pipeline-driven arm runs.
+    fn drives_the_pipeline(self) -> bool {
+        matches!(self, Api::Pipeline | Api::Both)
+    }
+
+    /// Whether the `Connection`-driven arm runs.
+    fn drives_a_connection(self) -> bool {
+        matches!(self, Api::Connection | Api::Both)
+    }
+
+    /// The name this arm reports under.
+    fn name(self) -> &'static str {
+        match self {
+            Api::Pipeline => "pipeline",
+            Api::Connection => "connection",
+            Api::Both => "both",
+        }
+    }
+}
+
+/// Times every workload through the shipped `Connection` API.
+///
+/// **The same fixture, the same plan, the same digest, a different entry
+/// point.** The pipeline arm beside it calls `plan`, `prepare` and `pipeline`;
+/// this one calls `Connection::prepare` and steps the `Statement`, which is
+/// the only thing an application outside this workspace can do. What sits
+/// between the two is the plan cache lookup, `parameter_count`'s second parse,
+/// a `String` per result column per execution, and `dirty_pages()`'s walk of
+/// every frame on the release path - sections 4.3.2, 4.3.3 and 4.3.5, none of
+/// which any published figure can see.
+///
+/// The fixture is imported by the same code the pipeline arm imports with, and
+/// then *opened* through the shipped API, so the bytes under the two arms are
+/// the same bytes.
+///
+/// @param fixture - the pristine SQLite database
+/// @param scratch - where the copy goes
+/// @param plan - the plan, for its workloads and row count
+/// @param settings - the page size and pool size
+fn time_through_a_connection(
+    fixture: &Path,
+    scratch: &Path,
+    plan: &inillucent_compat::perf::Plan,
+    settings: &Settings,
+) -> Result<(Vec<Sample>, Vec<String>, RoundCost), String> {
+    let copy = restore(fixture, scratch, "ours-connection")?;
+    let mut built = copy.clone().into_os_string();
+    built.push(".rdb");
+    let built = PathBuf::from(built);
+    // Imported and then dropped, so what the arm opens is a file on disk that
+    // the shipped `open_at` read - not a handle the import left behind.
+    drop(
+        ImportedDatabase::import_into(copy, built.clone(), settings.page_size, settings.frames)
+            .map_err(|error| format!("import failed: {}", why(&error)))?,
+    );
+    let database = ConnectedDatabase::open_at(&built, settings.page_size, settings.frames)
+        .map_err(|error| format!("open failed: {}", why(&error)))?;
+    round_through_a_connection(&database, plan)
+}
+
+/// Runs one round of the plan over an open `Connection`.
+///
+/// @param database - the open database
+/// @param plan - the plan, for its workloads and row count
+fn round_through_a_connection(
+    database: &ConnectedDatabase,
+    plan: &inillucent_compat::perf::Plan,
+) -> Result<(Vec<Sample>, Vec<String>, RoundCost), String> {
+    let connection = database.session();
+    warm_through_a_connection(&connection)?;
+    let opened = ProcessCost::now();
+    let mut samples = Vec::with_capacity(plan.workloads.len());
+    for workload in &plan.workloads {
+        if let Some(pre) = &workload.pre {
+            if let Err(reason) = batch_through_a_connection(&connection, pre) {
+                eprintln!("  {}: pre refused: {reason}", workload.name);
+                continue;
+            }
+        }
+        match time_one_through_a_connection(&connection, workload, plan.rows) {
+            Ok(sample) => samples.push(sample),
+            // Absent rather than zero, for the reason `round_on` gives: a
+            // sample of zero rolls into its family as an infinitely fast one.
+            Err(reason) => eprintln!("  {}: refused: {reason}", workload.name),
+        }
+        if let Some(post) = &workload.post {
+            if let Err(reason) = batch_through_a_connection(&connection, post) {
+                eprintln!("  {}: post refused: {reason}", workload.name);
+            }
+        }
+    }
+    let mut state = Vec::with_capacity(AGREEMENT.len());
+    for question in AGREEMENT {
+        let rows = connection
+            .query(question)
+            .map_err(|error| format!("{question}: {}", why(&error)))?;
+        state.push(render_row(&rows));
+    }
+    Ok((
+        samples,
+        state,
+        // **The costs and the marks are the pipeline arm's to report, and this
+        // arm says so by leaving them empty rather than by filling them with
+        // numbers about a different object.** `round_on` reads them off the
+        // `ImportedDatabase` - `frames_resident`, `wal().stats()`,
+        // `pool_stats()` - and a `Connection` is a borrow of a database this
+        // function does not hold mutably. The question this arm exists to
+        // answer is how long a statement takes through the shipped API, and
+        // that is the sample.
+        RoundCost {
+            round: ProcessCost::now().since(&opened),
+            costs: Vec::new(),
+            marks: Vec::new(),
+        },
+    ))
+}
+
+/// Fills the pool before the clock starts, the way `round_on` does.
+///
+/// `ImportedDatabase::warm` is not on the shipped API, so this reads every
+/// table the plan touches instead. It is the same effect by the only route a
+/// caller has, and it is outside every timed region either way.
+///
+/// @param connection - the open connection
+fn warm_through_a_connection(connection: &ConnectedConnection<'_>) -> Result<(), String> {
+    let tables = connection
+        .query("SELECT name FROM sqlite_master WHERE type = 'table'")
+        .map_err(|error| format!("warming failed: {}", why(&error)))?;
+    for row in &tables {
+        let Some(OwnedDatum::Text(bytes)) = row.first() else {
+            continue;
+        };
+        let name = String::from_utf8_lossy(bytes).into_owned();
+        if name.starts_with("sqlite_") {
+            continue;
+        }
+        // A count reads every page of the table, which is what warming is.
+        let _ = connection.query(&format!("SELECT count(*) FROM \"{name}\""));
+    }
+    Ok(())
+}
+
+/// Runs a setup script through the shipped API.
+///
+/// @param connection - the open connection
+/// @param script - the statements, separated by semicolons
+fn batch_through_a_connection(
+    connection: &ConnectedConnection<'_>,
+    script: &str,
+) -> Result<(), String> {
+    for statement in script.split(';') {
+        let trimmed = statement.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        connection
+            .execute(trimmed)
+            .map_err(|error| format!("{trimmed}: {}", why(&error)))?;
+    }
+    Ok(())
+}
+
+/// Times one workload through `Connection::prepare` and `Statement::step`.
+///
+/// **`prepare` is inside the clock for a workload the plan marks
+/// `prepare: each` and outside it otherwise**, which is exactly where the
+/// pipeline arm puts its `plan`/`prepare` pair and where `sqlite_bench.c` puts
+/// `sqlite3_prepare_v2`. A harness that hoisted the compile out of
+/// `open.prepare` would be measuring nothing.
+///
+/// The rows are digested as they are stepped and none are kept, so this arm
+/// and the pipeline arm are compared by the same digest over the same values.
+///
+/// @param connection - the open connection
+/// @param workload - the statement and how often to run it
+/// @param rows - the fixture's row count, for the bound values
+fn time_one_through_a_connection(
+    connection: &ConnectedConnection<'_>,
+    workload: &Workload,
+    rows: u32,
+) -> Result<Sample, String> {
+    let mut folded = Folded::default();
+    let started = Instant::now();
+    // **The commits go where the pipeline arm's go.** `time_write` calls
+    // `begin_batch` and `commit_batch` at the points `sqlite_bench.c` commits,
+    // and an arm that ignored the grouping would be timing two thousand
+    // separate transactions against two thousand statements inside one. The
+    // first paired run did exactly that and reported `txn.large` at 778x,
+    // which is the cost of a file lock and a sync per statement rather than
+    // anything the shipped API adds.
+    let grouped = workload.grouping != Grouping::Autocommit;
+    if grouped {
+        connection.execute("BEGIN").map_err(|error| why(&error))?;
+    }
+    let mut prepared = if workload.prepare_each {
+        None
+    } else {
+        Some(
+            connection
+                .prepare(&workload.sql)
+                .map_err(|error| why(&error))?,
+        )
+    };
+    for iteration in 0..workload.repeat {
+        match prepared.as_mut() {
+            Some(statement) => {
+                statement.reset();
+                bind_through_a_statement(statement, workload, iteration, rows)?;
+                step_and_digest(statement, &mut folded)?;
+            }
+            None => {
+                // The compile is inside the clock, which is where SQLite's is
+                // for a workload the plan marks `prepare: each`.
+                let mut statement = connection
+                    .prepare(&workload.sql)
+                    .map_err(|error| why(&error))?;
+                bind_through_a_statement(&mut statement, workload, iteration, rows)?;
+                step_and_digest(&mut statement, &mut folded)?;
+            }
+        }
+        if let Grouping::Every(every) = workload.grouping {
+            if every > 0 && iteration.saturating_add(1) % every == 0 {
+                connection.execute("COMMIT").map_err(|error| why(&error))?;
+                if iteration.saturating_add(1) < workload.repeat {
+                    connection.execute("BEGIN").map_err(|error| why(&error))?;
+                }
+            }
+        }
+    }
+    if grouped {
+        // **Dropped before the commit**, because a `Statement` borrows the
+        // connection and a `COMMIT` through the same connection while one is
+        // alive is a statement issued inside another statement's lifetime.
+        drop(prepared.take());
+        // Autocommit is on again when a `Grouping::Every` closed the last
+        // group exactly on the final iteration, and committing then would
+        // refuse. The engine's own answer is what decides.
+        if !connection.autocommit().map_err(|error| why(&error))? {
+            connection.execute("COMMIT").map_err(|error| why(&error))?;
+        }
+    }
+    Ok(Sample {
+        workload: workload.name.clone(),
+        nanos: started.elapsed().as_secs_f64() * 1e9,
+        rows: folded.rows,
+        digest: folded.digest.finish(),
+    })
+}
+
+/// Binds one iteration's values, one-based the way `?1` is.
+///
+/// @param statement - the prepared statement
+/// @param workload - the workload, for what it binds
+/// @param iteration - which repeat this is
+/// @param rows - the fixture's row count
+fn bind_through_a_statement(
+    statement: &mut ConnectedStatement<'_>,
+    workload: &Workload,
+    iteration: u32,
+    rows: u32,
+) -> Result<(), String> {
+    for (index, bind) in workload.binds.iter().enumerate() {
+        let at = u32::try_from(index.saturating_add(1)).unwrap_or(1);
+        statement
+            .bind(at, bind_value(*bind, iteration, rows))
+            .map_err(|error| why(&error))?;
+    }
+    Ok(())
+}
+
+/// Steps a statement to the end, digesting every value it produces.
+///
+/// @param statement - the prepared statement
+/// @param folded - the digest and row count to add to
+fn step_and_digest(
+    statement: &mut ConnectedStatement<'_>,
+    folded: &mut Folded,
+) -> Result<(), String> {
+    while statement.step().map_err(|error| why(&error))? {
+        for value in statement.row() {
+            eat_borrowed(&mut folded.digest, &value.borrow());
+        }
+        folded.rows = folded.rows.saturating_add(1);
+    }
+    Ok(())
+}
+
+/// What the second arm needs to run one round, in one value.
+///
+/// **A struct because `clippy.toml` sets the argument threshold once and
+/// `policy.rs` refuses an attribute that moves it for one function.** These
+/// four are the same four for every round and none of them changes between
+/// rounds, so passing them together is what they are.
+struct ArmInputs<'a> {
+    /// The pristine SQLite database both arms read.
+    fixture: &'a Path,
+    /// Where each round's copy goes.
+    scratch: &'a Path,
+    /// The plan both arms run.
+    plan: &'a inillucent_compat::perf::Plan,
+    /// The page size, the pool size and which arms were asked for.
+    settings: &'a Settings,
+}
+
+impl<'a> ArmInputs<'a> {
+    /// Gathers what the second arm needs for every round of a run.
+    ///
+    /// @param fixture - the pristine SQLite database
+    /// @param scratch - where each round's copy goes
+    /// @param plan - the plan both arms run
+    /// @param settings - the page size, the pool size and the arms asked for
+    fn new(
+        fixture: &'a Path,
+        scratch: &'a Path,
+        plan: &'a inillucent_compat::perf::Plan,
+        settings: &'a Settings,
+    ) -> ArmInputs<'a> {
+        ArmInputs {
+            fixture,
+            scratch,
+            plan,
+            settings,
+        }
+    }
+}
+
+/// Prints the two ways in against each other, when both of them ran.
+///
+/// @param pairs - one entry per workload
+fn report_the_two_ways_in(pairs: &[Paired]) {
+    if pairs.is_empty() || report_api_arms(pairs) {
+        return;
+    }
+    println!("  at least one workload is outside the 20% bar; section 4.3.10 asks for the");
+    println!("  difference to be explained on docs/performance.md rather than hidden");
+}
+
+/// Returns one empty pairing slot per workload, or nothing when only one arm runs.
+///
+/// **The pairing is what makes the second arm worth having.** The two ways in
+/// differ by about thirteen microseconds a statement, and a workload whose
+/// whole cost is a few hundred nanoseconds cannot show that against a run of
+/// this binary taken at a different time on a machine that moved.
+///
+/// @param settings - the command line, for which arms were asked for
+/// @param plan - the plan, for the workloads
+fn api_slots(settings: &Settings, plan: &inillucent_compat::perf::Plan) -> Vec<Paired> {
+    if settings.api != Api::Both {
+        return Vec::new();
+    }
+    plan.workloads
+        .iter()
+        .map(|workload| Paired {
+            workload: workload.name.clone(),
+            family: workload.family.clone(),
+            pairs: Vec::with_capacity(settings.rounds as usize),
+            agreed: true,
+            disagreement: String::new(),
+        })
+        .collect()
+}
+
+/// Runs the `Connection`-driven arm for one round and pairs it with the pipeline's.
+///
+/// Does nothing when `pairs` is empty, which is what `--api pipeline` and
+/// `--api connection` leave it as.
+///
+/// @param pairs - the accumulating per-workload pairs
+/// @param inputs - the fixture, the scratch area, the plan and the settings
+/// @param round - which round this is, for the message
+/// @param pipeline - what the pipeline arm produced this round
+/// @param pipeline_state - the state questions the pipeline arm left behind
+fn run_the_connection_arm(
+    pairs: &mut [Paired],
+    inputs: &ArmInputs<'_>,
+    round: u32,
+    pipeline: &[Sample],
+    pipeline_state: &[String],
+) -> Result<(), String> {
+    if pairs.is_empty() {
+        return Ok(());
+    }
+    // After the pipeline arm and the reference, so the connection arm is never
+    // the first thing to touch a cold fixture in a round.
+    let (through_api, api_state, _) =
+        time_through_a_connection(inputs.fixture, inputs.scratch, inputs.plan, inputs.settings)?;
+    if api_state != pipeline_state {
+        for entry in pairs.iter_mut() {
+            entry.agreed = false;
+            entry.disagreement = format!(
+                "round {round}: the connection arm left {api_state:?} where the pipeline arm                  left {pipeline_state:?}"
+            );
+        }
+        return Ok(());
+    }
+    pair_the_two_arms(pairs, inputs.plan, pipeline, &through_api);
+    Ok(())
+}
+
+/// Records one round's engine arm against the reference, workload by workload.
+///
+/// **Lifted out of [`run`] beside [`pair_the_two_arms`], which is the same
+/// shape.** One of the two pairings was a named function and the other was
+/// twenty-eight lines inside the round loop, so a reader comparing them had to
+/// hold one of them in their head. They now read the same way and differ only
+/// where they mean to: a missing sample from this engine is a workload that
+/// was refused and is recorded as such, and a missing sample from the
+/// reference is a harness fault and stops the run.
+///
+/// @param measured - one entry per workload, accumulating rounds
+/// @param plan - the plan, for the workload order
+/// @param ours - what this engine produced this round
+/// @param theirs - what the reference produced this round
+fn pair_against_the_reference(
+    measured: &mut [Paired],
+    plan: &inillucent_compat::perf::Plan,
+    ours: &[Sample],
+    theirs: &[Sample],
+) -> Result<(), String> {
+    for (index, workload) in plan.workloads.iter().enumerate() {
+        let Some(slot) = measured.get_mut(index) else {
+            continue;
+        };
+        let Some(mine) = ours.iter().find(|sample| sample.workload == workload.name) else {
+            slot.agreed = false;
+            slot.disagreement = "the new engine produced no sample".to_string();
+            continue;
+        };
+        let Some(reference) = theirs
+            .iter()
+            .find(|sample| sample.workload == workload.name)
+        else {
+            return Err(format!("{}: sqlite produced no sample", workload.name));
+        };
+        // A row-producing workload is compared by its digest. A write produces
+        // no rows on either arm, so comparing the digests of two empty result
+        // sets proves nothing - what those are compared by is the state
+        // questions the caller asks at the end of the round.
+        if !workload.mutates && (mine.digest != reference.digest || mine.rows != reference.rows) {
+            slot.agreed = false;
+            slot.disagreement = format!(
+                "inillucent {} rows digest {:016x} against sqlite {} rows digest {:016x}",
+                mine.rows, mine.digest, reference.rows, reference.digest
+            );
+            continue;
+        }
+        slot.pairs.push((mine.nanos, reference.nanos));
+    }
+    Ok(())
+}
+
+/// Records one round's two engine arms against each other, workload by workload.
+///
+/// **The digests are compared before the times, the way the reference pairing
+/// does it.** Two arms that disagree about the answer are not two measurements
+/// of the same thing, and a ratio between them would be a number about a
+/// difference nobody has looked at.
+///
+/// @param pairs - one entry per workload, accumulating rounds
+/// @param plan - the plan, for the workload order
+/// @param pipeline - what the pipeline arm produced this round
+/// @param connection - what the connection arm produced this round
+fn pair_the_two_arms(
+    pairs: &mut [Paired],
+    plan: &inillucent_compat::perf::Plan,
+    pipeline: &[Sample],
+    connection: &[Sample],
+) {
+    for (index, workload) in plan.workloads.iter().enumerate() {
+        let Some(slot) = pairs.get_mut(index) else {
+            continue;
+        };
+        let (Some(first), Some(second)) = (
+            pipeline
+                .iter()
+                .find(|sample| sample.workload == workload.name),
+            connection
+                .iter()
+                .find(|sample| sample.workload == workload.name),
+        ) else {
+            slot.agreed = false;
+            slot.disagreement = "one of the two arms produced no sample".to_string();
+            continue;
+        };
+        if !workload.mutates && (first.digest != second.digest || first.rows != second.rows) {
+            slot.agreed = false;
+            slot.disagreement = format!(
+                "the pipeline read {} rows digest {:016x} and the connection read {} rows \
+                 digest {:016x}",
+                first.rows, first.digest, second.rows, second.digest
+            );
+            continue;
+        }
+        slot.pairs.push((first.nanos, second.nanos));
+    }
+}
+
+/// Prints the pipeline arm against the connection arm, and whether they agree
+/// to within the bar.
+///
+/// **Twenty per cent, because that is what §4.3.10 asks for**: the two arms
+/// within 20%, or the difference explained on the page. A workload outside it
+/// is not a failure of the gate - it is the cost of the shipped API over the
+/// shortest path to an answer, and naming it is the point of having the arm.
+///
+/// The ratio printed is the connection arm over the pipeline arm, so 1.10x
+/// means the shipped API costs ten per cent more. That direction is the
+/// opposite of the SQLite table's on purpose: this one is a cost and that one
+/// is a speedup, and a single column that meant both would be read wrong.
+///
+/// @param pairs - one entry per workload
+/// @returns whether every workload stayed within the bar
+fn report_api_arms(pairs: &[Paired]) -> bool {
+    /// How far apart the two arms may be before the difference has to be
+    /// explained rather than reported (task-2066 §4.3.10).
+    const BAR: f64 = 1.20;
+
+    println!();
+    println!("## the two ways in: `Connection` over pipeline");
+    println!(
+        "  {:<24} {:>14} {:>14} {:>9}  within {:.0}%",
+        "workload",
+        "pipeline ns",
+        "connection ns",
+        "cost",
+        (BAR - 1.0) * 100.0
+    );
+    let mut every_workload_within = true;
+    for entry in pairs {
+        if !entry.agreed {
+            println!("  {:<24} {}", entry.workload, entry.disagreement);
+            every_workload_within = false;
+            continue;
+        }
+        if entry.pairs.is_empty() {
+            continue;
+        }
+        // `medians` names its two sides "ours" and "theirs" because the pairing
+        // it was written for is against SQLite. Here the pair is the two ways
+        // into this engine, in the order `pair_the_two_arms` pushes them.
+        let (pipeline, connection) = entry.medians();
+        let cost = if pipeline > 0.0 {
+            connection / pipeline
+        } else {
+            f64::NAN
+        };
+        let within = cost.is_finite() && cost <= BAR;
+        every_workload_within = every_workload_within && within;
+        println!(
+            "  {:<24} {pipeline:>14.1} {connection:>14.1} {cost:>8.2}x  {}",
+            entry.workload,
+            if within { "yes" } else { "NO" }
+        );
+    }
+    every_workload_within
 }
 
 /// Returns which breakdowns a command line asked for.
