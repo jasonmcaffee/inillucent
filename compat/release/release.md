@@ -1,64 +1,54 @@
 # inillucent release candidate
 
-> **These are the `release` gate's own output files, taken on the engine that came
-> before the rearchitecture, and they are kept as that run's record. They are not the current
-> numbers and they are not edited by hand.** The engine measured here was slower than SQLite on
-> every family; the shipping engine is **326% faster** weighted over the same ten families, with
-> no family below the contract's 1.00x floor. The current run is
-> [docs/performance.md](../../docs/performance.md) and
-> [docs/feature-comparison.md](../../docs/feature-comparison.md).
-
 **This candidate does not pass.** The gates it fails are marked below, with the numbers they were judged against. Nothing here argues that a number is acceptable: the bars were written down before the runs.
 
 ## Gates
 
 | gate | verdict | detail |
 |---|---|---|
-| `compatibility` | pass | 264 capabilities pass, 7 not implemented, 0 unsupported claims |
-| `performance.headline.small` | **FAIL** | weighted geometric mean 0.316x, lower bound 0.313x against a bound of 1.50x |
-| `performance.floors.small` | **FAIL** | below the 0.90x floor: open.prepare at 0.151x, read.point at 0.764x, read.range at 0.249x, read.analytical at 0.108x, read.join at 0.234x, write at 0.236x, transaction at 0.386x, schema at 0.249x, extension at 0.108x, large.values at 0.780x |
-| `performance.headline.medium` | **FAIL** | weighted geometric mean 0.232x, lower bound 0.229x against a bound of 1.50x |
-| `performance.floors.medium` | **FAIL** | below the 0.90x floor: open.prepare at 0.150x, read.point at 0.558x, read.range at 0.223x, read.analytical at 0.046x, read.join at 0.154x, write at 0.156x, transaction at 0.309x, schema at 0.070x, extension at 0.106x, large.values at 0.697x |
-| `performance.headline.large` | **FAIL** | weighted geometric mean 0.260x, lower bound 0.257x against a bound of 1.50x |
-| `performance.floors.large` | **FAIL** | below the 0.90x floor: open.prepare at 0.145x, read.point at 0.697x, read.range at 0.217x, read.analytical at 0.044x, read.join at 0.142x, write at 0.274x, transaction at 0.265x, schema at 0.019x, extension at 0.168x |
-| `performance.regressions` | pass | no workload has been slower than its best for two consecutive runs |
-| `artifacts` | pass | 24 artifacts present and digested |
+| `compatibility` | pass | 263 capabilities pass, 13 not implemented, 0 unsupported claims |
+| `checkpoint` | **FAIL** | worst commit over median: scheduled 19.3x, all_at_once 20.0x (bar 10x) |
+| `performance` | **FAIL** | no scorecard has been run |
+| `artifacts` | **FAIL** | missing: target/release/inillucent-shell.exe, target/release/inillucent-migrate.exe, target/release/inillucent_driver_capi.dll, _agent_output/measurements/migrate/release/corpus.db.migration-report.md, _agent_output/measurements/migrate/release/corpus.db.migration-manifest, _agent_output/measurements/migrate/full/corpus.db.migration-report.md, _agent_output/measurements/scorecard/scorecard.md, _agent_output/measurements/scorecard/arm-no-covering-index.md, _agent_output/measurements/scorecard/arm-no-indexed-write.md, _agent_output/measurements/scorecard/arm-no-ordered-walk.md, _agent_output/measurements/scorecard/arm-no-streaming-group.md, _agent_output/measurements/scorecard/arm-no-fused-bytecode.md, _agent_output/measurements/scorecard/scorecard.json, _agent_output/measurements/scorecard/history.jsonl, _agent_output/measurements/scorecard/dashboard.md |
 
 ## Supported platforms
 
 | platform | evidence |
 |---|---|
-| `windows-x86_64` (this machine) | compatibility evidence and a performance scorecard |
+| `windows-x86_64` (this machine) | compatibility evidence only |
 | `linux-x86_64` | compatibility evidence only |
 
 ## Artifacts
 
 | file | bytes | sha256 | what it is |
 |---|---:|---|---|
-| `target/release/inillucent-shell.exe` | 4616192 | `a3131fceec1713e8264e12ea05fa37d0006f686f10a6d87df220c7c29c141f82` | the SQLite-like shell |
-| `target/release/inillucent-migrate.exe` | 4819456 | `d299e13f6b8a514a3b7edb4c575a12de000ea246f54ca2277374e28910dea41c` | the resumable copy-and-verify migration tool |
-| `target/release/inillucent_capi.dll` | 5191168 | `aced63169eec0b21982611fc62001df1230b8ca3602b0877e4a95586bbcb1a13` | the C library, linked against the official sqlite3.h |
-| `compat/compat-report.md` | 22376 | `370ce58ef099525d672f08f9e61bc8f77ac42d5bdb979417afe2858e4a2af1a8` | the compatibility report |
-| `compat/compat-report.json` | 123900 | `b3e0bb18fb2fd85bddd823fd6ddb475be55053498d2b544b194848805a9cbade` | the same, machine readable |
-| `compat/sqlite-3.53.4.toml` | 118547 | `e29133cdfae4b172740a9902a12a34f0b6e66b0f419cce6e62df505e9ece0f92` | the parity manifest the report is generated from |
-| `compat/perf/contract.toml` | 2297 | `69b283d73d8ec7cc397239c44e57af595310bcb2e2ab8af81fc2104b9389300f` | the performance contract: weights, floors and the headline bound |
-| `docs/reference-register.toml` | 3596 | `9fb2ff1d779daf90894a12f48a005be1867b8159938afd5fd33221d517f6c832` | every external project consulted, and in what capacity |
-| `docs/invariants/layering.toml` | 12285 | `0430e44804bbb77eaeebf0e1f417cfe866909e9045da607c9f0a1d0876930bd6` | the dependency-direction contract |
-| `compat/baseline/inillucent-core-baseline.json` | 4982 | `e133fb06cd28d8108a7e91061016d2fa2baecd881b6bb98b5c286756755ddf2c` | the retrieval engine's frozen baseline |
-| `compat/baseline/inillucent-core-amendments.toml` | 835 | `92f51827b47a4beb252039cc412b0447ab2aa098e4f18de8bac1eea995e395fa` | every declared change to it, with its reason |
-| `compat/release/migrate-release-corpus.db.migration-report.md` | 3095 | `cff76ffb702cebb35e56c0450eff9a9ad7c2f8a7d73089eac509e57c5a4d224a` | the migration report for an index of the repository's own prose, at release size |
-| `compat/release/migrate-release-corpus.db.migration-manifest` | 3122 | `11bfa5ed5073ed88998033218ae2d36f00a799c634647646eb0a5b1096f5449f` | that migration's append-only manifest, which is what a resume reads |
-| `compat/release/migrate-full-corpus.db.migration-report.md` | 3054 | `678da01cdcbc77b438d7da6144647ebea1b0a6ab067510bfff3a29eafc123a4c` | the migration report for the small corpus that has one of everything |
-| `compat/release/scorecard.md` | 12173 | `96297b09fe12a48e5c58148ee7813765bf8ef8b078c53c86082afc0dc13be9fd` | the performance scorecard |
-| `compat/release/arm-no-covering-index.md` | 4653 | `9e45285a9950d1304549d6b48dba10377af01ba7bf24549ae888199e9656108a` | the same scorecard with the covering-index lever switched off |
-| `compat/release/arm-no-indexed-write.md` | 4653 | `cded2d67f48e8554d78e5bad2480eb5eefb5587ada9fae330eab1f8d3a864ebf` | the same scorecard with the indexed-write lever switched off |
-| `compat/release/arm-no-ordered-walk.md` | 4647 | `0996462520d6d1391de5cff10ead4ea7d0f4e5858b7367c5f62e45ba91a3777b` | the same scorecard with the ordered-walk lever switched off |
-| `compat/release/arm-no-streaming-group.md` | 4655 | `10b547fc9fcd239a9dbb5a7a78cfd5a6094d3022d8c00902bb52ba195759825a` | the same scorecard with the streaming-group lever switched off |
-| `compat/release/arm-no-fused-bytecode.md` | 4652 | `addfe46ff42c89fa1a0a90b1927fc30cae828c73124fffb80adf7f00973511b7` | the same scorecard with the fused-bytecode lever switched off |
-| `compat/release/checkpoint-checkpoint.md` | 1688 | `46b7b3eac07f3a1391becedf76a593b37117727732dfe528034ba9913b9f638a` | the checkpoint-scheduling lever, measured against its own arm and left off |
-| `compat/release/scorecard.json` | 20292 | `a36d1135df3e5ddf217273b5f380a25d51ae6cf8e5343f15788cffc260be4698` | the same, machine readable |
-| `compat/release/history.jsonl` | 26363 | `383f9e59f3b776494f01e3513fd480357c03626bdd9a9c09cae49327c7e14072` | the raw performance history, one line per workload per run |
-| `compat/release/dashboard.md` | 4426 | `859aa1d3a8e114830c5aef7f71ff067b32cb14abb0074fbb5eac3a965dd6413d` | every workload's ratio across every recorded run |
+| `compat/compat-report.md` | 22981 | `b7a6648d5eaa83f94c149ebe7c2a4266ad5dcdb06cd5af134911feedbb7e0b6e` | the compatibility report |
+| `compat/compat-report.json` | 125458 | `6ec3ea6e0160c0dd877f3996c4ac5a6eb9d167d5bfc663b4ce2906ae44a3388c` | the same, machine readable |
+| `compat/sqlite-3.53.4.toml` | 136078 | `1985448972032b6eef5a6eb74765d22559220bfa740b09d91ebd7228ca11f6a4` | the parity manifest the report is generated from |
+| `compat/perf/contract.toml` | 4745 | `8e55151807cfa80b187743882773d760ef042eda45ad6a912b576afeaf048d59` | the performance contract: weights, floors and the headline bound |
+| `docs/reference-register.toml` | 3783 | `ee2deae860ab3c6f73651e2b30c90deb7eeb79d3cbc14e05e209583f59db4fef` | every external project consulted, and in what capacity |
+| `docs/invariants/layering.toml` | 42879 | `6952834525586310f939c2b3abf88950f68478d661698cbcafd06717bd1ab54a` | the dependency-direction contract |
+| `compat/baseline/inillucent-core-baseline.json` | 6068 | `3e13be695a40b4eb200153a15effbbebcdf7f25005487c37428471de605d8437` | the retrieval engine's frozen baseline |
+| `compat/baseline/inillucent-core-amendments.toml` | 27604 | `6204e097f5eb783ec088161b5902bf73d138398badd79f5ce0b653d1084f14f4` | every declared change to it, with its reason |
+| `compat/release/checkpoint-checkpoint.md` | 1225 | `1e2dff4f9d16bea866936e718b22cb424dde6cf25e8cda8cc995ebe1ce93c286` | the checkpoint-scheduling lever, measured against its own arm and left off |
+
+Not present in this candidate:
+
+- `target/release/inillucent-shell.exe`
+- `target/release/inillucent-migrate.exe`
+- `target/release/inillucent_driver_capi.dll`
+- `_agent_output/measurements/migrate/release/corpus.db.migration-report.md`
+- `_agent_output/measurements/migrate/release/corpus.db.migration-manifest`
+- `_agent_output/measurements/migrate/full/corpus.db.migration-report.md`
+- `_agent_output/measurements/scorecard/scorecard.md`
+- `_agent_output/measurements/scorecard/arm-no-covering-index.md`
+- `_agent_output/measurements/scorecard/arm-no-indexed-write.md`
+- `_agent_output/measurements/scorecard/arm-no-ordered-walk.md`
+- `_agent_output/measurements/scorecard/arm-no-streaming-group.md`
+- `_agent_output/measurements/scorecard/arm-no-fused-bytecode.md`
+- `_agent_output/measurements/scorecard/scorecard.json`
+- `_agent_output/measurements/scorecard/history.jsonl`
+- `_agent_output/measurements/scorecard/dashboard.md`
 
 ## Reproducing this
 
@@ -74,6 +64,7 @@ A clean machine with a Rust toolchain and a C compiler reproduces every artifact
 | each optimization's A/B arm | `cargo run --release -p inillucent-compat --bin inillucent-scorecard -- --scale small --rounds 30 --label <name> --disable covering-index   # then --disable indexed-write` |
 | the storage and write profiles | `cargo run --release -p inillucent-compat --bin inillucent-storageprofile && cargo run --release -p inillucent-compat --bin inillucent-writeprofile` |
 | a legacy index migration | `cargo run --release -p inillucent-migrate -- <index-dir> <destination.db> --sqlite .sqlite-ref/3.53.4/shell/sqlite3` |
+| the checkpoint distribution | `cargo run --release -p inillucent-compat --bin inillucent-checkpointperf` |
 | this release candidate | `cargo run --release -p inillucent-compat --bin inillucent-release` |
 
 ## Upgrade and downgrade

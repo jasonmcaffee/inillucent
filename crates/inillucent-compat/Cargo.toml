@@ -249,6 +249,10 @@ name = "inillucent-checkpointperf"
 path = "src/bin/checkpointperf.rs"
 
 [[bin]]
+name = "inillucent-workloadperf"
+path = "src/bin/workloadperf.rs"
+
+[[bin]]
 name = "inillucent-writelogattrib"
 path = "src/bin/writelogattrib.rs"
 

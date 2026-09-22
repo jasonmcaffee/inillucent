@@ -30,7 +30,7 @@ use inillucent_compat::{platform_name, workspace_root};
 const PLATFORMS: [&str; 2] = ["windows-x86_64", "linux-x86_64"];
 
 /// The commands that reproduce every artifact, in the order they are run.
-const COMMANDS: [(&str, &str); 9] = [
+const COMMANDS: [(&str, &str); 11] = [
     (
         "the pinned reference",
         "tools/sqlite-reference.ps1   # or tools/sqlite-reference.sh on POSIX",
@@ -66,6 +66,14 @@ const COMMANDS: [(&str, &str); 9] = [
         "a legacy index migration",
         "cargo run --release -p inillucent-migrate -- <index-dir> <destination.db> --sqlite \
          .sqlite-ref/3.53.4/shell/sqlite3",
+    ),
+    (
+        "the checkpoint distribution",
+        "cargo run --release -p inillucent-compat --bin inillucent-checkpointperf",
+    ),
+    (
+        "one application's own statements",
+        "cargo run --release -p inillucent-compat --bin inillucent-workloadperf",
     ),
     (
         "this release candidate",
@@ -345,6 +353,7 @@ fn render(
     let latest = latest_label(history);
     let mut gates: Vec<(String, bool, String)> = Vec::new();
     gates.push(compatibility_gate());
+    gates.push(checkpoint_gate());
     gates.extend(performance_gates(contract, history, latest.as_deref()));
     gates.push((
         "artifacts".to_string(),
@@ -520,6 +529,72 @@ fn compatibility_gate() -> (String, bool, String) {
         "{pass} capabilities pass, {missing} not implemented, {problems} unsupported claims"
     );
     ("compatibility".to_string(), problems == 0, detail)
+}
+
+/// Returns the checkpoint gate: no arm's worst commit past ten times its median.
+///
+/// **The worst commit is the one an application notices** (task-2066 §4.3.11).
+/// `inillucent-checkpointperf` has measured it since it was written and was in
+/// no release command list, so nothing read it: a write path whose median is a
+/// millisecond and whose worst is forty is a write path with a stall in it,
+/// and a stall is invisible in every average this release already reports.
+///
+/// Ten times, which is the section's number. The gate is reported and, like
+/// every other gate here, it decides nothing on its own - `release.rs` reports
+/// what the runs recorded and there is no argument in this file for why a
+/// number is acceptable.
+///
+/// Absent numbers are a failed gate rather than a passed one, for the reason
+/// the compatibility gate gives: a claim without evidence is the only kind of
+/// dishonesty a report can commit.
+fn checkpoint_gate() -> (String, bool, String) {
+    /// How far past the median the worst commit may sit.
+    const BAR: f64 = 10.0;
+
+    let path = workspace_root().join("_agent_output/measurements/checkpoint/checkpoint.tsv");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return (
+            "checkpoint".to_string(),
+            false,
+            "no checkpoint profile has been run; see the command list".to_string(),
+        );
+    };
+    let mut worst_ratio: f64 = 0.0;
+    let mut said = String::new();
+    let mut read = 0usize;
+    for line in text.lines().skip(1) {
+        let mut fields = line.split('\t');
+        let (Some(arm), Some(median), Some(worst)) = (fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let (Ok(median), Ok(worst)) = (median.trim().parse::<f64>(), worst.trim().parse::<f64>())
+        else {
+            continue;
+        };
+        if median <= 0.0 {
+            continue;
+        }
+        read = read.saturating_add(1);
+        let ratio = worst / median;
+        worst_ratio = worst_ratio.max(ratio);
+        if !said.is_empty() {
+            said.push_str(", ");
+        }
+        said.push_str(&format!("{arm} {ratio:.1}x"));
+    }
+    if read == 0 {
+        return (
+            "checkpoint".to_string(),
+            false,
+            format!("{} names no arm this could read", path.display()),
+        );
+    }
+    (
+        "checkpoint".to_string(),
+        worst_ratio <= BAR,
+        format!("worst commit over median: {said} (bar {BAR:.0}x)"),
+    )
 }
 
 /// Returns the label of the most recent scorecard run.

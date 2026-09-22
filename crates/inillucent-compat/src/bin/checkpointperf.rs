@@ -74,6 +74,22 @@ fn main() -> ExitCode {
     }
     let report = render(&scheduled, &all_at_once);
     println!("{report}");
+    // **Beside the table, for the release gate to read** (task-2066 §4.3.11).
+    // The markdown is for a person; `inillucent-release` needs two numbers per
+    // arm and should not be parsing a table to get them.
+    let numbers = format!(
+        "arm\tmedian_us\tworst_us\n\
+         scheduled\t{:.1}\t{:.1}\n\
+         all_at_once\t{:.1}\t{:.1}\n",
+        across(&scheduled, |sample| sample.at(0.50)),
+        across(&scheduled, |sample| sample.at(1.0)),
+        across(&all_at_once, |sample| sample.at(0.50)),
+        across(&all_at_once, |sample| sample.at(1.0)),
+    );
+    if let Err(error) = std::fs::write(out.join("checkpoint.tsv"), &numbers) {
+        eprintln!("cannot write the checkpoint numbers: {error}");
+        return ExitCode::FAILURE;
+    }
     if let Err(error) = std::fs::write(out.join("checkpoint.md"), &report) {
         eprintln!("cannot write the report: {error}");
         return ExitCode::FAILURE;
