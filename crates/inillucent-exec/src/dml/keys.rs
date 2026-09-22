@@ -87,6 +87,7 @@ pub fn keys_query_joined(
         });
     }
     let mut sources = vec![BoundSource {
+        index_hint: inillucent_sql::ast::IndexHint::None,
         id: source,
         rows: SourceRows::Table,
         table: std::rc::Rc::new(table.clone()),
@@ -137,6 +138,7 @@ pub fn module_keys_query(
 ) -> BoundSelect {
     BoundSelect {
         sources: vec![BoundSource {
+            index_hint: inillucent_sql::ast::IndexHint::None,
             id: source,
             rows: SourceRows::Table,
             table: std::rc::Rc::new(table.clone()),

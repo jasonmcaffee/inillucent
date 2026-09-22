@@ -179,6 +179,7 @@ impl Binder<'_> {
         };
         let id = self.sources.len();
         self.sources.push(BoundSource {
+            index_hint: crate::ast::IndexHint::None,
             id,
             rows: SourceRows::RecursiveSelf { cte },
             table: std::rc::Rc::new(table),
@@ -240,6 +241,7 @@ impl Binder<'_> {
         // that a self-reference inside the step arm can name the store it will
         // read without the two being bound in an impossible order.
         self.sources.push(BoundSource {
+            index_hint: crate::ast::IndexHint::None,
             id,
             rows: SourceRows::Table,
             table: std::rc::Rc::new(TableInfo::subquery(alias.clone(), 0, Vec::new())),
@@ -299,6 +301,7 @@ impl Binder<'_> {
         outcome?;
 
         let mut source = BoundSource {
+            index_hint: crate::ast::IndexHint::None,
             id,
             rows: SourceRows::Recursive(Box::new(RecursiveBody { seeds, steps })),
             table: std::rc::Rc::new(table),

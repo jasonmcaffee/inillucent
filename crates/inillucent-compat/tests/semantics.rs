@@ -2309,89 +2309,312 @@ fn run(program: &PathBuf, area: &PathBuf, script: &str) -> String {
     text.trim().to_string()
 }
 
-/// The whole table, run once, with both directions checked.
+/// The groups the categories are graded in, and what each one is about.
 ///
-/// One test rather than one per case, because the value of the table is the
-/// count: "89 of 92 agree" is the number this ticket moved, and a suite of 92
-/// tests reports it as 92 lines nobody adds up.
-#[test]
-fn every_probed_construct_answers_as_the_table_says() {
-    let (Some(reference), Some(ours)) = (reference(), ours()) else {
-        inillucent_compat::differential::skipping("a shell is missing");
-        return;
-    };
+/// **Eight tests rather than one, and rather than twenty-three (task-2066
+/// section 4.4.13).** The table holds 235 cases in 23 categories, each one
+/// spawning two shells and comparing their bytes, and all of them used to run
+/// in a single `#[test]` - one libtest thread, start to finish, with a failure
+/// that named the table rather than the part of it that moved. Twenty-three
+/// tests would parallelise further and would be twenty-three functions whose
+/// doc comments all said the same thing; eight groups is where the categories
+/// stop being arbitrary and start being about something a reader can name.
+///
+/// A category that belongs to no group is graded by nothing, so
+/// `every_category_in_the_table_is_graded_by_a_group` fails when one is added
+/// and not placed here. It found one on the first run after the split: `fts5`
+/// had seven cases and was named by no group, which is the state the whole
+/// table would have been left in if the guard had been left out.
+const GROUPS: &[(&str, &[&str])] = &[
+    ("reading rows", &["read", "join", "desc"]),
+    ("the command line's own output", &["surface"]),
+    ("writing rows", &["constraint", "write", "dml", "trigger"]),
+    ("the interactive shell", &["shell", "explain"]),
+    (
+        "pragmas, schema and transactions",
+        &["pragma", "ddl", "txn"],
+    ),
+    (
+        "affinity, types and operators",
+        &["affinity", "types", "operator", "syntax"],
+    ),
+    ("the engine's own semantics", &["semantics", "differs"]),
+    (
+        "the built-in functions",
+        &["ext", "extension", "json", "time"],
+    ),
+    ("full text search", &["fts5"]),
+];
+
+/// What one group's cases did.
+struct Graded {
+    /// How many of the group's cases the two shells answered the same way.
+    agreed: usize,
+    /// How many cases the group holds.
+    total: usize,
+    /// One line per case whose disposition is no longer true of it.
+    wrong: Vec<String>,
+}
+
+/// Runs every case of one group and reports what it found.
+///
+/// **Every case is run before anything is asserted.** The first disagreement
+/// does not stop the group, because a change that moves one construct usually
+/// moves several and a reader fixing them one run at a time learns that the
+/// hard way.
+///
+/// @param group - the group's name, as `GROUPS` spells it
+/// @param reference - the pinned SQLite shell
+/// @param ours - the shell this repository builds
+fn grade(group: &str, reference: &PathBuf, ours: &PathBuf) -> Graded {
     let area = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("semantics");
-    let mut agreed = 0usize;
-    let mut wrong: Vec<String> = Vec::new();
-    for case in CASES {
-        let theirs = run(
-            &reference,
-            &area.join(case.name).join("sqlite"),
-            case.script,
-        );
-        let mine = run(&ours, &area.join(case.name).join("inillucent"), case.script);
+    let kinds = kinds_of(group);
+    let mut graded = Graded {
+        agreed: 0,
+        total: 0,
+        wrong: Vec::new(),
+    };
+    for case in CASES.iter().filter(|case| kinds.contains(&case.kind)) {
+        graded.total += 1;
+        let theirs = run(reference, &area.join(case.name).join("sqlite"), case.script);
+        let mine = run(ours, &area.join(case.name).join("inillucent"), case.script);
         let same = theirs == mine;
         if same {
-            agreed += 1;
+            graded.agreed += 1;
         }
         match (case.expect, same) {
-            (Agrees, false) => wrong.push(format!(
-                "{} [{}] was agreeing and no longer does
-  sqlite: {:?}
-  ours  : {:?}",
+            (Agrees, false) => graded.wrong.push(format!(
+                "{} [{}] was agreeing and no longer does\n  sqlite: {:?}\n  ours  : {:?}",
                 case.name, case.kind, theirs, mine
             )),
-            // **A case that starts agreeing is a failure too.** It is the whole
-            // point of declaring the disposition: the row has to move, or the
-            // next reader is told this construct is still broken.
-            (Differs, true) => wrong.push(format!(
+            // **A case that starts agreeing is a failure too.** It is why the
+            // disposition is declared at all: the row has to move, or the next
+            // reader is told this construct is still broken.
+            (Differs, true) => graded.wrong.push(format!(
                 "{} [{}] now agrees - move its row to Agrees",
                 case.name, case.kind
             )),
             _ => {}
         }
     }
+    graded
+}
+
+/// The categories one group covers.
+///
+/// @param group - the group's name, as `GROUPS` spells it
+fn kinds_of(group: &str) -> &'static [&'static str] {
+    GROUPS
+        .iter()
+        .find(|(name, _)| *name == group)
+        .map(|(_, kinds)| *kinds)
+        .unwrap_or(&[])
+}
+
+/// Grades one group and fails with everything it found.
+///
+/// **The count is asserted as well as the disagreements**, because the value of
+/// this table is a number - "89 of 92 agree" is what a reader of
+/// `docs/feature-comparison.md` is comparing against - and a group that ran no
+/// cases at all would otherwise report a pass. The number is now per group
+/// rather than for the whole table; the whole table's number is what
+/// `every_category_in_the_table_is_graded_by_a_group` keeps honest, by making
+/// the eight groups add up to all 235 rows.
+///
+/// @param group - the group's name, as `GROUPS` spells it
+fn check(group: &str) {
+    let (Some(reference), Some(ours)) = (reference(), ours()) else {
+        inillucent_compat::differential::skipping("a shell is missing");
+        return;
+    };
+    let graded = grade(group, &reference, &ours);
     assert!(
-        wrong.is_empty(),
-        "{} of {} agreed
-{}",
-        agreed,
-        CASES.len(),
-        wrong.join(
-            "
-"
-        )
+        graded.total > 0,
+        "the group '{group}' graded no cases at all, so its categories are named in \
+         GROUPS and by no row of the table"
     );
-    // **Counted against what the table declares, not against every case
-    // (task-2026).** This used to assert that all of them agreed, which made
-    // the `Differs` variant impossible to use: a case recorded as a known
-    // difference failed here even though the match above was satisfied. So the
-    // one discipline the file exists for - §1.3 of the testing standard, a
-    // known difference is recorded as a test that asserts it - was the one
-    // thing it could not do, and the two differences below would have had to
-    // be left out of the table and written down somewhere nobody runs.
-    // **And the differences are counted as well (task-2036).** Seven of them are
-    // what `docs/feature-comparison.md` measured and argued for; a table that
-    // lost those rows would agree with itself and say nothing.
-    let declared_differences = CASES
+    assert!(
+        graded.wrong.is_empty(),
+        "{} of {} agreed in '{group}'\n{}",
+        graded.agreed,
+        graded.total,
+        graded.wrong.join("\n")
+    );
+    let declared = CASES
+        .iter()
+        .filter(|case| kinds_of(group).contains(&case.kind) && matches!(case.expect, Agrees))
+        .count();
+    assert_eq!(
+        graded.agreed, declared,
+        "{} of {} agreed in '{group}', and the table declares {declared} that should",
+        graded.agreed, graded.total
+    );
+}
+
+/// The cases about reading rows answer as the table says.
+///
+/// `read`, `join` and `desc`: what a `SELECT` gives back, what an outer join
+/// gives back where there is nothing on the other side, and what a descending
+/// index gives back when the scan and the index disagree about order.
+#[test]
+fn the_cases_about_reading_rows_answer_as_the_table_says() {
+    check("reading rows");
+}
+
+/// The cases about the command line's own output answer as the table says.
+///
+/// `surface` is the largest category and the one least about SQL: how a value
+/// is printed, what a column is called when nobody named it, and what comes out
+/// when a statement produces no rows.
+#[test]
+fn the_cases_about_the_command_lines_output_answer_as_the_table_says() {
+    check("the command line's own output");
+}
+
+/// The cases about writing rows answer as the table says.
+///
+/// `constraint`, `write`, `dml` and `trigger`: what a conflicting write does,
+/// which row it leaves behind, and what `changes()` says afterwards.
+#[test]
+fn the_cases_about_writing_rows_answer_as_the_table_says() {
+    check("writing rows");
+}
+
+/// The cases about the interactive shell answer as the table says.
+///
+/// `shell` and `explain`: the dot commands, and the plan a statement prints
+/// when it is asked to explain itself rather than run.
+#[test]
+fn the_cases_about_the_interactive_shell_answer_as_the_table_says() {
+    check("the interactive shell");
+}
+
+/// The cases about pragmas, schema and transactions answer as the table says.
+///
+/// `pragma`, `ddl` and `txn`: what a pragma answers, what `ALTER TABLE` does to
+/// a schema, and what a rollback leaves.
+#[test]
+fn the_cases_about_pragmas_schema_and_transactions_answer_as_the_table_says() {
+    check("pragmas, schema and transactions");
+}
+
+/// The cases about affinity, types and operators answer as the table says.
+///
+/// `affinity`, `types`, `operator` and `syntax`: the rules that decide what a
+/// value *is* before anything is done with it, which is where two engines that
+/// agree about every statement can still disagree about every answer.
+#[test]
+fn the_cases_about_affinity_types_and_operators_answer_as_the_table_says() {
+    check("affinity, types and operators");
+}
+
+/// The cases about the engine's own semantics answer as the table says.
+///
+/// `semantics` and `differs`: the constructs where this engine and SQLite are
+/// known to answer differently, including the seven
+/// `docs/feature-comparison.md` measured and argued for.
+#[test]
+fn the_cases_about_the_engines_own_semantics_answer_as_the_table_says() {
+    check("the engine's own semantics");
+}
+
+/// The cases about the built-in functions answer as the table says.
+///
+/// `ext`, `extension`, `json` and `time`: the functions that are not part of
+/// the language, where a difference is a difference in one function rather than
+/// in how statements are run.
+#[test]
+fn the_cases_about_the_built_in_functions_answer_as_the_table_says() {
+    check("the built-in functions");
+}
+
+/// The full text search cases answer as the table says.
+///
+/// `fts5`: the virtual table module, its `MATCH` operator and the auxiliary
+/// functions that rank what it returns. It is its own group because it is the
+/// one category here that is not SQL - the statement around it is ordinary and
+/// the whole answer comes from a module.
+#[test]
+fn the_full_text_search_cases_answer_as_the_table_says() {
+    check("full text search");
+}
+
+/// Every category the table uses is graded by one of the groups.
+///
+/// **This is what makes the split safe.** With one test over the whole table, a
+/// new `kind` was graded whether or not anybody thought about it. With eight,
+/// a category named in a case and in no group is a case that runs nowhere and
+/// a suite that reports a pass for it - the exact shape §1.2 of the testing
+/// standard calls a test that cannot fail.
+///
+/// It also checks the other direction: a group naming a category no case uses
+/// is a group that will silently shrink to nothing as rows are renamed.
+#[test]
+fn every_category_in_the_table_is_graded_by_a_group() {
+    let grouped: Vec<&str> = GROUPS
+        .iter()
+        .flat_map(|(_, kinds)| kinds.iter().copied())
+        .collect();
+
+    let mut ungraded: Vec<&str> = CASES
+        .iter()
+        .map(|case| case.kind)
+        .filter(|kind| !grouped.contains(kind))
+        .collect();
+    ungraded.sort_unstable();
+    ungraded.dedup();
+    assert!(
+        ungraded.is_empty(),
+        "these categories are used by a case and named by no group, so their cases are \
+         run by no test: {ungraded:?}"
+    );
+
+    let empty: Vec<&&str> = grouped
+        .iter()
+        .filter(|kind| !CASES.iter().any(|case| case.kind == **kind))
+        .collect();
+    assert!(
+        empty.is_empty(),
+        "these categories are named by a group and used by no case: {empty:?}"
+    );
+
+    let counted: usize = GROUPS
+        .iter()
+        .map(|(name, _)| {
+            CASES
+                .iter()
+                .filter(|case| kinds_of(name).contains(&case.kind))
+                .count()
+        })
+        .sum();
+    assert_eq!(
+        counted,
+        CASES.len(),
+        "the groups add up to {counted} cases and the table holds {}, so a case is \
+         graded twice or not at all",
+        CASES.len()
+    );
+}
+
+/// The table still declares the seven measured differences.
+///
+/// Rule 1.3: a known difference is recorded as a test that asserts it.
+/// `docs/feature-comparison.md` argues for seven, and a table that quietly lost
+/// those rows would agree with itself and say nothing. A difference that the
+/// engine has closed is moved to `Agrees` and its row in the comparison
+/// document goes with it, which is a change somebody makes on purpose.
+///
+/// **This needs no shell**, so it is the one case in this file that grades
+/// something on a machine where the pinned SQLite is not built.
+#[test]
+fn the_table_still_declares_the_seven_measured_differences() {
+    let declared = CASES
         .iter()
         .filter(|case| matches!(case.expect, Differs))
         .count();
     assert!(
-        declared_differences >= 7,
-        "this file declares {declared_differences} differences and \
-         docs/feature-comparison.md records seven, so the table has lost rows rather than \
-         the engine having closed them - a difference that is closed is moved to `Agrees` \
-         and its row in the comparison document goes with it"
-    );
-    let declared_to_agree = CASES
-        .iter()
-        .filter(|case| matches!(case.expect, Agrees))
-        .count();
-    assert_eq!(
-        agreed,
-        declared_to_agree,
-        "{agreed} of {} agreed, and the table declares {declared_to_agree} that should",
-        CASES.len()
+        declared >= 7,
+        "this file declares {declared} differences and docs/feature-comparison.md records \
+         seven, so the table has lost rows rather than the engine having closed them"
     );
 }

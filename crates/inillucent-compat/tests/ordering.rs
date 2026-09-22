@@ -387,3 +387,451 @@ fn the_sort_is_skipped_exactly_where_the_walk_answers_the_order() {
         assert!(builds(sql, what), "this should still collect: {sql}");
     }
 }
+
+/// The pieces the generated strings are built out of.
+///
+/// **Chosen for the four ways a string comparison goes wrong**, not for
+/// coverage of the alphabet. Case, so a `NOCASE` index and a `BINARY` index
+/// disagree about the same pair. A combining mark, so two strings that look
+/// identical are different bytes and must stay in byte order rather than in
+/// reading order. A codepoint outside the basic plane, which is a surrogate
+/// pair to anything comparing UTF-16 and four bytes to anything comparing
+/// UTF-8. And a NUL, which no SQL string literal can carry - it is why every
+/// value here is inserted as a blob cast to text.
+const PIECES: &[&str] = &[
+    "a",
+    "A",
+    "b",
+    "B",
+    "y",
+    "Y",
+    "z",
+    "Z",
+    // é written as one codepoint, and as `e` followed by a combining acute.
+    // They read the same and sort far apart.
+    "\u{e9}",
+    "e\u{301}",
+    // Outside the basic multilingual plane: a surrogate pair in UTF-16, four
+    // bytes in UTF-8, and the last codepoint there is.
+    "\u{1f600}",
+    "\u{10ffff}",
+    // A NUL in the middle of the text.
+    "\0",
+    " ",
+    "0",
+    "9",
+    "_",
+];
+
+/// Builds `count` distinct strings from a seed.
+///
+/// Distinct by bytes, because the `BINARY` arms order by `s` alone: a
+/// duplicate would make the order partial, and two engines are then free to
+/// answer different row orders while both being right.
+///
+/// @param seed - the seed, which a failure prints so the run can be repeated
+/// @param count - how many distinct strings to return
+fn generated_strings(seed: u64, count: usize) -> Vec<String> {
+    let mut rng = inillucent_base::rng::Rng::new(seed);
+    let mut made: Vec<String> = Vec::new();
+    // Bounded, because the alphabet is finite and a caller asking for more
+    // distinct strings than it can build must not spin.
+    for _ in 0..count.saturating_mul(50) {
+        if made.len() >= count {
+            break;
+        }
+        let pieces = 1 + rng.below(4) as usize;
+        let mut built = String::new();
+        for _ in 0..pieces {
+            let at = rng.below(PIECES.len() as u64) as usize;
+            built.push_str(PIECES.get(at).copied().unwrap_or("a"));
+        }
+        if !made.contains(&built) {
+            made.push(built);
+        }
+    }
+    made
+}
+
+/// Renders a string as a SQL expression that carries every byte of it.
+///
+/// A blob literal cast to text, rather than a quoted string: a quoted string
+/// cannot hold a NUL, because the statement is parsed as text that ends at one.
+///
+/// @param value - the string to render
+fn as_text_literal(value: &str) -> String {
+    let hex: String = value
+        .as_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect();
+    if hex.is_empty() {
+        return "''".to_string();
+    }
+    format!("CAST(x'{hex}' AS TEXT)")
+}
+
+/// One generated statement: what to run, which table it reads, and whether the
+/// walk is expected to answer the order without a sort.
+struct Generated {
+    /// The statement.
+    sql: &'static str,
+    /// Whether it reads `g`, which holds every generated string, or `n`, which
+    /// holds only the ones with no NUL in them.
+    every_string: bool,
+    /// Whether the access path is expected to produce the order.
+    walked: bool,
+}
+
+/// The statements the generated arm compares, and what each one is for.
+///
+/// The five together are the three-way section 4.4.14 asks for: index order,
+/// scan order, and the oracle's order.
+///
+/// **The NOCASE arms read a table with no NULs in it**, and that is a recorded
+/// difference rather than a convenience -
+/// `nocase_stops_at_an_embedded_nul_in_sqlite_and_not_here` below is the case
+/// that asserts it.
+const GENERATED: &[Generated] = &[
+    // BINARY, answered by walking `g_s`. The `s >= ''` is what lets the index
+    // be the access path: it is true of every text value, so it selects the
+    // whole table through a seek rather than through a scan.
+    Generated {
+        sql: "SELECT hex(s) FROM g WHERE s >= '' ORDER BY s",
+        every_string: true,
+        walked: true,
+    },
+    // BINARY, the same rows with every index taken away.
+    Generated {
+        sql: "SELECT hex(s) FROM g NOT INDEXED ORDER BY s",
+        every_string: true,
+        walked: false,
+    },
+    // NOCASE, answered by walking `n_s`, whose key is
+    // `(s COLLATE NOCASE, rowid)` - so the `id` tie-break comes out of the
+    // index too. The tie-break is needed because NOCASE makes `a` and `A`
+    // equal, and an order with ties is not an order two engines must agree on.
+    Generated {
+        sql: "SELECT hex(s) FROM n ORDER BY s COLLATE NOCASE, id",
+        every_string: false,
+        walked: true,
+    },
+    // NOCASE, scanned and sorted.
+    Generated {
+        sql: "SELECT hex(s) FROM n NOT INDEXED ORDER BY s COLLATE NOCASE, id",
+        every_string: false,
+        walked: false,
+    },
+    // And backwards, which is a different walk of the same index.
+    Generated {
+        sql: "SELECT hex(s) FROM g WHERE s >= '' ORDER BY s DESC",
+        every_string: true,
+        walked: true,
+    },
+];
+
+/// Builds the generated fixture with the oracle and returns a driver on it.
+///
+/// The rows are written by the oracle, so both engines hold the same bytes:
+/// writing them twice would test two writers as well as two readers, and a
+/// difference could then be in either.
+///
+/// Two tables. `g` holds every generated string under a `BINARY` index. `n`
+/// holds the ones with no NUL in them under a `NOCASE` index, because the two
+/// engines are known to disagree about NOCASE over a string containing a NUL
+/// and that difference has its own case.
+///
+/// @param directory - where to put the database
+/// @param strings - the values to insert
+fn build_generated(directory: &Path, strings: &[String]) -> Option<(Driver, PathBuf)> {
+    let program = oracle_path()?;
+    let database = directory.join("ordering-generated.db");
+    let _ = std::fs::remove_file(&database);
+    let mut driver = Driver::start("sqlite", &program).ok()?;
+    driver.send(&Op::Hello).ok()?;
+    driver
+        .send(&Op::Open(database.display().to_string()))
+        .ok()?;
+    let mut script: Vec<String> = vec![
+        "CREATE TABLE g (id INTEGER PRIMARY KEY, s TEXT)".to_string(),
+        "CREATE INDEX g_s ON g (s)".to_string(),
+        "CREATE TABLE n (id INTEGER PRIMARY KEY, s TEXT)".to_string(),
+        "CREATE INDEX n_s ON n (s COLLATE NOCASE)".to_string(),
+    ];
+    for (at, value) in strings.iter().enumerate() {
+        let id = at.saturating_add(1);
+        let literal = as_text_literal(value);
+        script.push(format!("INSERT INTO g VALUES ({id}, {literal})"));
+        if !value.as_bytes().contains(&0) {
+            script.push(format!("INSERT INTO n VALUES ({id}, {literal})"));
+        }
+    }
+    for statement in &script {
+        let observation = driver.send(&Op::Exec(statement.clone())).ok()?;
+        assert!(
+            observation.ok,
+            "the oracle refused the generated fixture: {statement}: {}",
+            observation.message
+        );
+    }
+    Some((driver, database))
+}
+
+/// **Generated strings order the same by index, by scan, and by the oracle.**
+///
+/// The fixture at the top of this file is eight hand-written names, which is
+/// enough to show a NULL placement or a direction mismatch and not enough to
+/// show a collation one: every one of them is ASCII, and ASCII is where a
+/// wrong comparison is right by accident. This arm generates from an alphabet
+/// built out of the four cases that break a comparison - case variants, a
+/// combining mark, a codepoint outside the basic plane, and a NUL inside the
+/// text (task-2066 section 4.4.14).
+///
+/// **Three answers, not two.** The same rows are read through the index and
+/// with every index taken away, and both are compared to SQLite's. A test that
+/// compared only one of them would pass while the index and the scan disagreed
+/// with each other, which is the failure this is for: an index whose key order
+/// is not the order its collation defines returns the right rows in the wrong
+/// order, and nothing about the result looks wrong.
+///
+/// The plans are asserted too. Without that, both arms could be a sort over a
+/// scan and the comparison would be one route against itself. `NOT INDEXED` is
+/// what makes the scan arm a scan, and it only started working in task-2068 -
+/// before that both arms could have been the same route.
+#[test]
+fn generated_strings_order_the_same_by_index_by_scan_and_by_the_oracle() {
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("ordering");
+    let _ = std::fs::create_dir_all(&directory);
+    // A fixed seed, so a failure is reproducible from the message. The number
+    // is arbitrary; what matters is that it never changes silently.
+    const SEED: u64 = 20_662_014;
+    let strings = generated_strings(SEED, 120);
+    assert!(
+        strings.len() >= 100,
+        "the generator produced {} distinct strings from seed {SEED}, which is too few \
+         to order",
+        strings.len()
+    );
+    let without_nul = strings
+        .iter()
+        .filter(|value| !value.as_bytes().contains(&0))
+        .count();
+    assert!(
+        without_nul < strings.len(),
+        "not one of the {} generated strings holds a NUL, so the alphabet is not \
+         producing the case it was chosen for",
+        strings.len()
+    );
+
+    let Some((mut driver, database)) = build_generated(&directory, &strings) else {
+        inillucent_compat::differential::skipping("the pinned SQLite oracle is not built");
+        return;
+    };
+    let handle = Database::import_with_busy_timeout(&database, std::time::Duration::from_secs(5))
+        .expect("the generated fixture opens");
+    let connection = handle.session().expect("the connection opens");
+
+    let mut failures: Vec<String> = Vec::new();
+    let mut answers: Vec<Vec<String>> = Vec::new();
+    for case in GENERATED {
+        let sql = case.sql;
+        let expected_rows = if case.every_string {
+            strings.len()
+        } else {
+            without_nul
+        };
+        let observation = driver
+            .send(&Op::Query(sql.to_string()))
+            .expect("the oracle answers");
+        assert!(
+            observation.ok,
+            "the oracle refused {sql}: {}",
+            observation.message
+        );
+        let expected: Vec<String> = observation
+            .rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(render_tagged)
+                    .collect::<Vec<String>>()
+                    .join("|")
+            })
+            .collect();
+        assert_eq!(
+            expected.len(),
+            expected_rows,
+            "{sql}: the oracle returned {} rows and the table holds {expected_rows}",
+            expected.len()
+        );
+
+        match inillucent_rows(&connection, sql) {
+            Err(reason) => failures.push(format!("{sql}\n  inillucent failed: {reason}")),
+            Ok(actual) => {
+                if actual != expected {
+                    failures.push(disagreement(sql, &expected, &actual));
+                }
+                answers.push(actual);
+            }
+        }
+
+        // The plan, so that "index order" and "scan order" are two routes and
+        // not one route run twice.
+        let explained = format!("EXPLAIN QUERY PLAN {sql}");
+        let plan = inillucent_rows(&connection, &explained)
+            .unwrap_or_else(|reason| panic!("{explained}: {reason}"))
+            .join("\n");
+        let sorted = plan.contains("USE TEMP B-TREE");
+        if case.walked && sorted {
+            failures.push(format!(
+                "{sql}\n  was expected to be answered by the index walk and was sorted:\n{plan}"
+            ));
+        }
+        if !case.walked && !sorted {
+            failures.push(format!(
+                "{sql}\n  was expected to be scanned and sorted and was not:\n{plan}"
+            ));
+        }
+    }
+
+    // And the two arms of each collation against each other, which is the
+    // comparison the oracle cannot make: it says what the order is, and this
+    // says the engine gives the same one whichever way it got there.
+    for (walk, scan, what) in [(0usize, 1usize, "BINARY"), (2, 3, "NOCASE")] {
+        if let (Some(walked), Some(scanned)) = (answers.get(walk), answers.get(scan)) {
+            if walked != scanned {
+                failures.push(format!(
+                    "the {what} index walk and the {what} scan answered different orders"
+                ));
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "seed {SEED}, {} strings:\n{}",
+        strings.len(),
+        failures.join("\n")
+    );
+}
+
+/// **NOCASE stops at a NUL in SQLite and does not stop here.**
+///
+/// A known difference, recorded as §1.3 of the testing standard requires, and
+/// found by the generated arm above on its first run.
+///
+/// SQLite's `NOCASE` is `sqlite3StrNICmp`, a C string walk whose loop condition
+/// includes `*a != 0`: it stops at the first NUL in the *left* operand and
+/// compares whatever the two bytes are at that position, which for two NULs is
+/// a tie that falls through to the lengths. So for
+/// `x'0061'` (`"\0a"`) against `x'000079'` (`"\0\0y"`), SQLite compares the
+/// leading NULs, stops, ties, and answers by length - putting the two-byte
+/// string first. This engine compares the second byte and puts the three-byte
+/// string first.
+///
+/// **Why it is recorded rather than matched.** `Collation::NoCase` is declared
+/// order preserving in keys, which is what lets an index on
+/// `s COLLATE NOCASE` answer an `ORDER BY` by walking rather than by sorting:
+/// the key encoder lowercases the bytes and their natural order is the
+/// collation's order. SQLite's rule is not reachable that way - under it
+/// `"\0a"` sorts before `"\0\0y"` while their lowercased bytes sort the other
+/// way - so matching it means either dropping that optimisation for every
+/// `NOCASE` index or keeping two orders that disagree. Both are larger than a
+/// test, and the second is the thing this file exists to prevent.
+///
+/// Every string in this workspace that is not built from a blob literal is
+/// free of NULs, so the difference is reachable only through
+/// `CAST(x'..' AS TEXT)` or a bound parameter holding one.
+#[test]
+fn nocase_stops_at_an_embedded_nul_in_sqlite_and_not_here() {
+    let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("ordering");
+    let _ = std::fs::create_dir_all(&directory);
+    let database = directory.join("ordering-nocase-nul.db");
+    let _ = std::fs::remove_file(&database);
+
+    let Some(program) = oracle_path() else {
+        inillucent_compat::differential::skipping("the pinned SQLite oracle is not built");
+        return;
+    };
+    let mut driver = Driver::start("sqlite", &program).expect("the oracle starts");
+    driver.send(&Op::Hello).expect("the oracle answers");
+    driver
+        .send(&Op::Open(database.display().to_string()))
+        .expect("the oracle opens the file");
+    for statement in [
+        "CREATE TABLE p (id INTEGER PRIMARY KEY, s TEXT)",
+        "INSERT INTO p VALUES (1, CAST(x'0061' AS TEXT))",
+        "INSERT INTO p VALUES (2, CAST(x'000079' AS TEXT))",
+    ] {
+        let observation = driver
+            .send(&Op::Exec(statement.to_string()))
+            .expect("the oracle answers");
+        assert!(observation.ok, "{statement}: {}", observation.message);
+    }
+
+    let sql = "SELECT hex(s) FROM p ORDER BY s COLLATE NOCASE";
+    let observation = driver
+        .send(&Op::Query(sql.to_string()))
+        .expect("the oracle answers");
+    let theirs: Vec<String> = observation
+        .rows
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(render_tagged)
+                .collect::<Vec<String>>()
+                .join("|")
+        })
+        .collect();
+    assert_eq!(
+        theirs,
+        vec!["text:0061".to_string(), "text:000079".to_string()],
+        "SQLite no longer stops NOCASE at a NUL, so this difference has closed from \
+         its side"
+    );
+
+    let handle = Database::import_with_busy_timeout(&database, std::time::Duration::from_secs(5))
+        .expect("the fixture opens");
+    let connection = handle.session().expect("the connection opens");
+    let ours = inillucent_rows(&connection, sql).expect("the statement runs");
+    assert_eq!(
+        ours,
+        vec!["text:000079".to_string(), "text:0061".to_string()],
+        "NOCASE over a string holding a NUL now answers something other than the byte \
+         order this engine has always given it. If it answers SQLite's order, the \
+         difference is closed - move the NOCASE arms of \
+         `generated_strings_order_the_same_by_index_by_scan_and_by_the_oracle` back \
+         onto the table that holds every string, and take the row out of \
+         docs/feature-comparison.md."
+    );
+}
+
+/// Describes where two orders first differ, rather than printing both.
+///
+/// A hundred and twenty rows of hex on each side is a message nobody reads.
+/// This names the first position that differs and the two values at it, which
+/// is what a collation failure looks like: everything agrees until one pair.
+///
+/// @param sql - the statement
+/// @param expected - the oracle's rows, in order
+/// @param actual - inillucent's rows, in order
+fn disagreement(sql: &str, expected: &[String], actual: &[String]) -> String {
+    let at = expected
+        .iter()
+        .zip(actual.iter())
+        .position(|(theirs, ours)| theirs != ours);
+    match at {
+        Some(at) => format!(
+            "{sql}\n  rows agree to position {at}, and then\n    sqlite:     {:?}\n    \
+             inillucent: {:?}",
+            expected.get(at),
+            actual.get(at)
+        ),
+        None => format!(
+            "{sql}\n  the orders agree as far as they both go, and there are {} rows \
+             against {}",
+            expected.len(),
+            actual.len()
+        ),
+    }
+}

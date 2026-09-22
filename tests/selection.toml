@@ -2113,6 +2113,31 @@ covers = ["inillucent-compat"]
 # `tools/extract-nikaya-workload.py --check`, so there is one extractor rather
 # than two that agree on the day they are written. Nikaya is not part of this
 # repository, so a machine without it skips rather than passing.
+# The text a real number is printed as (task-2066 section 4.4.14).
+# `differential.rs` compares tagged values, so two renderings of the same double
+# are identical to it by construction, and nothing graded the characters a
+# person actually sees. Needs both shells, like `semantics`.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "numeric_text"
+tier = "differential"
+covers = ["inillucent-scalar", "inillucent-cli"]
+requires = ["shell"]
+
+# The coverage ratchet (task-2066 section 4.4.13). `docs/repository.md` carries
+# what `tools/coverage.mjs` measured, the measurement takes about an hour, and
+# until this target existed nothing read the table it wrote - so a refresh that
+# halved a crate's coverage was a diff nobody queried. It reads the published
+# numbers rather than the code, so it costs nothing and fails when the table is
+# refreshed downwards.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "coverage_floor"
+tier = "tooling"
+covers = ["inillucent-compat"]
+
 [[target]]
 package = "inillucent-compat"
 kind = "test"

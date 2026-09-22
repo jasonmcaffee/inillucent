@@ -1919,12 +1919,24 @@ fn choose_path(
     if let Some(path) = rowid_path(id, position, ids, table, terms, &mut trial) {
         candidates.push((path, trial));
     }
-    let mut trial = consumed.to_vec();
-    let needed = select.columns_read(id);
-    if let Some(path) = index_path(
-        id, position, ids, source, terms, &mut trial, &needed, levers,
-    ) {
-        candidates.push((path, trial));
+    // **`NOT INDEXED` removes the index candidates and nothing else.** SQLite's
+    // rule is that the clause prohibits every index on the table while leaving
+    // the INTEGER PRIMARY KEY usable, which is why `rowid_path` above is
+    // unconditional and this is the one candidate the hint takes away.
+    //
+    // `crates/inillucent-cli/src/diagnose.rs` is what this is for. Its integrity
+    // digest reads every table `SELECT * FROM "t" NOT INDEXED`, and its comment
+    // says that is what makes the digest a fact about the rows - which was not
+    // true while the hint was dropped, because a corrupt index would then be
+    // read in place of the table it was meant to be checked against.
+    if source.index_hint != crate::ast::IndexHint::NotIndexed {
+        let mut trial = consumed.to_vec();
+        let needed = select.columns_read(id);
+        if let Some(path) = index_path(
+            id, position, ids, source, terms, &mut trial, &needed, levers,
+        ) {
+            candidates.push((path, trial));
+        }
     }
     candidates.push((
         AccessPath::TableScan { root: table.root },
@@ -2164,6 +2176,7 @@ pub fn write_path_with(
         return path;
     }
     let source = BoundSource {
+        index_hint: crate::ast::IndexHint::None,
         id: source_id,
         rows: SourceRows::Table,
         table: std::rc::Rc::new(table.clone()),

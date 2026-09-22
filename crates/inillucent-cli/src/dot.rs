@@ -929,18 +929,29 @@ fn version(shell: &mut Shell) {
 }
 
 /// `.show`: the current settings.
+///
+/// **Three of these twelve used to be literals** (task-2066 section 4.4.13):
+/// `explain` was written as `auto`, `stats` as `off` and `output` as `stdout`,
+/// so `.show` answered the same three values whatever `.explain on`,
+/// `.stats on` or `.output FILE` had done. That is worse than not reporting
+/// them. A person runs `.show` to find out where their rows went and what mode
+/// they left the shell in, and the report told them confidently.
+///
+/// `dot_commands.rs` says in its own header that a setter is asserted through
+/// `.show`, so every case that used this report to check a setting was checking
+/// a constant. The three that were constants are now read off the shell.
 fn show(shell: &mut Shell) {
     let lines = vec![
         format!("        echo: {}", on_off(shell.echo)),
         format!("         eqp: {}", on_off(shell.explain_plan)),
-        format!("     explain: auto"),
+        format!("     explain: {}", shell.explain_mode.name()),
         format!("     headers: {}", on_off(shell.layout.headers)),
         format!("        mode: {}", shell.layout.mode.name()),
         format!("   nullvalue: \"{}\"", shell.layout.null),
-        format!("      output: {}", "stdout"),
+        format!("      output: {}", shell.output_target()),
         format!("colseparator: \"{}\"", shell.layout.separator),
         format!("rowseparator: \"{}\"", escape(&shell.layout.row_separator)),
-        format!("       stats: off"),
+        format!("       stats: {}", on_off(shell.stats)),
         format!("       width: {}", widths_text(&shell.layout.widths)),
         format!("    filename: {}", shell.path().to_string()),
     ];

@@ -775,3 +775,325 @@ fn dispatched_names(source: &str) -> Vec<String> {
     names.dedup();
     names
 }
+
+/// Types a script into a shell of its own and returns everything it printed.
+///
+/// `drive` takes a `Case`, whose `input` is a `&'static str`; these cases build
+/// their input at run time, so they go straight to the process runner.
+///
+/// @param shell - the built `inillucent-shell`
+/// @param database - the file to open
+/// @param typed - what to type, without the closing `.quit`
+fn typing(shell: &Path, database: &Path, typed: &str) -> String {
+    let path = database.to_string_lossy().replace('\\', "/");
+    let script = format!("{typed}\n.quit\n");
+    run_with_input(shell, &[path.as_str()], &script).said()
+}
+
+/// **`.help` answers in all five of its ways.**
+///
+/// `show_help` has five arms and `every_dispatched_dot_command_answers`
+/// reaches one of them, because it types `.help` and nothing else. The other
+/// four are what a person actually types: a command name, a prefix, a word they
+/// half remember, and a word that is in none of it.
+///
+/// The `journal` case is the one to keep. `.backup`'s summary line does not
+/// contain the word; one of its indented detail lines does, and the whole entry
+/// is printed because of it. That is the search arm working, and it is the
+/// difference between help that is browsable and help that is searchable.
+#[test]
+fn the_help_command_answers_in_all_five_of_its_ways() {
+    let Some(binary) = program("inillucent") else {
+        return;
+    };
+    let Some(shell) = program("inillucent-shell") else {
+        return;
+    };
+    let area = area("help-modes");
+    let database = populated(&binary, &area);
+    let ask = |pattern: &str| typing(&shell, &database, pattern);
+
+    // One summary line per documented command, and no detail lines.
+    let summary = ask(".help");
+    let named = summary.lines().filter(|line| line.starts_with('.')).count();
+    assert!(
+        named > 50,
+        "`.help` listed {named} commands, and the reference's list is 65 long:\n{summary}"
+    );
+    assert!(
+        summary.contains(".tables"),
+        "`.help` did not list `.tables`:\n{summary}"
+    );
+
+    // The same commands with their detail lines, which is strictly more text.
+    let everything = ask(".help -a");
+    assert!(
+        everything.lines().count() > summary.lines().count(),
+        "`.help -a` printed {} lines and `.help` printed {}, so the detail lines are \
+         being left out of both",
+        everything.lines().count(),
+        summary.lines().count()
+    );
+
+    // The commands deliberately left out of the summary, which is a short list
+    // and a different one.
+    let hidden = ask(".help 0");
+    assert!(
+        hidden.contains(".selftest"),
+        "`.help 0` did not list `.selftest`, which is one of the commands the summary \
+         leaves out:\n{hidden}"
+    );
+    assert!(
+        !hidden.contains(".tables"),
+        "`.help 0` listed `.tables`, which the summary documents, so it is printing the \
+         summary rather than the commands left out of it:\n{hidden}"
+    );
+
+    // One match is answered in full.
+    let one = ask(".help .mode");
+    assert!(
+        one.contains("USAGE: .mode"),
+        "`.help .mode` did not print the long form:\n{one}"
+    );
+    assert!(
+        !one.contains(".tables"),
+        "`.help .mode` printed other commands, so the prefix matched more than it should \
+         have:\n{one}"
+    );
+
+    // Several matches are answered one line each, with no long form.
+    let several = ask(".help .s");
+    for name in [".schema", ".shell", ".stats"] {
+        assert!(
+            several.contains(name),
+            "`.help .s` did not list `{name}`:\n{several}"
+        );
+    }
+    assert!(
+        !several.contains("USAGE:"),
+        "`.help .s` printed a long form, and several matches are one line each:\n{several}"
+    );
+
+    // A word that prefixes no command is looked for inside the help text.
+    let searched = ask(".help journal");
+    assert!(
+        searched.contains(".backup"),
+        "`.help journal` did not find `.backup`, whose detail lines are where the word \
+         is - so the search arm is matching summary lines only:\n{searched}"
+    );
+
+    // And a word that is in none of it says so rather than printing everything.
+    let nothing = ask(".help zzzznotacommand");
+    assert!(
+        nothing.contains("Nothing matches"),
+        "`.help zzzznotacommand` did not say it found nothing:\n{nothing}"
+    );
+    assert!(
+        !nothing.contains(".tables"),
+        "`.help zzzznotacommand` fell back to printing the whole list:\n{nothing}"
+    );
+}
+
+/// **`.dbconfig` lists, reads, sets and refuses.**
+///
+/// Four arms, of which the dispatch case reaches the first. The one that
+/// matters is the round trip: `.dbconfig defensive off` followed by
+/// `.dbconfig defensive` has to answer `off`, or the command is a report that
+/// prints a default back whatever it was told.
+#[test]
+fn the_dbconfig_command_lists_reads_sets_and_refuses() {
+    let Some(binary) = program("inillucent") else {
+        return;
+    };
+    let Some(shell) = program("inillucent-shell") else {
+        return;
+    };
+    let area = area("dbconfig-arms");
+    let database = populated(&binary, &area);
+    let ask = |typed: &str| typing(&shell, &database, typed);
+
+    // With no argument, every flag.
+    let listed = ask(".dbconfig");
+    assert_eq!(
+        listed
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count(),
+        22,
+        "`.dbconfig` printed something other than its 22 flags:\n{listed}"
+    );
+    for flag in ["attach_create", "defensive", "trusted_schema"] {
+        assert!(
+            listed.contains(flag),
+            "`.dbconfig` did not list `{flag}`:\n{listed}"
+        );
+    }
+
+    // With a name, that flag alone.
+    let one = ask(".dbconfig defensive");
+    assert_eq!(
+        one.lines().filter(|line| !line.trim().is_empty()).count(),
+        1,
+        "`.dbconfig defensive` printed more than the one flag:\n{one}"
+    );
+
+    // With a name and a value, the value is kept and read back. Both
+    // directions, because a setter that always writes `off` would pass one.
+    for wanted in ["off", "on"] {
+        let round = ask(&format!(
+            ".dbconfig defensive {wanted}\n.dbconfig defensive"
+        ));
+        let answers: Vec<&str> = round
+            .lines()
+            .filter(|line| line.contains("defensive"))
+            .collect();
+        assert_eq!(
+            answers.len(),
+            2,
+            "setting and reading `defensive` did not answer twice:\n{round}"
+        );
+        for line in &answers {
+            assert!(
+                line.trim().ends_with(wanted),
+                "`defensive` was set to `{wanted}` and reads as `{line}`"
+            );
+        }
+    }
+
+    // The name is folded, which is what the reference does.
+    let folded = ask(".dbconfig DEFENSIVE");
+    assert!(
+        folded.contains("defensive"),
+        "`.dbconfig DEFENSIVE` was not recognised:\n{folded}"
+    );
+
+    // A flag this engine holds no state for says so rather than pretending.
+    let refused = ask(".dbconfig comments off");
+    assert!(
+        refused.contains("cannot change dbconfig comments"),
+        "`.dbconfig comments off` did not refuse:\n{refused}"
+    );
+
+    // And a name that is not a flag gets the reference's three lines.
+    let unknown = ask(".dbconfig not_a_flag");
+    assert!(
+        unknown.contains("unknown dbconfig") && unknown.contains("with no arguments for a list"),
+        "`.dbconfig not_a_flag` did not answer the way the reference does:\n{unknown}"
+    );
+}
+
+/// **`.show` reports what was set, for the three settings that were literals.**
+///
+/// This file's header says a setter is asserted through `.show`, and for three
+/// of the twelve settings that was not possible: `explain`, `stats` and
+/// `output` were written into the format strings as `auto`, `off` and `stdout`
+/// (task-2066 section 4.4.13). So `.explain on` followed by `.show` answered
+/// `auto`, `.stats on` answered `off`, and a shell whose rows were going into a
+/// file said they were going to the terminal - which is the one line of that
+/// report somebody reads when they cannot find their output.
+///
+/// The three are read off the shell now, and this is the case that fails if
+/// they go back to being constants.
+#[test]
+fn the_show_command_reports_the_settings_that_were_written_into_it() {
+    let Some(binary) = program("inillucent") else {
+        return;
+    };
+    let Some(shell) = program("inillucent-shell") else {
+        return;
+    };
+    let area = area("show-settings");
+    let database = populated(&binary, &area);
+    let ask = |typed: &str| typing(&shell, &database, typed);
+
+    // The defaults, so that what follows is a change rather than a coincidence.
+    let before = ask(".show");
+    for expected in ["explain: auto", "stats: off", "output: stdout"] {
+        assert!(
+            before.contains(expected),
+            "a fresh shell did not report `{expected}`:\n{before}"
+        );
+    }
+
+    let after = ask(".explain on\n.stats on\n.show");
+    for expected in ["explain: on", "stats: on"] {
+        assert!(
+            after.contains(expected),
+            "`.show` did not report `{expected}` after it was set:\n{after}"
+        );
+    }
+
+    // `.explain off` is a third value rather than the absence of the second,
+    // so a report that only knew `auto` and `on` would still be wrong.
+    let off = ask(".explain off\n.show");
+    assert!(
+        off.contains("explain: off"),
+        "`.show` did not report `explain: off`:\n{off}"
+    );
+
+    // And the redirect. `.show` writes into the file it is reporting, so the
+    // answer is read back off disk.
+    let target = area.join("redirected.txt");
+    let named = target.to_string_lossy().replace('\\', "/");
+    let printed = ask(&format!(".output {named}\n.show"));
+    assert!(
+        printed.trim().is_empty(),
+        "`.output` did not redirect - `.show` printed to the terminal:\n{printed}"
+    );
+    let written = std::fs::read_to_string(&target).unwrap_or_else(|why| {
+        panic!("{} was not written: {why}", target.display());
+    });
+    assert!(
+        written.contains(&named),
+        "`.show` reported somewhere other than the file it was writing into:\n{written}"
+    );
+}
+
+/// **The settings commands take their arguments and refuse what they cannot.**
+///
+/// `.cd`, `.prompt`, `.auth`, `.scanstats`, `.trace` and `.connection` are
+/// dispatched by `every_dispatched_dot_command_answers` with no argument or
+/// with one that works. These are the other ends: a directory that is not
+/// there, and the two words a person types when they want a setting off again.
+#[test]
+fn the_settings_commands_take_their_arguments() {
+    let Some(binary) = program("inillucent") else {
+        return;
+    };
+    let Some(shell) = program("inillucent-shell") else {
+        return;
+    };
+    let area = area("settings-arguments");
+    let database = populated(&binary, &area);
+    let ask = |typed: &str| typing(&shell, &database, typed);
+
+    // A directory that is not there is refused by name rather than ignored.
+    let missing = ask(".cd no-such-directory-anywhere");
+    assert!(
+        missing.contains("Cannot change to directory"),
+        "`.cd` to a directory that is not there said nothing:\n{missing}"
+    );
+
+    // `.connection` names the database that is open, which is how a person
+    // checks which of several they are typing at.
+    let connections = ask(".connection");
+    assert!(
+        connections.contains("ACTIVE 0:") && connections.contains("app.rdb"),
+        "`.connection` did not name the open database:\n{connections}"
+    );
+
+    // The on and off words for the three settings that take them. None of
+    // these prints anything of its own, so what is asserted is that the
+    // dispatcher took the argument rather than answering its fallback.
+    let toggled = ask(
+        ".auth on\n.auth off\n.scanstats on\n.scanstats off\n.trace off\n         .prompt \"A> \" \"B> \"\nSELECT 'still-here';",
+    );
+    assert!(
+        !toggled.contains("unknown command or invalid arguments"),
+        "one of the settings commands refused its argument:\n{toggled}"
+    );
+    assert!(
+        toggled.contains("still-here"),
+        "the shell stopped answering after the settings were changed:\n{toggled}"
+    );
+}

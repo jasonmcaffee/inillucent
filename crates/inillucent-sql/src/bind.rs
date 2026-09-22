@@ -998,6 +998,21 @@ pub struct BoundSource {
     /// planner unable to choose it - the conservative answer, and the one that
     /// was in force while these forms were refused outright.
     pub index_exprs: Vec<crate::dml::BoundIndexExprs>,
+    /// `INDEXED BY name` or `NOT INDEXED`, as the FROM term wrote it.
+    ///
+    /// **The planner could not see this until task-2066 section 4.4.14.** The
+    /// parser built it, `check_index_hint` checked that an `INDEXED BY` named a
+    /// real index, and then nothing carried it any further - so both hints were
+    /// accepted and ignored. Measured against the pinned 3.53.4 shell on a
+    /// 2,000 row table with an index on each of two columns:
+    /// `SELECT count(*) FROM h NOT INDEXED WHERE a = 3 AND b = 100` planned as
+    /// `SCAN h` there and as `SEARCH h USING INDEX h_b (b=?)` here.
+    ///
+    /// `NOT INDEXED` is honoured now. `INDEXED BY` is still only checked for a
+    /// name that exists, because forcing one means refusing the statement when
+    /// the named index cannot answer it, and `choose_path` returns an
+    /// `AccessPath` rather than a `Result`.
+    pub index_hint: crate::ast::IndexHint,
 }
 
 /// One aggregate the statement computes.
@@ -2142,6 +2157,11 @@ impl<'a> Binder<'a> {
                 let indexed_by = *indexed_by;
                 self.bind_table_term(*database, *name, term.alias, join, span)?;
                 self.check_index_hint(indexed_by, span)?;
+                // The hint belongs to the term that was just pushed, and this
+                // is the only place that knows both.
+                if let Some(source) = self.sources.last_mut() {
+                    source.index_hint = indexed_by;
+                }
                 if let Some(arguments) = arguments {
                     self.bind_table_arguments(&arguments, span)?;
                 }
@@ -2285,6 +2305,7 @@ impl<'a> Binder<'a> {
         };
         let id = self.sources.len();
         self.sources.push(BoundSource {
+            index_hint: crate::ast::IndexHint::None,
             id,
             rows: SourceRows::Table,
             table,
@@ -2504,6 +2525,7 @@ impl<'a> Binder<'a> {
         let table = subquery_table(&alias, &columns, &bound);
         let id = self.sources.len();
         self.sources.push(BoundSource {
+            index_hint: crate::ast::IndexHint::None,
             id,
             rows: SourceRows::Subquery(Box::new(bound)),
             table: std::rc::Rc::new(table),
