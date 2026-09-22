@@ -1373,6 +1373,32 @@ covers = ["inillucent-engine", "inillucent-tree", "inillucent-pool"]
 # reference as a prerequisite, so that a run without the oracle built cannot
 # look like a pass - and a suite that never starts the oracle would be
 # declaring a prerequisite it does not have.
+# Pivoted query synthesis (task-2066 §4.4.4). It picks a row, builds a predicate
+# every atom of which it has verified true of that row in Rust, and asserts the
+# row comes back. It needs no oracle, which is the point: TLP proves the three
+# partitions agree with each other, and an agreement is not a correctness - a
+# comparison rule wrong the same way in all three passes it. This catches that,
+# and it is the one class neither TLP nor the hand-written differential cases
+# reach.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "pqs_differential"
+tier = "engine"
+covers = ["inillucent-sql", "inillucent-exec", "inillucent-engine"]
+
+# One table an order of magnitude past the buffer pool (task-2066 §4.4.5).
+# Nothing above twenty thousand rows was graded anywhere, so every claim the
+# suite made was about a table the pool holds whole. Nightly because it builds
+# that table; the properties it checks are TLP and NoREC, which need no oracle
+# and so cost nothing but the size.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "story_large_table_nightly"
+tier = "nightly"
+covers = ["inillucent-pool", "inillucent-tree", "inillucent-exec", "inillucent-engine"]
+
 [[target]]
 package = "inillucent-compat"
 kind = "test"
