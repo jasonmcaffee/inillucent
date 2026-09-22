@@ -1518,6 +1518,16 @@ tier = "durability"
 [[target]]
 package = "inillucent-wal"
 kind = "test"
+name = "wal_model"
+tier = "durability"
+# The log graded against an independent model, the way `btree_model` grades the
+# tree (task-2066 section 4.4.10). It runs on a memory file system and needs
+# nothing off disk, so it has no `requires` row.
+covers = ["inillucent-wal"]
+
+[[target]]
+package = "inillucent-wal"
+kind = "test"
 name = "recovery"
 tier = "durability"
 

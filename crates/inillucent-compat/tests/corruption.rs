@@ -221,19 +221,18 @@ fn a_damaged_database_is_refused_without_leaking_a_pin_or_a_lock() {
 }
 
 /// Asserts an error is one of the families a damaged file may produce.
+///
+/// **The judgement moved to `inillucent_compat::damage`** (task-2066 section
+/// 4.4.6). Three suites were making it three ways: this one over the SQLite
+/// format through the storage pager, `phase2_campaigns` over the native
+/// format's pages, and `fault_shapes` over a whole database. Three copies of a
+/// rule is how a fourth caller comes to have none.
+///
+/// @param error - what the reader said
+/// @param fixture - which fixture was damaged
+/// @param case - which damaged copy of it
 fn assert_expected(error: &inillucent_base::DbError, fixture: &str, case: u32) {
-    assert!(
-        matches!(
-            error.code(),
-            PrimaryCode::Corrupt
-                | PrimaryCode::NotADb
-                | PrimaryCode::IoErr
-                | PrimaryCode::TooBig
-                | PrimaryCode::NoMem
-        ),
-        "{fixture} case {case} failed with {:?}, which is not a corruption family",
-        error.code()
-    );
+    inillucent_compat::damage::assert_expected(error, fixture, case);
 }
 
 /// A cursor abandoned mid-traversal must still release everything it held.

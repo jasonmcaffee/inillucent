@@ -218,6 +218,183 @@ fn a_misdirected_write_is_refused_or_has_no_effect() {
     );
 }
 
+/// **A damaged page read through the pool is refused, and the rate is
+/// recorded.**
+///
+/// This is the claim `phase2_campaigns::corrupt_pages_never_panic` cannot make.
+/// That case hands bytes to `LeafRef::parse` and `InteriorRef::parse` directly,
+/// below the layer that checks a page's crc32c - so a decoder there has nothing
+/// to check its input against, and answering a plausible value for plausible
+/// bytes is what it is for. It measured 587 damaged pages that answered
+/// something the undamaged page did not (task-2066 section 4.4.6).
+///
+/// Here the same damage goes through the pool, which verifies the checksum on
+/// the way in from the file, so the claim is the strong one: refused, or
+/// exactly the rows the workload committed.
+///
+/// **The rates are recorded here rather than in a file the run rewrites**, for
+/// the reason `crash_reports.rs` gives about `tests/crash/`: a number the run
+/// produces is what the last run produced, and the last run is what is under
+/// suspicion. A number in this source is what a person accepted.
+#[test]
+fn a_damaged_page_read_through_the_pool_is_refused() {
+    let vfs = simulator(4_410);
+    build(Arc::clone(&vfs) as Arc<dyn Vfs>).expect("the fixture builds");
+    let clean = vfs.crash();
+    let whole = clean
+        .files
+        .get(&path())
+        .cloned()
+        .expect("the database is in the snapshot");
+    assert!(
+        whole.len() > PAGE_SIZE * 4,
+        "the fixture is {} bytes, which is too few pages to damage",
+        whole.len()
+    );
+    let wanted = expected();
+
+    // Page two onward: pages zero and one are the meta pages, which check their
+    // own checksum on every decode and are `corrupt_pages_never_panic`'s to
+    // measure.
+    let pages = whole.len() / PAGE_SIZE;
+    let mut sweep = inillucent_compat::damage::Sweep::default();
+    let mut served: Vec<String> = Vec::new();
+    for page in 2..pages {
+        for offset in [0usize, 37, PAGE_SIZE / 2, PAGE_SIZE - 1] {
+            let at = page.saturating_mul(PAGE_SIZE).saturating_add(offset);
+            let mut damaged = clean.clone();
+            let Some(bytes) = damaged.files.get_mut(&path()) else {
+                continue;
+            };
+            let Some(byte) = bytes.get_mut(at) else {
+                continue;
+            };
+            *byte = byte.wrapping_add(0x5A);
+            match reopen(&damaged) {
+                Reopened::Refused => sweep.refuse(),
+                Reopened::Answered(rows) if rows == wanted => sweep.unchanged(),
+                Reopened::Answered(rows) => {
+                    sweep.total = sweep.total.saturating_add(1);
+                    served.push(format!(
+                        "page {page} byte {offset}: {} rows came back where {} were committed",
+                        rows.len(),
+                        wanted.len()
+                    ));
+                }
+            }
+        }
+    }
+    println!(
+        "damaged pages through the pool: {} of {} refused ({:.3}), {} unchanged",
+        sweep.refused,
+        sweep.total,
+        sweep.detection_rate(),
+        sweep.unchanged
+    );
+    assert!(
+        sweep.total >= 32,
+        "only {} damaged pages were read, which is too few to be a sweep",
+        sweep.total
+    );
+    assert!(
+        served.is_empty(),
+        "a damaged page was served as a different answer rather than refused:
+  {}",
+        served
+            .iter()
+            .take(8)
+            .cloned()
+            .collect::<Vec<String>>()
+            .join(
+                "
+  "
+            )
+    );
+    // Measured 2026-09-22. The floor is what a person accepted; raising it is
+    // an edit somebody makes on purpose, and a fall is a detector that stopped
+    // detecting.
+    assert!(
+        sweep.detection_rate() >= 0.50,
+        "the detection rate fell to {:.3} and its recorded floor is 0.500",
+        sweep.detection_rate()
+    );
+}
+
+/// **A truncated database is refused, and that rate is asserted near one.**
+///
+/// Truncation is the one damage shape with no ambiguity: every page past the
+/// cut reads as zeroes through the pool's short-read fill, and zeroes fail the
+/// page checksum. A rate below one here would mean a truncated file being read
+/// as a shorter database, which is data loss served as an answer.
+#[test]
+fn a_truncated_database_is_refused() {
+    let vfs = simulator(4_411);
+    build(Arc::clone(&vfs) as Arc<dyn Vfs>).expect("the fixture builds");
+    let clean = vfs.crash();
+    let whole = clean
+        .files
+        .get(&path())
+        .cloned()
+        .expect("the database is in the snapshot");
+    let pages = whole.len() / PAGE_SIZE;
+    assert!(
+        pages > 4,
+        "the fixture holds {pages} pages, which is too few"
+    );
+
+    let wanted = expected();
+    let mut sweep = inillucent_compat::damage::Sweep::default();
+    let mut served: Vec<String> = Vec::new();
+    // Every page boundary from the third onward: cutting inside the meta pages
+    // is a file that is not a database, which the open refuses for a different
+    // reason and which says nothing about truncation.
+    for page in 2..pages {
+        let mut damaged = clean.clone();
+        let Some(bytes) = damaged.files.get_mut(&path()) else {
+            continue;
+        };
+        bytes.truncate(page.saturating_mul(PAGE_SIZE));
+        match reopen(&damaged) {
+            Reopened::Refused => sweep.refuse(),
+            Reopened::Answered(rows) if rows == wanted => sweep.unchanged(),
+            Reopened::Answered(rows) => {
+                sweep.total = sweep.total.saturating_add(1);
+                served.push(format!(
+                    "cut at page {page}: {} rows came back where {} were committed",
+                    rows.len(),
+                    wanted.len()
+                ));
+            }
+        }
+    }
+    println!(
+        "truncated databases: {} of {} refused ({:.3}), {} unchanged",
+        sweep.refused,
+        sweep.total,
+        sweep.detection_rate(),
+        sweep.unchanged
+    );
+    assert!(
+        served.is_empty(),
+        "a truncated database was served as a different answer:
+  {}",
+        served.join(
+            "
+  "
+        )
+    );
+    assert!(
+        sweep.total >= 3,
+        "only {} cuts were read, which is too few to be a sweep",
+        sweep.total
+    );
+    assert!(
+        sweep.detection_rate() >= 0.95,
+        "truncation was detected {:.3} of the time, and it has to be near one",
+        sweep.detection_rate()
+    );
+}
+
 /// **A sync that lies loses data, and the loss is refused rather than served.**
 ///
 /// The device acknowledges every flush and makes nothing durable, so the file a
