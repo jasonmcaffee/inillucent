@@ -61,6 +61,16 @@ fn next_handle() -> HandleId {
 pub struct OsVfs {
     name: String,
     temp_counter: AtomicU64,
+    /// How many times this VFS has forced a directory entry.
+    ///
+    /// **The only thing that makes a directory sync observable** (task-2066
+    /// section 4.2, item 19). Forcing the entry that names a newly created
+    /// file changes nothing a later read can see; what it changes is what
+    /// survives a power loss, and no test on a real file system can arrange
+    /// one. Without the counter the case that this repository forgot for a
+    /// year - `delete` and `rename` synced the directory and `open` did not -
+    /// could only be checked by reading the code that has the bug in it.
+    directory_syncs: AtomicU64,
 }
 
 impl OsVfs {
@@ -69,7 +79,29 @@ impl OsVfs {
         OsVfs {
             name: platform::VFS_NAME.to_string(),
             temp_counter: AtomicU64::new(1),
+            directory_syncs: AtomicU64::new(0),
         }
+    }
+
+    /// Returns how many directory entries this VFS has forced.
+    ///
+    /// See the field. It counts the calls this VFS made, on every platform -
+    /// including Windows, where `sync_directory` does nothing by design because
+    /// NTFS journals the metadata change itself, so the count says the engine
+    /// asked rather than that the disk was touched.
+    pub fn directory_syncs(&self) -> u64 {
+        self.directory_syncs.load(Ordering::Relaxed)
+    }
+
+    /// Forces the directory entry naming a path, and counts it.
+    ///
+    /// @param path - the file whose containing directory to force
+    fn force_the_directory_entry(&self, path: &DbPath) -> VfsResult<()> {
+        let Some(parent) = path.containing_directory() else {
+            return Ok(());
+        };
+        self.directory_syncs.fetch_add(1, Ordering::Relaxed);
+        platform::sync_directory(&parent)
     }
 }
 
@@ -107,9 +139,27 @@ impl Vfs for OsVfs {
         // workspace opens is opened here, so that one sentence was the whole
         // report for a missing database, a missing log segment and a missing
         // scratch file alike.
+        // **Whether this open is going to create the file, asked before it
+        // does** (task-2066 section 4.2, item 19). It is the only moment the
+        // answer is knowable: afterwards the file exists either way.
+        let creating = !options.read_only
+            && (options.create || options.exclusive)
+            && options.kind.survives_a_restart()
+            && !path.as_path().exists();
         let file = fs_options
             .open(path.as_path())
             .map_err(|error| VfsError::from_io(VfsOperation::Open, &error).about(path.as_path()))?;
+        // **And the directory entry that names it is forced.** `delete` and
+        // `rename` have done this since phase 1 and `open` never did, so on
+        // ext4 or XFS a power loss could leave a log segment whose header had
+        // been written and synced with no entry pointing at it - and
+        // `read_chain` reads a missing segment as the ordinary end of the
+        // chain, so every commit inside it is lost and recovery reports
+        // success. Windows does nothing here by design: NTFS journals the
+        // metadata change itself.
+        if creating {
+            self.force_the_directory_entry(path)?;
+        }
         let identity = platform::file_identity(&file)?;
         let file = Arc::new(file);
         Ok(Box::new(OsFile {
@@ -132,9 +182,7 @@ impl Vfs for OsVfs {
             Err(removal) => return Err(VfsError::from_io(VfsOperation::Delete, &removal)),
         }
         if sync_dir {
-            if let Some(parent) = path.containing_directory() {
-                platform::sync_directory(&parent)?;
-            }
+            self.force_the_directory_entry(path)?;
         }
         Ok(())
     }
@@ -150,9 +198,7 @@ impl Vfs for OsVfs {
         crate::confine::authorize(to)?;
         std::fs::rename(from.as_path(), to.as_path())
             .map_err(|error| VfsError::from_io(VfsOperation::Rename, &error))?;
-        if let Some(parent) = to.containing_directory() {
-            platform::sync_directory(&parent)?;
-        }
+        self.force_the_directory_entry(to)?;
         Ok(())
     }
 
@@ -353,9 +399,18 @@ impl VfsFile for OsFile {
     /// Flushes written data toward durable media.
     fn sync(&self, mode: SyncMode) -> VfsResult<()> {
         self.require_writable(VfsOperation::Sync)?;
+        // **`Full` is the drive's own barrier where the platform has one**
+        // (task-2066 section 4.2, item 19). On Darwin `fsync(2)` returns once
+        // the bytes have reached the disk's cache and says nothing about the
+        // platter, which is why Apple provides `F_FULLFSYNC` and why SQLite
+        // has a pragma for it; `Full` and `Normal` both mapped to `sync_all`
+        // here, so `PRAGMA synchronous = FULL` bought nothing on a shipped
+        // target. Everywhere else `sync_all` is the strongest barrier there
+        // is and `platform::full_sync` is it.
         let result = match mode {
             SyncMode::DataOnly => self.file.sync_data(),
-            SyncMode::Normal | SyncMode::Full => self.file.sync_all(),
+            SyncMode::Normal => self.file.sync_all(),
+            SyncMode::Full => platform::full_sync(&self.file),
         };
         result.map_err(|error| VfsError::from_io(VfsOperation::Sync, &error))
     }

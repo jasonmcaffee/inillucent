@@ -247,6 +247,71 @@ fn run_drives_the_shell_including_dot_commands() {
     assert_eq!(text_field(&ran.stdout, "command"), "run", "{}", ran.stdout);
 }
 
+/// **`run` exits 1 on a statement the shell refused, the way `exec` does.**
+///
+/// It used to answer `Ok` with a `shell_reported_an_error` field beside the
+/// printed text, so `inillucent run "SELECT * FROM nothing;"` exited 0 while
+/// `inillucent exec` on the same statement exits 1 - and the same refusal over
+/// MCP came back with `"isError": false`, so an agent branching on the status
+/// was told the command had run (task-2066 section 4.2, item 27). The other
+/// four verbs that drive the shell go through `command::verbs::dot`, which has
+/// reported this as a failure all along.
+///
+/// The second half is what stops the fix from being a verb that fails on
+/// everything: a script that works still exits 0, which the case above this
+/// one already asserts and this one asserts again beside its failure so the
+/// pair is read together.
+#[test]
+fn run_reports_a_failing_statement_as_a_failure() {
+    let Some(binary) = program("inillucent") else {
+        return;
+    };
+    let database = populated(&binary, "run-failing");
+    let refused = run(
+        &binary,
+        &[
+            "--db",
+            &database.to_string_lossy(),
+            "run",
+            "SELECT * FROM nothing;",
+            "--output",
+            "json",
+        ],
+    );
+    assert_eq!(
+        refused.code, 1,
+        "`run` on a statement the shell refused exited {}:
+{}
+{}",
+        refused.code, refused.stdout, refused.stderr
+    );
+    let said = format!("{}{}", refused.stdout, refused.stderr);
+    assert!(
+        said.contains("nothing"),
+        "the refusal did not name the table that is not there:
+{said}"
+    );
+
+    let ran = run(
+        &binary,
+        &[
+            "--db",
+            &database.to_string_lossy(),
+            "run",
+            "SELECT count(*) FROM note;",
+            "--output",
+            "json",
+        ],
+    );
+    assert_eq!(
+        ran.code, 0,
+        "`run` on a statement that works exited {}:
+{}
+{}",
+        ran.code, ran.stdout, ran.stderr
+    );
+}
+
 /// A `.once` in a script handed to `run` writes its file.
 ///
 /// **The defect `export --out` was reported for was the shell's, not the

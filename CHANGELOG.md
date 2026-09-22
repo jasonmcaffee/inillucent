@@ -180,6 +180,50 @@ is 10% more than SQLite's against a bar asking for 5% less, and the allocator is
 measured out of the difference: a trivial binary's floor is 3.62 MiB with it and
 3.62 MiB without.
 
+**Eleven correctness fixes the audit before release found, and nine smaller
+differences from SQLite beside them.**
+
+- A database file shorter than its own header is refused before a page is read
+  out of it, saying how many pages the header claims and how many the file
+  holds. It used to open and answer queries.
+- A zeroed sector in the middle of the redo log stops recovery there. It used to
+  end that segment's scan and carry on into the next one, replaying records
+  whose predecessors had never been read.
+- Creating a file forces the directory entry that names it on POSIX, and
+  `PRAGMA synchronous = FULL` is `F_FULLFSYNC` on macOS. A log segment could be
+  fsynced, acknowledged, and lost whole to a power loss.
+- `randomblob(n)` answers `n` bytes up to the connection's value bound and
+  refuses above it by name. It was silently clamped to 1,000,000, so
+  `length(randomblob(100000000))` answered `1000000`.
+- `CREATE TABLE` and `ALTER TABLE ... ADD COLUMN` are charged against
+  `SQLITE_LIMIT_COLUMN`. A 2,100 column table used to be accepted.
+- A recursive CTE has no pass limit. The guard at a million passes refused a
+  series generator past a million rows, which is an ordinary idiom; what stops a
+  recursion that settles neither way is the request budget, charged per row.
+- A reader waits for a busy file for as long as its own `PRAGMA busy_timeout`
+  says. It waited five seconds whatever the pragma was set to.
+- A CSV that is not UTF-8 is refused with the byte that does not decode and its
+  offset, instead of `cannot open "<path>"`.
+- `PRAGMA aux.user_version` is about the attached database it names. Every
+  pragma that is about a file answered about `main`.
+- `--readonly` admits the `run` verb and the shell refuses each write inside it,
+  so a read only agent can reach the dot commands.
+- `run` exits 1 on a statement the shell refused, and `inillucent_run` over MCP
+  answers `"isError": true`. Both used to report success.
+- A blank line no longer ends an MCP session.
+- The `CHECK` named in a refusal is the one that failed. Two unnamed `CHECK`s on
+  one table always reported the first.
+- `ESCAPE ''` is refused as SQLite refuses it, and an escape character of more
+  than one byte is the whole character rather than its first byte.
+- `date('2024-1-1')` and `date(' 2024-01-01')` are NULL, as they are in SQLite;
+  the field widths are exact and only trailing whitespace is skipped.
+- `printf('%.20f', 1.0/3)` answers sixteen significant digits and fills the rest
+  with zeros, which is what SQLite prints; `!` raises it to twenty.
+- An empty CSV field that is not NULL is written as two quotes, so an exported
+  blob is no longer indistinguishable from a NULL.
+- A path a confined process may not reach is reported as `invalid_state` rather
+  than as a syntax error.
+
 ## 0.1.7 — 2026-09-19
 
 **`packaging/install.sh` had been unrunnable for three releases, and the reason it

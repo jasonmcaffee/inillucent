@@ -378,7 +378,7 @@ fn real(spec: &Spec, argument: Option<&Value<'static>>) -> Vec<u8> {
                 trim_zeros(&format!("{value:.decimals$}"), false)
             }
         }
-        _ => fixed(value, precision),
+        _ => fixed(value, precision, significant_digits(spec)),
     };
     // Rust writes `1e2` where C writes `1.000000e+02`, so the exponent is
     // normalised rather than the whole number being re-rendered.
@@ -428,7 +428,7 @@ fn real(spec: &Spec, argument: Option<&Value<'static>>) -> Vec<u8> {
 /// value is exactly on the midpoint and rounds away; if they are all nines the
 /// first dropped digit is a nine and rounds away too. Every other case is
 /// decided by the first dropped digit alone.
-fn fixed(value: f64, precision: usize) -> String {
+fn fixed(value: f64, precision: usize, significant: usize) -> String {
     if !value.is_finite() {
         return format!("{value:.precision$}");
     }
@@ -446,6 +446,7 @@ fn fixed(value: f64, precision: usize) -> String {
     if first_dropped >= b'5' {
         carry(&mut digits);
     }
+    cap_significant(&mut digits, significant);
     let mut text = String::from_utf8_lossy(&digits).into_owned();
     if precision > 0 {
         while text.len() <= precision {
@@ -457,6 +458,54 @@ fn fixed(value: f64, precision: usize) -> String {
         text.insert(0, '-');
     }
     text
+}
+
+/// How many significant digits this conversion may print.
+///
+/// **SQLite generates sixteen and fills the rest with zeros** (task-2066 section 4.2,
+/// item 27). `printf('%.20f', 1.0/3)` answered `0.33333333333333331483` here
+/// and `0.33333333333333330000` in SQLite, and the digits after the sixteenth
+/// are not a more precise answer - they are the decimal expansion of the
+/// nearest double, which is a fact about the binary format rather than about
+/// the number the caller wrote. `strftime('%J', ...)` printed one extra digit
+/// for the same reason.
+///
+/// The `!` flag raises it to twenty, which is `SQLITE_PRINTF_PRECISION_LIMIT`.
+/// The flag was parsed and never read on this path.
+///
+/// @param spec - the conversion as it was written
+fn significant_digits(spec: &Spec) -> usize {
+    match spec.characters {
+        true => 20,
+        false => 16,
+    }
+}
+
+/// Zeroes every digit past the significant ones, rounding at the cut.
+///
+/// See [`significant_digits`]. Leading zeros are not significant, so
+/// `0.000123...` counts from the `1`; a carry that runs off the front prepends
+/// a digit, which is one more integer digit and is what the caller's decimal
+/// point then sits one place to the right of.
+///
+/// @param digits - the rendered digits, most significant first
+/// @param limit - how many significant digits to keep
+fn cap_significant(digits: &mut Vec<u8>, limit: usize) {
+    let Some(first) = digits.iter().position(|digit| *digit != b'0') else {
+        return;
+    };
+    let cut = first.saturating_add(limit);
+    if cut >= digits.len() {
+        return;
+    }
+    let rounds_up = digits.get(cut).copied().unwrap_or(b'0') >= b'5';
+    let zeros = digits.len().saturating_sub(cut);
+    let mut kept: Vec<u8> = digits.get(..cut).unwrap_or_default().to_vec();
+    if rounds_up {
+        carry(&mut kept);
+    }
+    kept.extend(core::iter::repeat_n(b'0', zeros));
+    *digits = kept;
 }
 
 /// Adds one to a string of decimal digits, in place.

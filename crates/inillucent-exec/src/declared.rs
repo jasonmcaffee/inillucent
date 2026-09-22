@@ -308,12 +308,12 @@ impl WriteDeclarations {
             }
         }
         let mut compiled = Vec::with_capacity(checks.len());
-        for check in checks {
+        for (position, check) in checks.iter().enumerate() {
             compiled.push(CompiledCheck {
                 label: check
                     .name
                     .clone()
-                    .unwrap_or_else(|| source_text_of(table, check)),
+                    .unwrap_or_else(|| source_text_of(table, position)),
                 expr: space.compile(&check.expr, params, catalog)?,
             });
         }
@@ -587,17 +587,20 @@ pub fn to_key_affinity(value: OwnedDatum) -> OwnedDatum {
 
 /// Recovers a `CHECK`'s source text from the table it was declared on.
 ///
-/// The binder hands the write path a bound predicate and the constraint's name
-/// when it had one; the text SQLite quotes for an unnamed constraint lives on
-/// `TableInfo::checks`, in declaration order beside the bound ones.
+/// **By position, and it used to be by name** (task-2066 section 4.2, item
+/// 27). `bind_checks` walks `TableInfo::checks` in declaration order and
+/// pushes one `BoundCheck` for each, so the two lists are the same list; the
+/// lookup compared `declared.name == check.name`, and every unnamed constraint
+/// has `name == None`, so `None == None` matched the *first* unnamed one
+/// whatever had actually failed. A row violating the second of two unnamed
+/// `CHECK`s was told the first one's text.
 ///
 /// @param table - the table being written
-/// @param check - the bound constraint
-fn source_text_of(table: &TableInfo, check: &BoundCheck) -> Vec<u8> {
-    for declared in &table.checks {
-        if declared.name == check.name {
-            return declared.expr_sql.clone();
-        }
-    }
-    Vec::new()
+/// @param position - which of the table's checks this is, in declaration order
+fn source_text_of(table: &TableInfo, position: usize) -> Vec<u8> {
+    table
+        .checks
+        .get(position)
+        .map(|declared| declared.expr_sql.clone())
+        .unwrap_or_default()
 }

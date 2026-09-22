@@ -600,6 +600,56 @@ impl Database {
             .map_err(inillucent_vfs::VfsError::into_db_error)
     }
 
+    /// Refuses a database whose header claims a page count nothing can address.
+    ///
+    /// **`page_count` was read and never checked against anything** (task-2066
+    /// section 4.2, item 16). A 163,840-byte file with both meta pages carrying
+    /// a `PAGE_COUNT` of 2^60 and both checksums resealed answered
+    /// `SELECT count(*)` with 10, answered `integrity-check` with `ok`, and
+    /// accepted an `INSERT` - all of them exit 0. The number is not decoration:
+    /// `paged::cursor` uses `pool.page_count()` as the only bound on the leaf
+    /// sibling chain, so inflating it disables that cycle guard as well.
+    ///
+    /// **What it checks is the arithmetic, not the file's length, and the
+    /// difference was measured.** The obvious check - refuse a count larger
+    /// than `file_size / page_size` - is unsound in this format, because the
+    /// file grows when a page is *written* and the count grows when a page is
+    /// *allocated*. A page allocated and never written leaves the count ahead
+    /// of the file for ever, and that is a state this engine produces itself: a
+    /// rolled-back `CREATE TABLE` keeps its root page, and
+    /// `new_engine_page_ownership`'s `the_leak_report_names_a_page_no_tree_reaches`
+    /// builds one deliberately and then reopens it. That check refused it, with
+    /// "the header claims 6 pages but the file holds 5" - a healthy database,
+    /// turned away over a leak the checker is there to *report*.
+    ///
+    /// So what is left is the claim that cannot be true of any file: a count
+    /// whose byte length does not fit in a `u64`. 2^60 pages of 4,096 bytes is
+    /// 2^72 bytes, and every offset this pager computes is `page * page_size`.
+    /// A count that overflows that multiplication describes no file on any
+    /// device, and no allocation can reach it.
+    ///
+    /// A count that is merely large and does fit is indistinguishable from a
+    /// leak, and is left to `check_page_ownership`, which reads the free map
+    /// and says which pages nothing reaches.
+    pub fn refuse_a_page_count_that_cannot_be_addressed(&self) -> DbResult<()> {
+        let claimed = self.meta.page_count;
+        if claimed
+            .checked_mul(self.pool.page_size().max(1) as u64)
+            .is_none()
+        {
+            // The sentence is the message as well as the detail, which most
+            // `corrupt` refusals here leave to the stock "database disk image
+            // is malformed". That text sends an operator to a repair tool; a
+            // header carrying a number no file can have wants the number.
+            let said = format!(
+                "the header claims {claimed} pages of {} bytes, which is longer than any file",
+                self.pool.page_size()
+            );
+            return Err(corrupt(said.clone()).with_message(said));
+        }
+        Ok(())
+    }
+
     /// Reports whether the free map says a page is handed out.
     ///
     /// **For the integrity checker, which is the only reader that has a second
@@ -847,7 +897,23 @@ impl Database {
         if self.pool.lock_level() != FileLock::None {
             return Ok(false);
         }
-        self.pool.lock(FileLock::Shared)?;
+        // **The reader waits for as long as this connection's own
+        // `busy_timeout` says** (task-2066 section 4.2, item 23). `Pool::lock`
+        // waits [`DEFAULT_BUSY_MILLIS`], which is the constant a connection
+        // that never set the pragma gets - so a reader that had been told to
+        // wait thirty seconds gave up after five, and one told to give up at
+        // once waited five seconds first. `set_busy_millis` has pushed the
+        // pragma down into this object since task-1979 and only the write path
+        // read it.
+        //
+        // **Through this module's own wait rather than `Pool::lock_within`,
+        // because the two build different refusals.** `Pool`'s hands back the
+        // file system's own error, which is the `a writer holds PENDING` that
+        // task-1979 C6 replaced: it names a lock level a caller cannot act on
+        // and it says "writer" whoever is holding. [`file_is_busy`] names what
+        // the holder is doing, what this caller wanted, and which pragma
+        // changes the answer.
+        wait_for_lock_within(self.pool.file(), FileLock::Shared, self.busy_millis)?;
         self.reload_if_moved()
     }
 
@@ -902,9 +968,11 @@ impl Database {
             // writes. The reload is after the raise rather than before it for
             // the reason `attempt_write` gives.
             let held = self.pool.lock_level() != FileLock::None;
-            self.pool.lock(FileLock::Shared)?;
-            self.pool.lock(FileLock::Reserved)?;
-            self.pool.lock(FileLock::Exclusive)?;
+            // This connection's own `busy_timeout`, and this module's own
+            // wait, for the two reasons `begin_read` gives above it.
+            for level in [FileLock::Shared, FileLock::Reserved, FileLock::Exclusive] {
+                wait_for_lock_within(self.pool.file(), level, self.busy_millis)?;
+            }
             if held {
                 return Ok(false);
             }

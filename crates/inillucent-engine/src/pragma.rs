@@ -68,7 +68,7 @@ use inillucent_sql::declare::argument_text;
 use inillucent_sql::directive::PragmaArgument;
 use inillucent_tree::datum::OwnedDatum;
 
-use super::{ImportedDatabase, Outcome};
+use super::{ImportedDatabase, Outcome, MAIN};
 
 // **The three modules this file is made of (task-1962, A1 step 1).** It was
 // 1,930 lines and 85 pragma names in one `impl` block. What is left here is
@@ -81,19 +81,36 @@ mod tuning;
 impl ImportedDatabase {
     /// Runs one `PRAGMA`.
     ///
+    /// **A qualifier names which attached database the pragma is about**
+    /// (task-2066 section 4.2, item 25). It used to be discarded in `ddl.rs`,
+    /// so every pragma that is about a file answered about `main`: after
+    /// `ATTACH ':memory:' AS aux`, `PRAGMA aux.user_version = 7` wrote main's
+    /// four bytes and `PRAGMA main.user_version` read 7 back, where SQLite
+    /// answers 7 and 0.
+    ///
+    /// The pragmas it changes are the ones that are *about a file* -
+    /// `user_version`, `application_id`, `schema_version`, `page_count`,
+    /// `freelist_count`, and the schema pragmas that list a table's columns
+    /// and indexes. The rest are about the connection - `cache_size`,
+    /// `busy_timeout`, `foreign_keys` and their kind - and SQLite ignores a
+    /// qualifier on those as well.
+    ///
     /// @param name - the pragma's folded name
     /// @param argument - the value it was given, when it was given one
+    /// @param at - the attached database it was qualified with, `None` for
+    ///             the unqualified form, which means `main`
     pub(super) fn pragma(
         &mut self,
         name: &[u8],
         argument: Option<&PragmaArgument>,
+        at: Option<usize>,
     ) -> DbResult<Outcome> {
         // **The read-only pragmas first, and through the same function the
         // table-valued form uses.** `PRAGMA table_info(t)` and `SELECT * FROM
         // pragma_table_info('t')` are the same question; if they were two
         // implementations they would eventually be two answers, and the one
         // nobody tested would be the wrong one.
-        if let Some(outcome) = self.pragma_rows(name, argument)? {
+        if let Some(outcome) = self.pragma_rows_of(name, argument, at)? {
             return Ok(outcome);
         }
         match name {
@@ -119,17 +136,17 @@ impl ImportedDatabase {
             b"page_size" => Ok(named_integer("page_size", self.storage.page_size as i64)),
             b"page_count" => Ok(named_integer(
                 "page_count",
-                self.storage.database.pool().page_count() as i64,
+                self.file_of(at)?.pool().page_count() as i64,
             )),
             b"freelist_count" => Ok(named_integer(
                 "freelist_count",
-                self.storage.database.free_pages() as i64,
+                self.file_of(at)?.free_pages() as i64,
             )),
-            b"user_version" => self.pragma_user_version(argument),
-            b"application_id" => self.pragma_application_id(argument),
+            b"user_version" => self.pragma_user_version(argument, at),
+            b"application_id" => self.pragma_application_id(argument, at),
             b"schema_version" => Ok(named_integer(
                 "schema_version",
-                i64::from(self.storage.database.schema_cookie()),
+                i64::from(self.file_of(at)?.schema_cookie()),
             )),
             // **A connection-visible counter, not a file one.** SQLite's
             // `data_version` changes when *another* connection has committed;
@@ -214,19 +231,59 @@ impl ImportedDatabase {
     ///
     /// @param name - the pragma's folded name
     /// @param argument - the value it was given, when it was given one
+    /// Returns the file a qualified pragma is about.
+    ///
+    /// `None` means the unqualified form, which is `main` - the same rule the
+    /// binder uses everywhere else a name may carry a schema.
+    ///
+    /// @param at - the attached database the pragma named
+    fn file_of(&self, at: Option<usize>) -> DbResult<&inillucent_pool::Database> {
+        self.schema_file(at.unwrap_or(MAIN))
+            .ok_or_else(|| refusal("that pragma names a database that is not attached"))
+    }
+
+    /// Returns the file a qualified pragma is about, to write into.
+    ///
+    /// @param at - the attached database the pragma named
+    fn file_of_mut(&mut self, at: Option<usize>) -> DbResult<&mut inillucent_pool::Database> {
+        let at = at.unwrap_or(MAIN);
+        if at == MAIN {
+            return Ok(&mut self.storage.database);
+        }
+        self.session_state
+            .schema_at_mut(at)
+            .map(|held| &mut held.database)
+            .ok_or_else(|| refusal("that pragma names a database that is not attached"))
+    }
+
     pub(super) fn pragma_rows(
         &self,
         name: &[u8],
         argument: Option<&PragmaArgument>,
     ) -> DbResult<Option<Outcome>> {
+        self.pragma_rows_of(name, argument, None)
+    }
+
+    /// The same, for a caller that knows which attached database was named.
+    ///
+    /// @param name - the pragma's folded name
+    /// @param argument - the value it was given, when it was given one
+    /// @param at - the attached database it was qualified with, `None` for
+    ///             every database, which is the unqualified form's answer
+    pub(super) fn pragma_rows_of(
+        &self,
+        name: &[u8],
+        argument: Option<&PragmaArgument>,
+        at: Option<usize>,
+    ) -> DbResult<Option<Outcome>> {
         Ok(Some(match name {
-            b"foreign_key_list" => self.pragma_foreign_key_list(argument)?,
-            b"table_info" => self.pragma_table_info(argument, false)?,
-            b"table_xinfo" => self.pragma_table_info(argument, true)?,
-            b"index_list" => self.pragma_index_list(argument)?,
-            b"index_info" => self.pragma_index_info(argument, false)?,
-            b"index_xinfo" => self.pragma_index_info(argument, true)?,
-            b"table_list" => self.pragma_table_list(argument)?,
+            b"foreign_key_list" => self.pragma_foreign_key_list(argument, at)?,
+            b"table_info" => self.pragma_table_info(argument, false, at)?,
+            b"table_xinfo" => self.pragma_table_info(argument, true, at)?,
+            b"index_list" => self.pragma_index_list(argument, at)?,
+            b"index_info" => self.pragma_index_info(argument, false, at)?,
+            b"index_xinfo" => self.pragma_index_info(argument, true, at)?,
+            b"table_list" => self.pragma_table_list(argument, at)?,
             b"collation_list" => self.pragma_collation_list(),
             b"pragma_list" => list_of("name", &listed_pragmas()),
             b"module_list" => {

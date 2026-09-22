@@ -1,4 +1,5 @@
-//! The 644 statements task-1979 asked both engines, run from the tree.
+//! The statements task-1979 asked both engines, run from the tree, and the
+//! ones task-2066 added to them.
 //!
 //! Invariant: **every case in `corpora/differential-part8/` agrees with the
 //! pinned SQLite 3.53.4 shell, unless its id is in `allow.list` with the defect

@@ -537,9 +537,18 @@ pub fn run_input(context: &mut Context, arguments: &Arguments) -> Result<Outcome
     let printed = context.collect_output(&input);
     let failed = context.shell().failed;
     context.shell().failed = false;
-    let mut produced = Outcome::said("run", printed.trim_end());
-    produced = produced.with("shell_reported_an_error", Json::Bool(failed));
-    Ok(produced)
+    // **A failing statement is a failure** (task-2066 section 4.2, item 27).
+    // This used to answer `Ok` with a `shell_reported_an_error` field beside
+    // the printed text, so `inillucent run "SELECT * FROM nothing;"` exited 0
+    // where `exec` exits 1, and the same refusal over MCP came back with
+    // `"isError": false` - an agent branching on the status was told the
+    // command had run. The other four verbs that drive the shell go through
+    // `dot`, which has reported this as a failure all along; `run` was the one
+    // that did not, and it is the one an agent reaches for.
+    if failed {
+        return Err(Failed::said(Status::Syntax, printed.trim_end().to_string()));
+    }
+    Ok(Outcome::said("run", printed.trim_end()))
 }
 
 /// `create`: makes a new database file.

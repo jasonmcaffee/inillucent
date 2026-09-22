@@ -43,7 +43,6 @@ use inillucent_compat::nikaya::{seed_the_workload, workload};
 use inillucent_compat::scenario;
 use inillucent_compat::stories::{open, reopen_and_check, run, Params};
 use inillucent_compat::workspace_root;
-use inillucent_engine::connect::Connection;
 use inillucent_tree::datum::OwnedDatum;
 
 /// Reads the allow list: the statements that do not work yet, and their ticket.

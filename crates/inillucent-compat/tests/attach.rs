@@ -415,3 +415,61 @@ fn the_same_page_number_in_two_databases_is_two_pages() {
     assert_eq!(cells, vec!["from main".to_string(), "from aux".to_string()]);
     let _ = Arc::new(());
 }
+
+/// **A qualified pragma is about the database it names.**
+///
+/// `ddl.rs` destructured `Directive::Pragma { name, argument, .. }` and the
+/// `..` threw away the `database: Option<usize>` the parser had already
+/// resolved, so every pragma that is about a file answered about `main`. After
+/// `ATTACH ... AS aux`, `PRAGMA aux.user_version = 7` wrote main's four bytes
+/// and `PRAGMA main.user_version` read 7 back, where SQLite answers 7 and 0 -
+/// so an application using `user_version` to version an attached database's
+/// schema was reading and writing the wrong file (task-2066 section 4.2,
+/// item 25).
+///
+/// Nothing in this repository had ever asked a pragma about a database other
+/// than `main`: a grep for a qualified pragma across the test tree returned
+/// nothing, and this file contained no pragma at all.
+///
+/// Graded against the reference rather than asserted, like everything else
+/// here, because which file a qualifier names is exactly the kind of rule
+/// where a number written down by hand is a second opinion that goes stale.
+#[test]
+fn a_qualified_pragma_is_about_the_database_it_names() {
+    grade(
+        "qualified-pragma",
+        "CREATE TABLE t(a);
+         ATTACH DATABASE '{dir}/aux.db' AS aux;
+         CREATE TABLE aux.u(b);
+         PRAGMA aux.user_version = 7;
+         SELECT 'aux'; PRAGMA aux.user_version;
+         SELECT 'main'; PRAGMA main.user_version;
+         SELECT 'bare'; PRAGMA user_version;
+         PRAGMA main.user_version = 3;
+         SELECT 'aux-again'; PRAGMA aux.user_version;
+         SELECT 'main-again'; PRAGMA main.user_version;
+         PRAGMA aux.application_id = 11;
+         SELECT 'aux-id'; PRAGMA aux.application_id;
+         SELECT 'main-id'; PRAGMA main.application_id;",
+    );
+}
+
+/// **A qualified schema pragma lists the named database's tables.**
+///
+/// The same discarded qualifier, reaching `pragma_rows`: `table_info`,
+/// `index_list` and `table_list` all resolved a name against every attached
+/// database at once, so `PRAGMA aux.table_info(t)` described `main`'s `t`.
+/// A separate case from the one above because the two are charged in two
+/// different functions and neither covers the other.
+#[test]
+fn a_qualified_schema_pragma_is_about_the_database_it_names() {
+    grade(
+        "qualified-schema-pragma",
+        "CREATE TABLE t(a INTEGER, b TEXT);
+         ATTACH DATABASE '{dir}/aux.db' AS aux;
+         CREATE TABLE aux.t(x REAL, y BLOB, z TEXT);
+         SELECT 'main-cols'; SELECT name FROM pragma_table_info('t');
+         SELECT 'aux-info'; PRAGMA aux.table_info(t);
+         SELECT 'main-info'; PRAGMA main.table_info(t);",
+    );
+}

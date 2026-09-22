@@ -36,6 +36,9 @@ Tools arrive named `inillucent_query`, `inillucent_exec`, `inillucent_describe`,
   *binder's* — whether the statement binds as a query — not a scan of the text, so
   `SELECT … ; DROP TABLE …` does not slip through and a `SELECT` that happens to contain the word
   "delete" is not refused.
+  `inillucent_run` is served like any other tool: the verb is admitted and the shell
+  underneath refuses each statement that writes, so an agent on a read only server still
+  reaches every dot command.
 - **`--root DIR` refuses every path that *resolves* outside a directory.** Resolves, not spells:
   every component is followed through the file system as it is appended, so a Windows junction or a
   Unix symbolic link placed below the root is replaced by what it points at before the check

@@ -469,7 +469,15 @@ fn parse_time_value(value: &Value<'static>, now: f64, encoding: TextEncoding) ->
             if trimmed.eq_ignore_ascii_case(b"now") {
                 return Some(Moment::at(now));
             }
-            if let Some((day, spelled)) = parse_iso(trimmed) {
+            // **Trailing whitespace only** (task-2066 section 4.2, item 27).
+            // `date(' 2024-01-01')` answered `2024-01-01` here and is NULL in
+            // SQLite, whose `parseYyyyMmDd` reads the string it was given and
+            // skips nothing before the year. It *does* skip whitespace after
+            // the date, which is why `date('2024-01-01 ')` is a date in both -
+            // and trimming both ends made the first case wrong while a raw
+            // parse would have made the second wrong. The reference's own
+            // answers to the pair are `differential_part8`'s `t2066-003`.
+            if let Some((day, spelled)) = parse_iso(trim_end(&raw)) {
                 return Some(Moment {
                     day,
                     spelled,
@@ -486,6 +494,22 @@ fn parse_time_value(value: &Value<'static>, now: f64, encoding: TextEncoding) ->
             None
         }
     }
+}
+
+/// Returns the bytes with any trailing whitespace removed.
+///
+/// @param bytes - the text as it was written
+fn trim_end(bytes: &[u8]) -> &[u8] {
+    let mut end = bytes.len();
+    while end > 0
+        && end
+            .checked_sub(1)
+            .and_then(|index| bytes.get(index))
+            .is_some_and(|byte| numeric::is_space(*byte))
+    {
+        end = end.saturating_sub(1);
+    }
+    bytes.get(..end).unwrap_or(bytes)
 }
 
 /// Returns the bytes with leading and trailing spaces removed.
@@ -585,11 +609,18 @@ fn split_datetime(bytes: &[u8]) -> Option<(Option<&[u8]>, Option<&[u8]>)> {
 }
 
 /// Parses `YYYY-MM-DD`.
+///
+/// **The widths are exact** (task-2066 section 4.2, item 27). `digits` accepts
+/// a run of any length, so `date('2024-1-1')` and `date('02024-01-01')` both
+/// parsed here and both are NULL in SQLite, whose `getDigits` is called with
+/// `"40f-21a-21d"` - four digits, then two, then two, and no other shape is a
+/// date. A date function that accepts more spellings than the reference is a
+/// migration that silently changes which rows a `WHERE` keeps.
 fn parse_date(bytes: &[u8]) -> Option<(i64, i64, i64)> {
     let mut parts = bytes.split(|byte| *byte == b'-');
-    let year = digits(parts.next()?)?;
-    let month = digits(parts.next()?)?;
-    let day = digits(parts.next()?)?;
+    let year = digits_wide(parts.next()?, 4)?;
+    let month = digits_wide(parts.next()?, 2)?;
+    let day = digits_wide(parts.next()?, 2)?;
     if parts.next().is_some() {
         return None;
     }
@@ -614,19 +645,21 @@ fn parse_time(bytes: &[u8]) -> Option<(i64, i64, f64, i64)> {
             let sign = if body.get(at) == Some(&b'-') { -1 } else { 1 };
             let zone = body.get(at.saturating_add(1)..)?;
             let mut halves = zone.split(|byte| *byte == b':');
-            let hours = digits(halves.next()?)?;
-            let minutes = halves.next().map_or(Some(0), digits)?;
+            let hours = digits_wide(halves.next()?, 2)?;
+            let minutes = halves.next().map_or(Some(0), |held| digits_wide(held, 2))?;
             offset = sign * (hours * 60 + minutes);
             body = body.get(..at)?;
         }
     }
+    // Two digits each, which is what SQLite's `"20c:20e"` and `"20g"` ask for.
+    // The fraction after the seconds is the one field whose width is free.
     let mut parts = body.split(|byte| *byte == b':');
-    let hour = digits(parts.next()?)?;
-    let minute = digits(parts.next()?)?;
+    let hour = digits_wide(parts.next()?, 2)?;
+    let minute = digits_wide(parts.next()?, 2)?;
     let second = match parts.next() {
         Some(text) => {
             let mut halves = text.splitn(2, |byte| *byte == b'.');
-            let whole = digits(halves.next()?)? as f64;
+            let whole = digits_wide(halves.next()?, 2)? as f64;
             let fraction = match halves.next() {
                 Some(digits_after) => {
                     let value = digits(digits_after)? as f64;
@@ -644,6 +677,15 @@ fn parse_time(bytes: &[u8]) -> Option<(i64, i64, f64, i64)> {
     }
     (hour <= 24 && minute <= 59 && second < 60.0).then_some(())?;
     Some((hour, minute, second, offset))
+}
+
+/// Parses exactly `width` ASCII digits.
+///
+/// @param bytes - the field as it was written
+/// @param width - how many digits the field must have
+fn digits_wide(bytes: &[u8], width: usize) -> Option<i64> {
+    (bytes.len() == width).then_some(())?;
+    digits(bytes)
 }
 
 /// Parses a run of ASCII digits.

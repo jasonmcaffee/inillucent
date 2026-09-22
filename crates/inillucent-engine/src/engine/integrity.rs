@@ -60,6 +60,27 @@ impl crate::ImportedDatabase {
     ///
     /// @param depth - how much of the file to read
     pub fn check_trees_to(&self, depth: CheckDepth) -> DbResult<()> {
+        // **First, whether each file's page count can address a file at all.**
+        // `integrity-check` answered `ok` about a 163,840-byte file whose meta
+        // pages both claimed 2^60 pages, with both checksums resealed
+        // (task-2066 section 4.2, item 16). Every check below walks trees by
+        // following pointers, so a page count that describes no file is a
+        // number none of them reads - and `paged::cursor` bounds the leaf
+        // sibling chain by it, so an inflated one disables that cycle guard
+        // too. The open path makes the same check; this is the one a caller
+        // can run on a file that is already open. See
+        // `Database::refuse_a_page_count_that_cannot_be_addressed` for why it
+        // is the arithmetic that is checked and not the file's length.
+        let mut seen = std::collections::BTreeSet::new();
+        for root in self.schema.trees.keys() {
+            let at = self.session_state.schema_of(*root);
+            if !seen.insert(at) {
+                continue;
+            }
+            self.schema_file(at)
+                .ok_or_else(|| refusal("a tree names a database that is not attached"))?
+                .refuse_a_page_count_that_cannot_be_addressed()?;
+        }
         for (root, tree) in &self.schema.trees {
             let pool = self
                 .schema_file(self.session_state.schema_of(*root))

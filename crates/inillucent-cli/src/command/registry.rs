@@ -13,7 +13,7 @@
 //! count, `params` being positional - say so.
 
 use super::verbs;
-use super::{Command, Kind, Param, DB, FORMAT, LIMIT};
+use super::{Command, Kind, Param, Writes, DB, FORMAT, LIMIT};
 
 /// The parameters `query` takes.
 const QUERY_PARAMS: &[Param] = &[
@@ -538,7 +538,7 @@ pub static COMMANDS: &[Command] = &[
                  itself when you cannot afford that, where the planner can act on it.",
         params: QUERY_PARAMS,
         cli_only: None,
-        writes: false,
+        writes: Writes::No,
         run: verbs::query,
     },
     Command {
@@ -548,7 +548,7 @@ pub static COMMANDS: &[Command] = &[
                  statement with RETURNING gives its rows back as well as its count.",
         params: EXEC_PARAMS,
         cli_only: None,
-        writes: true,
+        writes: Writes::Yes,
         run: verbs::exec,
     },
     Command {
@@ -558,7 +558,7 @@ pub static COMMANDS: &[Command] = &[
                  do, which is what you want when creating a schema or loading related rows.",
         params: BATCH_PARAMS,
         cli_only: None,
-        writes: true,
+        writes: Writes::Yes,
         run: verbs::batch,
     },
     Command {
@@ -570,7 +570,12 @@ pub static COMMANDS: &[Command] = &[
                  '.archive'. Run 'inillucent run \".help\"' for the full list of dot commands.",
         params: RUN_PARAMS,
         cli_only: None,
-        writes: true,
+        // **The verb gate stands aside and the shell refuses the writes.**
+        // `writes: true` here refused `--readonly run "SELECT count(*) FROM t;"`
+        // and the `inillucent_run` MCP tool with it, although `run` is how a
+        // read only agent reaches every dot command (task-2066 section 4.2,
+        // item 26).
+        writes: Writes::PerStatement,
         run: verbs::run_input,
     },
     Command {
@@ -580,7 +585,7 @@ pub static COMMANDS: &[Command] = &[
                  run twice. Every other command opens whatever it is pointed at.",
         params: CREATE_PARAMS,
         cli_only: None,
-        writes: true,
+        writes: Writes::Yes,
         run: verbs::create,
     },
     Command {
@@ -590,7 +595,7 @@ pub static COMMANDS: &[Command] = &[
                  are left out.",
         params: PATTERN_PARAMS,
         cli_only: None,
-        writes: false,
+        writes: Writes::No,
         run: verbs::tables,
     },
     Command {
@@ -602,7 +607,7 @@ pub static COMMANDS: &[Command] = &[
                  picture.",
         params: DESCRIBE_PARAMS,
         cli_only: None,
-        writes: false,
+        writes: Writes::No,
         run: verbs::describe,
     },
     Command {
@@ -611,7 +616,7 @@ pub static COMMANDS: &[Command] = &[
         detail: "The schema as SQL, which is the form you can paste into another database.",
         params: SCHEMA_PARAMS,
         cli_only: None,
-        writes: false,
+        writes: Writes::No,
         run: verbs::schema,
     },
     Command {
@@ -621,7 +626,7 @@ pub static COMMANDS: &[Command] = &[
                  an index you did not write may appear here.",
         params: PATTERN_PARAMS,
         cli_only: None,
-        writes: false,
+        writes: Writes::No,
         run: verbs::indexes,
     },
     Command {
@@ -631,7 +636,7 @@ pub static COMMANDS: &[Command] = &[
                  session's own scratch database and has no file.",
         params: DB_ONLY,
         cli_only: None,
-        writes: false,
+        writes: Writes::No,
         run: verbs::databases,
     },
     Command {
@@ -641,7 +646,7 @@ pub static COMMANDS: &[Command] = &[
                  joined. This is how you find out why a query is slow before making it faster.",
         params: EXPLAIN_PARAMS,
         cli_only: None,
-        writes: false,
+        writes: Writes::No,
         run: verbs::explain,
     },
     Command {
@@ -651,7 +656,7 @@ pub static COMMANDS: &[Command] = &[
                  RFC 4180 unless a different format is asked for.",
         params: IMPORT_PARAMS,
         cli_only: None,
-        writes: true,
+        writes: Writes::Yes,
         run: verbs::import,
     },
     Command {
@@ -661,7 +666,7 @@ pub static COMMANDS: &[Command] = &[
                  back in the result, which is usually what an agent wants.",
         params: EXPORT_PARAMS,
         cli_only: None,
-        writes: false,
+        writes: Writes::No,
         run: verbs::export,
     },
     Command {
@@ -671,7 +676,7 @@ pub static COMMANDS: &[Command] = &[
                  portable form: it is text, and another SQLite-speaking database will read it.",
         params: DUMP_PARAMS,
         cli_only: None,
-        writes: false,
+        writes: Writes::No,
         run: verbs::dump,
     },
     Command {
@@ -681,7 +686,7 @@ pub static COMMANDS: &[Command] = &[
                  a text dump.",
         params: BACKUP_PARAMS,
         cli_only: None,
-        writes: false,
+        writes: Writes::No,
         run: verbs::backup,
     },
     Command {
@@ -696,7 +701,7 @@ pub static COMMANDS: &[Command] = &[
                  backup file that is not there is refused rather than created empty.",
         params: RESTORE_PARAMS,
         cli_only: None,
-        writes: true,
+        writes: Writes::Yes,
         run: verbs::restore,
     },
     Command {
@@ -706,7 +711,7 @@ pub static COMMANDS: &[Command] = &[
                  and is what you want before copying the file by hand.",
         params: DB_ONLY,
         cli_only: None,
-        writes: true,
+        writes: Writes::Yes,
         run: verbs::checkpoint,
     },
     Command {
@@ -716,7 +721,7 @@ pub static COMMANDS: &[Command] = &[
                  the whole file, so it costs what the file costs.",
         params: DB_ONLY,
         cli_only: None,
-        writes: false,
+        writes: Writes::No,
         run: verbs::integrity_check,
     },
     Command {
@@ -727,7 +732,7 @@ pub static COMMANDS: &[Command] = &[
                  should use an index does not.",
         params: ANALYZE_PARAMS,
         cli_only: None,
-        writes: true,
+        writes: Writes::Yes,
         run: verbs::analyze,
     },
     Command {
@@ -737,7 +742,7 @@ pub static COMMANDS: &[Command] = &[
                  This is where you look when a workload is slower than it should be.",
         params: DB_ONLY,
         cli_only: None,
-        writes: false,
+        writes: Writes::No,
         run: verbs::stats,
     },
     Command {
@@ -748,7 +753,7 @@ pub static COMMANDS: &[Command] = &[
                  whether it is.",
         params: SEARCH_PARAMS,
         cli_only: None,
-        writes: false,
+        writes: Writes::No,
         run: verbs::search,
     },
     Command {
@@ -759,7 +764,7 @@ pub static COMMANDS: &[Command] = &[
                  this is an exhaustive scan and is still correct.",
         params: VECTOR_PARAMS,
         cli_only: None,
-        writes: false,
+        writes: Writes::No,
         run: verbs::vector_search,
     },
     Command {
@@ -772,7 +777,7 @@ pub static COMMANDS: &[Command] = &[
                  that was never declared was never checked.",
         params: CAPABILITY_PARAMS,
         cli_only: None,
-        writes: false,
+        writes: Writes::No,
         run: verbs::capabilities,
     },
     Command {
@@ -783,7 +788,7 @@ pub static COMMANDS: &[Command] = &[
                  documented once.",
         params: PATTERN_PARAMS,
         cli_only: None,
-        writes: false,
+        writes: Writes::No,
         run: verbs::functions,
     },
     Command {
@@ -799,7 +804,7 @@ pub static COMMANDS: &[Command] = &[
                  that fails a check is published.",
         params: MIGRATE_PARAMS,
         cli_only: None,
-        writes: true,
+        writes: Writes::Yes,
         run: verbs::migrate,
     },
     Command {
@@ -822,7 +827,7 @@ pub static COMMANDS: &[Command] = &[
                  questions.",
         params: SETUP_PARAMS,
         cli_only: None,
-        writes: true,
+        writes: Writes::Yes,
         run: crate::setup::setup_embeddings,
     },
     Command {
@@ -832,7 +837,7 @@ pub static COMMANDS: &[Command] = &[
                  library it links. There is no SQLite in this binary.",
         params: VERSION_PARAMS,
         cli_only: None,
-        writes: false,
+        writes: Writes::No,
         run: verbs::version,
     },
     Command {
@@ -842,7 +847,7 @@ pub static COMMANDS: &[Command] = &[
                  what it is for, and every parameter it takes.",
         params: HELP_PARAMS,
         cli_only: None,
-        writes: false,
+        writes: Writes::No,
         run: verbs::help,
     },
     Command {
@@ -855,7 +860,7 @@ pub static COMMANDS: &[Command] = &[
             "it is a terminal REPL: it reads a keyboard and writes a screen, and neither exists \
              at the other end of an MCP call. Use 'run' instead, which drives the same shell.",
         ),
-        writes: true,
+        writes: Writes::Yes,
         run: verbs::shell_placeholder,
     },
     Command {
@@ -868,7 +873,7 @@ pub static COMMANDS: &[Command] = &[
             "it is the server that would be exposing the tools, so offering it as one of them \
              would let a client ask the server to serve itself.",
         ),
-        writes: true,
+        writes: Writes::Yes,
         run: verbs::mcp_placeholder,
     },
 ];

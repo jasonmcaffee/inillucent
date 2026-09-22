@@ -110,6 +110,20 @@ impl FileKind {
     pub fn deletes_on_close(self) -> bool {
         matches!(self, FileKind::Transient | FileKind::TempDb)
     }
+
+    /// Reports whether this kind of file is meant to be there after a restart.
+    ///
+    /// **Which is the same question as whether its directory entry has to be
+    /// forced** (task-2066 section 4.2, item 19). A file whose contents were
+    /// synced and whose *name* was not can be lost whole on ext4 or XFS: the
+    /// inode is durable and nothing points at it. For a log segment that is
+    /// every commit inside it, and `read_chain` reads the missing segment as
+    /// the ordinary end of the chain, so recovery reports success over the
+    /// loss. A file that is deleted when it is closed has nothing to lose and
+    /// pays no directory sync for it.
+    pub fn survives_a_restart(self) -> bool {
+        !self.deletes_on_close()
+    }
 }
 
 /// How to open a file.

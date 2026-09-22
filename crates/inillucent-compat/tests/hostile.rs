@@ -601,6 +601,110 @@ fn a_chain_of_concatenations_cannot_double_past_the_value_bound() {
     );
 }
 
+/// **A table cannot be declared or grown past `Limit::Column`.**
+///
+/// The limit was charged on what a `SELECT` returns and on nothing a table
+/// declares, so a 2,100-column `CREATE TABLE` succeeded here and SQLite
+/// refused it with "too many columns"; at about five thousand columns it
+/// failed with "the mini-columns do not fit in one page", which refuses the
+/// right statement for a reason a caller cannot act on (task-2066 section 4.2,
+/// item 21).
+///
+/// Both ways in are asserted, because they are charged in two different places
+/// and neither covers the other: a `CREATE TABLE` declares its whole list, so
+/// the parser counts it, and an `ALTER TABLE ... ADD COLUMN` adds one to a
+/// list only the catalog can measure, so the binder counts it. Without the
+/// second, a table is walked past the limit one statement at a time.
+#[test]
+fn a_table_cannot_be_declared_or_grown_past_the_column_limit() {
+    let limit = inillucent_base::limits::Limit::Column.default_value() as usize;
+    let connection = connect();
+
+    let one_too_many: Vec<String> = (0..=limit).map(|n| format!("c{n} INT")).collect();
+    let refused = connection
+        .execute(&format!(
+            "CREATE TABLE wide (
+{})",
+            one_too_many.join(", ")
+        ))
+        .expect_err("a table past the column limit must be refused");
+    assert!(
+        refused.message().contains("too many columns"),
+        "a table past the column limit was refused by something else: {}",
+        refused.message()
+    );
+
+    // At the limit exactly, which is the case a bound off by one would refuse.
+    let exactly: Vec<String> = (0..limit).map(|n| format!("c{n} INT")).collect();
+    connection
+        .execute(&format!(
+            "CREATE TABLE full (
+{})",
+            exactly.join(", ")
+        ))
+        .expect("a table at the column limit is accepted");
+    let grown = connection
+        .execute("ALTER TABLE full ADD COLUMN one_more INT")
+        .expect_err("a column past the limit must be refused");
+    assert!(
+        grown.message().contains("too many columns"),
+        "growing a full table was refused by something else: {}",
+        grown.message()
+    );
+}
+
+/// **A recursion past a million passes answers, and a runaway is stopped by
+/// the budget rather than by a pass count.**
+///
+/// `run_recursive` refused after a million passes with "a recursive CTE did
+/// not settle", which refused a series generator past a million rows - an
+/// ordinary idiom SQLite answers - and the number it refused at was not
+/// derived from anything (task-2066 section 4.2, item 22).
+///
+/// The first case is the one the constant refused: it needs one pass more than
+/// the constant allowed, and it asserts the *count*, so a build that stopped
+/// early and answered a short number fails it as loudly as one that refuses.
+///
+/// The second is the guard that replaced the constant. Every row a pass
+/// produces is charged to the request's budget, so a recursion with no base
+/// case stops at the byte ceiling and the failure names that ceiling. It is
+/// armed here directly because the command line leaves the budget unbounded on
+/// purpose - see `a_chain_of_concatenations_cannot_double_past_the_value_bound`
+/// above, which says the same thing about the same surface - and a served
+/// server is what arms one.
+#[test]
+fn a_long_recursion_answers_and_a_runaway_meets_the_budget() {
+    let connection = connect();
+    let counted = connection
+        .query(
+            "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n WHERE x < 1000001)              SELECT count(*) FROM n",
+        )
+        .expect("a long recursion answers")
+        .first()
+        .and_then(|row| row.first())
+        .and_then(Value::as_integer);
+    assert_eq!(
+        counted,
+        Some(1_000_001),
+        "a recursion of a million and one passes did not answer its own count"
+    );
+
+    let _guard = inillucent_base::budget::arm(
+        inillucent_base::budget::Limits::served()
+            .with_bytes(Some(4 * 1024 * 1024))
+            .with_time(Some(std::time::Duration::from_secs(30))),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    );
+    let refused = connection
+        .query("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n) SELECT x FROM n")
+        .expect_err("a recursion with no base case must be stopped");
+    assert!(
+        inillucent_base::budget::exceeded_kind(&refused).is_some(),
+        "a runaway recursion was stopped by something other than the budget: {}",
+        refused.message()
+    );
+}
+
 /// Runs one statement as a process and reports its exit code, what it said, and
 /// the largest resident set it reached.
 ///

@@ -356,6 +356,47 @@ fn a_malformed_line_does_not_end_the_session() {
     );
 }
 
+/// **A blank line does not end the session.**
+///
+/// `read_request` returned `Ok(0)` for an empty line and for the end of the
+/// stream alike, and `serve` reads `Ok(0)` as the end of input - so one stray
+/// newline from a client ended the session, the next request went unanswered,
+/// and the process exited 0 as though the client had hung up (task-2066
+/// section 4.2, item 27). JSON-RPC over a line protocol has no meaning for an
+/// empty line, and reading past it is what every other implementation does.
+///
+/// Three blank lines and one holding a carriage return, because a client on Windows
+/// sends the second and the fix has to treat it as the same nothing.
+#[test]
+fn a_blank_line_does_not_end_the_session() {
+    let (Some(server), Some(binary)) = (program("inillucent-mcp"), program("inillucent")) else {
+        return;
+    };
+    let directory = area("blank-line");
+    let database = empty_database(&binary, &directory);
+    let mut session = Session::start_with(&server, &database, &[]);
+
+    session.write_line("");
+    session.write_line("   ");
+    session.write_line("\r");
+    let listed = session.call("tools/list", "{}");
+    assert!(
+        listed.contains("inillucent_query"),
+        "the server stopped answering after a blank line:
+{listed}"
+    );
+
+    // And again after a request, so the fix is about the read loop rather than
+    // about the state the handshake happened to be in.
+    session.write_line("");
+    let again = session.call("tools/list", "{}");
+    assert!(
+        again.contains("inillucent_query"),
+        "the server stopped answering after a blank line between requests:
+{again}"
+    );
+}
+
 /// A deeply nested request is refused, and the next one is answered.
 ///
 /// **One request used to kill the server** (task-2066 §4.1.6). The command

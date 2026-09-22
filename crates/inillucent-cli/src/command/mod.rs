@@ -118,6 +118,53 @@ pub struct Param {
     pub description: &'static str,
 }
 
+/// What a command does to the database, for the two questions that asks.
+///
+/// **Three states rather than two, because `run` is neither** (task-2066
+/// section 4.2, item 26). The flag this replaces answered one question with
+/// one bit and two different callers read it: `--readonly` refuses a command
+/// that writes, and a command that writes creates the file it was pointed at.
+/// `run` drives the shell, so it may do either, and marking it `true` refused
+/// `inillucent --readonly run "SELECT count(*) FROM t;"` and the
+/// `inillucent_run` MCP tool with it - while marking it `false` would stop
+/// `inillucent --db new.rdb run ".read schema.sql"` from making the file.
+///
+/// The shell it drives already refuses a write statement by statement when it
+/// is read only, from `inillucent_driver::readonly::admits`, which is the same
+/// classification `Context::refuse_if_it_writes` and the driver use. So `run`
+/// needs the verb gate to stand aside and let that refusal happen, which is
+/// the third state.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Writes {
+    /// It only reads. `--readonly` admits it and it never creates a file.
+    No,
+    /// It changes the database. `--readonly` refuses it by name.
+    Yes,
+    /// It may change the database, and refuses each statement that does.
+    ///
+    /// `--readonly` admits the verb and the shell underneath refuses the
+    /// writes, one statement at a time, with "attempt to write a readonly
+    /// database".
+    PerStatement,
+}
+
+impl Writes {
+    /// Whether `--readonly` refuses this command before it runs.
+    pub fn refused_when_read_only(self) -> bool {
+        self == Writes::Yes
+    }
+
+    /// Whether this command may create the database file it was pointed at.
+    ///
+    /// A read verb does not make the file it was pointed at, so
+    /// `inillucent --db typo.rdb tables` reports a missing database rather
+    /// than leaving an empty one behind. `run` may, because
+    /// `sqlite3 new.db ".read schema.sql"` does.
+    pub fn may_create(self) -> bool {
+        self != Writes::No
+    }
+}
+
 /// One command.
 pub struct Command {
     /// The verb, as `inillucent <name>` and as `inillucent_<name>`.
@@ -131,8 +178,9 @@ pub struct Command {
     pub params: &'static [Param],
     /// Why it is not offered over MCP, when it is not.
     pub cli_only: Option<&'static str>,
-    /// Whether it can change the database, and so is refused when read-only.
-    pub writes: bool,
+    /// Whether it can change the database, and what a read only surface does
+    /// about it.
+    pub writes: Writes,
     /// What it does.
     pub run: fn(&mut Context, &Arguments) -> Result<Outcome, Failed>,
 }
@@ -825,7 +873,7 @@ pub fn run(
     if let Some(path) = arguments.text("db") {
         context.use_database(path)?;
     }
-    if command.writes && context.readonly() {
+    if command.writes.refused_when_read_only() && context.readonly() {
         return Err(Failed::said(
             Status::ReadOnly,
             format!(

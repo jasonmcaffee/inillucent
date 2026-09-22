@@ -233,6 +233,22 @@ Two of those are limits worth planning around. A transaction that writes more pa
 holds needs a larger pool, set when the file is opened. And a `DROP TABLE` cannot be undone inside a
 transaction: attempting it leaves the connection unable to read that table.
 
+### Four smaller differences, each with a test that holds it still
+
+task-2066's correctness audit measured these and they are not fixed. Each one has a test asserting
+the behaviour as it is, so a change to any of them is a change somebody made on purpose.
+
+| | inillucent | SQLite 3.53.4 |
+|---|---|---|
+| `pragma_foreign_keys` as a table-valued function | not offered. The table-valued forms are the pragmas that answer rows; `foreign_keys` is a setting and is reachable as `PRAGMA foreign_keys` | offered, one row holding the flag |
+| an index on a `VIRTUAL` generated column | refused. `CREATE INDEX` needs a stored value to key on, and a `VIRTUAL` column has none in the row | allowed; the index stores the computed value |
+| `vector-search`'s result columns | the primary key appears twice: once as the table's own column and once as the column the search names | no equivalent; SQLite has no vector search |
+| a JSON-text vector handed to the `inillucent_search` hybrid table | refused as `syntax`, which does not say that the argument was the wrong shape | no equivalent |
+
+The first two are also absent from `inillucent capabilities`, which is why they are written down
+here: the capability table is checked against the running engine in both directions, and a row that
+does not exist is the one thing it cannot check.
+
 ## Reproducing the probe
 
 ```sh

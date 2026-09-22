@@ -52,19 +52,6 @@ pub struct SortKey {
 /// two of them can hold twice this, which is what the byte budget is for.
 const SPILL_BYTES: u64 = 64 * 1024 * 1024;
 
-/// The threshold this sort spills at.
-///
-/// `SPILL_BYTES` unless a test lowered it. **A test cannot reach the real
-/// threshold**: sixty-four mebibytes of rows takes seconds to build and the
-/// suite runs this file's cases in milliseconds, so a spill nobody can
-/// exercise is a spill nobody has run. Lowering it is how the merge gets
-/// tested at all, and the field is crate-private so nothing outside this crate
-/// can move it.
-#[cfg(test)]
-pub(crate) fn spill_threshold(sort: &Sort) -> u64 {
-    sort.threshold
-}
-
 /// Sorts every row, then emits.
 pub struct Sort {
     keys: Vec<SortKey>,
@@ -728,7 +715,6 @@ pub(crate) fn compare_by(left: &[OwnedDatum], right: &[OwnedDatum], keys: &[Sort
 #[cfg(test)]
 mod spill_tests {
     use super::*;
-    use crate::ops::Collect;
     use crate::spill::{Spill, SpillFile};
     use inillucent_base::DbResult;
 

@@ -427,3 +427,57 @@ fn writes_survive_a_close_and_reopen() {
 // is deleted rather than given a hollow replacement. If hooks are added to the
 // new engine later, these three cases (and their SQL scripts, preserved above
 // in this comment's neighbourhood in source history) are what to restore.
+
+/// **The `CHECK` that failed is the one the refusal names.**
+///
+/// `source_text_of` looked the constraint up by comparing `declared.name`
+/// against the bound constraint's name, and every unnamed `CHECK` has
+/// `name == None` - so `None == None` matched the first unnamed constraint
+/// whatever had actually failed, and a row violating the second of two was
+/// told the first one's text (task-2066 section 4.2, item 27).
+///
+/// The named arm beside it is the control: names are distinct, so the lookup
+/// by name was right for those all along, and a fix that broke them would be
+/// trading one wrong answer for another. `differential_part8`'s `t2066-017`
+/// and `t2066-018` grade the same two scripts against the reference, but the
+/// corpus compares answers rather than refusal text - both engines refuse and
+/// that is agreement - so the sentence itself is asserted here.
+#[test]
+fn the_check_that_failed_is_the_one_named() {
+    let (database, _) = database(
+        "check-names.rdb",
+        "CREATE TABLE unnamed (a INTEGER CHECK (a > 0), b INTEGER CHECK (b > 100))",
+    );
+    let connection = database.session();
+    let refusal = connection
+        .execute("INSERT INTO unnamed VALUES (1, 5)")
+        .expect_err("the second CHECK must refuse the row");
+    let said = refusal.message().to_string();
+    assert!(
+        said.contains("b > 100"),
+        "the refusal did not name the constraint that failed: {said}"
+    );
+    assert!(
+        !said.contains("a > 0"),
+        "the refusal named the constraint that passed: {said}"
+    );
+
+    connection
+        .execute_batch(
+            "CREATE TABLE named (a INTEGER, b INTEGER, \
+             CONSTRAINT first CHECK (a > 0), CONSTRAINT second CHECK (b > 100))",
+        )
+        .expect("the named table is created");
+    let refusal = connection
+        .execute("INSERT INTO named VALUES (1, 5)")
+        .expect_err("the second CHECK must refuse the row");
+    let said = refusal.message().to_string();
+    assert!(
+        said.contains("second"),
+        "the refusal did not name the constraint that failed: {said}"
+    );
+    assert!(
+        !said.contains("first"),
+        "the refusal named the constraint that passed: {said}"
+    );
+}
