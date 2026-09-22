@@ -737,35 +737,82 @@ pub(crate) struct Storage {
 /// flags that say whether one is open and who opened it. A1 step 3 lifts this into
 /// `Writer`, which is the type that makes "one transaction at a time" something the
 /// compiler knows rather than a sentence in a doc comment.
-/// Where a statement's writes begin, in both of a transaction's records.
+/// Where a statement's writes begin, in each of a transaction's records.
 ///
 /// **One value because they are taken together and used together.** A statement
 /// that fails is rolled back to the undo buffer's length *and* to the
 /// pending-free list's length, and passing them as two integers grew
 /// `ImportedDatabase::write` past the length it is recorded at - which is the
 /// ratchet doing its job: the second one belongs with the first, not beside it.
+/// The third arrived with task-2065 and went the same way rather than beside
+/// it, which is why `undo_to_floor` takes this value now instead of a list of
+/// integers that grows every time a transaction learns to record something
+/// else.
 #[derive(Clone, Copy)]
 pub(crate) struct StatementMark {
     /// How long the undo buffer was.
     pub(crate) undo: usize,
     /// How long the pending-free list was.
     pub(crate) dropped: usize,
+    /// How long the list of trees this transaction has built was.
+    pub(crate) built: usize,
 }
 
-/// One page a transaction has dropped and has not yet committed.
+/// One thing a transaction has dropped and has not yet committed.
 ///
 /// See [`Writing::pending_frees`] for why a drop waits: the free map is durable
 /// state, so giving a page back before the transaction that dropped it has
 /// committed is a change that a rollback would have to take back, and nothing in
 /// this engine's row-level undo buffer can.
 ///
-/// The schema travels with the page because one transaction may drop tables in
+/// The schema travels with each entry because one transaction may drop tables in
 /// more than one attached database, and a page number alone does not say which
 /// file's free map it belongs to.
 pub(crate) struct PendingFree {
-    /// Which attached database the page belongs to.
+    /// Which attached database it belongs to.
     pub(crate) schema: usize,
-    /// The page itself.
+    /// What is being given back.
+    pub(crate) what: Freed,
+}
+
+/// What one entry of the pending-free list gives back.
+///
+/// **A dropped tree gives back two kinds of thing and only one of them is a
+/// page number (task-2065).** A page of the tree itself belongs to that tree
+/// alone, so the commit hands it straight to the free map. A page an
+/// out-of-line value sits on may be shared with values from other trees, and
+/// giving it back because this tree used it would free a page another tree's
+/// value is still on - so what is recorded for a value is the reference, and
+/// `paged::free_extent` decides at the commit whether the page goes with it.
+pub(crate) enum Freed {
+    /// A page of the dropped tree - an interior page or a leaf.
+    Page(inillucent_pool::PageId),
+    /// One out-of-line value of the dropped tree, as its leaf held it.
+    Value(inillucent_pool::extent::ExtentRef),
+}
+
+/// One tree an open transaction has built and has not yet committed.
+///
+/// **The record that tells a rolled-back `CREATE` apart from a `DROP` whose
+/// pages belong to the commit (task-2065).** Both leave a handle the schema no
+/// longer names, and the two want opposite things done with the pages: a tree
+/// this transaction built was never committed, so an abandoned transaction has
+/// to give its pages back; a tree it dropped is on the pending-free list and
+/// its pages belong to the commit, which an abandoned transaction never
+/// reaches. Guessing from the catalog cannot separate them, because after the
+/// undo neither is in it.
+///
+/// The root page is recorded rather than only the handle, because by the time
+/// the rollback reads this the handle may hold nothing - the tree was dropped
+/// later in the same transaction - or may hold a different tree entirely, which
+/// is what `ALTER TABLE` leaves behind when it rebuilds under the same handle.
+/// The page is what still identifies the tree in both cases.
+pub(crate) struct BuiltTree {
+    /// Which attached database the tree was built in.
+    pub(crate) schema: usize,
+    /// The handle it was registered under.
+    pub(crate) root: u32,
+    /// The page its root sits on.
     pub(crate) page: inillucent_pool::PageId,
 }
 
@@ -815,14 +862,15 @@ pub(crate) struct Writing {
     /// in it - and copying it to read one entry would allocate per savepoint
     /// statement.
     ///
-    /// **Two lengths, because a transaction has two append-only records of what
-    /// it has done** and rolling back to a savepoint has to cut both to where
-    /// they stood when the savepoint was taken. Carrying only the `undo` length
-    /// and deriving the other from it is what a first version did, and it is
-    /// wrong at the boundary: a `DROP` and a `SAVEPOINT` taken immediately after
-    /// it sit at the same `undo` length, so nothing in that number says which
-    /// came first.
-    marks: std::cell::RefCell<Vec<(Vec<u8>, usize, usize)>>,
+    /// **A whole [`StatementMark`], because a transaction has several
+    /// append-only records of what it has done** and rolling back to a
+    /// savepoint has to cut every one of them to where it stood when the
+    /// savepoint was taken. Carrying only the `undo` length and deriving the
+    /// others from it is what a first version did, and it is wrong at the
+    /// boundary: a `DROP` and a `SAVEPOINT` taken immediately after it sit at
+    /// the same `undo` length, so nothing in that number says which came
+    /// first.
+    marks: std::cell::RefCell<Vec<(Vec<u8>, StatementMark)>>,
     /// Pages the open transaction has dropped, waiting for its commit.
     ///
     /// **A page is given back to the free map at commit, not at the statement
@@ -845,6 +893,25 @@ pub(crate) struct Writing {
     /// page P marked free while p still pointed at it, so the *next* statement
     /// to allocate anything overwrote p's rows.
     pending_frees: std::cell::RefCell<Vec<PendingFree>>,
+    /// Trees the open transaction has built, waiting for its commit.
+    ///
+    /// **The other half of task-2043's rule, and the leak it left (task-2065).**
+    /// Holding a drop's frees until the commit is what stops a rollback losing
+    /// rows; it says nothing about an allocation the rollback abandons. A
+    /// `CREATE TABLE` or `CREATE INDEX` inside a transaction allocates a root
+    /// page, and the undo buffer is row-level - it replays before-images
+    /// through `tree.put` and `tree.delete`, and no before-image says a page
+    /// was once free. So the page stayed marked allocated with nothing naming
+    /// it, one page per rolled-back `CREATE`.
+    ///
+    /// It is invisible on the connection that did it, because the rollback
+    /// leaves the tree's handle in `schema.trees` and a page walk therefore
+    /// still reaches the page. It appears after a checkpoint and a reopen, when
+    /// the schema is rebuilt from the catalog and nothing names that tree.
+    ///
+    /// Cleared at every commit, because a committed allocation is not one
+    /// anybody takes back.
+    built: std::cell::RefCell<Vec<BuiltTree>>,
     /// How many schemas the last commit was decided over.
     ///
     /// **The instrument for the one claim about this protocol that is otherwise
@@ -1126,7 +1193,7 @@ impl Writing {
     ///
     /// The cell rather than a borrow of it, because a caller that hands this to
     /// another type needs the cell itself.
-    pub(crate) fn marks(&self) -> &std::cell::RefCell<Vec<(Vec<u8>, usize, usize)>> {
+    pub(crate) fn marks(&self) -> &std::cell::RefCell<Vec<(Vec<u8>, StatementMark)>> {
         &self.marks
     }
 
@@ -1136,6 +1203,14 @@ impl Writing {
     /// hands back the cell.
     pub(crate) fn pending_frees(&self) -> &std::cell::RefCell<Vec<PendingFree>> {
         &self.pending_frees
+    }
+
+    /// Returns the cell holding the trees this transaction has built.
+    ///
+    /// The cell rather than a borrow of it, for the reason [`Writing::marks`]
+    /// hands back the cell.
+    pub(crate) fn built(&self) -> &std::cell::RefCell<Vec<BuiltTree>> {
+        &self.built
     }
 
     /// Returns the cell holding undo.
@@ -1164,6 +1239,7 @@ impl Writing {
             decided_over: std::cell::Cell::new(0),
             marks: std::cell::RefCell::new(Vec::new()),
             pending_frees: std::cell::RefCell::new(Vec::new()),
+            built: std::cell::RefCell::new(Vec::new()),
             implicit_transaction: std::cell::Cell::new(false),
             running: std::cell::Cell::new(0),
             settling: std::cell::Cell::new(false),

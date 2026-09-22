@@ -47,6 +47,7 @@ impl crate::ImportedDatabase {
         self.writing.undo().borrow_mut().clear();
         self.writing.marks().borrow_mut().clear();
         self.writing.pending_frees().borrow_mut().clear();
+        self.writing.built().borrow_mut().clear();
         self.writing.set_touched(0);
     }
 
@@ -65,7 +66,7 @@ impl crate::ImportedDatabase {
     ///
     /// @param to - the savepoint to stop at, or `None` for the whole transaction
     pub(crate) fn undo_to(&mut self, to: Option<&[u8]>) -> DbResult<()> {
-        let (floor, dropped_floor) = match to {
+        let to = match to {
             Some(name) => {
                 let folded = name.to_ascii_lowercase();
                 // One borrow, held only long enough to find the savepoint:
@@ -74,20 +75,24 @@ impl crate::ImportedDatabase {
                     let marks = self.writing.marks().borrow();
                     marks
                         .iter()
-                        .rposition(|(held, _, _)| *held == folded)
-                        .and_then(|index| marks.get(index).map(|(_, at, dropped)| (*at, *dropped)))
+                        .rposition(|(held, _)| *held == folded)
+                        .and_then(|index| marks.get(index).map(|(_, mark)| *mark))
                 };
-                let Some(position) = found else {
+                let Some(mark) = found else {
                     return Err(refusal(format!(
                         "no such savepoint: {}",
                         String::from_utf8_lossy(name)
                     )));
                 };
-                position
+                mark
             }
-            None => (0, 0),
+            None => crate::engine::state::StatementMark {
+                undo: 0,
+                dropped: 0,
+                built: 0,
+            },
         };
-        self.undo_to_floor(floor, dropped_floor, true, self.current_txn())
+        self.undo_to_floor(to, true, self.current_txn())
     }
 
     /// Undoes back to a position in the undo buffer, newest first.
@@ -97,21 +102,28 @@ impl crate::ImportedDatabase {
     /// a statement boundary is a length nobody named, taken by `write` before
     /// the statement wrote anything, and there is nothing to look up.
     ///
-    /// @param floor - the buffer length to stop at
-    /// @param dropped_floor - the pending-free list's length to cut back to,
-    ///   which undoes the `DROP`s taken after the same point: a page a
-    ///   rolled-back statement dropped is one this transaction never dropped
+    /// **It takes the whole mark rather than a length per record**, for the
+    /// reason [`crate::engine::state::StatementMark`] gives: the three lengths
+    /// are always taken together and always cut together, and a transaction
+    /// that learns to record a fourth thing should not have to grow every
+    /// caller of this.
+    ///
+    /// @param to - where the part being abandoned begins, in each of the
+    ///   transaction's records: the undo buffer, the pending-free list whose
+    ///   `DROP`s are undone by cutting it, and the list of trees built after
+    ///   the same point, whose pages are given back because the transaction
+    ///   they were allocated by is not going to commit
     /// @param reload - whether to rebuild the schema from the catalog tree
     /// @param txn - the transaction the restores are logged under, which is the
     ///   statement's own rather than `current_txn`: outside a batch `write` has
     ///   already taken a number and moved `next_txn` past it
     pub(crate) fn undo_to_floor(
         &mut self,
-        floor: usize,
-        dropped_floor: usize,
+        to: crate::engine::state::StatementMark,
         reload: bool,
         txn: u64,
     ) -> DbResult<()> {
+        let (floor, dropped_floor, built_floor) = (to.undo, to.dropped, to.built);
         while self.writing.undo().borrow().len() > floor {
             let Some(entry) = self.writing.undo().borrow_mut().pop() else {
                 break;
@@ -180,11 +192,21 @@ impl crate::ImportedDatabase {
             .pending_frees()
             .borrow_mut()
             .truncate(dropped_floor);
+        // **And the trees this part of the transaction built go back to the
+        // free map, also before the schema is rebuilt (task-2065).** The two
+        // lists are cut at the same point and mean opposite things: a page on
+        // the list above was allocated before this transaction and is only
+        // freed if the transaction commits, and a page below was allocated by
+        // the part of the transaction that is being abandoned, so it is freed
+        // precisely because the transaction does not commit. Doing it before
+        // `reload_entries` runs is what stops the walk it does reaching a tree
+        // that is on its way out.
+        self.release_built_trees(built_floor)?;
         let held = self.writing.undo().borrow().len();
         self.writing
             .marks()
             .borrow_mut()
-            .retain(|(_, at, _)| *at <= held);
+            .retain(|(_, mark)| mark.undo <= held);
         // **A DML statement cannot have changed the catalog, so undoing one has
         // nothing to rebuild from it.** `CREATE`, `DROP` and `ALTER` do not go
         // through `write`, and reloading here would cost a catalog read on
@@ -513,6 +535,11 @@ impl crate::ImportedDatabase {
         // makes that true even when the undo above failed part-way. An
         // abandoned transaction frees nothing.
         self.writing.pending_frees().borrow_mut().clear();
+        // Cleared rather than released, because `undo_to(None)` has already
+        // given these pages back. An entry still here is one the undo failed
+        // part-way through, and releasing it a second time would hand a page to
+        // the free map twice.
+        self.writing.built().borrow_mut().clear();
         self.writing.set_batch(None);
         self.writing.set_implicit_transaction(false);
         // Rolled back, so no-steal has nothing left to hold back on any
@@ -589,23 +616,148 @@ impl crate::ImportedDatabase {
         self.commit_across(txn, participants)
     }
 
-    /// Returns where a statement's writes begin, in both records.
+    /// Returns where a statement's writes begin, in each record.
     ///
     /// Taken before the statement writes anything; the success path does
     /// nothing with it and the failure path rolls back to it. That asymmetry is
-    /// the whole cost of statement atomicity inside a transaction - two integers
-    /// read off a `Vec`'s length - which is why there is no per-statement
-    /// savepoint and `txn.large`'s two thousand statements do not pay for two
-    /// thousand of them.
+    /// the whole cost of statement atomicity inside a transaction - three
+    /// integers read off a `Vec`'s length - which is why there is no
+    /// per-statement savepoint and `txn.large`'s two thousand statements do not
+    /// pay for two thousand of them.
     ///
     /// The second length is the pending-free list's, so a statement that dropped
     /// a tree and then failed drops nothing. A DML statement never adds to that
     /// list; the statement this protects is the one that runs a module's `DROP`.
+    ///
+    /// The third is the list of trees built, so a statement that built one and
+    /// then failed gives its pages back rather than leaving them allocated with
+    /// nothing naming them - a `CREATE TABLE ... AS SELECT` whose select fails
+    /// part way through, and every `ALTER TABLE` that rebuilds a tree and then
+    /// refuses.
     pub(crate) fn statement_mark(&self) -> crate::engine::state::StatementMark {
         crate::engine::state::StatementMark {
             undo: self.writing.undo().borrow().len(),
             dropped: self.writing.pending_frees().borrow().len(),
+            built: self.writing.built().borrow().len(),
         }
+    }
+
+    /// Gives back the pages of every tree built after a point in the
+    /// transaction.
+    ///
+    /// **Called only when that part of the transaction is being abandoned.** A
+    /// page here was allocated by a transaction that is not going to commit, so
+    /// the on-disk free map never learned about it and an in-memory
+    /// [`inillucent_pool::Database::release`] is the whole of the correction.
+    /// No `FreePage` record is written and none is wanted: recovery replays a
+    /// record only for a transaction whose `Commit` follows it, so the
+    /// `AllocPage` this undoes is never replayed either, and a `FreePage` for a
+    /// page that was never claimed would be a free of something the recovered
+    /// file still uses.
+    ///
+    /// The tree is walked from the root page rather than through the handle,
+    /// because the handle may by now hold nothing - the tree was dropped later
+    /// in the same transaction - or a different tree, which is what an
+    /// `ALTER TABLE` that rebuilds under the same handle leaves. Nothing has
+    /// freed those pages in the meantime, because a drop's frees wait for a
+    /// commit this transaction is not going to reach, so the tree is still
+    /// there to walk.
+    ///
+    /// @param floor - how long the list was when the abandoned part began
+    fn release_built_trees(&mut self, floor: usize) -> DbResult<()> {
+        let abandoned: Vec<crate::engine::state::BuiltTree> = {
+            let mut built = self.writing.built().borrow_mut();
+            if built.len() <= floor {
+                return Ok(());
+            }
+            built.split_off(floor)
+        };
+        // Newest first, for the reason the undo buffer is drained newest first:
+        // a handle built over twice inside one transaction has two entries, and
+        // the schema should end up holding neither.
+        for tree in abandoned.into_iter().rev() {
+            let at = tree.schema;
+            let Some(file) = self.schema_file(at) else {
+                continue;
+            };
+            let released = inillucent_tree::paged::released(file.pool(), tree.page)?;
+            // **The handle only goes if it still holds this tree.** A rollback
+            // to a savepoint may be abandoning a rebuild whose earlier tree is
+            // about to be re-attached under the same handle by
+            // `reload_entries`, and taking the handle out for a tree that is
+            // not the one being released would strand the one that is staying.
+            if self
+                .schema
+                .trees
+                .get(&tree.root)
+                .is_some_and(|held| held.root() == tree.page)
+            {
+                self.schema.trees.remove(&tree.root);
+                self.schema.layouts.remove(&tree.root);
+                self.schema.covering.remove(&tree.root);
+                for roots in self.schema.covering.values_mut() {
+                    roots.retain(|held| *held != tree.root);
+                }
+                self.session_state.owner.remove(&tree.root);
+            }
+            for reference in released.values {
+                self.free_built_value(at, reference)?;
+            }
+            let session = self.session_state.session.get();
+            let database = file_of(
+                &mut self.storage.database,
+                &mut self.session_state.attached,
+                &mut self.session_state.temps,
+                session,
+                at,
+            )?;
+            for page in released.pages {
+                database.release(page, 1)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Gives back one out-of-line value written by an abandoned transaction.
+    ///
+    /// **The values go back before the tree's own pages and through
+    /// `free_extent`**, for the same reason a `DROP` does: a value small enough
+    /// to be packed shares its page with values from other trees, and the page
+    /// is only free once the last live slot on it goes. A value the abandoned
+    /// transaction packed onto a page that existed before it leaves that page
+    /// alone and clears one slot, which is the correct answer - the page is not
+    /// this transaction's to give back.
+    ///
+    /// @param at - which attached database the value lives in
+    /// @param reference - the value, as its leaf held it
+    fn free_built_value(
+        &mut self,
+        at: usize,
+        reference: inillucent_pool::extent::ExtentRef,
+    ) -> DbResult<()> {
+        let wal = self
+            .log_of(at)
+            .ok_or_else(|| refusal("a rollback names a database that is not attached"))?;
+        let uncommitted = self.uncommitted_handle_of(at);
+        let mut log = WalLog {
+            wal,
+            // The records this writes belong to the transaction being
+            // abandoned, so nothing replays them - see `release_built_trees`.
+            txn: self.current_txn(),
+            schema: at,
+            wrote: false,
+            undo: None,
+            uncommitted,
+        };
+        let session = self.session_state.session.get();
+        let database = file_of(
+            &mut self.storage.database,
+            &mut self.session_state.attached,
+            &mut self.session_state.temps,
+            session,
+            at,
+        )?;
+        inillucent_tree::paged::free_extent(database, &mut log, reference)
     }
 
     /// Gives every page this transaction dropped back to the free map.
@@ -626,7 +778,19 @@ impl crate::ImportedDatabase {
     /// of that file and a commit is decided over the files it changed.
     ///
     /// @param txn - the transaction the frees are logged under
+    /// **A value is freed through `paged::free_extent` rather than released
+    /// (task-2065).** A page of the dropped tree belongs to that tree alone and
+    /// goes straight back. A page an out-of-line value sits on may hold small
+    /// values from other trees, so the reference is what was recorded and
+    /// `free_extent` is what decides: it clears the slot, and gives the page
+    /// back only when the last live slot on it goes. A value written as a run
+    /// of whole pages takes every page of the run with it. `free_extent`
+    /// appends its own `FreePage` records, which is why the loop below leaves
+    /// a value's records to it.
+    ///
+    /// @param txn - the transaction the frees are logged under
     pub(crate) fn flush_pending_frees(&mut self, txn: u64) -> DbResult<()> {
+        use crate::engine::state::Freed;
         let waiting: Vec<crate::engine::state::PendingFree> =
             std::mem::take(&mut *self.writing.pending_frees().borrow_mut());
         if waiting.is_empty() {
@@ -635,30 +799,81 @@ impl crate::ImportedDatabase {
         let mut touched = self.writing.touched();
         for dropped in &waiting {
             let at = dropped.schema;
+            touched |= crate::schema_bit(at);
+            let Freed::Page(page) = dropped.what else {
+                continue;
+            };
             let wal = self
                 .log_of(at)
                 .ok_or_else(|| refusal("a commit names a database that is not attached"))?;
-            wal.append(
-                txn,
-                inillucent_wal::record::Body::FreePage {
-                    page: dropped.page.0,
-                },
-            )?;
-            touched |= crate::schema_bit(at);
+            wal.append(txn, inillucent_wal::record::Body::FreePage { page: page.0 })?;
         }
+        // **The two kinds cannot collide, which is why the order they were
+        // recorded in is the order they are freed in.** A tree's own pages and
+        // the pages its values sit on are disjoint sets: a leaf is not an
+        // extent page and a shared extent page is not reachable as a child of
+        // any tree. Nothing in this loop allocates either - the only allocator
+        // is `Database::allocate` - so a page freed here cannot be handed back
+        // out before the loop ends and be written over by the free after it.
         for dropped in waiting {
-            let session = self.session_state.session.get();
-            let database = file_of(
-                &mut self.storage.database,
-                &mut self.session_state.attached,
-                &mut self.session_state.temps,
-                session,
-                dropped.schema,
-            )?;
-            database.release(dropped.page, 1)?;
+            let at = dropped.schema;
+            match dropped.what {
+                Freed::Page(page) => {
+                    let session = self.session_state.session.get();
+                    let database = file_of(
+                        &mut self.storage.database,
+                        &mut self.session_state.attached,
+                        &mut self.session_state.temps,
+                        session,
+                        at,
+                    )?;
+                    database.release(page, 1)?;
+                }
+                Freed::Value(reference) => self.free_dropped_value(at, txn, reference)?,
+            }
         }
         self.writing.set_touched(touched);
         Ok(())
+    }
+
+    /// Gives one dropped out-of-line value's pages back.
+    ///
+    /// Split out because `paged::free_extent` needs the file and a log at the
+    /// same time, and building the log takes a borrow of the connection that
+    /// the loop above cannot hold across `file_of`.
+    ///
+    /// @param at - which attached database the value lives in
+    /// @param txn - the transaction the frees are logged under
+    /// @param reference - the value, as its leaf held it
+    fn free_dropped_value(
+        &mut self,
+        at: usize,
+        txn: u64,
+        reference: inillucent_pool::extent::ExtentRef,
+    ) -> DbResult<()> {
+        let wal = self
+            .log_of(at)
+            .ok_or_else(|| refusal("a commit names a database that is not attached"))?;
+        let uncommitted = self.uncommitted_handle_of(at);
+        let mut log = WalLog {
+            wal,
+            txn,
+            schema: at,
+            wrote: false,
+            // The free is not undoable: it happens at the commit, which is
+            // past the point where anything can be abandoned.
+            undo: None,
+            uncommitted,
+        };
+        let session = self.session_state.session.get();
+        let database = file_of(
+            &mut self.storage.database,
+            &mut self.session_state.attached,
+            &mut self.session_state.temps,
+            session,
+            at,
+        )?;
+        inillucent_tree::paged::free_extent(database, &mut log, reference)
     }
 
     /// Commits one transaction across every file it wrote.
@@ -679,6 +894,20 @@ impl crate::ImportedDatabase {
     /// @param txn - the transaction to commit
     /// @param participants - the schemas it wrote
     pub(crate) fn commit_across(&mut self, txn: u64, participants: u16) -> DbResult<()> {
+        // **Every commit passes through here, which is why the record of what
+        // this transaction built is cleared here and nowhere else
+        // (task-2065).** That list exists so an abandoned transaction can give
+        // its allocations back, and a committed allocation is not one anybody
+        // takes back - so leaving an entry on it past a commit would let a
+        // later rollback to floor zero free the pages of a table that is
+        // committed and live. Clearing it at each of the commit paths instead
+        // would be the same rule stated three times, and a fourth commit path
+        // added later would not know about it.
+        //
+        // After the undo rather than before it: `abandon`'s `OR FAIL` path
+        // undoes the failed statement and then commits what came before, and
+        // the undo is what needs the list.
+        self.writing.built().borrow_mut().clear();
         let durable: Vec<usize> = schemas_in(participants)
             .filter(|at| self.path_of(*at).is_some())
             .collect();

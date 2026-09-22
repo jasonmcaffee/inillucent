@@ -74,7 +74,7 @@ pub use crate::keyenc::KeyEncoding;
 use crate::leaf::{Extents, Hit, LeafBuilder, LeafRef, Spill};
 use crate::tree::BULK_FILL;
 use crate::types::ColumnSpec;
-pub use occupancy::PageShare;
+pub use occupancy::{released, PageShare, Released};
 
 /// How many times a descent retries an optimistic read before giving up.
 ///

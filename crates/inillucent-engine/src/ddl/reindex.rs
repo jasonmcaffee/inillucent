@@ -230,7 +230,11 @@ impl ImportedDatabase {
                 tree_id: self.local_of(at, root),
             },
         )?;
+        // The tree being replaced goes on the list the commit drains, before
+        // the replacement is built - see `retire_the_index_this_replaces`.
+        self.retire_the_index_this_replaces(declared.root)?;
         let page = self.build_tree_from(root, columns, key_columns, layout, &rows)?;
+        self.carry_the_index_onto_its_new_handle(&owner, &index, root);
         // The statistics and the identifier come off the tree that was just
         // built, exactly as `record` takes them, so the row cannot describe a
         // different tree from the one it names.
@@ -244,6 +248,97 @@ impl ImportedDatabase {
             tree_id: self.local_of(at, root),
         };
         self.rewrite(rowid, entry)?;
+        self.move_the_recorded_handle(at, rowid, root);
         Ok(())
+    }
+
+    /// Puts the index tree a rebuild replaces on the list the commit frees.
+    ///
+    /// **A `REINDEX` builds into a handle `allocate_root` has just handed out,
+    /// not into the one the old index was read through**, and then rewrites the
+    /// catalog row to name the new one. So the old tree becomes unreachable
+    /// from anything the moment that row is rewritten, and until task-2065
+    /// nothing gave its pages back: one `REINDEX` of a three-hundred-row table
+    /// left `Page 5: never used`, which no test could see until the leak arm
+    /// reached `PRAGMA integrity_check`.
+    ///
+    /// The pages go on the list the commit drains rather than back to the free
+    /// map here, and that matters more here than anywhere else it is done: the
+    /// replacement is built by the very next statement, so freeing them now
+    /// would offer the old index's pages straight to it. That is task-2043
+    /// exactly.
+    ///
+    /// Forgetting the handle is right here, unlike in `ALTER TABLE`'s rebuild,
+    /// because the handle is not reused. What it costs is the two pieces of
+    /// bookkeeping either side of the build, neither of which is derived from
+    /// the catalog: [`Self::carry_the_index_onto_its_new_handle`] and
+    /// [`Self::move_the_recorded_handle`].
+    ///
+    /// @param old - the handle the index was read through before the rebuild
+    fn retire_the_index_this_replaces(&mut self, old: u32) -> DbResult<()> {
+        self.release_tree(old)
+    }
+
+    /// Makes the rebuilt tree the covering candidate the old one was.
+    ///
+    /// **`release_tree` took the old handle out of `schema.covering` and
+    /// nothing puts the new one back.** That list is maintained by hand, by
+    /// `create_index` and by `ALTER TABLE`; `rebuild_tables` derives the tables
+    /// from the catalog and does not touch it. Leaving the index out of it was
+    /// not a missing optimisation - a `SELECT` that chose the index failed
+    /// outright with `bad parameter or other API misuse`, which is what the
+    /// ledger story found, because it reads through `entry_account_idx` after
+    /// every `REINDEX`.
+    ///
+    /// The condition is `create_index`'s, for the reason given there: a partial
+    /// index holds fewer rows than the table, and the physical pass only checks
+    /// that a tree carries every column the query reads.
+    ///
+    /// @param owner - the table the index is on
+    /// @param index - the index, carrying its new handle
+    /// @param root - the handle the rebuilt tree was registered under
+    fn carry_the_index_onto_its_new_handle(
+        &mut self,
+        owner: &inillucent_sql::catalog_view::TableInfo,
+        index: &inillucent_sql::catalog_view::IndexInfo,
+        root: u32,
+    ) {
+        if !crate::covers_every_row(index) {
+            return;
+        }
+        self.schema
+            .covering
+            .entry(owner.root)
+            .or_default()
+            .push(root);
+        self.sort_covering(owner.root);
+    }
+
+    /// Points the catalog row's recorded handle at the rebuilt tree.
+    ///
+    /// **`rewrite` replaces a catalog entry and leaves `Recorded::root` - the
+    /// handle - alone**, which is right for every other caller, because they
+    /// rewrite a row that goes on naming the tree it already named. A `REINDEX`
+    /// is the one that does not, so the recorded handle went on naming the tree
+    /// the statement had just replaced and `rebuild_tables` derived the index
+    /// at that old handle.
+    ///
+    /// **It was a wrong answer and not only a leak.** While the old tree was
+    /// left attached, reading through the stale handle returned the same rows,
+    /// so nothing complained: the connection went on reading the index the
+    /// `REINDEX` was supposed to have replaced until something reopened the
+    /// file, and the leaked page was the only trace. Releasing the old tree is
+    /// what turned it into `no layout imported for root page ...`, which is why
+    /// the two are one change.
+    ///
+    /// @param at - which attached database the catalog row is in
+    /// @param rowid - the catalog row the rebuild rewrote
+    /// @param root - the handle the rebuilt tree was registered under
+    fn move_the_recorded_handle(&mut self, at: usize, rowid: i64, root: u32) {
+        for held in self.entries_of_mut(at).into_iter().flatten() {
+            if held.rowid == rowid {
+                held.root = root;
+            }
+        }
     }
 }

@@ -180,10 +180,11 @@ impl ImportedDatabase {
         let outcome = match outcome {
             Ok(outcome) => outcome,
             Err(error) => {
-                let undone = self.undo_to_floor(mark.undo, mark.dropped, true, txn);
+                let undone = self.undo_to_floor(mark, true, txn);
                 if autocommit {
                     self.writing.undo().borrow_mut().clear();
                     self.writing.pending_frees().borrow_mut().clear();
+                    self.writing.built().borrow_mut().clear();
                 }
                 // **The undo's own failure is the one worth reporting.** A
                 // "no such function" describing a database that is now in a

@@ -131,6 +131,20 @@ impl crate::ImportedDatabase {
         if at != crate::MAIN {
             self.session_state.owner.insert(root, at);
         }
+        // **Recorded so that a transaction which is abandoned can give the
+        // pages back (task-2065).** The allocation above is not committed
+        // until the transaction is, and the undo buffer is row-level, so
+        // nothing else in this engine knows that these pages were free before
+        // the statement ran. See [`crate::engine::state::BuiltTree`] for why
+        // the root page is recorded beside the handle.
+        self.writing
+            .built()
+            .borrow_mut()
+            .push(crate::engine::state::BuiltTree {
+                schema: at,
+                root,
+                page,
+            });
         self.writing
             .set_touched(self.writing.touched() | crate::schema_bit(at));
         Ok(page)
@@ -169,24 +183,49 @@ impl crate::ImportedDatabase {
     /// the right trade: the space comes back at the commit, and the alternative
     /// is the lost rows above.
     ///
+    /// **The tree's out-of-line values go on the list too (task-2065).** This
+    /// used to record a walk that answered the tree's interior pages and its
+    /// leaves and nothing else, so dropping a table of
+    /// large values gave back its tree and kept every page those values sat on
+    /// until a `VACUUM`. `paged::free_extent` is reached only from the tree's
+    /// own write paths - a row deleted, a value replaced, two leaves merged -
+    /// so a tree released whole never reached it, and `DELETE FROM t` before
+    /// the drop was what gave the space back. That is why the walk now answers
+    /// both: a value is recorded as the reference its leaf held rather than as
+    /// a page number, because a small value shares its page with values from
+    /// other trees and only the reference says which slot to clear.
+    ///
     /// @param root - the identifier it is registered under
     pub(crate) fn release_tree(&mut self, root: u32) -> DbResult<()> {
         let at = self.session_state.schema_of(root);
         let owner = self
             .schema_file(at)
             .ok_or_else(|| refusal("a statement names a database that is not attached"))?;
-        let pages = match self.schema.trees.get(&root) {
-            Some(tree) => tree.pages(owner.pool())?,
-            None => Vec::new(),
+        let released = match self.schema.trees.get(&root) {
+            Some(tree) => inillucent_tree::paged::released(owner.pool(), tree.root())?,
+            None => inillucent_tree::paged::Released {
+                pages: Vec::new(),
+                values: Vec::new(),
+            },
         };
         // The `FreePage` records go in with the release, at commit, for the same
         // reason: the log is redo-only, so a record that says a page is free is
         // only true of a transaction that committed, and appending it here would
         // describe a free that the rollback then did not do.
         {
+            use crate::engine::state::{Freed, PendingFree};
             let mut waiting = self.writing.pending_frees().borrow_mut();
-            for page in pages {
-                waiting.push(crate::engine::state::PendingFree { schema: at, page });
+            for page in released.pages {
+                waiting.push(PendingFree {
+                    schema: at,
+                    what: Freed::Page(page),
+                });
+            }
+            for reference in released.values {
+                waiting.push(PendingFree {
+                    schema: at,
+                    what: Freed::Value(reference),
+                });
             }
         }
         self.session_state.owner.remove(&root);

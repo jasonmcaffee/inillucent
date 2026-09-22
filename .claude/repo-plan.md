@@ -142,14 +142,48 @@ they are touching do not collide; two that have not, do.
   pages too; counted off the pool, the whole walk cost 4 page fetches on top of 133 over a table of
   sixty out-of-line values, because it takes an out-of-line value's pages from the reference in the
   leaf rather than by reading the value. (task-2052)
-- **Two ordinary statements leave a page the free map holds and no tree reaches, and that is
-  task-2065 rather than your change.** A rolled-back `CREATE TABLE` or `CREATE INDEX` keeps its
-  tree's root page - invisible until a checkpoint and a reopen - and `DROP TABLE` keeps every page
-  the table's out-of-line values sat on. Neither is reported by either pragma for that reason;
-  `ImportedDatabase::report_leaked_pages` is the walk that finds them and
-  `crates/inillucent-engine/src/engine/pages.rs` carries the measurement. If you close either leak,
-  two tests in `new_engine_page_ownership.rs` fail by design and tell you to wire the arm up.
-  (task-2052)
+- **~~Two ordinary statements leave a page the free map holds and no tree reaches.~~ Both are
+  closed, and `PRAGMA integrity_check` now reports a leaked page as `Page N: never used`.** So a
+  change that allocates a page and loses track of it fails the pragma, and the pragma runs after
+  every statement of the campaign suites - which is the point of having closed them. Two things
+  follow for anybody editing the write path. A tree built inside a transaction is recorded in
+  `Writing::built` and its pages are given back if the transaction is abandoned, so a new path that
+  builds a tree has to go through `build_tree_rows` or say why it does not. And a dropped tree's
+  out-of-line values go onto the pending-free list as `ExtentRef`s, freed at the commit by
+  `paged::free_extent` - never at the statement, which is the task-2043 rule and is unchanged.
+  `crates/inillucent-engine/src/engine/pages.rs` carries the reasoning. (task-2052, task-2065)
+- **`inillucent-migrate::corpus` can go red because of prose you wrote, and it is not a defect in
+  your change. See task-2067.** Its corpus is gathered **at run time from `crates/` and `docs/`**,
+  so it moves whenever the repository's text does: task-2065 tripped it by adding five tests - 226
+  lines of test code, not bloated comments - and then rebasing onto task-2053 put that ticket's
+  prose in as well and it passed again. It is green on `main` today and it is one edit from either
+  side of the line.
+  - **Do not spend an hour proving your own change innocent, as task-2065 did.** The corpus is read
+    off disk, so hold the test binary constant and revert only the *files*, with no rebuild. Ten
+    seconds an iteration, and it bisects to the single file that moved the ranking.
+  - What is actually wrong is underneath: `live_filter` compares a legacy ranking taken with the
+    filter applied *during* the search against a migrated one that ranks first and filters
+    afterwards. Those agree only while the tombstoned rows do not move a document's score, and
+    `inillucent-core` says they do. task-2067 has the diagnosis and three options.
+  (task-2065, task-2067)
+- **A test that shows zero CPU and zero I/O is not necessarily hung - look for a child process
+  first.** `inillucent::story_ledger_day_nightly` hands its 100,000-statement script to the pinned
+  `sqlite3.exe` and blocks in `Command::output()` for the last third of its run, so the parent's
+  counters stop dead while the oracle does the work. It was twice reported as a reproducible hang
+  on task-2065, "frozen at the same I/O position" under two different PIDs - which is exactly what a
+  parent that has stopped touching the disk looks like. Both runs completed normally. Sample
+  `ParentProcessId = <pid>` before concluding anything, and expect this target to take 30 minutes.
+  (task-2065)
+- **If you build a tree under a new handle, three things have to move with it, and only the first
+  is obvious.** `REINDEX` does this - `allocate_root()` then `build_tree_from` - and it got all
+  three wrong until task-2065. (1) The tree being replaced has to be released, or its pages leak.
+  (2) `release_tree` takes the old handle out of `schema.covering`, and nothing puts the new one
+  back: `covering` is maintained by hand in `create_index` and `ALTER TABLE`, and `rebuild_tables`
+  does **not** derive it. Miss this and a `SELECT` that picks the index fails with `bad parameter or
+  other API misuse`. (3) `rewrite` updates a catalog entry and leaves `Recorded::root` - the handle -
+  alone, so the recorded handle goes on naming the tree you just replaced, and reads keep going to
+  it until something reopens the file. Nothing caught (3) for as long as it existed, because the old
+  tree held the same rows; the leaked page from (1) was its only symptom. (task-2065)
 - **Adding a row to `tests/selection.toml` fails `documentation` until the tier table moves with
   it.** `tests/inillucent-testing-tdd.md` records a target count per tier and
   `the_per_tier_table_matches_the_map` compares the two. Update the `targets` cell of the tier you

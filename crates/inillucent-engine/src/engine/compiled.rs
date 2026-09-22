@@ -868,19 +868,28 @@ impl crate::ImportedDatabase {
         let unwind = error.unwind();
         let undone = match unwind {
             Unwind::Nothing => Ok(()),
-            Unwind::Statement => self.undo_to_floor(mark.undo, mark.dropped, false, txn),
+            Unwind::Statement => self.undo_to_floor(mark, false, txn),
             // **In autocommit the two are the same thing**: the statement is
             // the transaction, so `ROLLBACK` is `ABORT` with a floor of zero,
             // and there is no batch to close. Inside one it is the existing
             // `rollback` in full - the savepoints gone, the batch closed, the
             // schema refreshed.
-            Unwind::Transaction if autocommit => self.undo_to_floor(0, 0, false, txn),
+            Unwind::Transaction if autocommit => self.undo_to_floor(
+                crate::engine::state::StatementMark {
+                    undo: 0,
+                    dropped: 0,
+                    built: 0,
+                },
+                false,
+                txn,
+            ),
             Unwind::Transaction => self.rollback(),
         };
         if autocommit {
             self.writing.undo().borrow_mut().clear();
             self.writing.marks().borrow_mut().clear();
             self.writing.pending_frees().borrow_mut().clear();
+            self.writing.built().borrow_mut().clear();
             if matches!(unwind, Unwind::Nothing) && undone.is_ok() {
                 // **`OR FAIL` outside a transaction commits.** The rows written
                 // before the failure are kept, and keeping them only in the

@@ -12,9 +12,9 @@
 //! The check is a read. It reports the first thing that is wrong and repairs
 //! nothing, for the reason [`crate::engine::integrity`] gives.
 //!
-//! ## Three states, and why only two of them reach `PRAGMA integrity_check`
+//! ## Three states, and all three now reach `PRAGMA integrity_check`
 //!
-//! The walk can answer three questions, and the third one is held back:
+//! The walk answers three questions:
 //!
 //! 1. **a page two things hold** - corruption, with no benign cause;
 //! 2. **a page a tree holds that the free map calls free** - corruption with no
@@ -23,40 +23,48 @@
 //! 3. **a page the free map calls allocated that no tree reaches** - a leak,
 //!    which the pinned SQLite reports as `Page N: never used`.
 //!
-//! **The engine produces the third state itself, from two ordinary statements**
-//! (task-2052, measured over nineteen workloads, each read live and again after
-//! a checkpoint and a reopen):
+//! **The third was held back until task-2065, because the engine produced that
+//! state itself from two ordinary statements** (task-2052, measured over
+//! nineteen workloads, each read live and again after a checkpoint and a
+//! reopen). Both are closed now, and each in the place the leak was:
 //!
-//! - **a rolled-back `CREATE TABLE` or `CREATE INDEX` keeps its tree's root
+//! - **a rolled-back `CREATE TABLE` or `CREATE INDEX` kept its tree's root
 //!   page.** The undo is row-level - `undo_to_floor` replays before-images
-//!   through `tree.put` and `tree.delete` - so nothing gives the allocation
-//!   back. It is invisible on the connection that did it, because the rollback
+//!   through `tree.put` and `tree.delete` - so nothing gave the allocation
+//!   back. It was invisible on the connection that did it, because the rollback
 //!   leaves the tree's handle in `schema.trees` and this walk therefore still
-//!   reaches the page; it appears after a reopen, when the schema is rebuilt
-//!   from the catalog and nothing names that tree.
-//! - **`DROP TABLE` keeps every page the table's out-of-line values sit on.**
-//!   `release_tree` records [`inillucent_tree::PagedTree::pages`], which is the
-//!   interior pages and the leaves. `paged::free_extent` is reached only from
-//!   the tree's own write paths - a row deleted, a value replaced, two leaves
-//!   merged - so a tree released whole never reaches it. `DELETE FROM t` before
-//!   the drop gives the space back, which is why a drop of a table of small
-//!   values is sound.
+//!   reached the page; it appeared after a reopen, when the schema is rebuilt
+//!   from the catalog and nothing names that tree. `Writing::built` records
+//!   every tree an open transaction builds and `undo_to_floor` releases the
+//!   ones it is abandoning, which is a correction to the in-memory free map and
+//!   nothing else: an allocation a transaction never committed is one recovery
+//!   never replays.
+//! - **`DROP TABLE` kept every page the table's out-of-line values sat on.**
+//!   `release_tree` recorded the interior pages and the leaves, and
+//!   `paged::free_extent` is reached only from the tree's own write paths - a
+//!   row deleted, a value replaced, two leaves merged - so a tree released
+//!   whole never reached it. `DELETE FROM t` before the drop gave the space
+//!   back, which is why a drop of a table of small values was always sound.
+//!   The pending-free list now carries a value as the reference its leaf held
+//!   as well as a page number, and `flush_pending_frees` calls `free_extent`
+//!   for those at the commit - so a page holding values from several trees is
+//!   given back when its last slot goes rather than because this tree used it.
 //!
-//! **Both are leaks to fix, and neither is fixed here, which is the decision
-//! this ticket was asked to record.** Either fix changes *when* the engine
-//! hands a page back, and that is what task-2043 got subtly wrong: it freed a
-//! dropped tree's pages at the statement rather than at the commit, a later
-//! `CREATE TABLE` in the same transaction was given one of them, and the
-//! rollback left a catalog row naming a page another table then held. Three
-//! rows were lost durably and `PRAGMA integrity_check` answered `ok` about the
-//! file, which is why this module exists at all. Shipping the detector and a
-//! change to the same free map in one diff would mean the detector had never
-//! been run against the engine as it was when that defect was found.
+//! **Both fixes change *when* the engine hands a page back, which is what
+//! task-2043 got subtly wrong**: it freed a dropped tree's pages at the
+//! statement rather than at the commit, a later `CREATE TABLE` in the same
+//! transaction was given one of them, and the rollback left a catalog row
+//! naming a page another table then held. Three rows were lost durably and
+//! `PRAGMA integrity_check` answered `ok` about the file, which is why this
+//! module exists at all. Neither fix moves that boundary: a drop's frees still
+//! wait for the commit, and a build's pages are released only on the path where
+//! there is going to be no commit.
 //!
-//! So `PRAGMA integrity_check` reports the first two states and not the third.
-//! [`crate::ImportedDatabase::report_leaked_pages`] is the third, written and
-//! tested against a database damaged on purpose, so the arm cannot rot while
-//! the two leaks are open. task-2065 closes them and wires it.
+//! [`crate::ImportedDatabase::report_leaked_pages`] is the third state on its
+//! own, kept as a public entry point because a leak is now the one state of the
+//! three that no SQL statement produces - so the only way to show the arm one
+//! is to damage a file on purpose, and an arm nothing has been run against is
+//! an arm nobody has checked.
 
 use std::collections::BTreeMap;
 
@@ -114,51 +122,49 @@ fn damaged(said: String) -> DbError {
 }
 
 impl crate::ImportedDatabase {
-    /// Reports the first page two things both hold, or that a tree holds and
-    /// the free map has handed back.
+    /// Reports the first page two things both hold, that a tree holds and the
+    /// free map has handed back, or that the free map holds and no tree
+    /// reaches.
     ///
     /// What `PRAGMA integrity_check` runs. Run per file, because a page number
     /// means nothing without one: `main` and an attached database both have a
     /// page 7.
+    ///
+    /// **The third state joined the pragma in task-2065**, once the two leaks
+    /// the engine produced itself were closed. Until then this passed `false`,
+    /// because a pragma that answered `Page N: never used` after every
+    /// `DROP TABLE` of a table holding large values would be calling a sound
+    /// file damaged.
     pub(crate) fn check_page_ownership(&self) -> DbResult<()> {
-        self.walk_every_page(false)
+        self.walk_every_page()
     }
 
     /// Reports the first page the free map calls allocated that no tree
     /// reaches.
     ///
-    /// **No pragma runs this**, and the module comment says why: the engine
-    /// leaves that state behind itself, from a rolled-back `CREATE` and from a
-    /// `DROP TABLE` of a table holding out-of-line values. Both are leaks to
-    /// fix rather than states to live with, and either fix changes when a page
-    /// is handed back - which is a change to the write path and not to a
-    /// pragma's answers.
-    ///
-    /// It is public and tested so the arm is exercised against a database
-    /// damaged on purpose, which is what stops it rotting while the two leaks
-    /// are open. task-2065 closes them, and wiring this to the pragma is the
-    /// `false` in `check_page_ownership` above.
+    /// The same answer `PRAGMA integrity_check` now gives, reachable on its
+    /// own. It stays public and tested because a leak is the one state of the
+    /// three that no SQL statement produces any more, so the only way to show
+    /// this arm one is to take a page out of the free map on purpose - and an
+    /// arm nothing has been run against is an arm nobody has checked.
     pub fn report_leaked_pages(&self) -> DbResult<()> {
-        self.walk_every_page(true)
+        self.walk_every_page()
     }
 
     /// Walks every file's pages and reports the first thing that is wrong.
     ///
-    /// @param leaks - whether a page nothing reaches is reported too
-    fn walk_every_page(&self, leaks: bool) -> DbResult<()> {
+    /// **It took a `leaks` flag until task-2065**, because the pragma wanted
+    /// two of the three states and the public arm wanted all three. Both want
+    /// all three now, so the flag went rather than staying as a knob nothing
+    /// turns.
+    fn walk_every_page(&self) -> DbResult<()> {
         for (at, handles) in self.trees_by_schema() {
             let file = self
                 .schema_file(at)
                 .ok_or_else(|| refusal("a tree names a database that is not attached"))?;
             let names = self.name_every_tree(&handles);
             let held = self.hold_every_page(file, &handles, &names)?;
-            compare_against_the_free_map(
-                file,
-                &held,
-                &names,
-                leaks,
-                self.schema.skipped.is_empty(),
-            )?;
+            compare_against_the_free_map(file, &held, &names, self.schema.skipped.is_empty())?;
         }
         Ok(())
     }
@@ -287,13 +293,11 @@ impl crate::ImportedDatabase {
 /// @param file - the database the pages belong to
 /// @param held - what each page the trees reach is held by
 /// @param names - what each tree handle is called
-/// @param leaks - whether a page nothing reaches is reported
 /// @param complete - whether every object in the catalog was attached
 fn compare_against_the_free_map(
     file: &Database,
     held: &BTreeMap<PageId, Holder>,
     names: &BTreeMap<u32, String>,
-    leaks: bool,
     complete: bool,
 ) -> DbResult<()> {
     for number in inillucent_pool::meta::FIRST_DATA_PAGE.0..file.pool().page_count() {
@@ -315,9 +319,7 @@ fn compare_against_the_free_map(
             // An application matching on this answer is matching on the text,
             // so it is the text the reference this repository grades against
             // produces today.
-            (None, true) if leaks && complete => {
-                return Err(damaged(format!("Page {number}: never used")))
-            }
+            (None, true) if complete => return Err(damaged(format!("Page {number}: never used"))),
             _ => {}
         }
     }

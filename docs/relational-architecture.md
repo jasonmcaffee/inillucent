@@ -426,7 +426,8 @@ does not exist and checks each refusal, including through the command line's exi
   chain, every interior separator is the first key of the child it precedes, and the sibling chain
   reaches as many leaves as the interior levels do;
 - **every page against every other page, and against the free map** - a page two trees both reach,
-  and a page a tree reaches that the free map calls free;
+  a page a tree reaches that the free map calls free, and a page the free map calls allocated that
+  no tree reaches;
 - **every index against its table** - a duplicate under one key in a `UNIQUE` index, a row whose
   entry is missing, an entry naming a row the table does not hold.
 
@@ -435,16 +436,37 @@ is a well formed tree and neither is an index of the other, so both of them pass
 `SELECT count(*) FROM p` answers with `q`'s rows. That state loses rows durably and without a
 symptom at the time, and `PRAGMA integrity_check` called it `ok` until task-2052.
 
-**What it does not report is a page the free map calls allocated that no tree reaches**, which is
-dead space rather than lost data. The engine leaves that state behind itself in two places, both
-measured in task-2052: a rolled-back `CREATE TABLE` or `CREATE INDEX` keeps its tree's root page,
-and `DROP TABLE` keeps every page the table's out-of-line values sat on - `release_tree` gives back
-the interior pages and the leaves, and `paged::free_extent` is reached only from the tree's own
-write paths. `DELETE FROM t` before the drop gives that space back, and so does `VACUUM`. Both are
-leaks to fix rather than states to live with, and either fix changes *when* the engine hands a page
-back - which is the change task-2043 got subtly wrong and is why this check exists. So the walk that
-finds them is `ImportedDatabase::report_leaked_pages`, tested against a database damaged on purpose
-and not wired to the pragma until the two leaks are closed, which is task-2065.
+**The third of those is a leak - dead space rather than lost data - and it reached the pragma only
+in task-2065**, because until then the engine left that state behind itself in two places, both
+measured in task-2052. A rolled-back `CREATE TABLE` or `CREATE INDEX` kept its tree's root page: the
+undo is row-level, so nothing gave the allocation back. And `DROP TABLE` kept every page the table's
+out-of-line values sat on, because `release_tree` gave back the interior pages and the leaves and
+`paged::free_extent` is reached only from the tree's own write paths. `DELETE FROM t` before the drop
+gave that space back, and so did `VACUUM`.
+
+Both are closed. An open transaction now records every tree it builds, and abandoning it gives those
+pages back to the in-memory free map - no log record, because an allocation that was never committed
+is one recovery never replays. And the list a commit drains now carries a dropped tree's out-of-line
+values as the references their leaves held, so the commit calls `paged::free_extent` for each: a
+value written as a run of whole pages takes its pages with it, and a value packed onto a page shared
+with other trees clears its slot and gives the page back only when the last live slot on it goes.
+
+Neither fix moves the boundary task-2043 got wrong. A drop's frees still happen at the commit and
+not at the statement, and a build's pages are released only on the path where there is going to be
+no commit. `ImportedDatabase::report_leaked_pages` is still there as a public entry point, because a
+leak is now the one state of the three that no statement produces - so showing the arm one means
+damaging a file on purpose.
+
+**Wiring the arm to the pragma immediately found a third leak, which is the argument for having
+built the walk at all.** `REINDEX` rebuilds an index into a freshly allocated tree under a *new*
+handle and rewrites the catalog row to name it, and nothing released the tree it replaced: one
+tree's worth of pages per rebuild. Releasing it then turned up what the leak had been hiding.
+`rewrite` replaces a catalog entry and leaves the recorded *handle* alone - correct for every other
+caller, because they rewrite a row that goes on naming the tree it already named - so after a
+`REINDEX` the connection went on reading the index it had just replaced, and only a reopen moved it
+onto the new one. The rows agreed, so there was no symptom; the leaked page was the only trace. That
+is the same shape as task-2043, and it is why a page that nothing reaches is worth reporting even
+though it loses no data.
 
 **`PRAGMA quick_check` reads every tree and accounts for every page, and leaves out the index
 pass.** The two pragmas used to be one pass under two names, because there was no cheaper variant to

@@ -39,15 +39,15 @@ impl ImportedDatabase {
         // numbers its own marks by what it was told, so the two have to agree.
         let level = i32::try_from(self.writing.marks().borrow().len()).unwrap_or(i32::MAX);
         self.savepoint_modules(level)?;
-        let held = self.writing.undo().borrow().len();
-        // The second length is the pending-free list's. Both records are
-        // append-only within a transaction, and rolling back to this savepoint
-        // cuts both to where they stand now.
-        let dropped = self.writing.pending_frees().borrow().len();
+        // Every one of the transaction's records is append-only within it, and
+        // rolling back to this savepoint cuts each to where it stands now -
+        // which is exactly what `statement_mark` reads, so the savepoint and
+        // the statement boundary record the same thing.
+        let mark = self.statement_mark();
         self.writing
             .marks()
             .borrow_mut()
-            .push((name.to_ascii_lowercase(), held, dropped));
+            .push((name.to_ascii_lowercase(), mark));
         Ok(())
     }
 
@@ -72,7 +72,7 @@ impl ImportedDatabase {
             .marks()
             .borrow()
             .iter()
-            .rposition(|(held, _, _)| *held == folded);
+            .rposition(|(held, _)| *held == folded);
         let Some(position) = found else {
             // **A name no savepoint holds changes nothing, modules included.**
             // Defaulting the level to zero and telling the modules anyway made
@@ -106,7 +106,7 @@ impl ImportedDatabase {
             .marks()
             .borrow()
             .iter()
-            .rposition(|(held, _, _)| *held == folded);
+            .rposition(|(held, _)| *held == folded);
         let Some(position) = found else {
             return Err(refusal(format!(
                 "no such savepoint: {}",
