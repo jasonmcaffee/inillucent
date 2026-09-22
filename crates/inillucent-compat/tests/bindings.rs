@@ -98,19 +98,32 @@ const RUNNERS: [(&str, &str); 5] = [
 /// `tests/selection.toml` and run on every strict run already; starting them a
 /// second time here would double their cost and grade the same record twice.
 ///
-/// Each entry is the record's language name, the interpreter to look for, and
-/// the arguments after it. The interpreter is looked for by running it with
-/// `--version`, because a program on the path that will not start is the same
-/// to this suite as one that is not there.
-const DRIVEN: [(&str, &str, &[&str]); 3] = [
+/// Each entry is the record's language name, the interpreter to look for, the
+/// arguments that ask it for its version, and the arguments that run the
+/// suite. A program on the path that will not start is the same to this suite
+/// as one that is not there, so the version call is how "is it here" is asked.
+///
+/// **The version call is per language and not `--version` for all three.**
+/// `node --version` and `php --version` are right; Go's is `go version`, and
+/// `go --version` exits non zero with `flag provided but not defined:
+/// -version`. Probing Go the other way made a machine *with* Go report Go
+/// absent, and an absent interpreter is a named skip - so the Go binding would
+/// have stopped being graded and this suite would have said so in a sentence
+/// that read like a fact about the machine. Go is not installed here, which is
+/// why the wrong spelling reached the right answer and why this was found by
+/// reading rather than by a red run; every GitHub runner has Go, so 4.4.1 is
+/// where it would have shown.
+const DRIVEN: [(&str, &str, &[&str], &[&str]); 3] = [
     (
         "npm",
         "node",
+        &["--version"],
         &["--test", "packages/npm/inillucent/conformance.test.mjs"],
     ),
     (
         "go",
         "go",
+        &["version"],
         &[
             "test",
             "-C",
@@ -120,7 +133,12 @@ const DRIVEN: [(&str, &str, &[&str]); 3] = [
             "./...",
         ],
     ),
-    ("php", "php", &["packages/php/tests/conformance.php"]),
+    (
+        "php",
+        "php",
+        &["--version"],
+        &["packages/php/tests/conformance.php"],
+    ),
 ];
 
 /// Runs the three runners this suite owns, and names the ones it could not.
@@ -152,13 +170,13 @@ fn drive_the_runners() -> Vec<String> {
     let Some(binary) = inillucent_compat::cliproc::program("inillucent") else {
         return DRIVEN
             .iter()
-            .map(|(language, _, _)| (*language).to_string())
+            .map(|(language, _, _, _)| (*language).to_string())
             .collect();
     };
     let mut absent = Vec::new();
-    for (language, program, arguments) in DRIVEN {
+    for (language, program, version, arguments) in DRIVEN {
         let present = std::process::Command::new(program)
-            .arg("--version")
+            .args(version)
             .current_dir(&root)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -649,4 +667,105 @@ fn every_package_test_is_named_here() {
             .collect::<Vec<&str>>()
             .join("\n  ")
     );
+}
+
+/// Returns the directories on `PATH`, in order.
+fn path_entries() -> Vec<PathBuf> {
+    let Ok(path) = std::env::var("PATH") else {
+        return Vec::new();
+    };
+    std::env::split_paths(&path).collect()
+}
+
+/// Whether `PATH` holds a program of that name, without running it.
+///
+/// The independent half of the test below: `PATH` is asked whether the program
+/// is installed, and the probe in `DRIVEN` is then asked whether it works. A
+/// probe that decided both questions could not be wrong about either.
+///
+/// @param program - the program's name, without an extension
+fn is_on_the_path(program: &str) -> bool {
+    let suffixes: Vec<&str> = if std::env::consts::EXE_SUFFIX.is_empty() {
+        vec![""]
+    } else {
+        // Windows runs `go.exe` for `go`, and a Go installation puts `go.exe`
+        // on the path and nothing called `go`. `PATHEXT` holds more than these
+        // two; a `.bat` or `.cmd` shim is how several toolchains install, and
+        // `node` on Windows is frequently `node.exe` beside a `node.cmd`.
+        vec![".exe", ".cmd", ".bat", ""]
+    };
+    path_entries().iter().any(|directory| {
+        suffixes
+            .iter()
+            .any(|suffix| directory.join(format!("{program}{suffix}")).is_file())
+    })
+}
+
+/// Every runner's version probe is a spelling that runner accepts.
+///
+/// **`go --version` is not a Go command** (task-2066 §4.4.3). Every probe in
+/// `DRIVEN` used to be `--version`, which is right for `node` and `php` and
+/// wrong for `go`: Go answers `flag provided but not defined: -version` and
+/// exits non zero. The suite reads a failed probe as "this machine does not
+/// have Go", and an absent interpreter is a named skip - so on a machine that
+/// *has* Go, the Go binding would have stopped being graded and the suite would
+/// have said so in a sentence that reads like a fact about the machine.
+///
+/// The two halves come from different places on purpose. `PATH` says whether
+/// the program is installed; the probe says whether it runs. A test that asked
+/// the probe both questions could not be wrong about either, which is the shape
+/// that let the defect sit here in the first place.
+///
+/// A program this machine does not have is not evidence either way and is
+/// counted rather than asserted about, so the failure message can say how much
+/// of the table this run actually graded.
+#[test]
+fn every_version_probe_is_a_spelling_that_program_accepts() {
+    let root = workspace_root();
+    let mut refused: Vec<String> = Vec::new();
+    let mut graded = 0usize;
+    let mut uninstalled: Vec<&str> = Vec::new();
+    for (language, program, version, _) in DRIVEN {
+        if !is_on_the_path(program) {
+            uninstalled.push(program);
+            continue;
+        }
+        graded = graded.saturating_add(1);
+        let output = std::process::Command::new(program)
+            .args(version)
+            .current_dir(&root)
+            .output();
+        match output {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => refused.push(format!(
+                "{language}: `{program} {}` exited {} and printed:\n    {}",
+                version.join(" "),
+                output
+                    .status
+                    .code()
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "on a signal".to_string()),
+                String::from_utf8_lossy(&output.stderr)
+                    .trim()
+                    .replace('\n', "\n    ")
+            )),
+            Err(why) => refused.push(format!(
+                "{language}: `{program} {}` did not start: {why}",
+                version.join(" ")
+            )),
+        }
+    }
+    assert!(
+        refused.is_empty(),
+        "these version probes are on PATH and refuse the arguments DRIVEN asks them for, so \
+         `drive_the_runners` reads them as interpreters this machine does not have and skips \
+         the binding without grading it:\n  {}",
+        refused.join("\n  ")
+    );
+    if graded == 0 {
+        inillucent_compat::differential::skipping(&format!(
+            "none of {:?} is on PATH, so no version probe could be graded",
+            uninstalled
+        ));
+    }
 }
