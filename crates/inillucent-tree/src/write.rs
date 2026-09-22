@@ -2300,9 +2300,32 @@ impl PagedTree {
     /// the pack.
     ///
     /// @param database - the file and its pool
+    /// @param page - the leaf the delete emptied
     /// @param right - the sibling a merge would fold into
-    fn sibling_is_already_full(&self, database: &Database, right: PageId) -> DbResult<bool> {
+    fn sibling_is_already_full(
+        &self,
+        database: &Database,
+        page: PageId,
+        right: PageId,
+    ) -> DbResult<bool> {
+        // **Neither leaf may hold an out-of-line value** (task-2066 §4.3.7,
+        // found by `new_engine_extent_packing`). A merge frees the extents of
+        // both leaves it consumes - `doomed` below is `extents_of(page)` plus
+        // `extents_of(right)` - so a merge this skips is extent pages that
+        // never come back. `deleting_every_packed_value_returns_the_pages`
+        // deletes a thousand 4,200 byte values, which are past
+        // `page_size / EXTENT_DIVISOR` and therefore out of line, and it saw 3
+        // pages return where it expects hundreds.
+        //
+        // This shortcut is about *cost* and must not change what the tree
+        // reclaims, so a leaf with extents goes the long way.
         let ceiling = (self.page_size() as f64 * COMPACT_FILL) as usize;
+        for held in [page, right] {
+            let guard = database.pool().fetch(held)?;
+            if LeafRef::parse(&guard)?.has_extents() {
+                return Ok(false);
+            }
+        }
         let guard = database.pool().fetch(right)?;
         let leaf = LeafRef::parse(&guard)?;
         Ok(!leaf.has_writes() && leaf.used_bytes(self.page_size()) > ceiling)
@@ -2345,7 +2368,7 @@ impl PagedTree {
         // The second question is `sibling_is_already_full`, on the same line as
         // the first because both answer "do not attempt this" and neither
         // materialises anything.
-        if !underflowed || right.is_none() || self.sibling_is_already_full(database, right)? {
+        if !underflowed || right.is_none() || self.sibling_is_already_full(database, page, right)? {
             return Ok(());
         }
         let Some((mut separators, mut children, level, parent, position)) =
