@@ -238,6 +238,15 @@ named failures, which is how to tell a run that passed from a run that did not h
 from its own `--strict` flag, so a value inherited from the shell is overwritten. Copy the directory
 from the repository the worktree belongs to, or run `pwsh tools/sqlite-reference.ps1`.
 
+**`_agent_output/fixtures/` is the second thing a worktree does not have** (task-2070). It holds
+`small.db`, `medium.db` and `large.db`, built by `tools/build-gate-fixtures.sh`, and it is gitignored
+for the same reason. Without it `inillucent-compat::new_engine_log_lead` and
+`inillucent-compat::gates_fail_closed` report red under `--strict` and green without it — which is
+the exact confusion `--strict` exists to remove, so they read as defects in whatever was just
+changed. `new_engine_log_lead` is the one to notice: its two tests build an index bigger than the
+buffer pool and reopen it, which is the engine's open and recovery path under real pressure. Copy the
+directory from the repository the worktree belongs to.
+
 **The MSVC environment is now the runner's own job** (task-2047). `onig_sys` compiles oniguruma with
 `cl.exe`, and a terminal that is not a Developer PowerShell has no `INCLUDE`, so the whole run used
 to stop at `regenc.h(39): fatal error C1083: Cannot open include file: 'stddef.h'`. The runner finds

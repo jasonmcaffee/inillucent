@@ -741,9 +741,9 @@ pub(crate) fn open_file_as(
     if !read_only && database.pool().page_count() != database.meta().page_count {
         database.checkpoint()?;
     }
-    if !read_only {
-        database.give_back_the_unclaimed_tail()?;
-    }
+    // **The trim that used to follow waits until the open has succeeded**
+    // (task-2070). See `crate::engine::open::header_accounts_for_every_object`,
+    // which says what it cost to do it here.
 
     // **The log resumes where recovery ended, not at the beginning.** Opening it
     // at `FIRST_LSN` with sequence 1 starts a second stream over the same

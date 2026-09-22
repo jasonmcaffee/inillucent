@@ -603,8 +603,43 @@ impl crate::ImportedDatabase {
         opened.reconnect_modules()?;
         opened.rebuild_tables()?;
         opened.refresh_catalog();
+        // **The tail is given back only now, because every step above can
+        // refuse** (task-2070). See `header_accounts_for_every_object`.
+        if !read_only
+            && header_accounts_for_every_object(&opened.schema.entries, &opened.storage.database)
+        {
+            opened.storage.database.give_back_the_unclaimed_tail()?;
+        }
         Ok(opened)
     }
+}
+
+/// Reports whether every page the catalog names lies inside the page count the
+/// meta record carries.
+///
+/// **What makes giving the file's tail back safe** (task-2070).
+/// `Database::give_back_the_unclaimed_tail` cuts the file to
+/// `page_count * page_size`, and `page_count` comes from the meta record - so a
+/// meta record that is behind the file turns the trim from reclaiming a tail
+/// nothing owns into deleting pages the catalog is pointing at. Measured: a
+/// database of 360,448 bytes carrying the meta record its *creation* wrote came
+/// back as 131,072 bytes, the four pages that record describes, with its
+/// catalog still naming a table rooted in the part that had just been deleted.
+///
+/// Leaving the tail in place instead costs a file longer than it needs to be,
+/// which the next checkpoint's own count reclaims. That is the cheaper of the
+/// two wrong answers by a wide margin, and it is why this skips rather than
+/// refuses: a database that opens and reads correctly is not one to turn away
+/// over its length.
+///
+/// @param entries - the catalog rows this open read
+/// @param database - the file they were read from
+pub(crate) fn header_accounts_for_every_object(
+    entries: &[Recorded],
+    database: &inillucent_pool::Database,
+) -> bool {
+    let count = database.pool().page_count();
+    entries.iter().all(|held| held.entry.root.0 < count)
 }
 
 /// Returns a built tree's shape as the catalog records it.

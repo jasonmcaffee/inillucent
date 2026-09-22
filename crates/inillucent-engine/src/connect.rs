@@ -162,6 +162,45 @@ fn is_memory(path: &Path) -> bool {
     path.as_os_str().is_empty() || path.as_os_str() == ":memory:"
 }
 
+/// Reports whether there is a database at a path, or refuses to guess.
+///
+/// **"Create" is the destructive branch, so it may only be taken for a path the
+/// file system says holds nothing** (task-2070). [`Database::open_as`] chose
+/// between opening and creating on `Path::is_file`, which answers `false` for
+/// every error it meets - a permission the process does not have, a path on a
+/// share that is momentarily unreachable, a name that resolves to something
+/// that is not a file - and
+/// [`crate::ImportedDatabase::create_on`] begins by **deleting whatever is at
+/// the path**. So one unanswerable question about an existing database was one
+/// deleted database, answered to the caller as an empty one with no error
+/// anywhere. That is the shape task-2070 reports from the other end: a staged
+/// database reopened as four pages naming no objects at all, because
+/// `chunk_search_config` is simply the first name anything asks for after such
+/// an open.
+///
+/// So the three answers are kept apart. A file is a database to open. A
+/// `NotFound` is a path to create at. Anything else - an error the file system
+/// gave, or a directory or a device sitting at the name - is refused, carrying
+/// what the operating system said, because a caller who is told their database
+/// is empty cannot tell that from one that is.
+///
+/// @param path - the path a caller opened with
+fn there_is_a_database_at(path: &Path) -> DbResult<bool> {
+    match std::fs::metadata(path) {
+        Ok(found) if found.is_file() => Ok(true),
+        Ok(_) => Err(inillucent_base::error::refusal(format!(
+            "{} is not a file, so it is neither a database to open nor a path to create one at",
+            path.display()
+        ))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(inillucent_base::error::refusal(format!(
+            "cannot tell whether there is a database at {}: {error}. Refusing rather than \
+             creating one, because creating one deletes whatever is there",
+            path.display()
+        ))),
+    }
+}
+
 impl Database {
     /// Opens a database, creating it when the path holds nothing.
     ///
@@ -258,7 +297,7 @@ impl Database {
                 next_session: std::cell::Cell::new(1),
             });
         }
-        let engine = match (path.is_file(), read_only) {
+        let engine = match (there_is_a_database_at(&path)?, read_only) {
             (true, false) => ImportedDatabase::open(path.clone(), page_size, frames)?,
             (true, true) => ImportedDatabase::open_read_only(path.clone(), page_size, frames)?,
             // **A read only connection does not create the file it was given.**
@@ -1407,6 +1446,182 @@ mod tests {
             leading_trivia("  ;\n-- one\n/* two */ ;\nSELECT 1"),
             23,
             "the forms mix, in any order"
+        );
+    }
+
+    /// Returns a scratch directory of this test's own.
+    ///
+    /// @param name - what to call it
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|parent| parent.parent())
+            .map(Path::to_path_buf)
+            .unwrap_or_default()
+            .join("_agent_output/engine_open")
+            .join(name);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::create_dir_all(&root);
+        root
+    }
+
+    /// A path that holds nothing is a path to create a database at.
+    #[test]
+    fn a_path_that_holds_nothing_is_one_to_create_at() {
+        let root = scratch("absent");
+        assert_eq!(
+            there_is_a_database_at(&root.join("absent.rdb")).expect("it answers"),
+            false
+        );
+    }
+
+    /// A file is a database to open.
+    #[test]
+    fn a_file_is_a_database_to_open() {
+        let root = scratch("present");
+        let path = root.join("there.rdb");
+        std::fs::write(&path, b"anything").expect("the file writes");
+        assert_eq!(there_is_a_database_at(&path).expect("it answers"), true);
+    }
+
+    /// Anything else is refused by name, and is not deleted (task-2070).
+    ///
+    /// **The create branch deletes whatever is at the path before it writes**,
+    /// so a question the file system could not answer used to be answered as
+    /// "nothing is there" and cost the caller their database. A directory is
+    /// the case that can be built in a test; a permission error and an
+    /// unreachable share reach the same arm.
+    #[test]
+    fn something_that_is_not_a_file_is_refused_rather_than_created_over() {
+        let root = scratch("directory");
+        let path = root.join("a_directory.rdb");
+        std::fs::create_dir_all(path.join("inside")).expect("the directory is made");
+        let refusal = there_is_a_database_at(&path).expect_err("it refuses");
+        let said = refusal.detail().unwrap_or_else(|| refusal.message());
+        assert!(said.contains("is not a file"), "{said}");
+        assert!(
+            path.join("inside").is_dir(),
+            "the refusal must not have removed anything"
+        );
+
+        // And the refusal reaches a caller of `open`, rather than an empty
+        // database where their data used to be.
+        let opened = Database::open(&path);
+        assert!(
+            opened.is_err(),
+            "open must refuse a path that is not a file"
+        );
+        assert!(
+            path.join("inside").is_dir(),
+            "a refused open must leave the path alone"
+        );
+    }
+
+    /// Removes the log segments beside a database.
+    ///
+    /// @param path - the database file
+    fn take_the_log_away(path: &Path) {
+        let Some(parent) = path.parent() else {
+            return;
+        };
+        let Ok(entries) = std::fs::read_dir(parent) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().contains("-wal.") {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+
+    /// An open that cannot account for the file's length leaves it alone
+    /// (task-2070).
+    ///
+    /// **The trim cuts the file to `page_count * page_size`, and `page_count`
+    /// comes from the meta record.** So a meta record that is behind the file
+    /// turns giving back an unowned tail into deleting pages the catalog is
+    /// still pointing at. This builds that state exactly: a database, then the
+    /// meta record its own *creation* wrote put back over it, which is what a
+    /// checkpoint would leave if it folded every page and then failed to land
+    /// the record.
+    ///
+    /// Before the guard this shortened a 360,448 byte database to the 131,072
+    /// bytes the creation's record describes, and the next open then failed
+    /// reading a page that open had just discarded.
+    #[test]
+    fn an_open_that_cannot_account_for_the_file_does_not_shorten_it() {
+        let root = scratch("unaccounted_tail");
+        let path = root.join("staged.rdb");
+
+        let database = Database::open(&path).expect("it is created");
+        drop(database);
+        let creation = std::fs::read(&path).expect("the created file reads");
+
+        let database = Database::open(&path).expect("it reopens");
+        let connection = database.session();
+        connection
+            .execute_batch("CREATE TABLE note(id INTEGER PRIMARY KEY, body TEXT)")
+            .expect("the table is created");
+        for row in 0..600 {
+            connection
+                .execute_batch(&format!(
+                    "INSERT INTO note(id, body) VALUES ({row}, '{}')",
+                    "x".repeat(300)
+                ))
+                .expect("the row is inserted");
+        }
+        database.checkpoint().expect("it checkpoints");
+        let _ = connection;
+        drop(database);
+
+        let written = std::fs::read(&path).expect("the written file reads");
+        assert!(
+            written.len() > creation.len(),
+            "the workload has to grow the file past the pages a creation leaves"
+        );
+
+        let mut bytes = written.clone();
+        for slot in 0..2 {
+            let at = slot * PAGE_SIZE;
+            let (Some(source), Some(target)) = (
+                creation.get(at..at.saturating_add(PAGE_SIZE)),
+                bytes.get_mut(at..at.saturating_add(PAGE_SIZE)),
+            ) else {
+                continue;
+            };
+            target.copy_from_slice(source);
+        }
+        std::fs::write(&path, &bytes).expect("the file writes");
+        take_the_log_away(&path);
+
+        let database = Database::open(&path).expect("it opens");
+        let rows = database
+            .session()
+            .query("SELECT name FROM sqlite_schema ORDER BY name")
+            .expect("the catalog lists");
+        drop(database);
+        assert_eq!(rows.len(), 1, "the catalog still names the table: {rows:?}");
+        assert_eq!(
+            std::fs::metadata(&path).expect("it is still there").len(),
+            written.len() as u64,
+            "the open must not have shortened the file"
+        );
+
+        // And it opens again, which is the half the shortening took away: the
+        // second open used to fail on a page the first had just discarded.
+        // The file itself is byte for byte what it was, so the rows the header
+        // cannot account for are still there for a repair to find.
+        let again = Database::open(&path).expect("it opens again");
+        let rows = again
+            .session()
+            .query("SELECT name FROM sqlite_schema ORDER BY name")
+            .expect("the catalog lists again");
+        drop(again);
+        assert_eq!(rows.len(), 1, "and still names the table: {rows:?}");
+        assert_eq!(
+            std::fs::read(&path).expect("it still reads"),
+            bytes,
+            "two opens in a row must leave the file byte for byte as it was"
         );
     }
 }

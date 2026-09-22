@@ -562,3 +562,20 @@ they are touching do not collide; two that have not, do.
   from a flat counter, look for children:
   `Get-CimInstance Win32_Process -Filter "ParentProcessId = <pid>"`, and read *that* process's CPU.
   (task-2067)
+- **A migrate or retrieval flake is not reproducible by re-running it, and the corpus is why.**
+  `HnswParams::default().build_threads` is `available_parallelism()`, and `Hnsw::build_parallel` says
+  itself that it does not produce the same graph as the sequential build: "the order in which nodes
+  link to each other is whatever the thread pool produced". Measured on 2026-09-22: one legacy index
+  built from a fixed seed in five processes gave five different directories, and one *fixed* index
+  migrated in three processes gave three databases of 2,293,760 bytes differing on eleven pages. So
+  `inillucent-migrate::corpus` migrates a different file every run, and "ran it again and it passed"
+  is not evidence of anything. Set `build_threads` to 1 when you need a run you can compare.
+  (task-2070)
+- **Two copies of one test binary that share a directory under `_agent_output` produce convincing
+  false failures.** Two loops of the corpus binary against `_agent_output/migrate/release` failed
+  three times in five runs, two of them with the exact message task-2070 is about. One run's
+  `scratch()` removes the directory while the other is mid-migration; the running one keeps writing
+  through its now-unlinked handle, its manifest records land in a *new* file at the same path - so
+  the manifest begins halfway through with no header lines - and its reopen finds the other run's
+  fresh empty database. Before believing a failure from a loop, check there is only one loop.
+  (task-2070)

@@ -262,50 +262,7 @@ pub fn migrate(plan: &Plan) -> Result<Outcome, String> {
     let _ = connection;
     drop(database);
 
-    let mut checks = vec![structure_probe(&plan.staging)];
-
-    let mut sql = SqlIndex::open(&plan.staging, SEARCH_TABLE).map_err(|error| {
-        format!(
-            "cannot reopen the staged database: {}",
-            error.detail().unwrap_or_else(|| error.message())
-        )
-    })?;
-    checks.extend(verify::run(&source.index, &mut sql));
-    drop(sql);
-
-    // And once more through a second open, which is the check that the first
-    // reopen did not itself leave state behind.
-    let mut again = SqlIndex::open(&plan.staging, SEARCH_TABLE).map_err(|error| {
-        format!(
-            "cannot reopen the staged database: {}",
-            error.detail().unwrap_or_else(|| error.message())
-        )
-    })?;
-    let repeated = verify::run(&source.index, &mut again);
-    drop(again);
-    let stable = repeated.iter().all(|check| check.passed);
-    checks.push(if stable {
-        Check {
-            name: "reopen".to_string(),
-            passed: true,
-            detail: format!("{} checks pass again on a fresh open", repeated.len()),
-        }
-    } else {
-        Check {
-            name: "reopen".to_string(),
-            passed: false,
-            detail: repeated
-                .iter()
-                .filter(|check| !check.passed)
-                .map(|check| check.line())
-                .collect::<Vec<String>>()
-                .join(" | "),
-        }
-    });
-
-    for check in &checks {
-        manifest.record("verify", check.line())?;
-    }
+    let checks = verify_the_staged_file(plan, &source, &mut manifest)?;
     manifest.record("stage", "verify")?;
 
     let verified = checks.iter().all(|check| check.passed);
@@ -335,6 +292,162 @@ pub fn migrate(plan: &Plan) -> Result<Outcome, String> {
         documents,
         chunks,
     })
+}
+
+/// The checks established so far, each one written down as it is established.
+///
+/// **A check that is only in memory is a check a failure throws away**
+/// (task-2070). `structure_probe` runs before the reopen and answers whether
+/// the file is whole and how many rows it holds; its verdict used to be pushed
+/// onto a local list and then discarded with the `Err` of the step after it, so
+/// the one failure anybody has seen of that step - a reopen that could not find
+/// `chunk_search_config` - arrived with no way to tell an empty file from a
+/// catalog that had lost rows. Every check now reaches the manifest on disk the
+/// moment it is known, and goes into the failure's own text, so the next
+/// occurrence says which.
+struct Established<'a> {
+    /// The checks in the order they were established.
+    checks: Vec<Check>,
+    /// The manifest each one is appended to as it arrives.
+    manifest: &'a mut Manifest,
+}
+
+impl Established<'_> {
+    /// Records one check, in the manifest and in the list.
+    ///
+    /// @param check - what was established
+    fn note(&mut self, check: Check) -> Result<(), String> {
+        self.manifest.record("verify", check.line())?;
+        self.checks.push(check);
+        Ok(())
+    }
+
+    /// Records several checks, in the order they were established.
+    ///
+    /// @param checks - what was established
+    fn note_all(&mut self, checks: Vec<Check>) -> Result<(), String> {
+        for check in checks {
+            self.note(check)?;
+        }
+        Ok(())
+    }
+
+    /// Returns a failure carrying everything established before it.
+    ///
+    /// @param said - what went wrong
+    fn failing(&self, said: String) -> String {
+        if self.checks.is_empty() {
+            return said;
+        }
+        let established: Vec<String> = self.checks.iter().map(Check::line).collect();
+        format!("{said}; established before it: {}", established.join(" | "))
+    }
+}
+
+/// Verifies the staged file through two fresh opens, recording as it goes.
+///
+/// The second open is the check that the first one did not itself leave state
+/// behind - every open of this engine may write, so a reopen is not a read.
+///
+/// @param plan - what is being migrated and where the staging file is
+/// @param source - the legacy index every check compares against
+/// @param manifest - where each check is written down as it is established
+fn verify_the_staged_file(
+    plan: &Plan,
+    source: &Source,
+    manifest: &mut Manifest,
+) -> Result<Vec<Check>, String> {
+    let mut established = Established {
+        checks: Vec::new(),
+        manifest,
+    };
+    established.note(structure_probe(&plan.staging))?;
+
+    let mut sql = reopen(&plan.staging, "the first reopen", &established)?;
+    let first = verify::run(&source.index, &mut sql);
+    drop(sql);
+    established.note_all(first)?;
+
+    let mut again = reopen(&plan.staging, "the second reopen", &established)?;
+    let repeated = verify::run(&source.index, &mut again);
+    drop(again);
+    let failed: Vec<String> = repeated
+        .iter()
+        .filter(|check| !check.passed)
+        .map(Check::line)
+        .collect();
+    established.note(match failed.is_empty() {
+        true => Check::passed(
+            "reopen",
+            format!("{} checks pass again on a fresh open", repeated.len()),
+        ),
+        false => Check::failed("reopen", failed.join(" | ")),
+    })?;
+    Ok(established.checks)
+}
+
+/// Opens the staged search table, saying what the file held when it cannot.
+///
+/// **Which of the two reopens failed, and what the file actually holds**
+/// (task-2070). The two calls had the same message, so a failure could not say
+/// whether the first open had already read the file or whether an earlier open
+/// of the same file had damaged it for this one.
+///
+/// @param staging - the staged database
+/// @param which - the name of this reopen, for the failure to carry
+/// @param established - the checks that already passed, for the failure to
+///   carry
+fn reopen(staging: &Path, which: &str, established: &Established<'_>) -> Result<SqlIndex, String> {
+    SqlIndex::open(staging, SEARCH_TABLE).map_err(|error| {
+        let said = error.detail().unwrap_or_else(|| error.message());
+        established.failing(format!(
+            "cannot reopen the staged database on {which}: {said}; the file holds {}",
+            what_the_file_holds(staging)
+        ))
+    })
+}
+
+/// Returns what a file that should be a finished database actually holds.
+///
+/// **Read only, because asking what went wrong may not change the answer.** An
+/// ordinary open of this engine writes: recovery takes a corrective checkpoint
+/// when the page count has moved, and a successful open gives the file's tail
+/// back. Neither belongs in a step whose whole job is to describe a file
+/// somebody is about to read.
+///
+/// @param path - the file to describe
+fn what_the_file_holds(path: &Path) -> String {
+    let size = match std::fs::metadata(path) {
+        Ok(found) => format!("{} bytes", found.len()),
+        Err(error) => format!("no file ({error})"),
+    };
+    let opened = Database::open_read_only(path, inillucent_engine::DEFAULT_FRAMES);
+    let named = match &opened {
+        Err(error) => format!("and cannot be opened read only: {}", error.message()),
+        Ok(database) => match database
+            .session()
+            .query("SELECT name FROM sqlite_schema ORDER BY name")
+        {
+            Err(error) => format!("and its catalog cannot be listed: {}", error.message()),
+            Ok(rows) => format!("and names {} objects: {}", rows.len(), named_objects(&rows)),
+        },
+    };
+    format!("{size} {named}")
+}
+
+/// Returns the names a query of one column answered, joined for a message.
+///
+/// @param rows - what the query returned
+fn named_objects(rows: &[Vec<OwnedDatum>]) -> String {
+    let mut names: Vec<String> = rows
+        .iter()
+        .map(|row| match row.first() {
+            Some(OwnedDatum::Text(text)) => String::from_utf8_lossy(text).into_owned(),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    names.sort();
+    names.join(", ")
 }
 
 /// Moves a verified staging file into place, refusing to overwrite anything.
@@ -489,6 +602,121 @@ mod tests {
             .ends_with(".migration-manifest"));
         assert_ne!(plan.staging, plan.destination);
         assert_eq!(plan.staging.parent(), plan.destination.parent());
+    }
+
+    /// Returns a scratch directory of this test's own.
+    ///
+    /// @param name - what to call it
+    fn scratch(name: &str) -> PathBuf {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|parent| parent.parent())
+            .map(Path::to_path_buf)
+            .unwrap_or_default()
+            .join("_agent_output/migrate-lib")
+            .join(name);
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::create_dir_all(&root);
+        root
+    }
+
+    /// A failure names every check that had already passed (task-2070).
+    ///
+    /// The one failure of the reopen anybody has seen came back as eight words
+    /// with nothing else attached, and `structure.integrity` had already run
+    /// and counted the rows by then.
+    #[test]
+    fn a_failure_names_the_checks_established_before_it() {
+        let root = scratch("established");
+        let mut manifest = Manifest::open(root.join("m")).expect("the manifest opens");
+        let mut established = Established {
+            checks: Vec::new(),
+            manifest: &mut manifest,
+        };
+        assert_eq!(
+            established.failing("it broke".to_string()),
+            "it broke",
+            "with nothing established there is nothing to add"
+        );
+        established
+            .note(Check::passed("structure.integrity", "4 rows out of chunk"))
+            .expect("the check is recorded");
+        let said = established.failing("it broke".to_string());
+        assert!(
+            said.starts_with("it broke; established before it: "),
+            "{said}"
+        );
+        assert!(said.contains("structure.integrity"), "{said}");
+        assert!(said.contains("4 rows out of chunk"), "{said}");
+    }
+
+    /// Every check reaches the manifest as it is established, not at the end.
+    ///
+    /// A check held in memory until the verification finishes is a check the
+    /// `Err` of an earlier step throws away, which is what left task-2070 with
+    /// no evidence.
+    #[test]
+    fn a_check_reaches_the_manifest_before_the_next_one_runs() {
+        let root = scratch("recorded");
+        let path = root.join("m");
+        let mut manifest = Manifest::open(&path).expect("the manifest opens");
+        let mut established = Established {
+            checks: Vec::new(),
+            manifest: &mut manifest,
+        };
+        established
+            .note(Check::passed("structure.integrity", "whole"))
+            .expect("the check is recorded");
+        let written = std::fs::read_to_string(&path).expect("the manifest is on disk");
+        assert!(
+            written.contains("structure.integrity"),
+            "the manifest should already name it: {written}"
+        );
+    }
+
+    /// Describing the file leaves it exactly as it was found.
+    ///
+    /// It runs on a file a migration has just failed over, so a description
+    /// that wrote - an ordinary open of this engine truncates the file to the
+    /// page count its meta record carries - would be destroying the evidence
+    /// somebody is about to read.
+    #[test]
+    fn describing_the_file_names_its_objects_and_changes_nothing() {
+        let root = scratch("describe");
+        let path = root.join("probe.rdb");
+        {
+            let database = Database::open(&path).expect("the database is created");
+            database
+                .session()
+                .execute_batch("CREATE TABLE note(id INTEGER PRIMARY KEY, body TEXT)")
+                .expect("the table is created");
+            database.checkpoint().expect("it checkpoints");
+        }
+        let before = std::fs::read(&path).expect("the file reads");
+        let said = what_the_file_holds(&path);
+        assert!(said.contains("note"), "it should name the table: {said}");
+        assert!(
+            said.contains(&format!("{} bytes", before.len())),
+            "it should say how big the file is: {said}"
+        );
+        let after = std::fs::read(&path).expect("the file still reads");
+        assert_eq!(before, after, "describing the file must not write to it");
+    }
+
+    /// A file that is not a database is described rather than opened.
+    #[test]
+    fn describing_a_file_that_is_not_a_database_says_so() {
+        let root = scratch("describe-empty");
+        let path = root.join("rubbish.rdb");
+        std::fs::write(&path, vec![0u8; 4_096]).expect("the file writes");
+        let said = what_the_file_holds(&path);
+        assert!(said.contains("4096 bytes"), "{said}");
+        assert!(said.contains("cannot be opened"), "{said}");
+        assert_eq!(
+            std::fs::read(&path).expect("it still reads").len(),
+            4_096,
+            "describing the file must not write to it"
+        );
     }
 
     /// An outcome with no checks is not a verified one.

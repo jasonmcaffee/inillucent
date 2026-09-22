@@ -287,6 +287,11 @@ impl ImportedDatabase {
             skipped,
             highest_identifier,
         } = loaded;
+        // **And this file's tail, now that its schema has been read**
+        // (task-2070). See `engine::open::header_accounts_for_every_object`.
+        if crate::engine::open::header_accounts_for_every_object(&entries, &database) {
+            database.give_back_the_unclaimed_tail()?;
+        }
         for root in trees.keys() {
             self.session_state.owner.insert(*root, index);
         }
