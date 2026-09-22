@@ -534,14 +534,25 @@ impl Hnsw {
             Some(raw_entry)
         };
 
-        let mut node_top = vec![0u8; n_nodes];
-        r.read_exact(&mut node_top)?;
+        // **Read rather than reserved** (task-2066 §4.1.12). `n_nodes` is a
+        // header field of a `.rdb` segment, which is a page somebody else could
+        // have written, and `vec![0u8; n_nodes]` on a claimed length of a few
+        // hundred gigabytes aborts the process through `handle_alloc_error`
+        // rather than returning an error. `binio`'s module comment states this
+        // rule and `read_records` is what follows it: the buffer never grows
+        // past what has already arrived plus one step, so a length the source
+        // cannot satisfy costs one megabyte and then fails with
+        // `UnexpectedEof`.
+        let node_top = crate::binio::read_pod_vec::<u8>(r, n_nodes)?;
 
-        let mut layers = Vec::with_capacity(n_layers);
+        // The same argument for the two counts below, which is why neither
+        // reserves either. A `Vec` that grows as rows arrive is bounded by the
+        // rows that actually arrive.
+        let mut layers = Vec::new();
         for _ in 0..n_layers {
             r.read_exact(&mut buf4)?;
             let count = u32::from_le_bytes(buf4) as usize;
-            let mut layer = Vec::with_capacity(count);
+            let mut layer = Vec::new();
             for _ in 0..count {
                 r.read_exact(&mut buf4)?;
                 let degree = u32::from_le_bytes(buf4) as usize;

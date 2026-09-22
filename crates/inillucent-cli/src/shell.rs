@@ -516,6 +516,7 @@ impl Shell {
             recovered: report.recovered,
             scanned: report.scanned,
             applied: report.applied,
+            dropped: report.dropped,
             committed: report.committed,
             losers: report.losers,
             last_sequence: report.last_sequence,

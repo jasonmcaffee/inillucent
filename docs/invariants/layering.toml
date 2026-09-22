@@ -588,6 +588,23 @@ may_depend_on = [
   # It reaches `install` and `residency` and nothing else. The retrieval engine
   # itself is still reached the way it always was, through the facade.
   "inillucent-core",
+  # **The verified SQLite migration, which this crate had a second, worse copy
+  # of** (task-2066 §4.1.7). `inillucent migrate --kind sqlite` called
+  # `Database::import_sqlite_into` and renamed the result, so it did none of the
+  # verification `AGENTS.md` and the migrate skill both say a migration does - a
+  # database whose only content is an FTS5 table migrated to an empty file and
+  # reported success at exit 0.
+  #
+  # `inillucent_migrate::sqlite::migrate` is that verification: inventory,
+  # stage, checkpoint, reopen *from the file* rather than from the handle that
+  # built it, `verify_against`, and refuse to publish on a failed report. The
+  # `inillucent-migrate` binary has used it since it was written.
+  #
+  # The edge adds no engine to the graph that was not in it: this crate already
+  # links `inillucent-driver`, and `import_sqlite_into` is how the SQLite reader
+  # was already reachable from here. What it adds is the checking, in one place
+  # rather than two.
+  "inillucent-migrate",
 ]
 
 # **`may_test_with` on a production crate at the same layer, and the one edge

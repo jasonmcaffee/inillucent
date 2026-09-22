@@ -1432,6 +1432,138 @@ fn a_deeply_nested_params_file_is_refused_rather_than_fatal() {
     );
 }
 
+/// Returns the pinned SQLite shell, which builds this case's source.
+///
+/// The tracked fixture has no FTS5 table and no schema pragmas, and both are
+/// what this case is about, so it writes its own source with the same shell
+/// every differential comparison in this repository is graded against.
+fn pinned_shell() -> Option<PathBuf> {
+    let path = workspace_root()
+        .join(".sqlite-ref/3.53.4/shell")
+        .join(format!("sqlite3{}", std::env::consts::EXE_SUFFIX));
+    if path.is_file() {
+        return Some(path);
+    }
+    inillucent_base::testing::skipping(
+        "the pinned SQLite 3.53.4 shell is not built, so this case cannot write its source; \
+         run tools/sqlite-reference.ps1",
+    );
+    None
+}
+
+/// `inillucent migrate` carries an FTS5 table and the two schema pragmas.
+///
+/// **The shipped verb used to do none of the verification it is documented to
+/// do** (task-2066 §4.1.7). `AGENTS.md` and `agent-skills/inillucent-migrate`
+/// both say a migration is verified by row count and digest and published only
+/// if every check passes; `migrate_sqlite_file` called
+/// `Database::import_sqlite_into` and renamed the result. Measured on the
+/// shipped binary, that meant a database whose only content was an FTS5 table
+/// migrated to an empty file and reported success at exit 0, and
+/// `application_id` and `user_version` were dropped from every migration.
+///
+/// This drives `inillucent migrate`, not the `inillucent-migrate` tool beside
+/// it. The tool was always right. Two implementations of one job, and the
+/// shipped one was the one nobody graded.
+#[test]
+fn the_shipped_verb_carries_a_full_text_table_and_the_schema_pragmas() {
+    let (Some(shell), Some(binary)) = (pinned_shell(), program("inillucent")) else {
+        return;
+    };
+    let directory = area("migrate-shipped-verb");
+    let source = directory.join("src.db");
+    let built = std::process::Command::new(&shell)
+        .arg(&source)
+        .arg(
+            "CREATE VIRTUAL TABLE docs USING fts5(body); \
+             INSERT INTO docs VALUES('the quick brown fox'),('a second document'); \
+             CREATE TABLE plain(a INT); INSERT INTO plain VALUES(1),(2),(3); \
+             PRAGMA user_version=42; PRAGMA application_id=1234;",
+        )
+        .status();
+    assert!(
+        built.is_ok_and(|status| status.success()) && source.is_file(),
+        "the pinned shell did not write the source"
+    );
+
+    let destination = directory.join("out.rdb");
+    let ran = run(
+        &binary,
+        &[
+            "migrate",
+            &source.to_string_lossy(),
+            "--destination",
+            &destination.to_string_lossy(),
+            "--kind",
+            "sqlite",
+            "--output",
+            "json",
+        ],
+    );
+    assert_eq!(
+        ran.code,
+        0,
+        "the migration did not succeed:\n{}",
+        ran.said()
+    );
+
+    // The report carries its checks, which is what makes a failure readable
+    // rather than an exit code.
+    for wanted in [
+        "\"name\": \"carried.docs\"",
+        "\"name\": \"pragma.user_version\"",
+        "\"name\": \"pragma.application_id\"",
+        "\"name\": \"count.plain\"",
+        "\"name\": \"digest.plain\"",
+    ] {
+        assert!(
+            ran.stdout.contains(wanted),
+            "the report has no {wanted}:\n{}",
+            ran.stdout
+        );
+    }
+    assert!(
+        !ran.stdout.contains("\"passed\": false"),
+        "a check failed and the migration was published anyway:\n{}",
+        ran.stdout
+    );
+
+    // And the destination holds what the source did. The FTS5 table is the one
+    // that used to vanish; the two pragmas used to come back zero.
+    let published = destination.to_string_lossy().to_string();
+    for (sql, expected) in [
+        ("SELECT count(*) FROM docs", "2"),
+        ("SELECT count(*) FROM plain", "3"),
+        ("PRAGMA user_version", "42"),
+        ("PRAGMA application_id", "1234"),
+    ] {
+        let asked = run(
+            &binary,
+            &["--db", published.as_str(), "query", sql, "--output", "json"],
+        );
+        assert_eq!(asked.code, 0, "`{sql}` failed:\n{}", asked.said());
+        assert!(
+            asked.stdout.contains(expected),
+            "`{sql}` did not answer {expected}:\n{}",
+            asked.stdout
+        );
+    }
+    // A successful migration used to leave its staging file and log segments
+    // beside the destination, because `remove_staged` ran only on the error
+    // path.
+    let leftovers: Vec<String> = std::fs::read_dir(&directory)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
+        .filter(|name| name.contains(".staging-"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "a successful migration left staging files behind: {leftovers:?}"
+    );
+}
+
 /// `analyze` writes statistics the planner can read back.
 #[test]
 fn analyze_writes_statistics_the_planner_reads() {

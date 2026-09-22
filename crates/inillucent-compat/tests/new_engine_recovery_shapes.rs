@@ -221,6 +221,123 @@ fn crash_and_reopen(
     ImportedDatabase::open_on(recovered, path, PAGE_SIZE, FRAMES)
 }
 
+/// A crash that recovers every row drops no log record, and says so.
+///
+/// **The counter is the fix** (task-2066 §4.1.10). `tolerate_unknown_tree`
+/// turns "the log names tree N, which this recovery was not told the shape of"
+/// into `Ok(())` and forgets the record, and `inillucent-wal`'s replay loop
+/// counts an `Ok` as an applied record - so a recovery that dropped rows
+/// reported exactly the numbers of one that did not. task-1932 and task-2033
+/// are both defects that lived inside that silence; the second lost an inserted
+/// row and 487 FTS5 records with `PRAGMA integrity_check` answering `ok`.
+///
+/// This is the arm that says the ordinary case is clean. The one below is the
+/// one that says the number can move, and without it this would be a counter
+/// nobody has seen count.
+#[test]
+fn a_recovery_that_restores_every_row_drops_nothing() {
+    let mut engine = crash_and_reopen(BASE_TABLE, true).unwrap_or_else(|error| {
+        panic!(
+            "the database did not reopen: {} ({})",
+            error.message(),
+            error.detail().unwrap_or_default()
+        )
+    });
+    let (rows, carried) = counts(&mut engine);
+    assert_eq!(rows, ROWS, "every seeded row is back");
+    assert_eq!(carried, 12_000, "every committed update is back");
+    let report = engine.recovery_report();
+    assert!(
+        report.applied > 0,
+        "this arm replayed nothing, so it cannot say anything about drops"
+    );
+    assert_eq!(
+        report.dropped, 0,
+        "the recovery dropped {} log record(s) while restoring every row, which means the \
+         counter is counting something it should not",
+        report.dropped
+    );
+}
+
+/// A table created, filled and dropped inside the window drops no record.
+///
+/// **Not a drop, and that is the finding** (task-2066 §4.1.10). This is the
+/// shape that looks most likely to produce one: the transient table's rows are
+/// in the log and the catalog the recovery reads no longer names it. It
+/// replays cleanly, because `LearningRows` learns a tree's shape from the
+/// `InsertRow` records naming the schema tree, and the `CREATE TABLE` is one of
+/// those.
+///
+/// So the tolerated drop is narrower than the code around it suggests: it needs
+/// a catalog row that reached the log as a *page image* or through a bulk build
+/// rather than as a row, which is the case task-2033 found and repaired. That
+/// the ordinary shape cannot produce one is worth a test, because the next
+/// person to read `tolerate_unknown_tree` will assume it fires often.
+///
+/// The counter itself is proven in `inillucent-engine`'s own unit tests, where
+/// the drop can be handed to the function directly.
+#[test]
+fn a_table_created_and_dropped_inside_the_window_replays_without_a_drop() {
+    let vfs = Arc::new(SimVfs::new(SimConfig::default()));
+    let path = PathBuf::from("dropped-counter.rdb");
+    {
+        let mut engine = ImportedDatabase::create_on(
+            Arc::clone(&vfs) as Arc<dyn Vfs>,
+            path.clone(),
+            PAGE_SIZE,
+            FRAMES,
+        )
+        .expect("the database is created");
+        run(&mut engine, BASE_TABLE);
+        seed(&mut engine);
+        engine.checkpoint().expect("the fixture checkpoints");
+        run(&mut engine, "CREATE TABLE transient (a INTEGER, b TEXT)");
+        for at in 0..200i64 {
+            run(
+                &mut engine,
+                &format!("INSERT INTO transient VALUES ({at}, 'row {at}')"),
+            );
+        }
+        run(&mut engine, "DROP TABLE transient");
+        std::mem::forget(engine);
+    }
+    let snapshot = vfs.crash();
+    let recovered: Arc<dyn Vfs> = Arc::new(SimVfs::recovered(SimConfig::default(), &snapshot));
+    let mut engine =
+        ImportedDatabase::open_on(recovered, path, PAGE_SIZE, FRAMES).unwrap_or_else(|error| {
+            panic!(
+                "the database did not reopen: {} ({})",
+                error.message(),
+                error.detail().unwrap_or_default()
+            )
+        });
+
+    let outcome = engine
+        .execute_any("SELECT count(*) FROM chunk", &Params::new())
+        .unwrap_or_else(|error| {
+            panic!(
+                "the reopened database could not be read: {}",
+                error.message()
+            )
+        });
+    let rows = match outcome.rows.first().and_then(|row| row.first()) {
+        Some(OwnedDatum::Int(value)) => *value,
+        other => panic!("expected an integer, got {other:?}"),
+    };
+    assert_eq!(rows, ROWS, "the surviving table lost rows");
+
+    let report = engine.recovery_report();
+    assert!(
+        report.applied > 0,
+        "this arm replayed nothing, so it says nothing about drops"
+    );
+    assert_eq!(
+        report.dropped, 0,
+        "a table created and dropped inside the window produced {} dropped record(s). That is          not wrong on its own, but it is a change in when the engine tolerates a record, and          this arm exists to notice it.",
+        report.dropped
+    );
+}
+
 /// A column added after the last checkpoint, and indexed, reopens after a crash.
 #[test]
 fn a_column_added_after_the_last_checkpoint_reopens_after_a_crash() {

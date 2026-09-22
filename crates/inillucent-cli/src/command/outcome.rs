@@ -84,23 +84,6 @@ impl Failed {
         }
     }
 
-    /// Carries a failure the driver already classified.
-    ///
-    /// **For the callers that now go through the driver rather than the engine
-    /// (task-1962, roadmap item 7).** `from_engine` above asks the driver to
-    /// classify a raw engine error; this one is handed the answer, which is the
-    /// same decision made in the same place.
-    ///
-    /// @param error - the driver's error
-    pub fn from_driver(error: inillucent_driver::Error) -> Failed {
-        Failed {
-            status: error.status,
-            message: error.message,
-            feature: error.feature,
-            offset: error.offset,
-        }
-    }
-
     /// Classifies a shell failure, which may or may not carry the engine's error.
     ///
     /// @param failure - what the shell reported
@@ -252,12 +235,17 @@ impl Outcome {
         recovery: &inillucent_driver::Recovery,
         strays: &[u64],
     ) -> Outcome {
-        if recovery.recovered {
+        // **A dropped record is reported even when nothing else was**
+        // (task-2066 §4.1.10). `recovered` is false for an open that had no work
+        // to restore, and a drop can happen on one of those - so the condition
+        // is either, not just the first.
+        if recovery.recovered || recovery.dropped > 0 {
             self.extra.push((
                 "recovered".to_string(),
                 json::object(vec![
                     ("records_scanned", Json::Int(recovery.scanned as i64)),
                     ("records_applied", Json::Int(recovery.applied as i64)),
+                    ("records_dropped", Json::Int(recovery.dropped as i64)),
                     (
                         "transactions_committed",
                         Json::Int(recovery.committed as i64),
@@ -274,6 +262,15 @@ impl Outcome {
                 recovery.committed,
                 recovery.losers
             );
+        }
+        // On its own line and only when it happened, because it is the one
+        // number here that means somebody should look.
+        if recovery.dropped > 0 {
+            self.text = format!(
+                    "{}
+{} log record(s) were DROPPED: they name a tree this recovery had no                      shape for. That is usually a table dropped inside the replayed window, and                      it is how task-1932 and task-2033 both lost rows silently. Run                      `inillucent integrity-check` and compare the row counts you expect.",
+                    self.text, recovery.dropped
+                );
         }
         if !strays.is_empty() {
             let named: Vec<Json> = strays

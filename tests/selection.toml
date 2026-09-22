@@ -2086,7 +2086,11 @@ kind = "test"
 name = "bindings"
 tier = "tooling"
 covers = ["inillucent-compat"]
-requires = ["conformance-records"]
+# It runs the npm, Go and PHP conformance runners itself now, rather than
+# reading whatever records a previous run left behind (task-2066 §4.4.3), so
+# what it needs is those three interpreters. A machine missing one skips with
+# that interpreter named, which is what `--strict` counts.
+requires = ["node", "go", "php"]
 
 # The escape ledger's guard (task-2036). It resolves every `held_by` entry in
 # `tests/escapes.toml` against the tree, so a row that claims a test holds a

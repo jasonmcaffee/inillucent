@@ -51,6 +51,22 @@ pub struct RecoveryReport {
     pub scanned: u64,
     /// How many records the second pass applied.
     pub applied: u64,
+    /// How many records the replay **dropped** rather than applied.
+    ///
+    /// A record naming a tree this pass had no shape for. The argument for
+    /// dropping one is that the tree was dropped before the end of the window,
+    /// and that argument has been wrong twice here - task-1932 and task-2033,
+    /// where three `CREATE TABLE`s and an `INSERT` in one transaction lost the
+    /// inserted row and an FTS5 index lost 487 records, with
+    /// `PRAGMA integrity_check` answering `ok` on the result.
+    ///
+    /// **It is reported because it was invisible** (task-2066 §4.1.10). A drop
+    /// answers `Ok`, and the replay loop counts an `Ok` as applied, so a
+    /// recovery that dropped rows printed the same numbers as one that did not.
+    /// Non-zero here does not by itself mean data was lost - a genuinely
+    /// dropped table produces one - but it is the only signal there is, and an
+    /// operator who cannot see it cannot ask.
+    pub dropped: u64,
     /// How many transactions committed in the replayed window.
     pub committed: u64,
     /// How many transactions were open at the end of the log and were
@@ -356,6 +372,12 @@ fn replay(
                 error.with_detail(format!("replaying the log: {said}"))
             },
         )?;
+        let mut outcome = outcome;
+        // **The applier is the only thing that knows** (task-2066 §4.1.10).
+        // `inillucent_wal::recover` counts an `Ok` from `redo` as an applied
+        // record, and a dropped one answers `Ok` - so the count has to come
+        // back from the applier rather than out of the loop.
+        outcome.dropped = applier.rows().dropped();
         (outcome, applier.free_map_changes().to_vec())
     };
     // **Inside this function rather than after it**, because the free map's own
@@ -805,6 +827,7 @@ pub(crate) fn open_file_as(
         recovered: outcome.committed > 0 || outcome.losers > 0,
         scanned: outcome.scanned,
         applied: outcome.applied,
+        dropped: outcome.dropped,
         committed: outcome.committed,
         losers: outcome.losers,
         last_sequence: sequence.max(outcome.sequence),
@@ -884,6 +907,17 @@ struct LearningRows {
     rows: TreeRows,
     /// The catalog as it now stands: at most one entry per object.
     seen: Vec<SchemaEntry>,
+    /// How many records this pass dropped because it had no shape for the
+    /// tree they name.
+    ///
+    /// **A drop used to be invisible** (task-2066 §4.1.10).
+    /// `tolerate_unknown_tree` answers `Ok(())`, and `inillucent-wal`'s replay
+    /// loop counts an `Ok` as applied - so a dropped record was reported as an
+    /// applied one, `Recovered` had no field for it, and nothing printed it.
+    /// task-1932 and task-2033 are both defects that lived inside that silence:
+    /// the second lost an inserted row and 487 FTS5 records with
+    /// `PRAGMA integrity_check` answering `ok` on the result.
+    dropped: u64,
     /// The trees a fresh read of the catalog has already been made for.
     ///
     /// See [`LearningRows::refresh_from_the_file`]: the read is a walk of the
@@ -930,6 +964,7 @@ impl LearningRows {
     /// @param tolerant - whether an unknown tree is skipped rather than refused
     pub(crate) fn new_with_tolerance(checkpointed: &[SchemaEntry], tolerant: bool) -> LearningRows {
         let mut learning = LearningRows {
+            dropped: 0,
             rows: TreeRows::new().with_tree(
                 inillucent_catalog::paged::SCHEMA_TREE_ID,
                 schema_layout(),
@@ -1122,15 +1157,26 @@ impl LearningRows {
     ///
     /// @param tree - the tree the record named
     /// @param result - what the delegated redo answered
-    fn tolerate_unknown_tree(&self, tree: u64, result: DbResult<()>) -> DbResult<()> {
+    fn tolerate_unknown_tree(&mut self, tree: u64, result: DbResult<()>) -> DbResult<()> {
         let named = self.seen.iter().any(|entry| entry.tree_id == tree);
         if (!self.tolerant && named) || tree == inillucent_catalog::paged::SCHEMA_TREE_ID {
             return result;
         }
         match result {
-            Err(error) if is_an_unknown_tree(&error) => Ok(()),
+            Err(error) if is_an_unknown_tree(&error) => {
+                // Counted here rather than at the caller, because this is the
+                // one place a record stops being applied and starts being
+                // forgotten. See `LearningRows::dropped`.
+                self.dropped = self.dropped.saturating_add(1);
+                Ok(())
+            }
             other => other,
         }
+    }
+
+    /// Returns how many records this pass dropped for want of a tree's shape.
+    fn dropped(&self) -> u64 {
+        self.dropped
     }
 
     /// Reads the catalog off the file's own pages and learns whatever it says.
@@ -1169,7 +1215,21 @@ impl LearningRows {
         if self.refreshed_for.contains(&tree) {
             return false;
         }
-        self.refreshed_for.push(tree);
+        // **Marked as asked only once the catalog was actually read**
+        // (task-2066 §4.1.10). This used to push the tree before trying, so a
+        // read that failed still counted as an attempt - and a catalog that
+        // cannot be read yet is the ordinary case for the record this exists
+        // for: a record naming a new tree can precede the page image its
+        // catalog row lives on. The tree was then marked refreshed for the rest
+        // of the recovery, and every later record naming it was dropped without
+        // another attempt.
+        //
+        // That is the task-2033 defect one level up. The repair is made too
+        // early and the bookkeeping guarantees there is no second one.
+        //
+        // The cost argument the comment above makes still holds: this is asked
+        // once per tree *per successful catalog read*, and a read that fails
+        // fails at `attach_catalog`, which is a page fetch rather than a walk.
         let Ok(schema) =
             inillucent_catalog::paged::attach_catalog(database.pool(), database.catalog_root())
         else {
@@ -1178,6 +1238,7 @@ impl LearningRows {
         let Ok(entries) = inillucent_catalog::paged::read_catalog(database.pool(), &schema) else {
             return false;
         };
+        self.refreshed_for.push(tree);
         let mut fresh = false;
         for entry in entries {
             fresh = fresh || !self.seen.iter().any(|held| held.tree_id == entry.tree_id);
@@ -1325,4 +1386,96 @@ pub(crate) fn identifier_of(entry: &SchemaEntry) -> DbResult<u32> {
             String::from_utf8_lossy(&entry.name)
         ))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Builds an error of the shape `tolerate_unknown_tree` recognises.
+    ///
+    /// Assembled from the same sentence `is_an_unknown_tree` matches on, so the
+    /// two cannot drift apart without this failing.
+    ///
+    /// @param tree - the tree the record named
+    fn an_unknown_tree(tree: u64) -> inillucent_base::DbError {
+        inillucent_base::error::corrupt(format!(
+            "the log names tree {tree}, which this recovery was not told the shape of"
+        ))
+    }
+
+    /// A tolerated drop moves the counter.
+    ///
+    /// **A counter only ever asserted to be zero is not a counter** (task-2066
+    /// §4.4.12), and the whole of §4.1.10 is a number that could not move: the
+    /// drop answers `Ok(())`, `inillucent-wal` counts an `Ok` as an applied
+    /// record, and `Recovered` had no field for the difference. So the drop is
+    /// handed to the function directly here.
+    ///
+    /// It is a unit test rather than a recovery, because the recovery shapes
+    /// that can be built from SQL do not produce one: a `CREATE TABLE` reaches
+    /// the log as a row naming the schema tree and `LearningRows` learns the
+    /// shape from it. What produces a drop is a catalog row that arrived as a
+    /// page image or through a bulk build, which is the case task-2033 found -
+    /// and `a_table_created_and_dropped_inside_the_window_replays_without_a_drop`
+    /// records that the ordinary shape does not.
+    #[test]
+    fn a_tolerated_drop_is_counted() {
+        let mut rows = LearningRows::new_tolerant(&[]);
+        assert_eq!(rows.dropped(), 0, "a fresh applier has dropped nothing");
+
+        let tolerated = rows.tolerate_unknown_tree(7, Err(an_unknown_tree(7)));
+        assert!(
+            tolerated.is_ok(),
+            "the record was refused rather than tolerated, so this is testing the wrong branch"
+        );
+        assert_eq!(rows.dropped(), 1, "the tolerated drop was not counted");
+
+        let again = rows.tolerate_unknown_tree(9, Err(an_unknown_tree(9)));
+        assert!(again.is_ok());
+        assert_eq!(rows.dropped(), 2, "the second drop was not counted");
+    }
+
+    /// A record that succeeds, and one refused for another reason, count nothing.
+    ///
+    /// The falsifier. Without it the case above passes against a counter that
+    /// increments on every record, which would make the number useless in the
+    /// other direction - every recovery would look like it had dropped rows.
+    #[test]
+    fn nothing_but_a_tolerated_drop_is_counted() {
+        let mut rows = LearningRows::new_tolerant(&[]);
+        assert!(rows.tolerate_unknown_tree(7, Ok(())).is_ok());
+        assert_eq!(rows.dropped(), 0, "an applied record was counted as a drop");
+
+        let other = rows.tolerate_unknown_tree(
+            7,
+            Err(inillucent_base::error::corrupt("a page that is not a leaf")),
+        );
+        assert!(
+            other.is_err(),
+            "a failure that is not an unknown tree was tolerated, which would hide a real defect"
+        );
+        assert_eq!(
+            rows.dropped(),
+            0,
+            "a refusal that was passed through was counted as a drop"
+        );
+    }
+
+    /// And the schema tree is never tolerated, so it is never counted.
+    ///
+    /// Its shape is fixed in every constructor, so a refusal naming it is a
+    /// damaged catalog row rather than this gap - which is a rule the counter
+    /// must not quietly weaken.
+    #[test]
+    fn the_schema_tree_is_never_a_tolerated_drop() {
+        let mut rows = LearningRows::new_tolerant(&[]);
+        let schema = inillucent_catalog::paged::SCHEMA_TREE_ID;
+        let refused = rows.tolerate_unknown_tree(schema, Err(an_unknown_tree(schema)));
+        assert!(
+            refused.is_err(),
+            "a record naming the schema tree was tolerated"
+        );
+        assert_eq!(rows.dropped(), 0, "the schema tree's refusal was counted");
+    }
 }

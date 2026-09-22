@@ -621,6 +621,7 @@ dependencies = [
  "inillucent-core",
  "inillucent-driver",
  "inillucent-engine",
+ "inillucent-migrate",
  "inillucent-remote",
  "inillucent-scalar",
  "inillucent-tree",

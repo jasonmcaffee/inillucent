@@ -835,6 +835,20 @@ impl Pool {
         }
         {
             let mut state = self.state.borrow_mut();
+            // **`try_reserve` here too** (task-2066 §4.1.8). The three vectors
+            // above reserve fallibly and this one did not, so a growth the
+            // platform could not satisfy aborted the process rather than
+            // answering the caller - which is the one outcome a pool that
+            // refuses to grow is supposed to avoid.
+            let short_by = frames.saturating_sub(state.frames.len());
+            state
+                .frames
+                .try_reserve(short_by)
+                .map_err(|_| no_mem(format!("{more} more frame records")))?;
+            state
+                .free
+                .try_reserve(more)
+                .map_err(|_| no_mem(format!("{more} more entries in the free frame list")))?;
             state.frames.resize(frames, FrameMeta::empty());
             // Pushed in reverse, the way `new` builds the list, so the next
             // claim takes the lowest new index.

@@ -328,6 +328,12 @@ wrappers() {
     if command -v php >/dev/null 2>&1; then
         php "$root/packages/php/tests/target.php" || failed=1
         php "$root/packages/php/tests/roundtrip.php" || failed=1
+        # **The conformance runner, which nothing invoked** (task-2066 §4.4.3).
+        # The other four languages' runners were driven from somewhere; this one
+        # was written, checked in, and started by no script - so PHP's record of
+        # the shared suite was whatever a person had last produced by hand, and
+        # on most machines that is nothing.
+        php "$root/packages/php/tests/conformance.php" || failed=1
     else
         echo "no php on PATH; install one from https://www.php.net/downloads; skipping"
     fi

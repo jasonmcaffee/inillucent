@@ -127,6 +127,17 @@ pub struct SqliteInventory {
     pub page_size: u32,
     /// Its page count.
     pub page_count: u32,
+    /// What `PRAGMA user_version` answers on the source.
+    ///
+    /// Carried because an application uses it to know which schema version it
+    /// is looking at, and a migration that resets it to zero makes every
+    /// migration step run again (task-2066 §4.1.7).
+    pub user_version: u32,
+    /// What `PRAGMA application_id` answers on the source.
+    ///
+    /// Carried for the same reason: it says which application owns the file,
+    /// and a zero says "no application does".
+    pub application_id: u32,
     /// Every ordinary table, in schema order.
     pub tables: Vec<TableInventory>,
 }
@@ -170,6 +181,37 @@ impl Report {
     }
 }
 
+/// Returns `(user_version, application_id)` out of a SQLite file's header.
+///
+/// Read from the bytes rather than asked as a pragma, because the header is the
+/// first hundred bytes of every SQLite file and its layout is part of the
+/// format: `user_version` is a big-endian `u32` at offset 60 and
+/// `application_id` is one at offset 68. Opening a second connection to ask
+/// would be a second reader of the same file for two numbers.
+///
+/// `(0, 0)` for a file too short to have a header, which is the same answer
+/// SQLite gives for a database that never set either - and a file that short is
+/// refused by the inventory a few lines later anyway, with a better message
+/// than this could give.
+///
+/// @param path - the SQLite file
+fn header_versions(path: &Path) -> (u32, u32) {
+    /// Where `user_version` sits in the header.
+    const USER_VERSION_AT: usize = 60;
+    /// Where `application_id` sits.
+    const APPLICATION_ID_AT: usize = 68;
+
+    let Ok(head) = std::fs::read(path) else {
+        return (0, 0);
+    };
+    let read = |at: usize| -> u32 {
+        head.get(at..at.saturating_add(4))
+            .and_then(|bytes| <[u8; 4]>::try_from(bytes).ok())
+            .map_or(0, u32::from_be_bytes)
+    };
+    (read(USER_VERSION_AT), read(APPLICATION_ID_AT))
+}
+
 /// Reads a SQLite file's tables without writing to it.
 ///
 /// **Every failure here is named.** A truncated file, a file whose header is
@@ -189,6 +231,7 @@ pub fn inventory(path: &Path) -> DbResult<SqliteInventory> {
     })?;
     let page_size = file.page_size();
     let page_count = file.page_count();
+    let (user_version, application_id) = header_versions(path);
     let schema = file.schema().map_err(|error| {
         corrupt(format!(
             "{}: the schema could not be read: {}",
@@ -244,6 +287,8 @@ pub fn inventory(path: &Path) -> DbResult<SqliteInventory> {
         path: path.to_path_buf(),
         page_size,
         page_count,
+        user_version,
+        application_id,
         tables,
     })
 }
@@ -426,6 +471,17 @@ pub fn migrate(source: &Path, destination: &Path) -> DbResult<Report> {
     // fault.
     let carried = rebuild_full_text(source, &staged)?;
 
+    // **The two schema pragmas move with the database** (task-2066 §4.1.7).
+    // `application_id` says which application owns the file and `user_version`
+    // says which schema version it is on; both were dropped, so a tool that
+    // reads `user_version` to decide whether a migration step has run sees 0 on
+    // a migrated database and runs every step again.
+    //
+    // Written before the verification below rather than after it, so the check
+    // is reading the published file's own answer rather than the value this
+    // function just decided to write.
+    let pragmas = carry_schema_pragmas(&staged, &inventory)?;
+
     // **Opened from the file, not reopened from the handle.** The checks below
     // read a database whose schema was derived from bytes on a disk, by the
     // engine's own open path, in a pool that has never seen the import. A
@@ -441,6 +497,7 @@ pub fn migrate(source: &Path, destination: &Path) -> DbResult<Report> {
     })?;
     let mut checks = verify_against(&inventory, &opened);
     checks.extend(carried);
+    checks.extend(pragmas);
     drop(opened);
 
     let report = Report {
@@ -903,6 +960,51 @@ fn is_shadow_table(virtual_tables: &[String], name: &str) -> bool {
             .and_then(|rest| rest.strip_prefix('_'))
             .is_some_and(|suffix| !suffix.is_empty())
     })
+}
+
+/// Writes the source's `application_id` and `user_version` onto the staged file.
+///
+/// Returns a check per pragma, so a value that did not survive the write is a
+/// named failure rather than a silent zero. The check reads the staged database
+/// back rather than trusting the write, which is the same argument the row
+/// verification makes one level up: what is graded is what the file says.
+///
+/// @param staged - the database being built
+/// @param inventory - what the source held
+fn carry_schema_pragmas(staged: &Path, inventory: &SqliteInventory) -> DbResult<Vec<Check>> {
+    let database = inillucent_engine::connect::Database::open(staged)?;
+    let connection = database.session();
+    connection.execute_batch(&format!(
+        "PRAGMA application_id = {}; PRAGMA user_version = {};",
+        inventory.application_id, inventory.user_version
+    ))?;
+    let mut checks = Vec::new();
+    for (name, wanted) in [
+        ("application_id", inventory.application_id),
+        ("user_version", inventory.user_version),
+    ] {
+        let rows = connection.query(&format!("PRAGMA {name}"))?;
+        let found = rows
+            .first()
+            .and_then(|row| row.first())
+            .and_then(|value| match value {
+                OwnedDatum::Int(number) => u32::try_from(*number).ok(),
+                _ => None,
+            })
+            .unwrap_or(0);
+        checks.push(if found == wanted {
+            Check::passed(
+                &format!("pragma.{name}"),
+                format!("{wanted} carried from the source"),
+            )
+        } else {
+            Check::failed(
+                &format!("pragma.{name}"),
+                format!("the source says {wanted} and the destination says {found}"),
+            )
+        });
+    }
+    Ok(checks)
 }
 
 /// Rebuilds the source's FTS5 tables in the migrated database, and says so.

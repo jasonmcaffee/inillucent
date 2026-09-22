@@ -474,8 +474,15 @@ impl Bm25Index {
         let positions = binio::read_u32_vec(r)?;
         let n_terms = binio::read_u64(r)? as usize;
 
-        let mut sorted_terms = Vec::with_capacity(n_terms);
-        let mut postings = HashMap::with_capacity(n_terms);
+        // **Neither reserves from `n_terms`** (task-2066 §4.1.12). It is a raw
+        // `u64` out of the segment header with no ceiling and no check against
+        // the bytes remaining, and `HashMap::with_capacity` on a hostile one
+        // allocates before a single term has been read. Growing as the terms
+        // arrive costs a few reallocations on a real index and nothing on a
+        // claimed length the file cannot satisfy, which then fails at the first
+        // `read_str`.
+        let mut sorted_terms = Vec::new();
+        let mut postings = HashMap::new();
         for _ in 0..n_terms {
             let term = binio::read_str(r)?;
             let count = binio::read_u64(r)? as usize;

@@ -18,19 +18,32 @@
 //! because a `needs` was added and the runner started skipping it - shows up
 //! here as a count that does not add up.
 //!
-//! ## Why the records are read rather than the runners driven
+//! ## The runners are driven, and a missing interpreter is a skip
 //!
-//! Driving them would mean this suite owning a Node, a Go toolchain and a PHP
-//! in one place, and reporting a missing interpreter as a failure of the
-//! binding. The runners are their own targets in `tests/selection.toml`, each
-//! with its own `requires`, each skipping visibly when its interpreter is
-//! absent - which is what `--strict` counts. This grades what they produced.
+//! This used to read whatever records were on disk, and argued that driving the
+//! runners "would mean this suite owning a Node, a Go toolchain and a PHP in
+//! one place, and reporting a missing interpreter as a failure of the binding."
+//! The second half of that is the part worth keeping, and it is kept: an
+//! interpreter this machine does not have is a named skip, never a failure.
 //!
-//! **A record that is not there is a skip, not a pass.** A machine that has
-//! never run the binding suites has no records at all, and this prints
-//! `; skipping` with the commands that make them - which is what `--strict`
-//! counts. A machine that has *some* records and not others is a different
-//! thing: a runner stopped running, and that is a failure.
+//! **What reading leftovers cost was measured** (task-2066 §4.4.3).
+//! `rust.json` and `python.json` are written by targets inside the Rust suite on
+//! every strict run; npm, go and php are written only when somebody types their
+//! command. So "some records and not others" - which this file used to call
+//! "a runner stopped running, and that is a failure" - is the permanent state of
+//! every machine that has run the suite once and not run those three by hand.
+//! The first strict run on a clean machine skipped, because there were no
+//! records at all. The second failed, on an unchanged tree, because the first
+//! had written two of the five.
+//!
+//! It was also a green that evidenced nothing in the ordinary case: a developer
+//! who has never run the three sees a skip, and a skip is what `--strict` is
+//! supposed to make visible rather than what a release is cut on.
+//!
+//! **A record that is not there and cannot be made is a skip, not a pass.** A
+//! runner whose interpreter is absent prints `; skipping` naming it, which is
+//! what `--strict` counts. A runner whose interpreter is present is *run*, and
+//! then its record is graded the way it always was.
 //!
 //! **A stale record cannot pass either.** Every record names the cases it ran
 //! and the ones it skipped, and the two together have to be every case in the
@@ -78,6 +91,93 @@ const RUNNERS: [(&str, &str); 5] = [
     ),
     ("php", "php packages/php/tests/conformance.php"),
 ];
+
+/// The three runners this suite starts itself, and what each one needs.
+///
+/// `rust` and `python` are left out because they are their own targets in
+/// `tests/selection.toml` and run on every strict run already; starting them a
+/// second time here would double their cost and grade the same record twice.
+///
+/// Each entry is the record's language name, the interpreter to look for, and
+/// the arguments after it. The interpreter is looked for by running it with
+/// `--version`, because a program on the path that will not start is the same
+/// to this suite as one that is not there.
+const DRIVEN: [(&str, &str, &[&str]); 3] = [
+    (
+        "npm",
+        "node",
+        &["--test", "packages/npm/inillucent/conformance.test.mjs"],
+    ),
+    (
+        "go",
+        "go",
+        &[
+            "test",
+            "-C",
+            "packages/go",
+            "-run",
+            "TestConformanceSuite",
+            "./...",
+        ],
+    ),
+    ("php", "php", &["packages/php/tests/conformance.php"]),
+];
+
+/// Runs the three runners this suite owns, and names the ones it could not.
+///
+/// A runner that ran is graded below like any other. A runner whose interpreter
+/// is absent is named here and skipped there - which is the half of the old
+/// argument worth keeping: this suite is about whether a binding runs the whole
+/// conformance suite, and a machine with no Go toolchain says nothing about
+/// that either way.
+///
+/// The runner's own exit code is deliberately ignored. A runner that ran and
+/// failed a case writes that into its record, and the record is what this file
+/// grades; treating the exit code as the answer as well would report the same
+/// failure twice and in less detail.
+///
+/// @returns the languages whose interpreter this machine does not have
+fn drive_the_runners() -> Vec<String> {
+    let root = workspace_root();
+    // **The runners need the binary, and none of them can build it**
+    // (task-2066 §4.4.3). All three spawn `inillucent` and look for it through
+    // `INILLUCENT_BIN` or on the path; without it they skip, write no record,
+    // and this suite then reports them as runners that stopped running. The
+    // npm runner said so in as many words - `no inillucent binary: set
+    // INILLUCENT_BIN ...; skipping` - to a standard error nothing was reading.
+    //
+    // `cliproc::program` builds it into the same target directory the calling
+    // test binary is in, which is what makes this work under a redirected
+    // `CARGO_TARGET_DIR` and so in every worktree.
+    let Some(binary) = inillucent_compat::cliproc::program("inillucent") else {
+        return DRIVEN
+            .iter()
+            .map(|(language, _, _)| (*language).to_string())
+            .collect();
+    };
+    let mut absent = Vec::new();
+    for (language, program, arguments) in DRIVEN {
+        let present = std::process::Command::new(program)
+            .arg("--version")
+            .current_dir(&root)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if !present {
+            absent.push(language.to_string());
+            continue;
+        }
+        let _ = std::process::Command::new(program)
+            .args(arguments)
+            .current_dir(&root)
+            .env("INILLUCENT_BIN", &binary)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status();
+    }
+    absent
+}
 
 /// One runner's record of what it did.
 struct Record {
@@ -248,12 +348,20 @@ fn every_binding_runs_the_whole_suite() {
         cases.len()
     );
 
+    // The three this suite owns are run first, so what is graded below is this
+    // run's answer rather than whatever a previous one left on disk.
+    let absent = drive_the_runners();
+
     let mut missing_records: Vec<String> = Vec::new();
     let mut wrong: Vec<String> = Vec::new();
     let mut found = 0usize;
     for (language, how) in RUNNERS {
         let Some(record) = record(language) else {
-            missing_records.push(format!("{language}: produce it with `{how}`"));
+            // An interpreter this machine does not have is not a binding that
+            // stopped running. It is named in the skip below instead.
+            if !absent.iter().any(|named| named == language) {
+                missing_records.push(format!("{language}: produce it with `{how}`"));
+            }
             continue;
         };
         found = found.saturating_add(1);
@@ -318,11 +426,26 @@ fn every_binding_runs_the_whole_suite() {
         }
     }
 
-    // Nothing at all is a machine that has never run them, which is a skip.
-    // Some but not all is a runner that stopped running, which is not.
+    // **An interpreter that is not installed is a skip, and it is the only
+    // skip left** (task-2066 §4.4.3). It used to be "no records at all", which
+    // made the first strict run on a machine skip and the second fail, because
+    // the first had written two of the five itself.
+    if !absent.is_empty() {
+        // Built first, so the announcement and the early return sit next to
+        // each other: `every_early_return_in_a_test_says_why` reads the lines
+        // around a `return` looking for the helper, and a three-line `format!`
+        // between them puts it out of reach.
+        let said = format!(
+            "this machine has no {}, so {} of the five conformance runners could not be run",
+            absent.join(", no "),
+            absent.len()
+        );
+        inillucent_compat::differential::skipping(&said);
+        return;
+    }
     if found == 0 {
         inillucent_compat::differential::skipping(
-            "no conformance runner has been run on this machine, so there is no record to read",
+            "no conformance runner produced a record, so there is nothing to grade",
         );
         return;
     }

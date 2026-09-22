@@ -770,6 +770,16 @@ impl<'a, R: RowRedo> Applier<'a, R> {
         &self.free_map
     }
 
+    /// Returns the row applier this was built with.
+    ///
+    /// So a caller can ask it what it did. The engine's applier counts the
+    /// records it dropped for want of a tree's shape, and that count has to
+    /// reach the recovery's outcome - see `Recovered::dropped` (task-2066
+    /// §4.1.10).
+    pub fn rows(&self) -> &R {
+        &self.rows
+    }
+
     /// Copies a whole page image into the file and stamps its LSN.
     ///
     /// @param page - the page's number

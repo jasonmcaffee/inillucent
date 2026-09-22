@@ -1626,52 +1626,72 @@ fn migrate_remote(
         .with("notCarried", json::Json::Array(not_carried)))
 }
 
-/// Imports a SQLite database file into a new `.rdb`.
+/// Migrates a SQLite file, verified, the way the tool of the same name does.
 ///
-/// **Staged and then published, never written where an application looks.**
-/// `import_into` takes the target rather than deriving it because that is the
-/// property a migration needs: a half-written database must not sit at the path
-/// somebody is about to open. The staging name carries the process id so two
-/// migrations at once cannot collide, and the rename is the publish.
+/// **This used to import and rename, and call that a migration** (task-2066
+/// §4.1.7). `AGENTS.md` and `agent-skills/inillucent-migrate` both say a
+/// migration is verified by row count and digest and published only if every
+/// check passes. The verb did none of it: `Database::import_sqlite_into`
+/// followed by `std::fs::rename`. Measured on the shipped binary, that meant an
+/// FTS5 table was dropped and the migration exited 0 with no warning even under
+/// `--output json` - so a database whose only content was an FTS5 table
+/// migrated to an empty file and reported success. `application_id` and
+/// `user_version` went the same way, and every *successful* migration leaked
+/// its staging segments, because `remove_staged` ran only on the error path.
 ///
-/// @param from - the SQLite file
-/// @param to - the file to write
+/// `inillucent_migrate::sqlite::migrate` is the implementation that does what
+/// the documentation says, and the `inillucent-migrate` binary has used it
+/// since it was written. Two implementations of one job, and the shipped verb
+/// had the one nobody was grading.
+///
+/// The report is carried out rather than reduced to a sentence: `checks`,
+/// `rows`, `tables` and anything the source held that the destination does not,
+/// which is the shape the PostgreSQL path already reports.
+///
+/// @param from - the SQLite file to read
+/// @param to - the `.rdb` to publish
 fn migrate_sqlite_file(from: &std::path::Path, to: &std::path::Path) -> Result<Outcome, Failed> {
-    let mut staged = to.as_os_str().to_os_string();
-    staged.push(format!(".staging-{}", std::process::id()));
-    let staged = std::path::PathBuf::from(staged);
-    // **A source the reader could not read whole is refused here (task-1979,
-    // M1).** The import used to drop a table whose rows it could not read and
-    // carry on, so one flipped bit in a leaf page produced a published,
-    // integrity-clean database with the table gone and exit code 0. The engine
-    // refuses instead, and the staging file is left where it fell rather than
-    // renamed over the destination.
-    let imported = match inillucent_driver::Database::import_sqlite_into(from, &staged) {
-        Ok(imported) => imported,
-        Err(error) => {
-            // **The staging file goes with the refusal.** A migration that
-            // published nothing used to leave a half-built database and its log
-            // segments beside the destination, named after this process, for
-            // somebody to find later and wonder about.
-            remove_staged(&staged);
-            return Err(Failed::from_driver(error));
-        }
-    };
-    drop(imported);
-    std::fs::rename(&staged, to).map_err(|error| {
-        Failed::said(
-            Status::Io,
+    // The staging file is left where it fell on a failure, by design, so there
+    // is something to look at; `migrate`'s message says where.
+    let report = inillucent_migrate::sqlite::migrate(from, to)
+        .map_err(|error| Failed::from_engine(&error))?;
+    let failures: Vec<String> = report
+        .failures()
+        .iter()
+        .map(|check| format!("{}: {}", check.name, check.detail))
+        .collect();
+    let checks = Json::Array(
+        report
+            .checks
+            .iter()
+            .map(|check| {
+                json::object(vec![
+                    ("name", json::text(&check.name)),
+                    ("passed", Json::Bool(check.passed)),
+                    ("detail", json::text(&check.detail)),
+                ])
+            })
+            .collect(),
+    );
+    // **A report that did not pass is a failure, not a note.** `migrate`
+    // answers `Ok(report)` for one, because publishing is its decision and
+    // reporting is the caller's - and the caller used to have no opinion.
+    if !report.passed() {
+        return Err(Failed::said(
+            Status::Corrupt,
             format!(
-                "built {} but could not publish it: {error}",
-                staged.display()
+                "{} was not published: {}",
+                to.display(),
+                failures.join("; ")
             ),
-        )
-    })?;
+        ));
+    }
     Ok(Outcome::said(
         "migrate",
         format!("imported {} into {}", from.display(), to.display()),
     )
-    .with("destination", json::text(to.to_string_lossy())))
+    .with("destination", json::text(to.to_string_lossy()))
+    .with("checks", checks))
 }
 
 /// Removes a staging database and every log segment beside it.

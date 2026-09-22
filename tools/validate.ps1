@@ -350,6 +350,12 @@ Invoke-Stage -Name 'wrappers' -Because 'the Go, Node, PHP and Python wrappers, a
         if ($LASTEXITCODE -ne 0) { $wrong = 1 }
         & php (Join-Path $root 'packages/php/tests/roundtrip.php')
         if ($LASTEXITCODE -ne 0) { $wrong = 1 }
+        # **The conformance runner, which nothing invoked** (task-2066 §4.4.3).
+        # The other four languages' runners were driven from somewhere; this one
+        # was written, checked in, and started by no script - so PHP's record of
+        # the shared suite was whatever a person had last produced by hand.
+        & php (Join-Path $root 'packages/php/tests/conformance.php')
+        if ($LASTEXITCODE -ne 0) { $wrong = 1 }
     } else {
         Write-Host 'no php on PATH; install one from https://www.php.net/downloads; skipping'
     }

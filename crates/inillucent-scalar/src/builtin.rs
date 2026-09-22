@@ -870,8 +870,10 @@ fn substring(arguments: &[Value<'static>], encoding: TextEncoding) -> Value<'sta
     }
     let is_blob = matches!(subject, Value::Blob(_));
     let bytes = eval::text_bytes(subject, encoding);
-    let units: Vec<Vec<u8>> = if is_blob {
-        bytes.iter().map(|byte| vec![*byte]).collect()
+    // A blob counts in bytes and text counts in characters, which is SQLite's
+    // rule. Both borrow from `bytes`, so neither allocates per unit.
+    let units: Vec<&[u8]> = if is_blob {
+        bytes.chunks(1).collect()
     } else {
         characters(&bytes)
     };
@@ -921,12 +923,52 @@ fn substring(arguments: &[Value<'static>], encoding: TextEncoding) -> Value<'sta
     Value::owned_text(&out).unwrap_or(Value::Null)
 }
 
-/// Splits UTF-8 bytes into characters.
-fn characters(bytes: &[u8]) -> Vec<Vec<u8>> {
-    let text = String::from_utf8_lossy(bytes);
-    text.chars()
-        .map(|character| character.to_string().into_bytes())
-        .collect()
+/// Splits bytes into characters, borrowing rather than copying.
+///
+/// **This used to go through `String::from_utf8_lossy`, and the replacement was
+/// what got written back** (task-2066 §4.1.9). Every byte that is not valid
+/// UTF-8 became U+FFFD, so
+/// `hex(substr(CAST(x'fffe80' AS TEXT),1,2))` answered `EFBFBDEFBFBD` where
+/// SQLite answers `FFFE80`, and `UPDATE t SET c = trim(c)` over a column of
+/// latin1-derived text rewrote every non-ASCII value irreversibly. Nothing else
+/// in this file does that: `length`, `upper`, `lower`, `replace`, `instr`,
+/// `printf`, `||`, `unicode` and `char` all carry invalid bytes through
+/// unchanged, and TEXT is bytes here rather than a `String` precisely so they
+/// can.
+///
+/// It was also one heap allocation per character, which made the family
+/// quadratic - 8.4 s for `substr(x,2,3)` over a 1 MB value against SQLite's
+/// 77 ms, and no answer at all at 10 MB. Borrowing removes that with the
+/// replacement, because both came from the same line.
+///
+/// **A character is one byte plus every continuation byte after it**, which is
+/// the reference's rule rather than a decoder's. It does not ask whether the
+/// leader is valid or whether it promised that many: `sqlite3Utf8CharLen`
+/// advances one byte and then skips every byte whose top two bits are `10`. It
+/// matters on exactly the input this function exists to stop mangling -
+/// `x'fffe80'` is two characters by that rule, `FF` and `FE 80`, so
+/// `substr(...,1,2)` is all three bytes. Counting `80` as a character of its
+/// own because `FE` is not a legal leader gives two bytes and disagrees with
+/// SQLite.
+///
+/// @param bytes - the value's bytes
+fn characters(bytes: &[u8]) -> Vec<&[u8]> {
+    let mut units = Vec::new();
+    let mut at = 0usize;
+    while at < bytes.len() {
+        let mut end = at.saturating_add(1);
+        while bytes
+            .get(end)
+            .is_some_and(|byte| byte & 0b1100_0000 == 0b1000_0000)
+        {
+            end = end.saturating_add(1);
+        }
+        if let Some(unit) = bytes.get(at..end) {
+            units.push(unit);
+        }
+        at = end;
+    }
+    units
 }
 
 /// `trim(x[, chars])`, and its one-sided forms.
@@ -942,12 +984,15 @@ fn trim(
     if subject.is_null() {
         return Value::Null;
     }
-    let cutset = match arguments.get(1) {
+    // Held rather than inlined because `characters` borrows from them.
+    let cutset_bytes = match arguments.get(1) {
         Some(value) if value.is_null() => return Value::Null,
-        Some(value) => characters(&eval::text_bytes(value, encoding)),
-        None => vec![b" ".to_vec()],
+        Some(value) => eval::text_bytes(value, encoding),
+        None => b" ".to_vec(),
     };
-    let mut units = characters(&eval::text_bytes(subject, encoding));
+    let subject_bytes = eval::text_bytes(subject, encoding);
+    let cutset = characters(&cutset_bytes);
+    let mut units = characters(&subject_bytes);
     if left {
         while units.first().is_some_and(|unit| cutset.contains(unit)) {
             units.remove(0);

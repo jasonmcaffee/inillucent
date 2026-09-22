@@ -135,6 +135,9 @@ table.
 | `onnx` | 3 | ONNX Runtime and the embedding weights: `inillucent setup-embeddings all` |
 | `python` | 3 | a Python interpreter with `ssl`, for the TLS server, the `ctypes` conformance runner and the Nikaya workload extractor |
 | `fixtures` | 2 | the gate fixtures, which are 1.2 MB and 120 MB and are not tracked: `bash tools/build-gate-fixtures.sh _agent_output/fixtures` |
+| `node` | 1 | a Node.js runtime, for the npm wrapper's conformance runner: https://nodejs.org/ |
+| `go` | 1 | a Go toolchain, for the Go wrapper's conformance runner: https://go.dev/dl/ |
+| `php` | 1 | a PHP interpreter, for the PHP wrapper's conformance runner: https://www.php.net/downloads |
 | `asan` | 1 | a toolchain with the address sanitizer, which is nightly on every platform and absent on Windows |
 | `baseline` | 1 | a recorded performance baseline: `cargo run -p inillucent-compat --bin inillucent-baseline -- capture` |
 | `btree-corpus` | 1 | the retained sequences under `compat/corpus/btree/`, which are tracked |

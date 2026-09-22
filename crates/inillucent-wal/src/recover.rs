@@ -160,6 +160,19 @@ pub struct Recovered {
     pub scanned: u64,
     /// How many records the second pass applied.
     pub applied: u64,
+    /// How many records the replay **dropped** rather than applied.
+    ///
+    /// **Separate from `applied`, because it used to be counted in it**
+    /// (task-2066 §4.1.10). A `Redo` that answers `Ok(())` without applying a
+    /// record - which is what the engine's applier does for a record naming a
+    /// tree it has no shape for - was indistinguishable here from one that
+    /// applied it. A recovery that silently dropped rows reported the same
+    /// numbers as one that did not, and `PRAGMA integrity_check` answered `ok`
+    /// on the result.
+    ///
+    /// Filled by the caller after the replay, from the applier, because only
+    /// the applier knows: this loop sees an `Ok` either way.
+    pub dropped: u64,
     /// How many transactions committed.
     pub committed: u64,
     /// How many transactions were open at the end of the log and were discarded.
@@ -201,6 +214,10 @@ pub fn recover(
     let chain = read_chain(vfs, base, &start)?;
     let analysis = analyse(&chain, &start)?;
     let mut outcome = Recovered {
+        // Filled by the caller after the replay, from the applier - this loop
+        // cannot tell a dropped record from an applied one. See
+        // `Recovered::dropped`.
+        dropped: 0,
         next_lsn: analysis.valid_end,
         sequence: analysis.last_sequence,
         latest_cts: analysis.latest_cts,

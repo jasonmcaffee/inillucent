@@ -47,6 +47,8 @@ inillucent-base = { workspace = true }
 inillucent-core = { workspace = true }
 inillucent-driver = { workspace = true }
 inillucent-engine = { workspace = true }
+# The verified SQLite migration; see the argument in docs/invariants/layering.toml.
+inillucent-migrate = { workspace = true }
 # The remote migration sources. It depends on base, vfs, tree and
 # engine and on nothing else, which is why `migrate --kind postgres` can live in
 # the one command table both this CLI and the MCP server are generated from.

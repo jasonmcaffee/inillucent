@@ -229,6 +229,20 @@ pub unsafe extern "C" fn inillucent_bind_blob(
 pub unsafe extern "C" fn inillucent_clear_bindings(stmt: *mut inillucent_stmt) {
     guarded_value(
         || {
+            // **The handle is checked before it is dereferenced** (task-2066
+            // §4.1.13). This took `as_mut()` on whatever the caller passed, so
+            // clearing the bindings of a freed statement wrote into freed
+            // memory - the same defect task-1979 fixed in `bind`, which is the
+            // function immediately beside it and which has carried the guard
+            // ever since.
+            //
+            // Nothing is reported, because this returns nothing: a caller that
+            // passes a dead handle gets the same "no bindings were cleared"
+            // it would get for a null one, which is what the signature allows
+            // this to say.
+            if held(stmt as *const inillucent_stmt).is_none() {
+                return;
+            }
             if let Some(statement) = stmt.as_mut() {
                 statement.params.clear();
             }

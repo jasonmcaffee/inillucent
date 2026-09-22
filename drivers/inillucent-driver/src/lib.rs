@@ -313,6 +313,14 @@ pub struct Recovery {
     pub scanned: u64,
     /// How many records the second pass applied.
     pub applied: u64,
+    /// How many records the replay **dropped** rather than applied.
+    ///
+    /// A record naming a tree the recovery had no shape for. Non-zero does not
+    /// by itself mean rows were lost - a table genuinely dropped inside the
+    /// replayed window produces one - but it is the only signal there is, and
+    /// it used to be counted as an applied record, so an application could not
+    /// ask (task-2066 §4.1.10).
+    pub dropped: u64,
     /// How many transactions committed in the replayed window.
     pub committed: u64,
     /// How many transactions were open at the end of the log and were
@@ -381,6 +389,7 @@ impl Database {
             recovered: report.recovered,
             scanned: report.scanned,
             applied: report.applied,
+            dropped: report.dropped,
             committed: report.committed,
             losers: report.losers,
             last_sequence: report.last_sequence,

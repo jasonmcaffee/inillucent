@@ -629,6 +629,17 @@ pub unsafe extern "C" fn inillucent_txn_execute(
     error: *mut *mut inillucent_error,
 ) -> i32 {
     guarded("inillucent_txn_execute", error, || {
+        // **The handle is checked before it is dereferenced** (task-2066
+        // §4.1.13). task-1979 gave every handle a magic word read through
+        // `held()` and these three entry points were missed, so
+        // `as_mut()` followed whatever the caller passed. Begin, roll back,
+        // then commit the same pointer read a freed `Rc`, reached a live
+        // database through it, and issued a real `COMMIT` - reporting a syntax
+        // status. A Python `Transaction.__del__` after an explicit `commit()`
+        // is that sequence, written by accident rather than on purpose.
+        if held(txn as *const inillucent_txn).is_none() {
+            return misused("inillucent_txn_execute", error);
+        }
         let Some(transaction) = txn.as_mut() else {
             return misused("inillucent_txn_execute", error);
         };
@@ -679,6 +690,17 @@ pub unsafe extern "C" fn inillucent_txn_commit(
     error: *mut *mut inillucent_error,
 ) -> i32 {
     guarded("inillucent_txn_commit", error, || {
+        // **The handle is checked before it is dereferenced** (task-2066
+        // §4.1.13). task-1979 gave every handle a magic word read through
+        // `held()` and these three entry points were missed, so
+        // `as_mut()` followed whatever the caller passed. Begin, roll back,
+        // then commit the same pointer read a freed `Rc`, reached a live
+        // database through it, and issued a real `COMMIT` - reporting a syntax
+        // status. A Python `Transaction.__del__` after an explicit `commit()`
+        // is that sequence, written by accident rather than on purpose.
+        if held(txn as *const inillucent_txn).is_none() {
+            return misused("inillucent_txn_commit", error);
+        }
         let Some(transaction) = txn.as_mut() else {
             return misused("inillucent_txn_commit", error);
         };

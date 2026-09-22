@@ -132,3 +132,22 @@ default = 0
 hard_max = 8
 minimum = 0
 description = "Maximum number of auxiliary threads one prepared statement may start."
+
+[[limit]]
+name = "CacheSize"
+# **Not one of SQLite's**, and named so that nobody reads it as one. SQLite has
+# no `SQLITE_LIMIT_CACHE_SIZE`: it answers a huge `PRAGMA cache_size` by
+# allocating lazily, so it needs no ceiling to stay small. This engine allocates
+# a buffer, a latch and a pin counter per frame when the pool grows, so it does
+# (task-2066 §4.1.8).
+#
+# `the_limits_match_the_oracle` walks the oracle's rows and looks ours up by
+# `c_name`, so a row the oracle has no counterpart for is never compared rather
+# than being a failure.
+c_name = "INILLUCENT_LIMIT_CACHE_SIZE"
+# 262,144 frames. At the 32 KiB page size the gate uses that is 8 GiB of buffers
+# - far past any cache anybody configures on purpose, and bounded.
+default = 262144
+hard_max = 262144
+minimum = 1
+description = "Maximum number of buffer pool frames PRAGMA cache_size may ask for."
