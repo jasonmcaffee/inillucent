@@ -21,6 +21,8 @@ use inillucent_engine::connect::{Connection, Database};
 use inillucent_search::adapter::{Hit, Query, RetrievalIndex};
 use inillucent_tree::datum::OwnedDatum;
 
+use crate::copy;
+
 /// A search table, opened as a retrieval index.
 pub struct SqlIndex {
     /// The database handle. A connection is a borrow of it rather than a thing
@@ -30,6 +32,14 @@ pub struct SqlIndex {
     database: Database,
     table: String,
     dims: usize,
+    /// Whether the table declares the liveness facet the migration writes.
+    ///
+    /// A table that declares none has no tombstoned rows to exclude: a search
+    /// table's own `tombstone` deletes the row, so liveness only means anything
+    /// where something outside the table records it, and the facet is where
+    /// that record lives. So a query asking for live rows only against a table
+    /// with no facet is asking for every row, which is what it gets.
+    live_facet: bool,
 }
 
 impl SqlIndex {
@@ -42,11 +52,22 @@ impl SqlIndex {
     /// @param table - the `inillucent_search` table's name
     pub fn open(path: impl AsRef<std::path::Path>, table: &str) -> DbResult<SqlIndex> {
         let database = Database::open(path)?;
-        let dims = declared_dims(&database.session(), table)?;
+        // One session for both reads. `Database::session` hands out a *new*
+        // logical session each time it is called, and these two ask the same
+        // shadow table the same kind of question at the same moment, so there
+        // is no reason for them to be two.
+        let (dims, live_facet) = {
+            let connection = database.session();
+            (
+                declared_dims(&connection, table)?,
+                declares_live_facet(&connection, table)?,
+            )
+        };
         Ok(SqlIndex {
             database,
             table: table.to_string(),
             dims,
+            live_facet,
         })
     }
 
@@ -80,10 +101,33 @@ impl SqlIndex {
     }
 }
 
+/// Says which of the `%_config` reads failed, on top of what the engine said.
+///
+/// **Both reads name the same table, so the engine's own message cannot tell
+/// them apart** (task-2067). A run of the release-sized corpus suite came back
+/// with `cannot reopen the staged database: no such table: chunk_search_config`
+/// and there was no way to say which read had asked, which is the difference
+/// between a defect somebody can look at and one somebody has to guess about.
+/// It was not reproduced in 31 further runs of the two suites that exercise
+/// this path, so the next occurrence is what there is to work with, and it
+/// should arrive saying what it was doing.
+/// @param table - the search table's name
+/// @param key - the `%_config` key being read
+/// @param error - what the engine said
+fn reading(table: &str, key: &str, error: DbError) -> DbError {
+    let said = error
+        .detail()
+        .unwrap_or_else(|| error.message())
+        .to_string();
+    error.with_detail(format!("reading {key} out of {table}_config: {said}"))
+}
+
 /// Returns the vector width a search table declared, from its own config rows.
 fn declared_dims(connection: &Connection<'_>, table: &str) -> DbResult<usize> {
     let sql = format!("SELECT v FROM {table}_config WHERE k = 'dims'");
-    let mut statement = connection.prepare(&sql)?;
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|error| reading(table, "dims", error))?;
     if !statement.step()? {
         return Err(DbError::primary(inillucent_base::PrimaryCode::Error)
             .with_detail(format!("{table} is not a inillucent_search table")));
@@ -94,6 +138,29 @@ fn declared_dims(connection: &Connection<'_>, table: &str) -> DbResult<usize> {
         _ => 0,
     };
     Ok(width)
+}
+
+/// Reports whether a search table declared the liveness facet.
+///
+/// Read from the table's own `%_config` rather than from the `CREATE`
+/// statement, for the reason the stored rows always win here: they are what the
+/// existing rows were written against.
+/// @param connection - a session on the database
+/// @param table - the `inillucent_search` table's name
+fn declares_live_facet(connection: &Connection<'_>, table: &str) -> DbResult<bool> {
+    let sql = format!("SELECT v FROM {table}_config WHERE k = 'facets'");
+    let mut statement = connection
+        .prepare(&sql)
+        .map_err(|error| reading(table, "facets", error))?;
+    if !statement.step()? {
+        return Ok(false);
+    }
+    let Some(OwnedDatum::Text(value)) = statement.row().first() else {
+        return Ok(false);
+    };
+    Ok(String::from_utf8_lossy(value)
+        .split(',')
+        .any(|name| name.trim() == copy::LIVE_FACET))
 }
 
 /// Encodes a vector the way a search table stores one.
@@ -204,6 +271,15 @@ impl RetrievalIndex for SqlIndex {
         if let Some(recall) = query.recall {
             terms.push(format!("recall = {recall}"));
         }
+        // **Inside the search rather than around it** (task-2067). This is a
+        // constraint on the table's liveness facet, so the module compiles it
+        // into the filter the scan runs under and the ranking never sees a
+        // tombstoned chunk. Written as `AND live = '1'` outside the search it
+        // would be the same rows and a different order, because the position
+        // rescore reaches a fixed depth into whatever the scan admitted.
+        if !query.include_deleted && self.live_facet {
+            terms.push(format!("{} = '{}'", copy::LIVE_FACET, copy::LIVE));
+        }
         let sql = format!(
             "SELECT rowid, score({}), confidence({}), origin({}) FROM {} WHERE {} ORDER BY rank",
             self.table,
@@ -254,10 +330,22 @@ impl RetrievalIndex for SqlIndex {
 impl SqlIndex {
     /// Inserts the rows of one append, inside a transaction the caller opened.
     fn append_inside(&mut self, chunks: &[ChunkInput], embeddings: &[Vec<f32>]) -> DbResult<usize> {
-        let sql = format!(
-            "INSERT INTO {}(rowid, content, vector) VALUES (?1, ?2, ?3)",
-            self.table
-        );
+        // The facet is written whenever the table has one, from the chunk's own
+        // tombstone. A row inserted with the column left NULL would read back as
+        // the empty string, which is neither of the two values a liveness query
+        // asks for - so it would be a row no search could ever return, and
+        // nothing would say so.
+        let sql = match self.live_facet {
+            true => format!(
+                "INSERT INTO {}(rowid, content, {}, vector) VALUES (?1, ?2, ?4, ?3)",
+                self.table,
+                copy::LIVE_FACET
+            ),
+            false => format!(
+                "INSERT INTO {}(rowid, content, vector) VALUES (?1, ?2, ?3)",
+                self.table
+            ),
+        };
         let mut count = 0usize;
         for (chunk, embedding) in chunks.iter().zip(embeddings.iter()) {
             let Some(external) = chunk.external_chunk_id.as_deref() else {
@@ -275,6 +363,15 @@ impl SqlIndex {
                 statement.bind_blob(3, &vector_blob(embedding))?;
             } else {
                 statement.bind_null(3)?;
+            }
+            if self.live_facet {
+                statement.bind_text(
+                    4,
+                    match chunk.deleted {
+                        true => copy::TOMBSTONED,
+                        false => copy::LIVE,
+                    },
+                )?;
             }
             while statement.step()? {}
             count = count.saturating_add(1);

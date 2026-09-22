@@ -39,6 +39,17 @@ pub struct Query {
     pub limit: usize,
     /// The traversal breadth, when the index is an approximate one.
     pub recall: Option<f32>,
+    /// Whether a tombstoned document's chunks may answer.
+    ///
+    /// **Both implementations have to honour this or the trait is not a
+    /// contract** (task-2067). The direct engine's default filter already
+    /// excludes them, inside the scan; a search table holds every row and knows
+    /// nothing about a document being deleted, so the implementation over one
+    /// constrains the facet column its writer filed the flag in. The point of
+    /// there being a trait is that one script can ask both the same question,
+    /// and "which rows may answer" was a question only one of them was being
+    /// asked.
+    pub include_deleted: bool,
 }
 
 /// One answer.
@@ -78,9 +89,18 @@ pub trait RetrievalIndex {
     /// Both make the document unreachable, immediately and identically. What
     /// can differ afterwards is the ordering of results deep in a list, because
     /// the two are scoring against corpora of different sizes until the legacy
-    /// index is rebuilt. A caller who needs the legacy behaviour keeps the row
-    /// and filters it in SQL, which is what the migration's own `document`
-    /// table is for.
+    /// index is rebuilt.
+    ///
+    /// **A caller who needs the legacy behaviour keeps the row and declares a
+    /// facet column holding its liveness** (task-2067). That paragraph used to
+    /// end "and filters it in SQL, which is what the migration's own `document`
+    /// table is for", and it was wrong: a `WHERE` clause outside the search
+    /// runs after the ranking, and `Bm25Index::top_k` rescores the best `k *
+    /// rescore_depth_factor` hits of whatever the scan admitted, so removing
+    /// rows afterwards gives a different rescore window and therefore a
+    /// different order. Measured on a 400 row corpus, nine of the top ten hits
+    /// differed. A facet is seen before the ranking, which is the whole
+    /// difference.
     fn tombstone(&mut self, source: &str, external_doc_id: &str) -> DbResult<bool>;
 
     /// Replaces one document's chunks, returning how many chunks landed.
@@ -138,7 +158,10 @@ impl RetrievalIndex for Index {
 
     /// Runs the same branches the SQL path runs, through the same entry point.
     fn search(&mut self, query: &Query) -> DbResult<Vec<Hit>> {
-        let filter = self.compile(&Filter::default());
+        let filter = self.compile(&Filter {
+            include_deleted: query.include_deleted,
+            ..Filter::default()
+        });
         let branches = branches_for(query);
         let Some(branches) = branches else {
             return Ok(Vec::new());

@@ -2510,10 +2510,16 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 52] = [
     // `inillucent-migrate` denies `clippy::expect_used`, so a refused probe has
     // to travel out as a value, and `retrieval` is now the four lines that turn
     // that value into a failed check for a caller that wants a `Vec<Check>`.
+    //
+    // **Lowered from 213 in task-2067**, which added a check and took it to 214.
+    // The vector and hybrid comparisons - everything guarded by the source
+    // having a vector per chunk - are `vector_checks` now, which is a hundred
+    // and twenty lines this one no longer holds. They were already one
+    // contiguous block behind one `if`, so the seam was where the work was.
     (
         "crates/inillucent-migrate/src/verify.rs",
         "retrieval_checks",
-        213,
+        116,
     ),
     ("crates/inillucent-storage/src/mutate.rs", "balance", 224),
     ("crates/inillucent-compat/src/bin/analytical.rs", "run", 223),

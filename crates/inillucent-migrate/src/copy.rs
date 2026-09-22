@@ -38,6 +38,32 @@ pub const BATCH: usize = 512;
 /// The name of the search table the migration creates.
 pub const SEARCH_TABLE: &str = "chunk_search";
 
+/// The facet column that carries whether a chunk's document is tombstoned.
+///
+/// **The legacy default filter cannot be reproduced by a join** (task-2067).
+/// The legacy engine excludes a tombstoned document's chunks inside the posting
+/// scan, and `Bm25Index::top_k` then rescores the best `k *
+/// rescore_depth_factor` of whatever was admitted - so dropping the tombstoned
+/// rows from the answer instead gives a different rescore window and therefore
+/// a different order, measured at nine of the top ten hits. The flag has to be
+/// somewhere the ranking can see it before it ranks, which is what a facet
+/// column is.
+///
+/// It is written beside `document.deleted` rather than instead of it: the
+/// `document` table is the copy of the source's own row and every content check
+/// compares it, and this is the same fact in the place a query can use.
+pub const LIVE_FACET: &str = "live";
+
+/// The value `LIVE_FACET` holds for a chunk whose document is not tombstoned.
+pub const LIVE: &str = "1";
+
+/// The value `LIVE_FACET` holds for a chunk of a tombstoned document.
+///
+/// Both states are written rather than one of them being absent, because a
+/// facet resolves through the store's dictionary and a `NULL` would land there
+/// as the empty string - a value a caller would have to know to ask for.
+pub const TOMBSTONED: &str = "0";
+
 /// Returns the schema statements a destination needs.
 ///
 /// @param dims - the vector width the source index was built with
@@ -77,8 +103,8 @@ pub fn schema(dims: usize) -> Vec<String> {
         "CREATE INDEX chunk_document ON chunk(document)".to_string(),
     ];
     statements.push(format!(
-        "CREATE VIRTUAL TABLE {SEARCH_TABLE} USING inillucent_search(content, dims = {dims}, \
-         mode = 'exact', compact = 0)"
+        "CREATE VIRTUAL TABLE {SEARCH_TABLE} USING inillucent_search(content, \
+         {LIVE_FACET} FACET, dims = {dims}, mode = 'exact', compact = 0)"
     ));
     statements
 }
@@ -362,7 +388,10 @@ fn write_search(
     from: usize,
     to: usize,
 ) -> Result<(), String> {
-    let sql = format!("INSERT INTO {SEARCH_TABLE}(rowid, content, vector) VALUES (?1, ?2, ?3)");
+    let sql = format!(
+        "INSERT INTO {SEARCH_TABLE}(rowid, content, {LIVE_FACET}, vector) \
+         VALUES (?1, ?2, ?3, ?4)"
+    );
     for ordinal in from..to {
         let content = store.content(ordinal as u32).to_string();
         let mut statement = connection
@@ -370,22 +399,42 @@ fn write_search(
             .map_err(|error| error.message().to_string())?;
         bind(&mut statement, 1, OwnedDatum::Int(ordinal as i64))?;
         bind_text(&mut statement, 2, &content)?;
+        bind_text(&mut statement, 3, live_value(store, ordinal as u32))?;
         if dims > 0 && ordinal < vectors.len() {
             let mut bytes = Vec::with_capacity(dims.saturating_mul(4));
             for value in vectors.copy_of(ordinal as u32) {
                 bytes.extend_from_slice(&value.to_le_bytes());
             }
             statement
-                .bind_blob(3, &bytes)
+                .bind_blob(4, &bytes)
                 .map_err(|error| error.message().to_string())?;
         } else {
             statement
-                .bind_null(3)
+                .bind_null(4)
                 .map_err(|error| error.message().to_string())?;
         }
         drain(&mut statement)?;
     }
     Ok(())
+}
+
+/// Returns what the liveness facet holds for one chunk.
+///
+/// A chunk whose document the legacy store cannot name is read as live, which
+/// is the same reading `CompiledFilter::passes` gives it: the tombstone is a
+/// property of a document row, and a chunk with no document row has not been
+/// tombstoned.
+/// @param store - the legacy store
+/// @param chunk - the chunk's ordinal, which is also its rowid in the copy
+fn live_value(store: &Store, chunk: u32) -> &'static str {
+    let tombstoned = store
+        .doc_of(chunk)
+        .and_then(|document| store.documents.get(document as usize))
+        .is_some_and(|document| document.deleted);
+    match tombstoned {
+        true => TOMBSTONED,
+        false => LIVE,
+    }
 }
 
 /// Returns an ordered digest of one query's rows.
@@ -473,15 +522,22 @@ fn drain(statement: &mut Statement<'_>) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    /// The schema declares a search table with one column holding the text.
+    /// The schema declares a search table with one text column and the
+    /// liveness facet beside it.
+    ///
+    /// One text column, because the migration puts the source chunk's text in
+    /// it verbatim so that the terms and the corpus statistics are the source's
+    /// - see `merge::chunk_of`. The facet is not text and does not join it,
+    /// which is what keeps that true.
     #[test]
-    fn the_search_table_has_one_column() {
+    fn the_search_table_has_one_text_column_and_the_liveness_facet() {
         let statements = schema(8);
         let search = statements
             .iter()
             .find(|statement| statement.contains("inillucent_search"))
             .expect("a search table");
-        assert!(search.contains("(content, dims = 8"), "{search}");
+        assert!(search.contains("(content, live FACET"), "{search}");
+        assert!(search.contains("dims = 8"), "{search}");
         assert!(search.contains("mode = 'exact'"));
     }
 

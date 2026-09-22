@@ -19,9 +19,26 @@
 //! that is not a loophole - it is the like-for-like. The migrated search table
 //! holds every chunk, tombstoned or not, precisely so that its corpus
 //! statistics match the source's, whose inverted index also holds them and
-//! filters at query time. What a migrated database has to do to reproduce the
-//! legacy default is join to `document` and drop the deleted ones, and there is
-//! a check for exactly that below.
+//! filters at query time.
+//!
+//! **What a migrated database does to reproduce the legacy default is constrain
+//! the search table's `live` facet, and this module used to say it was a join
+//! to `document`** (task-2067). A join cannot do it and the difference is not
+//! small. A `WHERE` clause outside the search runs after the ranking, and
+//! `Bm25Index::top_k` rescores the best `k * rescore_depth_factor` hits by
+//! where the query's terms sit inside them - a rescore that only ever lowers a
+//! score, with everything below the window keeping its full score and competing
+//! against rescored ones. Which hits are in that window depends on which chunks
+//! the scan admitted, so removing rows afterwards produces a different order:
+//! measured on a 400 document corpus, one hit of ten survived, and with the
+//! position rescoring switched off the two became identical, hit for hit.
+//!
+//! So the copy carries the flag where the ranking can see it before it ranks.
+//! `document.deleted` is still written and still compared, because it is the
+//! copy of the source's own row; the facet is the same fact where a query can
+//! use it. `filter.deleted` compares the two orders and `filter.unreachable`
+//! asks the stricter question underneath, that no tombstoned chunk comes back
+//! at all.
 
 use inillucent_base::hash::Sha256;
 use inillucent_core::filter::Filter;
@@ -499,7 +516,7 @@ fn retrieval_checks(source: &Index, sql: &mut SqlIndex) -> Result<Vec<Check>, St
         let expected: Vec<i64> = wanted.iter().map(|hit| i64::from(hit.chunk)).collect();
         match ranked(sql, query, &[], wide) {
             Ok(found) => {
-                let capped = apply_cap(&found, &documents, cap, PROBE_K, &[]);
+                let capped = apply_cap(&found, &documents, cap, PROBE_K);
                 if capped != expected {
                     grouped.push(format!("{query:?}: {expected:?} became {capped:?}"));
                 }
@@ -522,117 +539,158 @@ fn retrieval_checks(source: &Index, sql: &mut SqlIndex) -> Result<Vec<Check>, St
 
     checks.push(scores_match(source, sql, &probes, &everything, wide)?);
 
-    if source.config().dims > 0 && source.vectors().len() == store.n_chunks() {
-        // Both sides are asked with their approximation switched off, so what
-        // is compared is the data rather than the luck of two graphs.
-        //
-        // The source's graph grew one insert at a time and the destination's
-        // was built in one pass over every row, which is better connected -
-        // that is the reason compaction is worth its cost. Two different graphs
-        // searched approximately give two slightly different answers, sometimes
-        // the destination's better and sometimes the source's, and a check that
-        // demanded they match would be demanding the migration reproduce the
-        // source's misses. So the graphs are traversed exhaustively here and
-        // the answers must be identical.
-        //
-        // What the approximation is actually worth is measured separately and
-        // reported rather than gated: `vector.recall` says how much of the
-        // exact answer each index finds at its default width, and the migration
-        // fails only if the destination finds less of it than the source did.
-        let mut wrong = Vec::new();
-        let mut theirs_found = 0.0f64;
-        let mut ours_found = 0.0f64;
-        let mut probed = 0usize;
-        for ordinal in sample(store.n_chunks(), PROBES) {
-            let query = source.vectors().copy_of(ordinal as u32);
-            let wanted = exact_probe(source, "", &query, &everything, Branches::Vector)?;
-            let expected: Vec<i64> = wanted.iter().map(|hit| i64::from(hit.chunk)).collect();
-            match exhaustive(sql, "", &query, wide) {
-                Ok(found) => {
-                    let capped = apply_cap(&found, &documents, cap, PROBE_K, &[]);
-                    if capped != expected {
-                        wrong.push(format!("chunk {ordinal}: {expected:?} became {capped:?}"));
-                    }
-                }
-                Err(failure) => wrong.push(format!("chunk {ordinal}: {failure}")),
-            }
-
-            // The same probe again, at the width each index uses by default,
-            // scored against the answer brute force says is right.
-            let truth = exact_neighbours(source, &query, &everything, PROBE_K);
-            let approximate = probe(source, "", &query, &everything, None, Branches::Vector)?;
-            let theirs: Vec<i64> = approximate.iter().map(|hit| i64::from(hit.chunk)).collect();
-            theirs_found += recall(&theirs, &truth);
-            if let Ok(found) = ranked(sql, "", &query, wide) {
-                let capped = apply_cap(&found, &documents, cap, PROBE_K, &[]);
-                ours_found += recall(&capped, &truth);
-            }
-            probed = probed.saturating_add(1);
-        }
-        checks.push(if wrong.is_empty() {
-            Check::pass(
-                "vector.exact",
-                format!("{PROBES} probes rank identically when both graphs are traversed in full"),
-            )
-        } else {
-            Check::fail("vector.exact", wrong.join(" | "))
-        });
-        let divisor = probed.max(1) as f64;
-        let (theirs, ours) = (theirs_found / divisor, ours_found / divisor);
-        checks.push(if ours + 1.0e-6 >= theirs {
-            Check::pass(
-                "vector.recall",
-                format!(
-                    "at the default width the source finds {theirs:.3} of the exact answer and \
-                     the copy finds {ours:.3}"
-                ),
-            )
-        } else {
-            Check::fail(
-                "vector.recall",
-                format!("recall fell from {theirs:.3} to {ours:.3} at the default width"),
-            )
-        });
-
-        // The same rule, for the same reason: a fused ranking inherits the
-        // vector branch's approximation, so both sides are asked with it off.
-        let mut hybrid_wrong = Vec::new();
-        for (position, ordinal) in sample(store.n_chunks(), probes.len())
-            .into_iter()
-            .enumerate()
-        {
-            let Some(query) = probes.get(position) else {
-                continue;
-            };
-            let vector = source.vectors().copy_of(ordinal as u32);
-            let wanted = exact_probe(source, query, &vector, &everything, Branches::Both)?;
-            let expected: Vec<i64> = wanted.iter().map(|hit| i64::from(hit.chunk)).collect();
-            match exhaustive(sql, query, &vector, wide) {
-                Ok(found) => {
-                    let capped = apply_cap(&found, &documents, cap, PROBE_K, &[]);
-                    if capped != expected {
-                        hybrid_wrong.push(format!("{query:?}: {expected:?} became {capped:?}"));
-                    }
-                }
-                Err(failure) => hybrid_wrong.push(format!("{query:?}: {failure}")),
-            }
-        }
-        checks.push(if hybrid_wrong.is_empty() {
-            Check::pass(
-                "hybrid.exact",
-                format!(
-                    "{} fused rankings agree when both graphs are traversed in full",
-                    probes.len()
-                ),
-            )
-        } else {
-            Check::fail("hybrid.exact", hybrid_wrong.join(" | "))
-        });
-    }
+    checks.extend(vector_checks(
+        source,
+        sql,
+        &probes,
+        &everything,
+        &documents,
+        cap,
+        wide,
+    )?);
 
     checks.push(live_filter(
         source, sql, &probes, &live, &documents, &deleted, cap, wide,
     )?);
+    checks.push(live_reachable(sql, &probes, &deleted, wide));
+    Ok(checks)
+}
+
+/// The checks that need a vector branch, or none when the source has none.
+///
+/// Split out of [`retrieval_checks`] in task-2067, which added a check and
+/// took it past the length it is recorded at. It is the whole of one step:
+/// every comparison that reads a vector, and nothing that does not. The
+/// guard travels with it rather than staying at the call site, because "the
+/// source has no vectors" and "the source has fewer vectors than chunks" are
+/// both answers to the question this function asks.
+///
+/// @param source - the legacy index
+/// @param sql - the migrated index
+/// @param probes - the queries both sides are asked
+/// @param everything - the filter that admits tombstoned chunks too
+/// @param documents - which document each chunk belongs to, read from the copy
+/// @param cap - the legacy per-document cap
+/// @param wide - the candidate depth both sides are asked at
+fn vector_checks(
+    source: &Index,
+    sql: &mut SqlIndex,
+    probes: &[String],
+    everything: &inillucent_core::filter::CompiledFilter,
+    documents: &[(i64, i64)],
+    cap: usize,
+    wide: usize,
+) -> Result<Vec<Check>, String> {
+    let store = source.store();
+    if source.config().dims == 0 || source.vectors().len() != store.n_chunks() {
+        return Ok(Vec::new());
+    }
+    let mut checks = Vec::new();
+    // Both sides are asked with their approximation switched off, so what
+    // is compared is the data rather than the luck of two graphs.
+    //
+    // The source's graph grew one insert at a time and the destination's
+    // was built in one pass over every row, which is better connected -
+    // that is the reason compaction is worth its cost. Two different graphs
+    // searched approximately give two slightly different answers, sometimes
+    // the destination's better and sometimes the source's, and a check that
+    // demanded they match would be demanding the migration reproduce the
+    // source's misses. So the graphs are traversed exhaustively here and
+    // the answers must be identical.
+    //
+    // What the approximation is actually worth is measured separately and
+    // reported rather than gated: `vector.recall` says how much of the
+    // exact answer each index finds at its default width, and the migration
+    // fails only if the destination finds less of it than the source did.
+    let mut wrong = Vec::new();
+    let mut theirs_found = 0.0f64;
+    let mut ours_found = 0.0f64;
+    let mut probed = 0usize;
+    for ordinal in sample(store.n_chunks(), PROBES) {
+        let query = source.vectors().copy_of(ordinal as u32);
+        let wanted = exact_probe(source, "", &query, everything, Branches::Vector)?;
+        let expected: Vec<i64> = wanted.iter().map(|hit| i64::from(hit.chunk)).collect();
+        match exhaustive(sql, "", &query, wide) {
+            Ok(found) => {
+                let capped = apply_cap(&found, documents, cap, PROBE_K);
+                if capped != expected {
+                    wrong.push(format!("chunk {ordinal}: {expected:?} became {capped:?}"));
+                }
+            }
+            Err(failure) => wrong.push(format!("chunk {ordinal}: {failure}")),
+        }
+
+        // The same probe again, at the width each index uses by default,
+        // scored against the answer brute force says is right.
+        let truth = exact_neighbours(source, &query, everything, PROBE_K);
+        let approximate = probe(source, "", &query, everything, None, Branches::Vector)?;
+        let theirs: Vec<i64> = approximate.iter().map(|hit| i64::from(hit.chunk)).collect();
+        theirs_found += recall(&theirs, &truth);
+        if let Ok(found) = ranked(sql, "", &query, wide) {
+            let capped = apply_cap(&found, documents, cap, PROBE_K);
+            ours_found += recall(&capped, &truth);
+        }
+        probed = probed.saturating_add(1);
+    }
+    checks.push(if wrong.is_empty() {
+        Check::pass(
+            "vector.exact",
+            format!("{PROBES} probes rank identically when both graphs are traversed in full"),
+        )
+    } else {
+        Check::fail("vector.exact", wrong.join(" | "))
+    });
+    let divisor = probed.max(1) as f64;
+    let (theirs, ours) = (theirs_found / divisor, ours_found / divisor);
+    checks.push(if ours + 1.0e-6 >= theirs {
+        Check::pass(
+            "vector.recall",
+            format!(
+                "at the default width the source finds {theirs:.3} of the exact answer and \
+                 the copy finds {ours:.3}"
+            ),
+        )
+    } else {
+        Check::fail(
+            "vector.recall",
+            format!("recall fell from {theirs:.3} to {ours:.3} at the default width"),
+        )
+    });
+
+    // The same rule, for the same reason: a fused ranking inherits the
+    // vector branch's approximation, so both sides are asked with it off.
+    let mut hybrid_wrong = Vec::new();
+    for (position, ordinal) in sample(store.n_chunks(), probes.len())
+        .into_iter()
+        .enumerate()
+    {
+        let Some(query) = probes.get(position) else {
+            continue;
+        };
+        let vector = source.vectors().copy_of(ordinal as u32);
+        let wanted = exact_probe(source, query, &vector, everything, Branches::Both)?;
+        let expected: Vec<i64> = wanted.iter().map(|hit| i64::from(hit.chunk)).collect();
+        match exhaustive(sql, query, &vector, wide) {
+            Ok(found) => {
+                let capped = apply_cap(&found, documents, cap, PROBE_K);
+                if capped != expected {
+                    hybrid_wrong.push(format!("{query:?}: {expected:?} became {capped:?}"));
+                }
+            }
+            Err(failure) => hybrid_wrong.push(format!("{query:?}: {failure}")),
+        }
+    }
+    checks.push(if hybrid_wrong.is_empty() {
+        Check::pass(
+            "hybrid.exact",
+            format!(
+                "{} fused rankings agree when both graphs are traversed in full",
+                probes.len()
+            ),
+        )
+    } else {
+        Check::fail("hybrid.exact", hybrid_wrong.join(" | "))
+    });
     Ok(checks)
 }
 
@@ -694,11 +752,48 @@ fn scores_match(
     }
 }
 
-/// Checks that a join to `document` reproduces the legacy default filter.
+/// Checks that the copy's liveness facet reproduces the legacy default filter.
 ///
 /// The legacy engine excludes a tombstoned document's chunks at query time,
-/// with the chunks still in the inverted index. A migrated database does the
-/// same thing in SQL, and this is the check that the two agree.
+/// with the chunks still in the inverted index and still in its corpus
+/// statistics. The copy reproduces that by carrying the flag on the search
+/// table's own `live` facet column, which the module compiles into the filter
+/// the scan runs under - so the two exclude the same rows at the same point in
+/// the same pipeline, and this is the check that they agree.
+///
+/// **It used to ask the two sides different questions, and it was red whenever
+/// the corpus was large enough to show it** (task-2067). The legacy side was
+/// asked with the filter applied during the search and the copy was asked with
+/// no filter at all, its tombstoned rows dropped from the answer afterwards and
+/// a deeper draw taken to make up the shortfall. Those are three different
+/// questions, and all three differences run through one mechanism:
+/// `Bm25Index::top_k` rescores the best `k * rescore_depth_factor` hits by
+/// where the query's terms sit inside them, the rescore only ever lowers a
+/// score, and a hit outside that window keeps its full score and competes
+/// against rescored ones. Which hits are in the window depends on which chunks
+/// the scan admitted and on the `k` it was given, so dropping rows afterwards
+/// and drawing deeper each move the window.
+///
+/// Measured on a 400 document corpus: the two orders shared one hit of ten, and
+/// with the position rescoring switched off they became identical, hit for hit. That is
+/// what says the mechanism is this one and not three.
+///
+/// So the copy is now asked the same question the legacy side is asked, at the
+/// same depth, and the answers have to be equal as they come back, rather than
+/// equal once the check has removed rows and drawn deeper to make up what
+/// removing them cost.
+/// `apply_cap` is still applied because the per-document cap is the legacy
+/// engine's own grouping and a search table gives every row its own document,
+/// which is the same pairing `bm25.grouped` uses and proves.
+///
+/// @param source - the legacy index
+/// @param sql - the migrated index
+/// @param probes - the queries both sides are asked
+/// @param live - the legacy default filter, which excludes tombstoned chunks
+/// @param documents - which document each chunk belongs to, read from the copy
+/// @param deleted - the tombstoned chunks, for the detail line
+/// @param cap - the legacy per-document cap
+/// @param wide - the candidate depth both sides are asked at
 fn live_filter(
     source: &Index,
     sql: &mut SqlIndex,
@@ -716,15 +811,12 @@ fn live_filter(
         ));
     }
     let mut wrong = Vec::new();
-    // Deep enough that after the tombstoned rows are dropped there are still at
-    // least as many live candidates as the legacy engine fused over.
-    let deep = wide.saturating_add(deleted.len());
     for query in probes {
         let wanted = probe(source, query, &[], live, None, Branches::Lexical)?;
         let expected: Vec<i64> = wanted.iter().map(|hit| i64::from(hit.chunk)).collect();
-        match ranked(sql, query, &[], deep) {
+        match live_ranked(sql, query, wide) {
             Ok(found) => {
-                let capped = apply_cap(&found, documents, cap, PROBE_K, deleted);
+                let capped = apply_cap(&found, documents, cap, PROBE_K);
                 if capped != expected {
                     wrong.push(format!("{query:?}: {expected:?} became {capped:?}"));
                 }
@@ -735,11 +827,87 @@ fn live_filter(
     if wrong.is_empty() {
         Ok(Check::pass(
             "filter.deleted",
-            format!("{} tombstoned chunks excluded identically", deleted.len()),
+            format!(
+                "{} tombstoned chunks excluded identically, inside the search on both sides",
+                deleted.len()
+            ),
         ))
     } else {
         Ok(Check::fail("filter.deleted", wrong.join(" | ")))
     }
+}
+
+/// Checks that a tombstoned chunk cannot be reached through the copy at all.
+///
+/// `filter.deleted` compares two orderings, and an ordering can only be
+/// compared where the corpus produces one. This asks the cheaper and stricter
+/// question underneath it: over every probe, does any chunk of a tombstoned
+/// document come back from a search the copy ran with its liveness facet
+/// constrained. One row that does is a deletion a search still returns, which
+/// is the failure the whole facet exists to prevent, and it is worth its own
+/// line in the manifest because a caller reading the report wants to know that
+/// before it wants to know about an order.
+///
+/// @param sql - the migrated index
+/// @param probes - the queries to run
+/// @param deleted - the tombstoned chunks
+/// @param wide - the candidate depth
+fn live_reachable(sql: &mut SqlIndex, probes: &[String], deleted: &[i64], wide: usize) -> Check {
+    if deleted.is_empty() {
+        return Check::pass("filter.unreachable", "the corpus holds no tombstoned chunk");
+    }
+    let mut wrong = Vec::new();
+    let mut looked = 0usize;
+    for query in probes {
+        match live_ranked(sql, query, wide) {
+            Ok(found) => {
+                looked = looked.saturating_add(found.len());
+                for chunk in found.iter().filter(|id| deleted.contains(id)) {
+                    wrong.push(format!("{query:?} answered tombstoned chunk {chunk}"));
+                }
+            }
+            Err(failure) => wrong.push(format!("{query:?}: {failure}")),
+        }
+    }
+    match wrong.is_empty() {
+        true => Check::pass(
+            "filter.unreachable",
+            format!(
+                "{looked} hits across {} probes, none tombstoned",
+                probes.len()
+            ),
+        ),
+        false => Check::fail("filter.unreachable", wrong.join(" | ")),
+    }
+}
+
+/// Returns the copy's ranking over its live rows only, as rowids in order.
+///
+/// The liveness is a constraint the search runs under rather than a filter on
+/// what it answered - see [`live_filter`] for the measurement that says the two
+/// are different questions.
+/// @param sql - the migrated index
+/// @param text - the query text
+/// @param limit - how many hits to ask for
+fn live_ranked(sql: &mut SqlIndex, text: &str, limit: usize) -> Result<Vec<i64>, String> {
+    let hits = sql
+        .search(&Query {
+            text: text.to_string(),
+            vector: Vec::new(),
+            limit,
+            recall: None,
+            include_deleted: false,
+        })
+        .map_err(|error| {
+            error
+                .detail()
+                .unwrap_or_else(|| error.message())
+                .to_string()
+        })?;
+    Ok(hits
+        .iter()
+        .filter_map(|hit| hit.id.parse::<i64>().ok())
+        .collect())
 }
 
 /// Returns the destination's ranking with its graph traversed exhaustively.
@@ -763,6 +931,10 @@ fn exhaustive(
             vector: vector.to_vec(),
             limit,
             recall: Some(1.0),
+            // Every row, because the caller of this is comparing the two
+            // unfiltered rankings against each other - the source is asked
+            // with `include_deleted` for the same reason.
+            include_deleted: true,
         })
         .map_err(|error| error.message().to_string())?;
     Ok(hits
@@ -833,6 +1005,9 @@ fn ranked(
             vector: vector.to_vec(),
             limit,
             recall: None,
+            // Every row: these are the unfiltered comparisons, and the source
+            // side of each of them is asked with `include_deleted` too.
+            include_deleted: true,
         })
         .map_err(|error| {
             error
@@ -859,6 +1034,9 @@ fn ranked_hits(
             vector: vector.to_vec(),
             limit,
             recall: None,
+            // Every row: these are the unfiltered comparisons, and the source
+            // side of each of them is asked with `include_deleted` too.
+            include_deleted: true,
         })
         .map_err(|error| error.message().to_string())?;
     Ok(hits
@@ -890,22 +1068,36 @@ fn chunk_documents(connection: &Connection<'_>) -> Result<Vec<(i64, i64)>, Strin
 
 /// Applies the legacy per-document cap to a ranking, in order.
 ///
-/// Capping is a prefix-stable filter: it walks the list once and emits, so the
-/// first `k` it emits depend only on the prefix it has seen. That is why a
-/// deeper draw on the destination side is safe rather than a different question.
-fn apply_cap(
-    order: &[i64],
-    documents: &[(i64, i64)],
-    cap: usize,
-    k: usize,
-    excluded: &[i64],
-) -> Vec<i64> {
+/// Capping walks the list once and emits, so the first `k` it emits depend only
+/// on the prefix it has seen. That is what makes every caller here sound: each
+/// one asks the destination at the candidate depth the legacy engine fuses over
+/// and then caps to `PROBE_K`, which is the same answer as capping a list drawn
+/// to `PROBE_K` would be. `a_cap_depends_only_on_the_prefix` is the test.
+///
+/// **It used to take a list of chunks to leave out, and that is gone**
+/// (task-2067). It existed for one caller, which removed the tombstoned rows
+/// from the destination's answer because the destination had no way to exclude
+/// them before it ranked. It has one now - the search table's `live` facet - so
+/// every caller passes the same unfiltered ranking through the same cap, and a
+/// parameter that would let somebody reintroduce filtering after the ranking is
+/// worse than no parameter.
+///
+/// @param order - the ranking to cap, best first
+/// @param documents - which document each chunk belongs to
+/// @param cap - the legacy per-document cap, or zero for none
+/// @param k - how many hits to emit
+fn apply_cap(order: &[i64], documents: &[(i64, i64)], cap: usize, k: usize) -> Vec<i64> {
+    // **Asked for none, emit none** (task-2067). The loop below tests its
+    // length after it has pushed, so a `k` of zero used to come back with one
+    // row. No caller passes zero, which is why nothing caught it; it was found
+    // by writing the test for the prefix rule, and the rule is not true without
+    // this line.
+    if k == 0 {
+        return Vec::new();
+    }
     let mut seen: Vec<(i64, usize)> = Vec::new();
     let mut out = Vec::new();
     for chunk in order {
-        if excluded.contains(chunk) {
-            continue;
-        }
         let document = documents
             .iter()
             .find(|(id, _)| id == chunk)
@@ -1076,6 +1268,59 @@ mod tests {
         assert_eq!(drawn, vec![0, 20, 40, 60, 80]);
         assert_eq!(sample(3, 12).len(), 3);
         assert!(sample(0, 5).is_empty());
+    }
+
+    /// Capping to `k` is capping deeper and taking the first `k`.
+    ///
+    /// **Every caller in this module depends on it** (task-2067). Each one asks
+    /// the destination at the candidate depth the legacy engine fuses over -
+    /// which is deeper than the ten hits being compared - and then caps to
+    /// `PROBE_K`. That is only the same question as capping a ten-deep draw
+    /// because the cap walks the list once and emits, so what it emits first
+    /// depends on the prefix and not on how much came after it. The claim was
+    /// written in `apply_cap`'s own doc comment and nothing checked it.
+    #[test]
+    fn a_cap_depends_only_on_the_prefix() {
+        // Three documents, interleaved, so the cap bites in the middle of the
+        // list rather than at its end.
+        let documents: Vec<(i64, i64)> = vec![
+            (1, 10),
+            (2, 10),
+            (3, 10),
+            (4, 20),
+            (5, 20),
+            (6, 30),
+            (7, 30),
+            (8, 30),
+        ];
+        let order: Vec<i64> = vec![1, 4, 2, 6, 5, 3, 7, 8];
+        let deep = apply_cap(&order, &documents, 2, order.len());
+        assert_eq!(deep, vec![1, 4, 2, 6, 5, 7], "the third of each is dropped");
+        for k in 0..=deep.len() {
+            assert_eq!(
+                apply_cap(&order, &documents, 2, k),
+                deep.get(..k).unwrap_or_default().to_vec(),
+                "capping to {k} is not the first {k} of capping deeper"
+            );
+        }
+    }
+
+    /// A cap of zero caps nothing, and a chunk with no document row is its own.
+    ///
+    /// Both are reachable: `per_doc_cap` is a configured number a caller may
+    /// set to zero, and the document map is read from the copy, so a chunk the
+    /// copy does not know about has to land somewhere rather than be dropped.
+    #[test]
+    fn a_cap_of_zero_caps_nothing_and_an_unknown_chunk_is_its_own_document() {
+        let documents: Vec<(i64, i64)> = vec![(1, 10), (2, 10), (3, 10)];
+        let order: Vec<i64> = vec![1, 2, 3];
+        assert_eq!(apply_cap(&order, &documents, 0, 10), vec![1, 2, 3]);
+        assert_eq!(apply_cap(&order, &documents, 1, 10), vec![1]);
+
+        // 7 is in no row of the map, so it is its own document and the cap of
+        // one lets it through beside the first chunk of document 10.
+        let order = vec![1, 7, 2];
+        assert_eq!(apply_cap(&order, &documents, 1, 10), vec![1, 7]);
     }
 
     /// A failing check renders a line the manifest can hold.

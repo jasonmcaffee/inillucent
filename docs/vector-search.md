@@ -137,6 +137,11 @@ expanded, so the walk can pass through it to reach the region behind it, but it 
 the results. The walk continues until it has collected enough passing rows. The cost is a longer
 walk; what it avoids is a result set that comes back short.
 
+From SQL, a predicate reaches the traversal through a `VECTOR(N)` column's own `WHERE` clause, and
+on an `inillucent_search` table through a [facet column](#filtering-a-search-table-facet-columns).
+A predicate written anywhere else runs after the ranking, which is a different answer rather than a
+slower spelling of the same one.
+
 That is the difference that shows up most in the measurements. pgvector evaluates a `WHERE` clause
 after the index scan has already chosen its candidates, so a plain HNSW scan produces only
 `hnsw.ef_search` candidates and a filter on a minority source can be left with almost none of them.
@@ -187,6 +192,56 @@ same answer.
 it is there because it rescues a caller who sets the coverage exponent to 0. `lexical_prefix` is off
 because on a dictionary of 494,000 terms it credits a chunk with holding a query term it does not
 hold, which is the exact judgement coverage weighting depends on.
+
+## Filtering a search table: facet columns
+
+A column of an `inillucent_search` table declared `FACET` is stored and can be constrained inside a
+search. Its value is not indexed as text.
+
+```sql
+CREATE VIRTUAL TABLE docs USING inillucent_search(
+    body,
+    live FACET,
+    region FACET,
+    dims = 768
+);
+
+INSERT INTO docs(rowid, body, live, region, vector) VALUES (1, 'the discount applies here', '1', 'eu', ?1);
+
+SELECT rowid, body
+FROM   docs
+WHERE  docs MATCH 'discount eligibility' AND k = 10 AND live = '1' AND region = 'eu'
+ORDER  BY rank;
+```
+
+Several facet constraints narrow rather than widen, which is what the `AND` reads as. A facet is an
+ordinary column otherwise: it comes back from a `SELECT`, and on a query that is not a search it is
+an ordinary predicate the engine evaluates itself. `FACET` is read without case and only as the last
+word of a column's declaration, so quote a column whose name ends in it: `"live facet"` is one
+column called `live facet`, and `"live" FACET` is a facet called `live`.
+
+**The constraint is applied inside the scan, and that is the difference the feature is for.** Writing
+the same predicate outside the search - joining to another table and filtering there, which is what
+FTS5 leaves you with - is not the same answer. The keyword ranking rescores the best `k * 6` hits by
+where the query's terms sit inside them, the rescore only ever lowers a score, and a hit below that
+window keeps its full score and competes against rescored ones. Which hits are in the window depends
+on which rows the scan admitted, so removing rows afterwards produces a different order. Measured on
+a 400 row corpus: one hit of the top ten survived. Filtering afterwards also returns fewer rows than
+the `LIMIT` asked for, because some of what it ranked is then thrown away.
+
+A value is matched as text, so `live = 1` and `live = '1'` select the same rows. Write every row's
+facet: a column left `NULL` reads back as the empty string, which is a value no query is likely to
+ask for, so the row answers nothing.
+
+**What it costs.** A constrained search makes the engine count how many rows pass before it runs,
+which is one pass over the table, because that count is what chooses between walking the graph and
+comparing every admitted vector. Measured on a 20,000 row table in a debug build, 40 queries each
+way interleaved: 45.4 ms against 48.7 ms, so about 7% on top. Both the count and the scoring pass
+grow with the table, so the share stays about the same as the table does not.
+
+**A table that declares a facet is stored in format 2** and a build older than this one refuses to
+open it, by name, saying which release to install. A table that declares none is stored in format 1
+exactly as before, so nothing already written becomes unreadable.
 
 ## Hybrid retrieval
 

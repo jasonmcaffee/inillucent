@@ -331,3 +331,14 @@ held_by = [
   "inillucent::story_rag::an_ordinary_fts5_ingest::small_pool",
   "inillucent::story_rag::ingest_and_search::sqlite_page",
 ]
+
+[[escape]]
+ref = "task-2067"
+surface = "inillucent_search, the migration's retrieval checks"
+what = "a database migrated out of a legacy retrieval index could not answer the legacy engine's default query. The legacy engine excludes a tombstoned document's chunks inside the posting scan; the copy had no way to exclude anything before it ranked, so the migration told callers to join to `document` and drop the deleted rows afterwards - and that is a different answer, because `Bm25Index::top_k` rescores the best `k * rescore_depth_factor` hits by the position of the query's terms and which hits are in that window depends on which chunks the scan admitted. Measured on a 400 document corpus, one hit of the top ten survived. The check that was supposed to catch this compared the two paths against each other and so could only go red by luck of the corpus, which is how it reached a release"
+found_by = "the migrate corpus suite, whose corpus is gathered from the repository's own prose at run time, going red on an ordinary commit that added a test file"
+held_by = [
+  "inillucent-migrate::migration::a_tombstoned_corpus_migrates_and_ranks_identically",
+  "inillucent-migrate::migration::removing_a_tombstoned_chunk_after_the_search_changes_the_order",
+  "inillucent-compat::search::a_facet_is_applied_inside_the_search_rather_than_to_its_answer",
+]

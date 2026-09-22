@@ -68,7 +68,7 @@ use std::collections::BTreeSet;
 use std::sync::Mutex;
 
 use inillucent_base::DbResult;
-use inillucent_core::filter::Filter;
+use inillucent_core::filter::{AttributeFilter, Filter};
 use inillucent_core::index::{Index, IndexConfig};
 use inillucent_core::rank::HitOrigin;
 use inillucent_core::store::ChunkInput;
@@ -117,6 +117,13 @@ pub struct Request {
     pub limit: usize,
     /// The recall target, between zero and one, or nothing for the default.
     pub recall: Option<f32>,
+    /// The facet constraints the statement carried, as the facet's column
+    /// position and the value that column must hold.
+    ///
+    /// Positions rather than names because that is what the access path can
+    /// record in one character, and the name is read back from the declaration
+    /// where the value has to agree with what the build filed it under.
+    pub facets: Vec<(usize, String)>,
 }
 
 /// The index one connection is currently answering from.
@@ -339,10 +346,19 @@ pub fn check_generation_metric(index: &Index, options: &Options) -> DbResult<()>
 
 /// Builds a chunk from one stored row.
 ///
-/// The content is every column joined by newlines. When there is more than one
-/// column the first is *also* the heading path, so a chunk's text begins with
-/// its heading - which is the shape the existing corpus has and the shape the
-/// heading boost and proximity weighting were measured against.
+/// The content is every text column joined by newlines. When there is more than
+/// one text column the first is *also* the heading path, so a chunk's text
+/// begins with its heading - which is the shape the existing corpus has and the
+/// shape the heading boost and proximity weighting were measured against.
+///
+/// **A facet column's value becomes an attribute rather than text**
+/// (task-2067). That is what lets a search constrain it *inside* the scan: an
+/// attribute is resolved against the store's own dictionary once per query and
+/// then tested per chunk by `CompiledFilter::passes`, which the BM25 posting
+/// loop and the graph walk both call before a candidate is admitted. Putting
+/// the value in the indexed text instead would make it searchable and not
+/// filterable, which is the opposite of what a facet is for - and it would
+/// change the corpus statistics of the text beside it.
 ///
 /// A one-column table has text and no heading, and that distinction matters
 /// rather than being tidiness: the legacy migration declares exactly one column
@@ -358,12 +374,32 @@ pub fn check_generation_metric(index: &Index, options: &Options) -> DbResult<()>
 /// table and a join - which is what a relational engine is for.
 /// @param id - the rowid, which is the document identity
 /// @param row - the stored row
-pub fn chunk_of(id: i64, row: &Row) -> ChunkInput {
-    let heading = if row.columns.len() > 1 {
-        row.columns.first().cloned().unwrap_or_default()
-    } else {
-        String::new()
+/// @param options - the table's declaration, which says which columns are facets
+pub fn chunk_of(id: i64, row: &Row, options: &Options) -> ChunkInput {
+    // Borrowed rather than cloned. This runs once per row of every build and
+    // every fold, and a corpus is hundreds of thousands of rows: collecting the
+    // columns as owned strings would allocate a copy of the whole corpus on the
+    // way to joining it, which is what the join was already going to do once.
+    let text: Vec<&str> = row
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|(position, _)| !options.is_facet(*position))
+        .map(|(_, value)| value.as_str())
+        .collect();
+    let heading = match text.len() > 1 {
+        true => text.first().copied().unwrap_or_default().to_string(),
+        false => String::new(),
     };
+    let attributes: Vec<(String, Vec<String>)> = options
+        .facets
+        .iter()
+        .filter_map(|position| {
+            let name = options.facet_name(*position)?;
+            let value = row.columns.get(*position)?.clone();
+            Some((name, vec![value]))
+        })
+        .collect();
     ChunkInput {
         source: SOURCE.to_string(),
         external_doc_id: id.to_string(),
@@ -373,7 +409,7 @@ pub fn chunk_of(id: i64, row: &Row) -> ChunkInput {
         } else {
             vec![heading.clone()]
         },
-        content: row.columns.join("\n"),
+        content: text.join("\n"),
         title: heading,
         url: String::new(),
         space_key: None,
@@ -382,7 +418,7 @@ pub fn chunk_of(id: i64, row: &Row) -> ChunkInput {
         updated_at: None,
         external_chunk_id: Some(id.to_string()),
         labels: Vec::new(),
-        attributes: Vec::new(),
+        attributes,
         flags: Vec::new(),
         deleted: false,
     }
@@ -508,7 +544,7 @@ pub fn build_from_rows(
     let mut chunks: Vec<ChunkInput> = Vec::new();
     let mut vectors: Vec<Vec<f32>> = Vec::new();
     store.scan_rows(context, |id, row| {
-        chunks.push(chunk_of(id, &row));
+        chunks.push(chunk_of(id, &row, options));
         vectors.push(embedding_of(&row, dims)?);
         Ok(true)
     })?;
@@ -568,7 +604,7 @@ pub fn build_segment_from_batch(
             Op::Delete => tombstoned.push(id),
             Op::Put => match store.read_row(context, id)? {
                 Some(row) => {
-                    chunks.push(chunk_of(id, &row));
+                    chunks.push(chunk_of(id, &row, options));
                     vectors.push(embedding_of(&row, dims)?);
                 }
                 // The log says the row was written and it is not there - the
@@ -1101,7 +1137,7 @@ fn apply(
                     index.tombstone(SOURCE, &entry.id.to_string());
                     continue;
                 };
-                let chunk = chunk_of(entry.id, &row);
+                let chunk = chunk_of(entry.id, &row, options);
                 let vector = embedding_of(&row, dims)?;
                 let stats = index
                     .replace_document(SOURCE, &entry.id.to_string(), vec![chunk], &[vector])
@@ -1123,13 +1159,24 @@ fn live_rows_of(index: &Index) -> usize {
 
 /// Runs one request against a loaded index.
 ///
+/// **The facet constraints are compiled into the filter the scan runs under,
+/// not applied to the answer** (task-2067). The distinction is the whole reason
+/// the feature exists and it is measurable: `Bm25Index::top_k` rescores the
+/// best `k * rescore_depth_factor` hits by the position of the query's terms
+/// inside them, rescoring only ever lowers a score, and a hit outside that
+/// window keeps its full score and competes against rescored ones. Which hits
+/// are inside the window depends on which chunks were admitted, so removing
+/// rows after the ranking gives a different order from never admitting them -
+/// measured at nine of the top ten hits on a 400 row corpus. Filtering
+/// afterwards is also what leaves an answer shorter than the `k` it asked for.
+///
 /// @param index - the loaded index
-/// @param options - the traversal settings
+/// @param options - the traversal settings and the facet declaration
 /// @param request - what was asked for
 /// @returns the hits, or the index's refusal of a query it cannot compare
 fn run(index: &Index, options: &Options, request: &Request) -> DbResult<Vec<Hit>> {
     let limit = request.limit.max(1);
-    let filter = index.compile(&Filter::default());
+    let filter = index.compile(&filter_of(options, request)?);
     let ef = traversal_width(options, request, limit);
     let text = request.text.clone().unwrap_or_default();
     let has_text = !text.trim().is_empty();
@@ -1157,6 +1204,38 @@ fn run(index: &Index, options: &Options, request: &Request) -> DbResult<Vec<Hit>
             })
         })
         .collect())
+}
+
+/// Returns the predicate one request's facet constraints express.
+///
+/// Each constraint becomes an `AttributeFilter` on the facet's own name, which
+/// is the name [`chunk_of`] filed the row's value under. Several of them narrow
+/// rather than widen, which is what `WHERE live = '1' AND region = 'eu'` reads
+/// as in SQL and what `CompiledFilter` does with a list of attribute
+/// constraints.
+///
+/// A constraint naming a column the declaration does not call a facet is a
+/// refusal rather than a constraint that is quietly dropped. The access path
+/// claims a facet constraint, which tells the engine not to evaluate it again,
+/// so dropping one here would answer rows that do not satisfy the `WHERE`
+/// clause.
+///
+/// @param options - the table's declaration
+/// @param request - what was asked for
+fn filter_of(options: &Options, request: &Request) -> DbResult<Filter> {
+    let mut filter = Filter::default();
+    for (position, value) in &request.facets {
+        let Some(name) = options.facet_name(*position) else {
+            return Err(failure(format!(
+                "inillucent_search: column {position} is not a facet of this table, so a search \
+                 cannot rank over it"
+            )));
+        };
+        filter
+            .attributes
+            .push(AttributeFilter::any_of(&name, &[value.as_str()]));
+    }
+    Ok(filter)
 }
 
 /// Returns the traversal width one request asks for.
@@ -1274,10 +1353,74 @@ mod tests {
             columns: vec!["Offer eligibility".to_string(), "who qualifies".to_string()],
             vector: Vec::new(),
         };
-        let chunk = chunk_of(7, &row);
+        let chunk = chunk_of(7, &row, &declaration(&["heading", "body"]));
         assert!(chunk.content.starts_with("Offer eligibility"));
         assert_eq!(chunk.heading_path, vec!["Offer eligibility".to_string()]);
         assert_eq!(chunk.external_chunk_id.as_deref(), Some("7"));
+    }
+
+    /// A facet column's value is filed as an attribute and is not in the text.
+    ///
+    /// Both halves matter. The value has to be an attribute or a query cannot
+    /// constrain the ranking by it; it has to be out of the text or it would
+    /// change the terms, the chunk length and therefore the score of the prose
+    /// beside it.
+    #[test]
+    fn a_facet_column_is_filed_as_an_attribute_and_not_as_text() {
+        let row = Row {
+            columns: vec!["who qualifies".to_string(), "1".to_string()],
+            vector: Vec::new(),
+        };
+        let chunk = chunk_of(7, &row, &declaration(&["body", "live facet"]));
+        assert_eq!(chunk.content, "who qualifies");
+        assert!(chunk.heading_path.is_empty(), "one text column, no heading");
+        assert_eq!(
+            chunk.attributes,
+            vec![("live".to_string(), vec!["1".to_string()])]
+        );
+    }
+
+    /// A facet constraint compiles into a predicate on the facet's own name.
+    #[test]
+    fn a_facet_constraint_becomes_an_attribute_predicate() {
+        let options = declaration(&["body", "live facet"]);
+        let request = Request {
+            facets: vec![(1, "1".to_string())],
+            ..Request::default()
+        };
+        let filter = filter_of(&options, &request).expect("compiled");
+        assert_eq!(filter.attributes.len(), 1);
+        assert_eq!(
+            filter.attributes.first().map(|held| held.name.as_str()),
+            Some("live")
+        );
+        assert!(
+            !filter.is_empty(),
+            "a facet constraint has to be a predicate"
+        );
+    }
+
+    /// A constraint on a column the declaration does not call a facet refuses.
+    ///
+    /// It cannot be dropped: the access path claims the constraint, which tells
+    /// the engine not to evaluate it, so a dropped one would answer rows the
+    /// `WHERE` clause excluded.
+    #[test]
+    fn a_constraint_on_a_column_that_is_not_a_facet_refuses() {
+        let options = declaration(&["body", "live facet"]);
+        let request = Request {
+            facets: vec![(0, "1".to_string())],
+            ..Request::default()
+        };
+        let failed = filter_of(&options, &request).expect_err("refused");
+        assert!(
+            failed.message().contains("not a facet")
+                || failed
+                    .detail()
+                    .is_some_and(|said| said.contains("not a facet")),
+            "should say which column is not a facet: {}",
+            failed.message()
+        );
     }
 
     /// A row with no embedding joins the corpus lexically and is invisible to

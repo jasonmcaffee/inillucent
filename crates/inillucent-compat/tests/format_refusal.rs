@@ -549,6 +549,11 @@ fn bind_value(statement: &mut Statement<'_>, index: u32, value: &Value<'static>)
 /// but as a plain statement error with no status, so a driver reported it the
 /// way it reports a syntax mistake, and the message named no release to go and
 /// install. task-2053 made it `unsupported` and gave it the release.
+///
+/// **The number here is 3 rather than 2** (task-2067). A search table that
+/// declares a facet column is written in format 2 and this build reads it, so 2
+/// stopped being a format from the future the day facets landed. The two
+/// numbers and why there are two are in `options.rs`.
 #[test]
 fn a_search_index_in_a_later_format_refuses_as_unsupported() {
     let path = scratch();
@@ -562,7 +567,7 @@ fn a_search_index_in_a_later_format_refuses_as_unsupported() {
             .execute("INSERT INTO corpus (rowid, content) VALUES (1, 'the ledger holds a segment')")
             .expect("indexes a document");
         connection
-            .execute("UPDATE corpus_config SET v = '2' WHERE k = 'format'")
+            .execute("UPDATE corpus_config SET v = '3' WHERE k = 'format'")
             .expect("claims a later format");
         connection
             .execute("UPDATE corpus_config SET v = '9.9.9' WHERE k = 'writer'")
@@ -576,7 +581,7 @@ fn a_search_index_in_a_later_format_refuses_as_unsupported() {
         .expect_err("a format this build has not got is refused");
     assert_eq!(
         refused.unsupported(),
-        Some("a search index in format 2"),
+        Some("a search index in format 3"),
         "the refusal carries the status, so the command line exits 3: {refused:?}"
     );
     let message = refused.message();

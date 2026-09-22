@@ -27,13 +27,50 @@ use inillucent_ext::vtab::failure;
 /// ignored would be a promise the index does not keep.
 pub const TOKENIZER: &str = "porter";
 
-/// The format version stamped into `%_config`.
+/// The format version stamped into `%_config` by a table that declares no
+/// facet column.
 ///
 /// A table written by a later layout is refused rather than misread, which is
 /// the same rule `inillucent_core::persist` applies to a generation directory and
 /// for the same reason: an index that answers differently from the one that was
 /// written is worse than one that will not open.
 pub const FORMAT: i64 = 1;
+
+/// The format version stamped into `%_config` by a table that declares a facet
+/// column.
+///
+/// **A second number rather than a bumped one, because the refusal has to be as
+/// narrow as the change** (task-2067). A facet column is stored beside the text
+/// columns and is deliberately *not* indexed as text, and a build that does not
+/// know the word reads the `columns` row, finds the right number of columns in
+/// the right order, and indexes the facet's value as prose. Nothing about that
+/// misreads the file - it answers a different ranking from the one the table was
+/// written to answer, which is the failure [`FORMAT`] exists to prevent, and
+/// it does it silently.
+///
+/// Raising [`FORMAT`] itself would have refused every table already on disk, so
+/// the two numbers sit side by side: a table with no facet keeps writing `1` and
+/// an older build opens it exactly as before, and a table with a facet writes
+/// `2` and an older build refuses it by name and says which release to install.
+pub const FORMAT_FACETED: i64 = 2;
+
+/// Every format this build reads, newest last.
+pub const FORMATS: [i64; 2] = [FORMAT, FORMAT_FACETED];
+
+/// The word that declares a column a facet, written after its name.
+///
+/// FTS5 spells a column option this way - `CREATE VIRTUAL TABLE t USING
+/// fts5(a, b UNINDEXED)` - and a caller who knows that grammar knows this one.
+pub const FACET_WORD: &str = "facet";
+
+/// How many columns of a table may be reached by a facet constraint.
+///
+/// The access path records one character per claimed constraint, and a facet's
+/// character is its column's position, so the position has to fit in one. A
+/// search table with twenty-six filterable columns is not a shape anybody
+/// writes; a declaration that asks for one is refused rather than silently
+/// having its constraint evaluated after the ranking instead of inside it.
+pub const MAX_FACET_COLUMN: usize = 26;
 
 /// The largest vector width the module accepts.
 ///
@@ -185,8 +222,18 @@ impl Metric {
 /// Everything the `CREATE VIRTUAL TABLE` statement declared.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Options {
-    /// The visible text columns, in declaration order.
+    /// The visible columns, in declaration order: the text ones and the facet
+    /// ones together, because a row stores one value for each of them and the
+    /// stored row's layout is their order.
     pub columns: Vec<Vec<u8>>,
+    /// Which of `columns` are facets rather than text, ascending.
+    ///
+    /// A facet's value is stored and can be constrained inside a search; it is
+    /// not indexed as prose, and it is not part of the text a query matches
+    /// against. Keeping the positions rather than the names is what the row
+    /// decoder and the access path both need, and the names are still
+    /// `columns[position]`.
+    pub facets: Vec<usize>,
     /// How many dimensions a row's vector has, or zero for a lexical-only table.
     pub dims: usize,
     /// The distance the vector branch minimises.
@@ -254,6 +301,40 @@ impl Options {
     /// Returns whether this table has a vector branch at all.
     pub fn has_vectors(&self) -> bool {
         self.dims > 0
+    }
+
+    /// Reports whether the column at this position is a facet.
+    ///
+    /// @param position - the column's position in `columns`
+    pub fn is_facet(&self, position: usize) -> bool {
+        self.facets.contains(&position)
+    }
+
+    /// Returns one facet column's name, when that position holds a facet.
+    ///
+    /// The name is what the core index files the value under, so a query
+    /// constraining the column and the build that indexed it agree on one
+    /// string rather than on a position.
+    /// @param position - the column's position in `columns`
+    pub fn facet_name(&self, position: usize) -> Option<String> {
+        if !self.is_facet(position) {
+            return None;
+        }
+        self.columns
+            .get(position)
+            .map(|name| String::from_utf8_lossy(name).into_owned())
+    }
+
+    /// Returns the format number a table with this declaration is written in.
+    ///
+    /// See [`FORMAT_FACETED`]: a declaration with no facet keeps writing the
+    /// first format, so nothing that is already on disk and nothing written
+    /// without the feature becomes unreadable to an older build.
+    pub fn format(&self) -> i64 {
+        match self.facets.is_empty() {
+            true => FORMAT,
+            false => FORMAT_FACETED,
+        }
     }
 
     /// Returns the delta size at which a commit compacts, for a given corpus.
@@ -331,8 +412,13 @@ impl Options {
             .iter()
             .map(|name| String::from_utf8_lossy(name).into_owned())
             .collect();
+        let facets: Vec<String> = self
+            .facets
+            .iter()
+            .filter_map(|position| self.facet_name(*position))
+            .collect();
         vec![
-            ("format".to_string(), FORMAT.to_string()),
+            ("format".to_string(), self.format().to_string()),
             // **The release that wrote the table, beside the format number it
             // wrote** (task-2053). The number alone tells a reader that it
             // cannot read the table; it does not tell anybody what to install.
@@ -341,6 +427,9 @@ impl Options {
             // added after a table was created has always done here.
             ("writer".to_string(), env!("CARGO_PKG_VERSION").to_string()),
             ("columns".to_string(), names.join(",")),
+            // Named rather than numbered, so the row survives a reader that
+            // lists the columns in a different order than this build would.
+            ("facets".to_string(), facets.join(",")),
             ("dims".to_string(), self.dims.to_string()),
             ("metric".to_string(), self.metric.name().to_string()),
             (
@@ -399,13 +488,14 @@ impl Options {
 
 /// Reads the arguments of a `CREATE VIRTUAL TABLE ... USING inillucent_search(...)`.
 ///
-/// An argument is either a column - a bare name - or an option, written
-/// `name = value`. That is FTS5's grammar and there is no reason to invent a
-/// second one; a caller who knows one virtual table's argument syntax knows
-/// this one's.
+/// An argument is either a column - a bare name, optionally followed by
+/// `FACET` - or an option, written `name = value`. That is FTS5's grammar and
+/// there is no reason to invent a second one; a caller who knows one virtual
+/// table's argument syntax knows this one's.
 /// @param arguments - the raw argument slices, as written
 pub fn parse(arguments: &[Vec<u8>]) -> DbResult<Options> {
     let mut columns: Vec<Vec<u8>> = Vec::new();
+    let mut facets: Vec<usize> = Vec::new();
     let mut dims = 0usize;
     let mut source: Option<Vec<u8>> = None;
     let mut threads: Option<usize> = None;
@@ -424,7 +514,18 @@ pub fn parse(arguments: &[Vec<u8>]) -> DbResult<Options> {
             continue;
         }
         let Some((name, value)) = split_option(&text) else {
-            columns.push(unquote(&text).into_bytes());
+            let (column, facet) = split_facet(&text)?;
+            if facet {
+                if columns.len() >= MAX_FACET_COLUMN {
+                    return Err(failure(format!(
+                        "inillucent_search: a facet may be declared on the first \
+                         {MAX_FACET_COLUMN} columns, and {column} is number {}",
+                        columns.len().saturating_add(1)
+                    )));
+                }
+                facets.push(columns.len());
+            }
+            columns.push(column.into_bytes());
             continue;
         };
         let value = unquote(&value);
@@ -492,8 +593,15 @@ pub fn parse(arguments: &[Vec<u8>]) -> DbResult<Options> {
             "inillucent_search: a search table needs at least one column",
         ));
     }
+    if facets.len() >= columns.len() {
+        return Err(failure(
+            "inillucent_search: a search table needs at least one column that is not a facet, \
+             because a facet is not indexed and a table of facets alone answers nothing",
+        ));
+    }
     Ok(Options {
         columns,
+        facets,
         dims,
         metric,
         m,
@@ -548,7 +656,10 @@ pub fn readable(rows: &[(String, String)]) -> DbResult<()> {
     let Some(format) = find("format") else {
         return Ok(());
     };
-    if format.trim() == FORMAT.to_string() {
+    if FORMATS
+        .iter()
+        .any(|known| format.trim() == known.to_string())
+    {
         return Ok(());
     }
     Err(wrong_format(format.trim(), find("writer")))
@@ -569,6 +680,11 @@ pub fn readable(rows: &[(String, String)]) -> DbResult<()> {
 /// a zero there is a `%_config` row that has been overwritten rather than a
 /// table from the future.
 ///
+/// The sentence names every format this build reads rather than one, because
+/// there are two of them now and which one a table is in depends on whether it
+/// declared a facet column - so "this build reads format 1" would be false of
+/// this build and no use to somebody holding a table in format 2.
+///
 /// @param found - the format the table's `%_config` carries
 /// @param writer - the release the table's `%_config` names, when it names one
 fn wrong_format(found: &str, writer: Option<&str>) -> inillucent_base::DbError {
@@ -576,16 +692,22 @@ fn wrong_format(found: &str, writer: Option<&str>) -> inillucent_base::DbError {
         Some(named) => format!(", written by inillucent {named}"),
         None => String::new(),
     };
-    let newer = found.parse::<i64>().is_ok_and(|number| number > FORMAT);
+    let reads = FORMATS
+        .iter()
+        .map(|known| known.to_string())
+        .collect::<Vec<String>>()
+        .join(" and ");
+    let newest = FORMATS.iter().copied().max().unwrap_or(FORMAT);
+    let newer = found.parse::<i64>().is_ok_and(|number| number > newest);
     if !newer {
         return failure(format!(
-            "inillucent_search: the table is in format {found}{by} and this build reads format \
-             {FORMAT}, and there is no earlier format: the configuration has been overwritten"
+            "inillucent_search: the table is in format {found}{by} and this build reads formats \
+             {reads}, and there is no earlier format: the configuration has been overwritten"
         ));
     }
     let said = format!(
-        "inillucent_search: the table is in format {found}{by} and this build reads format \
-         {FORMAT}"
+        "inillucent_search: the table is in format {found}{by} and this build reads formats \
+         {reads}"
     );
     failure(format!("{said}; upgrade inillucent to open it"))
         .with_message(said)
@@ -611,6 +733,44 @@ pub fn from_config(rows: &[(String, String)], fallback: &Options) -> DbResult<Op
             .map(|name| name.as_bytes().to_vec())
             .collect(),
         _ => fallback.columns.clone(),
+    };
+    // Resolved against the stored column list rather than against the
+    // declaration, so a facet whose column the stored rows put elsewhere is
+    // still the same column. A stored name that is not in the column list is
+    // dropped: it names a column this table does not have, and treating it as a
+    // position would filter on whichever column happened to be there.
+    let facets: Vec<usize> = match find("facets") {
+        Some(list) if !list.is_empty() => {
+            let mut held = Vec::new();
+            for name in list
+                .split(',')
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+            {
+                let Some(position) = columns
+                    .iter()
+                    .position(|column| column.as_slice() == name.as_bytes())
+                else {
+                    continue;
+                };
+                // The same bound `parse` enforces, enforced again here because
+                // the stored rows are a second way in and the access path
+                // records a position in one character.
+                if position >= MAX_FACET_COLUMN {
+                    return Err(failure(format!(
+                        "inillucent_search: the stored configuration puts the facet {name} at \
+                         column {}, and a facet may be declared on the first {MAX_FACET_COLUMN}",
+                        position.saturating_add(1)
+                    )));
+                }
+                held.push(position);
+            }
+            held
+        }
+        // A table written before facets existed says nothing here, and a table
+        // that declared none stores an empty value. Neither has any.
+        Some(_) => Vec::new(),
+        None => fallback.facets.clone(),
     };
     let dims = find("dims")
         .and_then(|value| value.parse::<usize>().ok())
@@ -639,6 +799,7 @@ pub fn from_config(rows: &[(String, String)], fallback: &Options) -> DbResult<Op
     let graph = |key: &str| find(key).and_then(|value| value.parse::<usize>().ok());
     Ok(Options {
         columns,
+        facets,
         dims,
         metric,
         m: graph("m").or(fallback.m),
@@ -663,6 +824,37 @@ pub fn from_config(rows: &[(String, String)], fallback: &Options) -> DbResult<Op
             .and_then(|value| value.parse::<usize>().ok())
             .or(fallback.threads),
     })
+}
+
+/// Splits a column declaration into its name and whether it said `FACET`.
+///
+/// The word is matched without case and only as the last whitespace-separated
+/// token, so a column genuinely called `facet` is still a text column.
+///
+/// **The suffix is read before the quoting is stripped, which is what keeps a
+/// quoted name whole.** A column name may contain a space if it is quoted, the
+/// way FTS5's may, and a declaration that read `FACET` off the unquoted name
+/// would turn `"live facet"` - one column with a space in its name - into a
+/// facet called `live`. Reading the raw argument, the closing quote is part of
+/// the last token, so it does not match and the whole thing stays a name.
+/// Quoting is therefore how a column called `live facet` is declared, and
+/// `'live' FACET` is still a facet called `live`.
+/// @param raw - the bare argument, exactly as written
+fn split_facet(raw: &str) -> DbResult<(String, bool)> {
+    let trimmed = raw.trim();
+    let (name, facet) = match trimmed.rsplit_once(char::is_whitespace) {
+        Some((head, last)) if last.eq_ignore_ascii_case(FACET_WORD) && !head.trim().is_empty() => {
+            (head.trim(), true)
+        }
+        _ => (trimmed, false),
+    };
+    let name = unquote(name);
+    if name.is_empty() {
+        return Err(failure(
+            "inillucent_search: a facet needs a column name in front of it",
+        ));
+    }
+    Ok((name, facet))
 }
 
 /// Splits `name = value`, which is how an option is written.
@@ -803,6 +995,142 @@ mod tests {
         );
     }
 
+    /// A column followed by `FACET` is a facet, and the rest are text.
+    #[test]
+    fn a_column_declared_facet_is_one() {
+        let declared = parse(&[
+            b"body".to_vec(),
+            b"live FACET".to_vec(),
+            b"dims = 8".to_vec(),
+        ])
+        .expect("parsed");
+        assert_eq!(declared.columns.len(), 2, "a facet is still a column");
+        assert_eq!(declared.facets, vec![1]);
+        assert_eq!(declared.facet_name(1).as_deref(), Some("live"));
+        assert!(!declared.is_facet(0), "body is text");
+        assert_eq!(declared.facet_name(0), None);
+    }
+
+    /// The word is matched without case, and only as the last word.
+    ///
+    /// A column genuinely called `facet` is a text column: the word has to
+    /// follow a name to declare anything, so one on its own is the name.
+    #[test]
+    fn the_facet_word_is_read_without_case_and_only_at_the_end() {
+        let declared = parse(&[b"body".to_vec(), b"live facet".to_vec()]).expect("parsed");
+        assert_eq!(declared.facets, vec![1]);
+
+        let plain = parse(&[b"body".to_vec(), b"facet".to_vec()]).expect("parsed");
+        assert!(
+            plain.facets.is_empty(),
+            "a column called facet is a text column"
+        );
+        assert_eq!(plain.columns.len(), 2);
+    }
+
+    /// Quoting keeps a name whole, including one that ends in the word.
+    ///
+    /// A column name may hold a space when it is quoted, the way FTS5's may,
+    /// and reading the suffix off the unquoted name would turn one column
+    /// called `live facet` into a facet called `live`.
+    #[test]
+    fn a_quoted_name_is_a_name_even_when_it_ends_in_the_word() {
+        let declared = parse(&[b"body".to_vec(), b"\"live facet\"".to_vec()]).expect("parsed");
+        assert!(declared.facets.is_empty(), "the quotes make it a name");
+        assert_eq!(
+            declared.columns.get(1).map(|held| held.as_slice()),
+            Some(b"live facet".as_slice())
+        );
+
+        let faceted = parse(&[b"body".to_vec(), b"\"live\" FACET".to_vec()]).expect("parsed");
+        assert_eq!(faceted.facets, vec![1]);
+        assert_eq!(faceted.facet_name(1).as_deref(), Some("live"));
+    }
+
+    /// A declaration of nothing but facets is refused.
+    ///
+    /// A facet is not indexed, so a table of them alone has no text for a
+    /// query to match and would answer every search with nothing.
+    #[test]
+    fn a_table_of_facets_alone_is_refused() {
+        let failed = parse(&[b"live FACET".to_vec()]).expect_err("refused");
+        let said = failed
+            .detail()
+            .unwrap_or_else(|| failed.message())
+            .to_string();
+        assert!(
+            said.contains("not a facet"),
+            "should say a text column is needed: {said}"
+        );
+    }
+
+    /// A facet moves the stored format, and a plain table does not.
+    ///
+    /// See `FORMAT_FACETED`: the refusal has to be as narrow as the change, so
+    /// a table that declares no facet keeps writing the format every build
+    /// already reads.
+    #[test]
+    fn only_a_faceted_table_moves_the_format() {
+        let plain = parse(&[b"body".to_vec()]).expect("parsed");
+        assert_eq!(plain.format(), FORMAT);
+        let faceted = parse(&[b"body".to_vec(), b"live FACET".to_vec()]).expect("parsed");
+        assert_eq!(faceted.format(), FORMAT_FACETED);
+        let rows = faceted.config_rows();
+        let find = |key: &str| {
+            rows.iter()
+                .find(|(name, _)| name == key)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(find("format"), Some(FORMAT_FACETED.to_string().as_str()));
+        assert_eq!(find("facets"), Some("live"));
+        assert_eq!(find("columns"), Some("body,live"));
+    }
+
+    /// The facets come back from `%_config` as the positions they were written
+    /// at, read against the stored column list rather than the declaration.
+    #[test]
+    fn a_stored_facet_is_resolved_against_the_stored_columns() {
+        let fallback = parse(&[b"body".to_vec()]).expect("parsed");
+        let stored = vec![
+            ("format".to_string(), FORMAT_FACETED.to_string()),
+            ("columns".to_string(), "body,region,live".to_string()),
+            ("facets".to_string(), "live,region".to_string()),
+        ];
+        let held = from_config(&stored, &fallback).expect("read back");
+        assert_eq!(held.columns.len(), 3);
+        assert_eq!(held.facets, vec![2, 1], "resolved by name, in stored order");
+        assert_eq!(held.facet_name(2).as_deref(), Some("live"));
+    }
+
+    /// A stored facet naming a column the table does not have is dropped.
+    ///
+    /// Taking it as a position instead would filter on whichever column
+    /// happened to sit there, which is a wrong answer rather than a missing
+    /// feature.
+    #[test]
+    fn a_stored_facet_naming_no_column_is_dropped() {
+        let fallback = parse(&[b"body".to_vec()]).expect("parsed");
+        let stored = vec![
+            ("format".to_string(), FORMAT_FACETED.to_string()),
+            ("columns".to_string(), "body,live".to_string()),
+            ("facets".to_string(), "live,missing".to_string()),
+        ];
+        let held = from_config(&stored, &fallback).expect("read back");
+        assert_eq!(held.facets, vec![1]);
+    }
+
+    /// A table written before facets existed says nothing about them.
+    #[test]
+    fn a_table_written_before_facets_has_none() {
+        let fallback = parse(&[b"body".to_vec()]).expect("parsed");
+        let stored = vec![
+            ("format".to_string(), FORMAT.to_string()),
+            ("columns".to_string(), "body".to_string()),
+        ];
+        let held = from_config(&stored, &fallback).expect("read back");
+        assert!(held.facets.is_empty());
+    }
+
     /// A table written by another format version is refused rather than read.
     #[test]
     fn another_format_is_refused() {
@@ -822,17 +1150,17 @@ mod tests {
     fn a_later_format_refuses_as_unsupported_and_names_the_release() {
         let fallback = parse(&[b"body".to_vec()]).expect("parsed");
         let stored = vec![
-            ("format".to_string(), "2".to_string()),
+            ("format".to_string(), "3".to_string()),
             ("writer".to_string(), "9.9.9".to_string()),
         ];
         let refused = from_config(&stored, &fallback).expect_err("a later format is refused");
         assert_eq!(
             refused.unsupported(),
-            Some("a search index in format 2"),
+            Some("a search index in format 3"),
             "the refusal carries the status, so the command line exits 3"
         );
         let message = refused.message();
-        assert!(message.contains("format 2"), "{message}");
+        assert!(message.contains("format 3"), "{message}");
         assert!(
             message.contains("9.9.9"),
             "the refusal names the release to install: {message}"

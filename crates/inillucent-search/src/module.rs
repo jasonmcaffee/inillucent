@@ -70,6 +70,15 @@ const ROLE_RECALL: char = 'r';
 /// The rowid, for a point lookup.
 const ROLE_ROWID: char = 'i';
 
+/// The first character a facet constraint is recorded under.
+///
+/// A facet's role character is `ROLE_FACET_FIRST + the column's position`, so
+/// the cursor reads which column the value belongs to out of the plan rather
+/// than having to guess it from the order the constraints were claimed in. The
+/// range is upper case and every other role is lower case, so the two cannot
+/// collide; `options::MAX_FACET_COLUMN` is what keeps a position inside it.
+const ROLE_FACET_FIRST: u8 = b'A';
+
 /// The module.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SearchModule;
@@ -1004,6 +1013,32 @@ impl VirtualTable for SearchTable {
                 }
             }
         }
+        // **Only when the plan is a search** (task-2067). A facet constraint is
+        // claimed so that the ranking runs over the rows it admits; on a scan
+        // there is no ranking, and claiming it would take the predicate away
+        // from the engine that was about to evaluate it correctly.
+        if searching {
+            for index in 0..query.constraints.len() {
+                let Some(spec) = query.constraints.get(index).copied() else {
+                    continue;
+                };
+                if !spec.usable || spec.op != ConstraintOp::Eq || spec.column < 0 {
+                    continue;
+                }
+                let position = spec.column as usize;
+                if !self.options.is_facet(position) || position >= options::MAX_FACET_COLUMN {
+                    continue;
+                }
+                // The cast cannot truncate: the line above bounds the position
+                // by `MAX_FACET_COLUMN`, which is what the one character of
+                // plan string can hold. A position past it is left unclaimed
+                // rather than encoded wrongly, so the engine evaluates the
+                // predicate itself and the answer is still the right rows.
+                let role = ROLE_FACET_FIRST.saturating_add(position as u8);
+                query.use_constraint(index, true);
+                roles.push(char::from(role));
+            }
+        }
         let mut plan = if searching { PLAN_SEARCH } else { PLAN_SCAN };
         if plan == PLAN_SEARCH {
             if let Some(order) = query.order_by.first() {
@@ -1339,6 +1374,16 @@ impl VirtualCursor for SearchCursor {
                         .or_else(|| value.as_integer().map(|whole| whole as f32));
                 }
                 ROLE_ROWID => wanted_rowid = value.as_integer(),
+                // A facet, whose role character carries its column's position.
+                // The value is read as text because a facet's stored value is
+                // text, so `live = 1` and `live = '1'` constrain the same rows
+                // rather than one of them matching nothing.
+                facet if facet.is_ascii_uppercase() => {
+                    let position = (facet as u8).saturating_sub(ROLE_FACET_FIRST) as usize;
+                    self.request
+                        .facets
+                        .push((position, text_of(Some(value)).unwrap_or_default()));
+                }
                 _ => {}
             }
         }

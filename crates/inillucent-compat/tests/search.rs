@@ -890,3 +890,240 @@ fn a_folded_index_reopens_and_answers() {
     assert_eq!(column(&reopened, QUERY), expected);
     assert_eq!(state(&reopened, "docs", "folds"), 5);
 }
+
+/// Creates a faceted search table and fills it.
+///
+/// Every row holds both query terms, at a distance that varies with the rowid,
+/// so the position rescore has something to move and BM25 has something to
+/// order. Every eleventh row is marked not live, which is the rate the
+/// migration's own corpus suite tombstones at.
+/// @param connection - the database
+/// @param rows - how many rows to write
+fn seed_faceted(connection: &Connection<'_>, rows: usize) {
+    exec(
+        connection,
+        "CREATE VIRTUAL TABLE docs USING inillucent_search(body, live FACET)",
+    );
+    for id in 0..rows {
+        let filler: String = (0..(id % 17)).map(|n| format!("filler{n} ")).collect();
+        let tail: String = (0..(id % 7)).map(|n| format!("tail{n} ")).collect();
+        let body = format!("alpha {filler}beta {tail}gamma delta epsilon body{id}");
+        let live = if id % 11 == 10 { "0" } else { "1" };
+        exec(
+            connection,
+            &format!("INSERT INTO docs(rowid, body, live) VALUES ({id}, '{body}', '{live}')"),
+        );
+    }
+}
+
+/// A facet constrains which rows a search ranks over.
+#[test]
+fn a_facet_constrains_the_search() {
+    let connection = start_inillucent(AREA, "facet-constrains");
+    seed_faceted(&connection, 60);
+    let live = column(
+        &connection,
+        "SELECT rowid FROM docs WHERE docs MATCH 'alpha beta' AND k = 20 AND live = '1' \
+         ORDER BY rank",
+    );
+    assert_eq!(live.len(), 20, "the search fills the k it was asked for");
+    for id in &live {
+        let ordinal: usize = id.parse().expect("a rowid");
+        assert!(
+            ordinal % 11 != 10,
+            "a row marked not live answered: {live:?}"
+        );
+    }
+    let dead = column(
+        &connection,
+        "SELECT rowid FROM docs WHERE docs MATCH 'alpha beta' AND k = 20 AND live = '0' \
+         ORDER BY rank",
+    );
+    assert!(!dead.is_empty(), "the other value selects the other rows");
+    for id in &dead {
+        let ordinal: usize = id.parse().expect("a rowid");
+        assert_eq!(ordinal % 11, 10, "a live row answered: {dead:?}");
+    }
+}
+
+/// A facet is applied inside the search, not to what the search answered.
+///
+/// **This is the property the feature exists for** (task-2067).
+/// `Bm25Index::top_k` rescores the best `k * rescore_depth_factor` hits by
+/// where the query's terms sit inside them, the rescore only ever lowers a
+/// score, and a hit outside that window keeps its full score and competes
+/// against rescored ones. Which hits are inside the window depends on which
+/// rows the scan admitted, so a constraint the ranking saw and the same
+/// constraint applied afterwards are different answers.
+///
+/// The test says so by comparing the two: a search with the facet constrained,
+/// against an unconstrained search with the same rows removed from its answer.
+/// If those two agreed there would be nothing here worth building, and a later
+/// change that quietly moved the facet out of the scan would make them agree.
+#[test]
+fn a_facet_is_applied_inside_the_search_rather_than_to_its_answer() {
+    let connection = start_inillucent(AREA, "facet-inside");
+    seed_faceted(&connection, 400);
+    let inside = column(
+        &connection,
+        "SELECT rowid FROM docs WHERE docs MATCH 'gamma delta epsilon alpha' AND k = 10 \
+         AND live = '1' ORDER BY rank",
+    );
+    let afterwards: Vec<String> = column(
+        &connection,
+        "SELECT rowid FROM docs WHERE docs MATCH 'gamma delta epsilon alpha' AND k = 10 \
+         ORDER BY rank",
+    )
+    .into_iter()
+    .filter(|id| id.parse::<usize>().is_ok_and(|ordinal| ordinal % 11 != 10))
+    .collect();
+    assert_eq!(inside.len(), 10, "the constrained search fills its k");
+    assert_ne!(
+        inside, afterwards,
+        "if these agree the facet is no longer reaching the scan"
+    );
+}
+
+/// A facet's value is not part of the text a query matches.
+///
+/// Both halves matter. Matching on the value finds nothing, because the value
+/// was never tokenised; and the ranking of the prose beside it is the ranking
+/// an unfaceted table gives, because a value in the indexed text would change
+/// the terms, the row's length and therefore its score.
+#[test]
+fn a_facet_value_is_not_indexed_as_text() {
+    let connection = start_inillucent(AREA, "facet-not-text");
+    seed_faceted(&connection, 60);
+    let matched = column(
+        &connection,
+        "SELECT rowid FROM docs WHERE docs MATCH 'gamma1' AND k = 10 ORDER BY rank",
+    );
+    assert!(
+        matched.is_empty(),
+        "the facet's value is not a term: {matched:?}"
+    );
+
+    let plain = start_inillucent(AREA, "facet-not-text-plain");
+    exec(
+        &plain,
+        "CREATE VIRTUAL TABLE docs USING inillucent_search(body)",
+    );
+    for id in 0..60usize {
+        let filler: String = (0..(id % 17)).map(|n| format!("filler{n} ")).collect();
+        let tail: String = (0..(id % 7)).map(|n| format!("tail{n} ")).collect();
+        let body = format!("alpha {filler}beta {tail}gamma delta epsilon body{id}");
+        exec(
+            &plain,
+            &format!("INSERT INTO docs(rowid, body) VALUES ({id}, '{body}')"),
+        );
+    }
+    const QUERY: &str = "SELECT rowid FROM docs WHERE docs MATCH 'alpha beta gamma' AND k = 10 \
+                         ORDER BY rank";
+    assert_eq!(
+        column(&connection, QUERY),
+        column(&plain, QUERY),
+        "a facet column changes no ranking of the text beside it"
+    );
+}
+
+/// A facet is a column like any other: it comes back from a select.
+#[test]
+fn a_facet_is_still_a_column() {
+    let connection = start_inillucent(AREA, "facet-column");
+    seed_faceted(&connection, 20);
+    assert_eq!(
+        column(&connection, "SELECT live FROM docs WHERE rowid = 10"),
+        vec!["0".to_string()]
+    );
+    assert_eq!(
+        column(&connection, "SELECT live FROM docs WHERE rowid = 9"),
+        vec!["1".to_string()]
+    );
+}
+
+/// A facet constraint on a plain scan is still the engine's to evaluate.
+///
+/// The module claims a facet constraint only when it is ranking, because
+/// claiming one tells the engine not to evaluate it - and on a scan there is no
+/// ranking to push it into, so the engine is the only thing that would.
+#[test]
+fn a_facet_on_a_scan_still_selects() {
+    let connection = start_inillucent(AREA, "facet-scan");
+    seed_faceted(&connection, 33);
+    let found = column(&connection, "SELECT rowid FROM docs WHERE live = '0'");
+    assert_eq!(
+        found,
+        vec!["10".to_string(), "21".to_string(), "32".to_string()],
+        "every row marked not live, and nothing else"
+    );
+}
+
+/// A faceted table survives being closed and opened again.
+///
+/// The declaration lives in `%_config`, and a reopen reads it from there rather
+/// than from the `CREATE` text - so this is the check that the stored rows say
+/// which column is a facet, not only the statement that made it.
+#[test]
+fn a_faceted_table_reopens_and_still_filters() {
+    const QUERY: &str = "SELECT rowid FROM docs WHERE docs MATCH 'alpha beta' AND k = 10 \
+                         AND live = '0' ORDER BY rank";
+    let path = scratch(AREA, "facet-reopen", "inillucent");
+    let expected = {
+        let database = Database::open(&path).expect("the database opens");
+        let connection = database.session();
+        let _ = connection.execute_batch("PRAGMA busy_timeout = 5000");
+        seed_faceted(&connection, 60);
+        column(&connection, QUERY)
+    };
+    assert!(!expected.is_empty(), "the query finds something to compare");
+    let reopened = open_at(&path);
+    assert_eq!(column(&reopened, QUERY), expected);
+}
+
+/// A faceted table stores the later format, and a plain one does not.
+///
+/// The number is what carries the refusal, so this asserts the number. An
+/// older build compares the stored number against the one it knows and refuses,
+/// which is the whole of the protection - and it is protection worth having,
+/// because such a build would otherwise index the facet's value as prose and
+/// answer a ranking the table was not written to answer. Keeping a plain table
+/// on the first format is the other half: nothing that declares no facet
+/// becomes unreadable to a build already installed.
+#[test]
+fn only_a_faceted_table_stores_the_later_format() {
+    let connection = start_inillucent(AREA, "facet-format");
+    seed_faceted(&connection, 5);
+    exec(
+        &connection,
+        "CREATE VIRTUAL TABLE plain USING inillucent_search(body)",
+    );
+    assert_eq!(
+        column(&connection, "SELECT v FROM docs_config WHERE k = 'format'"),
+        vec!["2".to_string()]
+    );
+    assert_eq!(
+        column(&connection, "SELECT v FROM plain_config WHERE k = 'format'"),
+        vec!["1".to_string()]
+    );
+    assert_eq!(
+        column(&connection, "SELECT v FROM docs_config WHERE k = 'facets'"),
+        vec!["live".to_string()]
+    );
+}
+
+/// A declaration of nothing but facets is refused.
+#[test]
+fn a_table_of_facets_alone_is_refused() {
+    let connection = start_inillucent(AREA, "facet-alone");
+    // Read straight off the error rather than through `try_exec`, which keeps
+    // only the message: the sentence that names the reason is the detail, and
+    // the message of a refusal like this one is "SQL logic error".
+    let failed = connection
+        .execute_batch("CREATE VIRTUAL TABLE docs USING inillucent_search(live FACET)")
+        .expect_err("a table with no text column is refused");
+    let said = failed
+        .detail()
+        .unwrap_or_else(|| failed.message())
+        .to_string();
+    assert!(said.contains("not a facet"), "the refusal says why: {said}");
+}

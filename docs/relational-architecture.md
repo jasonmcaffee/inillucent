@@ -337,7 +337,14 @@ records:
 |---|---|---|
 | the pages, records and header | byte 8 of the meta page, `crates/inillucent-pool/src/meta.rs` | the database will not open: `this database is format version N and this build reads version 1; upgrade inillucent to open it` |
 | an FTS5 index | a `%_data` row, `crates/inillucent-ext/src/vtab/fts5/layout.rs` | the database opens and the table's rows read; `MATCH`, any write, and `fts5vocab` refuse with `the full-text index on T is in layout N, written by inillucent X.Y.Z, and this build reads layouts up to 2` |
-| an `inillucent_search` index | the `format` row of `%_config`, `crates/inillucent-search/src/options.rs` | the database opens; every read and every write of the table refuses with `the table is in format N, written by inillucent X.Y.Z, and this build reads format 1` |
+| an `inillucent_search` index | the `format` row of `%_config`, `crates/inillucent-search/src/options.rs` | the database opens; every read and every write of the table refuses with `the table is in format N, written by inillucent X.Y.Z, and this build reads formats 1 and 2` |
+
+There are two numbers for a search table because there are two shapes of one. A table that declares
+no facet column stores `1`, which is what every build has always written and every build reads. A
+table that declares one stores `2`, so a build that does not know the word refuses it by name
+instead of reading the facet's value as ordinary indexed text and answering a ranking the table was
+not written to answer. Raising the one number would have refused every table already on disk, which
+is a wider refusal than the change deserves.
 
 All three carry `unsupported`, so the command line exits 3 and a driver reports the status
 `unsupported` - the same answer every other "this engine has not built that" gives, and the reason
@@ -552,6 +559,11 @@ drag a vector index into every database that only wanted SQL.
 A `inillucent_search` table keeps its index in five shadow tables. `%_content` holds the rows,
 `%_delta` is a log of what changed, `%_gen` holds published generations of the built index, `%_state`
 names which generation is current and how far it covers, and `%_config` records the declaration.
+
+`%_content` holds one column per declared column, facets among them, so a facet costs a stored value
+per row and nothing else. What a facet changes is the build: its value goes into the index as an
+attribute of the row rather than into the text, which is what lets a search constrain it before it
+ranks. `%_config` records which columns those are, by name, so a reopen agrees with the build.
 
 Four things happen to that index, and they cost different amounts.
 

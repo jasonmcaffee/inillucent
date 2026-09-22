@@ -10,6 +10,35 @@ fails the build when any copy of it disagrees.
 
 ## Unreleased
 
+**A search table can filter inside the search: `FACET` columns.** A column of an `inillucent_search`
+table declared `live FACET` is stored and can be constrained in a search - `WHERE docs MATCH ?1 AND
+k = 10 AND live = '1'` - and the constraint is compiled into the filter the scan runs under rather
+than applied to what the scan answered. Several narrow rather than widen. A facet's value is not
+indexed as text, so it changes no ranking of the prose beside it, and it is an ordinary column
+otherwise: it comes back from a `SELECT`, and on a query that is not a search the engine evaluates
+it itself.
+
+The difference between filtering inside the search and filtering after it is not small, and it is
+why the feature exists. The keyword ranking rescores the best `k * 6` hits by where the query's
+terms sit inside them, the rescore only ever lowers a score, and a hit below that window keeps its
+full score and competes against rescored ones - so which hits are in the window depends on which
+rows the scan admitted. Measured on a 400 row corpus, a constraint applied afterwards shared one hit
+of the top ten with the same constraint applied inside. Filtering afterwards also returns fewer rows
+than the `LIMIT` asked for.
+
+**A table declaring a facet is stored in format 2** and an older build refuses to open it, by name,
+naming the release to install. A table declaring none is stored in format 1 exactly as before, so
+nothing already written becomes unreadable.
+
+**`inillucent-migrate` uses it, and its `filter.deleted` check was wrong until it did.** The legacy
+engine excludes a tombstoned document's chunks inside the posting scan. The copy had no way to
+exclude anything before it ranked, so the migration claimed that joining to `document` and dropping
+the deleted rows reproduced the legacy default - which it does not, for the reason above. A migrated
+database now carries the flag on the search table's own `live` facet, and the check asks both sides
+the same question at the same depth instead of comparing an answer ranked over the live chunks against one ranked over every chunk and
+filtered afterwards. A second check goes in beside it, `filter.unreachable`, which asks whether
+any chunk of a tombstoned document comes back at all.
+
 **`PRAGMA integrity_check` and `PRAGMA quick_check` account for every page of the file.** They used
 to read one tree at a time and each index against its table, and neither of those can see a page two
 tables both own: each tree is a well formed tree and neither is an index of the other, so a file

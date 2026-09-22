@@ -528,3 +528,29 @@ they are touching do not collide; two that have not, do.
   not stamp one, because a file 0.1.2 through 0.1.7 wrote may hold rows in both layouts at once. If
   you change the dictionary layout again, raise `LAYOUT` in the same commit, or a build that cannot
   read what you wrote will answer no rows for it rather than refusing. (task-2053)
+- **`inillucent-migrate::corpus` going red is no longer a reason to suspect your own change - but
+  read which check it names.** The suite builds its corpus out of `crates/` and `docs/` at run time
+  and stops at 400 documents, so adding a file anywhere early in that walk shifts every document
+  after it and pushes some off the end. That sensitivity is deliberate and is stated in the suite's
+  own header; it is what proved task-2065's engine change innocent. What was **not** deliberate was
+  that `filter.deleted` compared two different operations and so could go red on an ordinary commit
+  that added a test file: task-2065, task-2066 and task-2068 each met it, and task-2068 measured its
+  phase 1 turning the suite red on its own. task-2067 fixed the comparison, so a red `filter.deleted`
+  now means a real difference. The other checks are still corpus-sensitive by design, and the way to
+  tell a corpus effect from a defect is the method task-2065 used: hold the test binary and vary only
+  the prose. (task-2067)
+- **Do not edit a file under `crates/` or `docs/` while that suite is running.** It reads every one of
+  them with `read_to_string` and skips any whose prose is under 400 characters, so a file caught
+  mid-rewrite reads short, gets skipped, and takes one document out of a walk that stops at 400 -
+  which shifts every document after it. task-2067 got a red `corpus` in a full run that way and a
+  green from the same binary a minute later; a whole sweep of deliberately built corpora passed in
+  between. Start the run, then leave the tree alone until it is finished. (task-2067)
+- **Copy `.sqlite-ref/` into your worktree rather than junctioning it.** `cp -r
+  C:/jason/dev/inillucent/.sqlite-ref <worktree>/.sqlite-ref` costs 42 MB and about ten seconds, and
+  retiring the worktree deletes it like any other file. A junction has to be removed with a command
+  that does not follow it, and the entry above records the day somebody's `rm -rf` followed one and
+  emptied the only copy for every worktree at once. The copy has no way to do that. (task-2067)
+- **A full test run leaves thirteen files under `tests/crash/` reported as modified, and they are
+  not.** The crash campaign rewrites them with different line endings, so `git status` lists them
+  while `git diff --numstat` shows nothing. Restore them by name rather than staging them, and do not
+  spend time working out what changed. (task-2067)

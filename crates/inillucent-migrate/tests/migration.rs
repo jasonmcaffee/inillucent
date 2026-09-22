@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 
 use inillucent_base::hash::Sha256;
 use inillucent_core::distance::normalize;
-use inillucent_core::index::{Index, IndexConfig};
+use inillucent_core::filter::Filter;
+use inillucent_core::index::{Branches, Index, IndexConfig};
 use inillucent_core::store::ChunkInput;
 use inillucent_migrate::manifest::Manifest;
 use inillucent_migrate::{migrate, Plan};
@@ -385,4 +386,160 @@ fn a_lexical_only_source_migrates() {
     for check in &outcome.checks {
         assert!(check.passed, "{} failed: {}", check.name, check.detail);
     }
+}
+
+/// How many documents the tombstone-ranking corpus holds.
+///
+/// Large enough that a probe drawn from it matches more chunks than
+/// `Bm25Index::top_k` rescores - the engine's default is `candidates` of 50
+/// times a `rescore_depth_factor` of 6, so 300 - because that window is the
+/// mechanism this corpus exists to exercise and below it the two orderings
+/// cannot differ.
+const RANKING_DOCUMENTS: usize = 400;
+
+/// Builds a corpus where excluding the tombstoned chunks changes the order.
+///
+/// Every chunk holds the same handful of terms, at a distance apart and a
+/// length that both vary with the ordinal, so BM25 orders them and the position
+/// rescore moves them. Every eleventh document is tombstoned, which is the rate
+/// the release-sized corpus next door uses.
+///
+/// Deliberately synthetic and deliberately fixed. The neighbouring `corpus`
+/// suite builds its corpus out of the repository's own prose at run time, which
+/// is what found this defect and is worth keeping - but it also means the
+/// condition comes and goes as the repository's text changes, so it cannot be
+/// the thing that holds the fix. This corpus is the same shape every run.
+/// @param directory - where the legacy index is written
+fn build_ranking_source(directory: &Path) -> Index {
+    let mut inputs = Vec::new();
+    let mut vectors: Vec<Vec<f32>> = Vec::new();
+    for document in 0..RANKING_DOCUMENTS {
+        let deleted = document % 11 == 10;
+        let filler: String = (0..(document % 17))
+            .map(|n| format!("filler{n} "))
+            .collect();
+        let tail: String = (0..(document % 7)).map(|n| format!("tail{n} ")).collect();
+        let text = format!("alpha {filler}beta {tail}gamma delta epsilon body{document}");
+        let mut input = chunk(document, 0, &text, deleted);
+        input.external_chunk_id = Some(format!("{document}"));
+        inputs.push(input);
+        let mut vector: Vec<f32> = (0..DIMS)
+            .map(|dimension| (((document * DIMS + dimension) as f32) * 0.37).sin())
+            .collect();
+        normalize(&mut vector);
+        vectors.push(vector);
+    }
+    let mut index = Index::new(IndexConfig {
+        dims: DIMS,
+        ..IndexConfig::default()
+    });
+    index.add(inputs, &vectors).expect("the chunks are added");
+    index.commit();
+    inillucent_core::persist::save(&index, directory).expect("the legacy index saves");
+    index
+}
+
+/// Returns the legacy engine's lexical ranking for one query.
+///
+/// @param index - the legacy index
+/// @param query - the query text
+/// @param include_deleted - whether a tombstoned document's chunks may answer
+/// @param k - how many hits to ask for
+fn legacy_ranking(index: &Index, query: &str, include_deleted: bool, k: usize) -> Vec<u32> {
+    let filter = index.compile(&Filter {
+        include_deleted,
+        ..Filter::default()
+    });
+    let (hits, _) = index
+        .search_branches(query, &[], &filter, k, None, Branches::Lexical)
+        .expect("the legacy index answers");
+    hits.iter().map(|hit| hit.chunk).collect()
+}
+
+/// Excluding a tombstoned chunk during the search is not the same answer as
+/// removing it afterwards, and this corpus is built so that it shows.
+///
+/// **The precondition of the test below, asserted rather than assumed**
+/// (task-2067). `a_tombstoned_corpus_migrates_and_ranks_identically` is only
+/// worth running on a corpus where the two paths disagree; on any other corpus
+/// it would pass whether the migration filtered inside the search or after it,
+/// and would hold nothing. So this measures the disagreement first, and fails
+/// if a later change to the engine's ranking makes this corpus degenerate.
+///
+/// The mechanism is `Bm25Index::top_k`. Proximity and phrase rescoring reaches
+/// `k * rescore_depth_factor` hits, only ever lowers a score, and leaves
+/// everything below that window at its full score to compete against rescored
+/// ones - so which hits are inside the window depends on which chunks the scan
+/// admitted. Nothing else about the scoring moves: the inverse document
+/// frequency comes from the whole posting list, the mean length from the whole
+/// corpus, and the coverage share from the query's own terms, so each chunk's
+/// score is what it was either way.
+#[test]
+fn removing_a_tombstoned_chunk_after_the_search_changes_the_order() {
+    let root = scratch("ranking-precondition");
+    let index = build_ranking_source(&root.join("index"));
+    let store = index.store();
+    let dead: Vec<u32> = (0..store.n_chunks() as u32)
+        .filter(|chunk| {
+            store
+                .doc_of(*chunk)
+                .and_then(|document| store.documents.get(document as usize))
+                .is_some_and(|document| document.deleted)
+        })
+        .collect();
+    assert!(!dead.is_empty(), "the corpus holds tombstoned chunks");
+
+    let query = "gamma delta epsilon body264 alpha filler0";
+    let inside = legacy_ranking(&index, query, false, 10);
+    let afterwards: Vec<u32> = legacy_ranking(&index, query, true, 10)
+        .into_iter()
+        .filter(|chunk| !dead.contains(chunk))
+        .collect();
+    assert_ne!(
+        inside, afterwards,
+        "this corpus no longer exercises the rescore window, so the migration \
+         check built on it would hold nothing"
+    );
+}
+
+/// A corpus whose tombstones change the ranking migrates, and every check
+/// passes.
+///
+/// **The regression test for task-2067.** `filter.deleted` used to ask the two
+/// sides different questions - the legacy index with its filter applied during
+/// the search, the copy with no filter at all, its tombstoned rows dropped from
+/// the answer and a deeper draw taken to make up the shortfall. On this corpus
+/// that came back with one hit of ten in common. It passes now because the copy
+/// carries the flag on the search table's own `live` facet, which the module
+/// compiles into the filter the scan runs under, so both sides exclude the same
+/// rows at the same point in the same pipeline.
+#[test]
+fn a_tombstoned_corpus_migrates_and_ranks_identically() {
+    let root = scratch("ranking");
+    let source_dir = root.join("index");
+    let built = build_ranking_source(&source_dir);
+    let before = tree_digest(&source_dir);
+
+    let plan = Plan::new(&source_dir, root.join("corpus.db"));
+    let outcome = migrate(&plan).expect("the migration runs");
+
+    for check in &outcome.checks {
+        assert!(check.passed, "{} failed: {}", check.name, check.detail);
+    }
+    // Named rather than left to the loop above: a check that stopped being
+    // produced at all would otherwise pass this test silently, and these two
+    // are the ones it exists for.
+    for name in ["filter.deleted", "filter.unreachable"] {
+        assert!(
+            outcome.checks.iter().any(|check| check.name == name),
+            "{name} was not among the checks that ran"
+        );
+    }
+    assert_eq!(outcome.chunks, RANKING_DOCUMENTS as u64);
+    assert_eq!(outcome.documents, built.store().n_documents() as u64);
+    assert_eq!(
+        tree_digest(&source_dir),
+        before,
+        "the source directory was modified"
+    );
 }
