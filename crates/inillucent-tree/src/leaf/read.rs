@@ -618,6 +618,101 @@ impl<'p> LeafRef<'p> {
         }
         Ok(())
     }
+    /// Materialises the live rows whose key matches a probe.
+    ///
+    /// **The merge an index probe needs, over the span it asked for**
+    /// (task-2066 §4.3.4). A probe into a written leaf used to call
+    /// [`LeafRef::live_between`] with the probe as both bounds, which calls
+    /// [`LeafRef::live`] - every row of the leaf materialised, a shadow scan
+    /// per delta entry over the delta entries already merged, and a sort of
+    /// the result - and then threw away everything outside the probe. A leaf
+    /// `CREATE INDEX` built before the load holds its whole contents in the
+    /// delta area, so that ran once per probe over the whole leaf: a join over
+    /// such an index took 2,634 ms against 2.91 ms for the same index built
+    /// after the load.
+    ///
+    /// The rules are [`LeafRef::live`]'s, unchanged: a tombstoned sorted row
+    /// is not live; the newest delta entry for a key wins and newest is the
+    /// lowest index; a delta entry replaces the sorted row it shadows rather
+    /// than joining it. What changes is that the probe filters the delta area
+    /// *before* the shadow scans instead of after the merge, so the quadratic
+    /// part applies to the rows that match rather than to the leaf.
+    ///
+    /// @param probe - the key, one value per column it names
+    /// @param scan_cap - how far a run is walked before its end is bisected
+    pub fn live_matching(
+        &self,
+        probe: &[Datum<'_>],
+        scan_cap: usize,
+    ) -> DbResult<Vec<Vec<Datum<'p>>>> {
+        let (begin, end) = self.equal_run(probe, scan_cap)?;
+        let mut rows: Vec<Vec<Datum<'p>>> = Vec::new();
+        for row in begin..end {
+            if self.is_tombstoned(row)? {
+                continue;
+            }
+            let mut values = Vec::with_capacity(self.column_count);
+            for column in 0..self.column_count {
+                values.push(self.value(row, column)?);
+            }
+            rows.push(values);
+        }
+        let sorted_rows = rows.len();
+        for index in 0..self.delta_count {
+            let values = self.delta_row_values(index)?;
+            if self.compare_prefix(&values, probe) != std::cmp::Ordering::Equal {
+                continue;
+            }
+            let shadowed = rows
+                .get(sorted_rows..)
+                .unwrap_or(&[])
+                .iter()
+                .any(|held| self.compare_keys(held, &values) == std::cmp::Ordering::Equal);
+            if shadowed {
+                continue;
+            }
+            let position = rows
+                .get(..sorted_rows)
+                .unwrap_or(&[])
+                .iter()
+                .position(|held| self.compare_keys(held, &values) == std::cmp::Ordering::Equal);
+            match position.and_then(|at| rows.get_mut(at)) {
+                Some(slot) => *slot = values,
+                None => rows.push(values),
+            }
+        }
+        rows.sort_by(|left, right| self.compare_keys(left, right));
+        Ok(rows)
+    }
+
+    /// Whether any live row of this leaf sorts after a probe.
+    ///
+    /// **The question an equality walk has to ask before it follows the right
+    /// sibling** (task-2066 §4.3.4). The leaves of a tree are ordered, so a run
+    /// of rows equal to a probe can continue into the next leaf only if nothing
+    /// in this one already sorts past it. The sorted region answers that with
+    /// `begin >= rows`; the delta area has to be asked directly, and a leaf
+    /// `CREATE INDEX` built before the load has its whole contents there.
+    ///
+    /// The delta area is unsorted, so this is a scan of it. That is bounded by
+    /// the leaf's own delta count rather than by the tree, which is the whole
+    /// difference: the walk it replaces visited every leaf of the index.
+    ///
+    /// A tombstoned sorted row is not live and does not count; a delta row
+    /// shadowing a sorted one is the same key either way, so shadowing does not
+    /// change the answer and is not resolved here.
+    ///
+    /// @param probe - the key, one value per column it names
+    pub(crate) fn holds_a_key_past(&self, probe: &[Datum<'_>]) -> DbResult<bool> {
+        for index in 0..self.delta_count {
+            let values = self.delta_row_values(index)?;
+            if self.compare_prefix(&values, probe) == std::cmp::Ordering::Greater {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     /// Materialises the live rows inside a key range.
     ///
     /// The merged counterpart of the sorted region's `lower_bound`/`upper_bound`

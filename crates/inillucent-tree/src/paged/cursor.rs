@@ -392,7 +392,19 @@ impl PagedTree {
             // Either the key sorts after everything here - so the run, if there
             // is one, starts in the next leaf - or it is simply not present and
             // everything after it is greater.
-            return Ok(if begin >= rows {
+            //
+            // **"Everything here" includes the delta area** (task-2066 §4.3.4).
+            // `begin >= rows` asks the sorted region alone, and a leaf that
+            // `CREATE INDEX` built before the load has an empty sorted region
+            // and every row in the delta - so `0 >= 0` was true for every
+            // probe and the walk stepped to the right sibling, and the next,
+            // through every leaf of the index. A join over such an index took
+            // 2,634 ms against 2.91 ms for the same index built after the
+            // load.
+            //
+            // The leaves are ordered, so the run continues rightwards only
+            // when nothing in this leaf already sorts past the probe.
+            return Ok(if begin >= rows && !leaf.holds_a_key_past(key)? {
                 Some(leaf.right_sibling())
             } else {
                 None

@@ -518,8 +518,20 @@ impl Probing<'_, '_> {
             // computed is over the *sorted region* rather than over the
             // live rows. So it is merged, filtered by the same prefix
             // the visitor matched on, and pushed as values.
+            //
+            // **The probe's own span, not the whole leaf** (task-2066 §4.3.4).
+            // This used to ask `live_between` with the probe as both bounds,
+            // which materialises every row of the leaf, scans the delta area
+            // once per delta entry and sorts the result before the bounds
+            // throw most of it away. On an index built before its rows were
+            // loaded - the ordinary application order - every leaf is delta,
+            // and that ran per probe.
+            // The same cap `PagedTree::visit_equal` gives `equal_run`, so the
+            // span this merges and the span the visitor matched are found the
+            // same way.
+            const RUN_SCAN: usize = 8;
             let merged: Vec<Vec<Datum<'_>>> = if leaf.needs_materialising() {
-                leaf.live_between(Some(probe), true, Some(probe), true)?
+                leaf.live_matching(probe, RUN_SCAN)?
             } else {
                 Vec::new()
             };

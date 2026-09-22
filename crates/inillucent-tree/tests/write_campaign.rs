@@ -567,6 +567,8 @@ fn every_read_path_agrees_over_a_written_to_tree() {
         );
     }
 
+    the_two_merges_agree(pool, &tree);
+
     // A skip scan over the key column, whose distinct values are the keys.
     let mut distinct = Vec::new();
     tree.skip_scan(pool, 1, &mut |values| {
@@ -732,4 +734,61 @@ fn a_split_does_not_log_its_parents_image_twice() {
         "after a campaign that only splits",
     );
     tree.check(database.pool()).expect("integrity after splits");
+}
+
+/// Runs both merges over every written leaf and requires the same answer.
+///
+/// Split out of `every_read_path_agrees_over_a_written_to_tree`, which
+/// reached 156 lines against the 150 `policy.rs` allows. It is one question
+/// over a tree that case has already built.
+///
+/// @param pool - the buffer pool
+/// @param tree - the tree the campaign wrote
+fn the_two_merges_agree(pool: &inillucent_pool::Pool, tree: &PagedTree) {
+    // **The probe-restricted merge answers what the range merge answers**
+    // (task-2066 section 4.3.4). `live_matching` exists because
+    // `live_between` materialises the whole leaf and then throws away
+    // everything outside the bounds, which on an index built before its rows
+    // were loaded runs once per probe over every row. It is only worth having
+    // if it is the same answer, so both are run over every leaf of a tree that
+    // really holds tombstones and delta rows - `dirty` above asserts it does -
+    // for every key, present or not.
+    //
+    // **What this does not reach, stated rather than implied.** Both
+    // functions carry rules for a delta entry that shadows a sorted row with
+    // the same key, and deleting those rules from `live_matching` does not
+    // fail this test. `LeafRef::live`'s own comment says why: the write path
+    // removes the old entry rather than shadowing it, so the state exists
+    // only on a page recovery replayed rather than on one this process
+    // built, and this campaign builds its own pages. The rules are a belt on
+    // top of braces in both functions, and this checks the braces.
+    const RUN_SCAN: usize = 8;
+    for key in 0..1_000i64 {
+        let probe = [Datum::Int(key)];
+        let mut restricted: Vec<i64> = Vec::new();
+        let mut ranged: Vec<i64> = Vec::new();
+        tree.visit_leaves(pool, &mut |leaf| {
+            if !leaf.needs_materialising() {
+                return Ok(true);
+            }
+            for row in leaf.live_matching(&probe, RUN_SCAN)? {
+                restricted.push(row.first().and_then(Datum::as_int).unwrap_or(-1));
+            }
+            for row in leaf.live_between(Some(&probe), true, Some(&probe), true)? {
+                ranged.push(row.first().and_then(Datum::as_int).unwrap_or(-1));
+            }
+            Ok(true)
+        })
+        .expect("a walk of every leaf");
+        assert_eq!(
+            restricted, ranged,
+            "live_matching and live_between disagree about the key {key}"
+        );
+        // **The model is not consulted here and the loop above is where it
+        // belongs.** This walk skips a leaf that needs no materialising, so a
+        // key living in a packed leaf is absent from both sides of the
+        // comparison - which is right for the question being asked and wrong
+        // for "is this key in the tree". `tree.point` answers that, over
+        // every leaf, a few lines up.
+    }
 }
