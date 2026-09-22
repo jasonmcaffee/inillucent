@@ -1356,12 +1356,36 @@ pub const DEFAULT_BUSY_MILLIS: u64 = 5_000;
 /// while a torn page might still be resident there gets a cache hit rather
 /// than a checksum failure - see [`Database::open_before_recovery`].
 ///
+/// **The walk is bounded and remembers where it has been** (task-2066
+/// §4.1.11). It followed `right_of` with no visited set and no limit, pushing a
+/// page image per hop, so a free map page whose right link points at itself is
+/// an open that never returns and never stops allocating. That is reachable
+/// from an ordinary `inillucent --db <file> integrity-check` on a damaged file,
+/// which is the one command whose job is to survive one.
+///
+/// The leaf sibling walk in `paged/cursor.rs` already carries the bound and
+/// makes the same argument for it: a chain cannot be longer than the file has
+/// pages, whatever any statistic says. The visited set is here as well because
+/// a bound alone turns an infinite loop into a long one, and the page count of
+/// a large file is long enough to look like a hang.
+///
 /// @param pool - the buffer pool the file is open through
 /// @param head - the free map's first page, from the meta record
 fn read_free_map(pool: &Pool, head: PageId) -> DbResult<FreeMap> {
     let mut free = FreeMap::new(pool.page_size());
     let mut next = head;
+    let mut seen: std::collections::BTreeSet<PageId> = std::collections::BTreeSet::new();
     while !next.is_none() {
+        if !seen.insert(next) {
+            return Err(corrupt(
+                "a free map chain that does not terminate: it returns to a page it has already                  read",
+            ));
+        }
+        if seen.len() as u64 > pool.page_count().max(1) {
+            return Err(corrupt(
+                "a free map chain that does not terminate: it is longer than the file has pages",
+            ));
+        }
         let image = {
             let guard = pool.fetch(next)?;
             guard.bytes().to_vec()
@@ -1548,6 +1572,66 @@ fn discover_page_size(file: &dyn inillucent_vfs::VfsFile) -> Option<usize> {
 mod tests {
     use super::*;
     use inillucent_vfs::MemoryVfs;
+
+    /// A free map page whose right link points at itself is refused.
+    ///
+    /// **It used to never return** (task-2066 §4.1.11). `read_free_map`
+    /// followed `right_of` with no visited set and no bound, pushing a page
+    /// image per hop, so the open loops and allocates until somebody kills the
+    /// process. It is reached from `Database::open`, which means from every
+    /// command there is - including `integrity-check`, whose whole job is to
+    /// survive a damaged file and say what is wrong with it.
+    ///
+    /// The damage is the one a per-page checksum cannot object to on its own:
+    /// the page is well formed and its link names a page that exists. The page
+    /// is rewritten whole through the VFS, checksum included, the way
+    /// `a_torn_primary_falls_back_to_the_shadow` rewrites the meta page.
+    ///
+    /// The bound is asserted by the test finishing. A wall-clock assertion
+    /// would be a different test on every machine; a walk that does not
+    /// terminate fails this by never returning, which is what the runner's
+    /// timeout is for.
+    #[test]
+    fn a_free_map_chain_that_returns_to_itself_is_refused() {
+        const PAGE: usize = 512;
+        let vfs = MemoryVfs::new();
+        let path = DbPath::new("cycle.rdb");
+        let head = {
+            let mut database =
+                Database::create(&vfs, &path, Options::default().with_page_size(PAGE)).unwrap();
+            // A page freed, so the map has a chain to walk rather than being
+            // empty and skipped.
+            let page = database.allocate(1).unwrap();
+            database.release(page, 1).unwrap();
+            database.checkpoint().unwrap();
+            database.meta().free_map
+        };
+        assert!(!head.is_none(), "the fixture has no free map to damage");
+
+        let file = vfs.open(&path, OpenOptions::main_db()).unwrap();
+        let at = head.0.saturating_mul(PAGE as u64);
+        let mut image = vec![0u8; PAGE];
+        file.read_exact_at(at, &mut image).unwrap();
+        assert_eq!(
+            crate::page::right_of(&image).unwrap(),
+            PageId::NONE,
+            "the head of a one-page chain should point at nothing, so this is not the page              this test thinks it is"
+        );
+        crate::page::set_right(&mut image, head).unwrap();
+        crate::page::checksum_page(&mut image).unwrap();
+        file.write_all_at(at, &image).unwrap();
+        drop(file);
+
+        let Err(error) = Database::open(&vfs, &path, 16) else {
+            panic!("a free map chain pointing at itself was accepted");
+        };
+        let said =
+            format!("{} {}", error.message(), error.detail().unwrap_or_default()).to_lowercase();
+        assert!(
+            said.contains("free map") && said.contains("terminate"),
+            "the refusal does not name the free map chain: {said}"
+        );
+    }
 
     /// A fresh database has its two meta pages, a free map, and nothing else.
     ///

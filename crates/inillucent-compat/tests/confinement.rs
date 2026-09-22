@@ -295,6 +295,144 @@ fn a_path_inside_the_root_is_admitted() {
     );
 }
 
+/// `params-file` outside the root is refused, and its contents do not leak.
+///
+/// **This was a bare `read_to_string` with no check at all** (task-2066
+/// §4.1.5). `params-file` is a parameter of `query` and `exec`, both served
+/// over MCP, so a server started `--root <root> --readonly` answered a request
+/// naming `C:/Windows/Temp/probe.json` with that file's contents. Every other
+/// path into the file system - ATTACH, VACUUM INTO, backup, restore, import,
+/// export - was confined, which is what made one hole worth a case of its own
+/// rather than a symptom of a missing design.
+///
+/// The assertion is on the refusal *and* on the absence of the contents,
+/// because a check that only looked for the word "refused" would pass against
+/// a version that printed the file and then complained.
+#[test]
+fn a_params_file_outside_the_root_is_refused() {
+    let Some(program) = binary("inillucent") else {
+        return;
+    };
+    let base = area("params-file-outside");
+    let root = base.join("root");
+    let outside = base.join("outside");
+    let _ = std::fs::create_dir_all(&root);
+    let _ = std::fs::create_dir_all(&outside);
+    let secret = outside.join("probe.json");
+    let _ = std::fs::write(&secret, r#"["ARBITRARY-FILE-READ-FROM-OUTSIDE-THE-ROOT"]"#);
+    let named = secret.to_string_lossy().into_owned();
+
+    let refused = run(
+        &program,
+        &root,
+        &[
+            "--db",
+            "app.rdb",
+            "query",
+            "SELECT ?1 AS leaked",
+            "--params-file",
+            &named,
+        ],
+    );
+    let said = refused.text().to_lowercase();
+    assert!(
+        !refused.text().contains("ARBITRARY-FILE-READ"),
+        "the file's contents came back through params-file: {}",
+        refused.text()
+    );
+    assert!(
+        said.contains("confined") || said.contains("outside") || said.contains("root"),
+        "a params-file outside the root was not refused by name: {said}"
+    );
+}
+
+/// A `params-file` inside the root still works.
+///
+/// The falsifier for the case above: a confinement that refused every
+/// `params-file` would pass it and would have broken the parameter.
+#[test]
+fn a_params_file_inside_the_root_is_admitted() {
+    let Some(program) = binary("inillucent") else {
+        return;
+    };
+    let base = area("params-file-inside");
+    let root = base.join("root");
+    let _ = std::fs::create_dir_all(&root);
+    let _ = std::fs::write(root.join("values.json"), r#"["admitted"]"#);
+    // The database has to exist, or the run is refused for that instead and the
+    // case grades the wrong refusal.
+    assert!(
+        run(&program, &root, &["create", "app.rdb"]).ok,
+        "the fixture database was not created"
+    );
+    let ran = run(
+        &program,
+        &root,
+        &[
+            "--db",
+            "app.rdb",
+            "query",
+            "SELECT ?1 AS bound",
+            "--params-file",
+            "values.json",
+        ],
+    );
+    assert!(
+        ran.ok,
+        "a params-file inside the root was refused: {}",
+        ran.text()
+    );
+    assert!(
+        ran.text().contains("admitted"),
+        "the value in the admitted file was not bound: {}",
+        ran.text()
+    );
+}
+
+/// `--params-file -` is refused on a confined surface.
+///
+/// A confined surface has no standard input of its own, and over MCP reading it
+/// would make the server consume its own JSON-RPC stream - so the request after
+/// it would never be answered. `resolve_source` already refuses `-` for exactly
+/// this reason, and `params-file` did not.
+#[test]
+fn a_params_file_of_standard_input_is_refused_when_confined() {
+    let Some(program) = binary("inillucent") else {
+        return;
+    };
+    let base = area("params-file-stdin");
+    let root = base.join("root");
+    let _ = std::fs::create_dir_all(&root);
+    // The database has to exist, or the run is refused for that instead and the
+    // case grades the wrong refusal.
+    assert!(
+        run(&program, &root, &["create", "app.rdb"]).ok,
+        "the fixture database was not created"
+    );
+    let refused = run(
+        &program,
+        &root,
+        &[
+            "--db",
+            "app.rdb",
+            "query",
+            "SELECT ?1 AS bound",
+            "--params-file",
+            "-",
+        ],
+    );
+    let said = refused.text().to_lowercase();
+    assert!(
+        !refused.ok,
+        "'-' was accepted on a confined surface: {}",
+        refused.text()
+    );
+    assert!(
+        said.contains("standard input") || said.contains("confined"),
+        "'-' was refused without saying why: {said}"
+    );
+}
+
 /// `ATTACH DATABASE` with an absolute path outside the root is refused.
 ///
 /// The second of the two reproductions above. The SQL path never reached the

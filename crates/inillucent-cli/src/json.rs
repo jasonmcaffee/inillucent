@@ -232,6 +232,7 @@ pub fn parse(source: &str) -> Result<Json, String> {
     let mut reader = Reader {
         characters: &characters,
         at: 0,
+        depth: 0,
     };
     reader.skip_space();
     let value = reader.value()?;
@@ -248,7 +249,30 @@ struct Reader<'a> {
     characters: &'a [char],
     /// How far in the cursor sits.
     at: usize,
+    /// How many objects and arrays are open around the cursor.
+    ///
+    /// **Bounded, because this parser is recursive and its input is not
+    /// trusted** (task-2066 §4.1.6). `value` calls `object` and `array`, each
+    /// of which calls `value`, and nothing counted the nesting. A 240 KB line
+    /// of 120,000 `[` overflowed the stack at exit 127 - in the CLI through
+    /// `--params`, and in `inillucent-mcp` through a request line well inside
+    /// the 1 MiB `MAX_REQUEST_BYTES`, which bounds the line and not what is
+    /// inside it. With `panic = "abort"` a stack overflow is not catchable, so
+    /// the server died with one line on stderr and the requests after it were
+    /// never answered.
+    ///
+    /// Charging it here also stops the recursive `Drop` of a deep `Json`
+    /// overflowing on the way out, which a check made anywhere later would not.
+    depth: usize,
 }
+
+/// How deeply an object or array may nest.
+///
+/// A thousand, matching `MAX_DEPTH` in `inillucent-scalar/src/json/parse.rs`.
+/// The two parsers read the same grammar from different callers, and a document
+/// the SQL `json_valid()` refuses cleanly should not be one that ends this
+/// process.
+const MAX_DEPTH: usize = 1000;
 
 impl Reader<'_> {
     /// Returns the character under the cursor without consuming it.
@@ -286,6 +310,30 @@ impl Reader<'_> {
         }
     }
 
+    /// Charges one level of nesting, refusing past the bound.
+    ///
+    /// Paired with `ascend` around the *body* of `object` and `array` rather
+    /// than held as a guard, because a guard borrowing the reader would stop
+    /// the body reading from it at all. The pairing is in one place in each,
+    /// with the body in its own function, so no `?` can leave a level charged -
+    /// and a counter that leaks only on the error path is a parser that starts
+    /// refusing valid documents after it has seen an invalid one.
+    fn descend(&mut self) -> Result<(), String> {
+        if self.depth >= MAX_DEPTH {
+            return Err(format!(
+                "nested more than {MAX_DEPTH} deep at character {}",
+                self.at
+            ));
+        }
+        self.depth = self.depth.saturating_add(1);
+        Ok(())
+    }
+
+    /// Gives one level of nesting back.
+    fn ascend(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
+    }
+
     /// Reads one value.
     fn value(&mut self) -> Result<Json, String> {
         match self.peek() {
@@ -314,6 +362,14 @@ impl Reader<'_> {
 
     /// Reads an object.
     fn object(&mut self) -> Result<Json, String> {
+        self.descend()?;
+        let produced = self.object_body();
+        self.ascend();
+        produced
+    }
+
+    /// Reads an object's contents, with its level already charged.
+    fn object_body(&mut self) -> Result<Json, String> {
         self.expect('{')?;
         let mut pairs = Vec::new();
         self.skip_space();
@@ -346,6 +402,14 @@ impl Reader<'_> {
 
     /// Reads an array.
     fn array(&mut self) -> Result<Json, String> {
+        self.descend()?;
+        let produced = self.array_body();
+        self.ascend();
+        produced
+    }
+
+    /// Reads an array's contents, with its level already charged.
+    fn array_body(&mut self) -> Result<Json, String> {
         self.expect('[')?;
         let mut items = Vec::new();
         self.skip_space();

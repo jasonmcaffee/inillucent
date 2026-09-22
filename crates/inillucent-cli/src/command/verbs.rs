@@ -315,8 +315,9 @@ fn refuse_a_script(context: &mut Context, command: &str, sql: &str) -> Result<()
 /// that supplied two sets of values has made a mistake and guessing which one
 /// it meant is how the wrong values get bound.
 ///
+/// @param context - the surface, which says whether it is confined
 /// @param arguments - the command line as it was parsed
-fn bound_values(arguments: &Arguments) -> Result<Vec<Json>, Failed> {
+fn bound_values(context: &Context, arguments: &Arguments) -> Result<Vec<Json>, Failed> {
     let inline = arguments.values("params");
     let Some(named) = arguments.text("params-file") else {
         return Ok(inline);
@@ -327,15 +328,53 @@ fn bound_values(arguments: &Arguments) -> Result<Vec<Json>, Failed> {
         ));
     }
     let text = match named {
+        // **A confined surface has no standard input of its own** (task-2066
+        // §4.1.5), and over MCP reading it would make the server consume its
+        // own JSON-RPC stream. `resolve_source` already refuses `-` for the
+        // same reason and in the same words.
+        "-" if context.confined() => {
+            return Err(Failed::said(
+                Status::InvalidState,
+                "this surface is confined to a directory with --root, and '-' reads the \
+                 parameters from standard input, which such a surface does not have to itself. \
+                 Write them with 'params', or name a file inside the root.",
+            ))
+        }
         "-" => {
             let mut held = String::new();
             std::io::Read::read_to_string(&mut std::io::stdin(), &mut held)
                 .map_err(|error| Failed::said(Status::Io, format!("standard input: {error}")))?;
             held
         }
-        path => std::fs::read_to_string(path)
-            .map_err(|error| Failed::said(Status::Io, format!("{path}: {error}")))?,
+        // **This read any file on the machine** (task-2066 §4.1.5). It was a
+        // bare `read_to_string`, and `params-file` is a parameter of `query`
+        // and `exec`, both of which are served over MCP - so a server started
+        // `--root <root> --readonly` answered a request naming
+        // `C:/Windows/Temp/probe.json` with that file's contents. A file that
+        // is not a JSON array still leaked its opening bytes and its existence
+        // through the parse error. `confinement.rs` covered ATTACH, VACUUM
+        // INTO, backup, restore, import and export, and had no case for this.
+        path => {
+            let admitted = context.confine(path)?;
+            std::fs::read_to_string(&admitted)
+                .map_err(|error| Failed::said(Status::Io, format!("{path}: {error}")))?
+        }
     };
+    // **A size cap, because this is `read_to_string` of a whole file**
+    // (task-2066 §4.1.6). The JSON parser below is now depth bounded, which
+    // stops a deep document overflowing the stack; this stops a large one
+    // being read into memory before the parser ever sees it. A megabyte is the
+    // same bound `mcp.rs` puts on a request line.
+    if text.len() > MAX_PARAMS_FILE_BYTES {
+        return Err(Failed::said(
+            Status::TooBig,
+            format!(
+                "'params-file' is {} bytes, past the {MAX_PARAMS_FILE_BYTES} byte limit. \
+                 Parameters are a list of values, not a data file.",
+                text.len()
+            ),
+        ));
+    }
     let parsed = json::parse(text.trim())
         .map_err(|why| Failed::misuse(format!("'params-file' is not JSON: {why}")))?;
     match parsed {
@@ -344,10 +383,17 @@ fn bound_values(arguments: &Arguments) -> Result<Vec<Json>, Failed> {
     }
 }
 
+/// The most a `params-file` may hold.
+///
+/// One mebibyte, matching `MAX_REQUEST_BYTES` in `mcp.rs`: a list of bound
+/// values is small, and a file larger than this is a mistake rather than a
+/// parameter list.
+const MAX_PARAMS_FILE_BYTES: usize = 1024 * 1024;
+
 /// `query`: runs a statement that returns rows.
 pub fn query(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
     let sql = arguments.required_text("sql")?.to_string();
-    let params = bound_values(arguments)?;
+    let params = bound_values(context, arguments)?;
     let limit = limit_of(context, arguments)?;
     produce(context, "query", &sql, &params, limit)
 }
@@ -355,7 +401,7 @@ pub fn query(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Fa
 /// `exec`: runs one statement for its effect.
 pub fn exec(context: &mut Context, arguments: &Arguments) -> Result<Outcome, Failed> {
     let sql = arguments.required_text("sql")?.to_string();
-    let params = bound_values(arguments)?;
+    let params = bound_values(context, arguments)?;
     let before = context
         .shell()
         .connection()
@@ -1015,8 +1061,55 @@ pub fn checkpoint(context: &mut Context, _arguments: &Arguments) -> Result<Outco
 }
 
 /// `integrity-check`: reads every page and says whether it holds together.
+///
+/// **The exit code and the `ok` field follow the answer** (task-2066 §4.1.4).
+/// `PRAGMA integrity_check` reports damage as a *row of text*, the way SQLite
+/// does, and this verb listed the rows and stopped there - so
+/// `outcome.rs`'s unconditional `("ok", Json::Bool(true))` said a corrupt file
+/// was fine, at exit 0. Any health check written as
+/// `inillucent integrity-check && echo healthy` was told the wrong thing, and
+/// this is the one command whose entire purpose is to answer whether a database
+/// is sound. The pinned SQLite 3.53.4 exits 1 on the equivalent.
+///
+/// The pragma still returns rows. What changed is that the verb reads them.
 pub fn integrity_check(context: &mut Context, _arguments: &Arguments) -> Result<Outcome, Failed> {
-    listing(context, "integrity-check", "PRAGMA integrity_check")
+    let produced = listing(context, "integrity-check", "PRAGMA integrity_check")?;
+    if let Some(damage) = first_damage(&produced) {
+        return Err(Failed::said(Status::Corrupt, damage));
+    }
+    Ok(produced)
+}
+
+/// Returns what an integrity report says is wrong, or `None` when it says `ok`.
+///
+/// SQLite's contract is one row reading `ok` for a healthy file, and one row
+/// per problem otherwise. Anything that is not exactly `ok` is damage, so a
+/// future check that reports something this does not recognise is read as
+/// damage rather than as health - which is the direction a health check has to
+/// fail in.
+///
+/// @param produced - what the pragma answered
+fn first_damage(produced: &Outcome) -> Option<String> {
+    let said: Vec<String> = produced
+        .rows
+        .iter()
+        .flatten()
+        .map(|value| match value {
+            Json::Text(text) => text.clone(),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    if said.is_empty() {
+        return Some(
+            "PRAGMA integrity_check returned no rows at all, so this database's soundness is \
+             unknown rather than confirmed"
+                .to_string(),
+        );
+    }
+    if said.iter().all(|line| line.trim() == "ok") {
+        return None;
+    }
+    Some(said.join("; "))
 }
 
 /// `analyze`: gathers the statistics the planner reads.

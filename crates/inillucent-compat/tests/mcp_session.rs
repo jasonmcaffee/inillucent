@@ -356,6 +356,63 @@ fn a_malformed_line_does_not_end_the_session() {
     );
 }
 
+/// A deeply nested request is refused, and the next one is answered.
+///
+/// **One request used to kill the server** (task-2066 §4.1.6). The command
+/// line's JSON parser had `value` calling `object` and `array`, each of which
+/// calls `value`, with no depth counter - so a 240 KB line of 120,000 `[`
+/// overflowed the stack. That line is well inside the 1 MiB
+/// `MAX_REQUEST_BYTES`, which bounds the line and not the nesting inside it,
+/// and with `panic = "abort"` a stack overflow is not catchable: the process
+/// died at exit 127 with one line on stderr, and every request after it went
+/// unanswered.
+///
+/// The sibling parser in `inillucent-scalar` has had `MAX_DEPTH = 1000` since
+/// it was written, which is why `json_valid()` on the same document answers `0`
+/// cleanly while the CLI died.
+///
+/// The second half is the whole point. A case that only asserted the refusal
+/// would pass against a server that refused and then exited, which is what it
+/// did before.
+#[test]
+fn a_deeply_nested_request_is_refused_and_the_session_carries_on() {
+    let (Some(server), Some(binary)) = (program("inillucent-mcp"), program("inillucent")) else {
+        return;
+    };
+    let directory = area("deep-nesting");
+    let database = empty_database(&binary, &directory);
+    let mut session = Session::start_with(&server, &database, &[]);
+
+    // Deep enough to overflow the stack before the bound existed, and far
+    // inside the request size limit so that this grades the nesting rather
+    // than the length.
+    let levels = 60_000;
+    let mut deep = String::with_capacity(levels * 2 + 128);
+    deep.push_str(r#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"inillucent_query","arguments":{"sql":"SELECT 1","params":"#);
+    for _ in 0..levels {
+        deep.push('[');
+    }
+    for _ in 0..levels {
+        deep.push(']');
+    }
+    deep.push_str("}}}");
+    assert!(
+        deep.len() < 1_048_576,
+        "the fixture is past the request size limit, so it would grade that instead: {} bytes",
+        deep.len()
+    );
+    session.write_line(&deep);
+
+    let answered = session.call(
+        "tools/call",
+        r#"{"name":"inillucent_query","arguments":{"sql":"SELECT 42 AS answered"}}"#,
+    );
+    assert!(
+        answered.contains("42"),
+        "the server stopped answering after a deeply nested request:\n{answered}"
+    );
+}
+
 /// A request one byte past the limit is refused by name, and the connection
 /// ends.
 ///

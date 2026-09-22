@@ -1295,6 +1295,143 @@ fn integrity_check_answers_ok_on_a_healthy_file() {
     );
 }
 
+/// `integrity-check` exits non-zero and answers `"ok": false` on a corrupt file.
+///
+/// **The counterpart the suite never had** (task-2066 §4.1.4).
+/// `integrity_check_answers_ok_on_a_healthy_file` runs the verb on a file it
+/// has just written, so exit 0 had never been asserted to be *wrong*. The
+/// pragma reports damage as a row of text, the way SQLite does, and the verb
+/// listed the rows without reading them - so `outcome.rs`'s unconditional
+/// `("ok", Json::Bool(true))` told every caller a corrupt database was sound.
+/// Any health check written as `inillucent integrity-check && echo healthy` was
+/// told the wrong thing by the one command whose purpose is to answer that
+/// question.
+#[test]
+fn integrity_check_refuses_a_corrupt_file() {
+    let Some(binary) = program("inillucent") else {
+        return;
+    };
+    let database = populated(&binary, "integrity-check-corrupt");
+    // Enough rows that the damage lands in a page the check reads rather than
+    // in the header, which is refused at open and would grade a different path.
+    let path = database.to_string_lossy().to_string();
+    succeeded(
+        "exec",
+        &run(
+            &binary,
+            &[
+                "--db",
+                path.as_str(),
+                "exec",
+                "CREATE TABLE wide (id INTEGER PRIMARY KEY, body TEXT)",
+            ],
+        ),
+    );
+    succeeded(
+        "exec",
+        &run(
+            &binary,
+            &[
+                "--db",
+                path.as_str(),
+                "exec",
+                "WITH RECURSIVE s(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM s WHERE i<2000) \
+             INSERT INTO wide SELECT i, 'row-' || i || '-padding-padding' FROM s",
+            ],
+        ),
+    );
+    succeeded(
+        "checkpoint",
+        &run(&binary, &["--db", path.as_str(), "checkpoint"]),
+    );
+
+    let Ok(mut bytes) = std::fs::read(&database) else {
+        panic!("the fixture could not be read back");
+    };
+    let at = bytes.len() / 2;
+    let Some(byte) = bytes.get_mut(at) else {
+        panic!("the fixture is too small to damage");
+    };
+    *byte ^= 0xFF;
+    let _ = std::fs::write(&database, &bytes);
+
+    let ran = run(
+        &binary,
+        &["--db", path.as_str(), "integrity-check", "--output", "json"],
+    );
+    assert_ne!(
+        ran.code,
+        0,
+        "`integrity-check` exited 0 on a file with a flipped byte in it:\n{}",
+        ran.said()
+    );
+    assert!(
+        ran.stdout.contains("\"ok\": false") || ran.said().contains("corrupt"),
+        "`integrity-check` did not report the damage as a failure:\n{}",
+        ran.said()
+    );
+}
+
+/// A `params-file` nested past the parser's bound is refused, not fatal.
+///
+/// **This exited 127** (task-2066 §4.1.6): a stack overflow, which is a
+/// different thing from a refusal and which no caller can handle. `--params`
+/// from argv reaches the same parser, and so does every MCP request line.
+#[test]
+fn a_deeply_nested_params_file_is_refused_rather_than_fatal() {
+    let Some(binary) = program("inillucent") else {
+        return;
+    };
+    let directory = area("deep-params-file");
+    let database = directory.join("app.rdb");
+    let path = database.to_string_lossy().to_string();
+    succeeded(
+        "create",
+        &run(&binary, &["create", path.as_str(), "--output", "json"]),
+    );
+    let deep = directory.join("deep.json");
+    let levels = 120_000;
+    let mut document = String::with_capacity(levels * 2);
+    for _ in 0..levels {
+        document.push('[');
+    }
+    for _ in 0..levels {
+        document.push(']');
+    }
+    let _ = std::fs::write(&deep, &document);
+
+    let ran = run(
+        &binary,
+        &[
+            "--db",
+            path.as_str(),
+            "query",
+            "SELECT 1",
+            "--params-file",
+            &deep.to_string_lossy(),
+        ],
+    );
+    assert_ne!(
+        ran.code,
+        0,
+        "a document nested {levels} deep was accepted:\n{}",
+        ran.said()
+    );
+    // 127 is what a stack overflow leaves behind, and 101 is a panic. Either
+    // means the process died rather than refused, which is the defect.
+    assert!(
+        ran.code == 1 || ran.code == 2,
+        "a deeply nested params-file ended the process with {} rather than being refused:\n{}",
+        ran.code,
+        ran.said()
+    );
+    assert!(
+        ran.said().contains("deep"),
+        "the refusal does not say what was wrong:\n{}",
+        ran.said()
+    );
+}
+
 /// `analyze` writes statistics the planner can read back.
 #[test]
 fn analyze_writes_statistics_the_planner_reads() {
