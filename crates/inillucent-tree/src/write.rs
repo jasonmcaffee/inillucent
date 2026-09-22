@@ -2233,6 +2233,81 @@ impl PagedTree {
         Ok(landed)
     }
 
+    /// Returns the parent's contents and this leaf's place in them, when the
+    /// two leaves are adjacent children of one parent.
+    ///
+    /// `None` when there is no parent, when the leaf is not among its
+    /// children, or when the right sibling is under a *different* parent -
+    /// merging across that boundary rewrites two interior pages and the
+    /// separator between them, and a half-empty leaf is cheaper than the code
+    /// that would.
+    ///
+    /// Split out of [`PagedTree::merge_if_small`], which reached 160 lines
+    /// against the 157 it is recorded at. It is one question and it reads one
+    /// page.
+    ///
+    /// @param database - the file and its pool
+    /// @param path - the descent that reached the leaf, parent last
+    /// @param page - the leaf the delete emptied
+    /// @param right - its right sibling
+    ///
+    /// @returns the separators, the children, the level, the parent's page and
+    ///   the leaf's position among the children
+    #[allow(clippy::type_complexity)]
+    fn adjacent_under_one_parent(
+        &mut self,
+        database: &mut Database,
+        path: &[PageId],
+        page: PageId,
+        right: PageId,
+    ) -> DbResult<Option<(Vec<Vec<u8>>, Vec<PageId>, u16, PageId, usize)>> {
+        let Some(parent) = path.last().copied() else {
+            return Ok(None);
+        };
+        let (separators, children, level) = self.read_interior(database.pool(), parent)?;
+        let Some(position) = children.iter().position(|held| *held == page) else {
+            return Ok(None);
+        };
+        if children.get(position.saturating_add(1)).copied() != Some(right) {
+            return Ok(None);
+        }
+        Ok(Some((separators, children, level, parent, position)))
+    }
+
+    /// Whether the right sibling is too full to take anything, asked from its
+    /// header.
+    ///
+    /// **The second cheap question, and it is the one that was costing**
+    /// (task-2066 §4.3.7). The check above stops a merge attempt on a leaf
+    /// that has not emptied; nothing stopped the attempt being made again
+    /// on every later delete, because `underflows` stays true once it is
+    /// true. So a table deleted in key order materialised both leaves,
+    /// borrowed them into a second vector, packed them to measure and threw
+    /// it away, once per row - work that grows with the rows per leaf. It is
+    /// why the delete was linear at a 4,096 byte page and not at 32,768:
+    /// 8,000 rows took 252 ms at the first and 1,301 at the second, with the
+    /// page count and the cache hits per row flat in both.
+    ///
+    /// The merged image has to hold every live row of the right sibling, so
+    /// a sibling that already fills more than `COMPACT_FILL` of a page
+    /// cannot take anything else. `a_bulk_built_leaf_compacts_rather_than_
+    /// splitting` states the same fact from the other side: a leaf packed at
+    /// `BULK_FILL` can never be repacked into `COMPACT_FILL` of a page.
+    ///
+    /// Asked only of a sibling with no tombstones and no delta rows, because
+    /// then its bytes are exactly its live payload. With either of those the
+    /// bytes overstate what a repack would need and the question is left to
+    /// the pack.
+    ///
+    /// @param database - the file and its pool
+    /// @param right - the sibling a merge would fold into
+    fn sibling_is_already_full(&self, database: &Database, right: PageId) -> DbResult<bool> {
+        let ceiling = (self.page_size() as f64 * COMPACT_FILL) as usize;
+        let guard = database.pool().fetch(right)?;
+        let leaf = LeafRef::parse(&guard)?;
+        Ok(!leaf.has_writes() && leaf.used_bytes(self.page_size()) > ceiling)
+    }
+
     /// Merges a leaf with its right sibling when the two fit in one page.
     ///
     /// @param database - the file
@@ -2267,22 +2342,17 @@ impl PagedTree {
             let leaf = LeafRef::parse(&guard)?;
             (leaf.right_sibling(), underflows(&leaf)?)
         };
-        if !underflowed || right.is_none() {
+        // The second question is `sibling_is_already_full`, on the same line as
+        // the first because both answer "do not attempt this" and neither
+        // materialises anything.
+        if !underflowed || right.is_none() || self.sibling_is_already_full(database, right)? {
             return Ok(());
         }
-        let Some(parent) = path.last().copied() else {
+        let Some((mut separators, mut children, level, parent, position)) =
+            self.adjacent_under_one_parent(database, path, page, right)?
+        else {
             return Ok(());
         };
-        let (mut separators, mut children, level) = self.read_interior(database.pool(), parent)?;
-        let Some(position) = children.iter().position(|held| *held == page) else {
-            return Ok(());
-        };
-        if children.get(position.saturating_add(1)).copied() != Some(right) {
-            // The right sibling is under another parent. Merging across that
-            // boundary rewrites two interior pages and the separator between
-            // them, and a half-empty leaf is cheaper than the code that would.
-            return Ok(());
-        }
 
         let (mut rows, mut carried) = self.rows_to_repack(database.pool(), page)?;
         let (right_rows, right_carried) = self.rows_to_repack(database.pool(), right)?;

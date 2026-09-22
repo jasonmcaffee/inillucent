@@ -685,6 +685,22 @@ impl<'p> LeafRef<'p> {
         Ok(rows)
     }
 
+    /// How many bytes of the page this leaf occupies.
+    ///
+    /// The page minus its free gap. The slots and the delta area grow up from
+    /// the directory and the heap grows *down* from the end of the page - see
+    /// `LeafBuilder`, where `heap_end` starts at the page size and decreases -
+    /// so everything outside `delta_start..heap_start` is in use.
+    ///
+    /// Two integers already parsed, which is the point: it lets a caller ask
+    /// how full a leaf is without materialising it (task-2066 §4.3.7).
+    ///
+    /// @param page_size - the page size the leaf was built at
+    pub fn used_bytes(&self, page_size: usize) -> usize {
+        let gap = self.heap_start.saturating_sub(self.delta_start);
+        page_size.saturating_sub(gap)
+    }
+
     /// Whether any live row of this leaf sorts after a probe.
     ///
     /// **The question an equality walk has to ask before it follows the right
