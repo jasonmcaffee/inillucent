@@ -133,9 +133,24 @@ function same(array $want, $got): bool
         return (string) $want['text'] === (string) $got;
     }
     if (array_key_exists('blob', $want)) {
-        $hex = bin2hex(pack('C*', ...array_map('intval', $want['blob'])));
+        // **The envelope, not the old x'..' string** (task-2066 section
+        // 4.1.15). A blob used to come back as text, so bytes could be written
+        // and not read - and this comparison agreed with it, which is why the
+        // round-trip case passed throughout. Both sides are compared as
+        // hexadecimal, which is exact whichever way either spells a byte array.
+        $hex = is_array($want['blob'])
+            ? bin2hex(pack('C*', ...array_map('intval', $want['blob'])))
+            : strtolower((string) $want['blob']);
+        if (is_array($got) && array_key_exists('blob', $got) && is_string($got['blob'])) {
+            return strtolower($got['blob']) === $hex;
+        }
+        // The wrapper's own `query` decodes the envelope to a binary string, so
+        // a step read through it arrives as bytes rather than as an array.
+        if (is_string($got)) {
+            return bin2hex($got) === $hex;
+        }
 
-        return $got === "x'" . $hex . "'";
+        return false;
     }
 
     return false;

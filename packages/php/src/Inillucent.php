@@ -197,9 +197,36 @@ final class Inillucent
         $this->refuseFailure($result);
         $names = array_map(static fn (array $column): string => $column['name'], $result['columns']);
         return array_map(
-            static fn (array $row): array => array_combine($names, $row),
+            static fn (array $row): array => array_combine(
+                $names,
+                array_map(static fn (mixed $value): mixed => self::decodeValue($value), $row)
+            ),
             $result['rows']
         );
+    }
+
+    /**
+     * Turns one cell of a result into the PHP value it stands for.
+     *
+     * **Bytes went in and could not come back** (task-2066 section 4.1.15). A
+     * blob left as the string `x'00ff'`, typed `text` in the column list, so
+     * nothing told it apart from a TEXT column holding that text - while the
+     * encoder has always sent bytes as `{"blob": "<hex>"}`. The two halves of
+     * the same grammar now agree, and a byte string read out of one query binds
+     * straight into the next.
+     *
+     * Anything that is not an envelope is passed through untouched.
+     *
+     * @param mixed $value one cell, as --output json rendered it
+     * @return mixed
+     */
+    private static function decodeValue(mixed $value): mixed
+    {
+        if (is_array($value) && array_keys($value) === ['blob'] && is_string($value['blob'])) {
+            $bytes = hex2bin($value['blob']);
+            return $bytes === false ? $value : $bytes;
+        }
+        return $value;
     }
 
     /**

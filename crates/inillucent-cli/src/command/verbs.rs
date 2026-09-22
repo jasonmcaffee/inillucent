@@ -22,9 +22,17 @@ use crate::json::{self, Json};
 
 /// Turns one engine value into the JSON a result carries.
 ///
-/// A blob becomes its hexadecimal spelling with an `x''` wrapper, because that
-/// is a form the engine will read back as the same bytes, and because JSON has
-/// no byte string. It is text in the document and says so in the column type.
+/// **A blob is `{"blob": "<hex>"}`, which is the grammar it goes in as**
+/// (task-2066 §4.1.15). It used to be the string `"x'00ff'"`, typed `text` in
+/// the column list while `typeof` said `blob` - so nothing distinguished it
+/// from a TEXT column that literally holds that text, and bytes went in through
+/// `--params` and could not come back. That affects Node, Go, PHP and the
+/// subprocess half of Python: four of the six bindings advertised.
+///
+/// The envelope matches `literal_of`'s input grammar exactly, so a value read
+/// out of one result can be bound into the next statement with no conversion -
+/// which is what "read back" has to mean for a wire format. `class_of` reports
+/// an object as `blob`, so the column type follows without a second rule.
 ///
 /// @param value - the cell the engine produced
 pub fn value_to_json(value: &Value<'static>) -> Json {
@@ -34,12 +42,11 @@ pub fn value_to_json(value: &Value<'static>) -> Json {
         Value::Real(number) => Json::Real(*number),
         Value::Text(text) => json::text(String::from_utf8_lossy(text.raw()).into_owned()),
         Value::Blob(bytes) => {
-            let mut rendered = String::from("x'");
+            let mut hex = String::with_capacity(bytes.raw().len().saturating_mul(2));
             for byte in bytes.raw() {
-                rendered.push_str(&format!("{byte:02x}"));
+                hex.push_str(&format!("{byte:02x}"));
             }
-            rendered.push('\'');
-            json::text(rendered)
+            json::object(vec![("blob", json::text(hex))])
         }
     }
 }

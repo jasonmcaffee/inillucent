@@ -53,6 +53,35 @@ $ python bindings/python/run_conformance.py
 | `conformance/suite.json` | the driver's behaviour, as data. |
 | `bindings/python/` | the reference binding, in the standard library only. |
 
+## Which bindings link the C ABI, and which spawn the command line
+
+Two ways in, and the difference is not a detail: it decides what a value looks
+like on the way back, and every defect task-2066 §4.1.14 and §4.1.15 found was
+on one side of this line.
+
+| binding | how it reaches the engine |
+|---|---|
+| Rust | the driver directly. |
+| C | the C ABI. |
+| Python | **both.** `Database` links the C ABI; the module-level `run` and `query` spawn the command line. |
+| Node, Go, PHP | they spawn `inillucent --output json` and read the report. |
+
+**What follows from spawning.** A binding on the C ABI gets typed values: a blob
+is bytes, an integer is an `i64`. A binding that spawns gets a JSON document,
+and JSON has no byte string and no integer wider than a double. So every
+question about types on those three - and about the subprocess half of Python -
+is a question about what `--output json` renders and what their own JSON parser
+does with it.
+
+- **Bytes are `{"blob": "<hex>"}`**, in both directions, which is what makes them
+  read back at all. Until task-2068 they went in as that and came out as the
+  string `x'00ff'` typed `text`, so bytes could be written and not read by four
+  of the six bindings.
+- **An integer past 2^53 is where the three differ from each other.** PHP's
+  `json_decode` and Python's `json.loads` carry it exactly; JavaScript's
+  `JSON.parse` and Go's decoder without `UseNumber()` do not. That is a property
+  of those parsers rather than of this engine, and it is task-2066 §4.1.14.
+
 `inillucent-driver` depends on `inillucent-engine` and nothing else in the
 workspace, and `inillucent-driver-capi` depends on `inillucent-driver` and
 nothing else. Those two edges are the point of the whole arrangement: the

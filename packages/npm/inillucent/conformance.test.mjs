@@ -102,7 +102,18 @@ function hexOf(bytes) {
  */
 function same(want, got) {
   if (want !== null && typeof want === 'object' && 'blob' in want) {
-    return got === `x'${want.blob}'`;
+    // **The envelope, not the old `x'..'` string** (task-2066 §4.1.15). A blob
+    // used to come back as text, so bytes could be written and not read, and
+    // this comparison agreed with it - which is why the round-trip case passed
+    // throughout. Both sides are compared as hexadecimal, which is exact and
+    // does not depend on how either side spells a byte array.
+    // The suite writes a blob as an array of bytes; a step that already wrote
+    // it as hexadecimal is taken as it stands, so both spellings grade.
+    const wanted = Array.isArray(want.blob) ? hexOf(want.blob) : String(want.blob).toLowerCase();
+    if (got !== null && typeof got === 'object' && typeof got.blob === 'string') {
+      return got.blob.toLowerCase() === wanted;
+    }
+    return false;
   }
   if (want === null || got === null) return want === got;
   if (typeof want === 'number' && Number.isInteger(want) && Math.abs(want) > Number.MAX_SAFE_INTEGER) {

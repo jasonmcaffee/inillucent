@@ -193,5 +193,32 @@ export async function query(sql, options = {}) {
     throw error;
   }
   const names = result.columns.map((column) => column.name);
-  return result.rows.map((row) => Object.fromEntries(names.map((name, at) => [name, row[at]])));
+  return result.rows.map((row) =>
+    Object.fromEntries(names.map((name, at) => [name, decodeValue(row[at])])),
+  );
+}
+
+/**
+ * Turns one cell of a result into the JavaScript value it stands for.
+ *
+ * **Bytes went in and could not come back** (task-2066 section 4.1.15). A blob
+ * left as the string `"x'00ff'"`, typed `text` in the column list, so nothing
+ * told it apart from a TEXT column holding that text - while `encodeParam`
+ * above has always sent bytes as `{blob: "<hex>"}`. The two halves of the same
+ * grammar now agree, and a `Uint8Array` read out of one query can be bound
+ * straight into the next.
+ *
+ * Anything that is not an envelope is passed through, so a caller's own object
+ * column - which arrives as text - is untouched.
+ *
+ * @param value - one cell, as `--output json` rendered it
+ */
+function decodeValue(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return value;
+  }
+  if (typeof value.blob === 'string') {
+    return Uint8Array.from(Buffer.from(value.blob, 'hex'));
+  }
+  return value;
 }

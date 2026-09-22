@@ -188,7 +188,37 @@ def query(
     if not result.get("ok"):
         raise _refusal(result)
     names = [column["name"] for column in result["columns"]]
-    return [dict(zip(names, row)) for row in result["rows"]]
+    return [
+        dict(zip(names, (_decode_value(value) for value in row)))
+        for row in result["rows"]
+    ]
+
+
+def _decode_value(value: Any) -> Any:
+    """Return one cell of a result as the Python value it stands for.
+
+    **Bytes went in and could not come back** (task-2066 §4.1.15). A blob left
+    the command line as the string ``x'00ff'``, typed ``text`` in the column
+    list, so nothing told it apart from a TEXT column holding that text - while
+    the parameter encoder has always sent bytes as ``{"blob": "<hex>"}``. The
+    two halves of the same grammar now agree, and ``bytes`` read out of one
+    query bind straight into the next.
+
+    This is the subprocess half of the package. :class:`Database` goes through
+    the C ABI and has always had the type.
+
+    Anything that is not an envelope is returned unchanged.
+
+    :param value: one cell, as ``--output json`` rendered it
+    """
+    if isinstance(value, dict) and list(value) == ["blob"]:
+        held = value["blob"]
+        if isinstance(held, str):
+            try:
+                return bytes.fromhex(held)
+            except ValueError:
+                return value
+    return value
 
 
 def _refusal(result: Mapping[str, Any]) -> DriverError:

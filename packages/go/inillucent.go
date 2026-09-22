@@ -123,12 +123,76 @@ func (result Result) Maps() []map[string]any {
 		held := make(map[string]any, len(result.Columns))
 		for at, column := range result.Columns {
 			if at < len(row) {
-				held[column.Name] = row[at]
+				held[column.Name] = DecodeValue(row[at])
 			}
 		}
 		out = append(out, held)
 	}
 	return out
+}
+
+// DecodeValue turns one cell of a result into the Go value it stands for.
+//
+// Bytes went in and could not come back (task-2066 section 4.1.15). A blob left
+// as the string `x'00ff'`, typed `text` in the column list, so nothing told it
+// apart from a TEXT column holding that text - while the encoder has always
+// sent bytes as {"blob": "<hex>"}. The two halves of the same grammar now
+// agree, and a []byte read out of one query binds straight into the next.
+//
+// Anything that is not an envelope is returned unchanged, so a caller's own
+// object column is untouched.
+func DecodeValue(value any) any {
+	held, ok := value.(map[string]any)
+	if !ok || len(held) != 1 {
+		return value
+	}
+	hex, ok := held["blob"].(string)
+	if !ok {
+		return value
+	}
+	bytes, err := hexDecode(hex)
+	if err != nil {
+		return value
+	}
+	return bytes
+}
+
+// hexDecode reads a lower-case hexadecimal string as bytes.
+//
+// Written here rather than taken from encoding/hex so this package keeps the
+// standard library surface it already imports; the grammar is two hexadecimal
+// digits a byte and nothing else.
+func hexDecode(text string) ([]byte, error) {
+	if len(text)%2 != 0 {
+		return nil, fmt.Errorf("inillucent: %q is not a whole number of bytes", text)
+	}
+	out := make([]byte, 0, len(text)/2)
+	for at := 0; at < len(text); at += 2 {
+		var value int
+		for _, letter := range text[at : at+2] {
+			digit, err := hexDigit(letter)
+			if err != nil {
+				return nil, err
+			}
+			value = value*16 + digit
+		}
+		out = append(out, byte(value))
+	}
+	return out, nil
+}
+
+// hexDigit returns the value of one hexadecimal digit.
+func hexDigit(letter rune) (int, error) {
+	switch {
+	case letter >= '0' && letter <= '9':
+		return int(letter - '0'), nil
+	case letter >= 'a' && letter <= 'f':
+		return int(letter-'a') + 10, nil
+	case letter >= 'A' && letter <= 'F':
+		return int(letter-'A') + 10, nil
+	default:
+		return 0, fmt.Errorf("inillucent: %q is not a hexadecimal digit", letter)
+	}
 }
 
 // Error is a refusal the engine or the command line reported.

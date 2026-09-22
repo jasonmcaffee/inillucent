@@ -22,6 +22,7 @@
 package inillucent_test
 
 import (
+	"strings"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -139,21 +140,31 @@ func bound(described map[string]any) any {
 	return nil
 }
 
-// hexOf renders a JSON byte array as lowercase hex.
+// hexOf renders a byte array as lowercase hex, whichever shape it arrives in.
+//
+// The suite writes a blob as a JSON array of numbers, which is []any after the
+// decoder; a step that wrote it as hexadecimal is a string; and Maps() hands
+// back []byte once the envelope has been decoded. All three are the same bytes
+// and all three have to compare (task-2066 section 4.1.15).
 func hexOf(value any) string {
-	bytes, ok := value.([]any)
-	if !ok {
+	switch held := value.(type) {
+	case []any:
+		out := make([]byte, 0, len(held))
+		for _, one := range held {
+			number, ok := one.(float64)
+			if !ok {
+				continue
+			}
+			out = append(out, byte(int(number)))
+		}
+		return hex.EncodeToString(out)
+	case []byte:
+		return hex.EncodeToString(held)
+	case string:
+		return strings.ToLower(held)
+	default:
 		return ""
 	}
-	out := make([]byte, 0, len(bytes))
-	for _, one := range bytes {
-		number, ok := one.(float64)
-		if !ok {
-			continue
-		}
-		out = append(out, byte(int(number)))
-	}
-	return hex.EncodeToString(out)
 }
 
 // same compares an expected value to what the command line answered.
@@ -180,7 +191,23 @@ func same(want map[string]any, got any) bool {
 		return value == got
 	}
 	if value, ok := want["blob"]; ok {
-		return got == fmt.Sprintf("x'%s'", hexOf(value))
+		// The envelope, not the old x'..' string (task-2066 section 4.1.15). A
+		// blob used to come back as text, so bytes could be written and not
+		// read - and this comparison agreed with it, which is why the
+		// round-trip case passed throughout. Both sides are compared as
+		// hexadecimal, which is exact.
+		wanted := strings.ToLower(hexOf(value))
+		if held, ok := got.(map[string]any); ok {
+			if hex, ok := held["blob"].(string); ok {
+				return strings.ToLower(hex) == wanted
+			}
+		}
+		// Maps() decodes the envelope to []byte, so a step read through the
+		// wrapper arrives as bytes rather than as a map.
+		if bytes, ok := got.([]byte); ok {
+			return strings.ToLower(hexOf(bytes)) == wanted
+		}
+		return false
 	}
 	return false
 }

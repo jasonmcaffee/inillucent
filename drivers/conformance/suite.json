@@ -1567,6 +1567,102 @@
           "status": "unsupported"
         }
       ]
+    },
+    {
+      "name": "bytes_read_back_are_bytes",
+      "group": "values",
+      "about": "Bytes go in and the same bytes come back, proven by binding what came back into a second statement rather than by comparing it with itself. task-2066 section 4.1.15: `--output json` rendered a blob as the string \"x'00ff'\" typed `text`, so Node, Go, PHP and the subprocess half of Python could write bytes and not read them. The existing round-trip case did not catch it because both sides of its comparison came back as the same wrong string.",
+      "setup": [
+        "CREATE TABLE bytes_back (k TEXT PRIMARY KEY, value BLOB)"
+      ],
+      "steps": [
+        {
+          "sql": "INSERT INTO bytes_back VALUES ('first', ?1)",
+          "params": [
+            {
+              "blob": [
+                0,
+                255,
+                127,
+                128,
+                1
+              ]
+            }
+          ],
+          "affected": 1
+        },
+        {
+          "sql": "SELECT value FROM bytes_back WHERE k = 'first'",
+          "rows": [
+            [
+              {
+                "blob": [
+                  0,
+                  255,
+                  127,
+                  128,
+                  1
+                ]
+              }
+            ]
+          ]
+        },
+        {
+          "sql": "SELECT typeof(value) FROM bytes_back WHERE k = 'first'",
+          "rows": [
+            [
+              {
+                "text": "blob"
+              }
+            ]
+          ]
+        },
+        {
+          "sql": "SELECT length(value) FROM bytes_back WHERE k = 'first'",
+          "rows": [
+            [
+              {
+                "int": 5
+              }
+            ]
+          ]
+        },
+        {
+          "sql": "SELECT hex(value) FROM bytes_back WHERE k = 'first'",
+          "rows": [
+            [
+              {
+                "text": "00FF7F8001"
+              }
+            ]
+          ]
+        },
+        {
+          "sql": "INSERT INTO bytes_back VALUES ('second', ?1)",
+          "params": [
+            {
+              "blob": [
+                0,
+                255,
+                127,
+                128,
+                1
+              ]
+            }
+          ],
+          "affected": 1
+        },
+        {
+          "sql": "SELECT count(*) FROM bytes_back a JOIN bytes_back b ON a.value = b.value WHERE a.k = 'first' AND b.k = 'second'",
+          "rows": [
+            [
+              {
+                "int": 1
+              }
+            ]
+          ]
+        }
+      ]
     }
   ],
   "groups": {
