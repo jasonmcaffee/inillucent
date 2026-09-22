@@ -134,6 +134,29 @@ impl ImportedDatabase {
             // one.
             return Ok(Some(Vec::new()));
         };
+        // **A TEXT probe written as a JSON array is converted here, while its
+        // type is still known** (task-2066 §4.1.2). `probe_module` wraps the
+        // bytes with `Value::owned_blob`, so everything below this line sees a
+        // blob whatever arrived - and the index reader then walked the text's
+        // raw bytes four at a time. `'[1,0,0]'` is seven bytes, so it was a one
+        // dimension vector and was refused against a three dimension index.
+        //
+        // That is the spelling `docs/vector-search.md` documents, and it failed
+        // only once the index existed: with no index the same statement is
+        // answered by `inillucent-scalar`, which has always parsed it. So the
+        // ordinary way to meet this was to develop against a small table, add
+        // the index for speed, and watch every vector query start failing.
+        //
+        // Text that is not a JSON array of numbers is passed through as it
+        // stands, because a blob that arrived typed as TEXT is a real case.
+        let converted = match probe {
+            inillucent_tree::datum::Datum::Text(text) => {
+                inillucent_value::vector::vector_from_json(text)
+                    .map(|numbers| inillucent_value::vector::encode(&numbers))
+            }
+            _ => None,
+        };
+        let bytes = converted.as_deref().unwrap_or(bytes);
         let candidates = self.probe_module(connected, bytes, depth)?;
         if candidates.is_empty() {
             // **An index that holds nothing is not an answer of nothing.** A

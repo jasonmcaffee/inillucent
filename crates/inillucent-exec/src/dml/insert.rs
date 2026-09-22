@@ -684,27 +684,14 @@ fn vector_from_json(value: Option<&OwnedDatum>, width: usize) -> Option<OwnedDat
 
 /// Returns the numbers of a JSON array, or `None` for anything else.
 ///
-/// A hand parser rather than the JSON reader, because the whole grammar here is
-/// `[` a comma separated list of numbers `]`: anything with a string, an
-/// object, a nested array or a name in it is not a vector, and answering `None`
-/// for it is what leaves the ordinary refusal in place.
+/// **One parser, in `inillucent-value`** (task-2066 §4.1.2). This is the
+/// width checked caller, so it is the one that wants `Some(vec![])` for `[]`
+/// rather than `None`: zero numbers against a column declaring three is a
+/// refusal that names the width, where "not an array" is a different message.
 ///
 /// @param text - the value's bytes
 fn json_numbers(text: &[u8]) -> Option<Vec<f64>> {
-    let held = std::str::from_utf8(text).ok()?.trim();
-    let inner = held.strip_prefix('[')?.strip_suffix(']')?.trim();
-    if inner.is_empty() {
-        return Some(Vec::new());
-    }
-    let mut numbers = Vec::new();
-    for part in inner.split(',') {
-        let part = part.trim();
-        if part.is_empty() {
-            return None;
-        }
-        numbers.push(part.parse::<f64>().ok()?);
-    }
-    Some(numbers)
+    inillucent_value::vector::numbers_from_json(text)
 }
 
 /// Refuses a value a `VECTOR(N)` column does not admit.

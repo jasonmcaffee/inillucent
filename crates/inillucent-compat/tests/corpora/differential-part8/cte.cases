@@ -14,3 +14,20 @@ cte-010	WITH x AS MATERIALIZED (SELECT 1 AS a) SELECT * FROM x
 cte-011	WITH x AS NOT MATERIALIZED (SELECT 1 AS a) SELECT * FROM x
 cte-012	CREATE TABLE t(a); INSERT INTO t VALUES(1),(2); WITH t AS (SELECT 9 AS a) SELECT * FROM t
 cte-013	WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n ORDER BY i LIMIT 3) SELECT * FROM n
+# task-2066 section 4.1.1: an outer ORDER BY ... LIMIT over a recursive CTE used to apply the
+# limit to the generation and then sort what it had kept, so cte-014 answered 1 against 5 and
+# cte-015 answered 2,1 against 5,4. cte-017 is the ordinary hierarchy walk for the deepest node,
+# which is the shape an application writes and which returned the root at exit 0.
+#
+# cte-018 to cte-020 were correct throughout and are here because they are why the suite never
+# saw it: a WHERE, a DISTINCT or a GROUP BY between the CTE and the sort blocks the pushdown, so
+# they are exactly what a fix in the wrong place would break.
+cte-014	WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<5) SELECT n FROM r ORDER BY n DESC LIMIT 1
+cte-015	WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<5) SELECT n FROM r ORDER BY n DESC LIMIT 2
+cte-016	WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<5) SELECT n FROM r ORDER BY n DESC LIMIT 1 OFFSET 1
+cte-017	CREATE TABLE node(id INTEGER, parent INTEGER); INSERT INTO node VALUES(1,NULL),(2,1),(3,2),(4,3); WITH RECURSIVE w(id,depth) AS (SELECT id,0 FROM node WHERE parent IS NULL UNION ALL SELECT n.id,w.depth+1 FROM node n JOIN w ON n.parent=w.id) SELECT id,depth FROM w ORDER BY depth DESC LIMIT 1
+cte-018	WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<5) SELECT n FROM r WHERE n>1 ORDER BY n DESC LIMIT 1
+cte-019	WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<5) SELECT DISTINCT n FROM r ORDER BY n DESC LIMIT 1
+cte-020	WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<5) SELECT n,count(*) FROM r GROUP BY n ORDER BY n DESC LIMIT 1
+cte-021	WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<5) SELECT n FROM r ORDER BY n ASC LIMIT 2
+cte-022	CREATE TABLE node(id INTEGER, parent INTEGER); INSERT INTO node VALUES(1,NULL),(2,1),(3,2),(4,3); WITH RECURSIVE w(id,depth) AS (SELECT id,0 FROM node WHERE parent IS NULL UNION ALL SELECT n.id,w.depth+1 FROM node n JOIN w ON n.parent=w.id) SELECT id,depth FROM w ORDER BY depth DESC, id ASC LIMIT 3

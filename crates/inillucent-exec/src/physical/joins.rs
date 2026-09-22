@@ -90,7 +90,6 @@ pub(crate) fn iterative_candidates(
     index: &[u8],
     wanted: &Datum<'_>,
     depth: usize,
-    limit: Option<usize>,
 ) -> DbResult<Vec<i64>> {
     let CandidateProbe {
         plan,
@@ -113,10 +112,23 @@ pub(crate) fn iterative_candidates(
     if predicates.is_empty() {
         return Ok(keys);
     }
-    // The rows the statement is asking for. `LIMIT` is what a vector path is
-    // chosen by, so this is nearly always `depth` - but a plan that arrived
-    // here with a smaller chain limit should stop at the smaller number.
-    let target = limit.unwrap_or(depth).min(depth).max(1);
+    // The rows the statement is asking for, which is `depth`.
+    //
+    // **This used to take a chain limit as well, and that value could never
+    // arrive** (task-2069). It was read only here, in the branch reached when
+    // there is a residual or a constant filter - and `source_limit_of` returns
+    // `None` for exactly those, so the expression
+    // `limit.unwrap_or(depth).min(depth).max(1)` could only ever produce
+    // `depth`. Its comment described a plan with a smaller chain limit, and the
+    // planner cannot produce one: `vector_probe` requires the statement's
+    // `LIMIT` to be a literal integer and refuses the path under `DISTINCT`,
+    // `GROUP BY`, an aggregate, an `OFFSET` or a compound, so `depth` *is* the
+    // `LIMIT` on every plan that gets here.
+    //
+    // Removed rather than left taking `None` forever, because a parameter that
+    // is always `None` is a claim the code makes about a case that does not
+    // exist, and the next reader has to prove it again.
+    let target = depth.max(1);
     let Some(pool) = catalog.pool_for(stage.root) else {
         return Ok(keys);
     };

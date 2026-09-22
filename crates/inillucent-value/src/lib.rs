@@ -49,6 +49,7 @@ pub mod encoding;
 pub mod numeric;
 pub mod record;
 pub mod value;
+pub mod vector;
 
 pub use affinity::Affinity;
 pub use collation::{Collation, CollationRegistry};

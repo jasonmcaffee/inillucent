@@ -1110,6 +1110,162 @@ fn checkpoint_reports_what_it_moved() {
     );
 }
 
+/// Returns a database holding the four table names that broke `dump`.
+///
+/// A reserved word as a column, a reserved word as a table, an empty column
+/// name, and one ordinary table so that a total wipe cannot pass. Built by the
+/// binary under test, like every other fixture here.
+///
+/// @param binary - the built `inillucent`
+/// @param case - what to name this case's directory after
+fn awkwardly_named(binary: &Path, case: &str) -> (PathBuf, PathBuf) {
+    let directory = area(case);
+    let source = directory.join("source.rdb");
+    let path = source.to_string_lossy().to_string();
+    let mut steps: Vec<Vec<&str>> = vec![vec!["create", path.as_str(), "--output", "json"]];
+    for statement in [
+        r#"CREATE TABLE d1 ("select" TEXT, b INT)"#,
+        "INSERT INTO d1 VALUES('x',1)",
+        r#"CREATE TABLE d2 ("order" TEXT)"#,
+        "INSERT INTO d2 VALUES('y')",
+        r#"CREATE TABLE d4 ("" TEXT, b INT)"#,
+        "INSERT INTO d4 VALUES('w',5)",
+        r#"CREATE TABLE "select"(x TEXT)"#,
+        r#"INSERT INTO "select" VALUES('v')"#,
+        "CREATE TABLE plain(a INT)",
+        "INSERT INTO plain VALUES(7)",
+    ] {
+        steps.push(vec!["--db", path.as_str(), "exec", statement]);
+    }
+    for arguments in &steps {
+        let ran = run(binary, arguments);
+        assert_eq!(
+            ran.code,
+            0,
+            "building the fixture failed at {arguments:?}:\n{}",
+            ran.said()
+        );
+    }
+    (directory, source)
+}
+
+/// Returns the row count of each fixture table, in one list.
+///
+/// One list rather than an assertion each, so a failure names every table that
+/// lost rows instead of stopping at the first.
+///
+/// @param binary - the built `inillucent`
+/// @param path - the database to count in
+fn fixture_counts(binary: &Path, path: &str) -> Vec<String> {
+    [
+        "SELECT count(*) FROM d1",
+        "SELECT count(*) FROM d2",
+        "SELECT count(*) FROM d4",
+        r#"SELECT count(*) FROM "select""#,
+        "SELECT count(*) FROM plain",
+    ]
+    .iter()
+    .map(|sql| {
+        let ran = run(binary, &["--db", path, "query", sql, "--output", "json"]);
+        assert_eq!(
+            ran.code,
+            0,
+            "`{sql}` on {path} exited {}:\n{}",
+            ran.code,
+            ran.said()
+        );
+        rows(&ran.stdout)
+            .into_iter()
+            .flatten()
+            .collect::<Vec<String>>()
+            .join("")
+    })
+    .collect()
+}
+
+/// Returns both columns of the table whose first column has no name.
+///
+/// @param binary - the built `inillucent`
+/// @param path - the database to read
+fn empty_named_column(binary: &Path, path: &str) -> Vec<Vec<String>> {
+    let ran = run(
+        binary,
+        &[
+            "--db",
+            path,
+            "query",
+            r#"SELECT "", b FROM d4"#,
+            "--output",
+            "json",
+        ],
+    );
+    assert_eq!(ran.code, 0, "reading d4 on {path}:\n{}", ran.said());
+    rows(&ran.stdout)
+}
+
+/// A dump round trip keeps every row of a table whose names are awkward.
+///
+/// **`dump` lost every row of a table with a reserved word in it, at exit 0**
+/// (task-2066 §4.1.3). The row-emitting half built its `SELECT` with the same
+/// quoting rule the *emitted* text uses - "a bare word needs nothing" - so a
+/// column named `"select"` produced `SELECT select,b FROM d1`, which does not
+/// parse. `shell.collect` answered `Err`, the function returned, and the dump
+/// carried the table's `CREATE` and none of its rows. A column named `""` was
+/// worse: it was dropped from the projection, so a two column row dumped as
+/// `INSERT INTO d4 VALUES(5)` and replayed into the wrong column.
+///
+/// Losing rows at exit 0 is the worst shape a backup tool can have, which is
+/// why this grades the *replay* rather than the dump: a test that read the dump
+/// text would have to know what it should say, and one that checked the exit
+/// code would have passed throughout.
+#[test]
+fn a_dump_round_trip_keeps_every_row_of_an_awkwardly_named_table() {
+    let Some(binary) = program("inillucent") else {
+        return;
+    };
+    let (directory, source) = awkwardly_named(&binary, "dump-round-trip");
+    let source_path = source.to_string_lossy().to_string();
+    let dumped = run(&binary, &["--db", source_path.as_str(), "dump"]);
+    succeeded("dump", &dumped);
+
+    let target = directory.join("target.rdb");
+    let target_path = target.to_string_lossy().to_string();
+    succeeded(
+        "create",
+        &run(
+            &binary,
+            &["create", target_path.as_str(), "--output", "json"],
+        ),
+    );
+    succeeded(
+        "run",
+        &run(
+            &binary,
+            &["--db", target_path.as_str(), "run", dumped.stdout.as_str()],
+        ),
+    );
+
+    let before = fixture_counts(&binary, &source_path);
+    let after = fixture_counts(&binary, &target_path);
+    assert!(
+        before.iter().all(|count| count == "1"),
+        "the fixture itself is wrong: {before:?}"
+    );
+    assert_eq!(
+        after, before,
+        "the replayed database holds different row counts:\nbefore {before:?}\nafter  {after:?}\n\nthe dump was:\n{}",
+        dumped.stdout
+    );
+    // The empty-named column keeps its own value rather than the second
+    // column's, which is the arity defect and which a row count cannot see.
+    assert_eq!(
+        empty_named_column(&binary, &target_path),
+        empty_named_column(&binary, &source_path),
+        "the empty-named column did not survive the round trip; the dump was:\n{}",
+        dumped.stdout
+    );
+}
+
 /// `integrity-check` answers `ok` on a database it just wrote.
 #[test]
 fn integrity_check_answers_ok_on_a_healthy_file() {

@@ -42,7 +42,7 @@ pub fn dump(shell: &mut Shell, pattern: Option<&str>) {
         if sql.starts_with("CREATE VIRTUAL TABLE") {
             continue;
         }
-        write_rows(shell, name);
+        write_rows(shell, name, sql);
     }
     for sql in other_objects(shell, pattern) {
         shell.say(&format!("{sql};"));
@@ -213,6 +213,14 @@ fn is_statistics_table(name: &str) -> bool {
 /// Empty when the pragma cannot be read, which the caller turns back into
 /// `SELECT *` rather than dumping nothing.
 ///
+/// **A column whose name is empty is a column** (task-2066 §4.1.3). This used
+/// to drop it, so `CREATE TABLE d4 ("" TEXT, b INT)` holding one row dumped as
+/// `INSERT INTO d4 VALUES(5)` - one value for two columns. Replaying that puts
+/// `5` in the first column and leaves the second null, which is worse than
+/// losing the row: the restored database holds different data and nothing says
+/// so. `""` is a legal column name and the pinned SQLite 3.53.4 dumps both of
+/// its values.
+///
 /// @param shell - the shell to ask
 /// @param table - the table's name
 fn stored_columns(shell: &mut Shell, table: &str) -> Vec<String> {
@@ -221,15 +229,32 @@ fn stored_columns(shell: &mut Shell, table: &str) -> Vec<String> {
     else {
         return Vec::new();
     };
-    rows.iter()
-        .map(|row| plain(row.first()))
-        .filter(|name| !name.is_empty())
-        .collect()
+    rows.iter().map(|row| plain(row.first())).collect()
 }
 
 /// Writes every row of one table as an `INSERT`.
-fn write_rows(shell: &mut Shell, table: &str) {
-    let quoted = quote_identifier(table);
+///
+/// **The projection quotes every name; the emitted `INSERT` quotes none**
+/// (task-2066 §4.1.3). The two are different jobs and used to share one rule.
+/// `quote_identifier` exists so the *emitted* text reads the way the reference
+/// writes it - a bare word is left bare - and applying that to the `SELECT`
+/// this reads the rows with produced `SELECT select,b FROM d1` for
+/// `CREATE TABLE d1 ("select" TEXT, b INT)`. That is a syntax error,
+/// `shell.collect` answered `Err`, and this returned having written no `INSERT`
+/// at all: the table's `CREATE` in the dump, its rows gone, exit 0. A column
+/// named `"order"` and a table named `"select"` did the same.
+///
+/// Losing rows at exit 0 is the worst shape a backup tool can have, so the
+/// failure is no longer silent either: a table whose rows cannot be read
+/// complains, which sets the shell's failure flag and makes the verb exit
+/// non-zero.
+///
+/// @param shell - where the lines go
+/// @param table - the table to write
+/// @param sql - the `CREATE` text the schema holds, which decides how the
+///   emitted name is spelled
+fn write_rows(shell: &mut Shell, table: &str, sql: &str) {
+    let quoted = emitted_name(table, sql);
     let columns = stored_columns(shell, table);
     // A plain `VALUES` list with no column names, which is what the reference
     // writes: an unnamed insert maps positionally onto the columns that are not
@@ -239,11 +264,17 @@ fn write_rows(shell: &mut Shell, table: &str) {
     } else {
         columns
             .iter()
-            .map(|name| quote_identifier(name))
+            .map(|name| always_quoted(name))
             .collect::<Vec<String>>()
             .join(",")
     };
-    let Ok((_, rows)) = shell.collect(&format!("SELECT {projection} FROM {quoted}")) else {
+    // The table name is quoted here too, for the same reason and independently
+    // of how it is emitted: `SELECT * FROM select` does not parse either.
+    let reading = format!("SELECT {projection} FROM {}", always_quoted(table));
+    let Ok((_, rows)) = shell.collect(&reading) else {
+        shell.complain(&format!(
+            "-- the rows of {table} could not be read, so none are in this dump"
+        ));
         return;
     };
     for row in rows {
@@ -255,11 +286,65 @@ fn write_rows(shell: &mut Shell, table: &str) {
     }
 }
 
+/// Returns the table name as the emitted `INSERT` spells it.
+///
+/// **The reference's rule is "however the `CREATE` spelled it", not "quote it
+/// when it needs quoting".** Asked the same schema, the pinned SQLite 3.53.4
+/// writes `INSERT INTO d1 VALUES('x',1)` for a table whose column is named
+/// `"select"`, and `INSERT INTO "select" VALUES('v')` for a table *named*
+/// `select` - because that `CREATE` carried the quotes. `quote_identifier`
+/// alone answers the first correctly and the second wrongly, since `select` is
+/// a bare word by its rule. `interchange.rs` compares this output with the
+/// reference's byte for byte, so the difference is a failure rather than a
+/// preference.
+///
+/// This is the same signal `say_definition` reads to decide whether to write
+/// `IF NOT EXISTS`, so the `CREATE` and the `INSERT` agree by construction.
+///
+/// @param table - the table's name
+/// @param sql - the `CREATE` text the schema holds
+fn emitted_name(table: &str, sql: &str) -> String {
+    /// What `CREATE TABLE ` occupies.
+    const CREATE_TABLE: usize = 13;
+
+    let quoted_in_the_schema = sql.len() > CREATE_TABLE
+        && sql
+            .get(..CREATE_TABLE)
+            .is_some_and(|head| head.eq_ignore_ascii_case("CREATE TABLE "))
+        && sql
+            .get(CREATE_TABLE..)
+            .is_some_and(|rest| rest.starts_with(['"', '\'']));
+    if quoted_in_the_schema {
+        return always_quoted(table);
+    }
+    quote_identifier(table)
+}
+
+/// Returns an identifier quoted, always.
+///
+/// For SQL this module *runs* rather than SQL it writes out. Nothing reads it,
+/// so there is no reason to leave a name bare and every reason not to: a
+/// reserved word is a bare word by `quote_identifier`'s rule, and leaving it
+/// bare is what made a dump lose every row of a table with a column named
+/// `"select"` (task-2066 §4.1.3).
+///
+/// @param name - the identifier
+fn always_quoted(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
 /// Returns an identifier, quoted only when it has to be.
 ///
-/// A dump is read by a person as often as by a program, and quoting every name
-/// makes it noisier than the schema it came from. The rule is the usual one: a
-/// name that is a bare word needs nothing.
+/// For the SQL this module **writes out**. A dump is read by a person as often
+/// as by a program, and quoting every name makes it noisier than the schema it
+/// came from. The rule is the usual one: a name that is a bare word needs
+/// nothing - and it is the reference's rule, asked of the pinned SQLite 3.53.4
+/// on the same schema, which emits `INSERT INTO d1 VALUES('x',1)` for a table
+/// with a column named `"select"` and quotes the table name only where the
+/// `CREATE` quoted it. `interchange.rs` compares the two byte for byte, so this
+/// is a contract rather than a preference.
+///
+/// @param name - the identifier
 fn quote_identifier(name: &str) -> String {
     let plain = !name.is_empty()
         && name
@@ -285,5 +370,54 @@ mod tests {
         assert_eq!(quote_identifier("has space"), "\"has space\"");
         assert_eq!(quote_identifier("1leading"), "\"1leading\"");
         assert_eq!(quote_identifier("a\"b"), "\"a\"\"b\"");
+    }
+
+    /// The name a `SELECT` is built from is always quoted.
+    ///
+    /// **Including a reserved word, which is the whole point** (task-2066
+    /// §4.1.3): `quote_identifier` leaves `select` bare because it is a bare
+    /// word, and `SELECT select,b FROM d1` does not parse - so a table with a
+    /// column of that name dumped with no rows and exit 0.
+    #[test]
+    fn a_name_a_query_is_built_from_is_always_quoted() {
+        assert_eq!(always_quoted("t"), "\"t\"");
+        assert_eq!(always_quoted("select"), "\"select\"");
+        assert_eq!(always_quoted("order"), "\"order\"");
+        assert_eq!(always_quoted(""), "\"\"");
+        assert_eq!(always_quoted("has space"), "\"has space\"");
+        assert_eq!(always_quoted("a\"b"), "\"a\"\"b\"");
+    }
+
+    /// The emitted name follows the schema's spelling, not a quoting rule.
+    ///
+    /// The reference's own behaviour, measured against the pinned SQLite
+    /// 3.53.4: a bare `CREATE TABLE d1` gives `INSERT INTO d1`, and a quoted
+    /// `CREATE TABLE "select"` gives `INSERT INTO "select"` - even though
+    /// `select` is a bare word.
+    #[test]
+    fn the_emitted_name_is_spelled_the_way_the_schema_spells_it() {
+        assert_eq!(
+            emitted_name("d1", "CREATE TABLE d1 (\"select\" TEXT, b INT)"),
+            "d1"
+        );
+        assert_eq!(
+            emitted_name("select", "CREATE TABLE \"select\"(x TEXT)"),
+            "\"select\""
+        );
+        assert_eq!(
+            emitted_name("has space", "CREATE TABLE \"has space\"(\"a b\" TEXT)"),
+            "\"has space\""
+        );
+    }
+
+    /// And the two answer differently for exactly the case that mattered.
+    ///
+    /// A test that pinned only the values above would still pass if somebody
+    /// made `always_quoted` an alias of `quote_identifier`, which is the one
+    /// change that would bring the defect back.
+    #[test]
+    fn the_two_quoting_rules_differ_on_a_reserved_word() {
+        assert_ne!(always_quoted("select"), quote_identifier("select"));
+        assert_eq!(quote_identifier("select"), "select");
     }
 }

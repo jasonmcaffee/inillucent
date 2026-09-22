@@ -808,16 +808,56 @@ fn already_sorted(
 /// It was the bare `LIMIT`, which made `WHERE id <= 5 ORDER BY id DESC LIMIT 2
 /// OFFSET 1` answer one row instead of two.
 ///
+/// **A sorter is the same argument and was missing from it** (task-2066
+/// §4.1.1). A `LIMIT` may be pushed below an `ORDER BY` only into an operator
+/// that preserves the order the `ORDER BY` names, and this asked every other
+/// question but that one. What it cost was the commonest recursive query there
+/// is:
+///
+/// ```sql
+/// WITH RECURSIVE r(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM r WHERE n<5)
+/// SELECT n FROM r ORDER BY n DESC LIMIT 1;
+/// ```
+///
+/// answering `1` where SQLite answers `5`, because the bound reached
+/// `run_recursive`, which reads it as "stop generating" - so one row was
+/// generated and then sorted. `LIMIT 2` answered `2, 1` against `5, 4`. The
+/// suite never saw it because any operator between the CTE and the sort blocks
+/// the pushdown, so the `WHERE`, `DISTINCT` and `GROUP BY` forms are all
+/// correct, and the one query with no such operator is the hierarchy walk for
+/// the deepest node, which returned the root at exit 0.
+///
+/// **This applies to every source the bound reaches, with no exception, and
+/// neither of the other two consumers loses anything** (task-2069):
+///
+/// - A **reverse scan** keeps its bound on every plan the planner can produce.
+///   `already_sorted` answers `!plan.needs_sort` for one, and `plan.reverse` is
+///   only set when `ordering_provided` returned `Some(true)`, which is exactly
+///   when `needs_sort` is false. `ordering_provided` also refuses a
+///   non-natural NULL placement, so the `default_nulls` gate cannot fail for a
+///   reverse plan either.
+/// - The **HNSW probe** is unaffected, because its bound is the `depth` the
+///   planner copied from the `LIMIT` when it chose the probe, not this. The
+///   chain limit only ever reached `iterative_candidates` on plans with no
+///   residual, and those return before reading it - which is why the parameter
+///   is gone from that function rather than being passed `None` forever.
+///
 /// @param plan - the planner's output
 /// @param prepared - the structural choices `prepare` made
 /// @param limit - the statement's own constant `LIMIT`
+/// @param sorted_already - whether the rows already arrive in the `ORDER BY`'s
+///   order, so that no sorter will be put above the source
+/// @param has_sort_keys - whether the statement names an `ORDER BY` at all
 fn source_limit_of(
     plan: &PhysicalPlan,
     prepared: &Prepared,
     limit: Option<usize>,
+    sorted_already: bool,
+    has_sort_keys: bool,
 ) -> Option<usize> {
     limit.filter(|_| {
-        plan.residuals.iter().all(Option::is_none)
+        (!has_sort_keys || sorted_already)
+            && plan.residuals.iter().all(Option::is_none)
             && plan.constant_filter.is_none()
             && prepared.stages.len() == 1
             && !plan.select.distinct
@@ -1171,7 +1211,18 @@ pub(crate) fn build_upper(
         head: chain,
         operators,
         names,
-        limit: source_limit_of(plan, prepared, limit).map(|limit| limit.saturating_add(up.offset)),
+        // `up.sorted_already` is the same answer `push_sort` acted on, read
+        // rather than derived a second time - the two used to be computed from
+        // different information about the same question, which is what let a
+        // bound reach a source that a sorter was about to sit on top of.
+        limit: source_limit_of(
+            plan,
+            prepared,
+            limit,
+            up.sorted_already,
+            !up.outputs.sort_keys.is_empty(),
+        )
+        .map(|limit| limit.saturating_add(up.offset)),
         correlations,
     })
 }
@@ -1654,7 +1705,7 @@ fn build_source<'t>(
                 stage,
                 probe_over: &probe_over,
             };
-            let keys = iterative_candidates(&scan, index, &wanted.borrow(), *depth, limit)?;
+            let keys = iterative_candidates(&scan, index, &wanted.borrow(), *depth)?;
             Ok(Source::Vector(probe_over, keys))
         }
         AccessKind::SeekUnion => {

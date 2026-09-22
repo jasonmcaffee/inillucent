@@ -1274,3 +1274,85 @@ fn an_unknown_function_in_a_declaration_is_refused_at_create_table() {
         )
         .expect("a declaration naming functions the engine has");
 }
+
+/// The spelling `docs/vector-search.md` documents answers the same rows with
+/// the index as without it.
+///
+/// **This is the case the whole vector suite was missing** (task-2066 §4.1.2).
+/// Every other test of the indexed probe builds its query vector through
+/// `literal()`, which emits `x'…'`, so eight tests exercised the probe and none
+/// of them exercised the documented spelling. The probe read the TEXT literal's
+/// raw bytes four at a time - `'[1,0,0]'` is seven bytes, so a one dimension
+/// vector - and refused it against a three dimension index. Without an index
+/// the same statement is answered by `inillucent-scalar`, which has always
+/// parsed it, so the failure appeared the moment somebody added the index for
+/// speed.
+///
+/// Asserted as "the same rows either way" rather than as a fixed list, because
+/// what is under test is that the index does not change the answer.
+#[test]
+fn the_documented_vector_literal_answers_the_same_rows_with_and_without_the_index() {
+    let held = database("documented_literal");
+    let connection = held.session();
+    connection
+        .execute_batch("CREATE TABLE p(id INTEGER PRIMARY KEY, v VECTOR(3))")
+        .expect("the table");
+    connection
+        .execute_batch("INSERT INTO p VALUES(1,'[1,0,0]'),(2,'[0,1,0]'),(3,'[0,0,1]')")
+        .expect("three rows");
+
+    // Each is the same vector written a different way, and the engine must not
+    // be able to tell them apart. The decimal form is here because it is a
+    // different wrong answer from the same cause: eleven bytes read four at a
+    // time is two dimensions, not one.
+    let spellings = [
+        "'[1,0,0]'",
+        "'[1.0,0.0,0]'",
+        "'[ 1 , 0 , 0 ]'",
+        "x'0000803F0000000000000000'",
+    ];
+    let query =
+        |probe: &str| format!("SELECT id FROM p ORDER BY vector_distance_cos(v,{probe}) LIMIT 2");
+
+    let mut without_the_index = Vec::new();
+    for probe in spellings {
+        without_the_index.push(integers(&connection, &query(probe)));
+    }
+
+    connection
+        .execute_batch("CREATE INDEX pv ON p USING inillucent_hnsw (v)")
+        .expect("the index");
+
+    for (probe, expected) in spellings.iter().zip(&without_the_index) {
+        let found = integers(&connection, &query(probe));
+        assert_eq!(
+            &found, expected,
+            "{probe} answered {found:?} with the index and {expected:?} without it"
+        );
+    }
+
+    // And the plan still says the index is being used, so this cannot pass by
+    // the probe having quietly stopped being chosen.
+    let plan = connection
+        .query(
+            "EXPLAIN QUERY PLAN SELECT id FROM p ORDER BY vector_distance_cos(v,'[1,0,0]') LIMIT 2",
+        )
+        .expect("a plan")
+        .iter()
+        .flat_map(|row| {
+            row.iter().filter_map(|value| match value {
+                OwnedDatum::Text(bytes) => Some(String::from_utf8_lossy(bytes).into_owned()),
+                _ => None,
+            })
+        })
+        .collect::<Vec<String>>()
+        .join(" ");
+    assert!(
+        plan.contains("VECTOR INDEX"),
+        "the documented spelling stopped using the index: {plan}"
+    );
+    assert!(
+        plan.contains("k=2"),
+        "the probe's depth is no longer the statement's LIMIT: {plan}"
+    );
+}

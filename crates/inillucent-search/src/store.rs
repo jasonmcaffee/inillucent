@@ -1031,7 +1031,21 @@ pub fn vector_of(value: &Value<'static>, dims: usize) -> DbResult<Vec<f32>> {
     let vector = match value {
         Value::Null => return Ok(Vec::new()),
         Value::Blob(blob) => decode_vector(blob.raw()),
-        Value::Text(text) => decode_vector(text.raw()),
+        // **TEXT is tried as a JSON array first** (task-2066 §4.1.2). It used
+        // to go straight to `decode_vector`, which walks `chunks_exact(4)` - so
+        // `'[1,0,0]'` is seven bytes and was read as a one dimension vector,
+        // then refused against a three dimension index. That is the spelling
+        // `docs/vector-search.md` documents, and it failed only once the index
+        // existed: without one the statement is answered by a different parser
+        // in `inillucent-scalar`, so an application developed against a small
+        // table, added the index for speed, and every vector query started
+        // failing.
+        //
+        // The fallback to the raw bytes stays, because a blob that arrived
+        // typed as TEXT is a real case and `vector_from_json` answers `None`
+        // for anything that is not an array of numbers.
+        Value::Text(text) => inillucent_value::vector::vector_from_json(text.raw())
+            .unwrap_or_else(|| decode_vector(text.raw())),
         _ => {
             return Err(failure(
                 "inillucent_search: a vector is a blob of little-endian 32-bit floats",

@@ -208,10 +208,19 @@ node, which returns the root at exit 0. The engine already refuses a `LIMIT` wri
 recursive CTE as unsupported, so an outer `LIMIT` becoming an inner one is a transformation it
 otherwise declines.
 
-**Fix.** Find the rule in `crates/inillucent-sql/src/plan.rs` that lowers
-`SELECT … FROM <recursive cte> ORDER BY … LIMIT n` and make the limit apply to the sort's output.
-The correct general rule: a `LIMIT` may be pushed below an `ORDER BY` only into an operator that
-preserves the order the `ORDER BY` names, and a recursive generation preserves no order.
+**Fix.** The rule is `source_limit_of` in `crates/inillucent-exec/src/physical/chain.rs`. It
+decides the source's bound without asking whether a sorter will be put above it; `build_upper`
+computes that answer (`sorted_already`) two lines later. Compute `already_sorted` first and add
+`sort_keys.is_empty() || sorted_already` to the condition. The correct general rule: a `LIMIT` may
+be pushed below an `ORDER BY` only into an operator that preserves the order the `ORDER BY` names,
+and a recursive generation preserves no order.
+
+This applies to every source the bound reaches. A reverse scan keeps its bound, because it is only
+chosen when the planner already decided the walk answers the `ORDER BY`. The HNSW probe is
+unaffected, because its bound is the `depth` the planner copied from the `LIMIT` when it chose the
+probe; the chain limit only reached `iterative_candidates` on plans that have no residual, and
+those never read it. (Corrected by task-2069 after task-2068 found that the rule as first written
+pointed at the wrong file and left the vector path ambiguous.)
 
 **Test.** The two statements above plus the hierarchy walk, in `differential_part8.rs`'s corpus
 under a new `cte` category, and in `b14-defects.sql`. A generated arm follows in §4.4.4.

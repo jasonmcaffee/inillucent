@@ -1108,22 +1108,14 @@ fn pattern_call(
 
 /// Reads a vector written as a JSON array of numbers.
 ///
-/// The grammar is `[` a comma separated list of numbers `]` and nothing else:
-/// a string, an object or a nested array inside it means the text is not a
-/// vector, and `None` is what leaves the caller answering NULL for it.
+/// **One parser, in `inillucent-value`** (task-2066 §4.1.2). There were three
+/// copies of this grammar in the tree and the one path that had none of them
+/// was the HNSW probe, which read the text's raw bytes and divided the byte
+/// length by four. Three copies is how a fourth caller comes to have none.
 ///
 /// @param text - the value's bytes
 fn vector_from_json(text: &[u8]) -> Option<Vec<f32>> {
-    let held = std::str::from_utf8(text).ok()?.trim();
-    let inner = held.strip_prefix('[')?.strip_suffix(']')?.trim();
-    if inner.is_empty() {
-        return None;
-    }
-    let mut out = Vec::new();
-    for part in inner.split(',') {
-        out.push(part.trim().parse::<f64>().ok()? as f32);
-    }
-    Some(out)
+    inillucent_value::vector::vector_from_json(text)
 }
 
 /// A vector, as this engine stores one: little-endian `f32` in a blob.
