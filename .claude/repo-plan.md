@@ -579,3 +579,21 @@ they are touching do not collide; two that have not, do.
   the manifest begins halfway through with no header lines - and its reopen finds the other run's
   fresh empty database. Before believing a failure from a loop, check there is only one loop.
   (task-2070)
+- **A stalled process with no children is not always a hang in that process.** The entry above is
+  right and it is not the whole rule. When `inillucent-testrun` itself is the stalled process with no
+  children, what is holding it is a grandchild it cannot see: `Command::output()` waits for the
+  child's pipes to close, not for the child to exit, and anything the child started with inherited
+  standard output keeps that pipe open after the child has gone. The runner now waits on the child
+  instead, so this shape should not recur - but the reasoning is the part to keep, because the same
+  trap is in any code that reads a child's output. (task-2071)
+- **libtest captures what a test prints, so a suite's pipe is not a heartbeat.** A `println!` inside a
+  test never reaches the parent while the test is running; what does is libtest's own
+  `test <name> ... ok` line as each test finishes. A suite that is one long test - which
+  `story_ledger_day_nightly` is - says nothing at all for its whole run. Do not write a check that
+  reads silence on a test binary's pipe as trouble. (task-2071)
+- **`inillucent::story_ledger_day_nightly` has no row in `tests/timings.toml`.** Nothing in the
+  `nightly` tier does, because an ordinary run never selects it, so `--record` has never written one.
+  It takes 1800.37s on an idle box and **3568.50s** when two other tickets are running theirs -
+  measured on 2026-09-22, both times. Anything that draws a bound from that file has to have a floor
+  that clears the loaded number, not the idle one: an hour would have missed it by 31 seconds.
+  `inillucent-testrun`'s floor is two hours for that reason. (task-2071)

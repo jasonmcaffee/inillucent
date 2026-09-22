@@ -159,6 +159,16 @@ prefix = "AGENTS.md"
 packages = []
 reason = "the agent front door; prose, and no code reads it"
 
+# The coordination notes and the agent skill pages. Markdown, and nothing
+# compiles from any of it - but without a row this is an unmatched top-level
+# directory, which selects every target in the map. Every agent working here is
+# asked to add what it learned to `.claude/repo-plan.md`, so every one of them
+# was running the whole suite to edit a paragraph (task-2071).
+[[path]]
+prefix = ".claude/"
+packages = []
+reason = "the coordination notes and the agent skill pages; prose, and no code reads them"
+
 [[path]]
 prefix = ".sqlite-ref/"
 packages = ["*"]

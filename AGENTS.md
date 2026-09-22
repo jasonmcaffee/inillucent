@@ -221,6 +221,31 @@ those and names them, so a green with nothing installed cannot be mistaken for a
 The code is the thing to branch on. `2` used to be `1`, so a build that would not compile was
 indistinguishable from a real defect, and an agent read one as the other.
 
+**A run that never ends used to be a fourth state none of those codes could describe** (task-2071).
+`run_one` called `Command::output()`, which reads the child's pipes to end of file rather than
+waiting for the child - and a pipe reaches end of file when the last handle to its write end closes,
+so anything the child started with inherited standard output holds it after the child is gone. The
+runner then sat there with no child of its own, no result line for the target, no summary and no exit
+code, and had to be stopped by its process id. It needs nobody to kill anything: `interchange.rs`
+runs cargo through `Command::status()`, which inherits standard output, so a cargo that outlives its
+test binary does it.
+
+It now waits on the child. Two things follow that are worth knowing before you read a report:
+
+- A target whose child has exited is reported, and if something it started still held the pipe open
+  its status line says so. That case has no threshold in it and cannot report a working target
+  wrongly.
+- A target is **killed** only when it is both past a budget drawn from its own row in
+  `tests/timings.toml` - eight times that time, never under two hours - **and** has printed nothing
+  for ten minutes. It is then `UNKNOWN`, listed under `STOPPED` with both numbers, never retried, and
+  the run exits 1. `--timeout <secs>` replaces the budget and `--timeout 0` removes it.
+
+**Do not narrow that budget because it looks generous.** `inillucent::story_ledger_day_nightly` has
+no row in `tests/timings.toml` at all - it is in the `nightly` tier, so `--record` has never seen it -
+and it takes **1800.37s** while printing nothing, because libtest holds a test's own output back
+until the test ends. A thirty minute floor would have killed it four tenths of a second before it
+finished.
+
 **In a shell, `$?` after a pipeline is the status of the last command in it**, so
 `inillucent-testrun --changed | tail -40` reports tail's `0` however the run went. That is what
 task-2041 hit, and reading 60 KB of log to find out is the cost. Redirect to a file and read the

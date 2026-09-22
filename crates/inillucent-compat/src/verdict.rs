@@ -82,6 +82,15 @@ pub enum Undetermined {
     NoSummary,
     /// The executable could not be started at all.
     NeverStarted,
+    /// The runner stopped waiting for it and killed it.
+    ///
+    /// Not a failure: nothing was graded, and the tests it had run before it was
+    /// stopped are not evidence that the rest would have passed. Not a pass
+    /// either, for the same reason. It is the third answer, which is what this
+    /// enum is for - and it is the one reason here that must never be retried,
+    /// because a second attempt costs the same budget again and cannot produce
+    /// information the first one withheld.
+    TimedOut,
 }
 
 impl Undetermined {
@@ -95,6 +104,9 @@ impl Undetermined {
                 "the process exited non-zero and printed no `test result:` line, so which tests ran is unknown"
             }
             Undetermined::NeverStarted => "the executable could not be started",
+            Undetermined::TimedOut => {
+                "it ran past its budget while printing nothing, so the runner stopped waiting and killed it"
+            }
         }
     }
 }

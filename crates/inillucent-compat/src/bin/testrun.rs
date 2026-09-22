@@ -96,6 +96,7 @@ use std::time::{Duration, Instant};
 
 use inillucent_compat::layering;
 use inillucent_compat::selection::{self, Kind, Map, Row, Target};
+use inillucent_compat::supervise::{self, Limits, Stopped};
 use inillucent_compat::verdict::{self, Undetermined, Verdict};
 use inillucent_compat::workspace_root;
 use inillucent_scalar::json::node::Node;
@@ -133,6 +134,13 @@ struct Options {
     no_build: bool,
     /// Pass a filter through to each test binary.
     filter: Option<String>,
+    /// What `--timeout` asked for, in seconds.
+    ///
+    /// `None` works each target's budget out from its own recorded time, which
+    /// is what an ordinary run wants. `Some(0)` turns the budget off and leaves
+    /// only the half of this that needs no judgement: reporting a target whose
+    /// child has exited instead of waiting on its pipe.
+    timeout: Option<u64>,
 }
 
 impl Options {
@@ -153,6 +161,7 @@ impl Options {
             record: other.record,
             no_build: other.no_build,
             filter: other.filter.clone(),
+            timeout: other.timeout,
         }
     }
 }
@@ -179,6 +188,7 @@ impl Default for Options {
             record: false,
             no_build: false,
             filter: None,
+            timeout: None,
         }
     }
 }
@@ -212,6 +222,14 @@ fn parse_options(arguments: &[String]) -> Result<Options, String> {
                     .map_err(|_| format!("`--test-threads` wants a number, not `{value}`"))?;
             }
             "--filter" => options.filter = Some(take("--filter")?),
+            "--timeout" => {
+                let value = take("--timeout")?;
+                options.timeout = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("`--timeout` wants seconds, not `{value}`"))?,
+                );
+            }
             "--changed" => {
                 // The revision is optional: `--changed` alone means the working
                 // tree against HEAD, which is what somebody about to commit
@@ -257,7 +275,8 @@ fn usage() -> String {
      Execution:\n  \
        --jobs <n>          test binaries at once (default: the machine's cores)\n  \
        --test-threads <n>  threads inside each binary (default: 2)\n  \
-       --no-build          do not build first\n\
+       --no-build          do not build first\n  \
+       --timeout <secs>    how long one target may run; 0 never stops one\n\
      \n\
      Reporting:\n  \
        --list              print the selection and stop\n  \
@@ -269,6 +288,13 @@ fn usage() -> String {
        0                   everything selected ran and passed\n  \
        1                   the run happened and was red\n  \
        2                   the run did not happen: nothing was graded\n\
+     \n\
+     A target is stopped only when it is BOTH past its budget and has\n\
+     printed nothing for ten minutes, because a suite that shells out to\n\
+     the pinned SQLite oracle is legitimately silent for a long time. The\n\
+     budget is eight times what tests/timings.toml recorded for that\n\
+     target, and never under two hours. `--timeout <secs>` replaces\n\
+     it, and `--timeout 0` removes it.\n\
      \n\
      Read the code, not the last line. In a shell, `$?` after a pipeline is the\n\
      status of the last command in it, so `inillucent-testrun | tail` reports\n\
@@ -415,6 +441,7 @@ fn run(options: &Options) -> Result<bool, String> {
         .map(|one| (one.target.clone(), one.clone()))
         .collect();
     let ordered = schedule(built, &ledger);
+    let budgets = budgets(&executables, &ledger, options);
 
     // Split off the targets whose tier asked for the machine to itself. They
     // go last, one at a time: see `selection::Tier::exclusive` for why a timing
@@ -454,7 +481,7 @@ fn run(options: &Options) -> Result<bool, String> {
         }
     );
     let started = Instant::now();
-    let mut outcomes = execute(shared, options);
+    let mut outcomes = execute(shared, options, &budgets);
     if !alone.is_empty() {
         // **One binary at a time, and one thread inside it.** `jobs: 1` alone
         // gave an exclusive target the machine to itself among the *binaries*
@@ -468,9 +495,9 @@ fn run(options: &Options) -> Result<bool, String> {
             test_threads: 1,
             ..Options::from(options)
         };
-        outcomes.extend(execute(alone, &solo));
+        outcomes.extend(execute(alone, &solo, &budgets));
     }
-    let outcomes = settle_undetermined(outcomes, &executables, options);
+    let outcomes = settle_undetermined(outcomes, &executables, options, &budgets);
     let wall = started.elapsed();
 
     report(&outcomes, wall, &map, options.strict);
@@ -1143,6 +1170,48 @@ fn write_ledger(
     std::fs::write(path, text).map_err(|error| format!("cannot write {}: {error}", path.display()))
 }
 
+/// Returns how long each target may run before the runner stops waiting for it.
+///
+/// Drawn from the same ledger the schedule is drawn from, so the number that
+/// says a target is slow and the number that says it is stuck are the same
+/// measurement. A target the ledger has never seen gets the floor rather than a
+/// multiple of a guess - `supervise::budget` is where that arithmetic and its
+/// tests live.
+///
+/// **A budget is not what stops a target on its own.** It is one of the two
+/// conditions `supervise` requires; the other is that the target has printed
+/// nothing for ten minutes. A suite that replays its work through the pinned
+/// SQLite shell sits at flat processor time for as long as the shell takes, and
+/// a bound that fired on that would kill working suites - which is a mistake
+/// that was made three times by hand on this machine in one evening, and cost a
+/// legitimate thirty minute run once.
+///
+/// @param targets - every target this run will start
+/// @param ledger - the recorded times
+/// @param options - what the command line asked for
+fn budgets(
+    targets: &BTreeMap<Target, Built>,
+    ledger: &BTreeMap<String, u64>,
+    options: &Options,
+) -> BTreeMap<Target, Option<Duration>> {
+    targets
+        .keys()
+        .map(|target| {
+            let limit = match options.timeout {
+                Some(0) => None,
+                Some(seconds) => Some(Duration::from_secs(seconds)),
+                None => Some(supervise::budget(
+                    ledger
+                        .get(&target.label())
+                        .copied()
+                        .map(Duration::from_millis),
+                )),
+            };
+            (target.clone(), limit)
+        })
+        .collect()
+}
+
 /// Puts the longest targets first.
 ///
 /// Longest-processing-time-first is the classic answer to this shape of
@@ -1174,7 +1243,12 @@ fn schedule(mut built: Vec<Built>, ledger: &BTreeMap<String, u64>) -> Vec<Built>
 ///
 /// @param ordered - the targets, longest first
 /// @param options - what the command line asked for
-fn execute(ordered: Vec<Built>, options: &Options) -> Vec<Outcome> {
+/// @param budgets - how long each target may run
+fn execute(
+    ordered: Vec<Built>,
+    options: &Options,
+    budgets: &BTreeMap<Target, Option<Duration>>,
+) -> Vec<Outcome> {
     let total = ordered.len();
     let (sender, receiver) = mpsc::channel::<Outcome>();
     let mut pending = ordered.into_iter();
@@ -1190,10 +1264,11 @@ fn execute(ordered: Vec<Built>, options: &Options) -> Vec<Outcome> {
         let threads = options.test_threads.to_string();
         let filter = options.filter.clone();
         let strict = options.strict;
+        let budget = budgets.get(&built.target).copied().flatten();
         let _ = std::thread::Builder::new()
             .name(built.target.label())
             .spawn(move || {
-                let outcome = run_one(&built, &threads, filter.as_deref(), strict);
+                let outcome = run_one(&built, &threads, filter.as_deref(), strict, budget);
                 let _ = sender.send(outcome);
             });
         true
@@ -1230,7 +1305,14 @@ fn execute(ordered: Vec<Built>, options: &Options) -> Vec<Outcome> {
 /// @param threads - what to pass as `--test-threads`
 /// @param filter - a name filter, when one was asked for
 /// @param strict - whether a suite that skips should panic rather than pass
-fn run_one(built: &Built, threads: &str, filter: Option<&str>, strict: bool) -> Outcome {
+/// @param budget - how long it may run before it is stopped; `None` never stops it
+fn run_one(
+    built: &Built,
+    threads: &str,
+    filter: Option<&str>,
+    strict: bool,
+    budget: Option<Duration>,
+) -> Outcome {
     let mut command = Command::new(&built.executable);
     command
         .current_dir(&built.directory)
@@ -1277,36 +1359,84 @@ fn run_one(built: &Built, threads: &str, filter: Option<&str>, strict: bool) -> 
     if let Some(filter) = filter {
         command.arg(filter);
     }
+    let limits = Limits {
+        budget,
+        ..Limits::default()
+    };
+    // **Not `Command::output()`, and that is the whole of task-2071.**
+    // `output()` waits for the child's pipes to reach end of file, which is a
+    // different event from the child exiting: anything the child started with
+    // inherited standard output holds the write end after the child is gone, so
+    // `output()` goes on waiting with no child of its own and no verdict to
+    // report. The runner did exactly that - alive at 1.625 seconds of processor
+    // time, no children, no result line, no summary and no exit code - and had
+    // to be stopped by its process id. `supervise` waits on the child.
     let started = Instant::now();
-    let output = command.output();
-    let elapsed = started.elapsed();
-    match output {
-        Ok(output) => {
-            let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-            text.push_str(&String::from_utf8_lossy(&output.stderr));
-            let summary = verdict::read_summary(&text).unwrap_or_default();
-            Outcome {
-                target: built.target.clone(),
-                verdict: verdict::classify(&text, output.status.success()),
-                elapsed,
-                ran: summary.passed + summary.failed,
-                output: text,
-                status: match output.status.code() {
-                    Some(code) => format!("exit status {code}"),
-                    None => "killed by a signal".to_string(),
-                },
-                retry_of: None,
-            }
-        }
+    match supervise::supervise(&mut command, &limits) {
+        Ok(run) => read_run(built, run),
         Err(error) => Outcome {
             target: built.target.clone(),
             verdict: Verdict::Undetermined(Undetermined::NeverStarted),
-            elapsed,
+            elapsed: started.elapsed(),
             ran: 0,
             output: format!("cannot start {}: {error}", built.executable.display()),
             status: "never started".to_string(),
             retry_of: None,
         },
+    }
+}
+
+/// Turns what the supervisor saw into the outcome the report prints.
+///
+/// @param built - which target ran
+/// @param run - what the supervisor produced
+fn read_run(built: &Built, run: supervise::Supervised) -> Outcome {
+    let mut text = String::from_utf8_lossy(&run.stdout).into_owned();
+    text.push_str(&String::from_utf8_lossy(&run.stderr));
+    let summary = verdict::read_summary(&text).unwrap_or_default();
+    let ran = summary.passed + summary.failed;
+    if let Stopped::Killed {
+        ran_for,
+        silent_for,
+    } = run.stopped
+    {
+        // Undetermined rather than FAILED, and the distinction is not cosmetic.
+        // Nothing was graded here: the tests this target got through before it
+        // was stopped are not evidence that the rest would have passed, and they
+        // are not evidence that any of them would have failed either. The run
+        // goes red and the target is named, which is what was missing.
+        return Outcome {
+            target: built.target.clone(),
+            verdict: Verdict::Undetermined(Undetermined::TimedOut),
+            elapsed: run.elapsed,
+            ran,
+            output: text,
+            status: format!(
+                "killed after {:.1}s, having printed nothing for the last {:.1}s of it",
+                ran_for.as_secs_f64(),
+                silent_for.as_secs_f64()
+            ),
+            retry_of: None,
+        };
+    }
+    let mut status = match run.status.and_then(|status| status.code()) {
+        Some(code) => format!("exit status {code}"),
+        None => "killed by a signal".to_string(),
+    };
+    if run.stopped == Stopped::ExitedHoldingPipes {
+        // Said out loud, because it is the one case where the transcript below
+        // may be short of what the target actually printed - and because it
+        // names a real thing about the suite: it left a process running.
+        status.push_str(" (something it started outlived it holding its output pipe)");
+    }
+    Outcome {
+        target: built.target.clone(),
+        verdict: verdict::classify(&text, run.status.is_some_and(|status| status.success())),
+        elapsed: run.elapsed,
+        ran,
+        output: text,
+        status,
+        retry_of: None,
     }
 }
 
@@ -1323,13 +1453,21 @@ fn run_one(built: &Built, threads: &str, filter: Option<&str>, strict: bool) -> 
 /// Whatever the second attempt says stands, and the first attempt's reason and
 /// exit status travel with it into the report either way.
 ///
+/// A target the runner **stopped** is not retried either, and for the opposite
+/// reason. Its first attempt was not an absence of information: the runner
+/// refused to wait any longer, and a second attempt would refuse again at the
+/// same budget, having spent it twice. What there is to say about a stopped
+/// target is in the report.
+///
 /// @param outcomes - what the first pass produced
 /// @param executables - the built binaries, by target
 /// @param options - what the command line asked for
+/// @param budgets - how long each target may run
 fn settle_undetermined(
     outcomes: Vec<Outcome>,
     executables: &BTreeMap<Target, Built>,
     options: &Options,
+    budgets: &BTreeMap<Target, Option<Duration>>,
 ) -> Vec<Outcome> {
     let unread: Vec<(Target, Undetermined, String)> = outcomes
         .iter()
@@ -1337,6 +1475,7 @@ fn settle_undetermined(
             outcome
                 .verdict
                 .undetermined()
+                .filter(|reason| *reason != Undetermined::TimedOut)
                 .map(|reason| (outcome.target.clone(), reason, outcome.status.clone()))
         })
         .collect();
@@ -1353,7 +1492,14 @@ fn settle_undetermined(
         let Some(built) = executables.get(&target) else {
             continue;
         };
-        let mut again = run_one(built, &threads, options.filter.as_deref(), options.strict);
+        let budget = budgets.get(&target).copied().flatten();
+        let mut again = run_one(
+            built,
+            &threads,
+            options.filter.as_deref(),
+            options.strict,
+            budget,
+        );
         again.retry_of = Some(format!(
             "{} on the first attempt ({status})",
             reason.reason()
@@ -1597,6 +1743,14 @@ fn report(outcomes: &[Outcome], wall: Duration, map: &Map, strict: bool) {
         .iter()
         .filter(|outcome| outcome.verdict.undetermined().is_some())
         .collect();
+    // Listed apart from the rest of `unread` below, because the sentence that
+    // list ends on - that a second attempt did not settle it either - is not
+    // true of these and must not be printed over them. A stopped target was
+    // never retried, on purpose.
+    let stopped: Vec<&Outcome> = outcomes
+        .iter()
+        .filter(|outcome| outcome.verdict.undetermined() == Some(Undetermined::TimedOut))
+        .collect();
     // The transcript of a target that could not be read is printed for the same
     // reason a failure's is: it is the only account of what happened, and the
     // summary line inside it is what says the tests themselves passed.
@@ -1702,9 +1856,19 @@ fn report(outcomes: &[Outcome], wall: Duration, map: &Map, strict: bool) {
             println!("  {:<44} {}", failure.target.label(), failure.status);
         }
     }
-    if !unread.is_empty() {
+    if !stopped.is_empty() {
+        println!("\nSTOPPED - the runner would not wait any longer, so nothing here was graded:");
+        for outcome in &stopped {
+            println!("  {:<44} {}", outcome.target.label(), outcome.status);
+        }
+    }
+    let unsettled: Vec<&&Outcome> = unread
+        .iter()
+        .filter(|outcome| outcome.verdict.undetermined() != Some(Undetermined::TimedOut))
+        .collect();
+    if !unsettled.is_empty() {
         println!("\nUNDETERMINED - a second attempt alone did not settle these either:");
-        for outcome in &unread {
+        for outcome in &unsettled {
             println!(
                 "  {:<44} {}, {}",
                 outcome.target.label(),

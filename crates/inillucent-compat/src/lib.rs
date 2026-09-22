@@ -64,6 +64,11 @@ pub mod results;
 pub mod selection;
 pub mod slt;
 pub mod stories;
+// Running one child and knowing when to stop waiting for it. `Command::output`
+// waits for the child's pipes to close rather than for the child to exit, which
+// are different events as soon as anything inherits a handle - and the runner
+// sat on that difference with no verdict and no exit code at all (task-2071).
+pub mod supervise;
 pub mod syntax;
 pub mod toml_lite;
 pub mod verdict;
