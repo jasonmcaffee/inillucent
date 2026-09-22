@@ -554,3 +554,11 @@ they are touching do not collide; two that have not, do.
   not.** The crash campaign rewrites them with different line endings, so `git status` lists them
   while `git diff --numstat` shows nothing. Restore them by name rather than staging them, and do not
   spend time working out what changed. (task-2067)
+- **A test binary's own CPU is not a progress signal when it shells out to the oracle.**
+  `inillucent::story_ledger_day_nightly` sits with flat CPU and every thread in `Wait` for minutes at
+  a time, and that is the correct state: it replays its day through
+  `.sqlite-ref/3.53.4/shell/sqlite3.exe` and blocks on it, so the work is in the child. task-2067 read
+  the parent's counter, called it wedged and killed it, and was wrong. Before you conclude anything
+  from a flat counter, look for children:
+  `Get-CimInstance Win32_Process -Filter "ParentProcessId = <pid>"`, and read *that* process's CPU.
+  (task-2067)
