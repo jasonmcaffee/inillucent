@@ -158,9 +158,9 @@ sha256 = "0c6c4ace63ffcb8104de467d93ae011623a00d0418c5bb2dcdd2a3cd97a49944"
 
 [[amendment]]
 path = "crates/inillucent-core/src/bm25.rs"
-ticket = "task-2006"
-reason = "task-2000 design 9: the ranked path selects the rows that reach the top instead of sorting every match. A term occurring in a tenth of the corpus produces a hit per chunk it occurs in, and the answer is k of them, so the full sort ordered thousands of rows to throw all but ten away; select_nth_unstable_by puts the top reach at the front in linear time and whichever sort follows orders the answer. The ordering step is top_k, split out because the argument took search past its recorded length and the ratchet asks for an extraction rather than a raised number. The result is the same result - order is total and a hit is one chunk - and the card's ranking verdicts are byte for byte unchanged, 15 better, 1 equivalent, 1 inconclusive, 0 worse, every correctness gate passing. It does not move the number it was aimed at: the hybrid search with a title as the query reads 4.629 ms against 4.636, so that query's 4.6 ms is the lexical leg's posting read and scoring rather than its ordering. Two warnings the extraction left behind are fixed in the same declaration: search destructures the three LexicalParams fields it no longer reads as `..`, because top_k takes params whole, and the hits vector it builds is no longer declared mutable."
-sha256 = "84b613cbf49ae9862c008e1a8e4b78197ebd0f8741ee456747516efd610c689e"
+ticket = "task-2068"
+reason = "The postings reader took n_terms as a raw u64 out of the segment header and passed it to Vec::with_capacity and HashMap::with_capacity before reading a single term, with no ceiling and no check against the bytes remaining. Both now grow as the terms arrive, which costs a few reallocations on a real index and nothing on a hostile length - that fails at the first read_str instead. Reached from an ordinary SELECT over an inillucent_search table, like the hnsw.rs change beside it. No scoring changes: the same terms and postings are read in the same order. task-2066 section 4.1.12."
+sha256 = "61bd60b87942c59907326f644855c737994c57b508481ef22a364263ce7aee30"
 
 [[amendment]]
 path = "crates/inillucent-core/src/distance.rs"
@@ -194,9 +194,9 @@ sha256 = "ef2b935a4f7ec6a35b8755f758e11eb863dc37fb28f7abeda781f3b9154c2e0d"
 
 [[amendment]]
 path = "crates/inillucent-core/src/hnsw.rs"
-ticket = "task-2006"
-reason = "task-2000 design 9: HnswParams::build_threads defaults to available_parallelism() rather than one, which took the index build from 129.7 s to 16.1 s for 185,078 chunks at 768 dimensions. What it costs is reproducibility: the levels come from the same seeded generator so the level distribution is identical, but the order in which nodes link to each other is whatever the thread pool produced, and neither graph is byte-comparable to the other. The condition for making it the default was the score card's ranking verdicts, and they are unchanged. Two tests that compare two graphs now pin build_threads: 1, because that is what isolates the variable each is named for - extra_entry_points_do_not_lower_recall and, in index.rs, thirty_appends_stay_close_to_a_clean_rebuild."
-sha256 = "2ba8e2fa16870df8b5763ddee62a62e1f052ef75bfcb78ccda2146ee1238abc8"
+ticket = "task-2068"
+reason = "The graph reader sized three allocations from header fields of a .rdb segment, which is a page somebody else could have written: vec![0u8; n_nodes] and Vec::with_capacity on n_layers and on each layer's count, all before a byte of the body had been shown to be there. binio's module comment states the rule and read_records is what follows it - the buffer never grows past what has arrived plus one step - so node_top is read through read_pod_vec and the two counts no longer reserve. A claimed length the file cannot satisfy now costs one megabyte and fails with UnexpectedEof instead of going through handle_alloc_error, which aborts the process rather than returning an error. Reached from an ordinary SELECT over an inillucent_search table. No ranking, no distance and no graph shape changes: the same bytes are read into the same structures, only the allocation is bounded. task-2066 section 4.1.12."
+sha256 = "f9caa093ecc852a622b1b08afbeed5c88b267454b13b487db850b1da0ec4b69d"
 
 [[amendment]]
 path = "crates/inillucent-core/src/index.rs"

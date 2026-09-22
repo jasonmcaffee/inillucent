@@ -1644,7 +1644,7 @@ fn migrate_remote(
 /// `--output json` - so a database whose only content was an FTS5 table
 /// migrated to an empty file and reported success. `application_id` and
 /// `user_version` went the same way, and every *successful* migration leaked
-/// its staging segments, because `remove_staged` ran only on the error path.
+/// its staging segments, because the cleanup ran only on the error path.
 ///
 /// `inillucent_migrate::sqlite::migrate` is the implementation that does what
 /// the documentation says, and the `inillucent-migrate` binary has used it
@@ -1699,29 +1699,6 @@ fn migrate_sqlite_file(from: &std::path::Path, to: &std::path::Path) -> Result<O
     )
     .with("destination", json::text(to.to_string_lossy()))
     .with("checks", checks))
-}
-
-/// Removes a staging database and every log segment beside it.
-///
-/// A `.rdb` is a file plus its own log segments, named after it, so removing
-/// the first and leaving the rest is leaving most of the bytes.
-///
-/// @param staged - the staging database
-fn remove_staged(staged: &std::path::Path) {
-    let _ = std::fs::remove_file(staged);
-    let (Some(directory), Some(stem)) = (staged.parent(), staged.file_name()) else {
-        return;
-    };
-    let stem = stem.to_string_lossy().into_owned();
-    let Ok(entries) = std::fs::read_dir(directory) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with(&format!("{stem}-wal.")) {
-            let _ = std::fs::remove_file(entry.path());
-        }
-    }
 }
 
 /// `version`: what this build is.

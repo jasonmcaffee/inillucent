@@ -153,6 +153,43 @@ fn run(gate: &str, arguments: &[&str]) -> Output {
         .unwrap_or_else(|error| panic!("{gate} did not start: {error}"))
 }
 
+/// The target directory a nested `inillucent-testrun` builds into.
+///
+/// **Not the one the outer run is executing out of** (task-2066 §4.4.16). A
+/// nested runner calls `locate`, which runs `cargo test --no-run`, and cargo
+/// then wants to relink whatever is stale - including
+/// `inillucent-testrun.exe`, which is the *outer* runner's own running image,
+/// and `inillucent-scorecard.exe`, which a sibling case in this file executes.
+///
+/// When that collides it does not collide quietly. A full gate run died
+/// mid-target and left `gates_fail_closed-*.exe` and `inillucent-scorecard.exe`
+/// running with no parent; an orphan holding `inillucent-scorecard.exe` open
+/// makes every later cargo build in that directory fail with
+/// `Access is denied (os error 5)`, so the *next* run reports "the build
+/// failed" and grades nothing. One run's leftovers poisoning the following
+/// run's build is worse than either failure on its own.
+///
+/// The three cases share one directory, so the cold build is paid once. It is a
+/// real cost - minutes - and it buys a nested run that cannot reach back into
+/// the run that started it.
+fn nested_target_dir() -> std::path::PathBuf {
+    let directory = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("nested-testrun");
+    let _ = std::fs::create_dir_all(&directory);
+    directory
+}
+
+/// Runs a nested `inillucent-testrun`, building somewhere of its own.
+///
+/// @param gate - the built runner
+/// @param arguments - the command line
+fn run_nested(gate: &str, arguments: &[&str]) -> Output {
+    Command::new(gate)
+        .args(arguments)
+        .env("CARGO_TARGET_DIR", nested_target_dir())
+        .output()
+        .unwrap_or_else(|error| panic!("{gate} did not start: {error}"))
+}
+
 /// Returns everything a run printed, both streams together.
 ///
 /// A gate says what is missing on standard error and reports on standard
@@ -1049,7 +1086,11 @@ fn testrun_refuses_a_selection_whose_names_do_not_overlap() {
         );
         return;
     };
-    let output = run(gate, &["--target", &outside, "--tier", "smoke"]);
+    // Nested too, although this one refuses its empty selection before it
+    // builds anything: a runner spawned from inside a run should never be able
+    // to reach the target directory the outer one is executing from, and a rule
+    // with an exception is one somebody has to re-derive.
+    let output = run_nested(gate, &["--target", &outside, "--tier", "smoke"]);
     let text = said(&output);
     assert_eq!(
         code(&output),
@@ -1126,7 +1167,7 @@ fn testrun_passes_a_real_run_with_code_zero() {
     let Some(gate) = built(TESTRUN, BUILDS_TESTRUN) else {
         return;
     };
-    let output = run(gate, &["--no-build", "--tier", "smoke"]);
+    let output = run_nested(gate, &["--no-build", "--tier", "smoke"]);
     let text = said(&output);
     if cargo_could_not_replace_a_running_binary(&text) {
         skip_a_contended_run("a real run that passes");
@@ -1162,7 +1203,7 @@ fn testrun_exits_one_when_the_run_went_red() {
     let Some(gate) = built(TESTRUN, BUILDS_TESTRUN) else {
         return;
     };
-    let output = run(
+    let output = run_nested(
         gate,
         &[
             "--no-build",

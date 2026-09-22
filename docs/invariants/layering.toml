@@ -540,10 +540,25 @@ may_depend_on = ["inillucent-driver"]
 # grows a construct, and a CLI that carried its own feature list would carry a
 # list nobody runs. Neither reaches the engine through the driver: statements go
 # through the shell, as they always have.
+#
+# **It sits at layer 11, one above the rest of the production crates, because it
+# is the only one of them that links another (task-2068).** `inillucent migrate
+# --from-sqlite` used to carry its own copy of the SQLite reader loop in
+# `verbs.rs`, and the copy had drifted: it staged a file and then reported the
+# staged file's own row counts, so a migration that dropped rows reported
+# success with the wrong totals. The fix is to call
+# `inillucent_migrate::sqlite::migrate`, which is the implementation
+# `inillucent-migrate` exists to hold and the one `inillucent-migrate`'s own
+# tests grade. That edge points at layer 10, so the CLI cannot stay at 10 with
+# it.
+#
+# Nothing in the workspace depends on `inillucent-cli` except
+# `inillucent-compat` at layer 12, so raising it costs no other edge. A second
+# copy of a migration would cost a defect every time one copy is fixed.
 [[crate]]
 name = "inillucent-cli"
 kind = "production"
-layer = 10
+layer = 11
 may_depend_on = [
     "inillucent-alloc",
   "inillucent-base",
