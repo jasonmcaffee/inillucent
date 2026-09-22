@@ -224,11 +224,20 @@ fn scenarios_run_every_quick_arm() {
         "these files opt out of the matrix and do not say what they run at instead:\n  {}",
         opted_out_badly.join("\n  ")
     );
+    // **Three, and the third argued for itself** (task-2066 section 4.4.5). The
+    // bound was two and the message asked a third to make its case rather than
+    // join a list, which is what `story_large_table_nightly.rs` does in its
+    // module documentation: each arm's pool is `frames * page_size`, so ten
+    // times it is 1.25 GiB at `default` and at `truncate-journal`, 160 MiB at
+    // three more, and 2.5 MiB at `small-pool`. Narrowing the pool at every arm
+    // instead is 520 seconds apiece, fifty two minutes for one target against a
+    // whole gate of thirty one. The bound moves when a story has done that
+    // arithmetic in public, and not otherwise.
     assert!(
-        opted_out.len() <= 2,
+        opted_out.len() <= 3,
         "{} story files opt out of the matrix, and the exemption was written for the two ledger \
-         soaks. A third is a story that should be arguing for itself rather than joining a \
-         list:\n  {}",
+         soaks and the large-table nightly. A fourth is a story that should be arguing for \
+         itself rather than joining a list:\n  {}",
         opted_out.len(),
         opted_out.join("\n  ")
     );

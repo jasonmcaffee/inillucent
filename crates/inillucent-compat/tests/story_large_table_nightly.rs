@@ -27,10 +27,51 @@
 //! `PRAGMA integrity_check` at the end. The properties need no oracle, which is
 //! what makes them affordable here: a table this size cannot be compared row by
 //! row against a second engine in a nightly window.
+//!
+//! ## Not a matrix story
+//!
+//! **Not a matrix story.** It runs at `matrix::default_arm()` alone - the
+//! engine's own page size - with the pool narrowed to 8 MiB so the table
+//! reaches ten times it at a size a nightly can build. Two tests take 520
+//! seconds at that one arm, so the six the matrix runs would be the better
+//! part of an hour for a question that is about size rather than page size.
+//!
+//! The arm is checked rather than described: `narrow_the_pool` asserts the
+//! page size of the file it opened against `default_arm().page_size`, so the
+//! day the facade's default stops being the arm's, this says so.
+//!
+//! **The arithmetic, because "it is too slow" is not an argument.** Each arm
+//! carries its own pool, `frames * page_size`, and this story builds ten times
+//! whatever that is:
+//!
+//! | arm | pool | ten times it |
+//! |---|---|---|
+//! | `default` | 4,096 x 32,768 = 128 MiB | 1.25 GiB |
+//! | `sqlite-page` | 4,096 x 4,096 = 16 MiB | 160 MiB |
+//! | `small-pool` | 64 x 4,096 = 256 KiB | 2.5 MiB |
+//! | `truncate-journal` | 128 MiB | 1.25 GiB |
+//! | `persist-journal` | 16 MiB | 160 MiB |
+//! | `waiting` | 16 MiB | 160 MiB |
+//!
+//! Two of the six are a gigabyte. Narrowing the pool at every arm instead, the
+//! way this file does at the one it runs, gives 80 MiB and 520 seconds apiece -
+//! fifty two minutes for one target, against a whole gate of thirty one.
+//!
+//! **What that leaves uncovered, stated rather than glossed.** Nothing in this
+//! repository runs a table past the pool at SQLite's 4,096 byte page. The
+//! generator arms in `tlp_differential.rs` are shapes of query, not page sizes;
+//! that file runs at one configuration like everything else outside the ten
+//! `scenario!` files. A large table at a small page is a real gap and it is a
+//! ticket, not a thing to claim is covered here.
+//!
+//! The page sizes are compared in `tlp_differential.rs`, which checks the same
+//! two properties across the matrix on a table the pool holds whole. What this
+//! file adds is the size, and the size is the thing the matrix does not vary.
 
 use std::path::PathBuf;
 
 use inillucent_compat::facade::{Connection, Database};
+use inillucent_compat::matrix::default_arm;
 use inillucent_value::Value;
 
 /// How many times past the pool the table must reach.
@@ -195,6 +236,19 @@ fn narrow_the_pool(connection: &Connection) -> u64 {
     assert_eq!(
         held, wanted,
         "`{sql}` left the pool at {held} bytes rather than {wanted}, so every size below would be          measured against a pool this test does not have"
+    );
+
+    // **The arm this file opts out of the matrix in favour of, checked.** The
+    // facade has no `open_at`, so the page size is whatever the engine's
+    // default is; `default_arm()` is the name of that default, and asserting
+    // they are the same is what keeps the module's claim about which arm this
+    // runs at from being a sentence nobody grades.
+    let page = scalar(connection, "PRAGMA page_size");
+    assert_eq!(
+        page,
+        format!("{}", default_arm().page_size),
+        "this file says it runs at `default_arm()`, whose page is {} bytes, and the file it          opened has {page} byte pages",
+        default_arm().page_size
     );
     held
 }
