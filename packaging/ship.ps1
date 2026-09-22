@@ -14,14 +14,30 @@
 
         1. preflight   read every credential and tool, decide which routes can run, print the plan.
                        Mutates nothing.
-        2. version     write the new version into every file that carries it, in one step, and
+        2. tests       `inillucent-testrun --strict`. Refuses the release on any non-zero exit.
+        3. version     write the new version into every file that carries it, in one step, and
                        refuse to continue if a seventh file is found holding the old one.
-        3. build       compile, sign, package, notarise. Local; nothing has left the machine.
-        4. publish     tag, push, GitHub, the mirror, the site, the registries.
-        5. report      route by route: published, skipped or failed, and why.
+        4. build       compile, sign, package, notarise. Local; nothing has left the machine.
+        5. publish     tag, push, GitHub, the mirror, the site, the registries.
+        6. report      route by route: published, skipped or failed, and why.
 
     Preflight is first and separate because a tag is the one step that cannot be taken back quietly.
     Nothing reaches it until the script knows which routes will run.
+
+    TESTS ARE SECOND, AND -Only CANNOT SKIP THEM
+
+    This script published to twelve destinations without running a test, for seven releases. The
+    phase sits above `version` rather than below it because the version phase rewrites eight files
+    and the publish phase commits them: a suite that goes red after that has already changed the
+    tree. Here, a red suite stops the release with nothing written.
+
+    It reads the runner's three exit codes and says which it got. `2` is not a test failure - it
+    means the run did not happen, so nothing was graded - and reporting it as a red suite is the
+    confusion task-2047 removed from the runner and would put back here.
+
+    `-Only` selects routes, and the tests are not a route, so `-Only site` still runs them. The one
+    way past is `-SkipTests`, which prints a sentence saying the release is untested and writes that
+    same sentence into the GitHub release notes, where the people downloading it can read it.
 
     A ROUTE WITH NO CREDENTIAL IS SKIPPED, NOT A FAILURE
 
@@ -49,6 +65,11 @@
 .PARAMETER AllowDirty
     Build from a working tree with uncommitted changes. Recorded in the report.
 
+.PARAMETER SkipTests
+    Release without running the suite. Prints that the release is untested and says so in the
+    GitHub release notes, because a release nobody graded is a fact about the release rather than
+    about the person who cut it.
+
 .PARAMETER WhatIf
     Print the plan and every path that would be written, and change nothing.
 
@@ -75,6 +96,7 @@ param(
     [string] $SitePath,
     [string] $TapPath,
     [switch] $AllowDirty,
+    [switch] $SkipTests,
     [switch] $WhatIf
 )
 
@@ -96,6 +118,8 @@ if ($Skip) { $Skip = @($Skip -split ',' | ForEach-Object { $_.Trim() } | Where-O
 . (Join-Path $PSScriptRoot 'macos/apple-credentials.ps1')
 
 $script:Outcomes = [ordered]@{}
+# Empty unless -SkipTests was given. Read by `Publish-GitHubRelease`, which puts it in the notes.
+$script:UntestedNote = ''
 $script:Dist = Join-Path $root 'dist'
 
 # **Script scope, and that is not a style choice.** Each route's `Needs`, `Run` and `Verify` is a
@@ -932,6 +956,76 @@ function Get-MirrorRepo {
     return "$($Matches.owner)/$($Matches.name)"
 }
 
+function Invoke-ReleaseTests {
+    <#
+    .SYNOPSIS
+        Runs the suite, and returns the sentence to put in the release notes.
+
+    .DESCRIPTION
+        Empty when the suite ran and passed. A sentence when -SkipTests was given, which the GitHub
+        release notes then carry. Anything else throws, because a release is not cut over a red
+        suite.
+
+        **The three exit codes are three different answers** (task-2047), and collapsing them is the
+        confusion the runner was changed to remove:
+
+          0  every selected target ran and passed
+          1  the run happened and was red - a target failed, or --strict found a suite whose
+             prerequisite was absent
+          2  the run did not happen. The build failed, or cargo could not say what it had built.
+             Nothing was graded, so nothing in that run may be read as a pass
+
+        A `2` is reported as a run that did not happen rather than as a failing test, because they
+        need different things done about them and an agent read one as the other once already.
+
+        **--strict rather than a plain run.** Several suites report success when a prerequisite is
+        absent, which is correct for a fresh clone and wrong for a release: it is exactly how a
+        release goes out with the binding conformance suite, the oracle-graded suites and the live
+        server suites all reporting green having run nothing.
+
+    .PARAMETER Root
+        The checkout to run in.
+
+    .PARAMETER Skip
+        Whether the run was waived.
+    #>
+    param([string] $Root, [bool] $Skip)
+
+    if ($Skip) {
+        $sentence = 'This release was published without running the test suite.'
+        Write-Host "   $sentence" -ForegroundColor Yellow
+        Write-Host '   It will be said again in the GitHub release notes.' -ForegroundColor Yellow
+        return $sentence
+    }
+
+    # The runner is behind `required-features = ["testrun"]`, so it is built here rather than
+    # assumed. A release that cannot build its own test runner is not one to publish.
+    Write-Host '   building inillucent-testrun'
+    & cargo build --manifest-path (Join-Path $Root 'Cargo.toml') -p inillucent-compat --bin inillucent-testrun --features testrun
+    if ($LASTEXITCODE -ne 0) { throw 'inillucent-testrun would not build, so the suite could not be run. Fix the build, or pass -SkipTests and accept an untested release.' }
+
+    $runner = Join-Path $Root 'target/debug/inillucent-testrun.exe'
+    if (-not (Test-Path -LiteralPath $runner)) {
+        # A worktree redirects CARGO_TARGET_DIR through its own .cargo/config.toml, so the binary
+        # is not under the checkout at all. Ask cargo where it put it rather than guessing.
+        $located = & cargo metadata --manifest-path (Join-Path $Root 'Cargo.toml') --format-version 1 --no-deps 2>$null |
+            ConvertFrom-Json
+        $targetDir = if ($located) { $located.target_directory } else { $null }
+        if ($targetDir) { $runner = Join-Path $targetDir 'debug/inillucent-testrun.exe' }
+    }
+    if (-not (Test-Path -LiteralPath $runner)) { throw "inillucent-testrun built and then could not be found. Looked at $runner." }
+
+    Write-Host "   $runner --strict"
+    & $runner --strict
+    $code = $LASTEXITCODE
+    switch ($code) {
+        0 { Write-Host '   the suite ran and passed.' -ForegroundColor Green; return '' }
+        1 { throw 'the suite is red: a target failed, or --strict named a suite whose prerequisite was absent. A release is not cut over it. Read the run above, fix it, and run this again.' }
+        2 { throw 'the run did not happen - the build failed, a selection matched nothing, or cargo could not say what it had built. Nothing was graded, so this is not evidence of anything. It is not a failing test and should not be treated as one.' }
+        default { throw "inillucent-testrun answered $code, which is not one of its three exit codes. Read the run above." }
+    }
+}
+
 function Publish-GitHubRelease {
     <#
     .SYNOPSIS
@@ -955,7 +1049,10 @@ function Publish-GitHubRelease {
     if ($exists) {
         & gh release upload "v$Version" @assets @repo --clobber
     } else {
-        & gh release create "v$Version" @assets @repo --title "inillucent $Version" --notes "inillucent $Version"
+        # The untested sentence rides in the notes rather than being printed once on the machine
+        # that cut the release, because the people who need it are the ones downloading the file.
+        $notes = if ($script:UntestedNote) { "inillucent $Version`n`n$script:UntestedNote" } else { "inillucent $Version" }
+        & gh release create "v$Version" @assets @repo --title "inillucent $Version" --notes $notes
     }
     if ($LASTEXITCODE -ne 0) { throw "the GitHub release for v$Version failed" }
 
@@ -1234,6 +1331,19 @@ foreach ($route in $routes) {
     Write-Host ("   [{0}] {1,-16} {2}{3}" -f $mark, $route.Name, $route.What, $detail)
 }
 
+Write-Phase 'tests'
+if ($WhatIf) {
+    # The plan says what would run, and running the suite is not a plan. What it prints is the one
+    # thing a reader of `-WhatIf` needs: whether this release would be graded.
+    if ($SkipTests) {
+        Write-Host '   would NOT run the suite (-SkipTests), and would say so in the release notes.' -ForegroundColor Yellow
+    } else {
+        Write-Host '   would run inillucent-testrun --strict, and refuse the release on any non-zero exit.'
+    }
+} else {
+    $script:UntestedNote = Invoke-ReleaseTests -Root $root -Skip ([bool]$SkipTests)
+}
+
 if ($WhatIf) {
     Write-Phase 'version'
     Set-ReleaseVersion -Version $Version -Previous $current
@@ -1284,6 +1394,9 @@ foreach ($name in $script:Outcomes.Keys) {
 
 $failed = @($script:Outcomes.Values | Where-Object { $_.State -eq 'failed' })
 Write-Host ''
+if ($script:UntestedNote) {
+    Write-Host $script:UntestedNote -ForegroundColor Yellow
+}
 if ($failed.Count -gt 0) {
     Write-Host "$($failed.Count) route(s) failed. Re-run just those with -Only." -ForegroundColor Red
     exit 1

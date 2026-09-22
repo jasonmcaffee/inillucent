@@ -137,6 +137,24 @@ pub struct Row {
     /// `package/feature`. Empty for every target that needs none, which is all
     /// but two of them.
     pub features: Vec<String>,
+    /// Whether this one target needs the run to itself.
+    ///
+    /// **`Tier::exclusive` is the same idea one level up, and the level is what
+    /// makes it the wrong tool here** (task-2066 §4.4.16). A tier that measures
+    /// time cannot share a machine, so every target in it runs alone. A target
+    /// that starts a *nested* run has a narrower problem: it asks cargo what it
+    /// built, cargo answers by building, and Windows will not replace an image
+    /// a sibling target is executing. `gates_fail_closed` is the only target in
+    /// the tree that does this, and it sits in `tooling` beside forty targets
+    /// that have no reason to run one at a time.
+    ///
+    /// The three cases concerned used to announce a skip on that exact cargo
+    /// error rather than assert, which is right as far as it goes - an exit code
+    /// read off a run that never started is a statement about the machine. What
+    /// it cost is that every strict run in a `git worktree` named three skips a
+    /// person could not clear, and the `1` those cases assert is the one exit
+    /// code task-2047 did not change.
+    pub alone: bool,
 }
 
 /// One tier: a named reason to run a subset.
@@ -277,6 +295,7 @@ impl Map {
                 .and_then(Value::as_list)
                 .map(<[String]>::to_vec)
                 .unwrap_or_default();
+            let alone = row.get("alone").and_then(Value::as_bool).unwrap_or(false);
             map.rows.push(Row {
                 target: Target {
                     package,
@@ -287,6 +306,7 @@ impl Map {
                 covers,
                 requires,
                 features,
+                alone,
             });
         }
         for row in document.array("path") {

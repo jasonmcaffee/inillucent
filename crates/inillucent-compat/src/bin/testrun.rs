@@ -456,9 +456,12 @@ fn run(options: &Options) -> Result<bool, String> {
     let mut shared = Vec::new();
     let mut alone = Vec::new();
     for built in ordered {
+        // A target runs alone because its tier asked for the machine, or
+        // because the row itself did. The second is for a target that starts a
+        // nested run: see `selection::Row::alone`.
         let solo = map
             .row(&built.target)
-            .is_some_and(|row| exclusive_tiers.contains(row.tier.as_str()));
+            .is_some_and(|row| exclusive_tiers.contains(row.tier.as_str()) || row.alone);
         if solo {
             alone.push(built);
         } else {

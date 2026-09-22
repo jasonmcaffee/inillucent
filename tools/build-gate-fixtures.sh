@@ -19,7 +19,14 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-OUT="${1:-$ROOT/_agent_output/gate-fixtures}"
+# **The default is the directory the suites read** (task-2066 §4.4.1). It used
+# to be `_agent_output/gate-fixtures`, which nothing looks in:
+# `gates_fail_closed.rs` and `new_engine_log_lead.rs` both read
+# `_agent_output/fixtures`, and `tools/validate` passes that path explicitly.
+# So the two callers that matter were right and the bare command this file
+# documents - and that `gates_fail_closed`'s own skip message tells you to run -
+# built three fixtures nothing could find, leaving both suites skipping.
+OUT="${1:-$ROOT/_agent_output/fixtures}"
 
 # The pinned shell, wherever this platform put it. INILLUCENT_SQLITE_SHELL wins,
 # which is how a machine with the reference somewhere else runs this unchanged.

@@ -180,6 +180,103 @@ is 10% more than SQLite's against a bar asking for 5% less, and the allocator is
 measured out of the difference: a trivial binary's floor is 3.62 MiB with it and
 3.62 MiB without.
 
+## 0.1.7 — 2026-09-19
+
+**`packaging/install.sh` had been unrunnable for three releases, and the reason it
+was the one script nobody noticed is that it was the one script git left alone.**
+`.gitattributes` converts every `.sh` in the repository to LF, and git skips a
+file that already holds a carriage return - `install.sh` holds a literal one
+inside a `tr -d` argument, so the conversion passed over it and it shipped with
+CRLF. `sh` on Debian and Ubuntu is dash, which reads the carriage return as part
+of the command and dies on the first line with `set: Illegal option -`. Anybody
+who ran the `curl | sh` line off inillucent.com got that. The site route now
+refuses to publish a shell script that does not parse or that holds a carriage
+return, so this cannot ship again without the release stopping.
+
+**Composer read the wrong commit, because a registry pins a version's commit the
+first time it sees the tag and never moves it.** Packagist is a route of
+`ship.ps1` now rather than something a person remembers, and it runs after the
+mirror and after the GitHub release for that reason. The same rule is why
+inillucent's Go module at v0.1.5 and its Composer package at v0.1.6 name the
+previous release's source and cannot be corrected.
+
+The mirror route pushes. It had never pushed anything, and `gh release create`
+against a tag that does not exist makes one at the repository's current HEAD, so
+a registry reading the mirror cached whatever was there. `-Only site,pypi` works
+when the script is launched with `-File`. The straggler scan stops reporting a
+dependency's version as a straggler.
+
+`AGENTS.md` carries what three releases taught, at the top where it is read
+before the first command rather than after the first mistake.
+
+## 0.1.6 — 2026-09-19
+
+**The first real release run found four places the plan and the run disagreed,
+and this version is what they cost.** `ship.ps1 -WhatIf` printed a plan that
+every route would follow, and then two routes could never have run at all: one
+named a parameter the function does not take, and one was unreachable. A
+`-WhatIf` that prints a route the run cannot take is worse than no plan, because
+it is read as evidence.
+
+**The mirror is pushed before the GitHub release is created against its tag.**
+proxy.golang.org and Packagist both pin a version's commit the first time they
+see the tag, and `gh release create` against a tag the mirror does not have makes
+one at that repository's HEAD. Ordering the two routes is the whole fix and it
+cannot be retried, which is why it is written down in `AGENTS.md` as well as
+fixed here.
+
+The PyPI route builds a wheel for every platform rather than only the one the
+release was cut on - 0.1.5 published a single wheel, so `pip install inillucent`
+worked on Windows and found nothing anywhere else. The Windows build imports the
+MSVC environment itself: `onig_sys` compiles oniguruma with `cl.exe`, and a shell
+that is not a Developer PowerShell has no `INCLUDE`, so the build stopped on
+`stddef.h`. The crates.io route needs no prompt. The version phase commits every
+file it wrote, rather than leaving some of them for the next run to trip on. The
+Go wrapper's pinned release is a version carrier, so it moves with the other
+seven. The release deploys inillucent.com rather than printing an instruction to
+deploy it.
+
+## 0.1.5 — 2026-09-19
+
+**One command releases inillucent, and says what reached where.**
+`packaging/ship.ps1` publishes to twelve destinations - five build targets, the
+Linux packages, the signature over `SHA256SUMS`, the tag, the GitHub release, the
+public mirror, inillucent.com, and the crates.io, npm, PyPI, Go module and
+Homebrew routes - in five phases, and verifies each by asking the destination
+what it serves rather than by reading an exit code. A route with no credential
+is a skip carrying the sentence that fixes it, because a script that refuses
+without all twelve is one nobody runs. Every credential is sealed under
+`%LOCALAPPDATA%\inillucent\signing` and unsealed to a RAM disk for the run.
+
+**The macOS release is built on the Windows box, with no Mac involved.** zig
+cross-links the Mach-O and `rcodesign` replaces `lipo`, `codesign`, `productsign`,
+`notarytool` and `stapler`; Apple's notary is an HTTPS API. The `.pkg` Apple
+refused had three things wrong with it, all of them recorded in
+`tasks/task-1995-macos-releases-without-a-mac-tdd.md`.
+
+**Two lost writes, both where a file is handed back.** A rollback journal put
+back after the pages it describes had already been superseded, and a checkpoint
+writing a file it no longer held the lock on. The crash record moved eight cut
+points from the new state to the old one, which is the evidence that the fix
+changed what the engine does under power loss rather than only what it reports.
+
+**Five things a statement stopped doing on its way out of the file** (task-1999),
+and a tombstoned document counts as one document rather than one per chunk
+(task-2001). An extent reference says what its value reads back as.
+
+The part eight review closed thirteen defects across `inillucent-cli`, the bench
+crate and the schema function authorizer, and the suite's own honesty work landed
+with it: the PHP round trip ran for the first time, a Python wrapper that
+resolved and would not start was fixed, the expected absences come from
+`tests/selection.toml` rather than from a list of four, and a run that had every
+prerequisite says so. Coverage was measured rather than estimated.
+
+**Known not to do.** The Go module at this version names the previous release's
+source, permanently: proxy.golang.org saw the tag before the mirror was pushed
+and a registry does not re-read a version it has cached. PyPI carries one wheel
+rather than four, so `pip install inillucent` finds nothing on macOS or Linux at
+this version; 0.1.6 is the first with all four.
+
 ## 0.1.4 — 2026-09-17
 
 **A statement no longer pays for the log's housekeeping on its way out, which

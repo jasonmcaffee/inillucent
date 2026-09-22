@@ -158,7 +158,7 @@ of a run rather than of the map and is not checked here.
 | `e2e` | 36 | 412 | the public surfaces an application binds to, end to end |
 | `perf` | 1 | 6 | the cost guards — **runs alone**, see §5 |
 | `retrieval` | 7 | 519 | the embedding and retrieval engine, and its graded harness |
-| `tooling` | 13 | 122 | the checks that keep the repository's own rules true |
+| `tooling` | 14 | 128 | the checks that keep the repository's own rules true |
 | `nightly` | 2 | 4 | the long forms, run on a schedule rather than on a change |
 
 The map that assigns them is `tests/selection.toml`, and it is data rather than

@@ -22,3 +22,12 @@
 /tests/interop/*/app.rdb binary
 /tests/interop/*/app.rdb-wal.* binary
 /tests/interop/*/expected.tsv text eol=lf
+
+# The crash schedules are written by the campaigns that produce them, with
+# `std::fs::write` and LF, and they are read as a diff - a change in one is a
+# change in what the engine does under failure. With `core.autocrlf` true, git
+# checks them out with CRLF, so every run of the durability tier left seven of
+# them modified with an empty diff (task-2066 §4.4.9). A reviewer who has to
+# skip past seven files that did not change stops reading the one that did, and
+# a dirty tree is refused by both `packaging/ship.ps1` and `cargo publish`.
+/tests/crash/** text eol=lf

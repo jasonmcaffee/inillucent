@@ -562,10 +562,18 @@ mod tests {
             match crate::install::model_dir(crate::install::DEFAULT_MODEL) {
                 Some(dir) => dir,
                 None => {
-                    eprintln!(
-                        "no {} is installed and no model root holds one; skipping",
+                    // **The message was not enough either** (task-2066
+                    // §4.4.11). The fix above replaced a silent `?` with a
+                    // print carrying the marker, and a print does not panic
+                    // under `INILLUCENT_STRICT`, so all four cases still
+                    // reported green on a machine with no weights. The guard
+                    // could not see it because the guard read one line and this
+                    // literal starts on the next; widening the guard is what
+                    // found this site.
+                    inillucent_base::testing::skipping(&format!(
+                        "no {} is installed and no model root holds one",
                         crate::install::DEFAULT_MODEL
-                    );
+                    ));
                     return None;
                 }
             }

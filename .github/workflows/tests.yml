@@ -1,0 +1,186 @@
+# The suite, run by something other than a person remembering to type a command.
+#
+# Until this file, nothing ran the tests except somebody on one Windows machine.
+# The release script published to twelve destinations without running one, the
+# binding conformance suite skipped on any machine that had not run five
+# commands by hand, twelve fuzz targets existed and nothing started them, and
+# four of the fifteen release blockers task-2066 found had a test that was
+# written in a way that could not fail. A suite has every mechanism it needs and
+# is driven by nobody.
+#
+# ## The Linux job is the first time this has run anywhere but that machine
+#
+# Every `requires` row in `tests/selection.toml` was written from what one
+# Windows box happens to have. The first Linux run is expected to name targets
+# that are Windows only, and each one gets a `requires` row with its reason or a
+# fix - never an unconditional skip, which is the failure the whole `--strict`
+# design exists to prevent.
+#
+# ## The runner's exit code is this job's exit code, and 2 is not a failure
+#
+# `inillucent-testrun` answers three codes (task-2047):
+#
+#   0  every selected target ran and passed
+#   1  the run happened and was red
+#   2  the run did NOT happen - the build failed, or cargo could not say what it
+#      had built. Nothing was graded
+#
+# A `2` fails the job, because a release cannot be cut on it either, but it is
+# reported as a run that did not happen rather than as a failing test. They need
+# different things done about them, and an agent read one as the other once
+# already, at the cost of 60 KB of log.
+#
+# ## Why --strict
+#
+# Several suites report success when a prerequisite is absent. That is correct
+# for a fresh clone and useless as evidence, so `--strict` counts them and names
+# them. A CI job without it would go green on a machine that built nothing.
+
+name: tests
+
+on:
+  push:
+  pull_request:
+
+# A second push to the same branch cancels the first. The suite is about 45
+# minutes, so without this a branch pushed to three times holds three runners.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # A backtrace on the one test that failed, rather than a name and nothing.
+  RUST_BACKTRACE: 1
+
+jobs:
+  suite:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    # The oracle build, the fixtures and 220 targets. The default 360 is enough
+    # today and would hide a suite that started taking twice as long.
+    timeout-minutes: 120
+    strategy:
+      # Both operating systems always run. `fail-fast` would cancel Linux the
+      # moment Windows went red, and "does it work on Linux" is the question
+      # this job was added to answer.
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The toolchain is pinned in `rust-toolchain.toml` and rustup honours it,
+      # so nothing here names a version. A new compiler brings new lints, and
+      # the strict lint run below is a required check.
+      - name: toolchain
+        run: |
+          rustup show active-toolchain
+          rustc --version
+          cargo --version
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          # The oracle and the fixtures are not cargo's, and they are what makes
+          # a cold run twenty minutes longer than a warm one.
+          cache-directories: |
+            .sqlite-ref
+            _agent_output/fixtures
+
+      # `.sqlite-ref/` is gitignored - it is a downloaded amalgamation compiled
+      # here, and no inillucent crate links it. Every download is checked
+      # against the SHA3-256 sum SQLite publishes, using inillucent's own
+      # implementation, so a substituted archive cannot become the thing every
+      # parity claim is measured against.
+      - name: the pinned SQLite 3.53.4 oracle
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            pwsh tools/sqlite-reference.ps1
+          else
+            tools/sqlite-reference.sh
+          fi
+
+      # 1.2 MB, 17 MB and 94 MB, written by the pinned SQLite shell so that both
+      # arms of a comparison start from a file SQLite itself wrote. Without them
+      # `gates_fail_closed` and `new_engine_log_lead` skip, and `--strict` names
+      # them - which is the right answer and not one to leave standing in CI.
+      - name: the gate fixtures
+        shell: bash
+        run: tools/build-gate-fixtures.sh
+
+      - name: cargo fmt
+        run: cargo fmt --all --check
+
+      # `--all-targets --all-features`, because a lint that only runs on the
+      # default feature set does not see the `onnx` and `embed` code. The
+      # governed crates' `deny(missing_docs)` and their ban on `unwrap`,
+      # `expect`, `panic!` and slice indexing are crate attributes, so they are
+      # enforced by this compile rather than by a list here - `tools/validate`
+      # was the only thing that ever evaluated them.
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+
+      # Only the runner. It is behind `required-features = ["testrun"]`, so a
+      # plain `cargo test` does not produce it. The test targets are built by
+      # the runner's own build step below, which is the one that knows which
+      # features each row asks for.
+      - name: build the runner
+        run: cargo build -p inillucent-compat --bin inillucent-testrun --features testrun
+
+      # The contract tests first and by name. They are seconds, and each one
+      # fails on a thing the rest of the run would fail on confusingly: a
+      # dependency that may not be linked, a crate depending on one it may not,
+      # a test target with no row in the map, a command in the table and not in
+      # MCP.
+      - name: the contracts
+        run: cargo test -p inillucent-compat --test policy --test selection --test command_parity --test documentation
+
+      # The whole suite. The runner's own exit code is read rather than the
+      # shell's: `$?` after a pipeline is the last command's status, which is
+      # how a run that went red was once reported as a pass.
+      - name: the suite
+        shell: bash
+        run: |
+          set +e
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            RUNNER=target/debug/inillucent-testrun.exe
+          else
+            RUNNER=target/debug/inillucent-testrun
+          fi
+          "$RUNNER" --strict
+          code=$?
+          echo "inillucent-testrun exited $code"
+          case "$code" in
+            0)
+              echo "::notice::every selected target ran and passed"
+              ;;
+            1)
+              echo "::error::the run happened and was red - a target failed, or --strict named a suite whose prerequisite was absent"
+              ;;
+            2)
+              echo "::error::THE RUN DID NOT HAPPEN. The build failed, a named selection matched nothing, or cargo could not say what it had built. Nothing was graded, so nothing above may be read as a pass - this is not a failing test and should not be investigated as one."
+              ;;
+            *)
+              echo "::error::inillucent-testrun answered $code, which is not one of its three exit codes"
+              ;;
+          esac
+          exit $code
+
+      # The schedules are written by the campaigns that produce them, and a diff
+      # on one is a change in what the engine does under failure. A run that
+      # leaves the tree dirty has either changed that, which a reviewer must
+      # see, or has reintroduced the line-ending churn `.gitattributes` and
+      # `crash_reports.rs` exist to stop.
+      - name: the tree is clean after a run
+        if: always()
+        shell: bash
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::the run left the working tree dirty:"
+            git status --porcelain
+            git --no-pager diff
+            exit 1
+          fi
+          echo "the run changed nothing that is tracked"

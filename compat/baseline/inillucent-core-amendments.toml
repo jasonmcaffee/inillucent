@@ -242,9 +242,9 @@ sha256 = "022f1fe51faf8019de7517920c0d00798c2121dd873b2f9a18f7b8dbec44e7c4"
 
 [[amendment]]
 path = "crates/inillucent-core/src/residency.rs"
-ticket = "task-1970"
-reason = "the same change to the one skip in this file (task-1969, 4.6)"
-sha256 = "351e16ab8fd9c30bc60c22f2d1e5446db8578d3502edd9ed30927b57fcf943b8"
+ticket = "task-2068"
+reason = "The skip site in managed_or_skip announced with a bare eprintln! carrying the marker and then returned None. A print does not panic under INILLUCENT_STRICT, and the policy guard could not read the message because the literal starts on the line after the eprintln!( - so all four ONNX residency cases reported green on a machine with no weights. The site now calls inillucent_base::testing::skipping, which is what task-1946 intended when it replaced a silent ? with a message. No behaviour changes on a machine that has the weights: the function returns None in exactly the same case, and the only difference is that a strict run now says so. task-2066 section 4.4.11."
+sha256 = "17e49794567b07924cf7ac27d97d8cea6b3e5725de7cec2ab2cf4489ced3f47f"
 
 [[amendment]]
 path = "crates/inillucent-core/src/store.rs"

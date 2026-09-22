@@ -1900,8 +1900,26 @@ covers = ["inillucent-alloc"]
 [[target]]
 package = "inillucent-compat"
 kind = "test"
+name = "crash_reports"
+tier = "tooling"
+# It reads `tests/crash/` off disk and needs nothing built, so it has no
+# `requires` row: on any machine, in any checkout, it either finds the schedules
+# or says which one is gone.
+covers = ["inillucent-compat"]
+
+[[target]]
+package = "inillucent-compat"
+kind = "test"
 name = "gates_fail_closed"
 tier = "tooling"
+# Three of its cases start a real `inillucent-testrun`, which asks cargo what it
+# built, and cargo answers by building. Windows will not replace an image that
+# is running, so a sibling target executing a workspace binary at that moment
+# made the nested run fail to start - and those three then announced a skip, so
+# every strict run in a worktree named three skips a person could not clear
+# (task-2066 §4.4.16). Running this one target after the rest costs about the
+# length of this file and removes the race rather than tolerating it.
+alone = true
 # Seven of its cases skip when the fixture, the pinned benchmark driver or the
 # runner is absent, and the row said nothing, so `--strict` dropped the target
 # before it looked at it. The file written so a gate cannot pass having

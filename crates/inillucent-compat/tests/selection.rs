@@ -150,13 +150,17 @@ fn no_test_hides_outside_the_map() {
 /// and is quoted with its line number.
 #[test]
 fn every_line_of_the_map_is_one_the_parser_reads() {
-    const KEYS: [&str; 12] = [
+    const KEYS: [&str; 13] = [
         "package",
         "kind",
         "name",
         "tier",
         "purpose",
+        // `exclusive` is a tier asking for the machine; `alone` is one target
+        // asking for the run. See `selection::Row::alone` for why the level
+        // matters.
         "exclusive",
+        "alone",
         "covers",
         "requires",
         "features",

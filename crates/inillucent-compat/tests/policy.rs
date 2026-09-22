@@ -1453,27 +1453,9 @@ fn every_skip_site_goes_through_the_one_helper() {
             if line.contains("skipping(") && !line.contains(&a_definition) {
                 through_the_helper = through_the_helper.saturating_add(1);
             }
-            let message = quoted_after(line, "eprintln!(")
-                .or_else(|| quoted_after(line, "println!("))
-                .unwrap_or_default();
-            if !message.contains("skipping") {
+            let Some(message) = announces_its_own_skip(&lines, at) else {
                 continue;
-            }
-            // A skip is an announcement followed by an early return. Anything
-            // else a print says is progress or a warning, and neither is a
-            // claim that a suite ran.
-            let follows = lines
-                .get(at..at.saturating_add(4))
-                .unwrap_or_default()
-                .join("\n");
-            let returns = follows.contains("\n        return;")
-                || follows.contains("\n            return;")
-                || follows.contains("\n                return;")
-                || follows.contains("\n    return;")
-                || follows.contains("return Ok(());");
-            if !returns {
-                continue;
-            }
+            };
             printed.push(format!(
                 "{}:{}: {message}",
                 file.strip_prefix(&root).unwrap_or(&file).display(),
@@ -2048,9 +2030,140 @@ fn test_function_lines(lines: &[&str]) -> Vec<usize> {
     inside
 }
 
+/// Returns the message of a skip a test announces itself, or `None`.
+///
+/// A skip is a print whose message carries the marker followed by an early
+/// return. Anything else a print says is progress or a warning, and neither is
+/// a claim that a suite ran.
+///
+/// **Both reads used to be narrower than the code they read** (task-2066
+/// §4.4.11). The message was taken off the line the macro opens on, so a
+/// `rustfmt`-wrapped
+///
+/// ```ignore
+/// eprintln!(
+///     "... is not set, so no server is available to \
+///      migrate; skipping. ..."
+/// );
+/// return None;
+/// ```
+///
+/// read as an empty message and was passed over; and the early return was
+/// matched against four exact spellings of an indented `return;`, none of which
+/// is `return None;`. `live_postgres.rs` and `live_mysql.rs` were written in
+/// exactly that shape, so both were invisible here and neither panicked under
+/// `INILLUCENT_STRICT`. `the_guard_sees_a_wrapped_macro_that_returns_none`
+/// hands this function that text, so the guard can be shown to fail rather than
+/// assumed to.
+///
+/// @param lines - the file's source lines
+/// @param at - the line the print opens on
+fn announces_its_own_skip(lines: &[&str], at: usize) -> Option<String> {
+    /// How many lines past a print's opening line this reads.
+    ///
+    /// Eight covers a `rustfmt`-wrapped macro whose literal runs to three
+    /// source lines and whose early return follows the closing `);`, which is
+    /// the shape both live-server suites were written in. Their return sits
+    /// five lines below the `eprintln!(`, where the old window was four.
+    const MACRO_WINDOW: usize = 8;
+
+    // The window is clamped rather than demanded, because `get` on a range
+    // past the end answers `None`: a skip inside the last eight lines of a
+    // file would have been passed over, which is exactly the class of
+    // blindness this check exists to remove.
+    let end = at.saturating_add(MACRO_WINDOW).min(lines.len());
+    let window = lines.get(at..end)?;
+    let invocation = window.join("\n");
+    let message = quoted_after(&invocation, "eprintln!(")
+        .or_else(|| quoted_after(&invocation, "println!("))?;
+    if !message.contains("skipping") {
+        return None;
+    }
+    let returns = window.iter().skip(1).any(|following| {
+        let trimmed = following.trim();
+        trimmed == "return;" || trimmed == "return None;" || trimmed.starts_with("return Ok(());")
+    });
+    returns.then_some(message)
+}
+
+/// The guard sees a wrapped macro that ends `return None;`.
+///
+/// This is `live_postgres.rs` as it stood at `8607adf`, the one shape the check
+/// was written to catch and could not. It fails before the §4.4.11 fix by both
+/// routes at once - an empty message and an unrecognised return - so one of the
+/// two being restored still fails it.
+#[test]
+fn the_guard_sees_a_wrapped_macro_that_returns_none() {
+    // The marker is assembled rather than written, so this file does not
+    // itself carry the text it forbids - the same reason the scan above
+    // builds the name of the helper it looks for.
+    // Both the marker and the early return are assembled rather than written.
+    // The sibling check `every_early_return_in_a_test_says_why` reads a bare
+    // `return None;` as a test bailing out in silence, and a fixture that spells
+    // one out is indistinguishable from the thing it describes.
+    let marker = format!("{}ping", "skip");
+    let bail = format!("return {};", "None");
+    let source = format!(
+        r#"fn url() -> Option<ConnectionUrl> {{
+    let Ok(text) = std::env::var("INILLUCENT_TEST_POSTGRES_URL") else {{
+        eprintln!(
+            "INILLUCENT_TEST_POSTGRES_URL is not set, so no PostgreSQL server is available to \
+             migrate; {marker}. See this file header for the two psql commands."
+        );
+        {bail}
+    }};
+}}"#
+    );
+    let lines: Vec<&str> = source.lines().collect();
+    let at = lines
+        .iter()
+        .position(|line| line.trim() == "eprintln!(")
+        .expect("the fixture opens a print");
+    let found = announces_its_own_skip(&lines, at).expect("the guard reads the wrapped literal");
+    assert!(
+        found.contains(&marker),
+        "the message came back without the marker: {found}"
+    );
+}
+
+/// A print that says `skipping` and does not return is not a skip.
+///
+/// The counterpart to the case above: widening the window is only correct if it
+/// did not also widen what counts as a skip. A suite that announces it is
+/// skipping one fixture and carries on running is reporting progress.
+#[test]
+fn a_print_with_no_early_return_is_not_a_skip() {
+    let marker = format!("{}ping", "skip");
+    let source = format!(
+        r#"fn run() {{
+    eprintln!(
+        "the optional fixture is absent, so {marker} that one case and running the rest"
+    );
+    for case in cases() {{
+        check(case);
+    }}
+}}"#
+    );
+    let lines: Vec<&str> = source.lines().collect();
+    let at = lines
+        .iter()
+        .position(|line| line.trim() == "eprintln!(")
+        .expect("the fixture opens a print");
+    assert!(
+        announces_its_own_skip(&lines, at).is_none(),
+        "a print with no early return was read as a skip"
+    );
+}
+
 /// Returns the text between the first pair of quotes after a marker.
 ///
-/// @param line - the source line
+/// The haystack may be several source lines joined by newlines, because a
+/// `rustfmt`-wrapped macro puts its literal below the line that opens it. A
+/// literal continued with a trailing backslash therefore comes back with the
+/// backslash and the newline still in it, which is harmless: every caller here
+/// asks whether a word appears in the message, not what the message renders as.
+///
+/// @param line - the source line, or several joined by newlines
 /// @param marker - what the string follows
 fn quoted_after(line: &str, marker: &str) -> Option<String> {
     let at = line.find(marker)?;

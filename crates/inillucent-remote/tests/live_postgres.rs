@@ -40,9 +40,9 @@ use inillucent_tree::datum::OwnedDatum;
 /// an absent server is counted and named rather than reported as a pass.
 fn url() -> Option<ConnectionUrl> {
     let Ok(text) = std::env::var("INILLUCENT_TEST_POSTGRES_URL") else {
-        eprintln!(
-            "INILLUCENT_TEST_POSTGRES_URL is not set, so no PostgreSQL server is available to \
-             migrate; skipping. See this file's header for the two psql commands that set one up."
+        inillucent_base::testing::skipping(
+            "INILLUCENT_TEST_POSTGRES_URL is not set, so no PostgreSQL server is available \
+             to migrate. See this file's header for the two psql commands that set one up.",
         );
         return None;
     };

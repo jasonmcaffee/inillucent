@@ -40,22 +40,22 @@ fn area(name: &str) -> PathBuf {
 /// Returns the `inillucent` binary, building it first.
 ///
 /// `None` when it will not build, which is what a machine missing the MSVC
-/// environment produces - and the suite says so and passes rather than failing
-/// for a reason it is not testing.
+/// environment produces - and `cliproc::program` announces that through the one
+/// skip helper, so `--strict` counts it rather than reading the six cases as
+/// passes.
+///
+/// **This suite used to look for the binary at a path nothing writes to**
+/// (task-2066 §4.4.16). It ran `cargo build -p inillucent-cli`, which honours
+/// whatever `CARGO_TARGET_DIR` says, and then looked at the hardcoded
+/// `<workspace>/target/debug`. Every `git worktree` in this repository
+/// redirects that variable to a directory of its own, so the build succeeded,
+/// the lookup found nothing, and all six cases returned having asserted
+/// nothing - and returned without a message, so neither `--strict` nor the skip
+/// guard could see it. `cliproc::program` reads the profile and the target
+/// directory back off the calling test's own path, which is the same problem
+/// task-1962 solved for twelve other suites.
 fn binary() -> Option<PathBuf> {
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let built = Command::new(cargo)
-        .current_dir(workspace_root())
-        .args(["build", "-p", "inillucent-cli", "--bin", "inillucent"])
-        .status()
-        .ok()?;
-    if !built.success() {
-        return None;
-    }
-    let path = workspace_root()
-        .join("target/debug")
-        .join(format!("inillucent{}", std::env::consts::EXE_SUFFIX));
-    path.is_file().then_some(path)
+    inillucent_compat::cliproc::program("inillucent")
 }
 
 /// Runs the command against an install root, and returns its output.
