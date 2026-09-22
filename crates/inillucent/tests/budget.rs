@@ -237,7 +237,27 @@ const ROWS: i64 = 20_000;
 /// pins the toolchain, so an upgrade is the one thing that can move this
 /// number without the engine changing. It is a deliberate edit when it
 /// happens, and the assertion prints what it read.
-const TRIVIAL_COMPILE_ALLOCATIONS: u64 = 15;
+/// **Sixteen rather than fifteen since task-2066 §4.3.5.** A compiled `SELECT`
+/// carries its result column names now, decoded once, behind an `Rc` - and
+/// that `Rc` is the one allocation. What it buys is the `Vec` and the `String`
+/// per column that every *execution* used to build: `SELECT 1` stepped through
+/// a connection made 11 allocations a step before and makes 8 now, which
+/// [`STEP_ALLOCATIONS`] records. A statement stepped twice is already ahead.
+const TRIVIAL_COMPILE_ALLOCATIONS: u64 = 16;
+
+/// How many allocations one step of `SELECT 1` may make through a connection.
+///
+/// **Eight, and it was eleven until task-2066 section 4.3.5.** A cached
+/// `SELECT` rebuilt its result column names on every execution - a `Vec` and a
+/// `String` per column - and they are `plan.select.columns`'s own names, which
+/// cannot change between executions of one compiled statement. They are
+/// decoded once at compile now and handed out behind an `Rc`.
+///
+/// Exactly what this reads, with no margin, for the reason
+/// [`TRIVIAL_COMPILE_ALLOCATIONS`] gives: an allocation count is a property of
+/// the code path rather than of the machine, so there is no run-to-run movement
+/// for a margin to absorb, and a margin is room for a regression to hide in.
+const STEP_ALLOCATIONS: u64 = 8;
 
 /// How many allocations compiling `SELECT id FROM t WHERE email = ?1` may make
 /// on a warm connection.
@@ -263,7 +283,9 @@ const TRIVIAL_COMPILE_ALLOCATIONS: u64 = 15;
 ///
 /// Read exactly, with no margin, for the reason
 /// [`TRIVIAL_COMPILE_ALLOCATIONS`] gives.
-const POINT_COMPILE_ALLOCATIONS: u64 = 92;
+/// **Ninety-three rather than ninety-two since task-2066 section 4.3.5**, for
+/// the same one `Rc` [`TRIVIAL_COMPILE_ALLOCATIONS`] gained and the same reason.
+const POINT_COMPILE_ALLOCATIONS: u64 = 93;
 
 /// How many more allocations a compile makes when the in-process embedder is
 /// compiled in.
@@ -1160,5 +1182,13 @@ fn a_statement_outside_a_transaction_rereads_nothing() {
         "one step outside a transaction made {outside_allocations} \
          allocation(s) and one inside a transaction made {inside_allocations}; \
          taking and giving back the file lock is not work that allocates"
+    );
+    // **A number, because the assertion above is a comparison** (task-2066
+    // section 4.3.5). Both sides of it moved together when a `SELECT`'s result
+    // column names were built on every execution, so three allocations a step
+    // could be added without it noticing. This reads what one step costs.
+    assert!(
+        inside_allocations <= STEP_ALLOCATIONS,
+        "one step of `SELECT 1` made {inside_allocations} allocation(s) against a bound of {STEP_ALLOCATIONS}"
     );
 }
