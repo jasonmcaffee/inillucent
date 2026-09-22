@@ -609,11 +609,12 @@ fn correlated_columns(
         catalog: Some(catalog),
         correlations: &[],
     };
-    let correlations = crate::correlate::correlations_of(plan, &|expr: &BoundExpr| match expr {
-        BoundExpr::Column { source, column, .. } => outer.column(*source, *column as usize),
-        BoundExpr::Rowid { source } => outer.rowid(*source),
-        _ => None,
-    })?;
+    let correlations =
+        crate::correlate::correlations_of(plan, catalog, &|expr: &BoundExpr| match expr {
+            BoundExpr::Column { source, column, .. } => outer.column(*source, *column as usize),
+            BoundExpr::Rowid { source } => outer.rowid(*source),
+            _ => None,
+        })?;
     let joined_width = space.types.len();
     let columns: Vec<(usize, usize)> = correlations
         .iter()

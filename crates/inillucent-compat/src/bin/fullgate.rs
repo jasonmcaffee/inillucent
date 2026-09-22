@@ -281,8 +281,19 @@ fn memory_round(database: &Path, settings: &Settings) -> Result<(), String> {
 fn filtered_plan(settings: &Settings) -> Result<inillucent_compat::perf::Plan, String> {
     let mut plan = plan_for(&settings.scale);
     plan.setup.clear();
-    plan.workloads
-        .retain(|workload| settings.families.contains(&workload.family));
+    // **A workload whose family no table weights still runs** (task-2066
+    // §4.3.1). `--families` names which of the ten weighted families to
+    // measure and its default is all of them, so a filter by membership drops
+    // a workload that is deliberately outside the weighting - which is what
+    // `read.correlated` is, and `perf::correlated_read_workloads` gives the
+    // reason. It is reported per workload and reaches no family, no floor and
+    // no headline. An explicit `--families` still selects, because a name the
+    // caller did not ask for is a name they did not ask for.
+    let asked = settings.families.clone();
+    plan.workloads.retain(|workload| {
+        asked.contains(&workload.family)
+            || !FAMILIES.iter().any(|(name, _)| *name == workload.family)
+    });
     if let Some(repeat) = settings.repeat_override {
         for workload in &mut plan.workloads {
             workload.repeat = repeat;

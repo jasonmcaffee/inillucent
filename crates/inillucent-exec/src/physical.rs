@@ -101,7 +101,8 @@ pub(crate) use chain::Listing;
 pub use chain::{build, build_prepared, build_prepared_described, build_statement, Statement};
 pub use params::Params;
 pub use run::{
-    prepare_any, rowid_seek_key, run, run_any, run_any_prepared, run_compound, run_prepared,
+    prepare_any, rowid_seek_key, run, run_any, run_any_prepared, run_any_prepared_limited,
+    run_compound, run_prepared, run_prepared_limited,
 };
 pub use stages::prepare;
 pub use stages::{AccessKind, Pipeline, Prepared, PreparedStage, Shape, Source, VirtualScanSource};

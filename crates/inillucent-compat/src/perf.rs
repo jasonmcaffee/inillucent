@@ -747,6 +747,7 @@ pub fn plan_for(scale: &str) -> Plan {
     workloads.extend(range_read_workloads(point));
     workloads.extend(analytical_read_workloads(scan));
     workloads.extend(join_read_workloads(point));
+    workloads.extend(correlated_read_workloads(point));
     workloads.extend(write_workloads(write));
     workloads.extend(transaction_workloads(write));
     workloads.extend(schema_workloads());
@@ -1025,6 +1026,82 @@ fn join_read_workloads(point: u32) -> Vec<Workload> {
             grouping: Grouping::Autocommit,
             prepare_each: false,
             binds: vec![Bind::Scatter],
+            mutates: false,
+        },
+    ]
+}
+
+/// Returns the `correlated` workloads: a block answered once per outer row.
+///
+/// **Graded against the join that answers the same question** (task-2066
+/// §4.3.1). A correlated block and its join are one query written two ways, so
+/// the join is the bar, and nothing measured either shape before this.
+///
+/// What it caught: a correlated `EXISTS` over 5,000 outer rows took 11,497 ms
+/// and the three causes were a parameter set cloned per outer row, the same
+/// set cloned again on every *read* of a parameter, and a structural choice
+/// remade per row. It is 2,616 ms now. On this fixture `EXISTS` is 51.75 ms
+/// against the join's 1.85, so the shape is still the expensive way to ask and
+/// this is what will say when that changes.
+///
+/// **The outer table is `wide`, which holds 400 rows, and bounding a larger
+/// one does not work.** The correlation operator sits *below* the filter - it
+/// computes a block for every row the source produces and the `WHERE` then
+/// discards most of them - so `a.key BETWEEN ?1 AND ?1 + 200` over
+/// `main_table` added a predicate and removed no work, and measured slower
+/// than the unbounded form for the extra iterations alone.
+///
+/// `EXISTS` and `IN (SELECT ...)` both, because they reach different code:
+/// `crate::correlate` answers the first and refuses the second, so a workload
+/// with only one of them says nothing about the other.
+///
+/// **They belong to no weighted family, deliberately.** Folded into
+/// `read.join` they took that family from 3.64x to 0.10x, which would be a
+/// 36-fold regression in a published number caused by the workload set
+/// changing rather than by the engine. And they cannot have a family of their
+/// own either: `compat/perf/contract.toml` says in its own first paragraph
+/// that the weights were fixed before any measurement was taken, and that a
+/// weighting chosen after the results are in is not a weighting but a way of
+/// writing down the results.
+///
+/// So the family name here is one no table knows. `report_results` prints
+/// these two and compares their digests against SQLite like every other
+/// workload; `report_families`, the floor and the headline iterate `FAMILIES`
+/// and never see them. The correctness half is graded and the timing is
+/// reported next to the join a reader should compare it with.
+///
+/// @param point - how many times a point workload repeats at this scale
+fn correlated_read_workloads(point: u32) -> Vec<Workload> {
+    // One iteration answers 400 correlated blocks and costs tens of
+    // milliseconds, which is already at the top of what the other read
+    // workloads cost for their whole repeat. The rounds are what provide the
+    // samples.
+    let repeat = (point / 4_000).max(1);
+    vec![
+        Workload {
+            name: "correlated.exists".to_string(),
+            family: "read.correlated".to_string(),
+            sql: "SELECT count(*) FROM wide a WHERE EXISTS (SELECT 1 FROM side_table b WHERE                   b.owner = a.id)"
+                .to_string(),
+            pre: None,
+            post: None,
+            repeat,
+            grouping: Grouping::Autocommit,
+            prepare_each: false,
+            binds: Vec::new(),
+            mutates: false,
+        },
+        Workload {
+            name: "correlated.in".to_string(),
+            family: "read.correlated".to_string(),
+            sql: "SELECT count(*) FROM wide a WHERE a.id IN (SELECT b.owner FROM side_table b                   WHERE b.owner = a.id)"
+                .to_string(),
+            pre: None,
+            post: None,
+            repeat,
+            grouping: Grouping::Autocommit,
+            prepare_each: false,
+            binds: Vec::new(),
             mutates: false,
         },
     ]

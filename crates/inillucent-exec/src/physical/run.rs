@@ -61,8 +61,39 @@ pub fn run_prepared(
     prepared: &Prepared,
     params: &Params,
 ) -> DbResult<(Vec<Vec<OwnedDatum>>, Shape)> {
+    run_prepared_limited(plan, catalog, prepared, params, None)
+}
+
+/// Runs a prepared pipeline, stopping after `limit` rows when one is given.
+///
+/// **For a caller that needs one row and not the answer** (task-2066 §4.3.1).
+/// A correlated `EXISTS` asks whether the inner query produces anything and an
+/// unlimited run reads every row of it to answer that; a scalar block takes
+/// the first row and drops the rest. `CollectInto::with_limit` already answers
+/// `Flow::Stop`, so the pipeline stops rather than the rows being thrown away
+/// afterwards.
+///
+/// A block's own `ORDER BY` is inside the pipeline, so the limit stops after
+/// the sort has emitted its first row - which is the row the unlimited path
+/// would have picked.
+///
+/// @param plan - the planner's output
+/// @param catalog - where the trees and layouts come from
+/// @param prepared - the structural choice
+/// @param params - the values bound to `?1`, `?2`, ...
+/// @param limit - how many rows to keep, or `None` for all of them
+pub fn run_prepared_limited(
+    plan: &PhysicalPlan,
+    catalog: &dyn TreeCatalog,
+    prepared: &Prepared,
+    params: &Params,
+    limit: Option<usize>,
+) -> DbResult<(Vec<Vec<OwnedDatum>>, Shape)> {
     let rows = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
-    let sink = Box::new(CollectInto::new(std::rc::Rc::clone(&rows)));
+    let sink: Box<CollectInto> = match limit {
+        Some(limit) => Box::new(CollectInto::with_limit(std::rc::Rc::clone(&rows), limit)),
+        None => Box::new(CollectInto::new(std::rc::Rc::clone(&rows))),
+    };
     let (mut pipeline, shape) = build_prepared(plan, catalog, prepared, params, sink)?;
     pipeline.run()?;
     // **Taken, not cloned.** The sink is dropped with the pipeline and nothing
@@ -250,13 +281,35 @@ pub fn run_any_prepared(
     prepared: &Prepared,
     params: &Params,
 ) -> DbResult<(Vec<Vec<OwnedDatum>>, Shape)> {
+    run_any_prepared_limited(plan, catalog, prepared, params, None)
+}
+
+/// Runs any planned query against a prepared choice, stopping after `limit` rows.
+///
+/// A compound and a windowed query take the unlimited path: neither is one
+/// pipeline, so there is no single sink to put the limit in, and the caller
+/// that asks for a limit here - a correlated block - reads the first row
+/// either way.
+///
+/// @param plan - the planner's output
+/// @param catalog - where the trees and layouts come from
+/// @param prepared - the structural choice
+/// @param params - the values bound to `?1`, `?2`, ...
+/// @param limit - how many rows to keep, or `None` for all of them
+pub fn run_any_prepared_limited(
+    plan: &PhysicalPlan,
+    catalog: &dyn TreeCatalog,
+    prepared: &Prepared,
+    params: &Params,
+    limit: Option<usize>,
+) -> DbResult<(Vec<Vec<OwnedDatum>>, Shape)> {
     if !plan.compounds.is_empty() {
         return run_compound(plan, catalog, params);
     }
     if !plan.select.windows.is_empty() {
         return crate::windowpass::run_windowed(plan, catalog, params);
     }
-    run_prepared(plan, catalog, prepared, params)
+    run_prepared_limited(plan, catalog, prepared, params, limit)
 }
 /// Returns the set operation a compound operator names.
 ///

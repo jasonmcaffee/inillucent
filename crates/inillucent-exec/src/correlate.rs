@@ -46,7 +46,7 @@ use inillucent_tree::datum::{Datum, OwnedDatum};
 
 use crate::batch::{Batch, Vector};
 use crate::ops::{Flow, Sink};
-use crate::physical::{run_any, Params, TreeCatalog};
+use crate::physical::{prepare_any, run_any_prepared_limited, Params, Prepared, TreeCatalog};
 
 /// The first parameter number a correlation may use.
 ///
@@ -67,6 +67,18 @@ pub struct Correlation {
     negated: bool,
     /// The block, with its outer references replaced by parameters.
     plan: PhysicalPlan,
+    /// The structural choice for that plan, made once.
+    ///
+    /// **`answer` used to call `run_any`, which is `prepare_any` and then
+    /// `run_any_prepared`, on every outer row** (task-2066 §4.3.1).
+    /// `prepare_any` runs the covering candidate trial - a speculative
+    /// pipeline build per candidate tree - so an `EXISTS` over five thousand
+    /// outer rows made five thousand structural decisions about the same inner
+    /// query against the same schema.
+    ///
+    /// The module comment above says a correlated block is planned once and
+    /// run per row. That was true of the plan and not of the prepare.
+    prepared: Prepared,
     /// For each replaced reference: the joined-row column that feeds it, and
     /// the parameter number it was given.
     feeds: Vec<(usize, u32)>,
@@ -118,6 +130,9 @@ impl<'t> Correlated<'t> {
 impl Sink for Correlated<'_> {
     fn push(&mut self, batch: &Batch<'_>) -> DbResult<Flow> {
         let width = batch.columns.len();
+        // **Once per batch, not once per row** (task-2066 §4.3.1). See
+        // `Correlation::answer` for what that clone cost.
+        let mut bound = self.params.clone();
         for nth in 0..batch.live() {
             let mut row: Vec<OwnedDatum> =
                 Vec::with_capacity(width.saturating_add(self.correlations.len()));
@@ -126,7 +141,7 @@ impl Sink for Correlated<'_> {
             }
             for position in 0..self.correlations.len() {
                 let answer = match self.correlations.get(position) {
-                    Some(correlation) => correlation.answer(self.catalog, &self.params, &row)?,
+                    Some(correlation) => correlation.answer(self.catalog, &mut bound, &row)?,
                     None => OwnedDatum::Null,
                 };
                 row.push(answer);
@@ -153,23 +168,39 @@ impl Sink for Correlated<'_> {
 impl Correlation {
     /// Returns what this block answers for one outer row.
     ///
+    /// **The parameter set is the caller's and is written into** (task-2066
+    /// §4.3.1). This used to clone it per row, and
+    /// [`FIRST_CORRELATION_PARAMETER`] is 100,000, so that clone copied a
+    /// hundred thousand `OwnedDatum` slots to write one of them. Measured on
+    /// 5,000 outer rows with an `EXISTS` whose probe matches nothing - so
+    /// nothing but the setup runs - it was **1.47 milliseconds an outer row**.
+    ///
+    /// Each block writes only its own numbers, and they are past anything a
+    /// statement can write, so sharing one set between the blocks of one batch
+    /// cannot let one of them read another's value.
+    ///
     /// @param catalog - where the trees and layouts come from
-    /// @param params - the statement's bound parameters
+    /// @param bound - the statement's parameters, to write this row's feeds into
     /// @param row - the joined row so far
     pub fn answer(
         &self,
         catalog: &dyn TreeCatalog,
-        params: &Params,
+        bound: &mut Params,
         row: &[OwnedDatum],
     ) -> DbResult<OwnedDatum> {
-        let mut bound = params.clone();
         for (column, number) in &self.feeds {
             bound.set(
                 *number,
                 row.get(*column).cloned().unwrap_or(OwnedDatum::Null),
             );
         }
-        let (rows, _shape) = run_any(&self.plan, catalog, &bound)?;
+        // **One row is all any of the three forms reads.** `Exists` asks
+        // whether the block produced anything and `Scalar` takes the first row
+        // and drops the rest, so the unlimited run was reading an inner result
+        // set to throw it away. `In` is refused in `correlations_of` and is
+        // stated below so a variant added later is a compilation error.
+        let (rows, _shape) =
+            run_any_prepared_limited(&self.plan, catalog, &self.prepared, bound, Some(1))?;
         let mut column = rows
             .into_iter()
             .map(|row| row.into_iter().next().unwrap_or(OwnedDatum::Null));
@@ -198,13 +229,14 @@ impl Correlation {
 /// @param resolve - which row column an outer reference reads
 pub fn correlations_in(
     exprs: &[&BoundExpr],
+    catalog: &dyn TreeCatalog,
     resolve: &dyn Fn(&BoundExpr) -> Option<usize>,
 ) -> DbResult<Vec<Correlation>> {
     let mut found: Vec<(usize, SubqueryKind, bool, BoundSelect)> = Vec::new();
     for expr in exprs {
         gather_expression(expr, &mut found);
     }
-    prepare_blocks(found, resolve)
+    prepare_blocks(found, catalog, resolve)
 }
 
 /// Finds every correlated block in a plan and prepares it.
@@ -216,6 +248,7 @@ pub fn correlations_in(
 /// @param resolve - which joined-row column an outer reference reads
 pub fn correlations_of(
     plan: &PhysicalPlan,
+    catalog: &dyn TreeCatalog,
     resolve: &dyn Fn(&BoundExpr) -> Option<usize>,
 ) -> DbResult<Vec<Correlation>> {
     if !plan.subqueries {
@@ -223,7 +256,25 @@ pub fn correlations_of(
     }
     let mut found: Vec<(usize, SubqueryKind, bool, BoundSelect)> = Vec::new();
     gather_plan(plan, &mut found);
-    prepare_blocks(found, resolve)
+    prepare_blocks(found, catalog, resolve)
+}
+
+/// Whether a plan holds any correlated block at all.
+///
+/// **A walk, and nothing else** (task-2066 §4.3.1). `compiled.rs` asks only
+/// whether the list is empty, and it used to ask by building the list - which
+/// plans every block and, since blocks are prepared now, would prepare them
+/// too. The comment above that call promises a shape it refuses costs nothing
+/// beyond the walk, and this is what keeps that true.
+///
+/// @param plan - the planner's output
+pub fn has_correlations(plan: &PhysicalPlan) -> bool {
+    if !plan.subqueries {
+        return false;
+    }
+    let mut found: Vec<(usize, SubqueryKind, bool, BoundSelect)> = Vec::new();
+    gather_plan(plan, &mut found);
+    !found.is_empty()
 }
 
 /// Rewrites each gathered block's outer references into parameters, and plans it.
@@ -232,6 +283,7 @@ pub fn correlations_of(
 /// @param resolve - which row column an outer reference reads
 fn prepare_blocks(
     found: Vec<(usize, SubqueryKind, bool, BoundSelect)>,
+    catalog: &dyn TreeCatalog,
     resolve: &dyn Fn(&BoundExpr) -> Option<usize>,
 ) -> DbResult<Vec<Correlation>> {
     let mut prepared = Vec::with_capacity(found.len());
@@ -269,11 +321,17 @@ fn prepare_blocks(
                 "a correlated subquery reading a column the joined row does not carry",
             );
         }
+        // Prepared here, once, which is the whole of section 4.3.1: the plan
+        // and the schema decide the structural choice and neither depends on
+        // the outer row.
+        let plan = plan_select_with(block, Levers::default());
+        let choice = prepare_any(&plan, catalog)?;
         prepared.push(Correlation {
             id,
             kind,
             negated,
-            plan: plan_select_with(block, Levers::default()),
+            plan,
+            prepared: choice,
             feeds,
         });
     }

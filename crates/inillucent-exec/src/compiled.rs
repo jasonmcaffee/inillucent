@@ -9,7 +9,6 @@
 
 use inillucent_base::error::misuse;
 use inillucent_base::DbResult;
-use inillucent_sql::bind::BoundExpr;
 use inillucent_sql::plan::{AccessPath, PhysicalPlan};
 use inillucent_tree::datum::OwnedDatum;
 
@@ -443,12 +442,7 @@ pub fn try_compile(
     // subquery - so a shape they refuse costs this call nothing beyond the
     // walk itself, and `run_any_prepared`'s build is the only one that ever
     // happens for it.
-    let correlations = crate::correlate::correlations_of(plan, &|expr: &BoundExpr| match expr {
-        BoundExpr::Column { source, column, .. } => space.column(*source, *column as usize),
-        BoundExpr::Rowid { source } => space.rowid(*source),
-        _ => None,
-    })?;
-    if !correlations.is_empty() {
+    if crate::correlate::has_correlations(plan) {
         return Ok(None);
     }
     let mut joins = Vec::with_capacity(prepared.stages.len().saturating_sub(1));

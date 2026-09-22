@@ -432,7 +432,7 @@ fn build_update_setup(
     // `crate::correlate` - the same operator a `SELECT` uses, so there is one
     // implementation of what a correlated block means rather than a second in
     // the write path.
-    let correlated = update_correlations(statement, layout)?;
+    let correlated = update_correlations(statement, layout, catalog)?;
     let space = RowSpace::new(&sources_for(statement.source, &statement.triggers), layout)
         .with_correlations(
             &correlated
@@ -514,6 +514,7 @@ fn build_update_setup(
 fn update_correlations(
     statement: &BoundUpdate,
     layout: &SourceLayout,
+    catalog: &dyn TreeCatalog,
 ) -> DbResult<Vec<crate::correlate::Correlation>> {
     let mut exprs: Vec<&BoundExpr> = statement
         .assignments
@@ -521,7 +522,7 @@ fn update_correlations(
         .map(|assignment| &assignment.value)
         .collect();
     exprs.extend(statement.returning.iter().map(|column| &column.expr));
-    crate::correlate::correlations_in(&exprs, &row_resolver(statement.source, layout))
+    crate::correlate::correlations_in(&exprs, catalog, &row_resolver(statement.source, layout))
 }
 /// Returns how an outer reference maps onto one row image's tree columns.
 ///
@@ -557,10 +558,16 @@ fn answer_correlations(
         return Ok(Vec::new());
     }
     let catalog = target.catalog();
-    let bare = params.without_subqueries();
+    // **One set for every block of this row, written into rather than cloned
+    // per block** (task-2066 §4.3.1). `without_subqueries` copies the whole
+    // parameter vector, and a correlation's own numbers start at 100,000 - so
+    // a statement with two correlated blocks used to copy two hundred thousand
+    // slots to write two of them. Each block writes only its own numbers and
+    // they are past anything a statement can write, so one set is safe.
+    let mut bare = params.without_subqueries();
     let mut answers = Vec::with_capacity(correlated.len());
     for correlation in correlated {
-        answers.push(correlation.answer(catalog, &bare, row)?);
+        answers.push(correlation.answer(catalog, &mut bare, row)?);
     }
     Ok(answers)
 }

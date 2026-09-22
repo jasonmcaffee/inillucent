@@ -298,8 +298,18 @@ impl Params {
         if index == 0 {
             return OwnedDatum::Null;
         }
-        self.held()
-            .get(index.saturating_sub(1) as usize)
+        // **Locked and indexed, not copied and indexed** (task-2066 §4.3.1).
+        // This read `self.held()`, which clones the whole vector, and then
+        // took one value out of the copy. For an ordinary statement that is a
+        // handful of slots and nobody noticed; a correlated block's parameters
+        // start at `FIRST_CORRELATION_PARAMETER`, which is 100,000, and
+        // `Params::set` stores into a dense vector - so every read of one
+        // copied a hundred thousand `OwnedDatum`s to return a single one, on
+        // every outer row.
+        let Ok(held) = self.values.lock() else {
+            return OwnedDatum::Null;
+        };
+        held.get(index.saturating_sub(1) as usize)
             .cloned()
             .unwrap_or(OwnedDatum::Null)
     }
