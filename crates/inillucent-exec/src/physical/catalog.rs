@@ -75,6 +75,24 @@ pub struct SourceLayout {
 }
 /// Where the executor finds its trees, its layouts and its pages.
 pub trait TreeCatalog {
+    /// Returns somewhere a buffering operator may spill runs to.
+    ///
+    /// **`None` by default, and that is the shipped answer for every
+    /// implementor that does not override it** (task-2066 §4.3.6). An operator
+    /// with no spill file holds everything, exactly as it did before spilling
+    /// existed, and the byte budget refuses the statement if a budget was
+    /// armed. A test harness, an import and every other catalog in the tree
+    /// keep compiling and keep behaving the same way.
+    ///
+    /// The trait it returns is declared in this crate and implemented in
+    /// `inillucent-engine`, because `docs/invariants/layering.toml` does not
+    /// let a query executor depend on `inillucent-vfs` - a executor has no
+    /// business naming a file system - and the engine may and already depends
+    /// on this crate.
+    fn spill(&self) -> Option<std::rc::Rc<dyn crate::spill::Spill>> {
+        None
+    }
+
     /// Returns the buffer pool one tree's pages live in.
     ///
     /// **Per tree, because a connection is a set of databases.** `ATTACH` gives

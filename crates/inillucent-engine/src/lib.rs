@@ -136,6 +136,7 @@ mod schema_write;
 use recovery::OpenedFile;
 /// Session-scoped `total_changes()` accounting.
 mod session_changes;
+mod spillfile;
 /// The engine's half of a vector index a module owns.
 mod vectors;
 pub mod vtab;
@@ -934,6 +935,19 @@ impl ImportedDatabase {
 }
 
 impl TreeCatalog for ImportedDatabase {
+    /// Returns this database's own file system, to spill sort runs onto.
+    ///
+    /// **The database's own rather than a fresh one** (task-2066 §4.3.6).
+    /// `MemoryVfs` is a file system per instance, so a spill made on a new one
+    /// would be invisible to everything else and a `:memory:` database would
+    /// spill into a void - the same reason `ImportedDatabase` holds its VFS at
+    /// all.
+    fn spill(&self) -> Option<std::rc::Rc<dyn inillucent_exec::spill::Spill>> {
+        Some(std::rc::Rc::new(crate::spillfile::VfsSpill::new(
+            std::sync::Arc::clone(&self.storage.vfs),
+        )))
+    }
+
     fn covering_candidates(&self, table_root: u32) -> Vec<u32> {
         self.schema
             .covering

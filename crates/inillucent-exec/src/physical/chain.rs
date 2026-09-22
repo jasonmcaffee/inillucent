@@ -903,6 +903,18 @@ fn push_trim(
     )))
 }
 
+/// Returns somewhere the sorter may spill, when the catalog offers one.
+///
+/// **`None` is the ordinary answer and it is not a failure** (task-2066
+/// §4.3.6): `TreeCatalog::spill` is defaulted to `None`, the write path and
+/// the two constant folds have no catalog at all, and a sort with nowhere to
+/// spill behaves exactly as it did before spilling existed.
+///
+/// @param up - what the chain is being built from
+fn spill_of(up: &Upward<'_>) -> Option<std::rc::Rc<dyn crate::spill::Spill>> {
+    up.space.catalog.and_then(|catalog| catalog.spill())
+}
+
 /// Puts the sorter and the `LIMIT` on, in whichever arrangement is right.
 ///
 /// The two are decided together because `TopN` fuses them: a bounded sort keeps
@@ -933,13 +945,17 @@ fn push_sort(
     let chain = push_trim(chain, operators, up)?;
     let Some(limit) = up.limit else {
         operators.add(|| "SORT".to_string());
-        return Ok(Box::new(Sort::new(sort_keys.clone(), chain)));
+        return Ok(Box::new(
+            Sort::new(sort_keys.clone(), chain).spilling_to(spill_of(up)),
+        ));
     };
     let bounded = limit.saturating_add(up.offset);
     if bounded > TopN::MAX_LIMIT || up.prepared.forced.full_sort {
         let chain = push_limit(chain, operators, limit, up.offset);
         operators.add(|| "SORT".to_string());
-        return Ok(Box::new(Sort::new(sort_keys.clone(), chain)));
+        return Ok(Box::new(
+            Sort::new(sort_keys.clone(), chain).spilling_to(spill_of(up)),
+        ));
     }
     let chain = if up.offset > 0 {
         push_limit(chain, operators, limit, up.offset)

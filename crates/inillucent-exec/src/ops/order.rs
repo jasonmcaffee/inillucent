@@ -38,11 +38,57 @@ pub struct SortKey {
     /// does not - it has to be carried, and the SLT corpus asks for both.
     pub nulls_first: bool,
 }
+/// How many bytes `Sort` holds before it writes a run and starts again.
+///
+/// **Far above anything the gate reaches, on purpose** (task-2066 §4.3.6).
+/// task-1869 measured a spill at 8 ms on a 27 ms `CREATE INDEX` and it put the
+/// `schema` family under its floor, so a threshold a benchmark trips is a
+/// threshold that makes every benchmark about the spill. The whole medium
+/// fixture is 17 MB and `scan.sort` sorts a fraction of it; sixty-four
+/// mebibytes is past every workload in the plan and far under the memory a
+/// machine running one has.
+///
+/// It bounds what one `Sort` holds, not what a statement holds: a query with
+/// two of them can hold twice this, which is what the byte budget is for.
+const SPILL_BYTES: u64 = 64 * 1024 * 1024;
+
+/// The threshold this sort spills at.
+///
+/// `SPILL_BYTES` unless a test lowered it. **A test cannot reach the real
+/// threshold**: sixty-four mebibytes of rows takes seconds to build and the
+/// suite runs this file's cases in milliseconds, so a spill nobody can
+/// exercise is a spill nobody has run. Lowering it is how the merge gets
+/// tested at all, and the field is crate-private so nothing outside this crate
+/// can move it.
+#[cfg(test)]
+pub(crate) fn spill_threshold(sort: &Sort) -> u64 {
+    sort.threshold
+}
+
 /// Sorts every row, then emits.
 pub struct Sort {
     keys: Vec<SortKey>,
     pub(crate) rows: Vec<Vec<OwnedDatum>>,
     downstream: Box<dyn Sink>,
+    /// Where runs go, when the caller gave this sort somewhere to put them.
+    spill: Option<std::rc::Rc<dyn crate::spill::Spill>>,
+    /// The file the runs are in, opened on the first spill and not before.
+    file: Option<Box<dyn crate::spill::SpillFile>>,
+    /// Every run written so far.
+    runs: Vec<crate::spill::Run>,
+    /// How many bytes the buffer holds, so the threshold is a comparison
+    /// rather than a walk of the rows.
+    held: u64,
+    /// How many bytes this sort holds before it writes a run.
+    ///
+    /// `SPILL_BYTES` unless a test lowered it; see `spilling_at`.
+    threshold: u64,
+    /// How many runs were written, kept past the merge that clears them.
+    ///
+    /// **So a test can say whether it spilled at all.** Without it a case that
+    /// set a threshold the rows never reached would compare an in-memory sort
+    /// against an in-memory sort and pass, which is rule 1.2's failure exactly.
+    written: usize,
 }
 impl Sort {
     /// Returns a sort.
@@ -54,9 +100,163 @@ impl Sort {
             keys,
             rows: Vec::new(),
             downstream,
+            spill: None,
+            file: None,
+            runs: Vec::new(),
+            held: 0,
+            threshold: SPILL_BYTES,
+            written: 0,
         }
     }
+
+    /// How many runs this sort wrote.
+    #[cfg(test)]
+    pub(crate) fn runs_written(&self) -> usize {
+        self.written
+    }
+
+    /// Returns this sort with a different spill threshold.
+    ///
+    /// **Only a test moves it.** The shipped threshold is far above anything a
+    /// benchmark reaches, on purpose, and that is also far above anything a
+    /// unit test can build in the milliseconds this file's cases take - so
+    /// without this the merge would be code nothing runs.
+    ///
+    /// @param bytes - how many bytes to hold before writing a run
+    #[cfg(test)]
+    pub(crate) fn spilling_at(mut self, bytes: u64) -> Sort {
+        self.threshold = bytes;
+        self
+    }
+
+    /// Returns this sort with somewhere to spill to.
+    ///
+    /// **Without one it behaves exactly as it did before spilling existed**
+    /// (task-2066 §4.3.6): every row is held and the byte budget refuses the
+    /// statement if a budget was armed. `TreeCatalog::spill` answers `None` by
+    /// default, so that is what an embedded caller and every test harness get
+    /// until something hands one over.
+    ///
+    /// @param spill - where runs go
+    pub fn spilling_to(mut self, spill: Option<std::rc::Rc<dyn crate::spill::Spill>>) -> Sort {
+        self.spill = spill;
+        self
+    }
+
+    /// Writes what is held as one run and empties the buffer.
+    ///
+    /// The rows are sorted first, because a run is read back in order and the
+    /// merge assumes it.
+    fn write_a_run(&mut self) -> DbResult<()> {
+        if self.rows.is_empty() {
+            return Ok(());
+        }
+        let Some(spill) = self.spill.clone() else {
+            return Ok(());
+        };
+        let keys = self.keys.clone();
+        self.rows
+            .sort_by(|left, right| compare_by(left, right, &keys));
+        let bytes = crate::spill::encode_run(&self.rows);
+        let rows = self.rows.len();
+        if self.file.is_none() {
+            self.file = Some(spill.open()?);
+        }
+        let Some(file) = self.file.as_mut() else {
+            return Ok(());
+        };
+        let at = file.append(&bytes)?;
+        self.runs.push(crate::spill::Run {
+            at,
+            bytes: bytes.len() as u64,
+            rows,
+        });
+        self.rows.clear();
+        self.held = 0;
+        self.written = self.written.saturating_add(1);
+        Ok(())
+    }
+
+    /// Emits every row of every run, in order, merging as it goes.
+    ///
+    /// **The comparison is `compare_by`, the same one the in-memory sort
+    /// uses.** An external sort that ordered rows by any other rule would be a
+    /// second answer to what `ORDER BY` means, and the two would agree until
+    /// the first collation nobody tried.
+    ///
+    /// A linear scan of the fronts rather than a heap: the runs are the
+    /// buffer's size over the input's, which is single figures for anything
+    /// that fits on a disk, and a scan of eight is cheaper than maintaining a
+    /// heap of eight.
+    fn merge_the_runs(&mut self) -> DbResult<()> {
+        let Some(file) = self.file.take() else {
+            return Ok(());
+        };
+        let mut readers: Vec<crate::spill::RunReader> = self
+            .runs
+            .iter()
+            .map(|run| crate::spill::RunReader::new(*run))
+            .collect();
+        let mut fronts: Vec<Option<Vec<OwnedDatum>>> = Vec::with_capacity(readers.len());
+        for reader in &mut readers {
+            fronts.push(reader.next(file.as_ref())?);
+        }
+        let keys = self.keys.clone();
+        let mut batch: Vec<Vec<OwnedDatum>> = Vec::new();
+        loop {
+            let mut best: Option<usize> = None;
+            for (index, front) in fronts.iter().enumerate() {
+                let Some(row) = front.as_ref() else {
+                    continue;
+                };
+                let better = match best.and_then(|at| fronts.get(at)).and_then(Option::as_ref) {
+                    // **Strictly less, so a tie keeps the earlier run.** The
+                    // runs were written in arrival order and `compare_by` is
+                    // applied to a stable sort inside each one, so taking the
+                    // lowest-numbered run on a tie is what makes the whole
+                    // merge stable - which is what SQLite's sorter is, and
+                    // what a digest comparison over equal keys depends on.
+                    Some(held) => compare_by(row, held, &keys) == Ordering::Less,
+                    None => true,
+                };
+                if better {
+                    best = Some(index);
+                }
+            }
+            let Some(at) = best else {
+                break;
+            };
+            let Some(slot) = fronts.get_mut(at) else {
+                break;
+            };
+            let Some(row) = slot.take() else {
+                break;
+            };
+            batch.push(row);
+            if let Some(reader) = readers.get_mut(at) {
+                *slot = reader.next(file.as_ref())?;
+            }
+            // Emitted in batches rather than one at a time, and rather than
+            // collected whole: collecting would put the answer back in memory,
+            // which is what this exists to avoid.
+            if batch.len() >= MERGE_BATCH {
+                emit_rows(&batch, self.downstream.as_mut())?;
+                batch.clear();
+            }
+        }
+        if !batch.is_empty() {
+            emit_rows(&batch, self.downstream.as_mut())?;
+        }
+        self.runs.clear();
+        Ok(())
+    }
 }
+
+/// How many merged rows are handed downstream at once.
+///
+/// The merge emits in batches so the answer is never resident, and a batch
+/// this size is what `emit_rows` already turns into one `Batch` elsewhere.
+const MERGE_BATCH: usize = 1024;
 impl Sink for Sort {
     fn push(&mut self, batch: &Batch<'_>) -> DbResult<Flow> {
         for nth in 0..batch.live() {
@@ -72,13 +272,28 @@ impl Sink for Sort {
             // breaker gives. `materialise` is a no-op when no request armed a
             // budget, which is the library default, so an embedded caller is
             // unaffected.
-            inillucent_base::budget::materialise(owned_row_bytes(&row))?;
+            let bytes = owned_row_bytes(&row);
+            inillucent_base::budget::materialise(bytes)?;
             self.rows.push(row);
+            self.held = self.held.saturating_add(bytes);
+            // **Only when there is somewhere to put it.** A sort with no spill
+            // file holds everything, exactly as it did before this existed.
+            if self.held >= self.threshold && self.spill.is_some() {
+                self.write_a_run()?;
+            }
         }
         Ok(Flow::Continue)
     }
 
     fn finish(&mut self) -> DbResult<()> {
+        // A sort that spilled finishes by merging what it wrote, with whatever
+        // is still buffered written as one last run so there is one rule
+        // rather than two.
+        if !self.runs.is_empty() || (self.spill.is_some() && self.file.is_some()) {
+            self.write_a_run()?;
+            self.merge_the_runs()?;
+            return self.downstream.finish();
+        }
         let keys = self.keys.clone();
         // A stable sort, because SQLite's sorter is stable and a digest
         // comparison over rows with equal keys would otherwise differ for a
@@ -93,6 +308,11 @@ impl Sink for Sort {
     /// Returns this operator and everything below it to its pre-input state.
     fn reset(&mut self) -> DbResult<()> {
         self.rows.clear();
+        self.held = 0;
+        self.written = 0;
+        // The runs go with the file, and the file deletes itself on close.
+        self.runs.clear();
+        self.file = None;
         self.downstream.reset()
     }
 }
@@ -503,4 +723,155 @@ pub(crate) fn compare_by(left: &[OwnedDatum], right: &[OwnedDatum], keys: &[Sort
         }
     }
     Ordering::Equal
+}
+
+#[cfg(test)]
+mod spill_tests {
+    use super::*;
+    use crate::ops::Collect;
+    use crate::spill::{Spill, SpillFile};
+    use inillucent_base::DbResult;
+
+    /// A spill file held in memory, so the merge can be exercised without a VFS.
+    #[derive(Default)]
+    struct InMemoryFile {
+        bytes: Vec<u8>,
+    }
+
+    impl SpillFile for InMemoryFile {
+        fn append(&mut self, bytes: &[u8]) -> DbResult<u64> {
+            let at = self.bytes.len() as u64;
+            self.bytes.extend_from_slice(bytes);
+            Ok(at)
+        }
+
+        fn read_at(&self, offset: u64, out: &mut [u8]) -> DbResult<()> {
+            let from = usize::try_from(offset).unwrap_or(usize::MAX);
+            match self.bytes.get(from..from.saturating_add(out.len())) {
+                Some(slice) => {
+                    out.copy_from_slice(slice);
+                    Ok(())
+                }
+                None => Err(inillucent_base::DbError::primary(
+                    inillucent_base::PrimaryCode::Internal,
+                )
+                .with_message("a spill read ran past the file")),
+            }
+        }
+    }
+
+    /// Hands out in-memory spill files.
+    struct InMemory;
+
+    impl Spill for InMemory {
+        fn open(&self) -> DbResult<Box<dyn SpillFile>> {
+            Ok(Box::new(InMemoryFile::default()))
+        }
+    }
+
+    /// Pushes rows through a sort one batch at a time and returns what came out.
+    ///
+    /// @param rows - the input, in the order it arrives
+    /// @param keys - what to order by
+    /// @param threshold - how many bytes to hold before writing a run, or
+    ///   `None` for a sort with nowhere to spill
+    fn sorted(
+        rows: &[Vec<OwnedDatum>],
+        keys: &[SortKey],
+        threshold: Option<u64>,
+    ) -> (Vec<Vec<OwnedDatum>>, usize) {
+        let collected = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let sink = Box::new(crate::ops::CollectInto::new(std::rc::Rc::clone(&collected)));
+        let mut sort = Sort::new(keys.to_vec(), sink);
+        if let Some(bytes) = threshold {
+            sort = sort
+                .spilling_to(Some(std::rc::Rc::new(InMemory)))
+                .spilling_at(bytes);
+        }
+        for row in rows {
+            let borrowed: Vec<Datum<'_>> = row.iter().map(OwnedDatum::borrow).collect();
+            let columns: Vec<Vector<'_>> =
+                borrowed.iter().map(|held| Vector::Const(*held)).collect();
+            sort.push(&Batch::new(1, columns)).expect("a row is pushed");
+        }
+        sort.finish().expect("the sort finishes");
+        let held = collected.borrow().clone();
+        (held, sort.runs_written())
+    }
+
+    /// **The external sort answers what the in-memory sort answers.**
+    ///
+    /// That is the whole claim (task-2066 §4.3.6). Both are run over the same
+    /// rows with the same keys and the only difference is a threshold small
+    /// enough to make the first one spill - so a disagreement is the merge and
+    /// nothing else.
+    ///
+    /// The real threshold is sixty-four mebibytes and no unit test can reach
+    /// it, which is why `spilling_at` exists: a merge nobody can exercise is a
+    /// merge nobody has run.
+    #[test]
+    fn a_spilled_sort_answers_what_an_in_memory_sort_answers() {
+        let keys = vec![SortKey {
+            column: 0,
+            descending: false,
+            collation: Collation::Binary,
+            nulls_first: true,
+        }];
+        // Deliberately not already sorted, and with duplicate keys, so a merge
+        // that took runs in the wrong order or lost a tie would show.
+        let rows: Vec<Vec<OwnedDatum>> = (0..2_000i64)
+            .map(|n| {
+                vec![
+                    OwnedDatum::Int((n * 7919) % 1_000),
+                    OwnedDatum::Text(format!("row-{n:05}").into_bytes()),
+                ]
+            })
+            .collect();
+
+        let (in_memory, never) = sorted(&rows, &keys, None);
+        // Small enough to write a good many runs out of two thousand rows.
+        let (spilled, runs) = sorted(&rows, &keys, Some(4 * 1024));
+
+        assert_eq!(never, 0, "a sort with nowhere to spill wrote a run");
+        assert!(
+            runs > 1,
+            "the threshold was never reached, so this compared an in-memory sort against an              in-memory sort and proved nothing: {runs} run(s)"
+        );
+        assert_eq!(in_memory.len(), rows.len(), "the in-memory sort lost rows");
+        assert_eq!(
+            spilled, in_memory,
+            "the spilled sort and the in-memory sort disagree"
+        );
+    }
+
+    /// Descending and NULLs travel through the merge unchanged.
+    ///
+    /// The merge compares with `compare_by`, which is what carries them, so
+    /// this asks whether the merge really uses it rather than a comparison of
+    /// its own.
+    #[test]
+    fn a_spilled_sort_keeps_the_terms_descending_and_nulls_last() {
+        let keys = vec![SortKey {
+            column: 0,
+            descending: true,
+            collation: Collation::Binary,
+            nulls_first: false,
+        }];
+        let rows: Vec<Vec<OwnedDatum>> = (0..500i64)
+            .map(|n| {
+                if n % 11 == 0 {
+                    vec![OwnedDatum::Null]
+                } else {
+                    vec![OwnedDatum::Int((n * 37) % 97)]
+                }
+            })
+            .collect();
+        let (in_memory, _) = sorted(&rows, &keys, None);
+        let (spilled, runs) = sorted(&rows, &keys, Some(1024));
+        assert!(runs > 1, "the threshold was never reached: {runs} run(s)");
+        assert_eq!(
+            spilled, in_memory,
+            "the merge lost a descending term or a NULL's place"
+        );
+    }
 }

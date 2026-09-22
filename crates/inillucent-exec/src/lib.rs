@@ -61,6 +61,7 @@ pub mod scalar;
 pub mod scan;
 pub mod sequence;
 pub mod setop;
+pub mod spill;
 pub mod subquery;
 pub mod trigger;
 pub mod window;
