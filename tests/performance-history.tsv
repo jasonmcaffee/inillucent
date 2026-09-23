@@ -31,7 +31,14 @@
 # `commit` may end in `+name`: the `--label` a run was given, which says which arm of
 # a before and after it was when two arms were built from one working tree.
 #
-stamp	commit	machine	workload	rounds	ours_wall_ms	ours_cpu_ms	ours_peak_mib	sqlite_wall_ms	sqlite_cpu_ms	sqlite_peak_mib	startup_ours_wall_ms	startup_sqlite_wall_ms	wall_ratio	cpu_ratio	rss_ratio	calibration_ms	drift
+# `cores` is the core class and affinity mask both shells ran on, such as
+# `performance:0xC03C03`. The program pins itself to one class of a hybrid processor
+# before timing, and `--cores any` records `any:<mask>` for a run left unpinned.
+# Rows written before task-2085 have no `cores` value and were not pinned: on the
+# machine that wrote them the two shells could run on different core classes, so
+# their absolute columns are not comparable with a pinned row (task-2064).
+#
+stamp	commit	machine	workload	rounds	ours_wall_ms	ours_cpu_ms	ours_peak_mib	sqlite_wall_ms	sqlite_cpu_ms	sqlite_peak_mib	startup_ours_wall_ms	startup_sqlite_wall_ms	wall_ratio	cpu_ratio	rss_ratio	calibration_ms	drift	cores
 2026-09-08T20:00:09Z	b935dab-dirty	machine-e909e6bf	insert.10k	5	5191.18	5521.88	15.70	35.96	15.62	5.65	25.34	12.26	0.005	0.001	0.360	199.2	0.762
 2026-09-08T20:00:09Z	b935dab-dirty	machine-e909e6bf	index.build	5	57.18	50.00	10.52	74.62	53.12	8.77	25.34	12.26	1.958	1.167	0.834	199.2	0.762
 2026-09-08T20:00:09Z	b935dab-dirty	machine-e909e6bf	lookup.indexed	5	98.72	93.75	8.05	26.90	25.00	5.66	25.34	12.26	0.199	0.192	0.703	199.2	0.762

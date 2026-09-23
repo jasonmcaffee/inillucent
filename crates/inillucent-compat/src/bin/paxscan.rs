@@ -64,7 +64,15 @@ struct Shape {
 }
 
 fn main() {
-    let mut arguments = std::env::args().skip(1);
+    let mut arguments: Vec<String> = std::env::args().skip(1).collect();
+    // **Pinned before anything is timed, and the mask printed (task-2085).**
+    // Unpinned, a hybrid processor can run this program and the arm it compares
+    // against on different core classes, and nothing else in the output says so.
+    if let Err(reason) = inillucent_compat::affinity::pin_from_arguments(&mut arguments) {
+        eprintln!("{reason}");
+        std::process::exit(2);
+    }
+    let mut arguments = arguments.into_iter();
     let Some(fixture) = arguments.next() else {
         eprintln!("usage: inillucent-paxscan <sqlite fixture> [rounds] [page size...]");
         std::process::exit(2);

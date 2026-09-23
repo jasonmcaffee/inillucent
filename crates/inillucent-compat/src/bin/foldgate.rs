@@ -104,7 +104,17 @@ struct Arm {
 }
 
 fn main() -> ExitCode {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let mut arguments: Vec<String> = std::env::args().skip(1).collect();
+    // **Pinned before anything is timed, and the mask printed (task-2085)** -
+    // by the parent only. An arm is a child of this program, inherits the
+    // parent's mask, and is checked against it in `spawn`; pinning it again
+    // would print into the output the parent reads.
+    if !arguments.iter().any(|value| value == "--arm") {
+        if let Err(reason) = inillucent_compat::affinity::pin_from_arguments(&mut arguments) {
+            eprintln!("{reason}");
+            return ExitCode::from(2);
+        }
+    }
     let documents = flag(&arguments, "--documents").unwrap_or(20_000);
     let queries = flag(&arguments, "--queries").unwrap_or(32);
     let dims = flag(&arguments, "--dims").unwrap_or(64);
@@ -204,9 +214,14 @@ fn spawn(
     if let Some(length) = fixed {
         command.args(["--compact", &length.to_string()]);
     }
-    let output = command
-        .output()
-        .map_err(|error| format!("the {name} arm did not start: {error}"))?;
+    let output = inillucent_compat::affinity::spawn_on_same_cores(
+        command
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+        &format!("the {name} arm"),
+    )?
+    .wait_with_output()
+    .map_err(|error| format!("the {name} arm did not finish: {error}"))?;
     if !output.status.success() {
         return Err(format!(
             "the {name} arm failed: {}",

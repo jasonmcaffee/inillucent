@@ -1456,18 +1456,28 @@ pub fn eat_borrowed(digest: &mut Digest, value: &inillucent_tree::datum::Datum<'
 ///
 /// @param bench - the `sqlite-bench` binary
 /// @param plan - the plan file both engines run
+/// **Started through [`crate::affinity::spawn_on_same_cores`] (task-2085)**, so
+/// a gate that pinned itself refuses to time a reference arm that is running on
+/// other processors. The child inherits the gate's mask, and this reads it back.
+///
 /// @param database - the SQLite database it runs against
 pub fn run_sqlite(
     bench: &std::path::Path,
     plan: &std::path::Path,
     database: &std::path::Path,
 ) -> Result<Vec<Sample>, String> {
-    let output = std::process::Command::new(bench)
-        .arg("run")
-        .arg(plan)
-        .arg(database)
-        .output()
-        .map_err(|error| format!("sqlite-bench did not start: {error}"))?;
+    let child = crate::affinity::spawn_on_same_cores(
+        std::process::Command::new(bench)
+            .arg("run")
+            .arg(plan)
+            .arg(database)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+        "sqlite-bench",
+    )?;
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("sqlite-bench did not finish: {error}"))?;
     if !output.status.success() {
         return Err(format!(
             "sqlite-bench failed: {}",

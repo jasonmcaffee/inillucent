@@ -60,6 +60,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::Instant;
 
+use inillucent_compat::affinity::{self, Placement};
 use inillucent_compat::newengine::ImportedDatabase;
 use inillucent_compat::perf::bind_value;
 use inillucent_compat::perf::{plan_for, Grouping, Paired, Sample, Workload};
@@ -89,13 +90,33 @@ struct Settings {
 }
 
 fn main() -> ExitCode {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let mut arguments: Vec<String> = std::env::args().skip(1).collect();
+    let cores = match affinity::take_cores_flag(&mut arguments) {
+        Ok(cores) => cores,
+        Err(reason) => {
+            eprintln!("write gate: {reason}");
+            return ExitCode::from(2);
+        }
+    };
     let Some(fixture) = arguments.first().filter(|first| !first.starts_with("--")) else {
         eprintln!(
             "usage: inillucent-writegate <sqlite fixture> [--rounds N] [--page-size N] \
-             [--scale S] [--frames N] [--families a,b] [--repeat N]"
+             [--scale S] [--frames N] [--families a,b] [--repeat N] \
+             [--cores performance|efficiency|any]"
         );
         return ExitCode::from(2);
+    };
+    // **Pinned before any child exists (task-2085).** The child inherits the
+    // mask, and `time_sqlite` checks that it did.
+    let placement = match affinity::pin(cores) {
+        Ok(placement) => placement,
+        Err(reason) => {
+            eprintln!(
+                "write gate: could not pin to the {} cores: {reason}",
+                cores.name()
+            );
+            return ExitCode::from(2);
+        }
     };
     let settings = Settings {
         rounds: flag(&arguments, "--rounds")
@@ -113,7 +134,7 @@ fn main() -> ExitCode {
             .unwrap_or_else(|| FAMILIES.iter().map(|(name, _)| name.to_string()).collect()),
         repeat_override: flag(&arguments, "--repeat").and_then(|value| value.parse().ok()),
     };
-    match run(Path::new(fixture), &settings) {
+    match run(Path::new(fixture), &settings, &placement) {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(1),
         Err(reason) => {
@@ -171,12 +192,18 @@ const AGREEMENT: [&str; 3] = [
 /// @param settings - the command line this run was given
 /// @param plan - the workload plan both arms run
 /// @param pool_bytes - the page pool's size, which the report states in MiB
+/// @param placement - the processors both arms run on
 fn print_configuration(
     settings: &Settings,
     plan: &inillucent_compat::perf::Plan,
     pool_bytes: usize,
+    placement: &Placement,
 ) {
     println!("## configuration");
+    // First, because an unpinned run on a hybrid processor can put the two
+    // arms on different core classes and nothing else here would show it
+    // (task-2085).
+    placement.print_configuration();
     println!("  scale       : {}", settings.scale);
     println!("  rounds      : {}", settings.rounds);
     println!(
@@ -291,7 +318,8 @@ fn report_families(settings: &Settings, measured: &[Paired]) -> bool {
     met_every_family
 }
 
-fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
+/// @param placement - the processors this process was pinned to
+fn run(fixture: &Path, settings: &Settings, placement: &Placement) -> Result<bool, String> {
     let bench = sqlite_bench().ok_or_else(|| {
         "sqlite-bench is not built; run tools/sqlite-reference.ps1 first".to_string()
     })?;
@@ -314,7 +342,7 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
     let pool_bytes = settings.frames.saturating_mul(settings.page_size);
     plan.cache_size = -((pool_bytes / 1024) as i32);
 
-    print_configuration(settings, &plan, pool_bytes);
+    print_configuration(settings, &plan, pool_bytes, placement);
     println!("## workloads");
     for workload in &plan.workloads {
         println!(
@@ -787,12 +815,19 @@ fn time_sqlite(
     scratch: &Path,
 ) -> Result<(Vec<Sample>, Vec<String>), String> {
     let copy = restore(fixture, scratch, "theirs")?;
-    let output = Command::new(bench)
-        .arg("run")
-        .arg(plan)
-        .arg(&copy)
-        .output()
-        .map_err(|error| format!("sqlite-bench did not start: {error}"))?;
+    // Started through the affinity check (task-2085): the launcher reads the
+    // child's mask back and refuses a reference arm on other processors.
+    let output = affinity::spawn_on_same_cores(
+        Command::new(bench)
+            .arg("run")
+            .arg(plan)
+            .arg(&copy)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+        "sqlite-bench",
+    )?
+    .wait_with_output()
+    .map_err(|error| format!("sqlite-bench did not finish: {error}"))?;
     if !output.status.success() {
         return Err(format!(
             "sqlite-bench failed: {}",

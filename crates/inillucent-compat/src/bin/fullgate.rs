@@ -81,6 +81,7 @@ use std::process::{Command, ExitCode};
 use std::rc::Rc;
 use std::time::Instant;
 
+use inillucent_compat::affinity::{self, Placement};
 use inillucent_compat::newengine::connect::{
     Connection as ConnectedConnection, Database as ConnectedDatabase,
     Statement as ConnectedStatement,
@@ -138,7 +139,16 @@ struct Settings {
 }
 
 fn main() -> ExitCode {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let mut arguments: Vec<String> = std::env::args().skip(1).collect();
+    // **Taken off the command line before anything else reads it (task-2085)**,
+    // so the positional fixture and every `flag` lookup see what they always saw.
+    let cores = match affinity::take_cores_flag(&mut arguments) {
+        Ok(cores) => cores,
+        Err(reason) => {
+            eprintln!("full gate: {reason}");
+            return ExitCode::from(2);
+        }
+    };
     // **A child of this same program, spawned by the parent for the memory
     // measurement and nothing else.** The reference arm is a whole child
     // process, so the only way to put this engine's residency beside it is to
@@ -158,12 +168,27 @@ fn main() -> ExitCode {
         eprintln!(
             "usage: inillucent-fullgate <sqlite fixture> [--rounds N] [--page-size N] \
              [--scale S] [--frames N] [--families a,b] [--repeat N] [--locking normal|exclusive] \
-             [--module-split] [--put-split]"
+             [--module-split] [--put-split] [--cores performance|efficiency|any]"
         );
         return ExitCode::from(2);
     };
     let settings = settings_from(&arguments);
-    match run(Path::new(fixture), &settings) {
+    // **Pinned before the fixture is read and before any child exists
+    // (task-2085).** With no affinity set, Windows ran this process on the
+    // efficiency cores and `sqlite-bench` on the performance cores, so every
+    // paired round compared two kinds of hardware. A child inherits the mask,
+    // and `time_sqlite` checks that it did.
+    let placement = match affinity::pin(cores) {
+        Ok(placement) => placement,
+        Err(reason) => {
+            eprintln!(
+                "full gate: could not pin to the {} cores: {reason}",
+                cores.name()
+            );
+            return ExitCode::from(2);
+        }
+    };
+    match run(Path::new(fixture), &settings, &placement) {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::from(1),
         Err(reason) => {
@@ -356,12 +381,32 @@ const AGREEMENT: [&str; 3] = [
 /// @param settings - the command line this run was given
 /// @param plan - the workload plan both arms run
 /// @param pool_bytes - the page pool's size, which the report states in MiB
+/// @param placement - the processors both arms run on
 fn print_configuration(
     settings: &Settings,
     plan: &inillucent_compat::perf::Plan,
     pool_bytes: usize,
+    placement: &Placement,
 ) {
     println!("## configuration");
+    // **First, because it decides whether any number below means anything
+    // (task-2085).** An unpinned run on a hybrid processor can put the two
+    // arms on different core classes, and nothing else in this block would
+    // show it.
+    placement.print_configuration();
+    if placement.pinned {
+        // task-2064 measured `correlated.exists` at 59.69 ms on the 8
+        // performance cores, 46.35 ms on the 16 efficiency cores and 38.74 ms
+        // unpinned on all 24. It is the one workload that gets slower when
+        // pinned, because it uses more processors than the mask allows.
+        println!(
+            "                read.correlated uses more than one thread and reads slower pinned:"
+        );
+        println!("                correlated.exists was 59.69 ms on 8 performance cores against");
+        println!(
+            "                38.74 ms unpinned on all 24 (task-2064); --cores any for that figure"
+        );
+    }
     println!("  scale       : {}", settings.scale);
     println!("  rounds      : {}", settings.rounds);
     println!(
@@ -555,7 +600,8 @@ fn report_results(measured: &[Paired]) -> bool {
     every_workload_agreed
 }
 
-fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
+/// @param placement - the processors this process was pinned to
+fn run(fixture: &Path, settings: &Settings, placement: &Placement) -> Result<bool, String> {
     let bench = sqlite_bench().ok_or_else(|| {
         "sqlite-bench is not built; run tools/sqlite-reference.ps1 first".to_string()
     })?;
@@ -565,7 +611,7 @@ fn run(fixture: &Path, settings: &Settings) -> Result<bool, String> {
     let pool_bytes = settings.frames.saturating_mul(settings.page_size);
     plan.cache_size = -((pool_bytes / 1024) as i32);
 
-    print_configuration(settings, &plan, pool_bytes);
+    print_configuration(settings, &plan, pool_bytes, placement);
     println!("## workloads");
     for workload in &plan.workloads {
         println!(
@@ -1961,21 +2007,29 @@ fn measure_in_a_child(fixture: &Path, scratch: &Path, settings: &Settings) -> Op
     // this engine does not do, and the parent holding it open would be that.
     drop(built);
     let exe = std::env::current_exe().ok()?;
-    let mut child = Command::new(exe)
-        .arg("--memory-round")
-        .arg(&target)
-        .arg("--scale")
-        .arg(&settings.scale)
-        .arg("--page-size")
-        .arg(settings.page_size.to_string())
-        .arg("--frames")
-        .arg(settings.frames.to_string())
-        .arg("--families")
-        .arg(settings.families.join(","))
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .ok()?;
+    let started = affinity::spawn_on_same_cores(
+        Command::new(exe)
+            .arg("--memory-round")
+            .arg(&target)
+            .arg("--scale")
+            .arg(&settings.scale)
+            .arg("--page-size")
+            .arg(settings.page_size.to_string())
+            .arg("--frames")
+            .arg(settings.frames.to_string())
+            .arg("--families")
+            .arg(settings.families.join(","))
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+        "the memory child",
+    );
+    let mut child = match started {
+        Ok(child) => child,
+        Err(reason) => {
+            eprintln!("  memory child: {reason}");
+            return None;
+        }
+    };
     let mut err = String::new();
     let mut out = String::new();
     if let Some(mut pipe) = child.stdout.take() {
@@ -2664,14 +2718,18 @@ fn time_sqlite(
     // left to read its peak resident set or its processor time from. The pipes
     // are drained before the wait for the ordinary reason: a child that fills
     // one blocks, and a parent that waits first would deadlock with it.
-    let mut child = Command::new(bench)
-        .arg("run")
-        .arg(plan)
-        .arg(&copy)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("sqlite-bench did not start: {error}"))?;
+    // **Started through the affinity check (task-2085)**: the child inherits
+    // this process's mask, and the launcher reads the child's mask back and
+    // refuses to time a reference arm running on other processors.
+    let mut child = affinity::spawn_on_same_cores(
+        Command::new(bench)
+            .arg("run")
+            .arg(plan)
+            .arg(&copy)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+        "sqlite-bench",
+    )?;
     let mut out = String::new();
     let mut err = String::new();
     if let Some(mut pipe) = child.stdout.take() {

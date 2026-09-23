@@ -172,7 +172,9 @@ impl Options {
         }
         let Some(fixture) = positional.first() else {
             return Err(
-                "usage: inillucent-prepareperf <sqlite fixture> [rounds] [--repeat n]".to_string(),
+                "usage: inillucent-prepareperf <sqlite fixture> [rounds] [--repeat n] \
+                 [--cores performance|efficiency|any]"
+                    .to_string(),
             );
         };
         let rounds = rounds
@@ -209,7 +211,14 @@ struct Preflight {
 }
 
 fn main() -> ExitCode {
-    let options = match Options::parse(std::env::args().skip(1)) {
+    let mut arguments: Vec<String> = std::env::args().skip(1).collect();
+    // **Pinned before anything is timed, and the mask printed (task-2085).**
+    // `run_sqlite` checks that `sqlite-bench` inherited the same mask.
+    if let Err(reason) = inillucent_compat::affinity::pin_from_arguments(&mut arguments) {
+        eprintln!("{reason}");
+        return ExitCode::from(2);
+    }
+    let options = match Options::parse(arguments.into_iter()) {
         Ok(options) => options,
         Err(reason) => {
             eprintln!("{reason}");

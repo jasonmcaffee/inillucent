@@ -74,11 +74,18 @@ const SWEEP_PRIMES: [i64; 10] = [
 /// delete of `story_large_table_nightly` alone (task-2077), with the pool
 /// defaulting to that story's 8 MiB.
 fn main() -> ExitCode {
-    let sweep_only = std::env::args()
-        .skip(1)
-        .any(|argument| argument == "--sweep");
-    let numbers: Vec<usize> = std::env::args()
-        .skip_while(|argument| argument != "--spread")
+    let mut arguments: Vec<String> = std::env::args().skip(1).collect();
+    // **Pinned before anything is timed, and the mask printed (task-2085).**
+    // Its index count sweep feeds `docs/performance.md`, and an unpinned run
+    // on a hybrid processor measures whichever core class the scheduler chose.
+    if let Err(reason) = inillucent_compat::affinity::pin_from_arguments(&mut arguments) {
+        eprintln!("{reason}");
+        return ExitCode::FAILURE;
+    }
+    let sweep_only = arguments.iter().any(|argument| argument == "--sweep");
+    let numbers: Vec<usize> = arguments
+        .iter()
+        .skip_while(|argument| *argument != "--spread")
         .skip(1)
         .filter_map(|number| number.parse().ok())
         .collect();

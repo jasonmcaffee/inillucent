@@ -716,6 +716,29 @@ target/release/inillucent-readgate  <dir>/medium-read.db  --scale medium
 target/release/inillucent-shellrss                        # peak memory, one shell each, same data
 ```
 
+**Every program that times this engine against SQLite pins itself to one class of core before it
+times anything (task-2085).** The machine these figures come from is an Intel Core Ultra 9 285, with
+8 performance cores and 16 efficiency cores. With no affinity set, Windows sometimes ran
+`inillucent-fullgate` on the efficiency cores and its `sqlite-bench` child on the performance cores,
+so the two arms of one round ran on different hardware. On the read families that made this engine's
+`scan.group` read 6.31 ms against 2.77 ms pinned, while SQLite's read the same either way.
+
+- The default is `--cores performance`: the processors with the highest `EfficiencyClass` that
+  `GetSystemCpuSetInformation` reports on Windows, or the highest `cpu_capacity` or
+  `cpuinfo_max_freq` on Linux. `--cores efficiency` takes the other class, and `--cores any` leaves
+  the process unpinned so the unpinned figure can still be taken on purpose. A machine with one core
+  class is not pinned, and neither is macOS, which has no call for it.
+- The `## configuration` block of `inillucent-fullgate`, `inillucent-writegate` and
+  `inillucent-searchgate`, and a `## cores` block at the top of every other such program, print
+  the class and the mask, for example `performance - 8 of 24 logical processors, mask 0xC03C03`.
+  `tests/performance-history.tsv` records the same thing in its `cores` column.
+- A child such as `sqlite-bench` or a shell inherits the mask. The launcher reads the child's mask
+  back and refuses to time it when it differs, and `crates/inillucent-compat/tests/affinity.rs` fails
+  if a child can end up on other processors.
+- Pinning makes one workload slower. `read.correlated` uses more than one thread, and task-2064
+  measured `correlated.exists` at 59.69 ms on the 8 performance cores, 46.35 ms on the 16 efficiency
+  cores and 38.74 ms unpinned on all 24.
+
 The gate binaries and the shell install `inillucent-alloc` as their global allocator. It is part of
 the build in the same way fat link time optimisation and a single codegen unit are: SQLite ships its
 own memory subsystem, so measuring a Rust workspace on the platform allocator measures a build

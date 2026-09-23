@@ -65,7 +65,14 @@ impl Measurement {
 
 /// Runs every family and writes the artifact.
 fn main() -> ExitCode {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let mut arguments: Vec<String> = std::env::args().skip(1).collect();
+    // **Pinned before anything is timed, and the mask printed (task-2085).**
+    // Unpinned, a hybrid processor can run this program and the arm it compares
+    // against on different core classes, and nothing else in the output says so.
+    if let Err(reason) = inillucent_compat::affinity::pin_from_arguments(&mut arguments) {
+        eprintln!("{reason}");
+        return ExitCode::from(2);
+    }
     let out = flag(&arguments, "--out")
         .unwrap_or_else(|| workspace_root().join("_agent_output/featureperf"));
     match run(&out) {
@@ -428,13 +435,18 @@ fn run_shell(program: &Path, database: &Path, script: &str) -> Option<Duration> 
     use std::io::Write;
     use std::process::Stdio;
     let started = Instant::now();
-    let mut child = Command::new(program)
-        .arg(database)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+    // Started through the affinity check (task-2085), so a shell running on
+    // other processors from this program is not timed.
+    let mut child = inillucent_compat::affinity::spawn_on_same_cores(
+        Command::new(program)
+            .arg(database)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+        "a shell",
+    )
+    .map_err(|reason| eprintln!("{reason}"))
+    .ok()?;
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(script.as_bytes());
     }

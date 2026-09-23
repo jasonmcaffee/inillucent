@@ -27,6 +27,9 @@
 // Running the shipped programs as processes, and reading what they printed.
 // Every end-to-end suite added by task-1969 section 5 goes through it, so the
 // way a binary is found and a JSON envelope is read is written once.
+// Which processors a measurement runs on, and pinning both arms of a gate to
+// one core class (task-2085).
+pub mod affinity;
 pub mod cliproc;
 pub mod corpus;
 pub mod crashcampaign;

@@ -57,7 +57,14 @@ struct Measurement {
 
 /// Runs the measurements and writes the artifact.
 fn main() -> ExitCode {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let mut arguments: Vec<String> = std::env::args().skip(1).collect();
+    // **Pinned before anything is timed, and the mask printed (task-2085).**
+    // Unpinned, a hybrid processor can run this program and the arm it compares
+    // against on different core classes, and nothing else in the output says so.
+    if let Err(reason) = inillucent_compat::affinity::pin_from_arguments(&mut arguments) {
+        eprintln!("{reason}");
+        return ExitCode::from(2);
+    }
     let out = flag(&arguments, "--out")
         .unwrap_or_else(|| workspace_root().join("_agent_output/read-only-baselines"));
     match run(&out) {

@@ -47,7 +47,14 @@ const SEED: u64 = 17_900_001;
 
 /// Runs the scorecard.
 fn main() -> ExitCode {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let mut arguments: Vec<String> = std::env::args().skip(1).collect();
+    // **Pinned before anything is timed, and the mask printed (task-2085).**
+    // Unpinned, a hybrid processor can run this program and the arm it compares
+    // against on different core classes, and nothing else in the output says so.
+    if let Err(reason) = inillucent_compat::affinity::pin_from_arguments(&mut arguments) {
+        eprintln!("{reason}");
+        return ExitCode::from(2);
+    }
     let out = flag(&arguments, "--out")
         .map(PathBuf::from)
         // Ticket-neutral. The default used to name one ticket's output folder,
@@ -312,13 +319,21 @@ fn clone(from: &Path, to: &Path) -> Result<(), String> {
 }
 
 /// Runs the reference arm and reads its samples back.
+///
+/// Started through the affinity check (task-2085): the launcher reads the
+/// child's mask back and refuses a reference arm on other processors.
 fn run_sqlite(bench: &Path, plan: &Path, database: &Path) -> Result<Vec<Sample>, String> {
-    let output = Command::new(bench)
-        .arg("run")
-        .arg(plan)
-        .arg(database)
-        .output()
-        .map_err(|error| format!("cannot run {bench:?}: {error}"))?;
+    let output = inillucent_compat::affinity::spawn_on_same_cores(
+        Command::new(bench)
+            .arg("run")
+            .arg(plan)
+            .arg(database)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+        "sqlite-bench",
+    )?
+    .wait_with_output()
+    .map_err(|error| format!("cannot run {bench:?}: {error}"))?;
     if !output.status.success() {
         return Err(format!(
             "the reference arm failed: {}",

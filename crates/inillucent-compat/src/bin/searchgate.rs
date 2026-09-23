@@ -94,10 +94,21 @@ const QUERIES: [&str; 6] = [
 ];
 
 fn main() -> ExitCode {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let mut arguments: Vec<String> = std::env::args().skip(1).collect();
+    // **Pinned before anything is timed (task-2085)**, so the figure does not
+    // depend on which core class the scheduler chose that day.
+    let placement = match inillucent_compat::affinity::take_cores_flag(&mut arguments)
+        .and_then(inillucent_compat::affinity::pin)
+    {
+        Ok(placement) => placement,
+        Err(reason) => {
+            eprintln!("inillucent-searchgate: {reason}");
+            return ExitCode::FAILURE;
+        }
+    };
     let documents = flag(&arguments, "--documents").unwrap_or(500);
     let rounds = flag(&arguments, "--rounds").unwrap_or(30);
-    match run(documents, rounds) {
+    match run(documents, rounds, &placement) {
         Ok(true) => ExitCode::SUCCESS,
         Ok(false) => ExitCode::FAILURE,
         Err(reason) => {
@@ -204,7 +215,12 @@ fn implausible(documents: usize, sql: &str, rows: &[Vec<String>]) -> Option<Stri
 ///
 /// @param documents - how many documents to index
 /// @param rounds - how many rounds to time
-fn run(documents: usize, rounds: usize) -> Result<bool, String> {
+/// @param placement - the processors this process was pinned to
+fn run(
+    documents: usize,
+    rounds: usize,
+    placement: &inillucent_compat::affinity::Placement,
+) -> Result<bool, String> {
     // **A corpus of nothing is a refusal, not a fast run (task-1961, T1).**
     // Every check below passed on an empty corpus: `count(*)` answered `0`,
     // which is exactly the number of documents there are, and every other
@@ -225,6 +241,7 @@ fn run(documents: usize, rounds: usize) -> Result<bool, String> {
     let _ = std::fs::create_dir_all(&area);
 
     println!("## configuration");
+    placement.print_configuration();
     println!("  documents   : {documents}");
     println!("  rounds      : {rounds}");
     println!("  queries     : {}", QUERIES.len());

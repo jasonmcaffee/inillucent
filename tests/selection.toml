@@ -2002,6 +2002,19 @@ alone = true
 # measured nothing could itself pass with seven of its cases not run.
 requires = ["fixtures", "sqlite-bench", "testrun"]
 
+# The gates pin themselves to one core class and start the reference arm
+# through a launcher that reads the child's affinity mask back (task-2085).
+# This starts a child through that launcher and fails when its mask differs
+# from the parent's, and when a child on other processors is not refused.
+# It pins only its own process, and it is its own test binary, so it needs no
+# `alone`: another target running beside it keeps its own mask.
+[[target]]
+package = "inillucent-compat"
+kind = "test"
+name = "affinity"
+tier = "tooling"
+covers = ["inillucent-compat"]
+
 [[target]]
 package = "inillucent-compat"
 kind = "test"

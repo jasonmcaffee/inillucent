@@ -298,7 +298,18 @@ struct Reading {
 
 /// Runs the history and appends its rows.
 fn main() -> std::process::ExitCode {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let mut arguments: Vec<String> = std::env::args().skip(1).collect();
+    // **Pinned before anything is timed, and the mask recorded in every row
+    // (task-2085).** Unpinned, the two shells of one round can run on
+    // different core classes of a hybrid processor, and a history whose rows
+    // were taken on different hardware says nothing about the engine.
+    let placement = match inillucent_compat::affinity::pin_from_arguments(&mut arguments) {
+        Ok(placement) => placement,
+        Err(reason) => {
+            eprintln!("inillucent-perfhistory: {reason}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
     let mut rounds = DEFAULT_ROUNDS;
     let mut dry_run = false;
     let mut only: Option<String> = None;
@@ -354,7 +365,13 @@ fn main() -> std::process::ExitCode {
             }
         }
     }
-    match run(rounds, dry_run, only.as_deref(), label.as_deref()) {
+    match run(
+        rounds,
+        dry_run,
+        only.as_deref(),
+        label.as_deref(),
+        &placement,
+    ) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(reason) => {
             eprintln!("inillucent-perfhistory: {reason}");
@@ -369,11 +386,13 @@ fn main() -> std::process::ExitCode {
 /// @param dry_run - print the rows instead of appending them
 /// @param only - a prefix of the workload names to run, or every workload
 /// @param label - a name for the build, recorded after the commit
+/// @param placement - the processors both shells run on, recorded in every row
 fn run(
     rounds: usize,
     dry_run: bool,
     only: Option<&str>,
     label: Option<&str>,
+    placement: &inillucent_compat::affinity::Placement,
 ) -> Result<(), String> {
     let root = workspace_root();
     let ours = shell_path(&root, "inillucent-shell")
@@ -391,6 +410,7 @@ fn run(
     };
     let stamp = timestamp();
     let machine = machine_name();
+    let cores = placement.row_field();
     let mut rows = Vec::new();
 
     // What starting each process costs, measured the same way and interleaved
@@ -449,6 +469,7 @@ fn run(
             stamp: stamp.clone(),
             commit: commit.clone(),
             machine: machine.clone(),
+            cores: cores.clone(),
             workload: workload.name,
             rounds,
             ours: ours_total,
@@ -502,6 +523,9 @@ struct Row {
     commit: String,
     /// Which machine it ran on.
     machine: String,
+    /// The core class and affinity mask both shells ran on,
+    /// `performance:0xC03C03`.
+    cores: String,
     /// The workload's name.
     workload: &'static str,
     /// How many rounds the median came from.
@@ -608,13 +632,16 @@ fn run_fresh(program: &Path, directory: &Path, script: &str) -> Result<Reading, 
 /// @param script - what to feed it on standard input
 fn time_only(program: &Path, path: &Path, script: &str) -> Result<Reading, String> {
     let started = Instant::now();
-    let mut child = Command::new(program)
-        .arg(path)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("cannot start {}: {error}", program.display()))?;
+    // Started through the affinity check (task-2085): a shell running on other
+    // processors from this program is refused rather than timed.
+    let mut child = inillucent_compat::affinity::spawn_on_same_cores(
+        Command::new(program)
+            .arg(path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+        &program.display().to_string(),
+    )?;
     if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
         stdin
@@ -760,7 +787,7 @@ fn render(rows: &[Row], before: f64, after: f64) -> String {
         let ours = row.ours.net_of(&row.ours_startup);
         let theirs = row.theirs.net_of(&row.theirs_startup);
         text.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.3}\t{:.3}\t{:.3}\t{:.1}\t{:.3}\n",
+            "{}\t{}\t{}\t{}\t{}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.2}\t{:.3}\t{:.3}\t{:.3}\t{:.1}\t{:.3}\t{}\n",
             row.stamp,
             row.commit,
             row.machine,
@@ -779,6 +806,7 @@ fn render(rows: &[Row], before: f64, after: f64) -> String {
             ratio(row.theirs.peak, row.ours.peak),
             before,
             ratio(after, before),
+            row.cores,
         ));
     }
     text
@@ -810,7 +838,12 @@ const HEADER: &str = "# The performance history: what each workload costs, besid
      # loop timed again afterwards, divided by the first - a row whose drift is far from\n\
      # 1.000 was taken on a machine that changed under it and should be distrusted.\n\
      #\n\
-     stamp\tcommit\tmachine\tworkload\trounds\tours_wall_ms\tours_cpu_ms\tours_peak_mib\tsqlite_wall_ms\tsqlite_cpu_ms\tsqlite_peak_mib\tstartup_ours_wall_ms\tstartup_sqlite_wall_ms\twall_ratio\tcpu_ratio\trss_ratio\tcalibration_ms\tdrift\n";
+     # `cores` is the core class and affinity mask both shells ran on, such as\n\
+     # `performance:0xC03C03`. The program pins itself to one class of a hybrid processor\n\
+     # before timing, and `--cores any` records `any:<mask>` for a run left unpinned.\n\
+     # Rows written before task-2085 have no `cores` value and were not pinned.\n\
+     #\n\
+     stamp\tcommit\tmachine\tworkload\trounds\tours_wall_ms\tours_cpu_ms\tours_peak_mib\tsqlite_wall_ms\tsqlite_cpu_ms\tsqlite_peak_mib\tstartup_ours_wall_ms\tstartup_sqlite_wall_ms\twall_ratio\tcpu_ratio\trss_ratio\tcalibration_ms\tdrift\tcores\n";
 
 /// Appends the rows, writing the header when the file is new.
 ///

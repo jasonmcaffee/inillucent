@@ -77,7 +77,14 @@ const WORKLOADS: [(&str, &str); 4] = [
 ];
 
 fn main() -> ExitCode {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let mut arguments: Vec<String> = std::env::args().skip(1).collect();
+    // **Pinned before anything is timed, and the mask printed (task-2085).**
+    // Unpinned, a hybrid processor can run this program and the arm it compares
+    // against on different core classes, and nothing else in the output says so.
+    if let Err(reason) = inillucent_compat::affinity::pin_from_arguments(&mut arguments) {
+        eprintln!("{reason}");
+        return ExitCode::from(2);
+    }
     let Some(fixture) = arguments.first().filter(|value| !value.starts_with("--")) else {
         eprintln!("usage: inillucent-analytical <sqlite fixture> [--rounds N] [--page-size N]");
         return ExitCode::from(2);

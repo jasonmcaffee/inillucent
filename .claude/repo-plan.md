@@ -687,3 +687,13 @@ they are touching do not collide; two that have not, do.
   tools/sqlite-reference.ps1` rebuilds it from the published sources if no copy exists.
   The 2026-09-21 emptying was a recursive delete through a junction; remove one with `cmd /c rmdir`.
   (task-2082)
+- **Every program that times this engine against SQLite now pins itself to the performance cores,
+  and a figure from before that is an efficiency core figure until shown otherwise.** This box has 8
+  performance cores (mask `0xC03C03`) and 16 efficiency cores (`0x3FC3FC`), and unpinned Windows
+  sometimes ran the gate process on the efficiency cores and `sqlite-bench` on the performance cores.
+  Read the `cores` line of a report before comparing it with another: two runs are comparable only
+  when both say the same class and mask. `--cores any` takes the unpinned figure on purpose.
+  Do not set the mask from outside with a script any more; the program sets its own and prints it,
+  and on Windows a mask set from outside is replaced unless the run passes `--cores any`. A new timing program calls
+  `inillucent_compat::affinity::pin_from_arguments` at the top of `main` and starts its reference
+  arm through `affinity::spawn_on_same_cores`. (task-2085)

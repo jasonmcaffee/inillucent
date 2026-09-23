@@ -110,7 +110,7 @@ const UNSAFE_CRATES: [&str; 1] = ["inillucent-driver-capi"];
 // are FFI. Each call installs a handler and reads nothing back; each handler
 // stores `true` into an already-allocated `AtomicBool` and returns, which is
 // the whole of what a handler is allowed to do.
-const UNSAFE_ALLOWED: [&str; 17] = [
+const UNSAFE_ALLOWED: [&str; 18] = [
     // **The AVX2 dot product, added by task-2000's design 9.** It is the one place
     // in the engine where safe Rust cannot express the thing that has to happen: a
     // 256-bit fused multiply-add is an intrinsic, every intrinsic in
@@ -175,6 +175,14 @@ const UNSAFE_ALLOWED: [&str; 17] = [
     // measurement rather than engine, which is the same ground the three above
     // stand on, and every call site carries its own SAFETY note.
     "crates/inillucent-compat/src/procstat.rs",
+    // **Which processors a gate runs on (task-2085).** Both arms of a gate were
+    // measured on different core classes of a hybrid processor because nothing
+    // pinned them, and pinning a process is an operating system call with no
+    // standard library form: `GetSystemCpuSetInformation`,
+    // `GetProcessAffinityMask` and `SetProcessAffinityMask` on Windows,
+    // `sched_getaffinity` and `sched_setaffinity` on Linux. Each is an FFI call
+    // into a buffer the calling frame owns, and each carries its own SAFETY note.
+    "crates/inillucent-compat/src/affinity.rs",
     // The allocator arm. A `GlobalAlloc` is the only way to
     // ask what the system allocator costs, and the question had to be asked:
     // the TDD expected the Linux gap to be the heap. Every path either forwards

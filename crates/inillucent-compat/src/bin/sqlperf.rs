@@ -92,6 +92,14 @@ struct Measurement {
 
 /// Runs the baselines and writes them.
 fn main() -> ExitCode {
+    let mut arguments: Vec<String> = std::env::args().skip(1).collect();
+    // **Pinned before anything is timed, and the mask printed (task-2085).**
+    // Unpinned, a hybrid processor can run this program and the arm it compares
+    // against on different core classes, and nothing else in the output says so.
+    if let Err(reason) = inillucent_compat::affinity::pin_from_arguments(&mut arguments) {
+        eprintln!("{reason}");
+        return ExitCode::from(2);
+    }
     let root = workspace_root();
     match run(&root) {
         Ok(count) => {

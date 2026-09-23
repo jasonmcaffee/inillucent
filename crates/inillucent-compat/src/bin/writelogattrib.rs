@@ -40,7 +40,14 @@ const ITERATIONS: u32 = 2_000;
 const PRESEEDED_ROWS: u32 = 100_000;
 
 fn main() -> ExitCode {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let mut arguments: Vec<String> = std::env::args().skip(1).collect();
+    // **Pinned before anything is timed, and the mask printed (task-2085).**
+    // Unpinned, a hybrid processor can run this program and the arm it compares
+    // against on different core classes, and nothing else in the output says so.
+    if let Err(reason) = inillucent_compat::affinity::pin_from_arguments(&mut arguments) {
+        eprintln!("{reason}");
+        return ExitCode::from(2);
+    }
     let Some(fixture) = arguments.first().filter(|first| !first.starts_with("--")) else {
         eprintln!(
             "usage: inillucent-writelogattrib <medium sqlite fixture> [--page-size N] \

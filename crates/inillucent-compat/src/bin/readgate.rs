@@ -78,12 +78,19 @@ const FAMILIES: [(&str, f64); 4] = [
 ];
 
 fn main() -> ExitCode {
-    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let mut arguments: Vec<String> = std::env::args().skip(1).collect();
+    // **Pinned before anything is timed, and the mask printed (task-2085).**
+    // Unpinned, Windows can run this process and `sqlite-bench` on different
+    // core classes of a hybrid processor. `run_sqlite` checks the child's mask.
+    if let Err(reason) = inillucent_compat::affinity::pin_from_arguments(&mut arguments) {
+        eprintln!("inillucent-readgate: {reason}");
+        return ExitCode::from(2);
+    }
     let Some(fixture) = arguments.first().filter(|value| !value.starts_with("--")) else {
         eprintln!(
             "usage: inillucent-readgate <sqlite fixture> [--rounds N] [--page-size N] \
              [--scale S] [--frames N] [--families a,b] [--repeat N] \
-             [--unfair-sqlite-cache-kib N]"
+             [--unfair-sqlite-cache-kib N] [--cores performance|efficiency|any]"
         );
         return ExitCode::from(2);
     };
