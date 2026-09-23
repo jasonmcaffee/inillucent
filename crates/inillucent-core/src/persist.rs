@@ -129,6 +129,12 @@ fn check_header(r: &mut impl Read, kind: u8) -> Result<()> {
 /// produces vectors that are subtly wrong rather than an error.
 const VECTOR_HEADER_BYTES: u64 = 8 + 4 + 1 + 8;
 
+/// Where a store's own encoding begins in `store.bin`.
+///
+/// The header `header` writes: eight magic bytes, four version bytes and the
+/// one-byte section tag.
+const STORE_HEADER_BYTES: u64 = 8 + 4 + 1;
+
 const KIND_STORE: u8 = 1;
 const KIND_VECTORS: u8 = 2;
 const KIND_GRAPH: u8 = 3;
@@ -643,10 +649,27 @@ fn load_generation(dir: &Path, resident_vectors: Option<bool>) -> Result<Index> 
     // those bytes are normalized or raw, which `VectorSet` has to be told at
     // construction rather than guess from the floats themselves.
     let config = saved.to_config()?;
+    // **The text is left in the file unless a caller asks for it** (task-2066
+    // §4.3.8), which is the same choice `vectors.bin` already makes below and
+    // for the same reason. `docs/roadmap.md` measured the store at 620.3 MiB
+    // resident for 564.8 MiB on disk on the 600,589 chunk corpus, and said what
+    // that is: not a structure being expanded by being loaded, simply all of the
+    // chunk text in memory because a chunk's text is read by every result. A
+    // search reading ten results reads ten ranges; a process that opens the
+    // index and searches nothing reads none.
+    //
+    // **The file format did not change.** `write_to` writes the text inline
+    // exactly as it did, and `Store::read_from` still reads it - an index
+    // written by any build opens under either. What this does is say where in
+    // `store.bin` the text section begins, which the format does not record and
+    // which the reader can count.
     let store: Store = {
-        let mut r = BufReader::with_capacity(1 << 20, File::open(path(dir, "store.bin"))?);
+        let opened = File::open(path(dir, "store.bin"))?;
+        let mut r = BufReader::with_capacity(1 << 20, opened.try_clone()?);
         check_header(&mut r, KIND_STORE)?;
-        Store::read_from(&mut r).context("reading the store")?
+        // The header is eight magic bytes, four version bytes and one kind
+        // byte, which is where the store's own encoding begins.
+        Store::read_from_filing(&mut r, opened, STORE_HEADER_BYTES).context("reading the store")?
     };
     // **The vectors are left in the file unless the caller asked for them.** They
     // are the largest thing an index holds - 1.85 GB for a 601,862 chunk corpus at
@@ -1658,6 +1681,59 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&p);
         p
+    }
+
+    /// **A loaded index answers with the same chunk text, reading it from the file.**
+    ///
+    /// The store's text is left in `store.bin` by a load (task-2066 §4.3.8), so
+    /// every `content` call after one is a positional read rather than a slice
+    /// of a `String`. This is the case that says the two answer the same thing:
+    /// every chunk of a saved index is compared against the index it was saved
+    /// from, not a sample of them, because a filed arena gets its offset from a
+    /// byte count and an offset that is wrong by one is wrong for every chunk
+    /// after the first.
+    ///
+    /// **It also checks the arena really is filed**, because a version of this
+    /// that quietly kept reading the text into memory would pass every other
+    /// assertion here.
+    #[test]
+    fn a_loaded_index_reads_its_chunk_text_out_of_the_file() {
+        let dir = temp_dir("filed-text");
+        let original = small_index();
+        save(&original, &dir).unwrap();
+        let loaded = load(&dir).unwrap();
+
+        assert!(
+            matches!(loaded.store().text, crate::store::TextArena::Filed { .. }),
+            "the load read the text into memory rather than leaving it in the file"
+        );
+        assert_eq!(
+            loaded.store().text.heap_bytes(),
+            0,
+            "the filed arena is holding bytes on the heap"
+        );
+
+        for chunk in 0..original.store().n_chunks() as u32 {
+            assert_eq!(
+                loaded.store().content(chunk),
+                original.store().content(chunk),
+                "chunk {chunk} read back differently from the file"
+            );
+        }
+
+        // And asking for it in memory gives the same answers again, which is
+        // what `inillucent-migrate` does before it scans a corpus.
+        let mut held = load(&dir).unwrap();
+        held.make_text_resident();
+        for chunk in 0..original.store().n_chunks() as u32 {
+            assert_eq!(
+                held.store().content(chunk),
+                original.store().content(chunk),
+                "chunk {chunk} changed when the text was read into memory"
+            );
+        }
+
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

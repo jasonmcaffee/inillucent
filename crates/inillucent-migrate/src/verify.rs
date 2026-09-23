@@ -200,7 +200,7 @@ fn chunk_digest(connection: &Connection<'_>, store: &Store) -> Check {
         integer(&mut hasher, i64::from(chunk.chunk_index));
         text(&mut hasher, store.chunk_external_id(ordinal as u32));
         text(&mut hasher, &store.heading_path(ordinal as u32).join(" > "));
-        text(&mut hasher, store.content(ordinal as u32));
+        text(&mut hasher, store.content(ordinal as u32).as_ref());
         hasher.update(b"\x1e");
     }
     let wanted = hasher.hex();

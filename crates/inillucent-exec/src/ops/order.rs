@@ -142,8 +142,7 @@ impl Sort {
             return Ok(());
         };
         let keys = self.keys.clone();
-        self.rows
-            .sort_by(|left, right| compare_by(left, right, &keys));
+        sort_rows(&mut self.rows, &keys);
         let bytes = crate::spill::encode_run(&self.rows);
         let rows = self.rows.len();
         if self.file.is_none() {
@@ -282,11 +281,7 @@ impl Sink for Sort {
             return self.downstream.finish();
         }
         let keys = self.keys.clone();
-        // A stable sort, because SQLite's sorter is stable and a digest
-        // comparison over rows with equal keys would otherwise differ for a
-        // reason that is not a bug in either engine.
-        self.rows
-            .sort_by(|left, right| compare_by(left, right, &keys));
+        sort_rows(&mut self.rows, &keys);
         let rows = std::mem::take(&mut self.rows);
         emit_rows(&rows, self.downstream.as_mut())?;
         self.downstream.finish()
@@ -693,6 +688,94 @@ fn order_under(left: &Datum<'_>, right: &Datum<'_>, term: &SortKey) -> Ordering 
 ///
 /// @param left - one row
 /// @param right - the other row
+/// Whether the encoded key's byte order is this term list's order.
+///
+/// Three things have to hold. **Every term ascending**, because a descending
+/// term reverses the comparison and one buffer cannot carry two directions.
+/// **NULLs first**, which is what an ascending term means by default and what
+/// `class::NULL` being the lowest class byte gives for free - an explicit
+/// `NULLS LAST` on an ascending term does not, and is why `nulls_first` is
+/// carried at all. And **a collation whose order survives the key encoder**:
+/// `BINARY`, `NOCASE` and `RTRIM` each have a byte transformation whose natural
+/// order is the collation's order, and `decimal`, `uint` and an application
+/// comparator have none - `"9"` sorts after `"10"` by bytes and before it by
+/// value.
+///
+/// Anything else falls through to `compare_by`, which is what every sort used
+/// before this and is still the only path that can answer those.
+///
+/// @param keys - the sort terms
+fn the_encoding_orders_these_terms(keys: &[SortKey]) -> bool {
+    !keys.is_empty()
+        && keys.iter().all(|term| {
+            !term.descending && term.nulls_first && term.collation.is_order_preserving_in_keys()
+        })
+}
+
+/// Encodes one row's sort terms into a single comparable buffer.
+///
+/// The terms are concatenated because the encoding is self-delimiting - a text
+/// or blob payload is escaped and terminated - which is the same property that
+/// lets an index key hold several columns in one buffer.
+///
+/// @param row - the row
+/// @param keys - the sort terms, in order
+fn encode_sort_key(row: &[OwnedDatum], keys: &[SortKey]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for term in keys {
+        let value = row
+            .get(term.column)
+            .map(OwnedDatum::borrow)
+            .unwrap_or(Datum::Null);
+        key::encode_into_with(&value, term.collation, &mut out);
+    }
+    out
+}
+
+/// Sorts rows in place, through the encoded keys where that is the same order.
+///
+/// **One encode per row instead of a dispatch per comparison** (task-2066
+/// §4.3.6, step 3). `compare_by` reads two `OwnedDatum`s out of their rows,
+/// borrows each, and dispatches on the pair of discriminants - and for text
+/// under `NOCASE` it folds both operands again - once for every one of the
+/// `n log n` comparisons a sort makes. Encoding first pays that `n` times and
+/// leaves the sort comparing byte strings.
+///
+/// **Stable, like the sort it replaces.** The row's position is the tie-break,
+/// so `sort_unstable` over `(bytes, position)` produces exactly the order
+/// `sort_by` did. SQLite's sorter is stable and a digest comparison over rows
+/// with equal keys would otherwise differ for a reason that is not a defect in
+/// either engine.
+///
+/// @param rows - the rows, reordered in place
+/// @param keys - the sort terms
+pub(crate) fn sort_rows(rows: &mut Vec<Vec<OwnedDatum>>, keys: &[SortKey]) {
+    if rows.len() < 2 {
+        return;
+    }
+    if !the_encoding_orders_these_terms(keys) {
+        rows.sort_by(|left, right| compare_by(left, right, keys));
+        return;
+    }
+
+    let mut encoded: Vec<(Vec<u8>, usize)> = rows
+        .iter()
+        .enumerate()
+        .map(|(at, row)| (encode_sort_key(row, keys), at))
+        .collect();
+    encoded.sort_unstable();
+
+    // The rows are moved rather than cloned: a clone here would copy every
+    // text and blob in the result set, which is the allocation this whole
+    // operator is built to avoid.
+    let mut held: Vec<Option<Vec<OwnedDatum>>> = rows.drain(..).map(Some).collect();
+    for (_, at) in encoded {
+        if let Some(row) = held.get_mut(at).and_then(Option::take) {
+            rows.push(row);
+        }
+    }
+}
+
 /// @param keys - the ordering terms
 pub(crate) fn compare_by(left: &[OwnedDatum], right: &[OwnedDatum], keys: &[SortKey]) -> Ordering {
     for term in keys {
@@ -858,6 +941,170 @@ mod spill_tests {
         assert_eq!(
             spilled, in_memory,
             "the merge lost a descending term or a NULL's place"
+        );
+    }
+}
+
+#[cfg(test)]
+mod encoded_key_tests {
+    use super::*;
+    use inillucent_base::rng::Rng;
+
+    /// One generated value, across every type a sort term can meet.
+    ///
+    /// The mixture is the point: SQL orders NULL before numbers before text
+    /// before blobs, and a comparison that only ever saw one type would agree
+    /// with anything. The text values repeat and differ only in case, so a
+    /// `NOCASE` term has ties to break and a `BINARY` one does not.
+    ///
+    /// @param rng - the generator
+    fn a_value(rng: &mut Rng) -> OwnedDatum {
+        match rng.below(6) {
+            0 => OwnedDatum::Null,
+            1 => OwnedDatum::Int(rng.below(40) as i64 - 20),
+            2 => OwnedDatum::Real((rng.below(4000) as f64 - 2000.0) / 8.0),
+            3 => OwnedDatum::Text(
+                ["alpha", "ALPHA", "Beta", "beta ", "", "gamma"]
+                    .get(rng.below(6) as usize)
+                    .copied()
+                    .unwrap_or("alpha")
+                    .as_bytes()
+                    .to_vec(),
+            ),
+            4 => OwnedDatum::Blob(vec![rng.below(4) as u8, rng.below(4) as u8]),
+            _ => OwnedDatum::Int(rng.below(4) as i64),
+        }
+    }
+
+    /// Builds a table of generated rows.
+    ///
+    /// @param seed - the seed, which a failure prints
+    /// @param rows - how many rows
+    /// @param columns - how many columns each row has
+    fn a_table(seed: u64, rows: usize, columns: usize) -> Vec<Vec<OwnedDatum>> {
+        let mut rng = Rng::new(seed);
+        (0..rows)
+            .map(|_| (0..columns).map(|_| a_value(&mut rng)).collect())
+            .collect()
+    }
+
+    /// **The encoded path answers what the dispatching path answers.**
+    ///
+    /// `sort_rows` takes the encoded route only when every term is ascending
+    /// with NULLs first under an encodable collation. That condition is the
+    /// whole safety argument, so it is checked by running both routes over the
+    /// same generated tables and comparing the rows - not the keys, the rows,
+    /// including the columns the sort does not read, because a permutation that
+    /// lost a row or duplicated one would still have the keys in order.
+    #[test]
+    fn the_encoded_sort_answers_what_the_comparing_sort_answers() {
+        let collations = [Collation::Binary, Collation::NoCase, Collation::RTrim];
+        for seed in 1..=24u64 {
+            let table = a_table(seed, 60, 3);
+            let mut rng = Rng::new(seed.wrapping_mul(7919));
+            let terms = 1 + rng.below(3) as usize;
+            let keys: Vec<SortKey> = (0..terms)
+                .map(|_| SortKey {
+                    column: rng.below(3) as usize,
+                    descending: false,
+                    collation: collations
+                        .get(rng.below(3) as usize)
+                        .copied()
+                        .unwrap_or(Collation::Binary),
+                    nulls_first: true,
+                })
+                .collect();
+            assert!(
+                the_encoding_orders_these_terms(&keys),
+                "seed {seed}: the generated terms did not take the encoded route, so this \
+                 case compares one route with itself"
+            );
+
+            let mut encoded = table.clone();
+            sort_rows(&mut encoded, &keys);
+            let mut compared = table.clone();
+            compared.sort_by(|left, right| compare_by(left, right, &keys));
+            assert_eq!(
+                encoded, compared,
+                "seed {seed}: the encoded sort and the comparing sort disagree"
+            );
+        }
+    }
+
+    /// **A term the encoding cannot order falls through, and still sorts.**
+    ///
+    /// Rule 1.5: the condition above is only worth having if the other side of
+    /// it works. A descending term, an explicit `NULLS LAST` on an ascending
+    /// one, and a collation with no byte transformation each have to be refused
+    /// by `the_encoding_orders_these_terms` and then sorted correctly by the
+    /// path that refusal sends them down.
+    #[test]
+    fn a_term_the_encoding_cannot_order_falls_through_and_still_sorts() {
+        let plain = SortKey {
+            column: 0,
+            descending: false,
+            collation: Collation::Binary,
+            nulls_first: true,
+        };
+        assert!(the_encoding_orders_these_terms(&[plain.clone()]));
+
+        for refused in [
+            SortKey {
+                descending: true,
+                ..plain.clone()
+            },
+            SortKey {
+                nulls_first: false,
+                ..plain.clone()
+            },
+            SortKey {
+                collation: Collation::Decimal,
+                ..plain.clone()
+            },
+        ] {
+            assert!(
+                !the_encoding_orders_these_terms(&[refused.clone()]),
+                "a term the key encoder cannot order was sent down the encoded route: \
+                 {refused:?}"
+            );
+            let table = a_table(11, 40, 2);
+            let mut ours = table.clone();
+            sort_rows(&mut ours, &[refused.clone()]);
+            let mut theirs = table.clone();
+            theirs.sort_by(|left, right| compare_by(left, right, &[refused.clone()]));
+            assert_eq!(
+                ours, theirs,
+                "the fall-through path did not sort: {refused:?}"
+            );
+        }
+
+        // And an empty term list, which is what a `SELECT` with no `ORDER BY`
+        // that still reaches this operator carries.
+        assert!(!the_encoding_orders_these_terms(&[]));
+    }
+
+    /// **The sort is stable, on both routes.**
+    ///
+    /// The rows are built so that every one has the same key and a different
+    /// second column, so the only thing a sort can do is keep them in order or
+    /// not. `sort_unstable` over `(bytes, position)` is what makes the encoded
+    /// route stable, and dropping the position would pass every other case here.
+    #[test]
+    fn rows_with_equal_keys_keep_the_order_they_arrived_in() {
+        let keys = vec![SortKey {
+            column: 0,
+            descending: false,
+            collation: Collation::Binary,
+            nulls_first: true,
+        }];
+        let table: Vec<Vec<OwnedDatum>> = (0..50i64)
+            .map(|nth| vec![OwnedDatum::Int(7), OwnedDatum::Int(nth)])
+            .collect();
+        let mut sorted = table.clone();
+        sort_rows(&mut sorted, &keys);
+        assert_eq!(
+            sorted, table,
+            "rows with equal keys came out in a different order, so the sort is not stable"
         );
     }
 }

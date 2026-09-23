@@ -510,6 +510,18 @@ impl Index {
         &self.store
     }
 
+    /// Reads the whole chunk text into memory.
+    ///
+    /// **For a caller that reads every chunk once** (task-2066 §4.3.8). A load
+    /// leaves the text in `store.bin` and reads a range per result, which is
+    /// what a search wants and what a full scan does not: `inillucent-migrate`
+    /// digests every chunk of the corpus, and paying a positional read for each
+    /// of six hundred thousand of them is slower than holding the text it is
+    /// about to touch anyway.
+    pub fn make_text_resident(&mut self) {
+        self.store.make_text_resident();
+    }
+
     /// Returns the full-precision vectors.
     pub fn vectors(&self) -> &VectorSet {
         &self.vectors

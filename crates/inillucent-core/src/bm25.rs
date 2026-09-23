@@ -126,14 +126,365 @@ impl Default for LexicalParams {
     }
 }
 
+/// One term's postings, which may sit in two pieces.
+///
+/// The flat array holds what was there when it was last built and the overflow
+/// holds what has been appended since, so a term written to after a load has
+/// both. Both pieces are sorted by chunk identifier and the overflow's chunks
+/// are all above the flat piece's, because chunks are only ever appended.
+#[derive(Clone, Copy)]
+pub(crate) struct PostingList<'a> {
+    /// What the flat array holds for this term.
+    head: &'a [Posting],
+    /// What has been appended to it since the array was built.
+    tail: &'a [Posting],
+}
+
+impl<'a> PostingList<'a> {
+    /// How many postings the term has.
+    pub(crate) fn len(&self) -> usize {
+        self.head.len().saturating_add(self.tail.len())
+    }
+
+    /// Every posting, in ascending chunk order.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &'a Posting> {
+        self.head.iter().chain(self.tail.iter())
+    }
+
+    /// The posting for one chunk, found by binary search.
+    ///
+    /// **Two searches rather than one**, because the two pieces are contiguous
+    /// separately and not together. Each is sorted, and every chunk in the
+    /// overflow is above every chunk in the flat array, so the pair behaves as
+    /// one sorted sequence.
+    ///
+    /// @param chunk - the chunk being looked for
+    pub(crate) fn at_chunk(&self, chunk: u32) -> Option<&'a Posting> {
+        if let Ok(at) = self.head.binary_search_by_key(&chunk, |p| p.chunk) {
+            return self.head.get(at);
+        }
+        let at = self.tail.binary_search_by_key(&chunk, |p| p.chunk).ok()?;
+        self.tail.get(at)
+    }
+}
+
+impl<'a> IntoIterator for PostingList<'a> {
+    type Item = &'a Posting;
+    type IntoIter = std::iter::Chain<std::slice::Iter<'a, Posting>, std::slice::Iter<'a, Posting>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.head.iter().chain(self.tail.iter())
+    }
+}
+
+/// The dictionary and its postings, as flat arrays with an overflow map.
+///
+/// **What this replaces, and what it cost** (task-2066 §4.3.8). It was a
+/// `HashMap<String, Vec<Posting>>` beside a `Vec<String>` of the same terms in
+/// sorted order. On the 600,589 chunk corpus that is 1,705,097 terms, and the
+/// representation charged for each of them three times over: a `String` in the
+/// map and a second `String` in the sorted list, a `Vec<Posting>` header and
+/// its own heap block however few postings the term has, and a hash map slot
+/// with its stored hash and its load factor. `docs/roadmap.md` measured the
+/// result at **890.3 MiB resident for 614.8 MiB on disk** - 53% of the whole
+/// index's resident bytes, and the largest single part of it.
+///
+/// Flat arrays charge once. The terms are one byte array with a start per term;
+/// the postings are one array with a start per term; a lookup is a binary search
+/// over the starts rather than a hash. Nothing is allocated per term at all.
+///
+/// **The overflow is what makes appending still possible.** A search table is
+/// added to after it is loaded, and rebuilding the flat arrays on every append
+/// would move every byte of them. So an append to a term already in the arrays
+/// goes into `overflow`, keyed by the term's index, and a term seen for the
+/// first time goes into `fresh`. Both are folded back in by [`Postings::flatten`],
+/// which a save calls. The maps hold what has arrived since the last one, not
+/// the corpus.
+///
+/// `fresh` is a `BTreeMap` rather than a hash map because the dictionary has to
+/// be readable in sorted order - a prefix expansion is a binary search and a
+/// forward walk - and a sorted container gives that without a second copy of
+/// its keys, which is the thing this type exists to stop paying for.
+#[derive(Default)]
+pub(crate) struct Postings {
+    /// Every flat term's bytes, concatenated in sorted order.
+    term_bytes: Vec<u8>,
+    /// Where each flat term starts in `term_bytes`, with a closing sentinel.
+    ///
+    /// Empty when there are no flat terms; otherwise `len() == terms + 1`.
+    term_starts: Vec<u32>,
+    /// Where each flat term's postings start in `flat`, with a closing sentinel.
+    posting_starts: Vec<u32>,
+    /// Every flat term's postings, in term order and ascending chunk order.
+    flat: Vec<Posting>,
+    /// Postings appended to a flat term since the arrays were built.
+    overflow: HashMap<u32, Vec<Posting>>,
+    /// Terms first seen since the arrays were built.
+    fresh: std::collections::BTreeMap<String, Vec<Posting>>,
+}
+
+impl Postings {
+    /// How many distinct terms the dictionary holds.
+    pub(crate) fn len(&self) -> usize {
+        self.flat_terms().saturating_add(self.fresh.len())
+    }
+
+    /// How many term-in-chunk appearances it holds.
+    pub(crate) fn total(&self) -> usize {
+        self.flat
+            .len()
+            .saturating_add(self.overflow.values().map(Vec::len).sum::<usize>())
+            .saturating_add(self.fresh.values().map(Vec::len).sum::<usize>())
+    }
+
+    /// How many terms the flat arrays hold.
+    fn flat_terms(&self) -> usize {
+        self.term_starts.len().saturating_sub(1)
+    }
+
+    /// One flat term's text.
+    ///
+    /// @param at - the term's index in the flat arrays
+    fn flat_term(&self, at: usize) -> &str {
+        let from = self.term_starts.get(at).copied().unwrap_or(0) as usize;
+        let to = self
+            .term_starts
+            .get(at.saturating_add(1))
+            .copied()
+            .unwrap_or(0) as usize;
+        self.term_bytes
+            .get(from..to)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .unwrap_or("")
+    }
+
+    /// The index of a flat term, or where it would be inserted.
+    ///
+    /// @param term - the term to look for
+    fn locate(&self, term: &str) -> Result<usize, usize> {
+        let mut low = 0usize;
+        let mut high = self.flat_terms();
+        while low < high {
+            let middle = low.saturating_add(high.saturating_sub(low) / 2);
+            match self.flat_term(middle).cmp(term) {
+                std::cmp::Ordering::Less => low = middle.saturating_add(1),
+                std::cmp::Ordering::Greater => high = middle,
+                std::cmp::Ordering::Equal => return Ok(middle),
+            }
+        }
+        Err(low)
+    }
+
+    /// One flat term's postings.
+    ///
+    /// @param at - the term's index in the flat arrays
+    fn flat_postings(&self, at: usize) -> &[Posting] {
+        let from = self.posting_starts.get(at).copied().unwrap_or(0) as usize;
+        let to = self
+            .posting_starts
+            .get(at.saturating_add(1))
+            .copied()
+            .unwrap_or(0) as usize;
+        self.flat.get(from..to).unwrap_or(&[])
+    }
+
+    /// The postings for one term, in both pieces.
+    ///
+    /// @param term - the analyzed term
+    pub(crate) fn get(&self, term: &str) -> Option<PostingList<'_>> {
+        match self.locate(term) {
+            Ok(at) => Some(PostingList {
+                head: self.flat_postings(at),
+                tail: self
+                    .overflow
+                    .get(&(at as u32))
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]),
+            }),
+            Err(_) => self.fresh.get(term).map(|list| PostingList {
+                head: list.as_slice(),
+                tail: &[],
+            }),
+        }
+    }
+
+    /// Whether the dictionary holds this term at all.
+    ///
+    /// @param term - the analyzed term
+    pub(crate) fn contains(&self, term: &str) -> bool {
+        self.locate(term).is_ok() || self.fresh.contains_key(term)
+    }
+
+    /// Appends one posting, and says whether the term was new.
+    ///
+    /// @param term - the analyzed term
+    /// @param posting - the posting to append
+    pub(crate) fn push(&mut self, term: &str, posting: Posting) -> bool {
+        match self.locate(term) {
+            Ok(at) => {
+                self.overflow.entry(at as u32).or_default().push(posting);
+                false
+            }
+            Err(_) => match self.fresh.get_mut(term) {
+                Some(list) => {
+                    list.push(posting);
+                    false
+                }
+                None => {
+                    self.fresh.insert(term.to_string(), vec![posting]);
+                    true
+                }
+            },
+        }
+    }
+
+    /// Every term in sorted order, with its postings.
+    ///
+    /// The flat terms and the fresh ones are each sorted, so this is a merge.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&str, PostingList<'_>)> {
+        let mut flat = 0usize;
+        let mut fresh = self.fresh.iter().peekable();
+        let total = self.len();
+        std::iter::from_fn(move || {
+            let next_flat = (flat < self.flat_terms()).then(|| self.flat_term(flat));
+            let take_flat = match (next_flat, fresh.peek()) {
+                (Some(left), Some((right, _))) => left <= right.as_str(),
+                (Some(_), None) => true,
+                (None, Some(_)) => false,
+                (None, None) => return None,
+            };
+            if take_flat {
+                let at = flat;
+                flat = flat.saturating_add(1);
+                return Some((
+                    self.flat_term(at),
+                    PostingList {
+                        head: self.flat_postings(at),
+                        tail: self
+                            .overflow
+                            .get(&(at as u32))
+                            .map(Vec::as_slice)
+                            .unwrap_or(&[]),
+                    },
+                ));
+            }
+            let (term, list) = fresh.next()?;
+            Some((
+                term.as_str(),
+                PostingList {
+                    head: list.as_slice(),
+                    tail: &[],
+                },
+            ))
+        })
+        .take(total)
+    }
+
+    /// The terms that begin with a prefix, capped.
+    ///
+    /// @param prefix - what each term must start with
+    /// @param cap - how many to return at most
+    pub(crate) fn expand_prefix(&self, prefix: &str, cap: usize) -> Vec<&str> {
+        let start = match self.locate(prefix) {
+            Ok(at) => at,
+            Err(at) => at,
+        };
+        let mut found: Vec<&str> = Vec::new();
+        for at in start..self.flat_terms() {
+            let term = self.flat_term(at);
+            if !term.starts_with(prefix) {
+                break;
+            }
+            found.push(term);
+            if found.len() >= cap {
+                return found;
+            }
+        }
+        for term in self.fresh.range(prefix.to_string()..) {
+            if !term.0.starts_with(prefix) {
+                break;
+            }
+            found.push(term.0.as_str());
+            if found.len() >= cap {
+                break;
+            }
+        }
+        found
+    }
+
+    /// Appends one term and its postings to the flat arrays, in sorted order.
+    ///
+    /// The caller supplies the terms already sorted, which is what the file
+    /// holds: `write_to` writes them in dictionary order.
+    ///
+    /// @param term - the term
+    /// @param postings - its postings, ascending by chunk
+    pub(crate) fn push_flat(&mut self, term: &str, postings: &[Posting]) {
+        if self.term_starts.is_empty() {
+            self.term_starts.push(0);
+            self.posting_starts.push(0);
+        }
+        self.term_bytes.extend_from_slice(term.as_bytes());
+        self.term_starts.push(self.term_bytes.len() as u32);
+        self.flat.extend_from_slice(postings);
+        self.posting_starts.push(self.flat.len() as u32);
+    }
+
+    /// Folds the maps back in once they hold an eighth of the postings.
+    ///
+    /// **An append must not rebuild, and the maps must not grow without
+    /// bound**, and those pull opposite ways. Rebuilding on every append moves
+    /// every byte of the flat arrays for one posting; never rebuilding leaves a
+    /// `HashMap` and a `BTreeMap` accumulating the per-term cost this type
+    /// exists to stop paying. An eighth is the amortised middle: a rebuild
+    /// costs `O(n)` and happens once per `n/8` postings added, so an append
+    /// pays a small constant, and the maps never hold more than a ninth of the
+    /// index.
+    ///
+    /// The threshold is a share rather than a count because the number that
+    /// matters is what the maps cost beside what the arrays cost, and an index
+    /// with a thousand postings and one with thirty million both want the same
+    /// answer to that.
+    pub(crate) fn flatten_if_heavy(&mut self) {
+        let in_maps = self
+            .overflow
+            .values()
+            .map(Vec::len)
+            .sum::<usize>()
+            .saturating_add(self.fresh.values().map(Vec::len).sum::<usize>());
+        if in_maps == 0 || in_maps.saturating_mul(8) < self.flat.len() {
+            return;
+        }
+        self.flatten();
+    }
+
+    /// Folds the overflow and the fresh terms back into the flat arrays.
+    ///
+    /// Everything after this is one contiguous run per term again, and the maps
+    /// start empty.
+    fn flatten(&mut self) {
+        if self.overflow.is_empty() && self.fresh.is_empty() {
+            return;
+        }
+        let mut rebuilt = Postings::default();
+        let held: Vec<(String, Vec<Posting>)> = self
+            .iter()
+            .map(|(term, list)| (term.to_string(), list.iter().copied().collect()))
+            .collect();
+        for (term, postings) in &held {
+            rebuilt.push_flat(term, postings);
+        }
+        *self = rebuilt;
+    }
+}
+
 /// The inverted index: every stemmed term, the chunks holding it, and where.
 #[derive(Default)]
 pub struct Bm25Index {
-    /// Stemmed term to its postings, sorted by chunk identifier.
-    postings: HashMap<String, Vec<Posting>>,
-    /// Terms in sorted order, so a prefix expansion is a binary search plus a
-    /// forward walk rather than a scan of the whole dictionary.
-    sorted_terms: Vec<String>,
+    /// Every stemmed term and its postings, sorted by term and then by chunk.
+    ///
+    /// See [`Postings`] for what this used to be and what that cost.
+    postings: Postings,
     /// Every posting's token positions, concatenated in posting order.
     positions: Vec<u32>,
     chunk_lengths: Vec<u32>,
@@ -231,7 +582,7 @@ impl Bm25Index {
         tokenizer: &Tokenizer,
         range: std::ops::Range<u32>,
     ) -> usize {
-        let mut new_terms: Vec<String> = Vec::new();
+        let mut added = 0usize;
         if self.chunk_lengths.len() < range.end as usize {
             self.chunk_lengths.resize(range.end as usize, 0);
             self.chunk_heading_lengths.resize(range.end as usize, 0);
@@ -242,7 +593,7 @@ impl Bm25Index {
         }
 
         for chunk in range {
-            let terms = tokenizer.terms(store.content(chunk));
+            let terms = tokenizer.terms(store.content(chunk).as_ref());
             // Both arrays were grown to cover the range above, so a chunk they
             // do not cover is a chunk this build has no room for; skipping it
             // is what an index would have panicked over (task-1932, H9).
@@ -288,12 +639,8 @@ impl Bm25Index {
                     term_frequency: at.len() as u32,
                     positions_at,
                 };
-                match self.postings.get_mut(term) {
-                    Some(list) => list.push(posting),
-                    None => {
-                        self.postings.insert(term.to_string(), vec![posting]);
-                        new_terms.push(term.to_string());
-                    }
+                if self.postings.push(term, posting) {
+                    added = added.saturating_add(1);
                 }
                 if let Some(recording) = self.recording.as_mut() {
                     recording.postings.push((
@@ -310,7 +657,8 @@ impl Bm25Index {
         }
 
         self.n_chunks = store.n_chunks();
-        self.merge_sorted_terms(new_terms)
+        self.postings.flatten_if_heavy();
+        added
     }
 
     /// Starts recording every field `index_chunks` adds, so a caller can
@@ -371,70 +719,16 @@ impl Bm25Index {
         }
         let positions_base = self.positions.len() as u32;
         self.positions.extend_from_slice(&delta.positions);
-        let mut new_terms: Vec<String> = Vec::new();
         for (term, relative) in &delta.postings {
             let posting = Posting {
                 chunk: relative.chunk,
                 term_frequency: relative.term_frequency,
                 positions_at: positions_base.saturating_add(relative.positions_at),
             };
-            match self.postings.get_mut(term) {
-                Some(list) => list.push(posting),
-                None => {
-                    self.postings.insert(term.clone(), vec![posting]);
-                    new_terms.push(term.clone());
-                }
-            }
+            self.postings.push(term, posting);
         }
         self.n_chunks = self.n_chunks.max(delta.range.end as usize);
-        self.merge_sorted_terms(new_terms);
-    }
-
-    /// Folds newly seen terms into the sorted dictionary.
-    ///
-    /// Merged in one pass rather than inserted one at a time: `sorted_terms` holds
-    /// 1.7 million strings on this corpus, and an insertion into the middle of it
-    /// moves the tail. A few hundred of those per sync is tens of gigabytes of
-    /// memmove for a list that can be rebuilt by merging in one linear walk.
-    /// @param new_terms - terms the dictionary did not previously hold
-    fn merge_sorted_terms(&mut self, mut new_terms: Vec<String>) -> usize {
-        if new_terms.is_empty() {
-            return 0;
-        }
-        let added = new_terms.len();
-        new_terms.sort();
-        if self.sorted_terms.is_empty() {
-            self.sorted_terms = new_terms;
-            return added;
-        }
-        let mut merged = Vec::with_capacity(self.sorted_terms.len() + added);
-        let mut existing = std::mem::take(&mut self.sorted_terms)
-            .into_iter()
-            .peekable();
-        let mut fresh = new_terms.into_iter().peekable();
-        // **`next()` after `peek()` cannot be `None`, and the `unwrap`s said so
-        // four times (task-1932, H9).** Matching on the value `next` returns
-        // says the same thing with no way to be wrong, and the arms are the
-        // same merge.
-        loop {
-            let take_existing = match (existing.peek(), fresh.peek()) {
-                (Some(a), Some(b)) => a <= b,
-                (Some(_), None) => true,
-                (None, Some(_)) => false,
-                (None, None) => break,
-            };
-            let taken = if take_existing {
-                existing.next()
-            } else {
-                fresh.next()
-            };
-            match taken {
-                Some(term) => merged.push(term),
-                None => break,
-            }
-        }
-        self.sorted_terms = merged;
-        added
+        self.postings.flatten_if_heavy();
     }
 
     /// Writes the inverted index, so a cold start reads it instead of rebuilding
@@ -455,12 +749,17 @@ impl Bm25Index {
         binio::write_u32_slice(w, &self.chunk_lengths)?;
         binio::write_u32_slice(w, &self.chunk_heading_lengths)?;
         binio::write_u32_slice(w, &self.positions)?;
-        binio::write_u64(w, self.sorted_terms.len() as u64)?;
-        for term in &self.sorted_terms {
+        binio::write_u64(w, self.postings.len() as u64)?;
+        // The merged order, so the file is written in dictionary order whether
+        // or not the arrays have been flattened since the last append. A term
+        // whose postings sit in two pieces is written as one run, which is what
+        // the reader builds back into one flat entry.
+        for (term, list) in self.postings.iter() {
             binio::write_str(w, term)?;
-            let postings = self.postings.get(term).map(|p| p.as_slice()).unwrap_or(&[]);
-            binio::write_u64(w, postings.len() as u64)?;
-            w.write_all(bytemuck::cast_slice(postings))?;
+            binio::write_u64(w, list.len() as u64)?;
+            for posting in list.iter() {
+                w.write_all(bytemuck::bytes_of(posting))?;
+            }
         }
         Ok(())
     }
@@ -481,17 +780,14 @@ impl Bm25Index {
         // arrive costs a few reallocations on a real index and nothing on a
         // claimed length the file cannot satisfy, which then fails at the first
         // `read_str`.
-        let mut sorted_terms = Vec::new();
-        let mut postings = HashMap::new();
+        let mut postings = Postings::default();
         for _ in 0..n_terms {
             let term = binio::read_str(r)?;
             let count = binio::read_u64(r)? as usize;
-            postings.insert(term.clone(), binio::read_pod_vec::<Posting>(r, count)?);
-            sorted_terms.push(term);
+            postings.push_flat(&term, &binio::read_pod_vec::<Posting>(r, count)?);
         }
         Ok(Bm25Index {
             postings,
-            sorted_terms,
             positions,
             chunk_lengths,
             chunk_heading_lengths,
@@ -508,7 +804,7 @@ impl Bm25Index {
 
     /// Returns how many term-in-chunk appearances the index holds.
     pub fn n_postings(&self) -> usize {
-        self.postings.values().map(|p| p.len()).sum()
+        self.postings.total()
     }
 
     /// Whether the dictionary holds this analyzed term at all. A query term it
@@ -516,7 +812,7 @@ impl Bm25Index {
     /// weighting wants to know.
     /// @param term - an analyzed query term
     pub fn contains_term(&self, term: &str) -> bool {
-        self.postings.contains_key(term)
+        self.postings.contains(term)
     }
 
     fn mean_length(&self) -> f32 {
@@ -537,15 +833,7 @@ impl Bm25Index {
 
     /// Terms in the dictionary that begin with `prefix`, capped.
     fn expand_prefix(&self, prefix: &str) -> Vec<&str> {
-        let start = self.sorted_terms.partition_point(|t| t.as_str() < prefix);
-        self.sorted_terms
-            .get(start..)
-            .unwrap_or(&[])
-            .iter()
-            .take_while(|t| t.starts_with(prefix))
-            .take(MAX_PREFIX_EXPANSIONS)
-            .map(|t| t.as_str())
-            .collect()
+        self.postings.expand_prefix(prefix, MAX_PREFIX_EXPANSIONS)
     }
 
     /// Score every chunk matching any query term, return the best `k`.
@@ -644,11 +932,11 @@ impl Bm25Index {
             // term would.
             let variants: Vec<&str> = if prefix {
                 let mut v = self.expand_prefix(qt);
-                if v.is_empty() && self.postings.contains_key(qt.as_str()) {
+                if v.is_empty() && self.postings.contains(qt.as_str()) {
                     v.push(qt.as_str());
                 }
                 v
-            } else if self.postings.contains_key(qt.as_str()) {
+            } else if self.postings.contains(qt.as_str()) {
                 vec![qt.as_str()]
             } else {
                 vec![]
@@ -681,7 +969,7 @@ impl Bm25Index {
                     1.0 / variants.len() as f32
                 };
                 let idf = self.idf(postings.len());
-                for p in postings {
+                for p in postings.iter() {
                     if !trivial && !filter.passes(p.chunk, store) {
                         continue;
                     }
@@ -975,8 +1263,7 @@ impl Bm25Index {
     /// @param chunk - the chunk being rescored
     fn positions_of(&self, term: &str, chunk: u32) -> Option<&[u32]> {
         let postings = self.postings.get(term)?;
-        let at = postings.binary_search_by_key(&chunk, |p| p.chunk).ok()?;
-        let p = postings.get(at)?;
+        let p = postings.at_chunk(chunk)?;
         let start = p.positions_at as usize;
         self.positions
             .get(start..start.saturating_add(p.term_frequency as usize))
@@ -2006,5 +2293,257 @@ mod tests {
         assert_eq!(longest_ordered_run(&reversed), 1);
         let partial: Vec<(usize, &[u32])> = vec![(0, &[1]), (1, &[4]), (2, &[2])];
         assert_eq!(longest_ordered_run(&partial), 2);
+    }
+}
+
+#[cfg(test)]
+mod postings_tests {
+    use super::*;
+
+    /// Builds a dictionary whose terms are all in the flat arrays.
+    ///
+    /// @param terms - the terms, which must already be sorted
+    fn flat_of(terms: &[(&str, &[u32])]) -> Postings {
+        let mut postings = Postings::default();
+        for (term, chunks) in terms {
+            let list: Vec<Posting> = chunks
+                .iter()
+                .map(|chunk| Posting {
+                    chunk: *chunk,
+                    term_frequency: 1,
+                    positions_at: 0,
+                })
+                .collect();
+            postings.push_flat(term, &list);
+        }
+        postings
+    }
+
+    /// One posting for a chunk.
+    ///
+    /// @param chunk - which chunk
+    fn posting(chunk: u32) -> Posting {
+        Posting {
+            chunk,
+            term_frequency: 1,
+            positions_at: 0,
+        }
+    }
+
+    /// **A term whose postings sit in two pieces reads as one list.**
+    ///
+    /// This is the whole risk of the overflow: every reader of a posting list
+    /// used to hold a `&Vec<Posting>` and now holds two slices, so a reader
+    /// that forgot the second would answer with the postings the index had when
+    /// it was loaded and none of the ones added since - silently, and only for
+    /// terms that were appended to.
+    #[test]
+    fn a_term_appended_to_after_a_load_reads_as_one_list() {
+        let mut postings = flat_of(&[("alpha", &[1, 4]), ("beta", &[2])]);
+        postings.push("alpha", posting(9));
+        postings.push("beta", posting(7));
+
+        let alpha = postings.get("alpha").expect("alpha is in the dictionary");
+        assert_eq!(alpha.len(), 3, "the appended posting is missing");
+        assert_eq!(
+            alpha.iter().map(|p| p.chunk).collect::<Vec<u32>>(),
+            vec![1, 4, 9],
+            "the two pieces did not read in chunk order"
+        );
+        assert_eq!(postings.total(), 5, "the total lost the appended postings");
+    }
+
+    /// **A term seen for the first time after a load is found.**
+    ///
+    /// It goes in `fresh` rather than in the flat arrays, and every lookup, the
+    /// merged iteration and the prefix expansion have to find it there.
+    #[test]
+    fn a_term_first_seen_after_a_load_is_found_everywhere() {
+        let mut postings = flat_of(&[("alpha", &[1]), ("gamma", &[2])]);
+        assert!(postings.push("beta", posting(3)), "beta was not new");
+        assert!(!postings.push("beta", posting(4)), "beta was new twice");
+
+        assert!(postings.contains("beta"));
+        assert_eq!(
+            postings.get("beta").map(|list| list.len()),
+            Some(2),
+            "the new term's postings are not both there"
+        );
+        assert_eq!(
+            postings.len(),
+            3,
+            "the term count did not include the new one"
+        );
+        assert_eq!(
+            postings.iter().map(|(term, _)| term).collect::<Vec<&str>>(),
+            vec!["alpha", "beta", "gamma"],
+            "the merged order is not sorted"
+        );
+    }
+
+    /// **A prefix expansion reaches both the flat terms and the new ones.**
+    ///
+    /// The flat terms are found by binary search and the new ones by a range on
+    /// the sorted map, and a version that searched only the first would stop
+    /// matching a term the moment it was added.
+    #[test]
+    fn a_prefix_expansion_reaches_both_halves() {
+        let mut postings = flat_of(&[("prefix", &[1]), ("prefixed", &[2]), ("zebra", &[3])]);
+        postings.push("prefixing", posting(4));
+
+        let mut found = postings.expand_prefix("prefix", 10);
+        found.sort_unstable();
+        assert_eq!(
+            found,
+            vec!["prefix", "prefixed", "prefixing"],
+            "the expansion missed a term on one side or picked up one that does not match"
+        );
+        assert!(
+            postings.expand_prefix("zeb", 10).contains(&"zebra"),
+            "a prefix past the new terms found nothing"
+        );
+        assert!(
+            postings.expand_prefix("nothing", 10).is_empty(),
+            "a prefix no term starts with matched something"
+        );
+        assert_eq!(
+            postings.expand_prefix("prefix", 2).len(),
+            2,
+            "the cap was not applied"
+        );
+    }
+
+    /// **A posting in the overflow is found by chunk.**
+    ///
+    /// `positions_of` binary searches the list, and the list is two sorted
+    /// pieces rather than one. A search of the first piece alone would fail to
+    /// find any chunk added after the load, which the phrase rescoring would
+    /// read as "this term does not occur in this chunk".
+    #[test]
+    fn a_posting_in_the_overflow_is_found_by_its_chunk() {
+        let mut postings = flat_of(&[("alpha", &[1, 4, 6])]);
+        postings.push("alpha", posting(11));
+        let alpha = postings.get("alpha").expect("alpha is there");
+
+        for chunk in [1u32, 4, 6, 11] {
+            assert_eq!(
+                alpha.at_chunk(chunk).map(|p| p.chunk),
+                Some(chunk),
+                "chunk {chunk} was not found"
+            );
+        }
+        assert!(
+            alpha.at_chunk(5).is_none(),
+            "a chunk the term does not occur in was found"
+        );
+        assert!(
+            alpha.at_chunk(99).is_none(),
+            "a chunk past the end was found"
+        );
+    }
+
+    /// **Folding the maps back in changes nothing a reader can see.**
+    ///
+    /// `flatten_if_heavy` rebuilds the arrays behind whoever is using them, so
+    /// the one thing that must be true is that the answers do not move. The
+    /// threshold is exercised from both sides: below it nothing is folded, and
+    /// above it everything is.
+    #[test]
+    fn folding_the_maps_back_in_changes_no_answer() {
+        let flat: Vec<(&str, &[u32])> = vec![
+            ("alpha", &[1, 2, 3, 4, 5, 6, 7, 8]),
+            ("beta", &[1, 2, 3, 4, 5, 6, 7, 8]),
+        ];
+        let mut postings = flat_of(&flat);
+        postings.push("alpha", posting(20));
+        postings.push("delta", posting(21));
+
+        let before: Vec<(String, Vec<u32>)> = postings
+            .iter()
+            .map(|(term, list)| (term.to_string(), list.iter().map(|p| p.chunk).collect()))
+            .collect();
+
+        // Two postings against sixteen flat ones is under the eighth, so this
+        // must leave the maps alone.
+        postings.flatten_if_heavy();
+        assert!(
+            postings.get("delta").is_some(),
+            "the new term was lost by a fold that should not have happened"
+        );
+
+        // Enough to cross it.
+        for chunk in 22..30 {
+            postings.push("alpha", posting(chunk));
+        }
+        postings.flatten_if_heavy();
+
+        let after: Vec<(String, Vec<u32>)> = postings
+            .iter()
+            .map(|(term, list)| (term.to_string(), list.iter().map(|p| p.chunk).collect()))
+            .collect();
+        assert_eq!(
+            after.len(),
+            before.len(),
+            "folding changed how many terms the dictionary holds"
+        );
+        for (term, chunks) in &before {
+            let held = after
+                .iter()
+                .find(|(name, _)| name == term)
+                .map(|(_, chunks)| chunks)
+                .unwrap_or_else(|| panic!("{term} was lost by the fold"));
+            assert!(
+                chunks.iter().all(|chunk| held.contains(chunk)),
+                "{term} lost postings in the fold: {chunks:?} against {held:?}"
+            );
+        }
+        assert_eq!(
+            postings.get("alpha").map(|list| list.len()),
+            Some(17),
+            "alpha lost the postings appended after the fold"
+        );
+    }
+
+    /// **An index written with an overflow reads back as one flat index.**
+    ///
+    /// The file format did not change, and this is what says so: a dictionary
+    /// with postings in both pieces is written, read back, and asked the same
+    /// questions. A writer that wrote only the flat piece would produce a file
+    /// that loads and is missing every posting added since the last save.
+    #[test]
+    fn an_index_written_with_an_overflow_reads_back_whole() {
+        let mut index = Bm25Index {
+            n_chunks: 12,
+            total_length: 24,
+            chunk_lengths: vec![2; 12],
+            chunk_heading_lengths: vec![0; 12],
+            positions: vec![0; 24],
+            ..Bm25Index::default()
+        };
+        index.postings = flat_of(&[("alpha", &[1, 4]), ("gamma", &[2])]);
+        index.postings.push("alpha", posting(9));
+        index.postings.push("beta", posting(3));
+
+        let mut bytes = Vec::new();
+        index.write_to(&mut bytes).expect("the index writes");
+        let read = Bm25Index::read_from(&mut bytes.as_slice()).expect("the index reads back");
+
+        assert_eq!(read.n_terms(), 3, "a term was lost in the round trip");
+        assert_eq!(read.n_postings(), 5, "a posting was lost in the round trip");
+        for (term, chunks) in [
+            ("alpha", vec![1u32, 4, 9]),
+            ("beta", vec![3]),
+            ("gamma", vec![2]),
+        ] {
+            let list = read
+                .postings
+                .get(term)
+                .unwrap_or_else(|| panic!("{term} is not in the index that was read back"));
+            assert_eq!(
+                list.iter().map(|p| p.chunk).collect::<Vec<u32>>(),
+                chunks,
+                "{term}'s postings did not survive the round trip"
+            );
+        }
     }
 }

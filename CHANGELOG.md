@@ -224,6 +224,69 @@ differences from SQLite beside them.**
 - A path a confined process may not reach is reported as `invalid_state` rather
   than as a syntax error.
 
+### The test and performance review (task-2066)
+
+**A retrieval index holds a fifth less of itself in memory.** The BM25 postings
+were a `HashMap<String, Vec<Posting>>` beside a second `Vec<String>` of the same
+terms in sorted order, so each of 1.7 million terms was charged for three times:
+a string in the map and a string in the list, a `Vec` header and its own heap
+block however few postings it had, and a hash map slot with its stored hash.
+They are flat arrays now - one byte array for the terms, one array for the
+postings, a start per term, and a binary search instead of a hash - with an
+overflow map that takes appends and is folded back in once it holds an eighth of
+the postings. And the chunk text is left in `store.bin` and read a range at a
+time, the way `vectors.bin` already was. Measured on a 185,078 chunk index, each
+figure taken twice: the postings went from 306.2 MiB resident to 209.4 for
+211.1 MiB on disk, and the whole index from 541.3 MiB to 444.3. **Neither
+changes the file format**, so an index written by any build opens under this one
+and the other way round.
+
+**`NOT INDEXED` reaches the planner.** The clause parsed, an `INDEXED BY` was
+checked for a name that exists, and then the hint was dropped: nothing carried it
+past the binder, so both were accepted and ignored. `SELECT count(*) FROM h NOT
+INDEXED WHERE a = 3 AND b = 100` on a 600 row table with two indexes planned as
+`SCAN h` in SQLite 3.53.4 and as `SEARCH h USING INDEX h_b (b=?)` here. It
+mattered beyond the plan: `inillucent integrity-check` reads every table
+`SELECT * FROM "t" NOT INDEXED` to build its digest, on the argument that the
+clause is what makes the digest a fact about the rows - and a table whose index
+disagreed with it was being digested through the index. `INDEXED BY` still does
+not force the index it names; that difference is written down in
+`docs/feature-comparison.md` rather than left to be found.
+
+**`printf` prints what SQLite prints for `%e` and `%g`.** The sixteen digit cap
+reached `%f` alone, so the other two carried on printing the decimal expansion of
+the nearest double past the sixteenth digit: `printf('%.20g', 3.14159265358979)`
+was `3.1415926535897900074` here and `3.14159265358979` there. 222 of 675
+generated statements disagreed with the pinned shell; 7 do now, all in the last
+digit of the mantissa on doubles in the exponent tail.
+
+**`.show` reports what was set.** `explain`, `stats` and `output` were written
+into its format strings as `auto`, `off` and `stdout`, so `.explain on` then
+`.show` answered `auto`, and a shell whose rows were going into a file said they
+were going to the terminal.
+
+**A sort that does not fit in memory spills to a run file and merges it back**,
+where it used to hold every surviving row and be killed by the operating system.
+The sort also encodes each row's key once and compares byte strings, instead of
+dispatching on the value's type for every one of the `n log n` comparisons.
+
+**`NOCASE` and a NUL.** SQLite's `NOCASE` stops at the first NUL in the left
+operand and then compares the byte lengths; this engine reads every byte. The
+difference is reachable only through `CAST(x'..' AS TEXT)` or a bound parameter,
+because no SQL string literal can carry a NUL, and it is recorded in
+`docs/feature-comparison.md` with the reason it is not matched.
+
+**And the suite grew where it could not fail.** Sixteen fuzz targets that had
+never been run are run by `tools/run-fuzz.ps1`, with a row per target in
+`tests/fuzz-history.tsv`; the first campaign found an allocation sized from an
+unvalidated `u32` in the HNSW reader, reachable from an ordinary `SELECT`. The
+nightly tier's ledger is checked for freshness, so a scheduled task that stops
+running is a failure rather than a silence. `docs/repository.md`'s coverage table
+has a floor per crate and a test that reads it. And `semantics.rs`'s 235 probed
+constructs are eight parallel groups rather than one serial test, with a guard
+that every category belongs to a group - which found seven `fts5` cases being
+graded by nothing.
+
 ## 0.1.7 — 2026-09-19
 
 **`packaging/install.sh` had been unrunnable for three releases, and the reason it

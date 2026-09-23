@@ -188,6 +188,186 @@ pub struct Chunk {
     pub content: Range<u64>,
 }
 
+/// A reader that remembers how many bytes have been taken from it.
+///
+/// **The store's format says nothing about where its sections begin**, because
+/// it is read in one pass from the front. Filing the text needs one number the
+/// format does not carry - the offset of the text section inside `store.bin` -
+/// and counting what the parser has consumed is how to have it without writing
+/// it down. It sits outside the buffering, so what it counts is what the parser
+/// asked for rather than what the operating system handed over.
+struct Counting<R> {
+    /// Where the bytes come from.
+    inner: R,
+    /// How many have been taken so far.
+    at: u64,
+}
+
+impl<R: Read> Read for Counting<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let taken = self.inner.read(buf)?;
+        self.at = self.at.saturating_add(taken as u64);
+        Ok(taken)
+    }
+}
+
+/// Where the chunk text lives: on the heap, or in the file it was read from.
+///
+/// **What this replaces, and what it cost** (task-2066 §4.3.8). `Store` held the
+/// whole corpus's chunk text in one `String`. `docs/roadmap.md` measured the
+/// store at **620.3 MiB resident for 564.8 MiB on disk** on the 600,589 chunk
+/// corpus - 37% of the index's resident bytes, and, unlike the graph, not
+/// expanded much by being loaded. It is simply all of it, in memory, because a
+/// chunk's text is read by every result.
+///
+/// So it is read on demand instead, the way `vectors.bin` already is. A search
+/// returning ten results reads ten ranges out of a file; a process that opens
+/// the index and never reads a chunk reads none.
+///
+/// **The file format did not change.** `write_to` still writes the text inline
+/// in `store.bin` and `read_from` still reads it. What changed is that
+/// `persist::load` can say *where in that file* the text section begins and
+/// skip past it, leaving a handle and an offset in place of the bytes. An index
+/// written by any build reads under either, and the one-stream form
+/// (`persist::write_index`) has no file to point at and stays resident, which is
+/// right: a generation living inside a database file is already read through
+/// the page pool.
+pub enum TextArena {
+    /// On the heap. What a build produces, and what the one-stream form reads.
+    Resident(String),
+    /// In the file the store was read from, plus whatever has been added since.
+    ///
+    /// **The tail is why a filed store can still be written to.** A search table
+    /// is added to after it is loaded, and an arena that refused an append would
+    /// have to be read into memory at the first one, which is the cost this
+    /// exists to avoid. Text added since the load is held on the heap until the
+    /// index is saved, at which point it is written into the file and the next
+    /// load has it filed with the rest.
+    Filed {
+        /// The file the store was read from, open for reading.
+        file: std::fs::File,
+        /// Where the text section's bytes begin in it.
+        offset: u64,
+        /// How many bytes the file holds.
+        filed: u64,
+        /// Text appended since the load, which begins at `filed`.
+        tail: String,
+    },
+}
+
+impl Default for TextArena {
+    /// An empty resident arena, which is what a `Store::default()` holds.
+    fn default() -> TextArena {
+        TextArena::Resident(String::new())
+    }
+}
+
+impl TextArena {
+    /// How many bytes of text the arena holds.
+    pub fn len(&self) -> u64 {
+        match self {
+            TextArena::Resident(text) => text.len() as u64,
+            TextArena::Filed { filed, tail, .. } => filed.saturating_add(tail.len() as u64),
+        }
+    }
+
+    /// Whether it holds none.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// How many bytes of heap it occupies.
+    ///
+    /// Zero for a filed arena that has not been added to, which is the point of
+    /// one.
+    pub fn heap_bytes(&self) -> usize {
+        match self {
+            TextArena::Resident(text) => text.len(),
+            TextArena::Filed { tail, .. } => tail.len(),
+        }
+    }
+
+    /// Appends text and returns the range it now occupies.
+    ///
+    /// @param text - what to add
+    pub fn push(&mut self, text: &str) -> std::ops::Range<u64> {
+        let start = self.len();
+        match self {
+            TextArena::Resident(held) => held.push_str(text),
+            TextArena::Filed { tail, .. } => tail.push_str(text),
+        }
+        start..self.len()
+    }
+
+    /// Returns one byte range of the arena.
+    ///
+    /// **A range the arena does not hold reads as empty**, which is what a
+    /// caller with a stale chunk identifier gets instead of a panic - the same
+    /// answer the resident form gave when the range ran past the string.
+    /// Invalid UTF-8 reads as empty for the same reason: this is a file, and a
+    /// file is bytes somebody else could have written.
+    ///
+    /// @param range - where the text sits
+    pub fn slice(&self, range: std::ops::Range<u64>) -> std::borrow::Cow<'_, str> {
+        if range.end < range.start {
+            return std::borrow::Cow::Borrowed("");
+        }
+        match self {
+            TextArena::Resident(text) => std::borrow::Cow::Borrowed(
+                text.get(range.start as usize..range.end as usize)
+                    .unwrap_or(""),
+            ),
+            TextArena::Filed {
+                file,
+                offset,
+                filed,
+                tail,
+            } => {
+                if range.start >= *filed {
+                    let from = range.start.saturating_sub(*filed) as usize;
+                    let to = range.end.saturating_sub(*filed) as usize;
+                    return std::borrow::Cow::Borrowed(tail.get(from..to).unwrap_or(""));
+                }
+                // A range that starts in the file and ends in the tail cannot
+                // happen: one chunk's text is written in one call, so it lies
+                // wholly on one side of the boundary. Reading the file part and
+                // stopping is the conservative answer if it ever does.
+                let length = range.end.min(*filed).saturating_sub(range.start) as usize;
+                let mut bytes = vec![0u8; length];
+                if crate::vectors::read_exact_at(
+                    file,
+                    offset.saturating_add(range.start),
+                    &mut bytes,
+                )
+                .is_err()
+                {
+                    return std::borrow::Cow::Borrowed("");
+                }
+                match String::from_utf8(bytes) {
+                    Ok(text) => std::borrow::Cow::Owned(text),
+                    Err(_) => std::borrow::Cow::Borrowed(""),
+                }
+            }
+        }
+    }
+
+    /// The whole arena as one string, for writing it back out.
+    ///
+    /// A filed arena reads its bytes back here, which is the one place it does:
+    /// a save is writing the whole corpus anyway, so the memory is transient
+    /// and the alternative is a second write path.
+    pub fn to_text(&self) -> String {
+        match self {
+            TextArena::Resident(text) => text.clone(),
+            TextArena::Filed { filed, tail, .. } => {
+                let mut whole = self.slice(0..*filed).into_owned();
+                whole.push_str(tail);
+                whole
+            }
+        }
+    }
+}
+
 #[derive(Default, Serialize, Deserialize)]
 /// The corpus: the documents, their chunks, and the dictionaries every
 /// filterable field is interned into.
@@ -229,7 +409,11 @@ pub struct Store {
     /// Heading string identifiers, referenced by `Chunk::heading_path`.
     pub heading_arena: Vec<u32>,
     /// All chunk text, contiguous. Chunks hold byte ranges into it.
-    pub text: String,
+    ///
+    /// See [`TextArena`]: this is the corpus's largest heap resident part, and
+    /// a load can leave it in the file instead.
+    #[serde(skip)]
+    pub text: TextArena,
     /// The identifier the source system uses for each chunk, parallel to `chunks`.
     ///
     /// A chunk needs an identity of its own. `Document::url` is a document
@@ -371,13 +555,11 @@ impl Store {
     /// caller reading a stale identifier gets instead of a panic.
     ///
     /// @param chunk - the chunk identifier
-    pub fn content(&self, chunk: u32) -> &str {
+    pub fn content(&self, chunk: u32) -> std::borrow::Cow<'_, str> {
         let Some(c) = self.chunks.get(chunk as usize) else {
-            return "";
+            return std::borrow::Cow::Borrowed("");
         };
-        self.text
-            .get(c.content.start as usize..c.content.end as usize)
-            .unwrap_or("")
+        self.text.slice(c.content.start..c.content.end)
     }
 
     /// Returns which document a chunk belongs to.
@@ -604,9 +786,8 @@ impl Store {
             }
             let h_end = self.heading_arena.len() as u32;
 
-            let t_start = self.text.len() as u64;
-            self.text.push_str(&input.content);
-            let t_end = self.text.len() as u64;
+            let range = self.text.push(&input.content);
+            let (t_start, t_end) = (range.start, range.end);
 
             let chunk_id = self.chunks.len() as u32;
             // The document was pushed or found just above, so this is never
@@ -907,7 +1088,7 @@ impl Store {
             .collect();
         binio::write_u32_slice(w, &attributes)?;
         binio::write_u32_slice(w, &self.heading_arena)?;
-        binio::write_text(w, &self.text)?;
+        binio::write_text(w, &self.text.to_text())?;
 
         binio::write_u32_slice(w, &self.live_chunks_per_source)?;
         binio::write_u32(w, self.live_chunks)?;
@@ -919,8 +1100,55 @@ impl Store {
         Ok(())
     }
 
-    /// Reads a store written by `write_to`.
+    /// Reads a store written by `write_to`, holding its text on the heap.
+    ///
+    /// @param r - the source
     pub fn read_from(r: &mut impl Read) -> std::io::Result<Store> {
+        let mut counted = Counting { inner: r, at: 0 };
+        Store::read_inner(&mut counted, None)
+    }
+
+    /// Reads a store, leaving its text in the file it came from.
+    ///
+    /// The text section is skipped rather than read, and the arena is given the
+    /// file and the offset it starts at. Nothing about the file changes: this is
+    /// the same bytes `read_from` reads, read later and only when a chunk is
+    /// asked for.
+    ///
+    /// @param r - the source, positioned where `base` says it is
+    /// @param file - the same file, open for reading, for the arena to keep
+    /// @param base - the absolute offset in that file of `r`'s current position
+    pub fn read_from_filing(
+        r: &mut impl Read,
+        file: std::fs::File,
+        base: u64,
+    ) -> std::io::Result<Store> {
+        let mut counted = Counting { inner: r, at: 0 };
+        Store::read_inner(&mut counted, Some((file, base)))
+    }
+
+    /// Reads the whole text into memory, whatever the arena was holding.
+    ///
+    /// **For a caller that reads every chunk once**, which is what
+    /// `inillucent-migrate` does when it digests a corpus: a filed arena costs
+    /// one positional read per chunk, and a scan of the whole corpus then pays
+    /// that a hundred thousand times for text it is going to touch anyway. A
+    /// search reading its ten results pays ten and should not hold the corpus.
+    pub fn make_text_resident(&mut self) {
+        if matches!(self.text, TextArena::Resident(_)) {
+            return;
+        }
+        self.text = TextArena::Resident(self.text.to_text());
+    }
+
+    /// Reads a store, filing its text when the caller supplied somewhere to file it.
+    ///
+    /// @param r - the source, counting what it hands over
+    /// @param filing - the file and the offset `r` began at, when the text is to stay there
+    fn read_inner<R: Read>(
+        r: &mut Counting<R>,
+        filing: Option<(std::fs::File, u64)>,
+    ) -> std::io::Result<Store> {
         let optional = |v: u32| if v == binio::NONE_ID { None } else { Some(v) };
 
         let n_documents = binio::read_u64(r)? as usize;
@@ -997,7 +1225,35 @@ impl Store {
             .filter_map(|p| Some((*p.first()?, *p.get(1)?)))
             .collect();
         let heading_arena = binio::read_u32_vec(r)?;
-        let text = binio::read_text(r)?;
+        let text = match filing {
+            None => TextArena::Resident(binio::read_text(r)?),
+            Some((file, base)) => {
+                // The length is read the way `read_text` reads it, and then the
+                // bytes are skipped rather than taken. Nothing is allocated from
+                // the length, which matters because it is a `u64` out of a file
+                // somebody else could have written - the same argument
+                // `binio`'s readers are built on.
+                let filed = binio::read_u64(r)?;
+                let offset = base.saturating_add(r.at);
+                // `by_ref` so the reader is reborrowed rather than moved: the
+                // sections after the text still have to be read out of it.
+                let skipped = std::io::copy(&mut r.by_ref().take(filed), &mut std::io::sink())?;
+                if skipped != filed {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        format!(
+                            "the store claims {filed} bytes of text and the file holds {skipped}"
+                        ),
+                    ));
+                }
+                TextArena::Filed {
+                    file,
+                    offset,
+                    filed,
+                    tail: String::new(),
+                }
+            }
+        };
 
         let live_chunks_per_source = binio::read_u32_vec(r)?;
         let live_chunks = binio::read_u32(r)?;
@@ -1348,5 +1604,146 @@ mod tests {
         assert_eq!(s.n_documents(), 1);
         assert_eq!(s.chunks[1].doc, doc);
         assert_eq!(s.deleted_chunks, 2);
+    }
+}
+
+#[cfg(test)]
+mod text_arena_tests {
+    use super::*;
+
+    /// **A resident arena and a filed one answer the same ranges.**
+    ///
+    /// The filed arm is built by writing the bytes to a file and pointing an
+    /// arena at them with an offset, which is what a load does, so this is the
+    /// same arithmetic without the rest of the store around it.
+    #[test]
+    fn a_filed_arena_answers_what_a_resident_one_answers() {
+        let text = "alpha beta gamma delta";
+        let resident = TextArena::Resident(text.to_string());
+
+        let directory = std::env::temp_dir().join("inillucent-text-arena");
+        let _ = std::fs::create_dir_all(&directory);
+        let path = directory.join("arena.bin");
+        // Written with eleven bytes of padding in front, so an arena that
+        // ignored its offset would read the padding and this would fail.
+        let mut bytes = vec![b'#'; 11];
+        bytes.extend_from_slice(text.as_bytes());
+        std::fs::write(&path, &bytes).expect("the arena file is written");
+        let filed = TextArena::Filed {
+            file: std::fs::File::open(&path).expect("the arena file opens"),
+            offset: 11,
+            filed: text.len() as u64,
+            tail: String::new(),
+        };
+
+        assert_eq!(filed.len(), resident.len());
+        assert_eq!(filed.heap_bytes(), 0, "a filed arena is holding bytes");
+        for range in [0u64..5, 6..10, 11..16, 17..22, 0..22] {
+            assert_eq!(
+                filed.slice(range.clone()),
+                resident.slice(range.clone()),
+                "the two arenas disagree about {range:?}"
+            );
+        }
+        assert_eq!(filed.to_text(), text, "the whole arena did not read back");
+
+        // A range the arena does not hold is empty on both, which is what a
+        // caller with a stale chunk identifier gets instead of a panic.
+        for range in [100u64..110, 20..5] {
+            assert_eq!(filed.slice(range.clone()), "");
+            assert_eq!(resident.slice(range.clone()), "");
+        }
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// **Text added to a filed arena is readable without reading the file back.**
+    ///
+    /// A search table is added to after it is loaded, and an arena that could
+    /// not take an append would have to read the whole corpus in at the first
+    /// one - which is the cost being avoided. The appended text goes on the
+    /// heap; the filed text stays where it is.
+    #[test]
+    fn a_filed_arena_takes_an_append_without_reading_itself_in() {
+        let directory = std::env::temp_dir().join("inillucent-text-arena-append");
+        let _ = std::fs::create_dir_all(&directory);
+        let path = directory.join("arena.bin");
+        std::fs::write(&path, b"alpha beta").expect("the arena file is written");
+        let mut filed = TextArena::Filed {
+            file: std::fs::File::open(&path).expect("the arena file opens"),
+            offset: 0,
+            filed: 10,
+            tail: String::new(),
+        };
+
+        let added = filed.push(" gamma");
+        assert_eq!(added, 10..16, "the append reported the wrong range");
+        assert_eq!(filed.len(), 16);
+        assert_eq!(
+            filed.heap_bytes(),
+            6,
+            "a filed arena that was appended to is holding more than the append"
+        );
+        assert_eq!(filed.slice(0..5), "alpha", "the filed half stopped reading");
+        assert_eq!(
+            filed.slice(10..16),
+            " gamma",
+            "the appended half is missing"
+        );
+        assert_eq!(filed.to_text(), "alpha beta gamma");
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// **A store claiming more text than its file holds is refused.**
+    ///
+    /// The length is a `u64` out of a file somebody else could have written,
+    /// which is what `binio`'s readers are built around. The filed path does
+    /// not allocate from it - it skips the bytes - so the check that matters is
+    /// that skipping past the end is an error rather than a store whose text
+    /// section silently ends early.
+    #[test]
+    fn a_store_claiming_more_text_than_the_file_holds_is_refused() {
+        let mut store = Store::default();
+        store.text = TextArena::Resident("alpha beta gamma".to_string());
+        let mut bytes = Vec::new();
+        store.write_to(&mut bytes).expect("the store writes");
+
+        // The text length is the one `u64` in there that says sixteen. Raising
+        // it leaves every other section intact and the file short.
+        let wanted = 16u64.to_le_bytes();
+        let places: Vec<usize> = bytes
+            .windows(8)
+            .enumerate()
+            .filter(|(_, window)| *window == wanted)
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(
+            places.len(),
+            1,
+            "the sixteen-byte length is not the only sixteen in the file, so this case              would be editing the wrong number"
+        );
+        let at = places.first().copied().unwrap_or(0);
+        if let Some(slot) = bytes.get_mut(at..at.saturating_add(8)) {
+            slot.copy_from_slice(&u64::MAX.to_le_bytes());
+        }
+
+        let directory = std::env::temp_dir().join("inillucent-text-arena-short");
+        let _ = std::fs::create_dir_all(&directory);
+        let path = directory.join("store.bin");
+        std::fs::write(&path, &bytes).expect("the store file is written");
+        let file = std::fs::File::open(&path).expect("the store file opens");
+        // Matched rather than unwrapped, because `expect_err` wants the `Ok`
+        // side to implement `Debug` and a `Store` holds an open file.
+        let Err(refused) = Store::read_from_filing(&mut bytes.as_slice(), file, 0) else {
+            panic!("a text length the file cannot satisfy must be refused");
+        };
+        assert_eq!(
+            refused.kind(),
+            std::io::ErrorKind::UnexpectedEof,
+            "the refusal was not about the file running out: {refused}"
+        );
+
+        let _ = std::fs::remove_file(&path);
     }
 }
