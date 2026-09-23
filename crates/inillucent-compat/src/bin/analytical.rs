@@ -320,7 +320,7 @@ fn run(
         "  {:<16} {:>12} {:>12} {:>9} {:>9} {:>9}  agreed",
         "workload", "inillucent ns", "sqlite ns", "ratio", "low", "high"
     );
-    let mut all_ratios: Vec<f64> = Vec::new();
+    let mut members: Vec<&Paired> = Vec::new();
     let mut passed = true;
     for entry in &measured {
         if !entry.agreed {
@@ -342,29 +342,30 @@ fn run(
             low,
             high
         );
-        all_ratios.extend(entry.log_ratios());
+        if !entry.pairs.is_empty() {
+            members.push(entry);
+        }
     }
 
-    if !all_ratios.is_empty() {
-        // The family figure is the arithmetic mean of the paired log ratios,
-        // exponentiated - the geometric mean - pooled over every workload in
-        // the family. That is `family_interval` in `scorecard.rs`, character
-        // for character, and it is written that way here rather than more
-        // conveniently because a gate measured by a different statistic than
-        // the scorecard reports is a gate on a different number. The first
-        // version of this harness took the median and read 5.21x where the
-        // scorecard's statistic said 3.88x on the same samples.
-        let family = (all_ratios.iter().sum::<f64>() / all_ratios.len() as f64).exp();
-        let (low, high) = inillucent_compat::perf::bootstrap(&all_ratios, SEED);
+    if !members.is_empty() {
+        // The family figure is `perf::family_interval`, the statistic the
+        // scorecard and every other gate use, because a gate measured by a
+        // different statistic than the scorecard reports is a gate on a
+        // different number. The first version of this harness took the median
+        // and read 5.21x where the scorecard's statistic said 3.88x on the same
+        // samples. Until task-2093 this pooled every workload's every round into
+        // one list, and a resample of that list draws the workloads in random
+        // proportions, and with `scan.aggregate` at 53.82x and `scan.distinct`
+        // at 1.71x (the full gate, pinned, task-2086) the interval measured the
+        // gap between those two workloads.
+        let (family, low, high) = inillucent_compat::perf::family_interval(&members, SEED);
+        let samples: usize = members.iter().map(|entry| entry.log_ratios().len()).sum();
         println!();
         println!(
-            "  read.analytical: {family:.2}x  (95% interval {:.2}x .. {:.2}x over {} paired samples)",
-            low.exp(),
-            high.exp(),
-            all_ratios.len()
+            "  read.analytical: {family:.2}x  (95% interval {low:.2}x .. {high:.2}x over {samples} paired samples)"
         );
         println!("  Phase 1 gate: lower bound at least 5.00x at medium scale");
-        if low.exp() < 5.0 {
+        if low < 5.0 {
             println!("  VERDICT: MISSED");
             passed = false;
         } else {

@@ -97,7 +97,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use inillucent_compat::perf::run_sqlite;
-use inillucent_compat::perf::{bind_value, bootstrap, median, Bind, Digest, Sample};
+use inillucent_compat::perf::{bind_value, family_interval, median, Bind, Digest, Paired, Sample};
 use inillucent_compat::workspace_root;
 use inillucent_engine::connect::{Connection, Database, Statement};
 use inillucent_engine::DEFAULT_FRAMES;
@@ -434,8 +434,8 @@ fn report(options: &Options, cached: &[Vec<f64>], uncached: &[Vec<f64>], referen
         "  {:<18} {:>12} {:>12} {:>12} {:>9} {:>9} {:>9}",
         "workload", "cached", "uncached", "sqlite", "cached", "uncached", "cache"
     );
-    let mut with_logs: Vec<f64> = Vec::new();
-    let mut without_logs: Vec<f64> = Vec::new();
+    let mut with_arms: Vec<Paired> = Vec::new();
+    let mut without_arms: Vec<Paired> = Vec::new();
     for (index, (name, _, _)) in WORKLOADS.iter().enumerate() {
         let (Some(a), Some(b), Some(c)) =
             (cached.get(index), uncached.get(index), reference.get(index))
@@ -443,12 +443,8 @@ fn report(options: &Options, cached: &[Vec<f64>], uncached: &[Vec<f64>], referen
             continue;
         };
         let (with, without, theirs) = (median(a), median(b), median(c));
-        for (ours, sqlite) in a.iter().zip(c.iter()) {
-            with_logs.push((sqlite / ours).ln());
-        }
-        for (ours, sqlite) in b.iter().zip(c.iter()) {
-            without_logs.push((sqlite / ours).ln());
-        }
+        with_arms.push(paired_arm(name, a, c));
+        without_arms.push(paired_arm(name, b, c));
         println!(
             "  {name:<18} {with:>12.0} {without:>12.0} {theirs:>12.0} {:>8.2}x {:>8.2}x {:>8.2}x",
             theirs / with,
@@ -456,13 +452,17 @@ fn report(options: &Options, cached: &[Vec<f64>], uncached: &[Vec<f64>], referen
             without / with
         );
     }
-    let family = |logs: &[f64]| {
-        let mean = logs.iter().sum::<f64>() / logs.len().max(1) as f64;
-        let (low, high) = bootstrap(logs, SEED);
-        (mean.exp(), low.exp(), high.exp())
+    // One value per round, the mean of that round's log ratios over the
+    // workloads, with the rounds resampled - `perf::family_interval`, the
+    // statistic every gate grades a family by. Until task-2093 this pooled
+    // every workload's every round into one list, which made the interval
+    // measure how far apart `prepare.trivial` and `prepare.point` are.
+    let family = |arms: &[Paired]| {
+        let members: Vec<&Paired> = arms.iter().collect();
+        family_interval(&members, SEED)
     };
-    let (with, with_low, with_high) = family(&with_logs);
-    let (without, without_low, without_high) = family(&without_logs);
+    let (with, with_low, with_high) = family(&with_arms);
+    let (without, without_low, without_high) = family(&without_arms);
     println!();
     println!("  open.prepare with the cache:    {with:.2}x  ({with_low:.2}x .. {with_high:.2}x)");
     println!(
@@ -473,6 +473,21 @@ fn report(options: &Options, cached: &[Vec<f64>], uncached: &[Vec<f64>], referen
         "  VERDICT: {}",
         if with_low >= 1.0 { "MET" } else { "MISSED" }
     );
+}
+
+/// Returns one workload's rounds as pairs of this engine's time and SQLite's.
+///
+/// @param name - the workload
+/// @param ours - this engine's time per round, in nanoseconds
+/// @param theirs - SQLite's time per round, in nanoseconds
+fn paired_arm(name: &str, ours: &[f64], theirs: &[f64]) -> Paired {
+    Paired {
+        workload: name.to_string(),
+        family: "open.prepare".to_string(),
+        pairs: ours.iter().copied().zip(theirs.iter().copied()).collect(),
+        agreed: true,
+        disagreement: String::new(),
+    }
 }
 
 /// Prints where one prepare-and-step goes, stage by stage.

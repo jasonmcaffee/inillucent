@@ -664,8 +664,10 @@ pub fn weighted_headline(
 /// a random quantity and the interval should not treat it as one.
 ///
 /// A family whose workloads ran a different number of rounds is cut to the
-/// shortest, so every per-round mean has every workload in it. A pair with a
-/// zero or negative time is left out of its round's mean.
+/// shortest, so every per-round mean has every workload in it. For the same
+/// reason a round in which any workload has a zero or negative time is left
+/// out whole: dropping only that workload would give that one round a
+/// different mix of workloads, which is the defect above in a smaller form.
 /// @param members - the workloads in the family, each with its paired timings
 /// @param seed - the seed the resampling uses
 pub fn family_interval(members: &[&Paired], seed: u64) -> (f64, f64, f64) {
@@ -676,14 +678,15 @@ pub fn family_interval(members: &[&Paired], seed: u64) -> (f64, f64, f64) {
         .unwrap_or(0);
     let per_round: Vec<f64> = (0..depth)
         .filter_map(|round| {
-            let logs: Vec<f64> = members
+            let logs: Option<Vec<f64>> = members
                 .iter()
-                .filter_map(|paired| {
+                .map(|paired| {
                     let (ours, theirs) = paired.pairs.get(round).copied()?;
                     (ours > 0.0 && theirs > 0.0).then(|| (theirs / ours).ln())
                 })
                 .collect();
-            (!logs.is_empty()).then(|| logs.iter().sum::<f64>() / logs.len() as f64)
+            let logs = logs.filter(|logs| !logs.is_empty())?;
+            Some(logs.iter().sum::<f64>() / logs.len() as f64)
         })
         .collect();
     if per_round.is_empty() {
@@ -1740,10 +1743,19 @@ mod tests {
         let members = [&selective, &range];
         let (centre, low, high) = family_interval(&members, 7);
         let expected = (21.0_f64 * 0.875).sqrt();
-        assert!((centre / expected - 1.0).abs() < 0.01, "{centre} {expected}");
-        assert!(low > centre * 0.97 && high < centre * 1.03, "{low} {centre} {high}");
+        assert!(
+            (centre / expected - 1.0).abs() < 0.01,
+            "{centre} {expected}"
+        );
+        assert!(
+            low > centre * 0.97 && high < centre * 1.03,
+            "{low} {centre} {high}"
+        );
         assert!(low > 3.0, "{low}");
-        let pooled: Vec<f64> = members.iter().flat_map(|paired| paired.log_ratios()).collect();
+        let pooled: Vec<f64> = members
+            .iter()
+            .flat_map(|paired| paired.log_ratios())
+            .collect();
         let (pooled_low, _) = bootstrap(&pooled, 7);
         assert!(pooled_low.exp() < 3.0, "{}", pooled_low.exp());
     }
@@ -1759,6 +1771,20 @@ mod tests {
         assert!((centre - 2.0).abs() < 0.02, "{centre}");
         short.pairs.clear();
         assert_eq!(family_interval(&[&long, &short], 7), (0.0, 0.0, 0.0));
+    }
+
+    /// A round in which one workload has no usable time is left out whole
+    /// (task-2093). Keeping the other workload's value would make that round
+    /// 4.0x alone instead of about 2.0x, and move the centre to about 2.05x.
+    #[test]
+    fn a_family_interval_leaves_out_a_round_a_workload_is_missing_from() {
+        let fast = steady_workload("join.selective", 4.0);
+        let mut even = steady_workload("join.range", 1.0);
+        if let Some(pair) = even.pairs.get_mut(3) {
+            *pair = (0.0, 1.0);
+        }
+        let (centre, _, _) = family_interval(&[&fast, &even], 7);
+        assert!((centre - 2.0).abs() < 0.01, "{centre}");
     }
 
     /// The verdicts are the thresholds the TDD names.
