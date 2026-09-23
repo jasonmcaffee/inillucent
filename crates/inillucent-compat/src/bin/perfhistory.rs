@@ -365,7 +365,7 @@ fn run(rounds: usize, dry_run: bool) -> Result<(), String> {
         );
     }
 
-    let history = root.join("tests/performance-history.tsv");
+    let history = root.join(HISTORY);
     let text = render(&rows, calibration_before, calibration_after);
     if dry_run {
         println!("\n--- would append to {} ---\n{text}", history.display());
@@ -778,15 +778,51 @@ fn commit_hash(root: &Path) -> String {
     }
     // A dirty tree is not the commit it says it is, and a history row that
     // claimed otherwise would be unreproducible in the most misleading way.
+    //
+    // **Except this file, which this program is the one writing** (task-2066
+    // §4.5.2). Taking a reading twice and keeping the second is the standing
+    // practice on this machine, and the first run appends here - so the second
+    // run read its own output as an uncommitted change and recorded
+    // `<commit>-dirty` about code that was committed. A row that says dirty when
+    // nothing but the history moved sends a reader looking for a change that is
+    // not there, which is the same class of misleading the check exists to
+    // prevent.
     match Command::new("git")
         .current_dir(root)
         .args(["status", "--porcelain"])
         .output()
     {
-        Ok(status) if !status.stdout.is_empty() => format!("{text}-dirty"),
+        Ok(status) => match anything_but_the_history_changed(&String::from_utf8_lossy(
+            &status.stdout,
+        )) {
+            true => format!("{text}-dirty"),
+            false => text,
+        },
         _ => text,
     }
 }
+
+/// Whether `git status --porcelain` reports anything but the history itself.
+///
+/// A porcelain line is two status characters, a space, and the path, so the
+/// path begins at the fourth byte. A line naming anything else - or a line this
+/// cannot read the path out of, which is the conservative answer - makes the
+/// tree dirty.
+///
+/// @param porcelain - what `git status --porcelain` printed
+fn anything_but_the_history_changed(porcelain: &str) -> bool {
+    porcelain
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .any(|line| !line.get(3..).is_some_and(|path| path.trim() == HISTORY))
+}
+
+/// Where the history lives, relative to the workspace root.
+///
+/// Named once because two things read it: the writer, and the dirty check in
+/// [`commit_hash`], which has to recognise its own output among the changes git
+/// reports.
+const HISTORY: &str = "tests/performance-history.tsv";
 
 /// The environment variable a machine labels its own rows with.
 const MACHINE_LABEL_VAR: &str = "INILLUCENT_MACHINE";
@@ -873,6 +909,51 @@ fn civil_from_days(days: i64) -> (i64, i64, i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **The history's own row does not make the tree dirty, and anything else does.**
+    ///
+    /// Taking a reading twice and keeping the second is the practice on this
+    /// machine, and the first run appends to the history - so without this the
+    /// second run reads its own output as an uncommitted change and records
+    /// `<commit>-dirty` about code that was committed (task-2066 section 4.5.2).
+    /// A row that says dirty when nothing but the history moved sends a reader
+    /// looking for a change that is not there.
+    ///
+    /// Both directions, because a check that answered `false` to everything
+    /// would pass the first half and be the more dangerous mistake: it would
+    /// record a clean commit for a tree with uncommitted code in it.
+    #[test]
+    fn only_the_history_moving_leaves_the_commit_clean() {
+        assert!(!anything_but_the_history_changed(""));
+        assert!(!anything_but_the_history_changed(
+            " M tests/performance-history.tsv
+"
+        ));
+        assert!(!anything_but_the_history_changed(
+            "M  tests/performance-history.tsv
+
+"
+        ));
+
+        assert!(anything_but_the_history_changed(
+            " M crates/inillucent-core/src/bm25.rs
+"
+        ));
+        assert!(anything_but_the_history_changed(
+            " M tests/performance-history.tsv
+ M crates/inillucent-core/src/bm25.rs
+"
+        ));
+        // A file whose name merely contains the history's is a different file.
+        assert!(anything_but_the_history_changed(
+            " M tests/performance-history.tsv.bak
+"
+        ));
+        // A line too short to hold a path is unreadable, and unreadable is
+        // dirty rather than clean.
+        assert!(anything_but_the_history_changed("??
+"));
+    }
 
     /// The date arithmetic has to be right, or every row is stamped wrongly and
     /// the history cannot be read in order.
