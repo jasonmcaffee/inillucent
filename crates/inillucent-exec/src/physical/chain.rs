@@ -1457,6 +1457,12 @@ pub struct Statement<'t> {
     shape: Shape,
     /// Whether anything but the source read a parameter while building.
     rebindable: bool,
+    /// The connection's settings when the chain was built.
+    ///
+    /// The chain folds in the length limit and the `LIKE` case rule without
+    /// counting a read, so [`Statement::run`] compares these instead - see
+    /// `Params::settings` (task-2081).
+    settings: crate::scalar::Context,
     /// The cell every `Expr::Parameter` in the chain reads.
     ///
     /// **The chain holds the cell it was built with, and the caller hands a
@@ -1497,6 +1503,15 @@ impl<'t> Statement<'t> {
         if !self.rebindable {
             return Err(misuse(
                 "this statement folded a parameter into its operator chain and cannot be re-run                  against different values",
+            ));
+        }
+        // **Refused rather than run with the old settings.** A `%` or a scalar
+        // call in the chain holds the length limit it was built under, and
+        // this statement has no plan cache to rebuild itself from, so running
+        // it would enforce a limit the connection no longer has.
+        if params.settings() != self.settings {
+            return Err(misuse(
+                "this statement was built under a different length limit or LIKE setting and cannot be re-run under this one",
             ));
         }
         let folded = crate::subquery::fold(self.plan, self.catalog, params)?;
@@ -1564,6 +1579,7 @@ pub fn build_statement<'t>(
         )?
     };
     let rebindable = params.reads() == before;
+    let settings = params.settings();
     let bindings = params.bindings();
     // Kept here, unlike the pipeline path: a `Statement` builds its chain once
     // and runs it many times, so the listing costs one render per statement
@@ -1585,6 +1601,7 @@ pub fn build_statement<'t>(
         limit: chain.limit,
         shape: Shape { names, operators },
         rebindable,
+        settings,
     })
 }
 /// Returns the pool the source stage's tree lives in, when it reads one.

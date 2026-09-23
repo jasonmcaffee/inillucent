@@ -18,7 +18,16 @@ use crate::eval;
 /// their arguments, and one of them is not even deterministic. Passing the
 /// answers in keeps `call` a pure function of what it is given, which is what
 /// lets the whole of this module be tested without a database.
-#[derive(Clone, Copy, Debug, Default)]
+///
+/// **Two kinds of field, and only the first kind is true of one execution
+/// only (task-2081).** `changes`, `total_changes`, `last_insert_rowid` and
+/// `seed` move between two executions of the same statement, so a compiled
+/// node that holds one may not be kept for the next. `like_case_sensitive`
+/// and `length_limit` are settings: they stay put until somebody changes them,
+/// so a node that holds one may be kept for as long as they have not changed.
+/// [`Context::settings`] is the second kind on its own, and
+/// [`reads_execution_constants`] says which functions read the first kind.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Context {
     /// What `changes()` returns.
     pub changes: i64,
@@ -58,6 +67,41 @@ impl Context {
     pub fn permits_length(&self, bytes: u64) -> bool {
         self.length_limit <= 0 || bytes <= self.length_limit as u64
     }
+
+    /// Returns this context with only the connection's settings kept.
+    ///
+    /// The counters and the seed are zero, so two contexts taken under the same
+    /// settings compare equal however many statements ran between them. That
+    /// equality is what a cached chain is checked against before it is reused.
+    pub fn settings(&self) -> Context {
+        Context {
+            like_case_sensitive: self.like_case_sensitive,
+            length_limit: self.length_limit,
+            ..Context::default()
+        }
+    }
+}
+
+/// Returns whether a function reads a field that changes between executions.
+///
+/// **These five and no others.** `changes()`, `total_changes()` and
+/// `last_insert_rowid()` read the counters, and `random()` and `randomblob()`
+/// read the seed; every other use of [`Context`] in [`call_with`] reads a
+/// setting. A compiled call to anything else answers the same way on the next
+/// execution, so building one must not stop a statement from being re-run.
+/// Before task-2081 every call counted, and so did every `%`, `/` and `||`,
+/// which read `length_limit` through the same route.
+///
+/// @param func - the function being compiled
+pub fn reads_execution_constants(func: ScalarFunc) -> bool {
+    matches!(
+        func,
+        ScalarFunc::Changes
+            | ScalarFunc::TotalChanges
+            | ScalarFunc::LastInsertRowid
+            | ScalarFunc::Random
+            | ScalarFunc::RandomBlob
+    )
 }
 
 /// Calls a scalar function.

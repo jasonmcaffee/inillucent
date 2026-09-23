@@ -430,6 +430,17 @@ impl ImportedDatabase {
         let Ok(mut held) = slot.try_borrow_mut() else {
             return Ok(physical::run_any_prepared(plan, self, prepared, params)?.0);
         };
+        // **A kept chain holds the length limit and the `LIKE` case rule it
+        // was built under (task-2081).** Neither counts as a parameter read,
+        // because neither moves between executions unless somebody moves it -
+        // and `sqlite3_limit` can move the length limit without touching the
+        // statement cache. So the chain is asked, and one built under other
+        // settings is tried again from scratch rather than run.
+        if let physical::Slot::Reusable(compiled) = &*held {
+            if !compiled.built_under(params) {
+                *held = physical::Slot::Untried;
+            }
+        }
         match &mut *held {
             physical::Slot::Reusable(compiled) => {
                 compiled.run(plan, self, params)?;

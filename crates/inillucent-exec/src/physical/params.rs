@@ -265,6 +265,22 @@ impl Params {
         held
     }
 
+    /// Returns the connection's settings, with the counters and the seed zeroed.
+    ///
+    /// **Not counted as a parameter read (task-2081).** `PRAGMA
+    /// case_sensitive_like` and `Limit::Length` are the same on the next
+    /// execution unless somebody changes them, so a chain that folded one in is
+    /// still right for as long as they have not changed. Counting this read made
+    /// every `%`, `/` and `||` in a chain, and every scalar call, enough to stop a
+    /// statement from being re-run, so it was rebuilt on every execution.
+    ///
+    /// What replaces the count is a comparison: a kept chain records what this
+    /// returned when it was built, and is rebuilt when a later execution's
+    /// answer differs. See `Compiled::built_under`.
+    pub fn settings(&self) -> crate::scalar::Context {
+        self.context.get().settings()
+    }
+
     /// Replaces every bound value, reusing the buffer.
     ///
     /// A benchmark that re-binds a prepared statement per iteration should not

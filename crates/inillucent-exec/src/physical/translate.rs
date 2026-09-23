@@ -446,8 +446,10 @@ fn translate_comparison(
                     left,
                     right,
                     // The connection's own `Limit::Length`, carried the same
-                    // way a scalar call's is.
-                    length_limit: params.context().length_limit,
+                    // way a scalar call's is. A setting rather than a counter,
+                    // so reading it does not stop the chain being re-run - see
+                    // `Params::settings`.
+                    length_limit: params.settings().length_limit,
                 },
             }
         }
@@ -678,8 +680,15 @@ fn translate_call(
                     arguments: translated,
                     collation: *collation,
                     // Every `changes()` in one statement is the same number,
-                    // for the same reason every `now` is the same instant.
-                    context: params.context(),
+                    // for the same reason every `now` is the same instant. Only
+                    // the five functions that read a counter or the seed take
+                    // the counted read; `upper(x)` holding the length limit is
+                    // still right on the next execution (task-2081).
+                    context: if inillucent_scalar::builtin::reads_execution_constants(*func) {
+                        params.context()
+                    } else {
+                        params.settings()
+                    },
                 }
             }
         }

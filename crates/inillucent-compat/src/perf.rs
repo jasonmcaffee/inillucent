@@ -1107,9 +1107,9 @@ fn correlated_read_workloads(point: u32) -> Vec<Workload> {
             mutates: false,
         },
         // **The two arms with a selective filter beside the block** (task-2076).
-        // `a.id + 0 > 396` keeps 4 of `wide`'s 400 rows, one in a hundred, and
-        // the `+ 0` is what stops the rowid range answering it, so it stays a
-        // residual predicate. The arms above keep every outer row, so they cost
+        // `a.id % 100 = 0` keeps 4 of `wide`'s 400 rows, one in a hundred, and
+        // no index or rowid range can answer a modulo, so it stays a residual
+        // predicate. The arms above keep every outer row, so they cost
         // the same whether the correlation operator answers a block before or
         // after the filter; these two are the arms where that order is the
         // whole of the difference.
@@ -1122,15 +1122,16 @@ fn correlated_read_workloads(point: u32) -> Vec<Workload> {
         // other. SQLite answers both selective arms in about 26 us, so against
         // SQLite they are still 0.01x.
         //
-        // Not `a.id % 100 = 0`, which was tried first. A modulo is translated
-        // through `Expr::General`, which reads the connection's length limit
-        // through `Params::context`, and that read is counted against
-        // `Statement::rebindable` - so the gate refused the arm in both builds
-        // before either had timed anything.
+        // Those timings were taken with `a.id + 0 > 396`, which keeps the same
+        // four rows. task-2076 tried the modulo first and the gate refused it:
+        // `Expr::General` read the connection's length limit through
+        // `Params::context`, which counted against `Statement::rebindable`.
+        // task-2081 made that read a setting, which does not count, and put
+        // the modulo back.
         Workload {
             name: "correlated.exists.selective".to_string(),
             family: "read.correlated".to_string(),
-            sql: "SELECT count(*) FROM wide a WHERE a.id + 0 > 396 AND EXISTS \
+            sql: "SELECT count(*) FROM wide a WHERE a.id % 100 = 0 AND EXISTS \
                   (SELECT 1 FROM side_table b WHERE b.owner = a.id)"
                 .to_string(),
             pre: None,
@@ -1144,7 +1145,7 @@ fn correlated_read_workloads(point: u32) -> Vec<Workload> {
         Workload {
             name: "correlated.scalar.selective".to_string(),
             family: "read.correlated".to_string(),
-            sql: "SELECT count(*) FROM wide a WHERE a.id + 0 > 396 AND a.id * 4 > \
+            sql: "SELECT count(*) FROM wide a WHERE a.id % 100 = 0 AND a.id * 4 > \
                   (SELECT count(*) FROM side_table b WHERE b.owner = a.id)"
                 .to_string(),
             pre: None,

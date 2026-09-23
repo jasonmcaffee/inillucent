@@ -228,6 +228,14 @@ pub struct Compiled {
     /// same way. A `Compiled` that answered `false` is never kept: see
     /// [`try_compile`].
     rebindable: bool,
+    /// The connection's settings when `upper` was built.
+    ///
+    /// **`upper` folds them in and nothing counts that as a read (task-2081).**
+    /// A `%`, a `/`, a `||` and every scalar call hold the connection's
+    /// `Limit::Length` and `LIKE`'s case rule, and those move only when somebody
+    /// changes them. So a kept chain is valid for as long as they are what they
+    /// were, and [`Compiled::built_under`] is how a caller asks.
+    settings: crate::scalar::Context,
     /// The cell every `Expr::Parameter` in `upper` reads. See
     /// `Statement::bindings` for why this has to be shared rather than
     /// re-read.
@@ -250,6 +258,17 @@ impl Compiled {
     /// not have to know it can only ever hear one answer.
     pub fn rebindable(&self) -> bool {
         self.rebindable
+    }
+
+    /// Reports whether this chain was built under the settings an execution has now.
+    ///
+    /// A chain that answers `false` holds a length limit or a `LIKE` case rule
+    /// that has since changed, and has to be built again rather than run. See
+    /// `Compiled::settings`.
+    ///
+    /// @param params - the next execution's parameters, carrying its context
+    pub fn built_under(&self, params: &Params) -> bool {
+        self.settings == params.settings()
     }
 
     /// Runs the statement against one parameter set, over a catalog borrowed
@@ -500,6 +519,7 @@ pub fn try_compile(
         },
         limit: upper.limit,
         rebindable,
+        settings: params.settings(),
         bindings,
         collected,
     }))

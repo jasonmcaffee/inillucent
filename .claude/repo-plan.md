@@ -654,3 +654,12 @@ they are touching do not collide; two that have not, do.
   UPDATE and DELETE binders. If you change which terms a path may use, whether that means
   `statement_terms`, `outer_terms` or `index_usable`, change them there, or the binder's refusal and
   the planner's choice disagree. (task-2078)
+- **A field added to `scalar::Context` has to be one of two kinds, and the kind decides whether a
+  statement can be re-run.** `changes`, `total_changes`, `last_insert_rowid` and `seed` move between
+  two executions, so reading them goes through `Params::context()`, which counts as a parameter read
+  and stops `Statement::rebindable`. `length_limit` and `like_case_sensitive` are settings, read
+  through `Params::settings()`, which does not count; instead a kept chain (`Compiled`, `Statement`,
+  `UpdateSetup`) records the settings it was built under and is rebuilt when they differ. A new
+  counter goes in `Context::settings()`'s zeroed half and in `builtin::reads_execution_constants`; a
+  new setting goes in the kept half. Before this, every `%`, `/`, `||` and scalar call counted, and
+  `inillucent-fullgate` refused `WHERE a.id % 100 = 0`. (task-2081)

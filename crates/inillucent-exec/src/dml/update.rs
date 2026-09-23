@@ -119,6 +119,12 @@ pub struct UpdateSetup {
     /// of one execution only, and each of them counts a read. A setup that
     /// counted one is used for the execution that built it and then thrown away.
     reusable: bool,
+    /// The connection's settings when this was built.
+    ///
+    /// A `%`, a `||` or a scalar call in an assignment holds the length limit
+    /// without counting a read, so a setup built under another limit is built
+    /// again rather than reused - see `Params::settings` (task-2081).
+    settings: crate::scalar::Context,
 }
 /// Runs an `UPDATE`, reusing the setup a previous execution built.
 ///
@@ -379,7 +385,10 @@ fn update_setup(
     catalog: &dyn TreeCatalog,
 ) -> DbResult<std::rc::Rc<UpdateSetup>> {
     if let Some(held) = cache.borrow().as_ref() {
-        if held.reusable && std::rc::Rc::ptr_eq(&held.layout, layout) {
+        if held.reusable
+            && std::rc::Rc::ptr_eq(&held.layout, layout)
+            && held.settings == params.settings()
+        {
             adopt_bindings(&held.bindings, params);
             return Ok(std::rc::Rc::clone(held));
         }
@@ -509,6 +518,7 @@ fn build_update_setup(
         joined,
         bindings: params.bindings(),
         reusable: params.reads() == before,
+        settings: params.settings(),
     })
 }
 fn update_correlations(

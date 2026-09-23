@@ -1080,3 +1080,169 @@ fn a_windowed_select_answers_through_the_cached_path_too() {
         assert_cache_agrees_with_fresh(&mut database, select, &params, "windowed, after INSERT");
     }
 }
+
+/// Returns a small table whose labels are ten bytes each.
+///
+/// @param name - the test's name, for the scratch path
+fn labelled_table(name: &str) -> ImportedDatabase {
+    let mut database = ImportedDatabase::create(scratch(name), PAGE_SIZE, FRAMES)
+        .expect("a fresh database is created");
+    exec(
+        &mut database,
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, label TEXT NOT NULL)",
+    );
+    for id in 1..=40 {
+        exec(
+            &mut database,
+            &format!("INSERT INTO t (id, label) VALUES ({id}, 'label-{id:04}')"),
+        );
+    }
+    database
+}
+
+/// Builds a statement over one query and reports whether it may be re-run.
+///
+/// @param database - the connection
+/// @param sql - the query
+fn statement_is_rebindable(database: &ImportedDatabase, sql: &str) -> bool {
+    let plan = database.plan(sql).expect(sql);
+    let prepared = database.prepare(&plan).expect(sql);
+    let rows = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = Box::new(inillucent_exec::ops::CollectInto::new(rows));
+    let statement = database
+        .statement(&plan, &prepared, &Params::new(), sink)
+        .expect(sql);
+    statement.rebindable()
+}
+
+/// A `%`, a `/`, a `||` or an ordinary scalar call leaves a statement re-runnable.
+///
+/// **task-2081.** Every one of these used to read the connection's context
+/// through `Params::context`, which counts as a parameter read, so
+/// `Statement::rebindable` answered `false` and the statement was rebuilt on
+/// every execution. `inillucent-fullgate` refused `SELECT count(*) FROM wide a
+/// WHERE a.id % 100 = 0 AND EXISTS (...)` with "the operator chain folded a
+/// bound parameter in", for a statement that has no bound parameter.
+///
+/// The length limit and the `LIKE` case rule are settings, so reading them no
+/// longer counts. The five functions that read a counter or the seed still do,
+/// and the second half of this test checks that they still refuse.
+#[test]
+fn a_modulo_or_a_scalar_call_leaves_a_statement_re_runnable() {
+    let database = labelled_table("rebindable-modulo");
+    for sql in [
+        "SELECT count(*) FROM t WHERE id % 10 = 0",
+        "SELECT id / 3 FROM t",
+        "SELECT label || '!' FROM t",
+        "SELECT id & 7, id | 8, id << 1 FROM t",
+        "SELECT upper(label), length(label), abs(id) FROM t",
+        "SELECT id FROM t WHERE label LIKE 'LABEL-001%'",
+    ] {
+        assert!(
+            statement_is_rebindable(&database, sql),
+            "{sql} reads no execution constant and should be re-runnable"
+        );
+    }
+    for sql in [
+        "SELECT changes() FROM t",
+        "SELECT total_changes() FROM t",
+        "SELECT last_insert_rowid() FROM t",
+        "SELECT random() FROM t",
+        "SELECT randomblob(4) FROM t",
+    ] {
+        assert!(
+            !statement_is_rebindable(&database, sql),
+            "{sql} folds a value that changes between executions and must not be re-run"
+        );
+    }
+}
+
+/// A kept chain holding the length limit is rebuilt when the limit changes.
+///
+/// **What makes it safe to stop counting the length limit as a read.** A
+/// `||` compiles the connection's `Limit::Length` into its node, and
+/// `sqlite3_limit` can change that limit between two executions without
+/// emptying the statement cache. The first reading keeps the chain; the second
+/// runs under a limit smaller than the answer and has to be refused; the third
+/// has the limit back and has to answer again. With the settings check in
+/// `run_cached_query` removed, the second reading answers the rows under the
+/// old limit, which is what this test exists to catch.
+#[test]
+fn a_kept_chain_follows_a_length_limit_changed_between_executions() {
+    use inillucent_base::limits::Limit;
+    let mut database = labelled_table("length-limit-kept-chain");
+    let select = "SELECT label || label FROM t WHERE id % 10 = 0 ORDER BY id";
+    let params = Params::new();
+    let expected: Vec<Vec<OwnedDatum>> = [10, 20, 30, 40]
+        .iter()
+        .map(|id| {
+            let label = format!("label-{id:04}");
+            vec![OwnedDatum::Text(format!("{label}{label}").into_bytes())]
+        })
+        .collect();
+    for reading in ["first", "second"] {
+        let answered = database
+            .execute_any(select, &params)
+            .unwrap_or_else(|error| panic!("{reading}: {}", error.detail().unwrap_or_default()));
+        assert_eq!(answered.rows, expected, "{reading} reading");
+    }
+
+    let before = database.set_limit(Limit::Length, 15);
+    let refused = database.execute_any(select, &params);
+    assert!(
+        refused.is_err(),
+        "a 20 byte answer under a 15 byte limit came back as {:?}",
+        refused.map(|outcome| outcome.rows)
+    );
+
+    database.set_limit(Limit::Length, before);
+    let answered = database
+        .execute_any(select, &params)
+        .unwrap_or_else(|error| panic!("limit restored: {}", error.detail().unwrap_or_default()));
+    assert_eq!(
+        answered.rows, expected,
+        "the limit is back and the answer should be too"
+    );
+}
+
+/// A `Statement` built under one length limit refuses to run under another.
+///
+/// A `Statement` has no plan cache to rebuild itself from, so the choice is
+/// between running with a limit the connection no longer has and refusing.
+/// It refuses, and it runs again once the settings match.
+#[test]
+fn a_statement_refuses_a_run_under_different_settings() {
+    let database = labelled_table("statement-settings");
+    let sql = "SELECT label || label FROM t WHERE id % 10 = 0";
+    let plan = database.plan(sql).expect(sql);
+    let prepared = database.prepare(&plan).expect(sql);
+    let rows = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let sink = Box::new(inillucent_exec::ops::CollectInto::new(std::rc::Rc::clone(
+        &rows,
+    )));
+    let limited = |length_limit: i64| {
+        let params = Params::new();
+        params.set_context(inillucent_exec::scalar::Context {
+            length_limit,
+            ..Default::default()
+        });
+        params
+    };
+    let built = limited(1_000);
+    let mut statement = database
+        .statement(&plan, &prepared, &built, sink)
+        .expect(sql);
+    assert!(statement.rebindable(), "{sql} reads no execution constant");
+
+    statement.run(&limited(1_000)).expect("the same settings");
+    assert_eq!(rows.borrow().len(), 4, "ids 10, 20, 30 and 40");
+    assert!(
+        statement.run(&limited(15)).is_err(),
+        "a chain holding a 1,000 byte limit ran under a 15 byte one"
+    );
+    rows.borrow_mut().clear();
+    statement
+        .run(&limited(1_000))
+        .expect("the settings match again");
+    assert_eq!(rows.borrow().len(), 4, "ids 10, 20, 30 and 40");
+}
