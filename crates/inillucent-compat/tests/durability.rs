@@ -344,44 +344,43 @@ fn forge_the_page_count(whole: &[u8], claimed: u64) -> Vec<u8> {
     bytes
 }
 
-/// **A flipped bit in a page's LSN is not detected, and a flipped bit next to
-/// it is.** This test records the gap; the format ticket closes it.
+/// **A flipped bit in a page's LSN is detected, and so is one next to it.**
 ///
-/// `page_checksum` covers `page[12..]` - the kind, the flags, the level, the
-/// tree, the right sibling and the body - and the LSN is bytes 0..8, outside
-/// it (task-2066 section 4.2, item 17, and section 9 item 2). The LSN is the
-/// one field whose corruption loses rows silently, and `meta.rs` already says
-/// so: a page carrying a stamp from a stream that no longer exists swallows
-/// every later write to it, because redo skips a record whose LSN is not above
-/// the page's. The file stays structurally intact and `PRAGMA integrity_check`
-/// answers `ok` about a row that is gone.
+/// The LSN is bytes 0..8, and until format 2 `page_checksum` covered
+/// `page[12..]` only, so a flipped LSN byte read back as a sound page
+/// (task-2066 section 4.2, item 17, and section 9 item 2). The LSN is the one
+/// field whose corruption loses rows silently: redo skips a record whose LSN is
+/// not above the page's, so a page carrying a stamp from a stream that no
+/// longer exists swallows every later write to it while `PRAGMA
+/// integrity_check` answers `ok`.
 ///
-/// Covering it is a change to the file format, under the `FORMAT_VERSION` rule at
-/// `meta.rs:30` - `page[0..8] ++ page[12..]`, the same split `meta.rs`'s own
-/// checksum already uses to skip its checksum field - so this ticket does not
-/// make it. What this case does is hold the difference still: the control
-/// arm proves the checksum works, so when the format ticket lands, this test
-/// fails on the first arm and is the one place that has to be edited to say
-/// the gap is closed.
+/// This case used to record that gap and was written to fail on its first arm
+/// when the format ticket closed it. task-2074 did, in format 2 (f540495:
+/// "The page checksum covers the LSN"), and the arm failed as designed on the
+/// first gate after that reached `main`. So the arm now asserts the closed
+/// gap. The control is unchanged: a flipped byte inside the region both
+/// formats cover is refused, so the first arm is a statement about the LSN
+/// rather than about a checksum that refuses everything.
 #[test]
-fn a_flipped_page_lsn_is_not_detected_and_a_flipped_body_byte_is() {
+fn a_flipped_page_lsn_is_detected_and_so_is_a_flipped_body_byte() {
     let root = inillucent_compat::workspace_root().join("_agent_output/durability");
     let _ = std::fs::create_dir_all(&root);
 
     let built = build_a_small_database(&root, "lsn-gap");
     let outside = flip_one_byte_of_a_page(&root, "lsn-outside", &built, 0);
     assert!(
-        reads_back(&outside),
-        "a flipped LSN byte was detected, so the checksum now covers bytes 0..8 - which is the          format change task-2066 section 9 item 2 hands to the format ticket. Delete this arm,          keep the control below, and record it there"
+        !reads_back(&outside),
+        "a flipped LSN byte was read back as a sound page, so the page checksum no longer \
+         covers bytes 0..8 - the gap format 2 closed in task-2074 is open again"
     );
 
-    // The control, and the reason the arm above is a statement about the LSN
-    // rather than about a checksum that does not work: one byte further into
-    // the same page is covered, and is refused.
+    // The control: one byte further into the same page is covered by both
+    // formats, and is refused.
     let inside = flip_one_byte_of_a_page(&root, "lsn-inside", &built, 12);
     assert!(
         !reads_back(&inside),
-        "a flipped byte inside the checksummed region was not detected, so the page checksum is          not working at all and the arm above says nothing"
+        "a flipped byte inside the checksummed region was not detected, so the page checksum is \
+         not working at all and the arm above says nothing"
     );
 }
 
