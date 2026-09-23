@@ -663,3 +663,24 @@ they are touching do not collide; two that have not, do.
   counter goes in `Context::settings()`'s zeroed half and in `builtin::reads_execution_constants`; a
   new setting goes in the kept half. Before this, every `%`, `/`, `||` and scalar call counted, and
   `inillucent-fullgate` refused `WHERE a.id % 100 = 0`. (task-2081)
+- **Before chasing a gate ratio that slipped, read this engine's own time in the same row.** The
+  `ours ns` and `theirs ns` columns are both printed. task-2074 reported `join.range` falling from
+  0.90x to 0.84x and `read.join`'s lower bound going under 3.00x; this engine's time for it was
+  33.0 to 33.6 ms on every build across 27 quiet passes, while SQLite's arm drifted from 24.8 to
+  31.6 ms inside one window, and the lower bound followed SQLite. A round also reads before it
+  writes, so no write change can reach a read workload's leaves at all. (task-2082)
+- **Three in four of the `transaction` family's updates match no row.** `Bind::Scatter` picks rowids
+  up to `main_table`'s row count and `side_table` holds a quarter of that, so those statements measure
+  a lookup past the end of `side_table`'s last leaf - the leaf `write.insert.autocommit` appended 100
+  rows to earlier in the round. A change to how a leaf's delta area is searched shows up in
+  `txn.large` for that reason, not because of the in-place update it describes. (task-2082)
+- **Count before you time, when the box is loaded.** `inillucent-fullgate --families write,transaction
+  --put-split` prints how many writes of each workload went through the tree's put path, and that
+  count does not move with load. It separated two hypotheses in minutes that timing on a box at 30%
+  could not: the same binary varied 20% run to run there. (task-2082)
+- **The shared `.sqlite-ref/` was empty again on 2026-09-23 (last written 05:07).** Every worktree
+  junctioned to it then had no oracle and the gates refused with "sqlite-bench is not built".
+  task-2082 restored it by copying a worktree's intact 3.53.4 directory back; `pwsh
+  tools/sqlite-reference.ps1` rebuilds it from the published sources if no copy exists.
+  The 2026-09-21 emptying was a recursive delete through a junction; remove one with `cmd /c rmdir`.
+  (task-2082)

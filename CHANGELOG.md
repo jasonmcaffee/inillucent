@@ -19,6 +19,12 @@ table, the cost of each secondary index went from 5.2 µs a row to 2.0, and at t
 workload went from 0.43x SQLite to 1.28x. A page's checksum also covers its LSN now, which it did
 not (task-2066 section 4.2, item 17).
 
+**A lookup past the last key of a leaf that has been written to costs one comparison in its delta
+area**, where it cost a binary search of it. Appending at the end of a table does this twice a row,
+and so does a lookup of a rowid past the end, so rows appended since the leaf was packed no longer
+slow either down; the gate's `txn.large` went from 3.185 ms to 3.038, 4.6% faster, and a range
+probe into such a leaf now reads only the rows inside its bounds (task-2082).
+
 **This build reads every earlier file**, written by any release from 0.1.1 on, and a file becomes
 format 2 at the first checkpoint after this build writes to it. **No earlier release reads a format
 2 file**: 0.1.5 and later refuse it by name as `unsupported`, and 0.1.1 to 0.1.3 report it as

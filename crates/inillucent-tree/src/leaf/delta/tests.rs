@@ -127,6 +127,181 @@ fn live_order_agrees_with_the_reference() {
     }
 }
 
+/// `delta_search` answers every probe the way a walk of the directory from
+/// its first entry would, including a probe past the last entry, which
+/// task-2082 answers from that entry alone.
+///
+/// The directory holds a key twice, so `Ok` has to be the first of the two,
+/// and the probes run from below the first key to above the last, so both
+/// ends and every gap between keys are asked about. An area of one row is
+/// checked as well, since there the last entry is also the first.
+#[test]
+fn delta_search_agrees_with_a_walk_for_every_probe() {
+    let columns = vec![
+        ColumnSpec::key(PhysicalType::Int64),
+        ColumnSpec::new(PhysicalType::Text),
+    ];
+    let builder = LeafBuilder::new(4096, 1, columns, 1).unwrap();
+    let page = builder
+        .encode(&[vec![Datum::Int(1_000), Datum::Text(b"sorted")]])
+        .unwrap();
+    let keys: Vec<i64> = vec![2, 4, 4, 9, 10, 15, 40, 41, 77];
+    let many: Vec<Vec<Datum<'_>>> = keys
+        .iter()
+        .map(|key| vec![Datum::Int(*key), Datum::Text(b"delta")])
+        .collect();
+    let one = vec![vec![Datum::Int(5), Datum::Text(b"only")]];
+    for (rows, held) in [(&many, keys.clone()), (&one, vec![5])] {
+        let page = with_delta(&page, rows);
+        let leaf = LeafRef::parse(&page).unwrap();
+        for probe in -1..90i64 {
+            let first = held.iter().position(|key| *key >= probe);
+            let expected = match first {
+                Some(at) if held[at] == probe => Ok(at),
+                Some(at) => Err(at),
+                None => Err(held.len()),
+            };
+            assert_eq!(
+                leaf.delta_search(&[Datum::Int(probe)]).unwrap(),
+                expected,
+                "probe {probe} over {held:?}"
+            );
+        }
+    }
+}
+
+/// Returns whether a row lies inside a range, by `compare_prefix` alone.
+///
+/// @param leaf - the leaf whose collations and directions apply
+/// @param row - the row
+/// @param low - the lower bound and whether it is inclusive
+/// @param high - the upper bound and whether it is inclusive
+fn inside(
+    leaf: &LeafRef<'_>,
+    row: &[Datum<'_>],
+    low: Option<(&[Datum<'_>], bool)>,
+    high: Option<(&[Datum<'_>], bool)>,
+) -> bool {
+    let above = low.is_none_or(|(bound, inclusive)| match leaf.compare_prefix(row, bound) {
+        std::cmp::Ordering::Greater => true,
+        std::cmp::Ordering::Equal => inclusive,
+        std::cmp::Ordering::Less => false,
+    });
+    let below = high.is_none_or(|(bound, inclusive)| match leaf.compare_prefix(row, bound) {
+        std::cmp::Ordering::Less => true,
+        std::cmp::Ordering::Equal => inclusive,
+        std::cmp::Ordering::Greater => false,
+    });
+    above && below
+}
+
+/// `live_between` returns exactly the rows the three rules make live that lie
+/// inside the bounds, for every pair of bounds over a leaf with tombstones, a
+/// shadowing delta row, a key held twice and new keys at both ends.
+///
+/// task-2082 made it search both regions rather than filter `live`, so it
+/// now has its own merge, and a range that lost or doubled a row at an edge
+/// would be a range scan returning the wrong rows. Every bound value from
+/// below the first key to above the last, in every combination of inclusive
+/// and exclusive and open ends, is compared against the rules filtered by
+/// `compare_prefix`, which is the filter the old implementation applied.
+/// The second leaf has a two-column key and one-column bounds, which is what
+/// a range over the leading column of an index asks.
+#[test]
+fn live_between_agrees_with_the_rules_for_every_bound() {
+    let one = vec![
+        ColumnSpec::key(PhysicalType::Int64),
+        ColumnSpec::new(PhysicalType::Text),
+    ];
+    let two = vec![
+        ColumnSpec::key(PhysicalType::Int64),
+        ColumnSpec::key(PhysicalType::Int64),
+    ];
+    let label = b"sorted".as_slice();
+    let rows_one: Vec<Vec<Datum<'_>>> = (0..20i64)
+        .map(|n| vec![Datum::Int(n * 3), Datum::Text(label)])
+        .collect();
+    let rows_two: Vec<Vec<Datum<'_>>> = (0..20i64)
+        .map(|n| vec![Datum::Int(n / 3 * 3), Datum::Int(n)])
+        .collect();
+    let first = LeafBuilder::new(4096, 1, one, 1)
+        .unwrap()
+        .encode(&rows_one)
+        .unwrap();
+    let second = LeafBuilder::new(4096, 1, two, 2)
+        .unwrap()
+        .encode(&rows_two)
+        .unwrap();
+    let mut first = with_delta(
+        &first,
+        &[
+            vec![Datum::Int(-2), Datum::Text(b"below")],
+            vec![Datum::Int(7), Datum::Text(b"fresh")],
+            vec![Datum::Int(9), Datum::Text(b"shadow")],
+            vec![Datum::Int(31), Datum::Text(b"newer")],
+            vec![Datum::Int(31), Datum::Text(b"older")],
+            vec![Datum::Int(70), Datum::Text(b"above")],
+        ],
+    );
+    let mut second = with_delta(
+        &second,
+        &[
+            vec![Datum::Int(0), Datum::Int(-1)],
+            vec![Datum::Int(6), Datum::Int(7)],
+            vec![Datum::Int(6), Datum::Int(100)],
+            vec![Datum::Int(40), Datum::Int(0)],
+        ],
+    );
+    for page in [&mut first, &mut second] {
+        let mut leaf = crate::mutate::LeafMut::new(page).unwrap();
+        leaf.set_tombstone(4).unwrap();
+        leaf.set_tombstone(11).unwrap();
+    }
+    for page in [&first, &second] {
+        let leaf = LeafRef::parse(page).unwrap();
+        let everything = live_by_the_rules(&leaf);
+        let values: Vec<i64> = (-4..75).collect();
+        let bounds: Vec<Option<(i64, bool)>> = std::iter::once(None)
+            .chain(
+                values
+                    .iter()
+                    .flat_map(|v| [Some((*v, true)), Some((*v, false))]),
+            )
+            .collect();
+        for low in &bounds {
+            for high in &bounds {
+                let low_key = low.map(|(v, _)| [Datum::Int(v)]);
+                let high_key = high.map(|(v, _)| [Datum::Int(v)]);
+                let low_pair = low_key
+                    .as_ref()
+                    .zip(*low)
+                    .map(|(k, (_, i))| (k.as_slice(), i));
+                let high_pair = high_key
+                    .as_ref()
+                    .zip(*high)
+                    .map(|(k, (_, i))| (k.as_slice(), i));
+                let expected: Vec<&Vec<Datum<'_>>> = everything
+                    .iter()
+                    .filter(|row| inside(&leaf, row, low_pair, high_pair))
+                    .collect();
+                let got = leaf
+                    .live_between(
+                        low_pair.map(|(k, _)| k),
+                        low_pair.is_none_or(|(_, i)| i),
+                        high_pair.map(|(k, _)| k),
+                        high_pair.is_none_or(|(_, i)| i),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    format!("{got:?}"),
+                    format!("{expected:?}"),
+                    "live_between({low:?}, {high:?})"
+                );
+            }
+        }
+    }
+}
+
 /// Writes a delta area into an already-built page.
 ///
 /// Nothing in Phase 1 *writes* a delta area - the leaf builder always

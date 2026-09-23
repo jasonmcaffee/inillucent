@@ -729,11 +729,111 @@ impl<'p> LeafRef<'p> {
     /// the leaf's own collations, which is what keeps a range over a `NOCASE`
     /// column agreeing with the order the tree is stored in.
     ///
+    /// **Only the rows inside the bounds are read** (task-2082). This used to
+    /// call [`LeafRef::live`] and filter, so a range probe into a leaf holding
+    /// 1,700 index entries decoded all of them and every delta row as well to
+    /// return the handful it wanted. Since task-2074 sized the delta area by
+    /// the free gap, a leaf that took writes keeps its delta rows, and so stays
+    /// on this path, for much longer than it did at 32 rows. The sorted region
+    /// is now bounded by `lower_bound`/`upper_bound` and the delta area by the
+    /// same searches over its directory, and the two runs are merged with the
+    /// rule [`LeafRef::live_matching`] uses.
+    ///
+    /// The gate's `join.range` does not reach this: its round reads before it
+    /// writes, so every leaf it probes is clean. task-2082 measured its time
+    /// unchanged by this and by task-2074 alike.
+    ///
+    /// A format 1 area is not in key order, and a bound naming more columns
+    /// than the key compares columns no search here can, so both still take
+    /// the whole leaf and filter it.
+    ///
     /// @param low - the lower bound, or `None` for the start
     /// @param low_inclusive - whether a key equal to `low` is in the range
     /// @param high - the upper bound, or `None` for the end
     /// @param high_inclusive - whether a key equal to `high` is in the range
     pub fn live_between(
+        &self,
+        low: Option<&[Datum<'_>]>,
+        low_inclusive: bool,
+        high: Option<&[Datum<'_>]>,
+        high_inclusive: bool,
+    ) -> DbResult<Vec<Vec<Datum<'p>>>> {
+        let too_wide =
+            |bound: Option<&[Datum<'_>]>| bound.is_some_and(|b| b.len() > self.key_columns);
+        if !self.has_delta_directory() || too_wide(low) || too_wide(high) {
+            return self.live_between_scanned(low, low_inclusive, high, high_inclusive);
+        }
+        let (sorted_begin, sorted_end) =
+            self.sorted_span(low, low_inclusive, high, high_inclusive)?;
+        let mut sorted: Vec<Vec<Datum<'p>>> = Vec::new();
+        for row in sorted_begin..sorted_end {
+            if self.is_tombstoned(row)? {
+                continue;
+            }
+            let mut values = Vec::with_capacity(self.column_count);
+            for column in 0..self.column_count {
+                values.push(self.value(row, column)?);
+            }
+            sorted.push(values);
+        }
+        let delta_begin = match low {
+            Some(bound) => self.delta_bound(bound, !low_inclusive)?,
+            None => 0,
+        };
+        let delta_end = match high {
+            Some(bound) => self.delta_bound(bound, high_inclusive)?,
+            None => self.delta_count,
+        };
+        // A key held twice keeps its first entry, which is the newer.
+        let mut delta: Vec<Vec<Datum<'p>>> = Vec::new();
+        for index in delta_begin..delta_end.max(delta_begin) {
+            let values = self.delta_row_values(index)?;
+            if let Some(earlier) = delta.last() {
+                if self.compare_keys(earlier, &values) == std::cmp::Ordering::Equal {
+                    continue;
+                }
+            }
+            delta.push(values);
+        }
+        Ok(self.merge_runs(sorted, delta))
+    }
+
+    /// Returns the sorted rows inside a key range, as a half-open span.
+    ///
+    /// @param low - the lower bound, or `None` for the start
+    /// @param low_inclusive - whether a key equal to `low` is in the range
+    /// @param high - the upper bound, or `None` for the end
+    /// @param high_inclusive - whether a key equal to `high` is in the range
+    fn sorted_span(
+        &self,
+        low: Option<&[Datum<'_>]>,
+        low_inclusive: bool,
+        high: Option<&[Datum<'_>]>,
+        high_inclusive: bool,
+    ) -> DbResult<(usize, usize)> {
+        let begin = match low {
+            Some(bound) if low_inclusive => self.lower_bound(bound)?,
+            Some(bound) => self.upper_bound(bound)?,
+            None => 0,
+        };
+        let end = match high {
+            Some(bound) if high_inclusive => self.upper_bound(bound)?,
+            Some(bound) => self.lower_bound(bound)?,
+            None => self.row_count,
+        };
+        Ok((begin, end.clamp(begin, self.row_count.max(begin))))
+    }
+
+    /// Materialises every live row and keeps the ones inside a key range.
+    ///
+    /// What [`LeafRef::live_between`] did for every leaf before task-2082, and
+    /// still does for the two cases it cannot bound by searching.
+    ///
+    /// @param low - the lower bound, or `None` for the start
+    /// @param low_inclusive - whether a key equal to `low` is in the range
+    /// @param high - the upper bound, or `None` for the end
+    /// @param high_inclusive - whether a key equal to `high` is in the range
+    fn live_between_scanned(
         &self,
         low: Option<&[Datum<'_>]>,
         low_inclusive: bool,

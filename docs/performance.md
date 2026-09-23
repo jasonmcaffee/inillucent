@@ -337,7 +337,78 @@ updates that lengthen a text value in place, and making heap room for a longer v
 area down by the value's size - the area is larger now, so each move copies more. **`join.range`
 moved by about as much as the two base runs differ from each other**, but it is the workload that
 holds `read.join`'s lower bound, and that bound went from 3.14x and 3.04x to 2.92x and 2.98x against
-a bar of 3.00x. Both are task-2082.
+a bar of 3.00x. Both are task-2082, and the next section is what it found.
+
+### The two workloads task-2074 cost, measured again
+
+task-2082 measured both again with more passes. The explanation above for `txn.large` was wrong, and
+`join.range` did not change. Each pass is `inillucent-fullgate` on the medium fixture at a 32 KiB
+page, 30 rounds, in two quiet windows on 2026-09-23. In the first, 11:35 to 12:13:31Z, the build
+before task-2074 (`420e68a`), task-2074 (`abf042c`, which is `main` with task-2074 in it) and a build
+with only the `live_between` change below were alternated over 15 passes. Three later passes are
+not counted: another ticket resumed at 12:15Z and they ran on a loaded box, one of them taking six
+minutes where the others took two and a half. In the second, 12:35 to 13:06Z, those three builds'
+first two and the fix were alternated over 12 passes, and every pass took 2.5 to 2.7 minutes. The
+times are this engine's own, in milliseconds, because the ratio also moves with SQLite's arm, and
+that arm moved by more than either change did.
+
+**`join.range` did not change, and the bar it holds is missed whatever the build.**
+
+| build | `join.range`, each pass, ms |
+|---|---|
+| before task-2074 | 33.34, 33.46, 33.48, 33.49, 33.24, 33.19 |
+| task-2074 | 33.54, 33.23, 33.16, 33.41, 33.38, 33.35, 33.31, 33.09, 33.09, 33.17, 33.57 |
+| task-2082 | 33.41, 33.03, 32.97, 33.15, 33.23 |
+
+SQLite's arm of the same workload read from 24.8 to 31.6 ms across the windows, drifting up through
+the first one, and the `read.join` lower bound followed it: from 2.57x to 3.16x, with passes on
+either side of 3.00x on every build, the build before task-2074 included (2.68x to 3.09x). The
+3.14x and 3.04x quoted above for that build are two samples of the same spread. There is also no
+mechanism by which task-2074 could have reached this workload: a round reads before it writes, so
+every leaf `join.range` probes is a leaf the fixture import packed, with no delta row in it.
+
+**`txn.large` was 2.3% slower in the first window and no slower in the second.**
+
+| build | first window, ms | second window, ms |
+|---|---|---|
+| before task-2074 | 3.113, 3.135, 3.133, 3.116 | 3.230, 3.165 |
+| task-2074 | 3.187, 3.164, 3.204, 3.207, 3.179, 3.228 | 3.160, 3.210, 3.215, 3.169, 3.171 |
+| task-2082 | | 3.062, 3.037, 2.999, 3.030, 3.060 |
+
+The cause was not the carve. Counted on the `write` and `transaction` families alone, which put the
+tables in the state `txn.large` meets, all but a few of its 2,000 statements either update in place
+or match nothing. The rest write their row through the delta area, three of them on task-2074 and
+one before it, about 0.1 ms either way. The in-place update's code did not change in task-2074. What changed is where
+the statements that match nothing go. `Bind::Scatter` picks rowids up to `main_table`'s row count
+and `side_table` holds a quarter of that, so three in four of the updates look up a rowid past the
+end of `side_table` and land in its last leaf. `write.insert.autocommit` appended 100 rows to that
+leaf earlier in the round. With the 32 row limit they were packed every 32; since task-2074 they
+stay in the delta area until the free gap fills, and each lookup past the end binary searched them,
+decoding one delta key per halving. The fix is in `LeafRef::delta_search`: a probe above the last
+directory entry is past the whole area, so it is answered by comparing that entry alone. The same
+search runs twice for every append at the right edge of a table, which is why `write.insert.batch`
+moved as well:
+
+| workload | task-2074, mean of 5, ms | task-2082, mean of 5, ms |
+|---|---:|---:|
+| `txn.large` | 3.185 | 3.038 |
+| `write.insert.batch` | 16.25 | 16.07 |
+| `write.update.indexed` | 24.62 | 24.80 |
+| `write.delete` | 19.32 | 19.30 |
+
+Every pass of the fix is below every task-2074 pass on `txn.large`, and the write family keeps
+task-2074's gain. The first pass of each build in the second window against its second, which is
+how much a build drifted by itself: 3.062 then 3.037 for the fix, 3.160 then 3.210 for task-2074,
+3.230 then 3.165 for the build before it.
+
+`live_between` was changed as well, as the ticket suggested: a range probe into a leaf that has been
+written to reads only the sorted rows and the delta directory entries inside its bounds, where it
+used to materialise the whole leaf and filter it. It does not show on the gate, for the reason
+`join.range` does not, and the first window measured the build carrying only that change at the
+task-2074 build's time (3.182, 3.182, 3.205 and 3.187 ms on `txn.large`, 32.94 to 33.29 on
+`join.range`). A splice rule was tried and dropped: refusing a splice when the heap held more
+unreferenced bytes than the splice would leave free changed no count on the gate, since the fallback
+writes it was aimed at came from these lookups past the end rather than from full leaves.
 
 
 ### What a statement costs before it reaches a tree

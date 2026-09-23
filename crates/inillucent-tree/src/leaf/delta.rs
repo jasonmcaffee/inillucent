@@ -438,8 +438,28 @@ impl<'p> LeafRef<'p> {
             }
             return Ok(Err(self.delta_count));
         }
+        // **A probe past the last entry is answered by one comparison**
+        // (task-2082). Appending at the right edge of a table probes a key
+        // above every key the leaf holds, twice a row - the uniqueness check
+        // and the write's own `locate` - and so does a lookup of a rowid past
+        // the end. The area is as large as the free gap since task-2074, so
+        // the rows an append leaves stay in it until the gap fills, where they
+        // used to be packed every 32, and a binary search costs one decoded
+        // key per halving. The gate's `txn.large` is the case that showed it:
+        // `write.insert.autocommit` appends 100 rows to `side_table` earlier
+        // in the round, and `Bind::Scatter` picks rowids up to `main_table`'s
+        // row count while `side_table` holds a quarter of that, so three in
+        // four of its updates match no row and probe past the end of
+        // `side_table`'s last leaf. The last entry holds the largest key, so a
+        // probe above it is past the whole area.
+        let Some(last) = self.delta_count.checked_sub(1) else {
+            return Ok(Err(0));
+        };
+        if self.compare_delta_key(last, probe)? == std::cmp::Ordering::Less {
+            return Ok(Err(self.delta_count));
+        }
         let mut low = 0usize;
-        let mut high = self.delta_count;
+        let mut high = last;
         while low < high {
             let middle = low.saturating_add(high.saturating_sub(low) / 2);
             match self.compare_delta_key(middle, probe)? {
@@ -485,6 +505,36 @@ impl<'p> LeafRef<'p> {
             }
         }
         Ok((begin..low).collect())
+    }
+
+    /// Returns the first directory position whose key is not below a bound.
+    ///
+    /// With `past_equal` set, the first whose key is above it instead. The
+    /// delta counterpart of `lower_bound` and `upper_bound` over the sorted
+    /// region, comparing only the columns the bound names, which is what lets
+    /// [`LeafRef::live_between`] take a run of the directory rather than
+    /// merging the whole area. Only meaningful for a leaf with a directory: a
+    /// format 1 area is not in key order and the caller has to scan it.
+    ///
+    /// @param probe - the bound, one value per column it names
+    /// @param past_equal - whether a row equal to the bound is below it
+    pub(crate) fn delta_bound(&self, probe: &[Datum<'_>], past_equal: bool) -> DbResult<usize> {
+        let mut low = 0usize;
+        let mut high = self.delta_count;
+        while low < high {
+            let middle = low.saturating_add(high.saturating_sub(low) / 2);
+            let below = match self.compare_delta_key(middle, probe)? {
+                std::cmp::Ordering::Less => true,
+                std::cmp::Ordering::Equal => past_equal,
+                std::cmp::Ordering::Greater => false,
+            };
+            if below {
+                low = middle.saturating_add(1);
+            } else {
+                high = middle;
+            }
+        }
+        Ok(low)
     }
 
     /// Returns every delta row's position, in key order.
