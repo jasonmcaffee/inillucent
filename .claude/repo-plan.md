@@ -727,3 +727,10 @@ they are touching do not collide; two that have not, do.
   for `Compiling <crate>` in the output before trusting the run. Do not restore a file with
   `git show ... | Set-Content` either: PowerShell joins the lines and the crate stops compiling.
   (task-2087)
+- **`bind.rs` and `expr/tree.rs::compile` sit at their `policy.rs` ceilings, and a unit test
+  module counts toward the file.** task-2088 added four fields to `BETWEEN` and a test module to
+  `bind.rs`, and `inillucent-compat::policy` failed at the end of a 30 minute `--changed` run on
+  `no_module_grows_past_the_size_it_is_recorded_at` and
+  `no_function_grows_past_the_length_it_is_recorded_at`. Put binder tests in a `bind/` submodule
+  next to the code they test, and run `cargo test -p inillucent-compat --test policy` on its own
+  before the full run when an edit adds lines to either. (task-2088)

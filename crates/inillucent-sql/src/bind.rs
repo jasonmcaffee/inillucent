@@ -21,11 +21,14 @@ pub(crate) use refusal::{
     no_such_column, no_such_column_quoted, no_such_function, no_such_index, no_such_table,
     order_out_of_range, schema_refused, unsupported, wrong_arguments,
 };
+mod collation;
 mod having;
 mod literal;
 mod rowvalue;
 mod scratch;
 
+use collation::apply_collation;
+pub use collation::{comparison_rules, result_collation};
 use literal::integer_literal;
 
 pub use cte::CteBinding;
@@ -269,6 +272,15 @@ pub enum BoundExpr {
         collation: Collation,
     },
     /// `BETWEEN`, kept as one node so its operand is evaluated once.
+    ///
+    /// **Each bound has its own affinity and collation (task-2088).** SQLite
+    /// codes `x BETWEEN lo AND hi` as `x >= lo AND x <= hi`, and each of those
+    /// comparisons takes its rules from its own two operands. One pair of rules
+    /// taken from `x` and `lo` ignored `hi` entirely: measured against 3.53.4,
+    /// `s BETWEEN 'a' AND 'B' COLLATE NOCASE` returned no rows where SQLite
+    /// returns `a` and `b`, and `'5' BETWEEN 1 AND CAST('9' AS INTEGER)`
+    /// answered 0 where SQLite applies the upper bound's INTEGER affinity and
+    /// answers 1.
     Between {
         /// Whether `NOT` was written.
         negated: bool,
@@ -278,10 +290,14 @@ pub enum BoundExpr {
         low: Box<BoundExpr>,
         /// The upper bound.
         high: Box<BoundExpr>,
-        /// The affinity applied to the comparisons.
-        affinity: Option<Affinity>,
-        /// The collation the comparisons use.
-        collation: Collation,
+        /// The affinity `operand >= low` applies.
+        low_affinity: Option<Affinity>,
+        /// The collation `operand >= low` uses.
+        low_collation: Collation,
+        /// The affinity `operand <= high` applies.
+        high_affinity: Option<Affinity>,
+        /// The collation `operand <= high` uses.
+        high_collation: Collation,
     },
     /// `IN` over a value list.
     InList {
@@ -432,28 +448,6 @@ impl BoundExpr {
             BoundExpr::Cast { affinity, .. } => Some(*affinity),
             BoundExpr::Rowid { .. } => Some(Affinity::Integer),
             BoundExpr::Collate { operand, .. } => operand.affinity(),
-            _ => None,
-        }
-    }
-
-    /// Returns the collation this expression carries, if it forces one.
-    pub fn collation(&self) -> Option<Collation> {
-        match self {
-            BoundExpr::Column { collation, .. } => Some(*collation),
-            BoundExpr::Collate { collation, .. } => Some(*collation),
-            _ => None,
-        }
-    }
-
-    /// Returns the collation an explicit `COLLATE` forced on this expression.
-    ///
-    /// This is *not* the same question as [`BoundExpr::collation`]. A column
-    /// declared `COLLATE NOCASE` has an implicit collation; `x COLLATE BINARY`
-    /// has an explicit one, and an explicit collation on either side of a
-    /// comparison beats an implicit one on the other side.
-    pub fn explicit_collation(&self) -> Option<Collation> {
-        match self {
-            BoundExpr::Collate { collation, .. } => Some(*collation),
             _ => None,
         }
     }
@@ -1090,18 +1084,6 @@ pub struct BoundAggregate {
     /// depends on the order the rows arrive in - `group_concat` and the JSON
     /// group aggregates - and SQLite accepts it on any of them.
     pub order_by: Vec<BoundOrderTerm>,
-}
-
-/// Returns the collation a result column compares with.
-///
-/// `DISTINCT` and `GROUP BY` compare result values, and a NOCASE column makes
-/// `blue` and `Blue` the same value for both. Comparing them with BINARY
-/// instead returns more rows than SQLite does, which looks like a duplicate
-/// rather than like a bug.
-pub fn result_collation(expr: &BoundExpr) -> Collation {
-    expr.explicit_collation()
-        .or_else(|| expr.collation())
-        .unwrap_or(Collation::Binary)
 }
 
 /// One result column, after star expansion.
@@ -3738,14 +3720,17 @@ impl<'a> Binder<'a> {
                 let operand = self.bind_expr(operand)?;
                 let low = self.bind_expr(low)?;
                 let high = self.bind_expr(high)?;
-                let (affinity, collation) = comparison_rules(&operand, &low);
+                let (low_affinity, low_collation) = comparison_rules(&operand, &low);
+                let (high_affinity, high_collation) = comparison_rules(&operand, &high);
                 Ok(BoundExpr::Between {
                     negated,
                     operand: Box::new(operand),
                     low: Box::new(low),
                     high: Box::new(high),
-                    affinity,
-                    collation,
+                    low_affinity,
+                    low_collation,
+                    high_affinity,
+                    high_collation,
                 })
             }
             Expr::In {
@@ -4624,56 +4609,6 @@ impl<'a> Binder<'a> {
             arguments: bound,
             collation,
         })
-    }
-}
-
-/// Returns the affinity and collation a comparison between two operands uses.
-///
-/// SQLite's rule, in order: if either side has a column affinity the comparison
-/// applies it, with the left side winning; the collation is the left operand's
-/// if it has one, otherwise the right's, otherwise BINARY.
-pub fn comparison_rules(left: &BoundExpr, right: &BoundExpr) -> (Option<Affinity>, Collation) {
-    let affinity = match (left.affinity(), right.affinity()) {
-        (Some(left), Some(right)) => inillucent_value::compare::comparison_affinity(left, right),
-        (Some(left), None) => Some(left),
-        (None, Some(right)) => Some(right),
-        (None, None) => None,
-    };
-    let collation = left
-        .explicit_collation()
-        .or_else(|| right.explicit_collation())
-        .or_else(|| left.collation())
-        .or_else(|| right.collation())
-        .unwrap_or(Collation::Binary);
-    (affinity, collation)
-}
-
-/// Wraps an expression in the collation an explicit `COLLATE` names.
-///
-/// **A `COLLATE` above a comparison does not reach the comparison (task-1979,
-/// F5).** `a = b COLLATE NOCASE` parses as `a = (b COLLATE NOCASE)`, because
-/// `COLLATE` binds tighter than `=`, and the comparison then reads NOCASE off
-/// its own right operand through [`comparison_rules`]. `(a = b) COLLATE
-/// NOCASE` is the other tree: the comparison is finished and NOCASE applies to
-/// the integer it produced, where a text collation does nothing. This function
-/// used to stamp the collation onto a `BoundExpr::Compare` it was handed, which
-/// made the two trees answer the same and made the outer name win over the
-/// inner one: measured against 3.53.4, `SELECT ('B'<'a') COLLATE NOCASE`
-/// answered 0 where SQLite answers 1, and
-/// `SELECT ('a' = 'A' COLLATE NOCASE) COLLATE BINARY` answered 0 where SQLite
-/// answers 1 because the inner NOCASE is the comparison's and the outer BINARY
-/// is the result's.
-///
-/// The wrapper is what carries the collation onward: [`comparison_rules`] asks
-/// an operand for its [`BoundExpr::explicit_collation`], so a `COLLATE` on a
-/// literal still reaches the comparison that uses it.
-///
-/// @param expr - the operand the `COLLATE` was written on
-/// @param collation - the collation it names
-fn apply_collation(expr: BoundExpr, collation: Collation) -> BoundExpr {
-    BoundExpr::Collate {
-        operand: Box::new(expr),
-        collation,
     }
 }
 

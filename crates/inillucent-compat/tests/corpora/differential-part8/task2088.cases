@@ -1,0 +1,23 @@
+# Differential cases, category `task2088`: each bound of a BETWEEN compares with its own rules.
+# One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
+# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+#
+# task-2088: SQLite codes `x BETWEEN lo AND hi` as `x >= lo AND x <= hi`, and each comparison takes
+# its affinity and collation from its own two operands. The binder took one pair from `x` and `lo`
+# and used it for both, so a COLLATE or a CAST on the upper bound was ignored, and one on the lower
+# bound was applied to the upper comparison too. The index cases go through the planner's split of
+# BETWEEN into two comparisons, which is the index range path. The build before task-2088 disagreed
+# with SQLite on 11 of these 12 cases; it answered between-index-both-nocase, where both bounds name
+# the same collation.
+between-high-nocase	CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE, i INTEGER); INSERT INTO t VALUES (1, 'a', 'a', 1), (2, 'B', 'B', 2), (3, 'c', 'c', 3), (4, 'A', 'A', 10), (5, 'b', 'b', 20), (6, 'C', 'C', 100);\nSELECT id FROM t WHERE s BETWEEN 'a' AND 'B' COLLATE NOCASE ORDER BY id;
+between-low-nocase	CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE, i INTEGER); INSERT INTO t VALUES (1, 'a', 'a', 1), (2, 'B', 'B', 2), (3, 'c', 'c', 3), (4, 'A', 'A', 10), (5, 'b', 'b', 20), (6, 'C', 'C', 100);\nSELECT id FROM t WHERE s BETWEEN 'A' COLLATE NOCASE AND 'b' ORDER BY id;
+between-high-binary-on-nocase-column	CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE, i INTEGER); INSERT INTO t VALUES (1, 'a', 'a', 1), (2, 'B', 'B', 2), (3, 'c', 'c', 3), (4, 'A', 'A', 10), (5, 'b', 'b', 20), (6, 'C', 'C', 100);\nSELECT id FROM t WHERE n BETWEEN 'a' AND 'B' COLLATE BINARY ORDER BY id;
+between-not-high-nocase	CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE, i INTEGER); INSERT INTO t VALUES (1, 'a', 'a', 1), (2, 'B', 'B', 2), (3, 'c', 'c', 3), (4, 'A', 'A', 10), (5, 'b', 'b', 20), (6, 'C', 'C', 100);\nSELECT id FROM t WHERE s NOT BETWEEN 'a' AND 'B' COLLATE NOCASE ORDER BY id;
+between-values	SELECT 'b' BETWEEN 'a' AND 'B' COLLATE NOCASE AS hi, 'b' BETWEEN 'A' COLLATE NOCASE AND 'B' AS lo, 'B' BETWEEN 'a' COLLATE NOCASE AND 'b' COLLATE BINARY AS both;
+between-affinity	SELECT '5' BETWEEN 1 AND CAST('9' AS INTEGER) AS hi, '5' BETWEEN CAST('1' AS INTEGER) AND 9 AS lo;
+between-index-high-nocase	CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE, i INTEGER); INSERT INTO t VALUES (1, 'a', 'a', 1), (2, 'B', 'B', 2), (3, 'c', 'c', 3), (4, 'A', 'A', 10), (5, 'b', 'b', 20), (6, 'C', 'C', 100);\nCREATE INDEX t_s ON t (s); CREATE INDEX t_sn ON t (s COLLATE NOCASE);\nSELECT id FROM t WHERE s BETWEEN 'a' AND 'B' COLLATE NOCASE ORDER BY id;
+between-indexed-by-binary	CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE, i INTEGER); INSERT INTO t VALUES (1, 'a', 'a', 1), (2, 'B', 'B', 2), (3, 'c', 'c', 3), (4, 'A', 'A', 10), (5, 'b', 'b', 20), (6, 'C', 'C', 100);\nCREATE INDEX t_s ON t (s); CREATE INDEX t_sn ON t (s COLLATE NOCASE);\nSELECT id FROM t INDEXED BY t_s WHERE s BETWEEN 'a' AND 'B' COLLATE NOCASE ORDER BY id;
+between-indexed-by-nocase-low	CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE, i INTEGER); INSERT INTO t VALUES (1, 'a', 'a', 1), (2, 'B', 'B', 2), (3, 'c', 'c', 3), (4, 'A', 'A', 10), (5, 'b', 'b', 20), (6, 'C', 'C', 100);\nCREATE INDEX t_s ON t (s); CREATE INDEX t_sn ON t (s COLLATE NOCASE);\nSELECT id FROM t INDEXED BY t_sn WHERE s BETWEEN 'A' COLLATE NOCASE AND 'b' ORDER BY id;
+between-index-both-nocase	CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE, i INTEGER); INSERT INTO t VALUES (1, 'a', 'a', 1), (2, 'B', 'B', 2), (3, 'c', 'c', 3), (4, 'A', 'A', 10), (5, 'b', 'b', 20), (6, 'C', 'C', 100);\nCREATE INDEX t_s ON t (s); CREATE INDEX t_sn ON t (s COLLATE NOCASE);\nSELECT id FROM t INDEXED BY t_sn WHERE s BETWEEN 'a' COLLATE NOCASE AND 'B' COLLATE NOCASE ORDER BY id;
+between-index-low-nocase	CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE, i INTEGER); INSERT INTO t VALUES (1, 'a', 'a', 1), (2, 'B', 'B', 2), (3, 'c', 'c', 3), (4, 'A', 'A', 10), (5, 'b', 'b', 20), (6, 'C', 'C', 100);\nCREATE INDEX t_s ON t (s); CREATE INDEX t_sn ON t (s COLLATE NOCASE);\nSELECT id FROM t WHERE s BETWEEN 'A' COLLATE NOCASE AND 'b' ORDER BY id;
+between-ticket-repro	CREATE TABLE p (id INTEGER PRIMARY KEY, s TEXT); INSERT INTO p VALUES (7, 'a'), (8, 'B'), (9, 'c');\nSELECT id FROM p WHERE s BETWEEN 'a' AND 'B' COLLATE NOCASE ORDER BY id;

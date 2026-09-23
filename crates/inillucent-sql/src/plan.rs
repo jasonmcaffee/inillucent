@@ -1807,26 +1807,32 @@ pub fn split_conjunction(expr: &BoundExpr, into: &mut Vec<BoundExpr>) {
             operand,
             low,
             high,
-            affinity,
-            collation,
+            low_affinity,
+            low_collation,
+            high_affinity,
+            high_collation,
         } if matches!(
             **operand,
             BoundExpr::Column { .. } | BoundExpr::Rowid { .. }
         ) =>
         {
+            // Each half keeps the affinity and collation of its own bound,
+            // which is what SQLite's two comparisons use (task-2088). The
+            // `between-index*` cases in `differential-part8/task2088.cases`
+            // grade this path with and without `INDEXED BY`.
             into.push(BoundExpr::Compare {
                 op: BinaryOp::GreaterEqual,
                 left: operand.clone(),
                 right: low.clone(),
-                affinity: *affinity,
-                collation: *collation,
+                affinity: *low_affinity,
+                collation: *low_collation,
             });
             into.push(BoundExpr::Compare {
                 op: BinaryOp::LessEqual,
                 left: operand.clone(),
                 right: high.clone(),
-                affinity: *affinity,
-                collation: *collation,
+                affinity: *high_affinity,
+                collation: *high_collation,
             });
         }
         other => into.push(other.clone()),

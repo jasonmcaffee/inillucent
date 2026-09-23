@@ -500,21 +500,15 @@ pub fn prepare(
 }
 /// Returns the collation an expression is compared and ordered under.
 ///
-/// SQLite's rule, in the part that matters here: an explicit `COLLATE` wins; a
-/// column carries its own; everything else is BINARY. It is deliberately not a
-/// full implementation of the rule - a `CASE` whose branches are columns has an
-/// assignable collation in SQLite and BINARY here - because the conservative
-/// answer is the one that sorts and groups by bytes, which is what an engine
-/// that did not know about collations at all would do, and never a wrong answer
-/// dressed as a right one.
+/// The binder's rule, so `GROUP BY`, `DISTINCT` and `PARTITION BY` group
+/// with the collation `ORDER BY` sorts with and a comparison compares with.
+/// This used to be its own copy that looked only at the top node, so
+/// `SELECT DISTINCT s COLLATE NOCASE || '' FROM t` kept `a` and `A` apart
+/// where 3.53.4 counts them as one value (task-2089).
 ///
 /// @param expr - the bound expression
 pub(crate) fn expression_collation(expr: &BoundExpr) -> Collation {
-    match expr {
-        BoundExpr::Collate { collation, .. } => *collation,
-        BoundExpr::Column { collation, .. } => *collation,
-        _ => Collation::Binary,
-    }
+    inillucent_sql::bind::result_collation(expr)
 }
 /// Reports whether the statement's answer depends on the order its rows arrive.
 ///

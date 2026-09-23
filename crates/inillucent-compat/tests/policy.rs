@@ -1269,7 +1269,17 @@ const CEILINGS: [(&str, usize); 16] = [
     // 5,422 and back to 5,290 in four days without anyone deciding it
     // should, and 25 lines of headroom in the file four tickets edited that
     // week is a gate that fails next on somebody who did not cause it.
-    ("crates/inillucent-sql/src/bind.rs", 4_968),
+    //
+    // **Lowered to 4,788 in task-2088.** Which collation a comparison, a sort
+    // or a grouping uses is `bind/collation.rs`: `BoundExpr::collation`,
+    // `BoundExpr::explicit_collation`, `comparison_rules`,
+    // `result_collation`, `apply_collation` and their tests. task-2088 and
+    // task-2089 made those rules walk an expression's operands, which took
+    // this file to 5,033, and the rules are one question with no other
+    // business in the binder.
+    ("crates/inillucent-sql/src/bind.rs", 4_788),
+    // Its own row from the day it was split out of `bind.rs` (task-2088).
+    ("crates/inillucent-sql/src/bind/collation.rs", 269),
     // **Lowered to 2,200 in task-1962 (A8).** 5,026 lines, the largest file
     // in the workspace, became four modules under `leaf/` beside the `delta.rs`
     // that was already there: `layout` (where a value goes in the page),
@@ -2620,7 +2630,8 @@ const FUNCTION_CEILINGS: [(&str, &str, usize); 52] = [
     ("crates/inillucent-engine/src/ddl.rs", "run_directive", 273),
     ("crates/inillucent-tree/src/paged/skip.rs", "skip_scan", 249),
     ("crates/inillucent-sql/src/bind.rs", "bind_call_with", 248),
-    ("crates/inillucent-exec/src/expr/tree.rs", "compile", 242),
+    // 237 in task-2088, which lifted the `IN` list arm into `in_list`.
+    ("crates/inillucent-exec/src/expr/tree.rs", "compile", 237),
     (
         "crates/inillucent-tree/src/leaf/encode.rs",
         "encode_rows_with",
