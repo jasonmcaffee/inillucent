@@ -80,15 +80,33 @@
 //! Each arm prints one line starting `cost |` with the columns below. The
 //! arms take turns rather than running at the same time (see [`ONE_ARM`]), so
 //! the two lines are measured on the same box under the same load and can be
-//! read side by side.
+//! read side by side. "scan" is the 25 TLP and NoREC cases, "after" is the ten
+//! cases and both sorts over what the delete left, and "reopen" includes
+//! `PRAGMA integrity_check`.
 //!
-//! Measured on 2026-09-22 in a quiet window (task-2075), release profile off,
-//! the way the nightly tier builds it:
+//! Measured on 2026-09-23 in a quiet window (task-2075): every other agent on
+//! the box paused, CPU at 17% from browsers and terminals at the start, the
+//! debug build the nightly tier runs, one arm after the other:
 //!
-//! | arm | page | rows | file | build | scan | sort | delete half | after | reopen |
-//! |---|---|---|---|---|---|---|---|---|---|
-//! | `default` | 32,768 | MEASURED | MEASURED | MEASURED | MEASURED | MEASURED | MEASURED | MEASURED | MEASURED |
-//! | `sqlite-page` | 4,096 | MEASURED | MEASURED | MEASURED | MEASURED | MEASURED | MEASURED | MEASURED | MEASURED |
+//! | arm | page | rows | file | build | scan | sort | delete half | after | reopen | total |
+//! |---|---|---|---|---|---|---|---|---|---|---|
+//! | `default` | 32,768 | 1,613,193 | 69.4 MiB | 354.4 s | 199.2 s | 8.6 s | 732.5 s | 60.1 s | 17.2 s | 1,374 s |
+//! | `sqlite-page` | 4,096 | 2,046,001 | 91.6 MiB | 211.6 s | 215.7 s | 11.9 s | 173.3 s | 79.2 s | 34.5 s | 730 s |
+//!
+//! Per row, the build is 220 microseconds at 32,768 and 103 at 4,096, and the
+//! delete is 908 microseconds a deleted row at 32,768 and 169 at 4,096: **5.4
+//! times as expensive at the engine's own page size**, on a table with fewer
+//! rows. That is task-2077. The sorts cost about the same at both sizes, and
+//! the 4,096 byte arm pays in the reopen and the checks after the delete,
+//! which have about ten times as many pages to visit (23,450 against 2,221).
+//!
+//! The first run, on a shared box where task-2068 was running its own copy of
+//! the previous version of this story, read 576.3, 546.5, 9.3, 1,391.5, 56.4
+//! and 15.0 s at 32,768 and 225.6, 203.1, 10.1, 196.6, 84.5 and 29.9 s at
+//! 4,096. The four largest phases of the 4,096 byte arm moved by less than 14%
+//! between the two runs and the 32 KiB arm by up to 2.7 times, because it was the one that overlapped
+//! the other process. So the 32 KiB seconds above are the quiet ones, and a
+//! `cost |` line from a shared box can be read for its ratios at best.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -741,9 +759,9 @@ fn a_table_past_the_pool_at_the_default_page() {
 /// The story at SQLite's page, 4,096 bytes (task-2075).
 ///
 /// The file an application migrating off SQLite is most likely to have: small
-/// pages, more rows than the pool holds, a secondary index. Eight times as
-/// many leaves as the default arm for the same bytes, a deeper tree, and eight
-/// times as many frames touched by one scan.
+/// pages, more rows than the pool holds, a secondary index. A page holds an
+/// eighth of what a default page holds, so the same rows need more leaves, a
+/// deeper tree, and more frames touched by one scan.
 #[test]
 fn a_table_past_the_pool_at_the_sqlite_page() {
     the_story_at(sqlite_page_arm());
