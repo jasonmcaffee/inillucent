@@ -59,7 +59,7 @@ pub(super) fn key_range(
             }
             continue;
         }
-        let Some((op, value)) = comparison_against_column(context.id, column, term) else {
+        let Some((op, value)) = indexable_comparison(context.id, column, term) else {
             continue;
         };
         if !is_available(context.position, context.ids, &value)
@@ -76,7 +76,11 @@ pub(super) fn key_range(
         };
         let slot = if at_low { &mut low } else { &mut high };
         if slot.is_none() {
-            *slot = Some(RangeBound { kind, value });
+            *slot = Some(RangeBound {
+                kind,
+                value,
+                unconverted: compares_unconverted(term),
+            });
             used.push(term_index);
         }
     }

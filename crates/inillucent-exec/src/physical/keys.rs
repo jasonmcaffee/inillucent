@@ -7,7 +7,7 @@
 //! stored - `WHERE k = '5'` over an INTEGER column finds nothing.
 //!
 //! Here rather than in [`super`] because `physical.rs` is six thousand lines
-//! and these nine functions are one idea, reached from the three places that
+//! and these eleven functions are one idea, reached from the three places that
 //! position a cursor: a nested loop's probe, a point probe, and the union and
 //! span forms that read a run of entries.
 
@@ -36,6 +36,7 @@ pub(crate) fn nested_key(
         )),
         AccessPath::IndexSeek {
             equalities,
+            unconverted,
             low,
             high,
             columns,
@@ -67,7 +68,10 @@ pub(crate) fn nested_key(
             for (position, expr) in equalities.iter().enumerate() {
                 keys.push(with_affinity(
                     translate_scan(expr, space, params)?,
-                    index_affinity(table, columns, position),
+                    probe_affinity(
+                        unconverted.contains(&position),
+                        index_affinity(table, columns, position),
+                    ),
                 ));
             }
             // A prefix of the index key, so the probe is a range over every
@@ -162,8 +166,17 @@ pub(super) fn index_union_keys(
                 expr,
                 space,
                 params,
-                index_affinity(table, columns, position),
+                probe_affinity(
+                    branch.unconverted.contains(&position),
+                    index_affinity(table, columns, position),
+                ),
             )?);
+        }
+        // `k IN (1, ?1)` with `?1` NULL matches what `k = 1` matches and no
+        // more: a NULL key equals no entry, including the index's NULL ones.
+        // See `SpanBounds::matches_nothing`.
+        if key.contains(&OwnedDatum::Null) {
+            continue;
         }
         if !seen.contains(&key) {
             seen.push(key);
@@ -226,6 +239,7 @@ pub(super) fn range_union_bounds<'t>(
             index_root,
             index_name: index_name.to_vec(),
             equalities: branch.equalities.clone(),
+            unconverted: branch.unconverted.clone(),
             low: branch.low.clone(),
             high: branch.high.clone(),
             collations: collations.to_vec(),
@@ -236,6 +250,10 @@ pub(super) fn range_union_bounds<'t>(
             covering: None,
         };
         let bounds = span_bounds(&branch_path, table, space, params)?;
+        // A branch whose key is NULL contributes no row, and the others still do.
+        if bounds.matches_nothing {
+            continue;
+        }
         scans.push(SpanScan::new(
             tree,
             projection.clone(),
@@ -264,6 +282,29 @@ pub struct SpanBounds {
     pub high: Option<Vec<OwnedDatum>>,
     /// Whether a key equal to the upper bound is in the range.
     pub high_inclusive: bool,
+    /// Whether an equality or a bound evaluated to NULL, so no row can match.
+    ///
+    /// **`k = NULL` and `k > NULL` are NULL for every row (task-2083).** The
+    /// planner refuses a NULL *literal* as a seek key, in
+    /// `plan::terms::comparison_against_column`, but a parameter is only known
+    /// at run time. A parameter bound to NULL used to become a seek to the
+    /// index's own NULL entries. `WHERE a = ?1` with `?1` NULL returned the
+    /// rows whose `a` is NULL, and `WHERE a > ?1` returned every row that was
+    /// not. A correlated subquery reaches the same seek through a parameter,
+    /// so `(SELECT id FROM h WHERE h.a = s.k)` found a row for a NULL `s.k`.
+    /// `IS NULL` never gets here: it is not a comparison, so the planner never
+    /// makes it an equality.
+    pub matches_nothing: bool,
+}
+
+impl SpanBounds {
+    /// A span that no row falls in.
+    fn nothing() -> SpanBounds {
+        SpanBounds {
+            matches_nothing: true,
+            ..SpanBounds::default()
+        }
+    }
 }
 
 /// Returns the affinity of one column of an index key.
@@ -296,6 +337,29 @@ fn index_affinity(
     }
 }
 
+/// Returns the affinity a seek applies to one probe value before it descends.
+///
+/// This is SQLite's rule from `codeAllEqualityTerms`: the probe takes the
+/// indexed column's affinity, unless both sides of the comparison have an
+/// affinity and neither is numeric. Then the comparison in `WHERE` converts
+/// nothing, and neither may the seek (task-2083). Converting there made an
+/// untyped column's `3` into the text `'3'` before it probed a TEXT index,
+/// which found a row that `WHERE` does not match.
+///
+/// The planner decides which case a key is, because only the planner sees the
+/// comparison, and records it as the path's `unconverted` flags. It has
+/// already refused an index whose affinity the comparison disagrees with, in
+/// `plan::terms::indexable_comparison`.
+///
+/// @param unconverted - whether the comparison converts nothing
+/// @param index - the indexed column's affinity, if the key position has one
+fn probe_affinity(unconverted: bool, index: Option<Affinity>) -> Option<Affinity> {
+    if unconverted {
+        return None;
+    }
+    index
+}
+
 /// Returns the bounds of a range scan.
 ///
 /// @param path - the FROM term's access path
@@ -313,6 +377,7 @@ pub(super) fn span_bounds(
             low_inclusive: true,
             high: None,
             high_inclusive: true,
+            matches_nothing: false,
         }),
         AccessPath::RowidRange { low, high, .. } => {
             // A rowid range compares against the rowid, which is an integer.
@@ -320,36 +385,43 @@ pub(super) fn span_bounds(
                 bound_value(low.as_ref(), space, params, Some(Affinity::Integer))?;
             let (high_value, high_inclusive) =
                 bound_value(high.as_ref(), space, params, Some(Affinity::Integer))?;
+            if [&low_value, &high_value]
+                .into_iter()
+                .any(|value| *value == Some(OwnedDatum::Null))
+            {
+                return Ok(SpanBounds::nothing());
+            }
             Ok(SpanBounds {
                 low: low_value.map(|value| vec![value]),
                 low_inclusive,
                 high: high_value.map(|value| vec![value]),
                 high_inclusive,
+                matches_nothing: false,
             })
         }
         AccessPath::IndexSeek {
             equalities,
+            unconverted,
             low,
             high,
             columns,
             descending,
             ..
         } => {
-            let mut prefix = Vec::with_capacity(equalities.len());
-            for (position, expr) in equalities.iter().enumerate() {
-                prefix.push(constant_value(
-                    expr,
-                    space,
-                    params,
-                    index_affinity(table, columns, position),
-                )?);
-            }
+            let prefix = equality_prefix(equalities, unconverted, table, columns, space, params)?;
             // The range is on the column after the equality prefix.
             let range_affinity = index_affinity(table, columns, equalities.len());
             let (low_value, low_inclusive) =
                 bound_value(low.as_ref(), space, params, range_affinity)?;
             let (high_value, high_inclusive) =
                 bound_value(high.as_ref(), space, params, range_affinity)?;
+            let mut evaluated = prefix
+                .iter()
+                .chain(low_value.iter())
+                .chain(high_value.iter());
+            if evaluated.any(|value| *value == OwnedDatum::Null) {
+                return Ok(SpanBounds::nothing());
+            }
             let mut low_key = prefix.clone();
             let mut high_key = prefix;
             if low_value.is_none() && high_value.is_none() {
@@ -359,6 +431,7 @@ pub(super) fn span_bounds(
                         low_inclusive: true,
                         high: None,
                         high_inclusive: true,
+                        matches_nothing: false,
                     });
                 }
                 // An equality prefix with no range is the run of every entry
@@ -368,6 +441,7 @@ pub(super) fn span_bounds(
                     low_inclusive: true,
                     high: Some(high_key),
                     high_inclusive: true,
+                    matches_nothing: false,
                 });
             }
             // **Which end of the walk the NULLs sit at.** An ascending index
@@ -426,10 +500,43 @@ pub(super) fn span_bounds(
                     Some(high_key)
                 },
                 high_inclusive,
+                matches_nothing: false,
             })
         }
         _ => unsupported("a range over that access path"),
     }
+}
+
+/// Returns the values an index seek's equality prefix pins, one per leading
+/// key column, each converted the way its comparison converts it.
+///
+/// @param equalities - the prefix's value expressions, in key order
+/// @param unconverted - the positions whose comparison converts nothing
+/// @param table - the indexed table, for each key column's affinity
+/// @param columns - which table column each index position holds
+/// @param space - the joined column space
+/// @param params - the bound parameters
+fn equality_prefix(
+    equalities: &[BoundExpr],
+    unconverted: &[usize],
+    table: &TableInfo,
+    columns: &[Option<u16>],
+    space: &Space<'_>,
+    params: &Params,
+) -> DbResult<Vec<OwnedDatum>> {
+    let mut prefix = Vec::with_capacity(equalities.len());
+    for (position, expr) in equalities.iter().enumerate() {
+        prefix.push(constant_value(
+            expr,
+            space,
+            params,
+            probe_affinity(
+                unconverted.contains(&position),
+                index_affinity(table, columns, position),
+            ),
+        )?);
+    }
+    Ok(prefix)
 }
 
 /// Returns one range bound's value and whether it is inclusive.
@@ -437,6 +544,7 @@ pub(super) fn span_bounds(
 /// @param bound - the bound, when there is one
 /// @param space - the joined column space
 /// @param params - the bound parameters
+/// @param affinity - the indexed column's affinity, which [`probe_affinity`] may drop
 fn bound_value(
     bound: Option<&RangeBound>,
     space: &Space<'_>,
@@ -446,7 +554,12 @@ fn bound_value(
     let Some(bound) = bound else {
         return Ok((None, true));
     };
-    let value = constant_value(&bound.value, space, params, affinity)?;
+    let value = constant_value(
+        &bound.value,
+        space,
+        params,
+        probe_affinity(bound.unconverted, affinity),
+    )?;
     let inclusive = matches!(bound.kind, BoundKind::GreaterEqual | BoundKind::LessEqual);
     Ok((Some(value), inclusive))
 }
@@ -465,12 +578,22 @@ fn bound_value(
 /// A join's inner probe evaluates its key once per outer row, so the conversion
 /// cannot be folded away the way a constant seek key's can.
 ///
+/// **It is the comparison's affinity, not a `CAST` (task-2083).** The two
+/// differ on every value the affinity cannot convert without loss. A `CAST` to
+/// BLOB turns the integer 3 into the bytes `'3'`, so a probe of an untyped
+/// column found nothing and `SELECT count(*) FROM s, h WHERE h.a = s.k`
+/// answered 0 where SQLite answers 1. A `CAST` to INTEGER turns `'abc'` into 0
+/// and `3.5` into 3, so a probe of a rowid or an INTEGER column matched rows
+/// SQLite does not match. The constant seek key in [`constant_value`] already
+/// applied the affinity this way, which is why `WHERE a = 3` was right and the
+/// join over the same index was not.
+///
 /// @param expr - the translated key expression
 /// @param affinity - the affinity to apply, if any
 fn with_affinity(expr: Expr, affinity: Option<Affinity>) -> Expr {
     match affinity {
         None => expr,
-        Some(affinity) => Expr::Cast {
+        Some(affinity) => Expr::Affinity {
             operand: Box::new(expr),
             affinity,
         },
@@ -489,19 +612,22 @@ mod tests {
     /// probe would compare a converted value against an unconverted one - a
     /// seek that lands somewhere else. SQLite applies none there either.
     #[test]
-    fn a_probe_is_cast_only_when_the_column_has_an_affinity() {
+    fn a_probe_is_converted_only_when_the_column_has_an_affinity() {
         let bare = with_affinity(Expr::Column(0), None);
         assert!(
             matches!(bare, Expr::Column(0)),
             "no affinity means the expression is unchanged"
         );
-        let cast = with_affinity(Expr::Column(0), Some(Affinity::Integer));
-        match cast {
-            Expr::Cast { affinity, operand } => {
+        let converted = with_affinity(Expr::Column(0), Some(Affinity::Integer));
+        match converted {
+            Expr::Affinity { affinity, operand } => {
                 assert_eq!(affinity, Affinity::Integer);
                 assert!(matches!(*operand, Expr::Column(0)));
             }
-            other => panic!("an affinity should wrap the probe in a cast; it gave {other:?}"),
+            other => panic!(
+                "an affinity should wrap the probe in the comparison's conversion, not a cast; \
+                 it gave {other:?}"
+            ),
         }
     }
 
@@ -524,6 +650,7 @@ mod tests {
             low_inclusive: false,
             high: None,
             high_inclusive: true,
+            matches_nothing: false,
         };
         assert!(
             !exclusive_low.low_inclusive && exclusive_low.high_inclusive,

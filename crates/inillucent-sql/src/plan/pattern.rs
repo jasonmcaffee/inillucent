@@ -94,10 +94,12 @@ pub(super) fn pattern_range(
     let low = RangeBound {
         kind: BoundKind::GreaterEqual,
         value: BoundExpr::Text(prefix.clone()),
+        unconverted: false,
     };
     let high = next_prefix(&prefix).map(|above| RangeBound {
         kind: BoundKind::Less,
         value: BoundExpr::Text(above),
+        unconverted: false,
     });
     // A descending index walks the other way, so the two ends swap: see the
     // note in the comparison arm above, which this follows exactly.
@@ -107,10 +109,12 @@ pub(super) fn pattern_range(
             high.map(|bound| RangeBound {
                 kind: BoundKind::Greater,
                 value: bound.value,
+                unconverted: false,
             }),
             Some(RangeBound {
                 kind: BoundKind::LessEqual,
                 value: low.value,
+                unconverted: false,
             }),
         )),
     }

@@ -711,6 +711,7 @@ mod tests {
                 low_inclusive: true,
                 high: Some(vec![OwnedDatum::Int(1_500)]),
                 high_inclusive: true,
+                matches_nothing: false,
             },
             Some(50),
         )

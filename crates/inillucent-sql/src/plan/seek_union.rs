@@ -111,6 +111,7 @@ pub(super) fn in_list_union_path(
     // Every leading key column pinned by an equality, in key order. The `IN`
     // is looked for on the column after them.
     let mut prefix: Vec<BoundExpr> = Vec::new();
+    let mut prefix_unconverted: Vec<usize> = Vec::new();
     let mut prefix_terms: Vec<usize> = Vec::new();
     let mut collations: Vec<Collation> = Vec::new();
     let mut descending: Vec<bool> = Vec::new();
@@ -125,16 +126,19 @@ pub(super) fn in_list_union_path(
             !consumed.get(*term_index).copied().unwrap_or(false)
                 && !prefix_terms.contains(term_index)
                 && comparison_collation(term) == collation
-                && comparison_against_column(id, column, term).is_some_and(|(op, value)| {
+                && indexable_comparison(id, column, term).is_some_and(|(op, value)| {
                     op == BinaryOp::Equal && is_available(position, ids, &value)
                 })
         });
         let Some((term_index, term)) = found else {
             break;
         };
-        let Some((_, value)) = comparison_against_column(id, column, term) else {
+        let Some((_, value)) = indexable_comparison(id, column, term) else {
             break;
         };
+        if compares_unconverted(term) {
+            prefix_unconverted.push(prefix.len());
+        }
         prefix.push(value);
         prefix_terms.push(term_index);
         collations.push(collation);
@@ -181,38 +185,7 @@ pub(super) fn in_list_union_path(
         if !list.iter().all(|value| is_available(position, ids, value)) {
             continue;
         }
-        let mut branches = Vec::with_capacity(list.len());
-        let mut seen: Vec<&BoundExpr> = Vec::with_capacity(list.len());
-        for value in list {
-            // **A NULL in the list matches nothing, so it gets no branch
-            // (task-1932, found by `tlp_differential.rs`).** `b IN ('k1', NULL)`
-            // is true for `k1`, false for nothing, and NULL for every other
-            // value - so the rows a `WHERE` keeps are exactly the rows equal to
-            // a non-NULL member. A branch for the NULL sought the index's own
-            // NULL entries and answered every row where `b IS NULL`: on a
-            // six-hundred-row table `b IN ('k1', 'k2', 'k7', NULL)` counted 95
-            // where a scan applying the same predicate counts 41, and the
-            // fifty-four extra rows were the ones whose `b` is NULL.
-            //
-            // Dropping it is sound rather than a special case: the seek answers
-            // the rows the `IN` is *true* for, and three-valued logic only
-            // separates false from NULL somewhere this path is not used - the
-            // planner does not turn a negated `IN` into a union.
-            if matches!(value, BoundExpr::Null) {
-                continue;
-            }
-            if seen.contains(&value) {
-                continue;
-            }
-            seen.push(value);
-            let mut equalities = prefix.clone();
-            equalities.push(value.clone());
-            branches.push(IndexSeekBranch {
-                equalities,
-                low: None,
-                high: None,
-            });
-        }
+        let branches = in_list_branches(list, &prefix, &prefix_unconverted);
         let covering = levers
             .has(Levers::COVERING_INDEX)
             .then(|| covering_slots(table, index, context.needed, usable))
@@ -374,6 +347,55 @@ fn flatten_or(expr: &BoundExpr, into: &mut Vec<BoundExpr>) {
     }
 }
 
+/// Returns one branch per distinct non-NULL member of an `IN` list, each
+/// pinning the shared equality prefix and then that member.
+///
+/// @param list - the members of the `IN` list
+/// @param prefix - the equalities on the key columns before the `IN` column
+/// @param prefix_unconverted - the prefix positions that compare unconverted
+fn in_list_branches(
+    list: &[BoundExpr],
+    prefix: &[BoundExpr],
+    prefix_unconverted: &[usize],
+) -> Vec<IndexSeekBranch> {
+    let mut branches = Vec::with_capacity(list.len());
+    let mut seen: Vec<&BoundExpr> = Vec::with_capacity(list.len());
+    for value in list {
+        // **A NULL in the list matches nothing, so it gets no branch
+        // (task-1932, found by `tlp_differential.rs`).** `b IN ('k1', NULL)`
+        // is true for `k1`, false for nothing, and NULL for every other
+        // value - so the rows a `WHERE` keeps are exactly the rows equal to
+        // a non-NULL member. A branch for the NULL sought the index's own
+        // NULL entries and answered every row where `b IS NULL`: on a
+        // six-hundred-row table `b IN ('k1', 'k2', 'k7', NULL)` counted 95
+        // where a scan applying the same predicate counts 41, and the
+        // fifty-four extra rows were the ones whose `b` is NULL.
+        //
+        // Dropping it is sound rather than a special case: the seek answers
+        // the rows the `IN` is *true* for, and three-valued logic only
+        // separates false from NULL somewhere this path is not used - the
+        // planner does not turn a negated `IN` into a union.
+        if matches!(value, BoundExpr::Null) {
+            continue;
+        }
+        if seen.contains(&value) {
+            continue;
+        }
+        seen.push(value);
+        let mut equalities = prefix.to_vec();
+        equalities.push(value.clone());
+        // A member of an `IN` list is converted to the column's affinity,
+        // as SQLite converts it, so only the prefix can name a position.
+        branches.push(IndexSeekBranch {
+            equalities,
+            unconverted: prefix_unconverted.to_vec(),
+            low: None,
+            high: None,
+        });
+    }
+    branches
+}
+
 /// Matches a flattened disjunction against the keyset tuple-comparison shape
 /// over one index, and returns its branches in the order they must run.
 ///
@@ -410,16 +432,20 @@ fn keyset_branches(
             return None;
         }
         let mut equalities = Vec::with_capacity(equality_terms.len());
+        let mut unconverted = Vec::new();
         for (at, eq_term) in equality_terms.iter().enumerate() {
             let key_column = index.columns.get(at)?;
             let column = key_column.column?;
             let collation = collation_of(&key_column.collation);
-            let (op, value) = comparison_against_column(id, column, eq_term)?;
+            let (op, value) = indexable_comparison(id, column, eq_term)?;
             if op != BinaryOp::Equal
                 || comparison_collation(eq_term) != collation
                 || !is_available(position, ids, &value)
             {
                 return None;
+            }
+            if compares_unconverted(eq_term) {
+                unconverted.push(equalities.len());
             }
             equalities.push(value);
         }
@@ -429,7 +455,7 @@ fn keyset_branches(
             return None;
         }
         let collation = collation_of(&key_column.collation);
-        let (op, value) = comparison_against_column(id, column, range_term)?;
+        let (op, value) = indexable_comparison(id, column, range_term)?;
         if op != BinaryOp::Greater
             || comparison_collation(range_term) != collation
             || !is_available(position, ids, &value)
@@ -444,9 +470,11 @@ fn keyset_branches(
         let slot = by_depth.get_mut(depth.saturating_sub(1))?;
         *slot = Some(IndexSeekBranch {
             equalities,
+            unconverted,
             low: Some(RangeBound {
                 kind: BoundKind::Greater,
                 value,
+                unconverted: compares_unconverted(range_term),
             }),
             high: None,
         });

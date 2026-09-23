@@ -1780,6 +1780,9 @@ fn build_source<'t>(
         }
         AccessKind::Span => {
             let bounds = span_bounds(path, table, space, params)?;
+            if bounds.matches_nothing {
+                return Ok(Source::Rows(Vec::new()));
+            }
             Ok(Source::Span(SpanScan::new(
                 tree,
                 projection,
@@ -1791,6 +1794,9 @@ fn build_source<'t>(
         }
         AccessKind::Reverse => {
             let bounds = span_bounds(path, table, space, params)?;
+            if bounds.matches_nothing {
+                return Ok(Source::Rows(Vec::new()));
+            }
             Ok(Source::Reverse(ReverseScan::new(
                 tree, projection, bounds, limit,
             )))

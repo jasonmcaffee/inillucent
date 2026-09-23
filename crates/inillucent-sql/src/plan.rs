@@ -29,7 +29,8 @@ pub use hint::unanswerable_index_hint;
 use hint::{forced_path, index_usable, outer_terms, statement_terms};
 use partial::implies;
 use terms::{
-    collation_of, comparison_against_column, comparison_against_rowid, comparison_collation,
+    collation_of, compares_unconverted, comparison_against_column, comparison_against_rowid,
+    comparison_collation, indexable_comparison,
 };
 mod seek_union;
 
@@ -53,6 +54,9 @@ pub struct RangeBound {
     pub kind: BoundKind,
     /// The value to compare against.
     pub value: BoundExpr,
+    /// Whether the seek compares `value` without converting it to the
+    /// column's affinity. See [`AccessPath::IndexSeek`]'s `unconverted`.
+    pub unconverted: bool,
 }
 
 /// One seek over an index, as a branch of an [`AccessPath::IndexSeekUnion`].
@@ -61,6 +65,9 @@ pub struct IndexSeekBranch {
     /// The equality prefix this branch pins, one value per leading index
     /// column.
     pub equalities: Vec<BoundExpr>,
+    /// The positions in `equalities` whose value is compared unconverted.
+    /// See [`AccessPath::IndexSeek`]'s `unconverted`.
+    pub unconverted: Vec<usize>,
     /// The lower bound on the column after the prefix, when there is one.
     pub low: Option<RangeBound>,
     /// The upper bound on that same column.
@@ -101,6 +108,26 @@ pub enum AccessPath {
         index_name: Vec<u8>,
         /// The equality prefix, one value per leading index column.
         equalities: Vec<BoundExpr>,
+        /// The positions in `equalities` whose value the seek compares without
+        /// converting it to the column's affinity.
+        ///
+        /// **The comparison decides this, and only the planner sees the
+        /// comparison (task-2083).** A seek converts the probe value to the
+        /// indexed column's affinity, except when both sides of the `=` have
+        /// an affinity and neither is numeric: then `WHERE` converts nothing
+        /// and neither may the seek. That is SQLite's `codeAllEqualityTerms`.
+        /// The executor used to decide it from the probe expression alone,
+        /// and a correlated subquery replaces the outer column with a
+        /// parameter before planning. The parameter has no affinity, so
+        /// `(SELECT id FROM h WHERE h.a = s.k)` with `h.a TEXT` and `s.k`
+        /// untyped converted the number 3 to `'3'` and found a row SQLite
+        /// does not.
+        ///
+        /// A list of positions rather than a flag per equality because it is
+        /// almost always empty, and an empty `Vec` does not allocate. A flag per
+        /// equality cost two allocations to compile `WHERE email = ?1`, which
+        /// `inillucent::budget` counts.
+        unconverted: Vec<usize>,
         /// A range on the column after the equality prefix.
         low: Option<RangeBound>,
         /// The upper end of that range.
@@ -2294,6 +2321,7 @@ fn rowid_path(
                 low = Some(RangeBound {
                     kind: BoundKind::Greater,
                     value,
+                    unconverted: false,
                 });
                 used.push(index);
             }
@@ -2301,6 +2329,7 @@ fn rowid_path(
                 low = Some(RangeBound {
                     kind: BoundKind::GreaterEqual,
                     value,
+                    unconverted: false,
                 });
                 used.push(index);
             }
@@ -2308,6 +2337,7 @@ fn rowid_path(
                 high = Some(RangeBound {
                     kind: BoundKind::Less,
                     value,
+                    unconverted: false,
                 });
                 used.push(index);
             }
@@ -2315,6 +2345,7 @@ fn rowid_path(
                 high = Some(RangeBound {
                     kind: BoundKind::LessEqual,
                     value,
+                    unconverted: false,
                 });
                 used.push(index);
             }
@@ -2495,6 +2526,7 @@ fn index_candidate(
         forced,
     } = *context;
     let mut equalities = Vec::new();
+    let mut unconverted = Vec::new();
     let mut used = Vec::new();
     let mut collations = Vec::new();
     let mut descending = Vec::new();
@@ -2523,6 +2555,9 @@ fn index_candidate(
         let Some((term_index, value, column)) = found else {
             break;
         };
+        if terms.get(term_index).is_some_and(compares_unconverted) {
+            unconverted.push(equalities.len());
+        }
         equalities.push(value);
         used.push(term_index);
         collations.push(collation);
@@ -2588,6 +2623,7 @@ fn index_candidate(
             index_root: index.root,
             index_name: index.name.clone(),
             equalities,
+            unconverted,
             low,
             high,
             collations,
@@ -2670,7 +2706,7 @@ fn find_equality(
         if consumed.get(index).copied().unwrap_or(false) || used.contains(&index) {
             continue;
         }
-        let Some((op, value)) = comparison_against_column(id, column, term) else {
+        let Some((op, value)) = indexable_comparison(id, column, term) else {
             continue;
         };
         if op != BinaryOp::Equal || !is_available(position, ids, &value) {
