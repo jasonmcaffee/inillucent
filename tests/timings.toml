@@ -393,6 +393,10 @@ target = "inillucent-compat::release_format"
 milliseconds = 173
 
 [[timing]]
+target = "inillucent-compat::release_format_history"
+milliseconds = 4790
+
+[[timing]]
 target = "inillucent-compat::rtree"
 milliseconds = 27044
 
@@ -447,6 +451,10 @@ milliseconds = 15020
 [[timing]]
 target = "inillucent-compat::storage_failure"
 milliseconds = 17667
+
+[[timing]]
+target = "inillucent-compat::story_large_table_nightly"
+milliseconds = 3352250
 
 [[timing]]
 target = "inillucent-compat::story_nikaya_crash"
@@ -719,6 +727,10 @@ milliseconds = 21774
 [[timing]]
 target = "inillucent::story_ledger_day"
 milliseconds = 12615
+
+[[timing]]
+target = "inillucent::story_ledger_day_nightly"
+milliseconds = 3991188
 
 [[timing]]
 target = "inillucent::story_nikaya"
