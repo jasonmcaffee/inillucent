@@ -315,6 +315,31 @@ whole free gap, and the compactions fall by 3.7x. **The splice is the smaller se
 write only the new rows' values. SQLite's own cost jumps at 10 indexes on this table, from 64 ms at
 5 to 525 ms, which is why that ratio moves more than the others.
 
+**And on the gate**, which is what the rest of this page reports: `inillucent-fullgate` on the medium
+fixture at a 32 KiB page, the base commit against this one, 30 rounds each, alternated twice in one
+quiet window. The workloads that moved:
+
+| workload | base | base | task-2074 | task-2074 |
+|---|---:|---:|---:|---:|
+| `write.insert.batch` | 0.88x | 0.81x | 1.52x | 1.52x |
+| `write.update.indexed` | 2.13x | 2.10x | 3.77x | 3.52x |
+| `write.delete` | 3.75x | 3.47x | 4.69x | 4.61x |
+| `extension.fts.build` | 0.70x | 0.73x | 0.98x | 0.99x |
+| `extension.rtree.insert` | 2.02x | 1.99x | 2.37x | 2.40x |
+| `txn.large` | 4.06x | 4.15x | 3.84x | 3.59x |
+| `join.range` | 0.90x | 0.87x | 0.87x | 0.84x |
+| the `write` family | 2.43x | 2.33x | 3.28x | 3.24x |
+| the weighted headline | 4.96x | 4.84x | 5.10x | 5.16x |
+
+`write.insert.batch` clears 1.00x for the first time, and the `extension` family's lower bound goes
+from 1.49x to 1.59x, over its 1.50x bar. **`txn.large` is 10% slower**, consistently: it is 2,000
+updates that lengthen a text value in place, and making heap room for a longer value moves the delta
+area down by the value's size - the area is larger now, so each move copies more. **`join.range`
+moved by about as much as the two base runs differ from each other**, but it is the workload that
+holds `read.join`'s lower bound, and that bound went from 3.14x and 3.04x to 2.92x and 2.98x against
+a bar of 3.00x. Both are task-2082.
+
+
 ### What a statement costs before it reaches a tree
 
 The whole tree write was ablated out of the in-place update path, so the statement found its row,
