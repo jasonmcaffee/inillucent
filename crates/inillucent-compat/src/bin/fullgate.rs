@@ -518,13 +518,16 @@ fn report_families(settings: &Settings, measured: &[Paired]) -> (bool, bool) {
             every_family_reported = false;
             continue;
         }
-        // The family is one log ratio per workload per round, weighted equally
-        // per workload - `writegate`'s rollup, arrived at after two wrong ones.
-        // Pooling raw pairs lets a workload with a hundred times
-        // the absolute time decide the family alone; collapsing each workload to
-        // its median first makes a three-point bootstrap whose lower bound *is*
-        // the minimum.
-        let (low, high) = pooled_interval(&members, SEED);
+        // The family is one value per round, the mean of that round's log
+        // ratios over the family's workloads, and the bootstrap resamples
+        // rounds - the statistic the headline already uses for each family.
+        // Pooling raw pairs lets a workload with a hundred times the absolute
+        // time decide the family alone; collapsing each workload to its median
+        // first makes a three-point bootstrap whose lower bound *is* the
+        // minimum; and one list of every workload's every round, which this
+        // used until task-2086, made the interval measure the gap between the
+        // workloads. See `perf::family_interval`.
+        let (low, high) = family_bounds(&members, SEED);
         let worst = members
             .iter()
             .map(|entry| entry.ratio())
@@ -799,7 +802,7 @@ fn run(fixture: &Path, settings: &Settings, placement: &Placement) -> Result<boo
         if members.is_empty() {
             continue;
         }
-        let (low, _) = pooled_interval(&members, SEED);
+        let (low, _) = family_bounds(&members, SEED);
         if low < contract.floor {
             println!("  {family:<16} {low:>8.2}x  UNDER THE FLOOR");
             floored = false;
@@ -944,17 +947,16 @@ fn geometric_mean(members: &[&Paired]) -> f64 {
     (logs.iter().sum::<f64>() / logs.len() as f64).exp()
 }
 
-/// Returns the family's bootstrap interval over every workload's every round.
+/// Returns the family's bootstrap interval, one per-round mean per round.
+///
+/// The statistic is `perf::family_interval`, shared with every other gate and
+/// the scorecard so that no two of them grade a family by different numbers.
 ///
 /// @param members - the workloads in the family
 /// @param seed - the seed the resampling uses
-fn pooled_interval(members: &[&Paired], seed: u64) -> (f64, f64) {
-    let logs: Vec<f64> = members
-        .iter()
-        .flat_map(|entry| entry.log_ratios())
-        .collect();
-    let (low, high) = inillucent_compat::perf::bootstrap(&logs, seed);
-    (low.exp(), high.exp())
+fn family_bounds(members: &[&Paired], seed: u64) -> (f64, f64) {
+    let (_, low, high) = inillucent_compat::perf::family_interval(members, seed);
+    (low, high)
 }
 
 /// Returns a fresh copy of the fixture for one arm of one round.

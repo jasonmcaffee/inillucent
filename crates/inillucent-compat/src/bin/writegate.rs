@@ -279,11 +279,19 @@ fn report_families(settings: &Settings, measured: &[Paired]) -> bool {
         // was its worst workload's ratio, exactly, and no amount of data would
         // have moved it.
         //
-        // So: one log ratio per workload per round - thirty times the sample -
-        // scaled so each workload contributes equally rather than in proportion
-        // to how long it happens to take. The `worst` column carries the
-        // information the collapse had, which is the workload holding the
-        // family back, and the per-workload table above carries the rest.
+        // The third attempt put one log ratio per workload per round into one
+        // list and bootstrapped it, and task-2086 found that wrong too: a
+        // resample draws the workloads in random proportions, so when they
+        // differ the interval measures the gap between them rather than the
+        // timing noise. `read.join` missed its bar on every build for that
+        // reason alone.
+        //
+        // So: one value per round, the mean of that round's log ratios over
+        // the family's workloads, and the bootstrap resamples rounds - which
+        // is how the headline already treats each family. Each workload
+        // counts equally whatever it costs in nanoseconds. The `worst` column
+        // carries the workload holding the family back, and the per-workload
+        // table above carries the rest.
         let rolled = Paired {
             workload: family.to_string(),
             family: family.to_string(),
@@ -294,7 +302,7 @@ fn report_families(settings: &Settings, measured: &[Paired]) -> bool {
             agreed: true,
             disagreement: String::new(),
         };
-        let (low, high) = pooled_interval(&members, SEED);
+        let (low, high) = family_bounds(&members, SEED);
         let worst = members
             .iter()
             .map(|entry| entry.ratio())
@@ -598,23 +606,16 @@ fn geometric_mean(members: &[&Paired]) -> f64 {
     (logs.iter().sum::<f64>() / logs.len() as f64).exp()
 }
 
-/// Returns the family's bootstrap interval over every workload's every round.
+/// Returns the family's bootstrap interval, one per-round mean per round.
 ///
-/// The sample is one log ratio per workload per round, so a thirty-round run of
-/// five workloads has a hundred and fifty points rather than five - and each
-/// workload contributes the same number of them whatever it costs in
-/// nanoseconds. That is what makes the interval an interval rather than a
-/// restatement of the worst workload.
+/// The statistic is `perf::family_interval`, shared with every other gate and
+/// the scorecard so that no two of them grade a family by different numbers.
 ///
 /// @param members - the workloads in the family
 /// @param seed - the seed the resampling uses
-fn pooled_interval(members: &[&Paired], seed: u64) -> (f64, f64) {
-    let logs: Vec<f64> = members
-        .iter()
-        .flat_map(|entry| entry.log_ratios())
-        .collect();
-    let (low, high) = inillucent_compat::perf::bootstrap(&logs, seed);
-    (low.exp(), high.exp())
+fn family_bounds(members: &[&Paired], seed: u64) -> (f64, f64) {
+    let (_, low, high) = inillucent_compat::perf::family_interval(members, seed);
+    (low, high)
 }
 
 /// Returns a fresh copy of the fixture for one arm of one round.
