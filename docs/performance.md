@@ -12,8 +12,11 @@ every interval and every control. This page is the summary.
 Measured at 100,000 rows on Windows, over the ten workload families the performance contract weights,
 30 paired rounds per run, four consecutive runs, medians of the two middle runs.
 
-**Measured 2026-09-23 on `main` at `6f84ce6` with task-2082's `7f93661` applied**, which is the engine
-you get. Every number on this page is that run unless a section says otherwise. It was taken in a
+**Measured 2026-09-23 on `main` at `6f84ce6` with task-2082's `7f93661` applied**, which is `main` as
+it stood apart from task-2081 (`3a39c94`), which merged after the run. task-2081 changes how `%`, `/`
+and `||` read the connection's settings, and it rewrote the two selective correlated workloads to
+filter with `a.id % 100 = 0` in place of `a.id + 0 > 396`, which keeps the same four rows. Every
+number on this page is that run unless a section says otherwise. It was taken in a
 quiet window: the other two agents working in this repository were paused, their process lists were
 checked empty before the first reading, and the box read 14% busy with nothing of theirs running.
 
@@ -466,13 +469,6 @@ build before task-2074 exited at once, because the worktree it was built in had 
 the SQLite oracle; they are not counted. The gate refuses without the oracle, but only a pass that
 takes two seconds instead of two and a half minutes shows it. Every output is in
 `_agent_output/task-2082-txn-large/` in the main checkout.
-
-**Every pass in this section ran without a processor affinity mask**, so by what task-2064 found the
-same day this engine's arm was on the efficiency cores and SQLite's on the performance cores. The
-comparisons between builds are like for like, because every build ran the same way; the absolute
-milliseconds are efficiency core figures, and so is the `read.join` bound that followed SQLite's arm.
-The published run at the top of this page, pinned, reads `txn.large` at 2.76 ms and `join.range` at
-28.57 ms on this engine's arm.
 
 
 ### What a statement costs before it reaches a tree
