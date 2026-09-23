@@ -680,34 +680,54 @@ SQLite's own rule. The last clause may omit its target and is then the catch-all
 | Operator precedence | yes | **yes** |
 | String comparison and BINARY collation | yes | **yes** |
 
-### Collations - 5 of 5, and one measured difference
+### Collations - 5 of 5
 
 | feature | SQLite 3.53.4 | inillucent |
 |---|---|---|
 | BINARY, NOCASE and RTRIM | yes | **yes** |
 | COLLATE in a column definition | yes | **yes** |
 | COLLATE in ORDER BY | yes | **yes** |
+| COLLATE in ORDER BY, GROUP BY and DISTINCT over a BINARY index | yes | **yes** |
 | A unique index under NOCASE | yes | **yes** |
 | PRAGMA collation_list | yes | **yes** |
-| NOCASE over text holding a NUL | stops at the NUL | **compares past it** |
+| NOCASE over text holding a NUL | stops at the NUL | **stops at the NUL** |
 
-**The NUL row, measured.** SQLite's `NOCASE` is `sqlite3StrNICmp`, a C string
-walk whose loop condition includes `*a != 0`: it stops at the first NUL in the
-left operand, compares the two bytes at that position, and a tie there falls
-through to the byte lengths. So `x'0061'` sorts before `x'000079'` there and
-after it here, where the comparison reads every byte.
-
-It is recorded rather than matched because `Collation::NoCase` is declared order
-preserving in keys, which is what lets an index on `s COLLATE NOCASE` answer an
-`ORDER BY` by walking rather than by sorting: the key encoder lowercases the
-bytes and their natural order is the collation's order. SQLite's rule is not
-reachable that way - under it `x'0061'` sorts before `x'000079'` while their
-lowercased bytes sort the other way - so matching it means either dropping that
-optimisation for every `NOCASE` index or keeping two orders that disagree with
-each other. The difference is reachable only through `CAST(x'..' AS TEXT)` or a
+**The NUL row.** SQLite's `NOCASE` is `sqlite3StrNICmp`, a C string walk whose
+loop condition includes `*a != 0`. At a NUL in the left operand it stops and
+compares the two bytes at that position. When both are NULs that is a tie, the
+bytes after it are never read, and the comparison falls through to the byte
+lengths. So `x'0061'` sorts before `x'000079'`, and `x'0061'` equals
+`x'0062'`. Until task-2079 this engine read every byte and put `x'000079'`
+first. The difference is reachable only through `CAST(x'..' AS TEXT)` or a
 bound parameter holding a NUL, because no SQL string literal can carry one.
-`inillucent-compat::ordering::nocase_stops_at_an_embedded_nul_in_sqlite_and_not_here`
-asserts both sides and fails if either moves.
+
+An index on `s COLLATE NOCASE` still answers an `ORDER BY` by walking, because
+SQLite's rule has a byte form whose natural order is the rule's order: the
+folded bytes before the first NUL, the NUL, then the value's whole length as
+eight big endian bytes. That is `nocase_key_bytes` in
+`crates/inillucent-value/src/collation.rs`, and its unit test checks it against
+a transcription of `sqlite3StrNICmp` over every pair of 781 short strings.
+`inillucent-compat::ordering::nocase_stops_at_an_embedded_nul_as_sqlite_does`
+checks the scan, the index walk, a range, `GROUP BY` and `DISTINCT` against
+the oracle, and a seek with a bound key against the rows SQLite's rule selects.
+
+**An index on `COLLATE NOCASE` built before task-2079 that holds text with a
+NUL is stored in the old order.** Measured on a file written by 0.1.2: the
+current `PRAGMA integrity_check` reports `row 2 does not sort after the row
+before it`, a seek on that index returned a row it should not have, and
+`REINDEX` on the index fixed both. An index whose text holds no NUL is
+unaffected, because for that text the key bytes did not change.
+
+**The BINARY index row.** A scan with no `WHERE` reads the narrowest tree that
+covers it, which can be an index on `s` under `BINARY`, so the rows arrive in
+byte order. Until task-2079, `ORDER BY s COLLATE NOCASE` then skipped its sort,
+`GROUP BY s COLLATE NOCASE` grouped by adjacency and `SELECT DISTINCT s COLLATE
+NOCASE` removed only adjacent duplicates, because the check that decides
+whether the walk already provides an order compared the columns and not the
+collation. With the rows `b A a B c` the three answered `A B a b c`, five
+groups and five rows, where SQLite answers `A a B b c`, three and three.
+`inillucent-compat::ordering::a_binary_walk_does_not_answer_a_nocase_order`
+checks all three against the oracle.
 
 `PRAGMA collation_list` reports five: `decimal`, `BINARY`, `NOCASE`, `RTRIM` and `uint`. `decimal`
 compares two numeric strings by value rather than by bytes, and `uint` compares a string of digits by

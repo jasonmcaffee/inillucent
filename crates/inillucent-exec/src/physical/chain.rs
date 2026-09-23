@@ -746,7 +746,7 @@ fn grouping_of(
         select.group_by.iter().map(expression_collation).collect();
     let grouped_walk = plan.aggregation == AggregationMode::Grouped
         && !prepared.forced.hash_group
-        && (is_scan_prefix(&group_exprs, scan_order)
+        && (is_scan_prefix(&group_exprs, &group_collations, scan_order)
             || (is_reverse_scan(prepared) && plan.grouped_walk));
     Ok((group_exprs, group_collations, grouped_walk))
 }
@@ -997,7 +997,7 @@ fn push_distinct(chain: Box<dyn Sink>, operators: &mut Listing, up: &Upward<'_>)
     let width = up.outputs.result_width;
     if up.plan.aggregation == AggregationMode::None
         && !up.prepared.forced.hash_distinct
-        && is_scan_prefix(&up.outputs.projected, &up.scan_order)
+        && is_scan_prefix(&up.outputs.projected, &collations, &up.scan_order)
     {
         operators.add(|| "DISTINCT ADJACENT".to_string());
         return Box::new(AdjacentDistinct::over(collations, width, chain));

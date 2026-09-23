@@ -72,7 +72,8 @@ fn custom_body(id: u32) -> Option<Comparator> {
 pub enum Collation {
     /// Compare the bytes, then the lengths. The default for every column.
     Binary,
-    /// Fold ASCII letters, compare, then compare the lengths.
+    /// Fold ASCII letters, compare up to a NUL both sides hold, then compare
+    /// the lengths.
     NoCase,
     /// Compare the bytes, ignoring trailing spaces on either side.
     RTrim,
@@ -215,18 +216,89 @@ fn compare_binary(left: &[u8], right: &[u8]) -> Ordering {
     }
 }
 
-/// NOCASE: fold ASCII letters over the shared prefix, then compare lengths.
+/// NOCASE: fold ASCII letters over the shared prefix, stopping at a NUL both
+/// sides hold, then compare lengths.
+///
+/// **The NUL is SQLite's rule, and it is not the obvious one.** SQLite's
+/// `nocaseCollatingFunc` calls `sqlite3StrNICmp`, a C string walk whose loop
+/// condition includes `*a != 0`. At a NUL in the left operand it stops and
+/// subtracts the two folded bytes at that position. If the right byte is not a
+/// NUL, that is an ordinary mismatch and this loop finds it the same way. If it
+/// is, the walk answers zero, the bytes after the NUL are never read, and the
+/// comparison falls through to the byte lengths. So `x'0061'` sorts before
+/// `x'000079'` by length, and `x'0061'` is equal to `x'0062'`. Reading every
+/// byte of the shared prefix, which this function did until task-2079, put
+/// `x'000079'` first.
+///
+/// [`nocase_key_bytes`] is the byte transformation whose natural order is this
+/// order, and the two have to change together.
+///
+/// @param left - the left operand, UTF-8
+/// @param right - the right operand, UTF-8
 fn compare_nocase(left: &[u8], right: &[u8]) -> Ordering {
     let shared = left.len().min(right.len());
     for index in 0..shared {
-        let left_byte = left.get(index).copied().unwrap_or(0).to_ascii_lowercase();
-        let right_byte = right.get(index).copied().unwrap_or(0).to_ascii_lowercase();
-        match left_byte.cmp(&right_byte) {
+        let left_byte = left.get(index).copied().unwrap_or(0);
+        let right_byte = right.get(index).copied().unwrap_or(0);
+        if left_byte == 0 && right_byte == 0 {
+            break;
+        }
+        match left_byte
+            .to_ascii_lowercase()
+            .cmp(&right_byte.to_ascii_lowercase())
+        {
             Ordering::Equal => continue,
             other => return other,
         }
     }
     left.len().cmp(&right.len())
+}
+
+/// Appends the bytes whose natural order is NOCASE's order for one value.
+///
+/// Without a NUL this is the value with `A`-`Z` folded to lower case. With one,
+/// it is the folded bytes before the first NUL, then that NUL, then the
+/// value's whole length as eight big-endian bytes, and nothing of what follows
+/// the NUL.
+///
+/// **Why that is the collation's order.** Take two values whose folded bytes
+/// agree up to some position. If they first differ there by a byte that is not
+/// a NUL on both sides, both forms hold those two bytes there - a folded letter
+/// is never zero - and both orders are decided by them. If one value ends
+/// there, it is the shorter form and the shorter value. If both hold a NUL
+/// there, [`Collation::compare_bytes`] stops and compares the lengths, and the
+/// two forms hold equal bytes up to the NUL and then two lengths of the same
+/// width, which compare as the numbers do. Two values of one length that agree
+/// up to a shared NUL are equal under NOCASE and their forms are identical,
+/// which is what lets a `UNIQUE` index or a `DISTINCT` see them as one value.
+///
+/// A key encoder escapes these bytes as it escapes any payload, and escaping
+/// keeps byte order. So the key order is the collation order and
+/// [`Collation::is_order_preserving_in_keys`] stays true for NOCASE.
+///
+/// Returns whether the value held a NUL, which is whether anything this
+/// appended is a zero byte. A key encoder that escapes zeros can skip its own
+/// scan for one when this says no, so the NUL rule costs the index build no
+/// second pass over the text.
+///
+/// @param bytes - the value, UTF-8
+/// @param out - the buffer to append to
+pub fn nocase_key_bytes(bytes: &[u8], out: &mut Vec<u8>) -> bool {
+    let start = out.len();
+    let before_nul = match bytes.iter().position(|byte| *byte == 0) {
+        None => bytes,
+        Some(at) => bytes.get(..at).unwrap_or(bytes),
+    };
+    out.extend_from_slice(before_nul);
+    if let Some(folded) = out.get_mut(start..) {
+        folded.make_ascii_lowercase();
+    }
+    if before_nul.len() == bytes.len() {
+        return false;
+    }
+    out.push(0);
+    out.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+    true
 }
 
 /// RTRIM: BINARY, except that a longer string whose tail is all spaces is
@@ -548,6 +620,134 @@ mod tests {
             Collation::NoCase.compare_bytes("\u{c9}".as_bytes(), "\u{e9}".as_bytes()),
             Ordering::Equal
         );
+    }
+
+    /// SQLite's `nocaseCollatingFunc`, transcribed from `main.c` and `util.c`
+    /// with the pointer walk kept as it is written there.
+    ///
+    /// @param left - the left operand
+    /// @param right - the right operand
+    fn sqlite_nocase(left: &[u8], right: &[u8]) -> Ordering {
+        // sqlite3StrNICmp(zLeft, zRight, N):
+        //   while( N-- > 0 && *a!=0 && UpperToLower[*a]==UpperToLower[*b]){ a++; b++; }
+        //   return N<0 ? 0 : UpperToLower[*a] - UpperToLower[*b];
+        let mut remaining = left.len().min(right.len()) as i64;
+        let mut at = 0usize;
+        let mut difference = 0i32;
+        loop {
+            let more = remaining > 0;
+            remaining -= 1;
+            if !more {
+                break;
+            }
+            let a = left[at].to_ascii_lowercase();
+            let b = right[at].to_ascii_lowercase();
+            if left[at] == 0 || a != b {
+                difference = i32::from(a) - i32::from(b);
+                break;
+            }
+            at += 1;
+        }
+        if remaining < 0 {
+            difference = 0;
+        }
+        // nocaseCollatingFunc: if( 0==r ) r = nKey1-nKey2;
+        if difference == 0 {
+            left.len().cmp(&right.len())
+        } else {
+            difference.cmp(&0)
+        }
+    }
+
+    /// Every string of up to four bytes over NUL, `a`, `A`, `b` and `y`.
+    fn short_strings() -> Vec<Vec<u8>> {
+        let alphabet = [0u8, b'a', b'A', b'b', b'y'];
+        let mut all: Vec<Vec<u8>> = vec![Vec::new()];
+        let mut layer: Vec<Vec<u8>> = vec![Vec::new()];
+        for _ in 0..4 {
+            let mut next = Vec::new();
+            for prefix in &layer {
+                for byte in alphabet {
+                    let mut grown = prefix.clone();
+                    grown.push(byte);
+                    next.push(grown);
+                }
+            }
+            all.extend(next.iter().cloned());
+            layer = next;
+        }
+        all
+    }
+
+    /// NOCASE agrees with SQLite's own walk on every pair of short strings,
+    /// NULs included (task-2079).
+    ///
+    /// 781 strings, so 609,961 ordered pairs. The two cases the ticket names
+    /// are asserted by value as well, so a reader does not have to trust the
+    /// transcription to see what the rule says.
+    #[test]
+    fn nocase_matches_sqlite_at_an_embedded_nul() {
+        assert_eq!(
+            Collation::NoCase.compare_bytes(b"\0a", b"\0\0y"),
+            Ordering::Less
+        );
+        assert_eq!(
+            Collation::NoCase.compare_bytes(b"\0a", b"\0b"),
+            Ordering::Equal
+        );
+        assert_eq!(
+            Collation::NoCase.compare_bytes(b"A\0z", b"a\0b"),
+            Ordering::Equal
+        );
+        assert_eq!(
+            Collation::NoCase.compare_bytes(b"a\0", b"ab"),
+            Ordering::Less
+        );
+        let strings = short_strings();
+        assert_eq!(strings.len(), 781);
+        for left in &strings {
+            for right in &strings {
+                assert_eq!(
+                    Collation::NoCase.compare_bytes(left, right),
+                    sqlite_nocase(left, right),
+                    "{left:?} against {right:?}"
+                );
+            }
+        }
+    }
+
+    /// The bytes `nocase_key_bytes` produces order every pair exactly as
+    /// NOCASE does, which is what keeps a NOCASE index ordered (task-2079).
+    #[test]
+    fn nocase_key_bytes_order_is_the_nocase_order() {
+        let strings = short_strings();
+        let keys: Vec<Vec<u8>> = strings
+            .iter()
+            .map(|value| {
+                let mut out = Vec::new();
+                nocase_key_bytes(value, &mut out);
+                out
+            })
+            .collect();
+        for (left, left_key) in strings.iter().zip(&keys) {
+            for (right, right_key) in strings.iter().zip(&keys) {
+                assert_eq!(
+                    left_key.cmp(right_key),
+                    Collation::NoCase.compare_bytes(left, right),
+                    "{left:?} against {right:?}"
+                );
+            }
+        }
+        // And the form itself, for the case with a NUL: the folded bytes before
+        // it, the NUL, the whole length, and nothing after.
+        let mut out = vec![0xEE];
+        assert!(nocase_key_bytes(b"Ab\0CD", &mut out));
+        assert_eq!(out, [0xEE, b'a', b'b', 0, 0, 0, 0, 0, 0, 0, 0, 5]);
+        // Without a NUL it is the folded bytes and nothing else, and it says
+        // so, which is what lets the key encoder skip its scan for a zero.
+        let mut plain = Vec::new();
+        assert!(!nocase_key_bytes(b"AbC", &mut plain));
+        assert_eq!(plain, b"abc");
     }
 
     /// RTRIM ignores trailing spaces on either side, and only trailing spaces.

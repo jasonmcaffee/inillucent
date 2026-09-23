@@ -53,7 +53,7 @@
 //! interior pages store [`order_preserving_int`] and nothing else: eight bytes,
 //! no class byte, no tail.
 
-use inillucent_value::collation::Collation;
+use inillucent_value::collation::{nocase_key_bytes, Collation};
 
 use crate::datum::Datum;
 
@@ -154,13 +154,18 @@ pub fn encode_into_with(value: &Datum<'_>, collation: Collation, out: &mut Vec<u
             out.push(class::TEXT);
             // Folded straight into the buffer. Collecting a `Vec` first was one
             // heap allocation per value, which on the index-build path is one
-            // per row.
+            // per row. `nocase_key_bytes` also applies SQLite's rule for a NUL,
+            // which is a length after the first NUL rather than the bytes after
+            // it (task-2079); its own comment says why that is still an order.
             let start = out.len();
-            out.extend_from_slice(bytes);
-            if let Some(folded) = out.get_mut(start..) {
-                folded.make_ascii_lowercase();
+            if nocase_key_bytes(bytes, out) {
+                escape_in_place(out, start);
+            } else {
+                // No NUL in the value means no zero byte in what was appended,
+                // so only the terminator is needed.
+                out.push(0x00);
+                out.push(0x00);
             }
-            escape_in_place(out, start);
         }
         (Datum::Text(bytes), Collation::RTrim) => {
             out.push(class::TEXT);
@@ -375,6 +380,46 @@ mod tests {
         let binary_plain = encode_with(&[Datum::Text(b"abc")], &[Collation::Binary]);
         let binary_padded = encode_with(&[Datum::Text(b"abc   ")], &[Collation::Binary]);
         assert_ne!(binary_plain.as_bytes(), binary_padded.as_bytes());
+    }
+
+    /// A NOCASE key orders text holding a NUL as SQLite's NOCASE does, with a
+    /// second column after it (task-2079).
+    ///
+    /// The length written after the first NUL is eight bytes, several of them
+    /// zero, and they are escaped like any payload byte. The rowid column after
+    /// the text is what shows the escaped length does not run into the next
+    /// column: two values equal under NOCASE must still be ordered by it.
+    #[test]
+    fn a_nocase_key_orders_an_embedded_nul_as_sqlite_does() {
+        let texts: [&[u8]; 9] = [
+            b"", b"\0", b"\0a", b"\0B", b"\0\0y", b"a", b"A\0z", b"a\0bc", b"ab",
+        ];
+        let mut tuples: Vec<(&[u8], i64)> = Vec::new();
+        for text in texts {
+            for rowid in [-1_i64, 0, 256] {
+                tuples.push((text, rowid));
+            }
+        }
+        for (left_text, left_rowid) in &tuples {
+            let left = encode_with(
+                &[Datum::Text(left_text), Datum::Int(*left_rowid)],
+                &[Collation::NoCase],
+            );
+            for (right_text, right_rowid) in &tuples {
+                let right = encode_with(
+                    &[Datum::Text(right_text), Datum::Int(*right_rowid)],
+                    &[Collation::NoCase],
+                );
+                let expected = Collation::NoCase
+                    .compare_bytes(left_text, right_text)
+                    .then(left_rowid.cmp(right_rowid));
+                assert_eq!(
+                    left.as_bytes().cmp(right.as_bytes()),
+                    expected,
+                    "{left_text:?}/{left_rowid} against {right_text:?}/{right_rowid}"
+                );
+            }
+        }
     }
 
     /// A NaN encodes above every real value, and does so consistently in both

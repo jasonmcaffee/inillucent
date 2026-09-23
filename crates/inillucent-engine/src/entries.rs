@@ -60,7 +60,7 @@ use inillucent_tree::datum::Datum;
 use inillucent_tree::key;
 use inillucent_tree::paged::KeyEncoding;
 use inillucent_tree::types::compare_under;
-use inillucent_value::collation::Collation;
+use inillucent_value::collation::{nocase_key_bytes, Collation};
 
 /// How many machine words of the encoded key an entry keeps.
 ///
@@ -541,9 +541,19 @@ fn clip<'a>(bytes: &'a [u8], collation: Collation, folded: &'a mut Vec<u8>) -> &
         }
         Collation::NoCase => {
             // Lowercasing commutes with clipping, so only the prefix is folded.
+            // A NUL inside the prefix is the exception: the key encoder writes
+            // the value's whole length after it (task-2079), and a clip cannot
+            // know that length, so the whole value is transformed and the
+            // result clipped instead.
             folded.clear();
-            folded.extend_from_slice(bytes.get(..PREFIX_BYTES).unwrap_or(bytes));
-            folded.make_ascii_lowercase();
+            let head = bytes.get(..PREFIX_BYTES).unwrap_or(bytes);
+            if head.contains(&0) {
+                nocase_key_bytes(bytes, folded);
+                folded.truncate(PREFIX_BYTES);
+            } else {
+                folded.extend_from_slice(head);
+                folded.make_ascii_lowercase();
+            }
             folded.as_slice()
         }
         Collation::RTrim => {
@@ -733,6 +743,44 @@ mod tests {
             })
             .collect();
         assert_eq!(rowids, vec![1, 2, 3]);
+    }
+
+    /// A NOCASE prefix follows SQLite's rule for a NUL, so the radix and the
+    /// tree's comparison agree about values that hold one (task-2079).
+    ///
+    /// Under that rule the bytes after a value's first NUL do not count and its
+    /// length does. A prefix folded byte by byte, as `clip` did before, would
+    /// put `"\0\0y"` before `"\0a"` while the comparison puts it after.
+    #[test]
+    fn a_nocase_prefix_stops_at_a_nul_as_the_comparison_does() {
+        let rows: Vec<(&str, i64)> = vec![
+            ("\0\0y", 1),
+            ("\0a", 2),
+            ("\0B", 3),
+            ("A\0zzzzzzzzzzzzzzzzzzzz", 4),
+            ("a\0b", 5),
+            ("a", 6),
+            ("ab", 7),
+            ("abcdefghijklmnopq\0x", 8),
+            ("ABCDEFGHIJKLMNOPQ\0", 9),
+            ("\0", 10),
+            ("", 11),
+        ];
+        let set = set_under(&rows, Collation::NoCase);
+        let mut expected: Vec<u32> = (0..set.len() as u32).collect();
+        expected.sort_by(|left, right| set.compare(*left, *right));
+        assert_eq!(set.order(), expected);
+        let rowids: Vec<i64> = set
+            .order()
+            .iter()
+            .map(|entry| match set.datum(*entry as usize, 1) {
+                Datum::Int(number) => number,
+                _ => 0,
+            })
+            .collect();
+        // `"\0a"` and `"\0B"` are one value, so the rowid orders them, and both
+        // come before `"\0\0y"` because they are shorter.
+        assert_eq!(rowids, vec![11, 10, 2, 3, 1, 6, 5, 4, 7, 9, 8]);
     }
 
     /// RTRIM trims the whole value before the prefix is clipped.
