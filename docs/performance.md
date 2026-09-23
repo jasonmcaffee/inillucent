@@ -125,18 +125,27 @@ taken inside a running program.
 `weight` is what the contract gives the family in the headline. `bar` is what the contract asks of
 it, expressed as the family's own ratio.
 
-| family | weight | what it measures | measured | 95% lower bound | bar |
-|---|---|---|---|---|---|
-| `read.point` | 16% | one row by rowid, by integer key, and through a secondary index | **2,885% faster** (29.85x) | 26.75x | 2.00x, met |
-| `large.values` | 4% | text and blobs across the boundary where a value stops fitting in a leaf | **1,135% faster** (12.35x) | 9.14x | 1.50x, met |
-| `read.analytical` | 10% | scans, aggregates, `GROUP BY`, `DISTINCT`, sorts | **971% faster** (10.71x) | 8.45x | 5.00x, met |
-| `read.range` | 12% | selective ranges, forward and reverse, covering and not | **402% faster** (5.02x) | 3.95x | 3.00x, met |
-| `read.join` | 8% | two table and four table joins | **321% faster** (4.21x) | 2.80x | 3.00x, missed on the lower bound |
-| `write` | 20% | insert, update, delete, upsert, with and without indexes | **204% faster** (3.04x) | 2.42x | 1.50x, met |
-| `transaction` | 10% | autocommit, small batches, large batches, savepoints | **137% faster** (2.37x) | 1.89x | no slower than SQLite, met |
-| `extension` | 8% | JSON, FTS5, R-Tree | **73% faster** (1.73x) | 1.55x | 1.50x, met on three runs of four |
-| `open.prepare` | 8% | parse, bind, step one row, reset | **69% faster** (1.69x) | 1.27x | 5.00x, missed |
-| `schema` | 4% | `CREATE INDEX` and its backfill | **31% faster** (1.31x) | 0.94x | 3.00x, missed |
+**The two lower bound columns are two different statistics.** `pooled` is what every gate printed
+until task-2093: both workloads' rounds in one list, bootstrapped, from the four runs above. That
+bound mostly measures how far apart a family's workloads are. `per round` is what the gates print
+now: one value a round, the mean of that round's log ratios over the family's workloads, with the
+rounds resampled. It is the lowest and highest of four pinned passes task-2093 took of `main` at
+`16c01a4` with the change applied, on 2026-09-23. [How a family's interval is
+computed](#how-a-familys-interval-is-computed-task-2093) has both statistics side by side, printed
+from the same samples.
+
+| family | weight | what it measures | measured | 95% lower bound, pooled | 95% lower bound, per round | bar |
+|---|---|---|---|---|---|---|
+| `read.point` | 16% | one row by rowid, by integer key, and through a secondary index | **2,885% faster** (29.85x) | 26.75x | 28.43x to 29.26x | 2.00x, met |
+| `large.values` | 4% | text and blobs across the boundary where a value stops fitting in a leaf | **1,135% faster** (12.35x) | 9.14x | 9.56x to 12.26x | 1.50x, met |
+| `read.analytical` | 10% | scans, aggregates, `GROUP BY`, `DISTINCT`, sorts | **971% faster** (10.71x) | 8.45x | 10.39x to 10.81x | 5.00x, met |
+| `read.range` | 12% | selective ranges, forward and reverse, covering and not | **402% faster** (5.02x) | 3.95x | 4.79x to 4.99x | 3.00x, met |
+| `read.join` | 8% | two table and four table joins | **321% faster** (4.21x) | 2.80x | 4.08x to 4.27x | 3.00x, met on the per round bound, missed on the pooled one |
+| `write` | 20% | insert, update, delete, upsert, with and without indexes | **204% faster** (3.04x) | 2.42x | 2.62x to 2.80x | 1.50x, met |
+| `transaction` | 10% | autocommit, small batches, large batches, savepoints | **137% faster** (2.37x) | 1.89x | 1.86x to 1.99x | no slower than SQLite, met |
+| `extension` | 8% | JSON, FTS5, R-Tree | **73% faster** (1.73x) | 1.55x | 1.54x to 1.67x | 1.50x, met on all four per round passes, by 2.7% at the narrowest |
+| `open.prepare` | 8% | parse, bind, step one row, reset | **69% faster** (1.69x) | 1.27x | 1.66x to 1.69x | 5.00x, missed |
+| `schema` | 4% | `CREATE INDEX` and its backfill | **31% faster** (1.31x) | 0.94x | 0.85x to 1.30x | 3.00x, missed |
 
 **The release condition is that no required family is below the 1.00x floor, and one of the four
 runs met it.** `schema`'s lower bound read 0.94x, 0.81x and 0.95x on the first three runs and 1.30x
@@ -157,14 +166,17 @@ with `extension.fts.build` at 0.56x to 0.58x and `extension.fts.query` at 1.70x 
 its own, against the 1.43x the reverted segment format left it at. That run is the measurement
 [the roadmap](roadmap.md#1-the-extension-and-join-families-either-side-of-their-bars) argues from.
 
-**`read.join` misses its bar on the lower bound, on all four runs**, at 2.73x, 2.83x, 2.78x and 2.90x
-against a 3.00x requirement, with the family reading 4.21x. `join.selective` reads 20.94x and
-`join.range` **0.84x**; the range join is the slow half and it is what holds the bound under the
-requirement. task-2082 measured `join.range` on three builds across 27 passes and found this engine's
-time for it unchanged on every one; the bound moves with SQLite's arm of the same workload.
-[Why `read.join` misses its 3.00x bar, and when it last met it](#why-readjoin-misses-its-300x-bar-and-when-it-last-met-it)
-has task-2086's pinned history: the bar was never measured, the lower bound mostly measures the
-gap between the two workloads, and `join.range` lost 26% of this engine's time since task-1833.
+**`read.join` meets its 3.00x bar once the family is graded by the per round statistic.** The four
+runs above printed pooled lower bounds of 2.73x, 2.83x, 2.78x and 2.90x, with the family reading
+4.21x. `join.selective` reads 20.94x and `join.range` **0.84x**, and the pooled bound is set by how
+far apart those two are: it can be predicted from the two ratios alone to within 0.07x. Four pinned
+passes of `main` with the per round statistic read the bound at 4.27x, 4.08x, 4.18x and 4.19x.
+[How a family's interval is computed](#how-a-familys-interval-is-computed-task-2093) has the change,
+and [`read.join`'s bar under the per round statistic](#readjoins-bar-under-the-per-round-statistic)
+has the decision to keep the bar at 3.00x, with what the family reads on five builds back to
+task-1819. `join.range` is still slower than SQLite, and task-2086 found it lost 26% of this
+engine's time since task-1833; [Why `read.join` misses its 3.00x bar, and when it last met
+it](#why-readjoin-misses-its-300x-bar-and-when-it-last-met-it) has that history.
 
 A join-only run reads the family much higher - 6.46x, 6.26x, 6.14x and 5.60x, with lower bounds of
 4.11x, 4.00x, 4.02x and 3.67x, when the gate was given `--families read.join` on 2026-09-15 - and
@@ -503,8 +515,8 @@ to within 0.07x on every clean pass, at every build. For the bound to reach 3.00
 
 Resampling rounds instead, with each round's value the mean of that round's two log ratios (the
 statistic `weighted_headline` already uses for every family), reads 4.15x [4.11x, 4.21x] and 4.17x
-[4.16x, 4.25x] on two pinned passes of HEAD. That change is on the unmerged branch
-`task-2086-family-interval` and is not what the gate runs today.
+[4.16x, 4.25x] on two pinned passes of HEAD. task-2093 made that the statistic every gate uses; see
+[How a family's interval is computed](#how-a-familys-interval-is-computed-task-2093).
 
 **3. `join.range` did lose time, 26% of this engine's time, in four steps.** On the read gate's plan,
 pinned, this engine in milliseconds, forward sweep / reverse sweep, with SQLite's arm at 23.9 to
@@ -538,6 +550,156 @@ ms. The bar was not set from any measurement at all, and the statistic it is gra
 missed it on the full plan even with that 5.7 ms back. Each of these is now its own ticket. Every
 output is in `_agent_output/task-2086-read-join/` in the main checkout.
 
+### How a family's interval is computed (task-2093)
+
+**Every gate grades a family on one value a round now.** That value is the mean of that round's log
+ratios over the family's workloads, and the bootstrap resamples the rounds. The headline has always
+treated each family this way, in `weighted_headline`. `perf::family_interval` is the one function
+that computes it, and `inillucent-fullgate`, `inillucent-readgate`, `inillucent-writegate`,
+`inillucent-scorecard`, `inillucent-analytical` and `inillucent-prepareperf` all call it. A round in
+which any workload of the family has no usable time is left out whole. Keeping the other workloads'
+values would give that one round a different mix of workloads.
+
+**Until task-2093 the gates put every workload's every round into one list and bootstrapped that
+list.** A resample of that list draws the workloads in random proportions. When a family's workloads
+are far apart, the proportion moves the mean much more than timing noise does, so the interval
+measured the distance between the workloads. `read.join` is the clearest case: `join.selective`
+reads about 21x and `join.range` about 0.86x, and the pooled interval printed beside them was about
+2.8x to 6.5x. The family's composition is fixed by the plan, so the proportion of each workload is
+not a random quantity.
+
+**How it was measured.** 22 passes on 2026-09-23, 20:21:56 to 20:52:09Z, in a quiet window with the
+other two agents in this repository paused and their process lists empty. Every pass was started by
+`_agent_output/task-2093-family-statistic/pinned-walk.ps1` (main checkout), which sets affinity mask
+`0xC03C03` on the gate process and reads the mask back from the SQLite child. The child read
+`0xC03C03` on all 22 passes, and the passes of `main` also printed that mask in their own
+configuration. Medium fixture, 30 rounds, the full gate at a 32 KiB page. `main` was `16c01a4` with
+this change applied, built so that each family line is followed by the pooled figure and the per
+round figure **computed from the same samples**. The four older builds were built at their own
+commit with one extra line that prints the per round figure; the family line they already print is
+the pooled figure. Builds alternated, forward and then reverse.
+
+**The full gate on `main`, every family, four passes.** Each cell has the four passes in order.
+
+| family | bar | family ratio | pooled lower bound | met | per round lower bound | met | per round width over pooled width |
+|---|---|---|---|---|---|---|---|
+| `open.prepare` | 5.00x | 1.71, 1.69, 1.69, 1.71 | 1.28, 1.27, 1.27, 1.30 | 0 of 4 | 1.68, 1.67, 1.66, 1.69 | 0 of 4 | 0.05 to 0.07 |
+| `read.point` | 2.00x | 29.63, 29.66, 29.02, 29.21 | 26.76, 26.92, 26.37, 26.52 | 4 of 4 | 28.62, 29.26, 28.60, 28.43 | 4 of 4 | 0.13 to 0.30 |
+| `read.range` | 3.00x | 4.97, 4.91, 4.97, 5.04 | 3.87, 3.85, 3.90, 3.94 | 4 of 4 | 4.86, 4.79, 4.91, 4.99 | 4 of 4 | 0.04 to 0.11 |
+| `read.join` | 3.00x | 4.37, 4.15, 4.22, 4.23 | 2.90, 2.75, 2.78, 2.81 | **0 of 4** | 4.27, 4.08, 4.18, 4.19 | **4 of 4** | 0.02 to 0.05 |
+| `read.analytical` | 5.00x | 10.95, 10.56, 10.56, 10.70 | 8.54, 8.26, 8.24, 8.39 | 4 of 4 | 10.81, 10.39, 10.48, 10.62 | 4 of 4 | 0.03 to 0.06 |
+| `write` | 1.50x | 3.22, 3.20, 3.20, 3.29 | 2.81, 2.79, 2.72, 2.80 | 4 of 4 | 2.75, 2.80, 2.62, 2.72 | 4 of 4 | 0.95 to 1.20 |
+| `transaction` | 1.00x | 2.26, 2.33, 2.21, 2.21 | 1.88, 1.93, 1.82, 1.78 | 4 of 4 | 1.93, 1.99, 1.98, 1.86 | 4 of 4 | 0.52 to 0.83 |
+| `schema` | 3.00x | 1.19, 1.44, 1.48, 1.19 | 0.94, 1.30, 1.30, 0.85 | 0 of 4 | 0.94, 1.30, 1.30, 0.85 | 0 of 4 | 1.00 |
+| `extension` | 1.50x | 1.63, 1.70, 1.67, 1.63 | 1.45, 1.55, 1.51, 1.47 | **2 of 4** | 1.54, 1.67, 1.60, 1.54 | **4 of 4** | 0.14 to 0.46 |
+| `large.values` | 1.50x | 13.81, 12.10, 10.93, 12.84 | 9.92, 8.78, 7.60, 9.22 | 4 of 4 | 12.26, 11.79, 9.56, 11.43 | 4 of 4 | 0.08 to 0.47 |
+
+The read gate on `main`, two passes, reads `read.join` at 2.86x and 2.81x pooled against 4.19x and
+4.06x per round, and meets every other read family's bar under both statistics. The write gate, two
+passes, meets both of its bars under both.
+
+**The families that pass only because of the change.** On `main`: **`read.join`**, on all six passes
+of the two gates that grade it, and **`extension`**, on two of the four full gate passes, where the
+pooled bound read 1.45x and 1.47x and the per round bound 1.54x on both. On the older builds:
+`read.analytical` at `f9e2374` on all four of its passes and at `b0ba286` on both of its full gate
+passes, and `read.range` at `b0ba286` on one full gate pass of two (2.99x pooled, 3.61x per round).
+**No family goes from met to missed on any pass of any build.** No family is on a different side of
+the 1.00x floor under the two statistics on any pass: `schema` is under it on two passes of `main`,
+and `schema` has one workload, so both statistics give it the same interval.
+
+**`write` is the one family whose bound goes down.** Its per round interval is 0.95 to 1.20 times
+as wide as the pooled one, and its lower bound is lower on three passes of four (2.75x against 2.81x,
+2.62x against 2.72x, 2.72x against 2.80x). A per round mean can only vary more than the pooled list
+implies when the family's workloads are slow in the same rounds and fast in the same rounds. The
+pooled list treats every value as independent, so for `write` it claimed more precision than five
+workloads that move together have.
+
+#### What was written down before the passes ran, and what happened to it
+
+These five tests were posted on task-2093 before any pinned pass, with the statement that a failure
+of any of them would reject the per round statistic.
+
+1. **The two statistics agree on the centre.** With every workload running the same rounds, the per
+   round mean is the pooled mean. Held: the read gate prints the per round centre in its family line,
+   and on the two passes of `main` it matches the pooled mean to the second decimal on all eight
+   family readings.
+2. **A family of one workload does not change.** Held: `schema`'s two intervals are identical on
+   all ten full gate passes.
+3. **The width is timing noise, not the distance between workloads.** For a family of k workloads
+   with log half widths h, the per round log half width has to fall between 0.5 x sqrt(sum of h
+   squared) / k and 1.5 x the largest h. Held for every family on every one of the 22 passes.
+   For `read.join` the per round log half width is 0.010 to 0.057, and the pooled one is 0.31 to 0.42.
+4. **The per round bound orders builds the way the family ratio does.** Held on the full plan, where
+   the builds are `b0ba286` < `a8f45b1` < `main` < `f9e2374` by both. On the read gate's plan it held
+   for `57e87b0` at the top and `main` at the bottom. The three builds between them have family ratios
+   within 1.5% of each other (4.51x, 4.49x and 4.56x, the mean of two passes) and per round bounds of
+   4.385x, 4.38x and 4.38x, which does not order them. The pooled bound puts `b0ba286` (3.09x) above
+   `f9e2374` (3.005x), the reverse of their family ratios, because `b0ba286`'s `join.range` was faster
+   and its two workloads were closer together.
+5. **Repeat passes of one build give closer per round lower bounds than pooled ones.** **This
+   failed**: the per round bound varied more between passes on 33 of 62 groups of one build, one
+   gate and one family.
+
+**Why test 5 was the wrong test, and why the statistic is kept.** The pooled lower bound is the
+family ratio minus a width set by the distance between the workloads. That distance does not change
+between passes, so the pooled bound moves only when the family ratio moves. The per round bound
+moves when the family ratio moves and again when the noise in that pass moves. Test 5 therefore
+rewarded the statistic whose width does not respond to noise, which is the property test 3 was
+written to reject. The pooled bound fails test 3 by a factor of ten on `read.join`, so keeping it is
+not an option. A third statistic would have to pass test 5 by being wider than the noise in a single
+pass, and the next paragraph is what that would have to cover.
+
+**A single pass's interval does not cover the next pass.** On the four full gate passes of `main`,
+the family ratio moved between passes by more than the per round half width in eight of the ten
+families. `read.join` read 4.15x to 4.37x, 5.2% apart, with a per round half width of about 1.5%,
+so pass 20's interval [4.08x, 4.21x] does not contain pass 1's ratio of 4.37x. Something that is
+constant within a pass and different between passes moves every round of it together, and no
+statistic computed inside one pass can see it. The per round interval states how precisely one
+pass measured the family. It does not state what the next pass will read. **So a family whose per
+round bound is within about 5% of its bar has not settled its verdict in one pass.** `extension` is
+that family today: 1.54x at its lowest against 1.50x. The published figures on this page are four
+runs for this reason, and grading from more than one pass is task-2095.
+
+### `read.join`'s bar under the per round statistic
+
+**The bar stays at 3.00x.** Under the per round statistic, pinned, the family's lower bound on five
+builds back to task-1819, two passes each except `main`:
+
+| build | full plan, per round | full plan, pooled | read gate plan, per round | read gate plan, pooled | `join.selective` and `join.range`, full plan |
+|---|---|---|---|---|---|
+| `57e87b0`, task-1819, the first build graded | no full gate | no full gate | 4.69x, 4.52x | 3.23x, 3.18x | no full gate |
+| `b0ba286`, task-1833 | **3.23x, 3.18x** | 2.42x, 2.38x | 4.42x, 4.35x | 3.11x, 3.07x | 11.15x and 0.97x, 11.03x and 0.95x |
+| `a8f45b1`, task-1870 | 4.17x, 4.07x | 2.78x, 2.76x | 4.39x, 4.37x | 2.91x, 2.96x | 20.89x and 0.85x, 20.32x and 0.85x |
+| `f9e2374`, task-1962 | 4.33x, 4.21x | 2.92x, 2.82x | 4.56x, 4.20x | 3.04x, 2.97x | 21.27x and 0.90x, 20.62x and 0.87x |
+| `main` at `16c01a4` | 4.27x, 4.08x, 4.18x, 4.19x | 2.90x, 2.75x, 2.78x, 2.81x | 4.19x, 4.06x | 2.86x, 2.81x | 20.36x to 21.68x and 0.86x to 0.88x |
+
+**Every build since the family was first graded meets 3.00x on both plans under the per round
+statistic, and under the pooled one no build ever met it on the full plan.** The reasons for keeping
+3.00x rather than moving it:
+
+1. **3.00x is the number the contract meant, on the statistic it meant.** It is the "low estimate"
+   column of `tasks/task-1816-rearchitecture-tdd.md`, the value the TDD gives for the family's ratio,
+   and a family's ratio in that document is the geometric mean over its workloads. The per round
+   statistic grades exactly that. Nine of the ten family bars come from the same column; the tenth is
+   `read.analytical`, at 5.00x against a low estimate of 8x. The bar was never wrong. The statistic
+   that graded it was.
+2. **Moving it now would be choosing it from the measurement.** `main` reads 4.08x at its lowest. A
+   bar of 4.00x would be that reading rounded down, and `compat/perf/contract.toml` says why a
+   threshold that moves towards the measurement is not a threshold.
+3. **3.00x is within reach of builds that existed.** `b0ba286` met it on the full plan by 6%, at
+   3.18x and 3.23x, with `join.selective` at 11x. With today's `join.range` of 0.86x, the family
+   drops under 3.00x if `join.selective` falls from about 21x to about 10.5x, or if `join.range` falls
+   from 0.86x to about 0.43x. Either is a loss of half a workload's speed, which is what a family bar
+   is for.
+4. **The bar does not catch the 26% `join.range` lost since task-1833**, and it is not meant to.
+   That loss moved the family 8% on the read gate's plan (4.71x at `57e87b0` to 4.32x on `main`, the
+   mean of two passes each), and it has its own tickets, task-2091 and task-2092.
+
+`join.range` is still slower than SQLite, at 0.84x to 0.88x. The TDD's reason column for this family
+calls `join.range` at 0.015x "a planner bug" and expected the hash join to fix it. It went from 0.015x
+to 0.86x and stopped short of SQLite. It is listed in
+[the workloads that are slower](#the-workloads-that-are-slower), and the family bar says nothing
+about it. Every output is in `_agent_output/task-2093-family-statistic/` in the main checkout.
 
 ### What a statement costs before it reaches a tree
 

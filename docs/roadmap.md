@@ -17,6 +17,15 @@ three runs of four. `read.join` reads 4.21x with lower bounds of 2.73x, 2.83x, 2
 misses its 3.00x requirement on all four. [Performance](performance.md#by-family) has both. The rest
 of this item is how each got here.
 
+**Those lower bounds are the pooled statistic, and task-2093 replaced it.** A pooled bound mostly
+measures how far apart a family's workloads are. Graded one round at a time, four pinned passes of
+`main` read `read.join`'s lower bound at 4.27x, 4.08x, 4.18x and 4.19x, so **`read.join` meets its
+3.00x bar**, and the bar stays at 3.00x; every build since task-1819 meets it that way.
+`extension` reads 1.54x, 1.67x, 1.60x and 1.54x, so it meets its bar on all four passes, by 2.7% at
+the narrowest, which one pass does not settle (task-2095).
+[Performance](performance.md#how-a-familys-interval-is-computed-task-2093) has both statistics for
+every family. `read.join` stays on this list for `join.range`, which is still slower than SQLite.
+
 task-2086 walked `read.join` back through history, pinned, in
 [Performance](performance.md#why-readjoin-misses-its-300x-bar-and-when-it-last-met-it), and it has three follow-up tickets.
 

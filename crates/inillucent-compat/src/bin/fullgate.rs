@@ -107,6 +107,14 @@ const SEED: u64 = 0x5eed_1833;
 /// bars the earlier phases were measured against and are carried so that a
 /// Phase 4 change that cost a read family shows up here rather than in Phase 5.
 /// `open.prepare` takes the TDD's own low estimate of 5x.
+///
+/// Each bar is a bar on the family's geometric mean over its workloads, which
+/// is what `perf::family_interval` grades. `read.join`'s 3.00x missed on every
+/// build until task-2093, because the statistic that graded it measured the
+/// distance between `join.selective` and `join.range`. task-2093 kept it at
+/// 3.00x: it is the TDD's number for the statistic the TDD meant, and every
+/// build since task-1819 meets it under that statistic, `b0ba286` by 6% on this
+/// gate's plan. `docs/performance.md` has the five builds.
 const FAMILIES: [(&str, f64); 10] = [
     ("open.prepare", 5.0),
     ("read.point", 2.0),

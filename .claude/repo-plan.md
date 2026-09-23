@@ -672,12 +672,23 @@ they are touching do not collide; two that have not, do.
   writes, so no write change can reach a read workload's leaves at all. And pin the gate before you
   compare it with anything: unpinned, the scheduler put this engine on the efficiency cores and SQLite
   on the performance cores (task-2064), and task-2085 makes the gates pin themselves. (task-2082)
-- **A family's lower bound in every gate is mostly the gap between its workloads, not noise.**
-  fullgate, readgate, writegate and scorecard all bootstrap one list of every workload's every round.
-  For `read.join` (21x and 0.87x) that gives [2.8x, 6.5x] around two workloads each measured to
-  within 2%, and the printed bound is predicted from the two ratios alone to within 0.07x. Before
-  reading a family's bound as a regression, compute it from the per-workload rows. The fix that
-  resamples rounds is on the unmerged branch `task-2086-family-interval`. (task-2086)
+- **A family's lower bound printed before task-2093 is mostly the gap between its workloads.**
+  Until then every gate bootstrapped one list of every workload's every round; for `read.join` (21x
+  and 0.87x) that gave [2.8x, 6.5x] around two workloads each measured to within 2%. Every gate now
+  calls `perf::family_interval`, one value a round, rounds resampled. Do not compare a family bound
+  from before task-2093 with one from after it; compare the family ratio, which is the same under
+  both. (task-2086, task-2093)
+- **A family's per round interval covers one pass, not the next one.** On four pinned full gate
+  passes of `main`, eight of ten families moved between passes by more than their interval's half
+  width; `read.join` moved 5.2% against a half width of 1.5%. A family within about 5% of its bar
+  needs several passes before its verdict means anything. `extension` is that family now. (task-2093,
+  follow up task-2095)
+- **To print two statistics from the same samples, build twice, not run twice.** task-2093 built
+  `main` with an extra line after each family line, copied the binaries to
+  `_agent_output/task-2093-family-statistic/bin/both/` (main checkout), then restored the sources by
+  name. The older builds got the same one extra line through `perf.rs` and the gate's family loop.
+  Two separate runs would leave every difference open to the objection that the samples differed.
+  (task-2093)
 - **To walk a gate back through history, pin from outside and use the read gate.** Builds before
   `d389021` cannot pin themselves, so `_agent_output/task-2086-read-join/pinned-walk.ps1` (main
   checkout) sets `0xC03C03` on the gate process and reads the SQLite child's mask back on every pass.

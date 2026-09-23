@@ -1597,6 +1597,13 @@ the family reading 4.21x. `join.range` at 0.84x is the half that holds it down. 
 that workload's time on this engine across three builds and 27 passes and found it unchanged; the
 bound follows SQLite's arm of the same workload.
 
+**Every lower bound in the table above is the pooled statistic**, which the gates used until
+task-2093: every workload's every round in one list, bootstrapped. That bound mostly measures how
+far apart a family's workloads are. The gates now resample rounds, and four pinned passes of `main`
+read `read.join`'s lower bound at 4.08x to 4.27x, which meets the bar, and `extension`'s at 1.54x to
+1.67x. [Performance](performance.md#how-a-familys-interval-is-computed-task-2093) has both statistics
+from the same samples for every family.
+
 **`read.analytical` is 10.71x**, with a lower bound of 8.45x against the 5.00x the bar grades.
 `scan.aggregate` reads **52.09x** and `scan.group` **27.72x**, where they read 11.54x and 7.96x before
 task-2000 made `count(*)` one addition a batch rather than one accumulator call a row. `scan.sort`
