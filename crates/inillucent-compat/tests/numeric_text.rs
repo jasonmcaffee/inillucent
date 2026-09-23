@@ -8,47 +8,40 @@
 //!
 //! ## What is graded
 //!
-//! `printf('%s', <real>)` and the default rendering, which is what a `SELECT`
-//! prints (task-2066 section 4.4.14). Both go through the shell, because the
-//! shell is what turns a value into characters.
+//! `printf('%s', <real>)`, the default rendering, which is what a `SELECT`
+//! prints, and `printf('%.20g', <real>)` (task-2066 section 4.4.14). A second
+//! test grades the `!`, `#` and `,` flags on the real conversions (task-2080).
+//! Everything goes through the shell, because the shell is what turns a value
+//! into characters.
 //!
-//! The population is twenty-four named doubles and two hundred generated ones.
+//! The population is twenty-four named doubles and a thousand generated ones.
 //! The named ones are the places a renderer goes wrong: negative zero, the
 //! smallest subnormal, the boundary between the subnormals and the normals,
 //! the largest finite double, `2^53` and `2^53 + 1`, and the run from fifteen
 //! to seventeen significant digits where the shortest representation that
 //! reads back as the same double changes length.
 //!
-//! ## The one difference, and why it is a ceiling rather than zero
+//! ## Why the answer is exact agreement, with no allowance
 //!
-//! Seven of the 672 statements this file runs disagree, and all seven are the
-//! final digit of the mantissa. Neither engine emits the shortest
-//! representation for those values - for `-8.24034521633578e-167` both print
-//! seventeen digits where fifteen read back as the same double - and they round
-//! the seventeenth differently. Measured against the exact decimal expansion of
-//! the double: SQLite's digit is the nearer one on that value and this engine's
-//! is the nearer one on `printf('%.20g', 3.1643187021860255e-168)`, so neither
-//! is simply better and this is not a defect with a side.
+//! Until task-2080 this file allowed seven statements to differ in their last
+//! digit. They were random doubles with large exponents, such as
+//! `1.1304293785495057e251`, which SQLite prints with a final `7` and this
+//! engine printed with a final `8`. Neither engine prints the shortest
+//! representation for those values, and SQLite does not print the correctly
+//! rounded seventeenth digit either: `sqlite3FpDecode` multiplies the binary
+//! significand by an approximation of a power of ten, so its last digit is
+//! sometimes the nearer one and sometimes not. This engine used Rust's
+//! correctly rounded conversion and then rounded a second time.
 //!
-//! One in a hundred random doubles, and none of the twenty-four named ones.
-//! task-2080 is where the argument for closing it lives.
-//!
-//! So the claim is exact agreement on structure and a counted allowance on the
-//! last digit. A structural difference - a different exponent, a different
-//! number of digits, a missing sign - fails whatever the count says, and the
-//! count itself is asserted, so a change that widened the disagreement to four
-//! values fails too.
+//! That was closed by rendering through a transcription of `sqlite3FpDecode`,
+//! `inillucent_value::fpdecode`, so the digits are SQLite's by construction. A
+//! last digit that differs now is a defect in that transcription, and the test
+//! fails on it rather than counting it.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use inillucent_compat::workspace_root;
-
-/// How many of the statements may disagree, and only in their last digit.
-///
-/// Measured, not chosen. Raising it is a decision about compatibility and
-/// belongs in a commit message.
-const ALLOWED_LAST_DIGIT_DIFFERENCES: usize = 7;
 
 /// The doubles a renderer gets wrong, named rather than generated.
 ///
@@ -87,6 +80,39 @@ const NAMED: &[&str] = &[
     "3.141592653589793",
     "2.718281828459045",
 ];
+
+/// The conversions the ordinary test runs on every value, with `{}` for it.
+///
+/// `%s`, the default rendering, and `%.20g`, which is the widest ordinary way
+/// to ask for a number and the one that exposes a difference in how many
+/// digits an engine believes it has.
+const ORDINARY: &[&str] = &["printf('%s', {})", "{}", "printf('%.20g', {})"];
+
+/// The conversions the flag test runs on every value, with `{}` for it.
+///
+/// The `!` flag with a precision stops at the digits SQLite's decoder
+/// produced, which is eighteen for pi and nineteen for `0.1`, and removes the
+/// trailing zeros. Without a precision it still removes them, so `%!e` of
+/// `0.1` is `1.0e-01`. `%!.17g` is the one precision at which SQLite tries a
+/// shorter string. `#` keeps the point and drops the sign of a negative value
+/// that displays as zero, and `,` groups a `%g` that chose the fixed form.
+const FLAGGED: &[&str] = &[
+    "printf('%!.20g', {})",
+    "printf('%!.25e', {})",
+    "printf('%!.25f', {})",
+    "printf('%!e', {})",
+    "printf('%!f', {})",
+    "printf('%!g', {})",
+    "printf('%!.17g', {})",
+    "printf('%!.0e', {})",
+    "printf('%#g', {})",
+    "printf('%#.0f', {})",
+    "printf('%,.10g', {})",
+    "printf('%.20e', {})",
+];
+
+/// A fixed seed, so a failure names a population somebody else can rebuild.
+const SEED: u64 = 20_662_014;
 
 /// Returns the pinned reference shell, when it has been built.
 fn reference() -> Option<PathBuf> {
@@ -138,19 +164,25 @@ fn generated(seed: u64, count: usize) -> Vec<String> {
     made
 }
 
+/// Returns the named doubles followed by `count` generated ones.
+///
+/// @param count - how many generated doubles to add
+fn population(count: usize) -> Vec<String> {
+    let mut values: Vec<String> = NAMED.iter().map(|text| (*text).to_string()).collect();
+    values.extend(generated(SEED, count));
+    values
+}
+
 /// The script both shells are fed.
 ///
-/// Three statements per value: the `%s` conversion, the default rendering, and
-/// `%.20g`, which is the widest ordinary way to ask for a number and the one
-/// that exposes a difference in how many digits an engine believes it has.
-///
 /// @param values - the doubles, as the text that produces them
-fn script(values: &[String]) -> String {
+/// @param conversions - the expressions to run on each, with `{}` for the value
+fn script(values: &[String], conversions: &[&str]) -> String {
     let mut lines = vec![".mode list".to_string(), ".headers off".to_string()];
     for value in values {
-        lines.push(format!("SELECT printf('%s', {value});"));
-        lines.push(format!("SELECT {value};"));
-        lines.push(format!("SELECT printf('%.20g', {value});"));
+        for conversion in conversions {
+            lines.push(format!("SELECT {};", conversion.replace("{}", value)));
+        }
     }
     lines.push(".quit".to_string());
     lines.join("\n") + "\n"
@@ -175,100 +207,44 @@ fn run(program: &PathBuf, area: &PathBuf, text: &str) -> Vec<String> {
     else {
         return Vec::new();
     };
-    if let Some(mut stdin) = child.stdin.take() {
-        use std::io::Write;
-        let _ = stdin.write_all(text.as_bytes());
-    }
+    // **The script is written from its own thread.** Writing all of it before
+    // reading any output deadlocks once the output is larger than the pipe
+    // buffer: the shell blocks writing its stdout while this blocks writing its
+    // stdin, neither uses any CPU, and nothing times out. At 672 statements the
+    // output fit and it never showed; at 7,000 it hung the run for 33 minutes
+    // (task-2080).
+    let writer = child.stdin.take().map(|mut stdin| {
+        let script = text.to_string();
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let _ = stdin.write_all(script.as_bytes());
+        })
+    });
     let Ok(output) = child.wait_with_output() else {
         return Vec::new();
     };
+    if let Some(writer) = writer {
+        let _ = writer.join();
+    }
     let mut printed = String::from_utf8_lossy(&output.stdout).replace("\r\n", "\n");
     printed.push_str(&String::from_utf8_lossy(&output.stderr).replace("\r\n", "\n"));
     printed.lines().map(str::to_string).collect()
 }
 
-/// How two renderings of the same double differ.
-#[derive(Debug, PartialEq, Eq)]
-enum Difference {
-    /// The same characters.
-    None,
-    /// The same shape and the same number of digits, differing in the last one.
-    LastDigit,
-    /// Anything else: a different exponent, a different length, a lost sign.
-    Structural,
-}
-
-/// Classifies a disagreement between two rendered numbers.
+/// Runs one script through both shells and returns every statement whose
+/// output differs, with both outputs.
 ///
-/// **The last digit is the only forgiven position**, and it is forgiven only
-/// when everything else is identical - the sign, the exponent, the position of
-/// the point and the number of digits. A renderer that dropped a digit or moved
-/// the point produces two strings that differ at the end as well, and this must
-/// not call that a rounding difference.
+/// Checks first that each shell printed one line per statement, because a
+/// script that stopped early would otherwise compare as a short list of
+/// agreements.
 ///
-/// @param theirs - the reference shell's text
-/// @param ours - this repository's text
-fn classify(theirs: &str, ours: &str) -> Difference {
-    if theirs == ours {
-        return Difference::None;
-    }
-    if theirs.len() != ours.len() {
-        return Difference::Structural;
-    }
-    let differing: Vec<usize> = theirs
-        .bytes()
-        .zip(ours.bytes())
-        .enumerate()
-        .filter(|(_, (left, right))| left != right)
-        .map(|(at, _)| at)
-        .collect();
-    let Some(at) = differing.first().copied() else {
-        return Difference::Structural;
-    };
-    if differing.len() != 1 {
-        return Difference::Structural;
-    }
-    let is_digit = |text: &str, at: usize| text.as_bytes().get(at).is_some_and(u8::is_ascii_digit);
-    if !is_digit(theirs, at) || !is_digit(ours, at) {
-        return Difference::Structural;
-    }
-    // **The last digit of the mantissa, and not of the exponent.** The first
-    // version of this checked only that nothing followed the differing
-    // character except an exponent marker, which made `1.25e+10` against
-    // `1.25e+11` a rounding difference - two numbers ten times apart. The
-    // mantissa ends where the marker begins, or at the end of the text.
-    let mantissa_end = theirs
-        .find(['e', 'E'])
-        .unwrap_or_else(|| theirs.chars().count());
-    if at.saturating_add(1) == mantissa_end {
-        Difference::LastDigit
-    } else {
-        Difference::Structural
-    }
-}
-
-/// **`printf('%s', <real>)` and the default rendering agree with the shell.**
-///
-/// The one allowance is the last digit of a value in the subnormal tail, and it
-/// is counted rather than waved through: `ALLOWED_LAST_DIGIT_DIFFERENCES` is
-/// what was measured, and both a new disagreement and a disappeared one fail
-/// here. A difference of any other shape fails whatever the count is.
-#[test]
-fn the_text_a_real_is_printed_as_agrees_with_the_pinned_shell() {
-    let (Some(reference), Some(ours_shell)) = (reference(), ours()) else {
-        inillucent_compat::differential::skipping("a shell is missing");
-        return;
-    };
-    // A fixed seed, so a failure names a population somebody else can rebuild.
-    const SEED: u64 = 20_662_014;
-    let mut values: Vec<String> = NAMED.iter().map(|text| (*text).to_string()).collect();
-    values.extend(generated(SEED, 200));
-
-    let text = script(&values);
-    let area = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("numeric-text");
-    let theirs = run(&reference, &area.join("sqlite"), &text);
-    let mine = run(&ours_shell, &area.join("inillucent"), &text);
-
+/// @param shells - the pinned shell and this repository's shell
+/// @param area - the name of a scratch directory for this comparison
+/// @param text - the script
+fn disagreements(shells: &(PathBuf, PathBuf), area: &str, text: &str) -> Vec<String> {
+    let area = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(area);
+    let theirs = run(&shells.0, &area.join("sqlite"), text);
+    let mine = run(&shells.1, &area.join("inillucent"), text);
     let statements: Vec<&str> = text
         .lines()
         .filter(|line| line.starts_with("SELECT"))
@@ -289,65 +265,7 @@ fn the_text_a_real_is_printed_as_agrees_with_the_pinned_shell() {
         mine.len(),
         statements.len()
     );
-
-    let mut structural: Vec<String> = Vec::new();
-    let mut rounding: Vec<String> = Vec::new();
-    for (at, statement) in statements.iter().enumerate() {
-        let left = theirs.get(at).map(String::as_str).unwrap_or("");
-        let right = mine.get(at).map(String::as_str).unwrap_or("");
-        let said = format!("{statement}\n    sqlite     : {left}\n    inillucent : {right}");
-        match classify(left, right) {
-            Difference::None => {}
-            Difference::LastDigit => rounding.push(said),
-            Difference::Structural => structural.push(said),
-        }
-    }
-
-    assert!(
-        structural.is_empty(),
-        "seed {SEED}: {} of {} statements print a number of a different shape, which is \
-         not a rounding difference:\n{}",
-        structural.len(),
-        statements.len(),
-        structural.join("\n")
-    );
-    assert_eq!(
-        rounding.len(),
-        ALLOWED_LAST_DIGIT_DIFFERENCES,
-        "seed {SEED}: {} of {} statements differ in their last digit and {} were \
-         measured. If this went up, a rounding change made the two engines disagree \
-         about more numbers; if it went down, the difference has closed and the \
-         allowance should go with it.\n{}",
-        rounding.len(),
-        statements.len(),
-        ALLOWED_LAST_DIGIT_DIFFERENCES,
-        rounding.join("\n")
-    );
-}
-
-/// **Every named double is printed identically, with no allowance at all.**
-///
-/// The allowance above is for the generated tail. These twenty-four are the
-/// cases somebody chose because they are where a renderer goes wrong, and a
-/// disagreement on one of them is a defect rather than a last-digit rounding
-/// choice. Splitting them out is what stops the allowance covering one.
-#[test]
-fn every_named_double_is_printed_identically() {
-    let (Some(reference), Some(ours_shell)) = (reference(), ours()) else {
-        inillucent_compat::differential::skipping("a shell is missing");
-        return;
-    };
-    let values: Vec<String> = NAMED.iter().map(|text| (*text).to_string()).collect();
-    let text = script(&values);
-    let area = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("numeric-text-named");
-    let theirs = run(&reference, &area.join("sqlite"), &text);
-    let mine = run(&ours_shell, &area.join("inillucent"), &text);
-
-    let statements: Vec<&str> = text
-        .lines()
-        .filter(|line| line.starts_with("SELECT"))
-        .collect();
-    let mut wrong: Vec<String> = Vec::new();
+    let mut wrong = Vec::new();
     for (at, statement) in statements.iter().enumerate() {
         let left = theirs.get(at).map(String::as_str).unwrap_or("");
         let right = mine.get(at).map(String::as_str).unwrap_or("");
@@ -357,35 +275,115 @@ fn every_named_double_is_printed_identically() {
             ));
         }
     }
+    wrong
+}
+
+/// Returns both shells, or `None` after reporting the skip.
+fn shells() -> Option<(PathBuf, PathBuf)> {
+    match (reference(), ours()) {
+        (Some(reference), Some(ours_shell)) => Some((reference, ours_shell)),
+        _ => {
+            inillucent_compat::differential::skipping("a shell is missing");
+            None
+        }
+    }
+}
+
+/// **`printf('%s', <real>)`, the default rendering and `%.20g` agree with the
+/// shell on every value, to the last digit.**
+///
+/// This allowed seven last digit differences until task-2080. The module
+/// comment says why the allowance is gone rather than lowered.
+#[test]
+fn the_text_a_real_is_printed_as_agrees_with_the_pinned_shell() {
+    let Some(shells) = shells() else {
+        return;
+    };
+    let text = script(&population(1000), ORDINARY);
+    let statements = text
+        .lines()
+        .filter(|line| line.starts_with("SELECT"))
+        .count();
+    let wrong = disagreements(&shells, "numeric-text", &text);
     assert!(
         wrong.is_empty(),
-        "{} of {} named cases print differently:\n{}",
+        "seed {SEED}: {} of {statements} statements print differently:\n{}",
         wrong.len(),
-        statements.len(),
         wrong.join("\n")
     );
 }
 
-/// The classifier calls a moved point structural and a rounded digit rounding.
+/// **The `!`, `#` and `,` flags on the real conversions agree with the shell.**
 ///
-/// Rule 1.5: the allowance above is only as narrow as this function, and a
-/// classifier that called everything `LastDigit` would turn the count into a
-/// number with no meaning. These are the shapes it has to tell apart.
+/// Before task-2080 `printf('%!.25f', 0.1)` was `0.1000000000000000055500000`
+/// here and `0.1000000000000000056` in SQLite, and `printf('%!e', 0.1)` was
+/// `1.000000e-01` against `1.0e-01`: the flag was read for the digit count and
+/// ignored for the trailing zeros. `printf('%,.10g', 1234567.0)` was
+/// `1234567` against `1,234,567`.
 #[test]
-fn the_classifier_forgives_a_last_digit_and_nothing_else() {
-    assert_eq!(classify("1.25e+10", "1.25e+10"), Difference::None);
-    assert_eq!(classify("1.25e+10", "1.26e+10"), Difference::LastDigit);
-    assert_eq!(classify("0.125", "0.126"), Difference::LastDigit);
+fn the_real_conversion_flags_agree_with_the_pinned_shell() {
+    let Some(shells) = shells() else {
+        return;
+    };
+    let mut values = population(300);
+    // Values whose digits `%!.17g` shortens, values that `%#.0f` shows as a
+    // zero with no sign, and one that `%,.10g` groups.
+    values.extend(
+        [
+            "49.47",
+            "0.3",
+            "1e23",
+            "-0.1",
+            "-0.0004",
+            "1234567.0",
+            "0.5",
+            "2.5",
+        ]
+        .iter()
+        .map(|text| (*text).to_string()),
+    );
+    let text = script(&values, FLAGGED);
+    let statements = text
+        .lines()
+        .filter(|line| line.starts_with("SELECT"))
+        .count();
+    let wrong = disagreements(&shells, "numeric-text-flags", &text);
+    assert!(
+        wrong.is_empty(),
+        "seed {SEED}: {} of {statements} statements print differently:\n{}",
+        wrong.len(),
+        wrong.join("\n")
+    );
+}
 
-    // A different exponent, with the digits untouched.
-    assert_eq!(classify("1.25e+10", "1.25e+11"), Difference::Structural);
-    // A digit that is not the last one.
-    assert_eq!(classify("1.25e+10", "1.35e+10"), Difference::Structural);
-    assert_eq!(classify("0.125", "0.135"), Difference::Structural);
-    // A lost sign, which makes the lengths differ.
-    assert_eq!(classify("-0.125", "0.1250"), Difference::Structural);
-    // A different number of digits.
-    assert_eq!(classify("0.125", "0.1250"), Difference::Structural);
-    // Two digits apart.
-    assert_eq!(classify("0.1255", "0.1266"), Difference::Structural);
+/// **`run` does not deadlock on output larger than the pipe buffer.**
+///
+/// `run` used to write the whole script to the shell's stdin before it read
+/// any stdout. Once the output outgrew the pipe buffer, the shell blocked
+/// writing and the test blocked writing too, and neither used any CPU, so the
+/// run hung instead of failing (task-2080). This feeds the pinned shell a
+/// script whose output is a few hundred kilobytes, far past any pipe buffer,
+/// and fails if `run` has not come back within a minute. Without the thread
+/// that writes stdin, this test fails.
+#[test]
+fn a_script_larger_than_the_pipe_buffer_does_not_hang() {
+    let Some(reference) = reference() else {
+        inillucent_compat::differential::skipping("the reference shell is missing");
+        return;
+    };
+    const STATEMENTS: usize = 50_000;
+    let mut lines = vec![".mode list".to_string()];
+    lines.extend((0..STATEMENTS).map(|at| format!("SELECT {at};")));
+    lines.push(".quit".to_string());
+    let text = lines.join("\n") + "\n";
+    let area = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("numeric-text-pipe");
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(run(&reference, &area, &text));
+    });
+    let printed = receiver
+        .recv_timeout(std::time::Duration::from_secs(60))
+        .expect("run did not return within a minute, so it deadlocked on a full pipe");
+    assert_eq!(printed.len(), STATEMENTS);
+    assert_eq!(printed.last().map(String::as_str), Some("49999"));
 }

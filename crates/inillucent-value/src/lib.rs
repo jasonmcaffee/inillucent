@@ -17,6 +17,8 @@
 //! - [`encoding`] - UTF-8 and the two UTF-16 forms, and conversion between;
 //! - [`value`] - the value model itself, borrowed or owned;
 //! - [`numeric`] - SQLite's own text-to-number scanners and number-to-text;
+//! - [`fpdecode`] - SQLite's conversion of a double to decimal digits, and
+//!   the real `printf` conversions built on it;
 //! - [`affinity`] - classifying a declared type, and applying the result;
 //! - [`cast`] - `CAST`, which is a command rather than a preference;
 //! - [`collation`] - BINARY, NOCASE, RTRIM, and the named registry;
@@ -46,6 +48,7 @@ pub mod cast;
 pub mod collation;
 pub mod compare;
 pub mod encoding;
+pub mod fpdecode;
 pub mod numeric;
 pub mod record;
 pub mod value;

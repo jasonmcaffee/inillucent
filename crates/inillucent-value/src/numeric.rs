@@ -14,7 +14,7 @@
 //! The functions are named after the SQLite ones they reproduce so that a
 //! reader can put them side by side: `atoi64` is `sqlite3Atoi64`, `atof` is
 //! `sqlite3AtoF`, `real_to_i64` is `sqlite3RealToI64`, `real_same_as_int` is
-//! `sqlite3RealSameAsInt`, and `real_to_text` is `%!.15g`.
+//! `sqlite3RealSameAsInt`, and `real_to_text` is `%!.17g`.
 
 use std::borrow::Cow;
 
@@ -499,15 +499,17 @@ pub const FP_DIGITS: usize = 17;
 
 /// Renders a double as text the way SQLite's `%!.17g` does.
 ///
-/// This is a transcription rather than an approximation, because every part of
-/// it is observable and none of it is what a general-purpose float formatter
-/// does:
+/// This is `vdbeMemRenderNum`, and it goes through the same conversion
+/// `printf()` uses, [`crate::fpdecode::render`], because SQLite's does. Four
+/// parts of it are observable and none of them is what a general purpose float
+/// formatter does:
 ///
-/// 1. the decimal conversion produces **eighteen** significant digits, and the
-///    result is then rounded to seventeen. Rounding twice is not the same as
-///    rounding once, and it is why `1.0/3` renders as `0.33333333333333332`
-///    where a single correctly rounded conversion to seventeen digits gives
-///    `...331`;
+/// 1. the digits come from `sqlite3FpDecode`, which scales the double by an
+///    approximation of a power of ten rather than computing the exact decimal
+///    expansion. Its eighteen digits are then rounded to seventeen. That is why
+///    `1.0/3` renders as `0.33333333333333332` where a single correctly rounded
+///    conversion gives `...331`, and why `1.1304293785495057e251` renders as
+///    `...057e+251` where the exact expansion rounds to `...058` (task-2080);
 /// 2. at exactly seventeen digits - which only `%!` asks for - SQLite tries to
 ///    *shorten* the result, and keeps the shorter form when it still converts
 ///    back to the same double. That is what makes `49.47` render as `49.47`
@@ -517,209 +519,22 @@ pub const FP_DIGITS: usize = 17;
 /// 4. the `!` flag forces a decimal point, so a whole number still reads as a
 ///    real, and trailing zeros are stripped after the point.
 ///
-/// Infinities render as `Inf` and `-Inf`. A NaN renders as `NaN`, which is
-/// what `printf` produces; it cannot arrive from a stored value, because
-/// SQLite stores a NaN double as NULL.
+/// A negative zero renders as `0.0`, because SQLite decides the sign with
+/// `r < 0.0`. Infinities render as `Inf` and `-Inf`. A NaN renders as `NaN`,
+/// which is what `printf` produces; it cannot arrive from a stored value,
+/// because SQLite stores a NaN double as NULL.
 pub fn real_to_text(value: f64) -> Vec<u8> {
-    if value.is_nan() {
-        return b"NaN".to_vec();
-    }
-    if value.is_infinite() {
-        return if value < 0.0 {
-            b"-Inf".to_vec()
-        } else {
-            b"Inf".to_vec()
-        };
-    }
-    // A negative zero renders without its sign. SQLite decides the sign with
-    // `r < 0.0`, and `-0.0 < 0.0` is false, so `CAST(-0.0 AS TEXT)` is `'0.0'`.
-    // Using `is_sign_negative` here instead - which is what "render the value
-    // faithfully" would suggest - produces `'-0.0'` and is a visible parity
-    // difference in every CAST and every TEXT column.
-    if value == 0.0 {
-        return b"0.0".to_vec();
-    }
-    let negative = value < 0.0;
-    let magnitude = value.abs();
-
-    // Eighteen significant digits, correctly rounded, as SQLite's decimal
-    // conversion produces before it rounds to the requested precision.
-    let (mut digits, mut decimal_point) = decimal_digits(magnitude, FP_DIGITS + 1);
-    let produced = digits.len();
-
-    // The round-trip shortening SQLite performs at exactly seventeen digits.
-    let mut keep = FP_DIGITS;
-    if produced > FP_DIGITS {
-        if let Some(shorter) = shorten(&digits, decimal_point, magnitude) {
-            keep = shorter;
-        }
-    }
-
-    // Round to `keep` digits, half-up on the first digit dropped, carrying
-    // into the decimal point when the carry runs off the front.
-    if keep < digits.len() {
-        let rounds_up = digits.get(keep).copied().unwrap_or(b'0') >= b'5';
-        digits.truncate(keep);
-        if rounds_up {
-            let mut index = keep;
-            loop {
-                if index == 0 {
-                    digits.insert(0, b'1');
-                    digits.pop();
-                    decimal_point = decimal_point.saturating_add(1);
-                    break;
-                }
-                index = index.saturating_sub(1);
-                match digits.get_mut(index) {
-                    Some(digit) if *digit == b'9' => *digit = b'0',
-                    Some(digit) => {
-                        *digit = digit.saturating_add(1);
-                        break;
-                    }
-                    None => break,
-                }
-            }
-        }
-    }
-
-    let exponent = decimal_point.saturating_sub(1);
-    let mut output: Vec<u8> = Vec::with_capacity(32);
-    if negative {
-        output.push(b'-');
-    }
-    if exponent < -4 || exponent > (FP_DIGITS as i32 - 1) {
-        render_exponential(&mut output, &digits, exponent);
-    } else {
-        render_fixed(&mut output, &digits, decimal_point);
-    }
-    output
-}
-
-/// Returns `count` significant decimal digits of a positive finite double,
-/// correctly rounded, and the position of the decimal point.
-///
-/// The point is expressed as SQLite's `iDP`: the number of digits that belong
-/// before it, so `1.5` is digits `15` with a point at 1 and `0.25` is digits
-/// `25` with a point at 0.
-fn decimal_digits(value: f64, count: usize) -> (Vec<u8>, i32) {
-    let precision = count.saturating_sub(1);
-    let rendered = format!("{value:.precision$e}");
-    let (mantissa, exponent) = match rendered.split_once('e') {
-        Some(parts) => parts,
-        None => (rendered.as_str(), "0"),
+    let format = crate::fpdecode::Format {
+        conversion: crate::fpdecode::Conversion::General,
+        precision: Some(FP_DIGITS),
+        prefix: None,
+        alternate: false,
+        alternate2: true,
+        zero_pad: false,
+        thousands: false,
+        upper: false,
     };
-    let digits: Vec<u8> = mantissa
-        .bytes()
-        .filter(|byte| byte.is_ascii_digit())
-        .collect();
-    let exponent: i32 = exponent.parse().unwrap_or(0);
-    (digits, exponent.saturating_add(1))
-}
-
-/// Returns the shorter digit count that still round-trips, if there is one.
-///
-/// SQLite looks at two shapes. A run of nines ending near the end means the
-/// value is just below a shorter decimal, so it increments the prefix and
-/// tries that; a run of zeros, or a value large enough to have no fraction at
-/// all, means the value is just above one, so it truncates. Either candidate
-/// is accepted only when converting it back produces the same double.
-fn shorten(digits: &[u8], decimal_point: i32, value: f64) -> Option<usize> {
-    let produced = digits.len() as i32;
-    let scale = decimal_point.saturating_sub(produced);
-    let digit = |index: usize| -> u8 { digits.get(index).copied().unwrap_or(b'0') };
-
-    if digit(15) == b'9' && digit(14) == b'9' {
-        let mut kept = 14usize;
-        while kept > 0 && digit(kept.saturating_sub(1)) == b'9' {
-            kept = kept.saturating_sub(1);
-        }
-        let candidate = if kept == 0 {
-            1u64
-        } else {
-            prefix_value(digits, kept)?.checked_add(1)?
-        };
-        let exponent = scale.saturating_add(produced).saturating_sub(kept as i32);
-        if round_trips(candidate, exponent, value) {
-            return Some(kept.saturating_add(1));
-        }
-        return None;
-    }
-
-    let trailing_zeros = digit(15) == b'0' && digit(14) == b'0' && digit(13) == b'0';
-    if decimal_point < produced && !trailing_zeros {
-        return None;
-    }
-    let mut kept = 13usize;
-    while kept > 0 && digit(kept.saturating_sub(1)) == b'0' {
-        kept = kept.saturating_sub(1);
-    }
-    let candidate = prefix_value(digits, kept)?;
-    let exponent = scale.saturating_add(produced).saturating_sub(kept as i32);
-    round_trips(candidate, exponent, value).then_some(kept.saturating_add(1))
-}
-
-/// Returns the first `count` digits read as an integer.
-fn prefix_value(digits: &[u8], count: usize) -> Option<u64> {
-    let mut value = 0u64;
-    for index in 0..count {
-        let digit = u64::from(digits.get(index)?.checked_sub(b'0')?);
-        value = value.checked_mul(10)?.checked_add(digit)?;
-    }
-    Some(value)
-}
-
-/// Reports whether `mantissa x 10^exponent` is exactly `value`.
-fn round_trips(mantissa: u64, exponent: i32, value: f64) -> bool {
-    let rendered = format!("{mantissa}e{exponent}");
-    rendered
-        .parse::<f64>()
-        .is_ok_and(|candidate| candidate.to_bits() == value.to_bits())
-}
-
-/// Writes `d.ddde+NN`, with trailing zeros stripped and one digit kept.
-fn render_exponential(output: &mut Vec<u8>, digits: &[u8], exponent: i32) {
-    output.push(digits.first().copied().unwrap_or(b'0'));
-    output.push(b'.');
-    let mut fraction: Vec<u8> = digits.get(1..).unwrap_or(&[]).to_vec();
-    while fraction.len() > 1 && fraction.last() == Some(&b'0') {
-        fraction.pop();
-    }
-    if fraction.is_empty() {
-        fraction.push(b'0');
-    }
-    output.extend_from_slice(&fraction);
-    output.push(b'e');
-    output.push(if exponent < 0 { b'-' } else { b'+' });
-    let magnitude = exponent.unsigned_abs();
-    if magnitude < 10 {
-        output.push(b'0');
-    }
-    output.extend_from_slice(magnitude.to_string().as_bytes());
-}
-
-/// Writes the fixed form, with trailing zeros stripped and one digit kept.
-fn render_fixed(output: &mut Vec<u8>, digits: &[u8], decimal_point: i32) {
-    if decimal_point <= 0 {
-        output.push(b'0');
-    } else {
-        for position in 0..decimal_point {
-            output.push(digits.get(position as usize).copied().unwrap_or(b'0'));
-        }
-    }
-    let mut fraction: Vec<u8> = Vec::new();
-    if decimal_point < 0 {
-        fraction.resize(decimal_point.unsigned_abs() as usize, b'0');
-    }
-    let first = decimal_point.max(0) as usize;
-    fraction.extend_from_slice(digits.get(first..).unwrap_or(&[]));
-    while fraction.len() > 1 && fraction.last() == Some(&b'0') {
-        fraction.pop();
-    }
-    if fraction.is_empty() {
-        fraction.push(b'0');
-    }
-    output.push(b'.');
-    output.extend_from_slice(&fraction);
+    crate::fpdecode::render(value, &format)
 }
 
 /// Reports whether text holds a number, ignoring surrounding whitespace.

@@ -734,3 +734,13 @@ they are touching do not collide; two that have not, do.
   `no_function_grows_past_the_length_it_is_recorded_at`. Put binder tests in a `bind/` submodule
   next to the code they test, and run `cargo test -p inillucent-compat --test policy` on its own
   before the full run when an edit adds lines to either. (task-2088)
+- **A suite that shells out to `inillucent-shell` builds it while the run is going, so edits made
+  during a baseline run end up in that baseline.** `numeric_text.rs` calls `cargo build -p
+  inillucent-cli` from inside the test. A baseline started before an edit therefore measures the
+  edit if the target runs after it. On task-2080 that made the baseline show 3 differences where
+  the code at `HEAD` had 7. Do not edit engine code while a baseline is running, or take the
+  baseline in a second worktree. (task-2080)
+- **A double is printed through `inillucent_value::fpdecode`, which transcribes SQLite's
+  `sqlite3FpDecode`.** `real_to_text` and every `printf` real conversion go through it. Do not use
+  Rust's `{:e}` or `{:.N}` to print a value SQLite would print. Those are correctly rounded, and
+  SQLite's last digit sometimes is not. `numeric_text.rs` fails on any difference. (task-2080)

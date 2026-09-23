@@ -2165,7 +2165,7 @@ package = "inillucent-compat"
 kind = "test"
 name = "numeric_text"
 tier = "differential"
-covers = ["inillucent-scalar", "inillucent-cli"]
+covers = ["inillucent-scalar", "inillucent-value", "inillucent-cli"]
 requires = ["shell"]
 
 # The coverage ratchet (task-2066 section 4.4.13). `docs/repository.md` carries
