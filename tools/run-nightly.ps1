@@ -190,7 +190,19 @@ function Write-History {
     }
     $stamp = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     $commit = (& git -C $root rev-parse --short HEAD 2>$null)
-    if (& git -C $root status --porcelain) { $commit = "$commit-dirty" }
+    # **This run's own two outputs do not make the tree dirty.** `--record`
+    # writes `tests/timings.toml` and the lines below write
+    # `tests/nightly-history.tsv`, both before this reads the tree - so every
+    # row this script has ever written says `-dirty` about the files the script
+    # is itself writing. A row that says dirty when nothing but its own output
+    # moved sends a reader looking for a code change that is not there, which is
+    # the same class of misleading the marker exists to prevent. task-2066 fixed
+    # the identical shape in `inillucent-perfhistory`.
+    $ours = @('tests/nightly-history.tsv', 'tests/timings.toml')
+    $changed = @(& git -C $root status --porcelain | Where-Object { $_.Trim() } | Where-Object {
+        $ours -notcontains $_.Substring(3).Trim()
+    })
+    if ($changed.Count -gt 0) { $commit = "$commit-dirty" }
     $machine = Get-MachineLabel
     $rows = foreach ($target in ($Verdicts.Keys | Sort-Object)) {
         $said = if ($Seconds.ContainsKey($target)) { $Seconds[$target] } else { '-' }
