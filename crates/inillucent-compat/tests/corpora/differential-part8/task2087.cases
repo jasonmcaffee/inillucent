@@ -1,0 +1,30 @@
+# Differential cases, category `task2087`: a seek key that is a CAST or a function call over constants.
+# One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
+# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+#
+# task-2087: a seek key that is a CAST or a builtin call was refused as misuse ("a seek key or
+# range bound reads a column") on any rowid or index seek. The planner chose the seek, and the
+# executor could only fold a literal, a parameter, arithmetic, a unary operator or a registered
+# function, so every other key that reads no row was refused. The COLLATE is not part of the
+# defect: the ticket was filed from `s = CAST('a' AS TEXT) COLLATE NOCASE`, and `id = CAST('8' AS
+# INTEGER)` and `k = abs(-4)` on a plain index were refused the same way. The build before
+# task-2087 refused 11 of these 15 cases; it answered seekfn-subquery, -range, -range-both and
+# -join. In seekfn-correlated the outer column is a parameter by the time the block is prepared,
+# so its key is a CAST of a parameter and is rebuilt for each outer row. seekfn-join reads the
+# other table's row, and is here to show that such a key is still not folded once for the whole
+# statement.
+seekfn-cast	CREATE TABLE p (id INTEGER PRIMARY KEY, s TEXT); CREATE INDEX p_n ON p (s COLLATE NOCASE); INSERT INTO p VALUES (7, 'a'), (8, 'B'), (9, 'c'), (10, 'A');\nSELECT id FROM p WHERE s = CAST('a' AS TEXT) COLLATE NOCASE ORDER BY id;
+seekfn-upper	CREATE TABLE p (id INTEGER PRIMARY KEY, s TEXT); CREATE INDEX p_n ON p (s COLLATE NOCASE); INSERT INTO p VALUES (7, 'a'), (8, 'B'), (9, 'c'), (10, 'A');\nSELECT id FROM p WHERE s = upper('a') COLLATE NOCASE ORDER BY id;
+seekfn-indexed-by	CREATE TABLE p (id INTEGER PRIMARY KEY, s TEXT); CREATE INDEX p_n ON p (s COLLATE NOCASE); INSERT INTO p VALUES (7, 'a'), (8, 'B'), (9, 'c'), (10, 'A');\nSELECT id FROM p INDEXED BY p_n WHERE s = CAST('a' AS TEXT) COLLATE NOCASE ORDER BY id;
+seekfn-nested	CREATE TABLE p (id INTEGER PRIMARY KEY, s TEXT); CREATE INDEX p_n ON p (s COLLATE NOCASE); INSERT INTO p VALUES (7, 'a'), (8, 'B'), (9, 'c'), (10, 'A');\nSELECT id FROM p WHERE s = (lower(substr('xBx', 2, 1)) || '') COLLATE NOCASE ORDER BY id;
+seekfn-subquery	CREATE TABLE p (id INTEGER PRIMARY KEY, s TEXT); CREATE INDEX p_n ON p (s COLLATE NOCASE); INSERT INTO p VALUES (7, 'a'), (8, 'B'), (9, 'c'), (10, 'A');\nSELECT id FROM p WHERE s = (SELECT upper('c')) COLLATE NOCASE ORDER BY id;
+seekfn-range	CREATE TABLE p (id INTEGER PRIMARY KEY, s TEXT); CREATE INDEX p_n ON p (s COLLATE NOCASE); INSERT INTO p VALUES (7, 'a'), (8, 'B'), (9, 'c'), (10, 'A');\nSELECT id FROM p WHERE s > lower('A') COLLATE NOCASE ORDER BY id;
+seekfn-range-both	CREATE TABLE p (id INTEGER PRIMARY KEY, s TEXT); CREATE INDEX p_n ON p (s COLLATE NOCASE); INSERT INTO p VALUES (7, 'a'), (8, 'B'), (9, 'c'), (10, 'A');\nSELECT id FROM p WHERE s >= upper('b') COLLATE NOCASE AND s < CAST('D' AS TEXT) COLLATE NOCASE ORDER BY id;
+seekfn-null	CREATE TABLE p (id INTEGER PRIMARY KEY, s TEXT); CREATE INDEX p_n ON p (s COLLATE NOCASE); INSERT INTO p VALUES (7, 'a'), (8, 'B'), (9, 'c'), (10, 'A');\nSELECT id FROM p WHERE s = CAST(NULL AS TEXT) COLLATE NOCASE ORDER BY id;
+seekfn-nul	CREATE TABLE p (id INTEGER PRIMARY KEY, s TEXT); CREATE INDEX p_n ON p (s COLLATE NOCASE); INSERT INTO p VALUES (7, 'a'), (8, 'B'), (9, 'c'), (10, 'A');\nINSERT INTO p VALUES (11, CAST(x'0061' AS TEXT)), (12, CAST(x'0062' AS TEXT));\nSELECT id FROM p WHERE s = CAST(x'0042' AS TEXT) COLLATE NOCASE ORDER BY id;
+seekfn-rowid-cast	CREATE TABLE p (id INTEGER PRIMARY KEY, s TEXT); CREATE INDEX p_n ON p (s COLLATE NOCASE); INSERT INTO p VALUES (7, 'a'), (8, 'B'), (9, 'c'), (10, 'A');\nSELECT id FROM p WHERE id = CAST('8' AS INTEGER);
+seekfn-rowid-abs	CREATE TABLE p (id INTEGER PRIMARY KEY, s TEXT); CREATE INDEX p_n ON p (s COLLATE NOCASE); INSERT INTO p VALUES (7, 'a'), (8, 'B'), (9, 'c'), (10, 'A');\nSELECT id FROM p WHERE id = abs(-9);
+seekfn-plain-cast	CREATE TABLE p (id INTEGER PRIMARY KEY, s TEXT); CREATE INDEX p_n ON p (s COLLATE NOCASE); INSERT INTO p VALUES (7, 'a'), (8, 'B'), (9, 'c'), (10, 'A');\nCREATE TABLE r (id INTEGER PRIMARY KEY, k INTEGER); CREATE INDEX r_k ON r (k); INSERT INTO r VALUES (1, 3), (2, 4), (3, 3);\nSELECT id FROM r WHERE k = CAST('3' AS INTEGER) ORDER BY id;
+seekfn-plain-abs	CREATE TABLE p (id INTEGER PRIMARY KEY, s TEXT); CREATE INDEX p_n ON p (s COLLATE NOCASE); INSERT INTO p VALUES (7, 'a'), (8, 'B'), (9, 'c'), (10, 'A');\nCREATE TABLE r (id INTEGER PRIMARY KEY, k INTEGER); CREATE INDEX r_k ON r (k); INSERT INTO r VALUES (1, 3), (2, 4), (3, 3);\nSELECT id FROM r WHERE k = abs(-4) ORDER BY id;
+seekfn-join	CREATE TABLE p (id INTEGER PRIMARY KEY, s TEXT); CREATE INDEX p_n ON p (s COLLATE NOCASE); INSERT INTO p VALUES (7, 'a'), (8, 'B'), (9, 'c'), (10, 'A');\nCREATE TABLE q (k INTEGER PRIMARY KEY, t TEXT); INSERT INTO q VALUES (1, 'b'), (2, 'C'), (3, 'z');\nSELECT q.k, p.id FROM q, p WHERE p.s = upper(q.t) COLLATE NOCASE ORDER BY q.k, p.id;
+seekfn-correlated	CREATE TABLE p (id INTEGER PRIMARY KEY, s TEXT); CREATE INDEX p_n ON p (s COLLATE NOCASE); INSERT INTO p VALUES (7, 'a'), (8, 'B'), (9, 'c'), (10, 'A');\nCREATE TABLE q (k INTEGER PRIMARY KEY, t TEXT); INSERT INTO q VALUES (1, 'b'), (2, 'C'), (3, 'z');\nSELECT q.k, (SELECT max(id) FROM p WHERE s = CAST(q.t AS TEXT) COLLATE NOCASE) FROM q ORDER BY q.k;

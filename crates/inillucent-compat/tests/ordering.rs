@@ -726,6 +726,13 @@ fn generated_strings_order_the_same_by_index_by_scan_and_by_the_oracle() {
 ///
 /// The difference was reachable only through `CAST(x'..' AS TEXT)` or a bound
 /// parameter holding a NUL, because no SQL string literal can carry one.
+///
+/// **The seek is graded by the oracle with a CAST key** (task-2087). Until
+/// task-2087 `s = CAST(x'0042' AS TEXT) COLLATE NOCASE` was refused whenever
+/// `p_n` existed, because the executor could not fold a CAST into a seek key,
+/// so this test could only seek with a bound key and state the expected rows
+/// itself. The bound key stays as well: a bare `?1` takes a different path to
+/// the seek key than a CAST does.
 #[test]
 fn nocase_stops_at_an_embedded_nul_as_sqlite_does() {
     let directory = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("ordering");
@@ -775,7 +782,11 @@ fn nocase_stops_at_an_embedded_nul_as_sqlite_does() {
     .map(|hex| format!("text:{hex}"))
     .collect();
 
-    let cases: [(&str, Option<&[String]>); 5] = [
+    // The seek key `x'0042'` is `"\0B"`: one value with `"\0a"` and `"\0b"`
+    // under SQLite's rule, a NUL at the same position and the same length, and
+    // a different value from every other row. So the seek finds rows 1 and 3.
+    let cast_seek = "SELECT id FROM p WHERE s = CAST(x'0042' AS TEXT) COLLATE NOCASE ORDER BY id";
+    let cases: [(&str, Option<&[String]>); 6] = [
         (
             "SELECT hex(s) FROM p NOT INDEXED ORDER BY s COLLATE NOCASE, id",
             Some(&expected_order),
@@ -798,6 +809,7 @@ fn nocase_stops_at_an_embedded_nul_as_sqlite_does() {
             "SELECT count(*) FROM (SELECT DISTINCT s COLLATE NOCASE FROM p)",
             None,
         ),
+        (cast_seek, None),
     ];
 
     let handle = Database::import_with_busy_timeout(&database, std::time::Duration::from_secs(5))
@@ -839,19 +851,18 @@ fn nocase_stops_at_an_embedded_nul_as_sqlite_does() {
         }
     }
 
-    // **The seek, with a bound key**, because the oracle driver cannot bind
-    // one and a constant key cannot hold a NUL: `s = CAST(x'..' AS TEXT)
-    // COLLATE NOCASE` is refused by the planner for a reason that has nothing to
-    // do with NULs, and task-2087 is the ticket for it.
-    // `"\0B"` is one value with `"\0a"` and `"\0b"` under SQLite's rule - a NUL
-    // at the same position and the same length - and a different value from
-    // every other row, so the seek has to find rows 1 and 3 and nothing else.
+    // **The seek, with a bound key.** The oracle driver cannot bind a value,
+    // so the rows are stated here: the same rows 1 and 3 the CAST key above
+    // was graded to. Both statements must actually seek `p_n`, or a scan
+    // answering correctly would hide a wrong seek key.
     let seek = "SELECT id FROM p WHERE s = ?1 COLLATE NOCASE ORDER BY id";
-    let plan = inillucent_rows(&connection, &format!("EXPLAIN QUERY PLAN {seek}"))
-        .expect("the seek is explained")
-        .join("\n");
-    if !plan.contains("SEARCH p USING COVERING INDEX p_n") {
-        failures.push(format!("{seek}\n  was expected to seek p_n:\n{plan}"));
+    for sql in [cast_seek, seek] {
+        let plan = inillucent_rows(&connection, &format!("EXPLAIN QUERY PLAN {sql}"))
+            .expect("the seek is explained")
+            .join("\n");
+        if !plan.contains("SEARCH p USING COVERING INDEX p_n") {
+            failures.push(format!("{sql}\n  was expected to seek p_n:\n{plan}"));
+        }
     }
     let mut statement = connection.prepare(seek).expect("the seek prepares");
     statement.bind_text(1, "\0B").expect("the key binds");

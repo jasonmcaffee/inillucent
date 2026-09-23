@@ -103,12 +103,27 @@ pub(crate) fn constant_value(
                 // evaluator that would agree with the first until somebody
                 // fixed a rounding rule in one of them.
                 //
-                // **Only this case.** Everything else `fold` declines is
-                // declined here too. A missing column reads back as NULL from a
-                // batch with no columns rather than failing, so evaluating
-                // whatever `fold` could not would turn "this reads a column"
-                // from a refusal into a silently wrong seek key.
-                None if constant_call(&translated) => evaluated_constant(&translated)?,
+                // A missing column reads back as NULL from a batch with no
+                // columns rather than failing, so evaluating whatever `fold`
+                // could not would turn "this reads a column" from a refusal
+                // into a silently wrong seek key. What is evaluated is
+                // therefore decided on the *bound* expression, where a column
+                // is still a column: `reads_no_row` answers `true` only when
+                // nothing in it can depend on the row.
+                //
+                // **A CAST or a builtin call is a constant too (task-2087).**
+                // `fold` has no arm for `Cast` or `Call`, so every seek whose
+                // key was one of them was refused as misuse: `id =
+                // CAST('8' AS INTEGER)` and `id = abs(-9)` on a rowid, `k =
+                // abs(-4)` on a plain index, `s = CAST('a' AS TEXT) COLLATE
+                // NOCASE` on an index on `s COLLATE NOCASE`. The planner had
+                // accepted each seek. The same comparison on a column with no
+                // index is a filter on a scan and was answered, so for an
+                // ordinary column creating the index is what broke the
+                // statement. SQLite answers all of them.
+                None if constant_call(&translated) || reads_no_row(expr) => {
+                    evaluated_constant(&translated)?
+                }
                 None => {
                     return Err(misuse(
                         "a seek key or range bound reads a column, which it may not",
@@ -146,14 +161,40 @@ fn constant_call(expr: &Expr) -> bool {
     }
 }
 
+/// Reports whether a bound expression can be evaluated without a row.
+///
+/// `false` for anything that reads the row being scanned or a value that only
+/// exists once rows have been grouped or windowed: a column, a rowid, a
+/// module's auxiliary function, an aggregate, a window value, a sorter slot,
+/// and a subquery correlated to any outer term. `RAISE` is `false` as well,
+/// because it is an abort and not a value. Everything else is decided by its
+/// children, so a CAST, an operator, a builtin call or an uncorrelated
+/// subquery over constants is `true`.
+///
+/// @param expr - the bound seek key or range bound
+fn reads_no_row(expr: &BoundExpr) -> bool {
+    match expr {
+        BoundExpr::Column { .. }
+        | BoundExpr::Rowid { .. }
+        | BoundExpr::VirtualFunction { .. }
+        | BoundExpr::Aggregate { .. }
+        | BoundExpr::WindowRef { .. }
+        | BoundExpr::SorterColumn { .. }
+        | BoundExpr::Raise { .. } => false,
+        BoundExpr::Subquery { block, .. } if !block.correlations.is_empty() => false,
+        other => other.children().into_iter().all(reads_no_row),
+    }
+}
+
 /// Returns the value a translated expression evaluates to, reading no row.
 ///
 /// The batch is one row wide and holds no columns. **A column reference would
 /// not fail against it - it would read back NULL**, which is why the only
 /// expression this is ever handed is one the caller has already checked reads
-/// no column at all - [`constant_call`] for a seek key or a range bound,
-/// [`translate`](crate::physical) for a deterministic registered function's
-/// call over constant arguments (`docs/roadmap.md` item 15).
+/// no column at all - [`constant_call`] or [`reads_no_row`] for a seek key or
+/// a range bound, [`translate`](crate::physical) for a deterministic
+/// registered function's call over constant arguments (`docs/roadmap.md`
+/// item 15).
 ///
 /// @param expr - the translated expression
 pub(crate) fn evaluated_constant(expr: &Expr) -> DbResult<OwnedDatum> {

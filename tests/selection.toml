@@ -1174,7 +1174,7 @@ package = "inillucent-compat"
 kind = "test"
 name = "ordering"
 tier = "differential"
-covers = ["inillucent-engine"]
+covers = ["inillucent-engine", "inillucent-exec"]
 requires = ["oracle"]
 
 [[target]]

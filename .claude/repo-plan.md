@@ -719,3 +719,11 @@ they are touching do not collide; two that have not, do.
 - **`perfhistory` rows record `dirty` whenever the working tree has any edit**, documents included,
   so a history row taken while a doc rewrite is open reads `<sha>-dirty` although the engine is
   clean. Commit or stash the documents first if the row should name a clean commit. (task-2064)
+- **Putting a source file back with PowerShell `Copy-Item` keeps its old modification time, and
+  cargo then does not rebuild.** task-2087 built the old version of `constant.rs` to prove a test
+  failed before the fix, put the fixed file back with `Copy-Item`, and the next `cargo test` ran the
+  old code: the corpus reported nine refusals the fix had already removed. After copying a file
+  back, set `(Get-Item <path>).LastWriteTime = Get-Date` or write it with a bash redirect, and look
+  for `Compiling <crate>` in the output before trusting the run. Do not restore a file with
+  `git show ... | Set-Content` either: PowerShell joins the lines and the crate stops compiling.
+  (task-2087)
