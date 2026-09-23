@@ -1401,7 +1401,9 @@ covers = ["inillucent-sql", "inillucent-exec", "inillucent-engine"]
 # Nothing above twenty thousand rows was graded anywhere, so every claim the
 # suite made was about a table the pool holds whole. Nightly because it builds
 # that table; the properties it checks are TLP and NoREC, which need no oracle
-# and so cost nothing but the size.
+# and so cost nothing but the size. It runs at two page sizes, the engine's
+# 32,768 bytes and SQLite's 4,096 (task-2075), and at each one it builds, scans,
+# sorts, deletes half the table and reopens it.
 [[target]]
 package = "inillucent-compat"
 kind = "test"
