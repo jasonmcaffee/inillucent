@@ -1162,7 +1162,7 @@ fn no_new_crate_reaches_into_the_retired_engine() {
 // here at their post-split size, because a new file of four hundred lines with
 // nothing watching it is the shape every module on this list started as. `paged.rs`
 // is recorded at 2,300 from 2,450, which is what the shrunk check below asks for.
-const CEILINGS: [(&str, usize); 16] = [
+const CEILINGS: [(&str, usize); 17] = [
     ("crates/inillucent-pool/src/pool/fold.rs", 600),
     ("crates/inillucent-tree/src/paged/bulk.rs", 600),
     // **The facade's own size, which had no ratchet (task-1979, Q2).** It is
