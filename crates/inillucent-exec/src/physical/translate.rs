@@ -131,7 +131,7 @@ pub(crate) fn translate(
 /// @param frame - which pass is translating
 fn resolve_in_frame(expr: &BoundExpr, frame: Frame<'_>) -> DbResult<Option<Expr>> {
     if let Frame::Window { pre, width } = frame {
-        if let BoundExpr::WindowRef { slot } = expr {
+        if let BoundExpr::WindowRef { slot, .. } = expr {
             return Ok(Some(Expr::Column(width.saturating_add(*slot))));
         }
         // A whole sub-expression the pass already computed, which is how a
@@ -148,7 +148,7 @@ fn resolve_in_frame(expr: &BoundExpr, frame: Frame<'_>) -> DbResult<Option<Expr>
         group_width,
     } = frame
     {
-        if let BoundExpr::Aggregate { slot } = expr {
+        if let BoundExpr::Aggregate { slot, .. } = expr {
             return Ok(Some(Expr::Column(group_width.saturating_add(*slot))));
         }
         if let Some(position) = select.group_by.iter().position(|key| key == expr) {
@@ -541,7 +541,7 @@ fn translate_comparison(
             operand,
             branches,
             otherwise,
-            collation,
+            comparisons,
         } => {
             let mut translated = Vec::with_capacity(branches.len());
             for (when, then) in branches {
@@ -560,7 +560,7 @@ fn translate_comparison(
                     Some(otherwise) => Some(Box::new(translate(otherwise, space, params, frame)?)),
                     None => None,
                 },
-                collation: *collation,
+                comparisons: comparisons.clone(),
             }
         }
         _ => return Ok(None),

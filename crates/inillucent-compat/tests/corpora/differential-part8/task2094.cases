@@ -1,0 +1,32 @@
+# Differential cases, category `task2094`: a COLLATE inside an aggregate or window call, and each
+# WHEN of a CASE base form, decide the comparison around them.
+# One case per line: the case's id, a tab, and the statements, with `\n` for a newline.
+# Read by `crates/inillucent-compat/tests/differential_part8.rs`; nothing else parses this.
+#
+# task-2094: SQLite marks an aggregate or window call EP_Collate from its arguments, so
+# `max(s COLLATE NOCASE) = 'C'` compares with NOCASE. BoundExpr::Aggregate and BoundExpr::WindowRef
+# name a slot and hold no arguments, so the explicit collation never reached the comparison. The
+# ORDER BY and FILTER of an aggregate and the PARTITION BY and ORDER BY of a window do not count,
+# and a column's declared collation does not pass through the call; the cases check both.
+# SQLite codes `CASE x WHEN y` as `x = y` for each branch, with the affinity and collation of that
+# pair. The binder took one collation from `x` for every branch and no affinity. The build before
+# task-2094 disagreed with SQLite on 10 of these 18 cases; the other 8 agreed before and are here so
+# the fix cannot overshoot.
+agg-max-collate	CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE); INSERT INTO t VALUES (1, 'a', 'a'), (2, 'B', 'B'), (3, 'c', 'c'), (4, 'A', 'A'), (5, 'b', 'b'), (6, 'C', 'C');\nSELECT max(s COLLATE NOCASE) = 'C' AS eq, max(s COLLATE NOCASE) AS v FROM t;
+agg-min-collate	CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE); INSERT INTO t VALUES (1, 'a', 'a'), (2, 'B', 'B'), (3, 'c', 'c'), (4, 'A', 'A'), (5, 'b', 'b'), (6, 'C', 'C');\nSELECT min(s COLLATE NOCASE) = 'a' AS eq, 'a' = min(s COLLATE NOCASE) AS swapped FROM t;
+agg-column-collation-stays-inside	CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE); INSERT INTO t VALUES (1, 'a', 'a'), (2, 'B', 'B'), (3, 'c', 'c'), (4, 'A', 'A'), (5, 'b', 'b'), (6, 'C', 'C');\nSELECT max(n) = 'C' AS eq, max(n) AS v FROM t;
+agg-group-concat-collate	CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE); INSERT INTO t VALUES (1, 'a', 'a'), (2, 'B', 'B'), (3, 'c', 'c'), (4, 'A', 'A'), (5, 'b', 'b'), (6, 'C', 'C');\nSELECT group_concat(s COLLATE NOCASE) = 'A,B,C,A,B,C' AS eq FROM t;
+agg-second-argument-collate	CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE); INSERT INTO t VALUES (1, 'a', 'a'), (2, 'B', 'B'), (3, 'c', 'c'), (4, 'A', 'A'), (5, 'b', 'b'), (6, 'C', 'C');\nSELECT group_concat(s, ',' COLLATE NOCASE) = 'A,B,C,A,B,C' AS eq FROM t;
+agg-order-by-collate-does-not-count	CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE); INSERT INTO t VALUES (1, 'a', 'a'), (2, 'B', 'B'), (3, 'c', 'c'), (4, 'A', 'A'), (5, 'b', 'b'), (6, 'C', 'C');\nSELECT group_concat(s ORDER BY s COLLATE NOCASE) = 'A,A,B,B,C,C' AS eq FROM t;
+agg-filter-collate-does-not-count	CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE); INSERT INTO t VALUES (1, 'a', 'a'), (2, 'B', 'B'), (3, 'c', 'c'), (4, 'A', 'A'), (5, 'b', 'b'), (6, 'C', 'C');\nSELECT max(s) FILTER (WHERE s <> 'x' COLLATE NOCASE) = 'C' AS eq FROM t;
+agg-collate-through-concat	CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE); INSERT INTO t VALUES (1, 'a', 'a'), (2, 'B', 'B'), (3, 'c', 'c'), (4, 'A', 'A'), (5, 'b', 'b'), (6, 'C', 'C');\nSELECT max(s COLLATE NOCASE) || '' = 'C' AS eq FROM t;
+agg-having-collate	CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE); INSERT INTO t VALUES (1, 'a', 'a'), (2, 'B', 'B'), (3, 'c', 'c'), (4, 'A', 'A'), (5, 'b', 'b'), (6, 'C', 'C');\nSELECT count(*) FROM t GROUP BY id > 0 HAVING max(s COLLATE NOCASE) = 'C';
+agg-left-binary-wins	CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE); INSERT INTO t VALUES (1, 'a', 'a'), (2, 'B', 'B'), (3, 'c', 'c'), (4, 'A', 'A'), (5, 'b', 'b'), (6, 'C', 'C');\nSELECT max(s COLLATE BINARY) = max(n COLLATE NOCASE) AS eq, max(s) = max(s COLLATE NOCASE) AS plain_left FROM t;
+window-collate	CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE); INSERT INTO t VALUES (1, 'a', 'a'), (2, 'B', 'B'), (3, 'c', 'c'), (4, 'A', 'A'), (5, 'b', 'b'), (6, 'C', 'C');\nSELECT id, max(s COLLATE NOCASE) OVER () = 'C' AS mx, first_value(s COLLATE NOCASE) OVER (ORDER BY id) = 'A' AS fv, lag(s COLLATE NOCASE) OVER (ORDER BY id) = 'A' AS lg FROM t ORDER BY id;
+window-column-collation-stays-inside	CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE); INSERT INTO t VALUES (1, 'a', 'a'), (2, 'B', 'B'), (3, 'c', 'c'), (4, 'A', 'A'), (5, 'b', 'b'), (6, 'C', 'C');\nSELECT id, first_value(n) OVER (ORDER BY id) = 'A' AS fv FROM t ORDER BY id;
+window-partition-collate-does-not-count	CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE); INSERT INTO t VALUES (1, 'a', 'a'), (2, 'B', 'B'), (3, 'c', 'c'), (4, 'A', 'A'), (5, 'b', 'b'), (6, 'C', 'C');\nSELECT id, max(s) OVER (PARTITION BY s COLLATE NOCASE) = 'C' AS eq FROM t ORDER BY id;
+case-when-collate	SELECT CASE 'a' WHEN 'A' COLLATE NOCASE THEN 1 ELSE 0 END AS v, CASE 'a' WHEN 'b' THEN 2 WHEN 'A' COLLATE NOCASE THEN 1 ELSE 0 END AS second;
+case-base-collate-wins	SELECT CASE 'a' COLLATE NOCASE WHEN 'A' THEN 1 ELSE 0 END AS base, CASE 'a' COLLATE BINARY WHEN 'A' COLLATE NOCASE THEN 1 ELSE 0 END AS both;
+case-when-column-collation	CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE); INSERT INTO t VALUES (1, 'a', 'a'), (2, 'B', 'B'), (3, 'c', 'c'), (4, 'A', 'A'), (5, 'b', 'b'), (6, 'C', 'C');\nSELECT id, CASE n WHEN 'a' THEN 1 ELSE 0 END AS base_col, CASE 'A' WHEN n THEN 1 ELSE 0 END AS when_col, CASE s WHEN n THEN 1 ELSE 0 END AS both_col FROM t ORDER BY id;
+case-when-affinity	CREATE TABLE u (id INTEGER PRIMARY KEY, i INTEGER, x TEXT); INSERT INTO u VALUES (1, 1, '1');\nSELECT CASE '1' WHEN 1 THEN 1 ELSE 0 END AS lit, CASE i WHEN '1' THEN 1 ELSE 0 END AS base_int, CASE '1' WHEN i THEN 1 ELSE 0 END AS when_int, CASE x WHEN 1 THEN 1 ELSE 0 END AS base_text FROM u;
+case-searched-unchanged	CREATE TABLE t (id INTEGER PRIMARY KEY, s TEXT, n TEXT COLLATE NOCASE); INSERT INTO t VALUES (1, 'a', 'a'), (2, 'B', 'B'), (3, 'c', 'c'), (4, 'A', 'A'), (5, 'b', 'b'), (6, 'C', 'C');\nSELECT id, CASE WHEN s = 'a' COLLATE NOCASE THEN 1 WHEN s = 'b' THEN 2 ELSE 0 END AS v FROM t ORDER BY id;

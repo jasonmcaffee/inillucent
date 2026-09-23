@@ -13,14 +13,9 @@
 # tells apart from a refusal for any other reason. They come off this list when
 # the construct is built, and until then they are what keeps the list honest
 # about what the engine does not do.
-#
-# The two task-2094 lines at the end are different: they are wrong answers, found by task-2088 in
-# code it did not change and listed so the ticket that fixes them has to take them off.
 
 lim-004	an exit 3 gap: `LIMIT 1+1`, an expression rather than a literal
 lim-005	an exit 3 gap: `LIMIT '2'`, a text literal
 ms-006	an exit 3 gap: `UPDATE t SET (a,b) = (3,4)`, the row-value form
 sub-010	an exit 3 gap: `(a, b) IN (SELECT ...)`, a row value against a subquery
 win-025	an exit 3 gap: a window function inside a derived table
-collate-aggregate-result	task-2094: a wrong answer, 0 where SQLite answers 1. An Aggregate slot hides its arguments, so a COLLATE inside max(...) does not reach the comparison around it
-collate-case-base-when	task-2094: a wrong answer, 0 where SQLite answers 1. A CASE base form keeps one collation from its operand, so a COLLATE on a WHEN value is ignored

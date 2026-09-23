@@ -415,8 +415,9 @@ pub enum Expr {
         branches: Vec<(Expr, Expr)>,
         /// The `ELSE` arm.
         otherwise: Option<Box<Expr>>,
-        /// The collation comparisons in the base form use.
-        collation: Collation,
+        /// The affinity and collation each `WHEN` comparison uses in the base
+        /// form, one per branch, and empty in the searched form.
+        comparisons: Vec<(Option<Affinity>, Collation)>,
     },
     /// `LIKE` or `GLOB`.
     Pattern {
@@ -695,7 +696,7 @@ pub fn compile(expr: &Expr, types: &[StaticType]) -> DbResult<Box<dyn Eval>> {
             operand,
             branches,
             otherwise,
-            collation,
+            comparisons,
         } => {
             let mut compiled = Vec::with_capacity(branches.len());
             for (when, then) in branches {
@@ -711,7 +712,7 @@ pub fn compile(expr: &Expr, types: &[StaticType]) -> DbResult<Box<dyn Eval>> {
                     Some(otherwise) => Some(compile(otherwise, types)?),
                     None => None,
                 },
-                collation: *collation,
+                comparisons: comparisons.clone(),
             })
         }
         Expr::Pattern {

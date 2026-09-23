@@ -1277,9 +1277,18 @@ const CEILINGS: [(&str, usize); 17] = [
     // task-2089 made those rules walk an expression's operands, which took
     // this file to 5,033, and the rules are one question with no other
     // business in the binder.
-    ("crates/inillucent-sql/src/bind.rs", 4_788),
+    //
+    // **Lowered to 4,728 in task-2094.** `bind/aggregate.rs` took
+    // `bind_external_call` and the new `aggregate_slot`, which is where every
+    // aggregate reference is made and where it picks up its arguments'
+    // explicit collation. Without the move the aggregate and window references
+    // carrying a collation took this file to 4,824.
+    ("crates/inillucent-sql/src/bind.rs", 4_728),
     // Its own row from the day it was split out of `bind.rs` (task-2088).
-    ("crates/inillucent-sql/src/bind/collation.rs", 269),
+    // Lowered to 158 in task-2094, when its tests moved to
+    // `bind/collation/tests.rs`; the aggregate and window rules and a test
+    // for them had taken it to 319.
+    ("crates/inillucent-sql/src/bind/collation.rs", 158),
     // **Lowered to 2,200 in task-1962 (A8).** 5,026 lines, the largest file
     // in the workspace, became four modules under `leaf/` beside the `delta.rs`
     // that was already there: `layout` (where a value goes in the page),

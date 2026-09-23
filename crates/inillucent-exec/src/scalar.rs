@@ -904,8 +904,9 @@ pub struct Case {
     pub branches: Vec<(Box<dyn Eval>, Box<dyn Eval>)>,
     /// The `ELSE` arm.
     pub otherwise: Option<Box<dyn Eval>>,
-    /// The collation comparisons in the base form use.
-    pub collation: Collation,
+    /// The affinity and collation each `WHEN` comparison uses in the base
+    /// form, one per branch, and empty in the searched form.
+    pub comparisons: Vec<(Option<Affinity>, Collation)>,
 }
 
 impl Eval for Case {
@@ -914,17 +915,22 @@ impl Eval for Case {
             Some(operand) => Some(Value::from(&operand.value(batch, nth)?.get()).into_owned()?),
             None => None,
         };
-        for (when, then) in &self.branches {
+        for (branch, (when, then)) in self.branches.iter().enumerate() {
             let candidate = when.value(batch, nth)?;
             let matched = match &base {
                 // `CASE x WHEN y` compares; `CASE WHEN p` tests a predicate.
                 Some(base) => {
+                    let (affinity, collation) = self
+                        .comparisons
+                        .get(branch)
+                        .copied()
+                        .unwrap_or((None, Collation::Binary));
                     let equal = eval::comparison(
                         BinaryOp::Equal,
                         base,
                         &Value::from(&candidate.get()).into_owned()?,
-                        None,
-                        self.collation,
+                        affinity,
+                        collation,
                         ENCODING,
                     );
                     eval::truth(&equal) == compare::Truth::True
@@ -1305,7 +1311,7 @@ mod tests {
             operand: None,
             branches: vec![(column(0, 4), column(1, 4)), (column(2, 4), column(3, 4))],
             otherwise: None,
-            collation: Collation::Binary,
+            comparisons: Vec::new(),
         };
         assert_eq!(
             eval_one(
@@ -1326,7 +1332,7 @@ mod tests {
             operand: Some(column(0, 3)),
             branches: vec![(column(1, 3), column(2, 3))],
             otherwise: None,
-            collation: Collation::Binary,
+            comparisons: vec![(None, Collation::Binary)],
         };
         assert_eq!(
             eval_one(&simple, &[Datum::Int(7), Datum::Int(7), Datum::Int(99)]),

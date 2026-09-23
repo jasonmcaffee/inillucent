@@ -11,9 +11,9 @@
 # collate-implicit-not-through-concat and collate-scalar-subquery agreed before and are here so the
 # fix cannot overshoot, and so are collate-outer-wins, collate-concat-column-binary and
 # collate-index-between, which also agreed before. The build before task-2088 disagreed with SQLite
-# on the other 21 of these 28 cases. collate-aggregate-result and collate-case-base-when are listed in allow.list:
-# an aggregate slot hides its arguments and a CASE base form keeps one collation, and neither is
-# the code this ticket changed (task-2094).
+# on the other 21 of these 28 cases. collate-aggregate-result and collate-case-base-when were left
+# disagreeing, because an aggregate slot hid its arguments and a CASE base form kept one collation;
+# task-2094 fixed both, and task2094.cases grades the rest of that code.
 collate-concat-left	SELECT ('a' COLLATE NOCASE || 'x') = 'AX' AS l, 'AX' = ('a' COLLATE NOCASE || 'x') AS r, ('a' || 'x' COLLATE NOCASE) = 'AX' AS inner_right;
 collate-concat-left-operand-wins	SELECT ('a' COLLATE NOCASE || 'b' COLLATE BINARY) = 'AB' AS nocase_first, ('a' COLLATE BINARY || 'b' COLLATE NOCASE) = 'AB' AS binary_first;
 collate-explicit-left-beats-right	SELECT ('AX' COLLATE BINARY) = ('a' COLLATE NOCASE || 'x') AS binary_left, ('a' COLLATE NOCASE || 'x') = ('AX' COLLATE BINARY) AS nocase_left;

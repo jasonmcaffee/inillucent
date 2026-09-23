@@ -182,13 +182,13 @@ fn lowered(about: &Lowering, block: &BoundSelect, next: &mut usize) -> BoundExpr
                     operand: None,
                     branches: vec![(any_row, BoundExpr::Null)],
                     otherwise: Some(Box::new(missing.clone())),
-                    collation: Collation::Binary,
+                    comparisons: Vec::new(),
                 },
             ),
             (any_null, BoundExpr::Null),
         ],
         otherwise: Some(Box::new(missing)),
-        collation: Collation::Binary,
+        comparisons: Vec::new(),
     }
 }
 

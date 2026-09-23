@@ -21,13 +21,14 @@ pub(crate) use refusal::{
     no_such_column, no_such_column_quoted, no_such_function, no_such_index, no_such_table,
     order_out_of_range, schema_refused, unsupported, wrong_arguments,
 };
+mod aggregate;
 mod collation;
 mod having;
 mod literal;
 mod rowvalue;
 mod scratch;
 
-use collation::apply_collation;
+use collation::{apply_collation, explicit_argument_collation};
 pub use collation::{comparison_rules, result_collation};
 use literal::integer_literal;
 
@@ -320,8 +321,16 @@ pub enum BoundExpr {
         branches: Vec<(BoundExpr, BoundExpr)>,
         /// The `ELSE` arm.
         otherwise: Option<Box<BoundExpr>>,
-        /// The collation comparisons in the base form use.
-        collation: Collation,
+        /// The affinity and collation each `WHEN` comparison uses in the base
+        /// form, one per branch, and empty in the searched form.
+        ///
+        /// SQLite codes `CASE x WHEN y` as `x = y` for each branch, so each
+        /// comparison takes its rules from `x` and its own `y` through
+        /// [`comparison_rules`]. One collation taken from `x` for every branch
+        /// made `CASE 'a' WHEN 'A' COLLATE NOCASE` answer 0 where 3.53.4
+        /// answers 1, and no affinity made `CASE id WHEN '1'` answer 0 on an
+        /// INTEGER column where 3.53.4 answers 1 (task-2094).
+        comparisons: Vec<(Option<Affinity>, Collation)>,
     },
     /// `CAST`.
     Cast {
@@ -385,11 +394,29 @@ pub enum BoundExpr {
     WindowRef {
         /// Which window call, by position in the block's list.
         slot: usize,
+        /// The explicit collation the call's arguments carry, if one does.
+        ///
+        /// The arguments live in the block's window list, out of reach of
+        /// [`BoundExpr::explicit_collation`], so the binder copies the answer
+        /// here (task-2094). The `PARTITION BY` and the `ORDER BY` of the
+        /// window do not count: 3.53.4 answers `max(s) OVER (PARTITION BY s
+        /// COLLATE NOCASE) = 'C'` with 0.
+        collation: Option<Collation>,
     },
     /// A reference to an aggregate accumulator computed for this row group.
     Aggregate {
         /// Which accumulator, by position.
         slot: usize,
+        /// The explicit collation the call's arguments carry, if one does.
+        ///
+        /// SQLite marks the aggregate call `EP_Collate` from its arguments, so
+        /// `max(s COLLATE NOCASE) = 'C'` compares with NOCASE. The arguments
+        /// live in the binder's aggregate list, out of reach of
+        /// [`BoundExpr::explicit_collation`], so the binder copies the answer
+        /// here (task-2094). An argument's `ORDER BY` and a `FILTER` do not
+        /// count: 3.53.4 answers `group_concat(s ORDER BY s COLLATE NOCASE) =
+        /// 'A,A,B,B,C,C'` with 0.
+        collation: Option<Collation>,
     },
     /// A column of the current sorter row, used after an ORDER BY sort.
     SorterColumn {
@@ -2712,6 +2739,7 @@ impl<'a> Binder<'a> {
             ));
         }
         let slot = self.windows.len();
+        let explicit = explicit_argument_collation(&bound_arguments);
         self.windows.push(BoundWindow {
             call,
             distinct,
@@ -2726,7 +2754,10 @@ impl<'a> Binder<'a> {
             end,
             exclude: spec.exclude,
         });
-        Ok(BoundExpr::WindowRef { slot })
+        Ok(BoundExpr::WindowRef {
+            slot,
+            collation: explicit,
+        })
     }
 
     /// Resolves an `OVER` clause into one fully-written window specification.
@@ -3090,86 +3121,6 @@ impl<'a> Binder<'a> {
             return Some(*collation);
         }
         Collation::from_name(core::str::from_utf8(name).unwrap_or(""))
-    }
-
-    /// Binds a call to a function an application registered, if there is one.
-    ///
-    /// Registered functions are consulted before the built-ins, which is what
-    /// makes `sqlite3_create_function("upper", 1, ...)` replace `upper` rather
-    /// than collide with it - the same order SQLite resolves in.
-    fn bind_external_call(
-        &mut self,
-        folded: &[u8],
-        arguments: &[ExprId],
-        distinct: bool,
-        span: Span,
-    ) -> Result<Option<BoundExpr>, ParseError> {
-        let Some(found) = function::lookup_external(self.externals, folded, arguments.len()) else {
-            return Ok(None);
-        };
-        // **Where a schema is stopped from choosing what code runs
-        // (task-1972).** The rule is `inillucent-sql`'s own, and
-        // `Registry::authorize_function` reads the same one over the same
-        // flags, so an application that asks the registry directly and a
-        // statement the binder compiles get the same answer.
-        if let Some(why) =
-            function::schema_refusal(found.flags, self.call_site, self.trusted_schema)
-        {
-            return Err(refused(
-                format!("{} {why}", String::from_utf8_lossy(folded)),
-                span,
-            ));
-        }
-        let aggregate = found.aggregate;
-        if !aggregate {
-            if distinct {
-                return Err(unsupported("DISTINCT on a scalar function", span));
-            }
-            let mut bound = Vec::with_capacity(arguments.len());
-            for argument in arguments {
-                bound.push(self.bind_expr(*argument)?);
-            }
-            return Ok(Some(BoundExpr::External {
-                name: folded.to_vec(),
-                arguments: bound,
-            }));
-        }
-        if !self.allow_aggregates || self.inside_aggregate {
-            return Err(unsupported("misuse of aggregate function", span));
-        }
-        self.inside_aggregate = true;
-        let mut bound = Vec::with_capacity(arguments.len());
-        for argument in arguments {
-            bound.push(self.bind_expr(*argument)?);
-        }
-        self.inside_aggregate = false;
-        let collation = bound
-            .first()
-            .and_then(BoundExpr::collation)
-            .unwrap_or(Collation::Binary);
-        let candidate = BoundAggregate {
-            func: AggregateFunc::External,
-            external: Some(folded.to_vec()),
-            distinct,
-            arguments: bound,
-            star: false,
-            collation,
-            // A registered aggregate reaches this path without a `FILTER` or an
-            // `ORDER BY`; both are read where a built-in is bound.
-            filter: None,
-            order_by: Vec::new(),
-        };
-        if let Some(slot) = self
-            .aggregates
-            .iter()
-            .position(|existing| existing == &candidate)
-        {
-            return Ok(Some(BoundExpr::Aggregate { slot }));
-        }
-        self.aggregates.push(candidate);
-        Ok(Some(BoundExpr::Aggregate {
-            slot: self.aggregates.len().saturating_sub(1),
-        }))
     }
 
     /// Binds `f(table, ...)` as a module's auxiliary function, if that is what
@@ -3824,15 +3775,18 @@ impl<'a> Binder<'a> {
                     Some(expr) => Some(Box::new(self.bind_expr(expr)?)),
                     None => None,
                 };
-                let collation = bound_operand
-                    .as_ref()
-                    .and_then(|operand| operand.collation())
-                    .unwrap_or(Collation::Binary);
+                let comparisons = match &bound_operand {
+                    Some(operand) => bound_branches
+                        .iter()
+                        .map(|(when, _)| comparison_rules(operand, when))
+                        .collect(),
+                    None => Vec::new(),
+                };
                 Ok(BoundExpr::Case {
                     operand: bound_operand,
                     branches: bound_branches,
                     otherwise: bound_otherwise,
-                    collation,
+                    comparisons,
                 })
             }
             Expr::Function {
@@ -4472,21 +4426,7 @@ impl<'a> Binder<'a> {
                 filter: bound_filter,
                 order_by: bound_order,
             };
-            // The same aggregate written twice is one accumulator. It is not
-            // only cheaper: `... ORDER BY count(*)` has to name the *same* slot
-            // the result column named, or the two are different values that
-            // happen to be spelt alike.
-            if let Some(slot) = self
-                .aggregates
-                .iter()
-                .position(|existing| existing == &candidate)
-            {
-                return Ok(BoundExpr::Aggregate { slot });
-            }
-            self.aggregates.push(candidate);
-            return Ok(BoundExpr::Aggregate {
-                slot: self.aggregates.len().saturating_sub(1),
-            });
+            return Ok(self.aggregate_slot(candidate));
         }
         if let Some(func) = function::lookup_time(&folded) {
             if star {
@@ -4564,7 +4504,7 @@ impl<'a> Binder<'a> {
             // A JSON group aggregate carries the subtype too, and its function
             // is in the binder's list rather than in the expression - so the
             // slot is resolved here, where the list is.
-            if let BoundExpr::Aggregate { slot } = &bound {
+            if let BoundExpr::Aggregate { slot, .. } = &bound {
                 let carries = matches!(
                     self.aggregates.get(*slot).map(|held| held.func),
                     Some(
