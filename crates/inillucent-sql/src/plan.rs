@@ -20,9 +20,13 @@ use crate::bind::{BoundExpr, BoundSelect, BoundSource, ColumnUse, SourceRows};
 use crate::catalog_view::{IndexInfo, TableInfo};
 use crate::cost;
 
+mod hint;
 mod partial;
 mod pattern;
+mod range;
 mod terms;
+pub use hint::unanswerable_index_hint;
+use hint::{forced_path, index_usable, outer_terms, statement_terms};
 use partial::implies;
 use terms::{
     collation_of, comparison_against_column, comparison_against_rowid, comparison_collation,
@@ -766,108 +770,6 @@ impl Levers {
         }
         names
     }
-}
-
-/// Returns the conjuncts a path for an inner or comma joined term may seek on.
-///
-/// The statement's `WHERE`, and the `ON` of every term that is not the
-/// null-extendable side of an outer join. [`plan_select_with`] plans with these,
-/// and [`unanswerable_index_hint`] proves a forced index with them, so the two
-/// cannot reach different verdicts about the same statement.
-/// @param select - the bound statement
-fn statement_terms(select: &BoundSelect) -> Vec<BoundExpr> {
-    let mut terms = Vec::new();
-    if let Some(filter) = &select.filter {
-        split_conjunction(filter, &mut terms);
-    }
-    for source in &select.sources {
-        if is_outer(source.join) {
-            continue;
-        }
-        if let Some(constraint) = &source.constraint {
-            split_conjunction(constraint, &mut terms);
-        }
-    }
-    terms
-}
-
-/// Returns the conjuncts of an outer join term's own `ON`, which are the only
-/// ones its path may seek on. `plan_select_with` says why.
-/// @param source - the null-extendable term
-fn outer_terms(source: &BoundSource) -> Vec<BoundExpr> {
-    let mut terms = Vec::new();
-    if let Some(constraint) = &source.constraint {
-        split_conjunction(constraint, &mut terms);
-    }
-    terms
-}
-
-/// Returns the name of an `INDEXED BY` index that cannot answer its term.
-///
-/// **This is the refusal `choose_path` has nowhere to put.** It returns an
-/// `AccessPath` and has a dozen callers, so the binder asks this instead,
-/// once per block, before anything is planned. SQLite's answer to such a
-/// statement is `no query solution`, and the cases are few, because a named
-/// b-tree index can always be walked from end to end: the pinned 3.53.4 shell
-/// plans `INDEXED BY h_a` over `WHERE c = 3`, with nothing on `a` at all, as
-/// `SCAN h USING INDEX h_a`. What cannot be walked is a partial index whose
-/// predicate the statement does not imply, because it would lose the rows the
-/// predicate leaves out. `CREATE INDEX h_part ON h(c) WHERE c > 3` refuses
-/// `SELECT * FROM h INDEXED BY h_part WHERE a = 1` there, and here.
-///
-/// An index a module owns is answerable only by the nearest neighbour probe,
-/// and a virtual table has no index this clause can name.
-/// @param select - one bound block, with its sources attached
-pub fn unanswerable_index_hint(select: &BoundSelect) -> Option<Vec<u8>> {
-    let mut shared: Option<Vec<BoundExpr>> = None;
-    for (position, source) in select.sources.iter().enumerate() {
-        let crate::bind::IndexChoice::Only(wanted) = &source.index_hint else {
-            continue;
-        };
-        if !matches!(source.rows, SourceRows::Table) {
-            continue;
-        }
-        let table = &source.table;
-        let Some((at, index)) = table
-            .indexes
-            .iter()
-            .enumerate()
-            .find(|(_, index)| &index.folded == wanted)
-        else {
-            continue;
-        };
-        let answerable = if table.module.is_some() {
-            false
-        } else if index.origin == crate::catalog_view::IndexOrigin::Module {
-            let id = source.id;
-            matches!(
-                vector_path(id, position, source, select),
-                Some(AccessPath::VectorProbe { index: ref chosen, .. }) if chosen == &index.name
-            )
-        } else if is_outer(source.join) {
-            index_usable(source, at, index, &outer_terms(source))
-        } else {
-            let terms = shared.get_or_insert_with(|| statement_terms(select));
-            index_usable(source, at, index, terms)
-        };
-        if !answerable {
-            return Some(index.name.clone());
-        }
-    }
-    None
-}
-
-/// Reports whether one b-tree index may be read for a term at all.
-///
-/// Every index may, except a partial one whose predicate the terms do not
-/// imply; `index_path` says why that one would lose rows.
-/// @param source - the term
-/// @param at - the index's position in the table's list
-/// @param index - the index
-/// @param terms - the conjuncts the term's path may seek on
-fn index_usable(source: &BoundSource, at: usize, index: &IndexInfo, terms: &[BoundExpr]) -> bool {
-    let computed = source.index_exprs.iter().find(|held| held.position == at);
-    index.partial_sql.is_none() || implies(computed, terms)
 }
 
 /// Plans a bound SELECT with some optimizations switched off.
@@ -2087,46 +1989,6 @@ fn choose_path(
     }
 }
 
-/// Chooses the path for a term written `INDEXED BY name`: that index, read the
-/// cheapest way it can be.
-///
-/// **Nothing else is a candidate**, not the table scan and not the rowid, which
-/// is SQLite's rule and was measured against the pinned 3.53.4 shell:
-/// `SELECT count(*) FROM h INDEXED BY h_a WHERE a = 3 AND b = 100` searches
-/// `h_a` there even though `ANALYZE` prefers `h_b`, and until task-2078 it
-/// searched `h_b` here. When nothing in the statement seeks the index it is
-/// walked end to end, which is what `SCAN h USING INDEX h_a` means.
-///
-/// The binder has already refused a statement the index cannot answer, through
-/// [`unanswerable_index_hint`], so the table scan at the bottom is only reached
-/// by a caller that built a `BoundSource` without the binder. It returns every
-/// row, which is the answer that cannot be wrong.
-/// @param id - the term's statement-wide id
-/// @param position - its place in the visiting order
-/// @param ids - every term's id in visiting order
-/// @param source - the term
-/// @param select - the whole statement, for the columns it reads
-/// @param terms - the conjuncts the path may seek on
-/// @param consumed - which conjuncts an earlier path already answers
-/// @param levers - which optimizations are on
-fn forced_path(
-    id: usize,
-    position: usize,
-    ids: &[usize],
-    source: &BoundSource,
-    select: &BoundSelect,
-    terms: &[BoundExpr],
-    consumed: &mut [bool],
-    levers: Levers,
-) -> AccessPath {
-    let needed = select.columns_read(id);
-    index_path(id, position, ids, source, terms, consumed, &needed, levers).unwrap_or(
-        AccessPath::TableScan {
-            root: source.table.root,
-        },
-    )
-}
-
 /// Returns what a sort would cost this term, or nothing when no path could
 /// avoid one anyway.
 ///
@@ -2668,74 +2530,25 @@ fn index_candidate(
         columns.push(column);
         key = key.saturating_add(1);
     }
-    let mut low = None;
-    let mut high = None;
     // **A range is an outermost-term path only**, the rule `rowid_path` and
     // `seek_union` already follow and this candidate did not. The physical
-    // pass refuses an inner index seek with a bound, with or without an
-    // equality before it, so `SELECT count(*) FROM s, h WHERE h.b > 595`
-    // over an index on `b` was planned as `SEARCH h ... (b>?)` for the inner
-    // term and then refused with exit code 3, on the release build and
-    // without any hint. The pinned 3.53.4 shell answers it. Leaving the bound
-    // unconsumed makes it a residual over the pair, which answers. task-2078
-    // found it because `INDEXED BY` on an inner term reaches this every time.
-    let inner = position != 0;
-    if let Some(key_column) = index.columns.get(key).filter(|_| !inner) {
-        if let Some(column) = key_column.column {
-            let collation = collation_of(&key_column.collation);
-            for (term_index, term) in terms.iter().enumerate() {
-                if consumed.get(term_index).copied().unwrap_or(false) || used.contains(&term_index)
-                {
-                    continue;
-                }
-                // An anchored pattern is a range; see `plan::pattern`, which
-                // also says why the term is left as a residual (task-1932, M7).
-                if let Some((low_bound, high_bound)) =
-                    pattern::pattern_range(id, column, term, collation, key_column.descending)
-                {
-                    if low.is_none() && high.is_none() {
-                        low = low_bound;
-                        high = high_bound;
-                    }
-                    continue;
-                }
-                let Some((op, value)) = comparison_against_column(id, column, term) else {
-                    continue;
-                };
-                if !is_available(position, ids, &value) || comparison_collation(term) != collation {
-                    continue;
-                }
-                // `low` and `high` are the two ends of the *walk*, not of the
-                // value. A column the index holds descending runs the other
-                // way, so `k > 5` is where its walk starts rather than where it
-                // stops - and reading it as a low bound seeks past every row it
-                // was meant to return. It did: `WHERE k > 5` on a descending
-                // index returned nothing at all, silently, with no ORDER BY
-                // anywhere near it.
-                let (kind, at_low) = match (op, key_column.descending) {
-                    (BinaryOp::Greater, false) => (BoundKind::Greater, true),
-                    (BinaryOp::GreaterEqual, false) => (BoundKind::GreaterEqual, true),
-                    (BinaryOp::Less, false) => (BoundKind::Less, false),
-                    (BinaryOp::LessEqual, false) => (BoundKind::LessEqual, false),
-                    (BinaryOp::Greater, true) => (BoundKind::Less, false),
-                    (BinaryOp::GreaterEqual, true) => (BoundKind::LessEqual, false),
-                    (BinaryOp::Less, true) => (BoundKind::Greater, true),
-                    (BinaryOp::LessEqual, true) => (BoundKind::GreaterEqual, true),
-                    _ => continue,
-                };
-                let slot = if at_low { &mut low } else { &mut high };
-                if slot.is_none() {
-                    *slot = Some(RangeBound { kind, value });
-                    used.push(term_index);
-                }
-            }
-            if low.is_some() || high.is_some() {
-                collations.push(collation);
-                descending.push(key_column.descending);
-                columns.push(Some(column));
-            }
+    // pass refuses an inner index seek with a bound, so
+    // `SELECT count(*) FROM s CROSS JOIN h WHERE h.b > 595` was refused with
+    // exit code 3 on the release build, with no hint anywhere (task-2078).
+    // Left unconsumed, the bound is a residual over the pair, which answers.
+    let range = match index.columns.get(key) {
+        Some(key_column) if position == 0 => range::key_range(context, key_column, &mut used),
+        _ => None,
+    };
+    let (low, high) = match range {
+        Some(found) => {
+            collations.push(found.collation);
+            descending.push(found.descending);
+            columns.push(Some(found.column));
+            (found.low, found.high)
         }
-    }
+        None => (None, None),
+    };
     let covering = levers
         .has(Levers::COVERING_INDEX)
         .then(|| covering_slots(table, index, needed, usable))

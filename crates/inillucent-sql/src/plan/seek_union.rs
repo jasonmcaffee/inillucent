@@ -105,7 +105,6 @@ pub(super) fn in_list_union_path(
         table,
         terms,
         consumed,
-        needed,
         levers,
         ..
     } = *context;
@@ -216,7 +215,7 @@ pub(super) fn in_list_union_path(
         }
         let covering = levers
             .has(Levers::COVERING_INDEX)
-            .then(|| covering_slots(table, index, needed, usable))
+            .then(|| covering_slots(table, index, context.needed, usable))
             .flatten();
         return Some((
             AccessPath::IndexSeekUnion {

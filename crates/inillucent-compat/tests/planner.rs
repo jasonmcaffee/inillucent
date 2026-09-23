@@ -1024,7 +1024,10 @@ fn indexed_by_refuses_what_the_named_index_cannot_answer() {
             "SELECT count(*) FROM s LEFT JOIN h INDEXED BY h_part ON h.c > 3",
             "int:240",
         ),
-        ("SELECT count(*) FROM s CROSS JOIN h WHERE h.b > 595", "int:10"),
+        (
+            "SELECT count(*) FROM s CROSS JOIN h WHERE h.b > 595",
+            "int:10",
+        ),
     ] {
         let rows = run(&connection, sql).unwrap_or_else(|reason| panic!("{sql}: {reason}"));
         assert_eq!(rows, vec![expected.to_string()], "{sql}");
